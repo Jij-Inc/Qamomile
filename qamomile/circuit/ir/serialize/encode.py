@@ -1062,6 +1062,37 @@ def _encode_loop_carried_rebinds(
     ]
 
 
+def _encode_loop_carries(
+    op: ForOperation | ForItemsOperation | WhileOperation,
+) -> dict[str, Any]:
+    """Encode a loop op's carry slots as parallel reference lists.
+
+    The final carried values ride the generic ``result_refs`` (they are
+    the loop's ``results``), so only the input-side lists are written
+    here. Keys are omitted entirely for carry-free loops so payloads
+    produced before this field existed keep decoding unchanged
+    (additive schema policy; ``SCHEMA_VERSION`` stays 1).
+
+    Args:
+        op (ForOperation | ForItemsOperation | WhileOperation): The loop
+            op whose carry slots are encoded. Their values are already
+            registered in the value table via ``all_input_values``.
+
+    Returns:
+        dict[str, Any]: ``carried_names`` plus ``iter_arg_refs`` /
+            ``body_arg_refs`` / ``body_yield_refs`` UUID lists, or an
+            empty dict when the loop has no carries.
+    """
+    if not op.carried_names:
+        return {}
+    return {
+        "carried_names": list(op.carried_names),
+        "iter_arg_refs": [v.uuid for v in op.iter_args],
+        "body_arg_refs": [v.uuid for v in op.body_args],
+        "body_yield_refs": [v.uuid for v in op.body_yields],
+    }
+
+
 def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`ForOperation`.
 
@@ -1072,7 +1103,8 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
     Returns:
         dict[str, Any]: Base op dict plus ``loop_var`` display name,
             ``loop_var_value_ref`` (or ``None``), the
-            ``loop_carried_rebinds`` record list, and ``body`` op list.
+            ``loop_carried_rebinds`` record list, the carry-slot
+            reference lists (when present), and ``body`` op list.
     """
     d = _base_op_dict("ForOperation", op)
     d["loop_var"] = op.loop_var
@@ -1080,6 +1112,7 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
         op.loop_var_value.uuid if op.loop_var_value is not None else None
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
+    d.update(_encode_loop_carries(op))
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1107,6 +1140,7 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
         op.value_var_value.uuid if op.value_var_value is not None else None
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
+    d.update(_encode_loop_carries(op))
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1119,12 +1153,14 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
         ctx (_EncodeContext): The active encoding context.
 
     Returns:
-        dict[str, Any]: Base op dict plus ``max_iterations`` and the
-            loop ``body``.
+        dict[str, Any]: Base op dict plus ``max_iterations``, the
+            carry-slot reference lists (when present), and the loop
+            ``body``.
     """
     d = _base_op_dict("WhileOperation", op)
     d["max_iterations"] = op.max_iterations
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
+    d.update(_encode_loop_carries(op))
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 

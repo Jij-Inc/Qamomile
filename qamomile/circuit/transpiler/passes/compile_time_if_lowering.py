@@ -21,7 +21,13 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
 )
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
+    HasNestedOps,
+    IfOperation,
+    WhileOperation,
+)
 from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
@@ -439,6 +445,48 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         return tuple(new_records) if changed else rebinds
 
     @staticmethod
+    def _substitute_loop_carries(
+        op: Any,
+        substitutor: "ValueSubstitutor",
+    ) -> Any:
+        """Rewrite loop carry-slot values through the substitutor.
+
+        Keeps ``iter_args`` / ``body_args`` / ``body_yields`` coherent
+        when a slot references a merge output the lowering erased — an
+        ``iter_arg`` selected by a pre-loop compile-time if, or a
+        ``body_yield`` merged by an in-body one. The loop's ``results``
+        are loop-defined outputs, never merge outputs, so they need no
+        substitution here.
+
+        Args:
+            op (Any): The rebuilt loop operation
+                (``ForOperation`` / ``ForItemsOperation`` /
+                ``WhileOperation``).
+            substitutor (ValueSubstitutor): The active substitution.
+
+        Returns:
+            Any: ``op`` with substituted carry lists; ``op`` itself when
+                nothing changed.
+        """
+        replacements: dict[str, Any] = {}
+        for field_name in ("iter_args", "body_args", "body_yields"):
+            values = getattr(op, field_name)
+            new_values: list[Value] = []
+            changed = False
+            for value in values:
+                new_value = substitutor.substitute_value(value)
+                if isinstance(new_value, Value) and new_value is not value:
+                    new_values.append(new_value)
+                    changed = True
+                else:
+                    new_values.append(value)
+            if changed:
+                replacements[field_name] = new_values
+        if not replacements:
+            return op
+        return dataclasses.replace(op, **replacements)
+
+    @staticmethod
     def _substitute_loop_rebinds(
         rebinds: tuple[Any, ...],
         substitutor: "ValueSubstitutor",
@@ -589,6 +637,8 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 rebuilt = dataclasses.replace(
                     cast(Any, rebuilt), loop_carried_rebinds=new_rebinds
                 )
+            if isinstance(rebuilt, (ForOperation, ForItemsOperation, WhileOperation)):
+                rebuilt = self._substitute_loop_carries(rebuilt, substitutor)
             return rebuilt
 
         result_op = op

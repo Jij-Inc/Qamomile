@@ -160,18 +160,22 @@ class _BlockPrinter:
         stop = _format_value(op.operands[1]) if len(op.operands) > 1 else "?"
         step = _format_value(op.operands[2]) if len(op.operands) > 2 else "?"
         lv = op.loop_var or "_"
-        self.lines.append(f"{pad}for %{lv} in range({start}, {stop}, {step}) {{")
+        carry_in = _format_carry_header(op)
+        self.lines.append(
+            f"{pad}for %{lv} in range({start}, {stop}, {step}){carry_in} {{"
+        )
         self._emit_ops(op.operations, indent=indent + 1)
-        self.lines.append(f"{pad}}}")
+        self.lines.append(f"{pad}}}{_format_carry_footer(op)}")
 
     def _emit_for_items(self, op: ForItemsOperation, *, indent: int, pad: str) -> None:
         keys = ", ".join(f"%{k}" for k in op.key_vars) if op.key_vars else "%k"
         val = f"%{op.value_var}" if op.value_var else "%v"
         iterable = _format_value(op.operands[0]) if op.operands else "<iterable>"
-        header = f"{pad}for ({keys}), {val} in items({iterable}) {{"
+        carry_in = _format_carry_header(op)
+        header = f"{pad}for ({keys}), {val} in items({iterable}){carry_in} {{"
         self.lines.append(header)
         self._emit_ops(op.operations, indent=indent + 1)
-        self.lines.append(f"{pad}}}")
+        self.lines.append(f"{pad}}}{_format_carry_footer(op)}")
 
     def _emit_if(self, op: IfOperation, *, indent: int, pad: str) -> None:
         cond = _format_value(op.operands[0]) if op.operands else "<cond>"
@@ -192,9 +196,10 @@ class _BlockPrinter:
             if op.max_iterations is not None
             else ""
         )
-        self.lines.append(f"{pad}while {cond}{max_iter} {{")
+        carry_in = _format_carry_header(op)
+        self.lines.append(f"{pad}while {cond}{max_iter}{carry_in} {{")
         self._emit_ops(op.operations, indent=indent + 1)
-        self.lines.append(f"{pad}}}")
+        self.lines.append(f"{pad}}}{_format_carry_footer(op)}")
 
     # -- call block ------------------------------------------------------
 
@@ -370,6 +375,49 @@ def _format_merge(op: IfOperation, merge: IfMerge) -> str:
         f"{_format_results([merge.result])} = "
         f"select({cond} ? {true_value} : {false_value})"
     )
+
+
+def _format_carry_header(
+    op: "ForOperation | ForItemsOperation | WhileOperation",
+) -> str:
+    """Format a loop's carry slots as an ``iter_args(...)`` header suffix.
+
+    Args:
+        op (ForOperation | ForItemsOperation | WhileOperation): The loop
+            whose carries are rendered.
+
+    Returns:
+        str: `` iter_args(%body_arg = %iter_arg, ...)`` (leading space
+            included), or an empty string for a carry-free loop.
+    """
+    carries = list(op.iter_carries())
+    if not carries:
+        return ""
+    parts = ", ".join(
+        f"{_format_value(c.body_arg)} = {_format_value(c.iter_arg)}" for c in carries
+    )
+    return f" iter_args({parts})"
+
+
+def _format_carry_footer(
+    op: "ForOperation | ForItemsOperation | WhileOperation",
+) -> str:
+    """Format a loop's carry slots as a ``yield(...) -> (...)`` footer suffix.
+
+    Args:
+        op (ForOperation | ForItemsOperation | WhileOperation): The loop
+            whose carries are rendered.
+
+    Returns:
+        str: `` yield(%body_yield, ...) -> (%result, ...)`` (leading
+            space included), or an empty string for a carry-free loop.
+    """
+    carries = list(op.iter_carries())
+    if not carries:
+        return ""
+    yields = ", ".join(_format_value(c.body_yield) for c in carries)
+    results = ", ".join(_format_value(c.result) for c in carries)
+    return f" yield({yields}) -> ({results})"
 
 
 def _format_binary(op: Operation, table: dict[Any, str]) -> str:

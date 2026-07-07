@@ -1244,6 +1244,55 @@ def _decode_loop_carried_rebinds(
     )
 
 
+def _decode_loop_carries(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+    results: list[Value],
+) -> dict[str, Any]:
+    """Decode a loop op's carry slots from its parallel reference lists.
+
+    Args:
+        d (dict[str, Any]): The loop op dict, possibly carrying
+            ``carried_names`` / ``iter_arg_refs`` / ``body_arg_refs`` /
+            ``body_yield_refs``.
+        ctx (_DecodeContext): The active decode context.
+        results (list[Value]): The already-materialized loop results the
+            carries must align with (one result per carry).
+
+    Returns:
+        dict[str, Any]: Constructor kwargs (``carried_names`` /
+            ``iter_args`` / ``body_args`` / ``body_yields``); all empty
+            when the payload has no carries.
+
+    Raises:
+        ValueError: If the carry lists disagree in length with each
+            other or with the loop's results.
+    """
+    names = [str(name) for name in d.get("carried_names", ())]
+    iter_refs = list(d.get("iter_arg_refs", ()))
+    body_arg_refs = list(d.get("body_arg_refs", ()))
+    body_yield_refs = list(d.get("body_yield_refs", ()))
+    lengths = {len(names), len(iter_refs), len(body_arg_refs), len(body_yield_refs)}
+    if lengths != {len(names)}:
+        raise ValueError(
+            "Loop carry payload is inconsistent: "
+            f"{len(names)} carried_names / {len(iter_refs)} iter_arg_refs / "
+            f"{len(body_arg_refs)} body_arg_refs / "
+            f"{len(body_yield_refs)} body_yield_refs."
+        )
+    if names and len(names) != len(results):
+        raise ValueError(
+            f"Loop carry payload is inconsistent: {len(names)} carries "
+            f"for {len(results)} results."
+        )
+    return {
+        "carried_names": names,
+        "iter_args": [_materialize_as_value(ctx, ref) for ref in iter_refs],
+        "body_args": [_materialize_as_value(ctx, ref) for ref in body_arg_refs],
+        "body_yields": [_materialize_as_value(ctx, ref) for ref in body_yield_refs],
+    }
+
+
 def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
     """Decode :class:`ForOperation`.
 
@@ -1253,8 +1302,12 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
 
     Returns:
         ForOperation: The reconstructed op, including the
-            materialized loop variable and the recursively-decoded
-            loop body.
+            materialized loop variable, the carry slots, and the
+            recursively-decoded loop body.
+
+    Raises:
+        ValueError: If the carry lists are inconsistent (see
+            :func:`_decode_loop_carries`).
     """
     operands, results = _operands_results(d, ctx)
     loop_var_ref = d.get("loop_var_value_ref")
@@ -1267,6 +1320,7 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         loop_var_value=loop_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+        **_decode_loop_carries(d, ctx, results),
     )
 
 
@@ -1301,6 +1355,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         value_var_value=value_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+        **_decode_loop_carries(d, ctx, results),
     )
 
 
@@ -1323,6 +1378,7 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
         operations=body,
         max_iterations=d.get("max_iterations"),
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+        **_decode_loop_carries(d, ctx, results),
     )
 
 

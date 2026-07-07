@@ -602,7 +602,10 @@ def _op_read_uuids(op: Operation) -> set[str]:
     ``IfOperation``s their branch rebind records — through
     ``all_input_values`` (for cloning); those record values are not
     reads and must not trigger read-based checks, so they are
-    subtracted before the operands are re-added.
+    subtracted before the operands are re-added. Carry slots follow the
+    same split: ``body_args`` / ``body_yields`` are body-internal
+    formals, while ``iter_args`` are genuine reads of pre-loop values
+    and stay in the set.
 
     Args:
         op (Operation): Operation to inspect.
@@ -615,6 +618,9 @@ def _op_read_uuids(op: Operation) -> set[str]:
         for r in op.loop_carried_rebinds:
             excluded.add(r.before.uuid)
             excluded.add(r.after.uuid)
+        for carry in op.iter_carries():
+            excluded.add(carry.body_arg.uuid)
+            excluded.add(carry.body_yield.uuid)
     if isinstance(op, IfOperation):
         for branch_record in op.branch_rebinds:
             excluded.add(branch_record.before.uuid)
@@ -624,6 +630,15 @@ def _op_read_uuids(op: Operation) -> set[str]:
         operand_uuid = getattr(v, "uuid", None)
         if operand_uuid is not None:
             uuids.add(operand_uuid)
+    iter_arg_uuids = {
+        carry.iter_arg.uuid
+        for carry in (
+            op.iter_carries()
+            if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation))
+            else ()
+        )
+    }
+    uuids |= iter_arg_uuids
     return uuids
 
 
