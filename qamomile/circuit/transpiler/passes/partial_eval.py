@@ -49,9 +49,9 @@ class PartialEvaluationPass(Pass[Block, Block]):
                 still reads).
             QubitRebindError: If a runtime if branch or a loop body
                 rebinds a quantum variable to a different quantum value —
-                a fresh allocation or another existing register — while
-                the incoming state is neither consumed on that path nor
-                owned elsewhere.
+                a fresh allocation or another existing register — in a
+                shape the control-flow discard check cannot prove safe
+                (see ``reject_control_flow_quantum_discard``).
         """
         # HIERARCHICAL is accepted so that the self-recursion unroll loop
         # can interleave inline (which leaves one CallBlockOperation per

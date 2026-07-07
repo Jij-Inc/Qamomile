@@ -294,10 +294,11 @@ def _if_branch_rebind_kernel() -> qmc.Bit:
 def _loop_quantum_rebind_kernel(n: qmc.UInt) -> qmc.Bit:
     """Kernel whose ForOperation carries a quantum ``LoopCarriedRebind``.
 
-    The body consumes the incoming register (measures it) before
-    rebinding to a fresh one — the legal reset idiom — so the record
-    survives the control-flow discard check while giving the serializer
-    a quantum-``before`` loop record to round-trip.
+    Gives the serializer a quantum-``before`` loop record to round-trip.
+    The kernel is only built to AFFINE here — transpiling it would be
+    rejected by the control-flow discard check (unrolled loops carry no
+    register between iterations), which is irrelevant to the wire
+    format under test.
     """
     q = qmc.qubit("q")
     b = qmc.bit(0)
@@ -1806,3 +1807,118 @@ class TestRealAlgorithmRoundTrip:
             if op["$type"] == "CompositeGateOperation"
         )
         assert composite["implementation_block"] == composite_r["implementation_block"]
+
+
+# ---------------------------------------------------------------------------
+# Dict runtime parameter round-trip
+# ---------------------------------------------------------------------------
+
+
+@qmc.qkernel
+def _dict_runtime_param_layer(
+    n: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Ising-style layer whose coefficient dicts are runtime parameters."""
+    q = qmc.qubit_array(n, name="q")
+    q = qmc.h(q)
+    for i in qmc.range(n):
+        q[i] = qmc.rz(q[i], angle=2.0 * linear[i])
+    for i in qmc.range(n - 1):
+        q[i], q[i + 1] = qmc.rzz(q[i], q[i + 1], angle=2.0 * quad[(i, i + 1)])
+    return qmc.measure(q)
+
+
+def _analyzed_with_params(kernel: qmc.QKernel, parameters: list[str], **bindings):
+    """Return an ANALYZED block for a kernel built with runtime parameters.
+
+    Unlike :func:`_to_affine`, which uses ``kernel.block`` (auto-detected
+    parameters), this builds the block with an explicit ``parameters``
+    list so a ``Dict`` argument is created on the runtime-parameter path.
+
+    Args:
+        kernel (qmc.QKernel): The kernel to build.
+        parameters (list[str]): Argument names kept as runtime parameters.
+        **bindings (Any): Compile-time bindings (e.g. register sizes).
+
+    Returns:
+        Block: The kernel's block advanced to ``BlockKind.ANALYZED``.
+    """
+    block = kernel.build(parameters=parameters, **bindings)
+    return _to_analyzed(InlinePass().run(block))
+
+
+class TestDictRuntimeParameterRoundTrip:
+    """A runtime-parameter Dict survives serialize -> deserialize intact.
+
+    The runtime-parameter identity is carried on two channels, both of
+    which serialize: the ``DictValue`` in ``Block.parameters`` (parameter
+    marker plus absence of ``dict_runtime`` bound data) and the
+    ``DictType``-typed ``RUNTIME_PARAMETER`` entry in
+    ``Block.param_slots``. These tests pin that both round-trip. In
+    particular ``dict_runtime`` must stay ``None`` across the round-trip;
+    were it to decode as an empty-but-present ``DictRuntimeMetadata``,
+    re-emit would misread the dict as compile-time-bound and drop the
+    per-key parameters.
+    """
+
+    _PARAMS = ["quad", "linear"]
+
+    def _assert_dict_param_signature(self, block) -> None:
+        """Assert both dict arguments kept their runtime-parameter signature.
+
+        Checks both channels that carry the runtime-parameter identity: the
+        ``DictValue`` in ``Block.parameters`` (marker plus absent
+        ``dict_runtime``) and the ``DictType``-typed ``RUNTIME_PARAMETER``
+        entry in ``Block.param_slots``.
+
+        Args:
+            block (Block): The deserialized block to inspect.
+        """
+        from qamomile.circuit.ir.types.primitives import DictType
+
+        slots = {s.name: s for s in block.param_slots}
+        for name in self._PARAMS:
+            dv = block.parameters.get(name)
+            assert dv is not None, f"{name} missing from Block.parameters"
+            assert dv.is_parameter(), f"{name} lost its parameter marker"
+            assert dv.metadata.dict_runtime is None, (
+                f"{name} gained dict_runtime metadata (would be misread as a "
+                f"compile-time-bound dict on re-emit)"
+            )
+            assert name in slots, f"{name} missing from Block.param_slots"
+            assert slots[name].kind is ParamKind.RUNTIME_PARAMETER
+            assert isinstance(slots[name].type, DictType), (
+                f"{name} param slot type is {type(slots[name].type).__name__}, "
+                f"expected DictType"
+            )
+
+    def test_json_round_trip_preserves_runtime_dict(self):
+        """JSON round-trip keeps content hash and the dict parameter signature."""
+        block = _analyzed_with_params(_dict_runtime_param_layer, self._PARAMS, n=3)
+        restored = load_json(dump_json(block))
+        assert content_hash(restored) == content_hash(block)
+        self._assert_dict_param_signature(restored)
+
+    def test_msgpack_round_trip_preserves_runtime_dict(self):
+        """msgpack round-trip mirrors the JSON one."""
+        block = _analyzed_with_params(_dict_runtime_param_layer, self._PARAMS, n=3)
+        restored = load_msgpack(dump_msgpack(block))
+        assert content_hash(restored) == content_hash(block)
+        self._assert_dict_param_signature(restored)
+
+    def test_reemit_after_round_trip_matches_parameters(self):
+        """Re-emitting a deserialized block yields identical per-key parameters."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        t = QiskitTranspiler()
+        exe_ref = t.transpile(
+            _dict_runtime_param_layer, bindings={"n": 3}, parameters=self._PARAMS
+        )
+        block = _analyzed_with_params(_dict_runtime_param_layer, self._PARAMS, n=3)
+        restored = load_json(dump_json(block))
+        lowered = t.validate_symbolic_shapes(t.classical_lowering(restored))
+        exe = t.emit(t.plan(lowered), bindings={"n": 3}, parameters=self._PARAMS)
+        assert sorted(exe.parameter_names) == sorted(exe_ref.parameter_names)

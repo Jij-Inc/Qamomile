@@ -53,10 +53,17 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
             q = qm.h(q)
             bit = qm.measure(q)
             while bit:
-                q = qm.qubit("q2")
-                q = qm.h(q)
-                bit = qm.measure(q)
+                q2 = qm.qubit("q2")
+                q2 = qm.h(q2)
+                bit = qm.measure(q2)
             return bit
+
+    The body register is a body-local name (``q2``), not a rebind of the
+    pre-loop ``q``: rebinding a pre-existing quantum variable to a
+    register allocated in the body is rejected by the transpiler's
+    control-flow discard check, because the runtime loop re-executes its
+    body on one persistent register without reset and cannot realize
+    "fresh per iteration" semantics for the rebound name.
     """
     # 1. Get the PARENT tracer (the one active before entering the while loop)
     parent_tracer = get_current_tracer()
@@ -286,6 +293,38 @@ def should_trace_for_loop(
         return True
 
 
+def should_trace_items_loop(mapping: typing.Any) -> bool:
+    """Decide whether a ``qmc.items`` body must be traced.
+
+    The frontend executes loop bodies once to capture a
+    ``ForItemsOperation``. When the mapping is a ``Dict`` handle whose
+    bound contents are compile-time-known and EMPTY, Python's iteration
+    would execute zero times, so tracing the body would incorrectly
+    leak bindings (and rebind records) into the enclosing scope — the
+    ``qmc.range`` zero-trip guard's exact analogue
+    (:func:`should_trace_for_loop`). Symbolic or unbound mappings stay
+    conservative and trace the body so the normal compiler validation
+    path reports any errors.
+
+    Args:
+        mapping (typing.Any): The iterated mapping — normally a ``Dict``
+            handle; anything without bound dict metadata is treated as
+            symbolic.
+
+    Returns:
+        bool: ``False`` only for a mapping with present-and-empty bound
+        dict contents; ``True`` otherwise.
+    """
+    value = getattr(mapping, "value", None)
+    if value is None:
+        return True
+    metadata = getattr(value, "metadata", None)
+    dict_runtime = getattr(metadata, "dict_runtime", None)
+    if dict_runtime is None:
+        return True
+    return len(dict_runtime.bound_data) > 0
+
+
 def loop_rebind_snapshot(
     frame_locals: dict[str, typing.Any],
     names: tuple[str, ...],
@@ -372,10 +411,25 @@ def record_loop_rebinds(
         if before_value is not None and before_value.type.is_quantum():
             # Quantum rebind: compare logical_id, not uuid — a gate
             # self-update keeps the wire identity and is not a rebind.
-            # A post-body handle that is no IR value at all (plain
-            # Python overwrite) is not recorded, matching the if-branch
-            # records.
+            # A post-body handle that is no IR value at all (a plain
+            # Python constant, ``None``, or an opaque classical call
+            # result — the shape the decoration-time analyzer forbids at
+            # top level) drops the wire just the same: synthesize a
+            # classical placeholder so the record exists for the
+            # transpiler's discard check (mirroring the if-branch
+            # records).
             if after_value is None:
+                if isinstance(after, (bool, int, float)):
+                    after_value = _value_to_ir_value(after, name)
+                else:
+                    after_value = Value(type=UIntType(), name=name)
+                records.append(
+                    LoopCarriedRebind(
+                        var_name=name,
+                        before=before_value,
+                        after=after_value,
+                    )
+                )
                 continue
             if after_value.logical_id != before_value.logical_id:
                 records.append(
@@ -874,10 +928,13 @@ def _rebound_from(pre_value: Value, post_handle: typing.Any) -> bool:
 
     Compares ``logical_id``, not ``uuid``: a gate self-update
     (``q = qmc.x(q)``) produces a new SSA version with a fresh uuid but
-    the SAME logical_id (same quantum wire), which is not a discard. Only
-    a substitution to a different quantum resource — a fresh allocation
-    or another existing register — changes the logical_id, and only those
-    are genuine branch rebinds worth recording.
+    the SAME logical_id (same quantum wire), which is not a discard. A
+    substitution to a different quantum resource — a fresh allocation or
+    another existing register — changes the logical_id, and a post-branch
+    binding that is no IR value at all (a plain Python constant, ``None``,
+    or an opaque classical call result — the shape the decoration-time
+    analyzer forbids at top level as an unknown-call overwrite) drops the
+    wire just the same; both are recorded.
 
     Args:
         pre_value (Value): The variable's IR value at branch entry.
@@ -887,13 +944,13 @@ def _rebound_from(pre_value: Value, post_handle: typing.Any) -> bool:
 
     Returns:
         bool: True when the branch left the variable bound to a
-            different quantum wire.
+            different quantum wire or to a non-IR value.
     """
     if post_handle is _DEAD_REBIND_UNBOUND:
         return False
     post_value = post_handle.value if hasattr(post_handle, "value") else post_handle
     if not isinstance(post_value, Value):
-        return False
+        return True
     return post_value.logical_id != pre_value.logical_id
 
 
@@ -941,16 +998,39 @@ def _collect_branch_rebinds(
 
     Returns:
         tuple[BranchRebind, ...]: One record per quantum variable whose
-            binding changed in at least one branch. Empty when the
-            result tuples do not align with the name lists (defensive —
-            the AST transformer guarantees alignment).
+            binding changed in at least one branch. Empty when there are
+            no rebind candidates at all.
+
+    Raises:
+        AssertionError: If the branch result tuples do not align
+            positionally with the name lists. This is an internal
+            invariant the AST transformer guarantees; raising loudly
+            keeps a future alignment regression from silently disabling
+            the branch-discard check (whose sole input is these records).
     """
     if not rebind_pre_bindings:
         return ()
+    # These records are the branch-discard check's SOLE input, so a
+    # silent empty return on misalignment would fail open — it would
+    # disable discard detection and let a rejectable kernel compile
+    # silently. The AST transformer builds the branch return tuples and
+    # ``emit_if`` slices them to match ``output_names`` / ``dead_names``
+    # by construction, so a mismatch is an internal invariant break, not
+    # a legitimate input; fail loud so a future change that breaks the
+    # alignment is caught in tests rather than reopening the hole.
     if not (len(output_names) == len(true_result) == len(false_result)):
-        return ()
+        raise AssertionError(
+            "Branch output alignment broken in _collect_branch_rebinds: "
+            "expected len(output_names) == len(true_result) == "
+            f"len(false_result), got {len(output_names)} / "
+            f"{len(true_result)} / {len(false_result)}."
+        )
     if not (len(dead_names) == len(dead_true) == len(dead_false)):
-        return ()
+        raise AssertionError(
+            "Dead-probe alignment broken in _collect_branch_rebinds: "
+            "expected len(dead_names) == len(dead_true) == len(dead_false), "
+            f"got {len(dead_names)} / {len(dead_true)} / {len(dead_false)}."
+        )
     positions = {name: index for index, name in enumerate(output_names)}
     dead_positions = {name: index for index, name in enumerate(dead_names)}
     records: list[BranchRebind] = []
@@ -1216,6 +1296,13 @@ def for_items(
     Yields:
         Tuple of (key_handles, value_handle) for use in loop body
 
+    Raises:
+        TypeError: If ``d`` is a runtime-parameter Dict (declared via
+            ``parameters=[...]`` without bound data). Its key structure
+            is unknown at compile time, so an items() loop cannot be
+            unrolled; only constant-key subscript lookups (``d[key]``)
+            are supported for runtime-parameter dicts.
+
     Example:
         ```python
         @qkernel
@@ -1229,6 +1316,22 @@ def for_items(
             return q
         ```
     """
+    # Runtime-parameter dicts carry no bound data, so the loop would
+    # silently unroll over an unknown key set at emit time. Fail at
+    # trace time with an actionable message instead. The Handle-level
+    # flag (set only by ``parameters=[...]`` input creation) is what
+    # distinguishes these from visualization / inner-kernel dummy
+    # inputs, whose entries connect at inline/emit time; dicts reaching
+    # a sub-kernel indirectly are caught by the emit-time check in
+    # ``emit_for_items`` instead.
+    if getattr(d, "_runtime_parameter", False):
+        raise TypeError(
+            f"Dict '{d.value.name}' is a runtime parameter; items() "
+            f"iteration requires the key structure at compile time. "
+            f"Bind the dict via bindings={{...}} instead, or use "
+            f"constant-key subscript lookups (d[key])."
+        )
+
     parent_tracer = get_current_tracer()
     body_tracer = Tracer()
 

@@ -2548,9 +2548,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2580,9 +2580,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2613,9 +2613,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2638,9 +2638,9 @@ class TestControlFlowWhileStructure:
             q = qmc.x(q)  # |1>
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2669,9 +2669,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2711,9 +2711,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2734,9 +2734,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2757,9 +2757,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2786,9 +2786,9 @@ class TestControlFlowWhileStructure:
             q = qmc.x(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2812,9 +2812,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -2852,9 +2852,9 @@ class TestControlFlowWhileStructure:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)
@@ -3519,9 +3519,9 @@ class TestControlFlowWhileSampling:
             # q stays |0⟩, so bit = 0 → while condition is false
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = QiskitTranspiler()
@@ -3551,9 +3551,9 @@ class TestControlFlowWhileSampling:
             q = qmc.x(q)  # |1⟩ → bit = 1 → enter loop
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)  # 50% chance of |0⟩ each iteration
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)  # 50% chance of |0⟩ each iteration
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = QiskitTranspiler()
@@ -3586,9 +3586,9 @@ class TestControlFlowWhileSampling:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = QiskitTranspiler()
@@ -3616,9 +3616,9 @@ class TestControlFlowWhileSampling:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = QiskitTranspiler()
@@ -7860,9 +7860,9 @@ class TestDeadPhiTranspilation:
                 else:
                     q_t = qmc.h(q_t)
                 # q_t is dead within the while body
-                q0 = qmc.qubit("q_loop")
-                q0 = qmc.h(q0)
-                bit = qmc.measure(q0)
+                q_loop = qmc.qubit("q_loop")
+                q_loop = qmc.h(q_loop)
+                bit = qmc.measure(q_loop)
             return bit
 
         _, qc = _transpile_and_get_circuit(circuit)

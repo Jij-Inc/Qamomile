@@ -1,0 +1,101 @@
+"""Shared naming for per-key backend parameters of runtime-parameter Dicts.
+
+A ``Dict[K, Float]`` kernel argument kept as a runtime parameter
+(``transpile(..., parameters=["coeffs"])``) is decomposed into one
+backend parameter per looked-up key. The emit pass creates each backend
+parameter from the key it resolves (``coeffs[3]``, ``coeffs[(0, 1)]``),
+and the program orchestrator decomposes the execution-time binding
+``{"coeffs": {...}}`` into the same names. Both sides MUST agree on the
+string format, so the formatting lives here and nowhere else.
+"""
+
+from __future__ import annotations
+
+import typing
+
+
+def dict_param_key(dict_name: str, key: typing.Any) -> str:
+    """Format the backend-parameter name for one entry of a Dict parameter.
+
+    The key is formatted with ``repr`` rather than ``str`` so the helper is
+    collision-proof on its own: ``str("0")`` and ``str(0)`` both yield
+    ``"coeffs[0]"``, but ``repr`` keeps the string key distinct
+    (``"coeffs['0']"``). Callers pass keys already normalized to plain
+    ``int`` / tuple-of-``int`` (see :func:`normalize_dict_binding_key`), for
+    which ``repr`` and ``str`` produce identical text (``repr(3) == '3'``,
+    ``repr((0, 1)) == '(0, 1)'``), so the emitted names are unchanged.
+
+    Args:
+        dict_name (str): The kernel argument name of the Dict parameter.
+        key (Any): The looked-up key, already normalized (a plain ``int``
+            or a tuple of plain ``int``s — see
+            :func:`normalize_dict_binding_key`).
+
+    Returns:
+        str: The backend parameter name, e.g. ``"coeffs[3]"`` for an int
+            key or ``"coeffs[(0, 1)]"`` for a tuple key.
+    """
+    return f"{dict_name}[{key!r}]"
+
+
+def normalize_dict_binding_key(key: typing.Any) -> typing.Any:
+    """Normalize a user-supplied dict key for parameter-name formatting.
+
+    Integer-valued keys are canonicalized to plain ``int`` (``numpy.int64``,
+    ``float`` ``1.0``, ...) so that the execution-time decomposition of
+    ``{"coeffs": {np.int64(3): 0.5}}`` produces the same parameter name the
+    emit pass created from the IR-resolved ``int`` key. Tuples/lists are
+    normalized component-wise into a tuple. Non-integer-valued keys (``str``,
+    ``1.5``, ``float("inf")``, ``float("nan")``, ...) are returned unchanged;
+    callers must then filter them out via
+    :func:`is_decomposable_dict_binding_key` — string-formatting them into a
+    parameter name would collide with genuine int keys (``"1"`` and ``1``
+    both format as ``d[1]``).
+
+    Args:
+        key (Any): A key of the user-supplied binding dict.
+
+    Returns:
+        Any: ``int``, ``tuple`` of normalized components, or the original
+            key when it has no exact integer representation.
+    """
+    if isinstance(key, (tuple, list)):
+        return tuple(normalize_dict_binding_key(component) for component in key)
+    try:
+        as_int = int(key)
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: int(float("inf")); ValueError covers nan.
+        return key
+    # Only adopt the int form when it is exactly equal to the original
+    # (guards against silently mapping 1.5 -> 1). Plain bool is int-equal
+    # and harmless. String keys like "3" are not int-equal and stay str.
+    if as_int == key:
+        return as_int
+    return key
+
+
+def is_decomposable_dict_binding_key(key: typing.Any) -> bool:
+    """Report whether a normalized key can name an emitted parameter.
+
+    The emit pass creates per-key parameters only from IR-resolved integer
+    keys (``int`` or tuples of ``int``), so only those keys can ever match
+    an emitted parameter name. Any other key must NOT be string-formatted
+    into a name: the str key ``"1"`` would format identically to the int
+    key ``1`` (both ``d[1]``) and silently bind the wrong parameter, and
+    ``"(0, 1)"`` would collide with the tuple key ``(0, 1)``.
+
+    Args:
+        key (Any): A key already passed through
+            :func:`normalize_dict_binding_key`.
+
+    Returns:
+        bool: True when the key is an ``int`` or a tuple of ``int``s
+            (numpy integers count once normalized; anything else,
+            including nested tuples, is not decomposable).
+    """
+    if isinstance(key, tuple):
+        return all(
+            isinstance(component, int) and not isinstance(component, bool)
+            for component in key
+        )
+    return isinstance(key, int) and not isinstance(key, bool)
