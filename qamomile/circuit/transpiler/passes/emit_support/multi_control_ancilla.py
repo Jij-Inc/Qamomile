@@ -522,9 +522,10 @@ def _for_operation_demand(
     count from the loop variable (e.g. ``qmc.control(qmc.x,
     num_controls=k)`` inside ``qmc.range(...)``), which only resolves
     with the loop variable bound. Small resolved loops are walked per
-    iteration, mirroring emit-time unrolling. Large resolved loops are
-    walked once without the loop variable to keep estimation bounded;
-    loop-variable-dependent counts then fall back to their
+    iteration, mirroring emit-time unrolling. Large resolved loops —
+    including ones so long that ``len(range(...))`` itself overflows —
+    are walked once without the loop variable to keep estimation
+    bounded; loop-variable-dependent counts then fall back to their
     control-operand width, which is a conservative upper bound for
     valid controlled calls. When the bounds cannot be resolved, the same
     single symbolic body walk still counts loop-independent demand.
@@ -556,9 +557,16 @@ def _for_operation_demand(
             op.operations, inherited_controls, resolver, bindings
         )
     indexset = range(start, stop, step)
-    if len(indexset) == 0:
+    try:
+        iteration_count: int | None = len(indexset)
+    except OverflowError:
+        # A range longer than ``sys.maxsize`` cannot be counted (nor
+        # precisely walked). Treat it like any over-cutoff loop and fall
+        # back to a single conservative symbolic body walk.
+        iteration_count = None
+    if iteration_count == 0:
         return 0
-    if len(indexset) > _MAX_PRECISE_FOR_LOOP_ITERATIONS:
+    if iteration_count is None or iteration_count > _MAX_PRECISE_FOR_LOOP_ITERATIONS:
         return _demand_in_operations(
             op.operations, inherited_controls, resolver, bindings
         )

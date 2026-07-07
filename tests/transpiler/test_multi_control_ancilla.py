@@ -226,6 +226,34 @@ def test_estimate_large_loop_falls_back_to_symbolic_body_walk() -> None:
     assert _estimate([loop]) == width - 1
 
 
+def test_estimate_uncountable_loop_range_falls_back_without_overflow() -> None:
+    """A loop longer than sys.maxsize is walked once, not counted (no OverflowError).
+
+    ``len(range(0, sys.maxsize + 2, 1))`` raises ``OverflowError``; the
+    estimate must treat such an uncountable range like any over-cutoff
+    loop and fall back to a single conservative symbolic body walk rather
+    than crashing.
+    """
+    import sys
+
+    # Fixed 3-control X (loop-var-independent) so the single conservative
+    # symbolic walk still resolves demand to 2 without unrolling.
+    inner = _controlled(3, _fixed_gate(GateOperationType.X, 1))
+    huge = sys.maxsize + 2  # len(range(0, huge, 1)) raises OverflowError
+    loop = ForOperation(
+        operands=[
+            Value(type=UIntType(), name="start").with_const(0),
+            Value(type=UIntType(), name="stop").with_const(huge),
+            Value(type=UIntType(), name="step").with_const(1),
+        ],
+        results=[],
+        loop_var="k",
+        loop_var_value=Value(type=UIntType(), name="k"),
+        operations=[inner],
+    )
+    assert _estimate([loop]) == 2
+
+
 def test_estimate_symbolic_num_controls_falls_back_to_operand_width() -> None:
     """An unresolvable num_controls falls back to the control-prefix width."""
     controls = [_qubit(f"c{i}") for i in range(4)]
