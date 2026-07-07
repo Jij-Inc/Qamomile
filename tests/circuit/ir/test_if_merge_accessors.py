@@ -143,3 +143,40 @@ class TestIterMerges:
 
         with pytest.raises(RuntimeError, match="does not"):
             list(if_op.iter_merges())
+
+    def test_iter_merges_condition_mismatch_raises(self) -> None:
+        """A merge carrying a different condition than the if is corruption."""
+        cond = Value(type=BitType(), name="cond")
+        other_cond = Value(type=BitType(), name="other_cond")
+        result = _uint("r")
+        if_op = IfOperation(
+            operands=[cond],
+            results=[result],
+            phi_ops=[
+                PhiOp(
+                    operands=[other_cond, _uint("t"), _uint("f")],
+                    results=[result],
+                )
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="condition"):
+            list(if_op.iter_merges())
+
+    def test_iter_merges_missing_condition_with_merges_raises(self) -> None:
+        """Merges attached to a condition-less if are IR corruption."""
+        cond = Value(type=BitType(), name="cond")
+        result = _uint("r")
+        if_op = IfOperation(
+            operands=[],
+            results=[result],
+            phi_ops=[
+                PhiOp(
+                    operands=[cond, _uint("t"), _uint("f")],
+                    results=[result],
+                )
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="condition operand is missing"):
+            list(if_op.iter_merges())

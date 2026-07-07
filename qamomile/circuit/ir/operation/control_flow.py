@@ -616,9 +616,12 @@ class IfOperation(HasNestedOps, Operation):
             RuntimeError: If the stored merge data is internally
                 inconsistent (merge count differs from result count, a
                 merge does not have exactly condition/true/false operands
-                and one result, or a merge result does not match the
-                if-operation result at the same position). Any of these
-                indicates IR corruption, not a user error.
+                and one result, a merge result does not match the
+                if-operation result at the same position, or a merge's
+                condition operand does not match the if-operation's
+                condition — including a missing condition while merges
+                are attached). Any of these indicates IR corruption, not
+                a user error.
         """
         if len(self.phi_ops) != len(self.results):
             raise RuntimeError(
@@ -626,6 +629,12 @@ class IfOperation(HasNestedOps, Operation):
                 f"{len(self.phi_ops)} phi_ops for {len(self.results)} "
                 "results. Merges must be created through add_merge()."
             )
+        if self.phi_ops and not self.operands:
+            raise RuntimeError(
+                "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
+                "merges are attached but the condition operand is missing."
+            )
+        condition = self.operands[0] if self.operands else None
         for i, phi in enumerate(self.phi_ops):
             if len(phi.operands) != 3 or len(phi.results) != 1:
                 raise RuntimeError(
@@ -633,6 +642,21 @@ class IfOperation(HasNestedOps, Operation):
                     f"phi_ops[{i}] has {len(phi.operands)} operands and "
                     f"{len(phi.results)} results; expected "
                     "[condition, true_value, false_value] -> [output]."
+                )
+            phi_condition = phi.operands[0]
+            if isinstance(phi_condition, ValueBase) and isinstance(
+                condition, ValueBase
+            ):
+                condition_matches = phi_condition.uuid == condition.uuid
+            else:
+                # Compile-time-constant conditions may be raw Python bools
+                # with no IR identity; identity comparison covers them.
+                condition_matches = phi_condition is condition
+            if not condition_matches:
+                raise RuntimeError(
+                    "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
+                    f"phi_ops[{i}] condition does not match the "
+                    "if-operation's condition operand."
                 )
             if phi.results[0].uuid != self.results[i].uuid:
                 raise RuntimeError(
