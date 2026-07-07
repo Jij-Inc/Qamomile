@@ -438,6 +438,71 @@ class ClassicalExecutor:
             f"resolved for element store."
         )
 
+    def _seed_carry_args(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+        carried_values: list[Any],
+        results: dict[str, Any],
+    ) -> None:
+        """Bind the previous iteration's carried values to the body formals.
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): The
+                loop whose carry slots are seeded.
+            carried_values (list[Any]): Current carried values, one per
+                slot (the ``iter_arg`` values before the first
+                iteration, the previous iteration's yields afterwards).
+            results (dict[str, Any]): Mutable results map; each
+                ``body_arg`` UUID is (re)bound in place.
+        """
+        for carry, value in zip(op.iter_carries(), carried_values, strict=True):
+            results[carry.body_arg.uuid] = value
+
+    def _collect_carry_yields(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        loop_scope: dict[str, Any],
+    ) -> list[Any]:
+        """Read the values the just-executed body yields for the next trip.
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): The
+                loop whose carry slots are read.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Results map after the body ran.
+            loop_scope (dict[str, Any]): The finished iteration's scope.
+
+        Returns:
+            list[Any]: One yielded value per carry slot.
+        """
+        return [
+            self._get_value(carry.body_yield, context, results, loop_scope)
+            for carry in op.iter_carries()
+        ]
+
+    def _bind_carry_results(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+        carried_values: list[Any],
+        results: dict[str, Any],
+    ) -> None:
+        """Bind the final carried values to the loop's result values.
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): The
+                finished loop.
+            carried_values (list[Any]): Final carried values — the last
+                iteration's yields, or the ``iter_arg`` values when the
+                loop ran zero times.
+            results (dict[str, Any]): Mutable results map; each carry
+                ``result`` UUID is bound in place.
+        """
+        for carry, value in zip(op.iter_carries(), carried_values, strict=True):
+            results[carry.result.uuid] = value
+
     def _execute_for(
         self,
         op: ForOperation,
@@ -468,10 +533,19 @@ class ClassicalExecutor:
         self._materialize_loop_store_defaults(
             op.operations, context, results, scoped_locals
         )
+        carried_values = [
+            self._get_value(carry.iter_arg, context, results, scoped_locals)
+            for carry in op.iter_carries()
+        ]
         for loop_value in range(start, stop, step):
             loop_scope = scoped_locals.copy()
             loop_scope[op.loop_var] = loop_value
+            self._seed_carry_args(op, carried_values, results)
             self._execute_operations(op.operations, context, results, loop_scope)
+            carried_values = self._collect_carry_yields(
+                op, context, results, loop_scope
+            )
+        self._bind_carry_results(op, carried_values, results)
 
     def _execute_for_items(
         self,
@@ -489,11 +563,20 @@ class ClassicalExecutor:
         self._materialize_loop_store_defaults(
             op.operations, context, results, scoped_locals
         )
+        carried_values = [
+            self._get_value(carry.iter_arg, context, results, scoped_locals)
+            for carry in op.iter_carries()
+        ]
         for key, value in iterable:
             loop_scope = scoped_locals.copy()
             self._bind_for_items_key(loop_scope, op, key)
             loop_scope[op.value_var] = value
+            self._seed_carry_args(op, carried_values, results)
             self._execute_operations(op.operations, context, results, loop_scope)
+            carried_values = self._collect_carry_yields(
+                op, context, results, loop_scope
+            )
+        self._bind_carry_results(op, carried_values, results)
 
     def _execute_if(
         self,
@@ -540,10 +623,19 @@ class ClassicalExecutor:
         condition_value = op.operands[0]
         next_condition = op.operands[1] if len(op.operands) > 1 else condition_value
 
+        carried_values = [
+            self._get_value(carry.iter_arg, context, results, scoped_locals)
+            for carry in op.iter_carries()
+        ]
         while bool(self._get_value(condition_value, context, results, scoped_locals)):
             loop_scope = scoped_locals.copy()
+            self._seed_carry_args(op, carried_values, results)
             self._execute_operations(op.operations, context, results, loop_scope)
+            carried_values = self._collect_carry_yields(
+                op, context, results, loop_scope
+            )
             condition_value = next_condition
+        self._bind_carry_results(op, carried_values, results)
 
     def _execute_dict_getitem(
         self,

@@ -121,6 +121,106 @@ def resolve_loop_bounds(
 
 
 # ---------------------------------------------------------------------------
+# Loop-carried classical values (emit-time threading)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_carry_value(
+    emit_pass: "StandardEmitPass",
+    value: Value,
+    bindings: dict[str, Any],
+    var_name: str,
+    when: str,
+) -> Any:
+    """Resolve one carried classical value at emit time.
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        value (Value): The carry slot value to resolve (an ``iter_arg``
+            before the first iteration, a ``body_yield`` afterwards).
+        bindings (dict[str, Any]): The bindings scope the value lives in
+            (the outer scope for ``iter_arg``, the just-emitted
+            iteration's scope for ``body_yield``).
+        var_name (str): Display name of the carried variable, for the
+            error message.
+        when (str): Human-readable resolution point ("entering the
+            loop" / "after an iteration"), for the error message.
+
+    Returns:
+        Any: The resolved value — a concrete Python number, or a
+            backend parameter expression when the carried arithmetic
+            involves runtime parameters.
+
+    Raises:
+        EmitError: If the value cannot be resolved — e.g. the carried
+            update depends on a measurement result, which has no
+            emit-time value.
+    """
+    resolved = emit_pass._resolver.resolve_classical_value(value, bindings)
+    if resolved is None:
+        raise EmitError(
+            f"Loop-carried classical value '{var_name}' could not be "
+            f"resolved {when}: the carried update depends on a value "
+            "with no emit-time result (e.g. a measurement outcome). "
+            "Loop-carried classical values must be computable from "
+            "compile-time bindings and runtime parameters.",
+        )
+    return resolved
+
+
+def _resolve_carry_iter_args(
+    emit_pass: "StandardEmitPass",
+    op: ForOperation | ForItemsOperation | WhileOperation,
+    bindings: dict[str, Any],
+) -> list[Any]:
+    """Resolve every carry slot's loop-entry value.
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        op (ForOperation | ForItemsOperation | WhileOperation): The loop
+            being emitted.
+        bindings (dict[str, Any]): The enclosing bindings scope.
+
+    Returns:
+        list[Any]: One resolved value per carry slot.
+
+    Raises:
+        EmitError: If an ``iter_arg`` cannot be resolved (see
+            :func:`_resolve_carry_value`).
+    """
+    return [
+        _resolve_carry_value(
+            emit_pass, carry.iter_arg, bindings, carry.var_name, "entering the loop"
+        )
+        for carry in op.iter_carries()
+    ]
+
+
+def _register_carry_results(
+    op: ForOperation | ForItemsOperation | WhileOperation,
+    carried_values: list[Any],
+    bindings: dict[str, Any],
+) -> None:
+    """Bind the final carried values to the loop's results.
+
+    Post-loop operations read the carry ``result`` values, so the final
+    values must land in the ENCLOSING bindings scope (not a per-iteration
+    copy).
+
+    Args:
+        op (ForOperation | ForItemsOperation | WhileOperation): The loop
+            just emitted.
+        carried_values (list[Any]): Final carried values — the last
+            iteration's yields, or the loop-entry values for a loop that
+            ran zero times.
+        bindings (dict[str, Any]): The enclosing bindings scope, mutated
+            in place.
+    """
+    for carry, value in zip(op.iter_carries(), carried_values, strict=True):
+        _set_emit_value(bindings, carry.result.uuid, value)
+
+
+# ---------------------------------------------------------------------------
 # For loop
 # ---------------------------------------------------------------------------
 
@@ -143,6 +243,11 @@ def emit_for(
 
     indexset = range(start, stop, step)
     if len(indexset) == 0:
+        # Zero-trip passthrough: post-loop reads of the carried results
+        # must observe the loop-entry values.
+        _register_carry_results(
+            op, _resolve_carry_iter_args(emit_pass, op, bindings), bindings
+        )
         return
 
     if force_unroll:
@@ -235,22 +340,46 @@ def emit_for_unrolled(
                 name = getattr(operand, "name", None) or "<anonymous>"
                 unresolved_details.append(f"{label}={name!r}")
         details = ", ".join(unresolved_details)
+        carry_note = (
+            " Note: this loop carries classical values "
+            f"({', '.join(op.carried_names)}) between iterations; "
+            "loop-carried classical values require "
+            "compile-time-resolvable loop bounds, so a native runtime "
+            "loop is not an option here."
+            if op.carried_names
+            else ""
+        )
         raise ValueError(
             "Cannot unroll loop: bounds could not be resolved at compile "
             f"time ({details}). Likely causes: (1) a parameter array shape "
             "dimension reached emit without being folded — bind the array "
             "concretely in transpile(bindings={...}), or use a separate "
             "compile-time loop counter (e.g. bindings={'p': p} with "
-            "qmc.range(p)); (2) a non-parameter symbolic value slipped "
-            "through the pipeline (report this as a compiler bug)."
+            f"qmc.range(p)); (2) a non-parameter symbolic value slipped "
+            f"through the pipeline (report this as a compiler bug).{carry_note}"
         )
 
+    carried_values = _resolve_carry_iter_args(emit_pass, op, bindings)
+    carries = list(op.iter_carries())
     for i in range(start, stop, step):
         loop_bindings = bindings.copy()
         _bind_loop_var(loop_bindings, op, i)
+        for carry, value in zip(carries, carried_values, strict=True):
+            _set_emit_value(loop_bindings, carry.body_arg.uuid, value)
         emit_pass._emit_operations(
             circuit, op.operations, qubit_map, clbit_map, loop_bindings
         )
+        carried_values = [
+            _resolve_carry_value(
+                emit_pass,
+                carry.body_yield,
+                loop_bindings,
+                carry.var_name,
+                "after an iteration",
+            )
+            for carry in carries
+        ]
+    _register_carry_results(op, carried_values, bindings)
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +440,8 @@ def emit_for_items(
     key_var_values = op.key_var_values
     value_var_value = op.value_var_value
 
+    carried_values = _resolve_carry_iter_args(emit_pass, op, bindings)
+    carries = list(op.iter_carries())
     for key, value in entries:
         loop_bindings = bindings.copy()
         push = getattr(loop_bindings, "push_loop_var", None)
@@ -368,9 +499,22 @@ def emit_for_items(
         value_uuid = value_var_value.uuid if value_var_value is not None else None
         _bind(value_uuid, op.value_var, value)
 
+        for carry, carried in zip(carries, carried_values, strict=True):
+            _set_emit_value(loop_bindings, carry.body_arg.uuid, carried)
         emit_pass._emit_operations(
             circuit, op.operations, qubit_map, clbit_map, loop_bindings
         )
+        carried_values = [
+            _resolve_carry_value(
+                emit_pass,
+                carry.body_yield,
+                loop_bindings,
+                carry.var_name,
+                "after an iteration",
+            )
+            for carry in carries
+        ]
+    _register_carry_results(op, carried_values, bindings)
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +863,18 @@ def emit_while(
     bindings: dict[str, Any],
 ) -> None:
     """Emit while loop operation."""
+    if op.carried_names:
+        # Backstop for the transpile-time rejection: a while loop's trip
+        # count is a runtime measurement outcome, so the loop must stay
+        # a runtime loop, and no backend can carry a classical value
+        # between runtime-loop iterations.
+        raise EmitError(
+            "Loop-carried classical values in a while loop cannot be "
+            f"emitted ({', '.join(op.carried_names)}): a runtime loop "
+            "re-executes one static body and cannot thread a classical "
+            "value between iterations.",
+            operation="WhileOperation",
+        )
     if not op.operands:
         raise EmitError(
             "WhileOperation requires a condition operand.",

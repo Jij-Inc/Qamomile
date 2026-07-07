@@ -60,6 +60,12 @@ class LoopAnalyzer:
         op: ForOperation,
         bindings: dict[str, object],
     ) -> bool:
+        # A native backend loop keeps one static body per iteration and
+        # cannot thread a classical value between iterations, so any
+        # loop-carried value forces unrolling (emit re-resolves the
+        # carried value per unrolled iteration).
+        if op.carried_names:
+            return True
         loop_uuid = op.loop_var_value.uuid if op.loop_var_value is not None else None
         if self._has_dynamic_nested_loop(op.operations, bindings, loop_uuid):
             return True
