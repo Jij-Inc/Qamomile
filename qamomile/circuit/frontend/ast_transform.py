@@ -17,6 +17,7 @@ from qamomile.circuit.frontend.operation.control_flow import (
     loop_rebind_snapshot,
     record_loop_rebinds,
     should_trace_for_loop,
+    should_trace_items_loop,
     while_loop,
 )
 
@@ -1199,8 +1200,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
     def _transform_for_items(
         self, node: ast.For, flattened_body: list[ast.stmt]
-    ) -> ast.With:
+    ) -> ast.stmt:
         """Transform 'for (k, v) in items(d)' or 'for (k, v) in d.items()' to 'with for_items(d, [...], "v")'.
+
+        The with-statement is wrapped in ``if should_trace_items_loop(d):``
+        so a compile-time-known EMPTY dict skips tracing the body, exactly
+        like the ``qmc.range`` zero-trip guard.
 
         Supports patterns:
             for key, value in items(d):  ->  for_items(d, ["key"], "value")
@@ -1254,7 +1259,21 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=node.col_offset,
         )
 
-        return with_stmt
+        # Mirror the qmc.range zero-trip guard: a compile-time-known
+        # EMPTY dict must not trace the body at all, so post-loop code
+        # keeps the pre-loop handles exactly like Python's zero-pass
+        # iteration (and no loop op / rebind record is created).
+        return ast.If(
+            test=ast.Call(
+                func=ast.Name(id="should_trace_items_loop", ctx=ast.Load()),
+                args=[copy.deepcopy(dict_arg)],
+                keywords=[],
+            ),
+            body=[with_stmt],
+            orelse=[],
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+        )
 
     def visit_If(self, node: ast.If) -> Any:
         # Collect variables from the pre-transform AST (post generic_visit would include generated names)
@@ -1423,10 +1442,16 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # have function scope, so a nested branch assigning a name whose
         # definition sits outside the enclosing branch's inputs still
         # rebinds that variable (the pre-branch handle is resolved
-        # through the enclosing emit_if captures at run time).
-        rebind_record_existing = (body_assigned | orelse_assigned) & (
-            outer_defined | self._lexical_defined_vars
-        )
+        # through the enclosing emit_if captures at run time). The
+        # candidate base is ``store_vars``, not ``locally_defined_vars``:
+        # a read-before-write reassignment (``q = qmc.x(q)`` followed by
+        # ``q = qmc.qubit("fresh")``) is not "locally defined" yet still
+        # ends the branch on a different register. Extra candidates are
+        # harmless — pure gate self-updates keep their logical_id and
+        # produce no record.
+        rebind_record_existing = (
+            collector_body.store_vars | collector_orelse.store_vars
+        ) & (outer_defined | self._lexical_defined_vars)
         dead_rebind_candidates = sorted(rebind_record_existing - set(output_vars))
 
         def _dead_probe_exprs() -> list[ast.expr]:
@@ -1635,6 +1660,7 @@ def transform_control_flow(func: Callable):
             "while_loop": while_loop,
             "for_loop": for_loop,
             "should_trace_for_loop": should_trace_for_loop,
+            "should_trace_items_loop": should_trace_items_loop,
             "for_items": for_items,
             "emit_if": emit_if,
             "branch_rebind_pre_bindings": branch_rebind_pre_bindings,

@@ -544,15 +544,28 @@ class Transpiler(ABC, Generic[T]):
         """Full compilation pipeline from QKernel to executable.
 
         Args:
-            kernel: The QKernel to compile
-            bindings: Parameter values to bind (also resolves array shapes).
-                Names in ``bindings`` and ``parameters`` must be disjoint —
-                a name is either compile-time bound or runtime symbolic,
-                never both.
-            parameters: Parameter names to preserve as backend parameters
+            kernel (QKernel): The QKernel to compile
+            bindings (dict[str, Any] | None): Parameter values to bind
+                (also resolves array shapes). Names in ``bindings`` and
+                ``parameters`` must be disjoint — a name is either
+                compile-time bound or runtime symbolic, never both.
+            parameters (list[str] | None): Parameter names to preserve as
+                backend parameters. Scalars/arrays of float/int/UInt are
+                supported, plus ``Dict[K, Float]``: each constant-key
+                subscript lookup (``d[key]``) becomes one backend
+                parameter named ``"d[<key>]"``, and the execution-time
+                binding ``bindings={"d": {...}}`` is decomposed per key
+                onto those parameters. A Dict runtime parameter is
+                recorded in ``Block.param_slots`` as a slot whose type is
+                a ``DictType`` (compile-time-bound Dicts and ``Tuple``
+                arguments stay out of the slot manifest); its emitted
+                per-key parameters are visible via
+                ``ExecutableProgram.parameter_names``.
 
         Returns:
-            ExecutableProgram ready for execution
+            ExecutableProgram[T]: Executable wrapping the backend circuit
+                and the parameter metadata needed to re-bind runtime
+                parameters, ready for execution.
 
         Raises:
             ValueError: If a name appears in both ``bindings`` and
