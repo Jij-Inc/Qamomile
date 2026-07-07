@@ -28,25 +28,32 @@ class QKernelBuildMixin:
         self,
         *,
         bindings: dict[str, Any] | None = None,
-        backend: str | None = None,
+        parameters: list[str] | None = None,
+        policy: Any = None,
+        cost_basis: Any = None,
+        strategies: dict[str, str] | None = None,
+        unknown_policy: Any = None,
     ) -> ResourceEstimate:
         """Estimate all resources for this kernel's circuit.
 
-        Convenience method that delegates to the module-level
-        ``estimate_resources`` function, eliminating the need to
-        access ``.block`` directly.
+        Convenience wrapper around ``ResourceEstimator().estimate(...)``.
 
         Args:
             bindings (dict[str, Any] | None): Optional concrete parameter
-                bindings (scalars and dicts). Dict values trigger ``|key|``
-                cardinality substitution. Defaults to ``None``.
-            backend (str | None): Optional backend name used to select
-                backend-specific callable implementation resources or bodies.
+                bindings. Defaults to ``None``.
+            parameters (list[str] | None): Runtime parameter names to preserve
+                while building the kernel. Defaults to ``None``.
+            policy (Any): Optional ``ResourcePolicy`` override. Defaults to
+                ``None``, meaning the estimator default is used.
+            cost_basis (Any): Optional ``CostBasis`` override. Defaults to
+                ``None``, meaning the estimator default is used.
+            strategies (dict[str, str] | None): Callable strategy overrides.
+                Defaults to ``None``.
+            unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
                 Defaults to ``None``.
 
         Returns:
-            ResourceEstimate: Resource estimate with qubits, gates, and
-            parameters.
+            ResourceEstimate: Logical symbolic resource estimate.
 
         Example:
             >>> @qm.qkernel
@@ -59,7 +66,15 @@ class QKernelBuildMixin:
             >>> print(est.qubits)  # 2
         """
         kernel = cast("QKernel[..., Any]", self)
-        return estimate_qkernel_resources(kernel, bindings=bindings, backend=backend)
+        return estimate_qkernel_resources(
+            kernel,
+            bindings=bindings,
+            parameters=parameters,
+            policy=policy,
+            cost_basis=cost_basis,
+            strategies=strategies,
+            unknown_policy=unknown_policy,
+        )
 
     def build(
         self,

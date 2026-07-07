@@ -1,8 +1,8 @@
 """Implement Quantum Fourier Transform stdlib callables.
 
 The public qkernel-facing entry points are :func:`qft` and :func:`iqft`. They
-emit named callables that carry a standard Qamomile body, resource metadata,
-and a native-first lowering policy. The ``QFT`` and ``IQFT`` classes are the
+emit named callables that carry a standard Qamomile body and a native-first
+lowering policy. The ``QFT`` and ``IQFT`` classes are the
 advanced strategy-backed implementation objects behind those functions; custom
 user-defined named operations should normally use
 ``qamomile.circuit.composite_gate`` rather than subclassing these patterns
@@ -44,7 +44,6 @@ from qamomile.circuit.ir.operation.callable import (
     CallPolicy,
     CompositeGateType,
     InvokeOperation,
-    ResourceMetadata,
     signature_from_values,
 )
 
@@ -80,10 +79,6 @@ class QFT(CompositeGate):
 
         # Apply with specific strategy
         result = qft_gate(q0, q1, q2, strategy="approximate")
-
-        # Compare resources between strategies
-        standard = qft_gate.get_resources_for_strategy("standard")
-        approx = qft_gate.get_resources_for_strategy("approximate")
 
         # Or use the factory function
         qubits = qft(qubit_vector)
@@ -148,31 +143,6 @@ class QFT(CompositeGate):
             )
 
         return tuple(qubits_list)
-
-    def _resources(self) -> ResourceMetadata:
-        """Return resource metadata for QFT.
-
-        QFT uses O(n^2) gates but no T gates in the standard decomposition.
-        """
-        n = self._num_qubits
-        num_h = n
-        num_cp = n * (n - 1) // 2
-        num_swap = n // 2
-        return ResourceMetadata(
-            t_gates=0,
-            total_gates=num_h + num_cp + num_swap,
-            single_qubit_gates=num_h,
-            two_qubit_gates=num_cp + num_swap,
-            clifford_gates=num_h + num_swap,
-            rotation_gates=num_cp,
-            custom_metadata={
-                "num_h_gates": num_h,
-                "num_cp_gates": num_cp,
-                "num_swap_gates": num_swap,
-                "total_gates": num_h + num_cp + num_swap,
-            },
-        )
-
 
 class IQFT(CompositeGate):
     """Inverse Quantum Fourier Transform composite gate.
@@ -260,31 +230,6 @@ class IQFT(CompositeGate):
 
         return tuple(qubits_list)
 
-    def _resources(self) -> ResourceMetadata:
-        """Return resource metadata for IQFT.
-
-        IQFT uses the same resources as QFT.
-        """
-        n = self._num_qubits
-        num_h = n
-        num_cp = n * (n - 1) // 2
-        num_swap = n // 2
-        return ResourceMetadata(
-            t_gates=0,
-            total_gates=num_h + num_cp + num_swap,
-            single_qubit_gates=num_h,
-            two_qubit_gates=num_cp + num_swap,
-            clifford_gates=num_h + num_swap,
-            rotation_gates=num_cp,
-            custom_metadata={
-                "num_h_gates": num_h,
-                "num_cp_gates": num_cp,
-                "num_swap_gates": num_swap,
-                "total_gates": num_h + num_cp + num_swap,
-            },
-        )
-
-
 @overload
 def qft(qubits: VectorView[Qubit]) -> VectorView[Qubit]: ...
 @overload
@@ -345,7 +290,6 @@ def _emit_vector_qft_invoke(
             ),
             body=None,
             body_ref=body_ref,
-            resource=None,
             default_policy=CallPolicy.NATIVE_FIRST,
             attrs=attrs,
         ),

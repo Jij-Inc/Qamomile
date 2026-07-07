@@ -7,7 +7,7 @@ from .callable import (
     CallTransform,
     CompositeGateType,
     InvokeOperation,
-    ResourceMetadata,
+    ResourceModelBinding,
 )
 from .cast import CastOperation
 from .classical_ops import (
@@ -44,7 +44,7 @@ __all__ = [
     "InvokeOperation",
     "InverseBlockOperation",
     "CompositeGateType",
-    "ResourceMetadata",
+    "ResourceModelBinding",
     "GateOperation",
     "GateOperationType",
     "MeasureOperation",

@@ -2,6 +2,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .estimator import (
+    CallResources,
+    CostBasis,
+    DepthResources,
+    FixedResourceModel,
+    GateResources,
+    ResourceContext,
+    ResourceEstimate,
+    ResourceEstimator,
+    ResourcePolicy,
+    UnknownResourcePolicy,
+    WidthResources,
+    estimate_resources,
+)
+
 # Frontend API
 from .frontend.callable_signature import CallableSignature
 from .frontend.composite_gate import (
@@ -54,7 +69,6 @@ from .frontend.operation.qubit_gates import (
 )
 from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
-from .ir.operation.callable import ResourceMetadata
 
 # Standard library circuits
 from .stdlib import iqft, qft, qpe
@@ -104,7 +118,18 @@ __all__ = [
     "Oracle",
     "opaque",
     "CallableSignature",
-    "ResourceMetadata",
+    "CallResources",
+    "CostBasis",
+    "DepthResources",
+    "FixedResourceModel",
+    "GateResources",
+    "ResourceContext",
+    "ResourceEstimate",
+    "ResourceEstimator",
+    "ResourcePolicy",
+    "UnknownResourcePolicy",
+    "WidthResources",
+    "estimate_resources",
     "control",
     "inverse",
     "cast",

@@ -98,30 +98,26 @@ class TestQFT:
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_resources(self, n):
-        """QFT returns correct resource metadata."""
-        gate = QFT(n)
-        metadata = gate.get_resource_metadata()
+        """QFT resources are estimated through ResourceEstimator."""
 
-        assert metadata is not None
+        @qkernel
+        def circuit() -> Vector[Qubit]:
+            qs = qubit_array(n, "qs")
+            qs = qft(qs)
+            return qs
+
+        estimate = circuit.estimate_resources()
 
         num_h = n
         num_cp = n * (n - 1) // 2
         num_swap = n // 2
 
-        # Typed fields
-        assert metadata.t_gates == 0
-        assert metadata.total_gates == num_h + num_cp + num_swap
-        assert metadata.single_qubit_gates == num_h
-        assert metadata.two_qubit_gates == num_cp + num_swap
-        assert metadata.clifford_gates == num_h + num_swap
-        assert metadata.rotation_gates == num_cp
-
-        # custom_metadata
-        assert metadata.custom_metadata["num_h_gates"] == num_h
-        assert metadata.custom_metadata["num_cp_gates"] == num_cp
-        assert metadata.custom_metadata["num_swap_gates"] == num_swap
-        assert metadata.custom_metadata["total_gates"] == num_h + num_cp + num_swap
-        # total_depth removed from ResourceMetadata
+        assert estimate.gates.t == 0
+        assert estimate.gates.total == num_h + num_cp + num_swap
+        assert estimate.gates.single_qubit == num_h
+        assert estimate.gates.two_qubit == num_cp + num_swap
+        assert estimate.gates.clifford == num_h + num_swap
+        assert estimate.gates.rotation == num_cp
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_resources_symbolic(self, n):
@@ -306,30 +302,26 @@ class TestIQFT:
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_resources(self, n):
-        """IQFT returns correct resource metadata."""
-        gate = IQFT(n)
-        metadata = gate.get_resource_metadata()
+        """IQFT resources are estimated through ResourceEstimator."""
 
-        assert metadata is not None
+        @qkernel
+        def circuit() -> Vector[Qubit]:
+            qs = qubit_array(n, "qs")
+            qs = iqft(qs)
+            return qs
+
+        estimate = circuit.estimate_resources()
 
         num_h = n
         num_cp = n * (n - 1) // 2
         num_swap = n // 2
 
-        # Typed fields
-        assert metadata.t_gates == 0
-        assert metadata.total_gates == num_h + num_cp + num_swap
-        assert metadata.single_qubit_gates == num_h
-        assert metadata.two_qubit_gates == num_cp + num_swap
-        assert metadata.clifford_gates == num_h + num_swap
-        assert metadata.rotation_gates == num_cp
-
-        # custom_metadata
-        assert metadata.custom_metadata["num_h_gates"] == num_h
-        assert metadata.custom_metadata["num_cp_gates"] == num_cp
-        assert metadata.custom_metadata["num_swap_gates"] == num_swap
-        assert metadata.custom_metadata["total_gates"] == num_h + num_cp + num_swap
-        # total_depth removed from ResourceMetadata
+        assert estimate.gates.t == 0
+        assert estimate.gates.total == num_h + num_cp + num_swap
+        assert estimate.gates.single_qubit == num_h
+        assert estimate.gates.two_qubit == num_cp + num_swap
+        assert estimate.gates.clifford == num_h + num_swap
+        assert estimate.gates.rotation == num_cp
 
     @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
     def test_resources_symbolic(self, n):

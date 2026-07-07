@@ -68,7 +68,11 @@ def estimate_qkernel_resources(
     kernel: "QKernel[Any, Any]",
     *,
     bindings: dict[str, Any] | None = None,
-    backend: str | None = None,
+    parameters: list[str] | None = None,
+    policy: Any = None,
+    cost_basis: Any = None,
+    strategies: dict[str, str] | None = None,
+    unknown_policy: Any = None,
 ) -> "ResourceEstimate":
     """Estimate resources for a kernel.
 
@@ -76,13 +80,33 @@ def estimate_qkernel_resources(
         kernel (QKernel[Any, Any]): Kernel to estimate.
         bindings (dict[str, Any] | None): Optional concrete parameter
             bindings. Defaults to ``None``.
-        backend (str | None): Optional backend name used to select
-            backend-specific callable implementation resources or bodies.
+        parameters (list[str] | None): Runtime parameter names to preserve
+            during kernel build. Defaults to ``None``.
+        policy (Any): Optional ``ResourcePolicy`` override. Defaults to
+            ``None``.
+        cost_basis (Any): Optional ``CostBasis`` override. Defaults to
+            ``None``.
+        strategies (dict[str, str] | None): Callable strategy overrides.
+            Defaults to ``None``.
+        unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
             Defaults to ``None``.
 
     Returns:
         ResourceEstimate: Estimated qubit, gate, and parameter resources.
     """
-    from qamomile.circuit.estimator.resource_estimator import estimate_resources
+    from qamomile.circuit.estimator.resource_estimator import (
+        CostBasis,
+        ResourcePolicy,
+        UnknownResourcePolicy,
+        estimate_resources,
+    )
 
-    return estimate_resources(kernel.block, bindings=bindings, backend=backend)
+    return estimate_resources(
+        kernel,
+        bindings=bindings,
+        parameters=parameters,
+        policy=policy or ResourcePolicy.MODEL_IF_AVAILABLE,
+        cost_basis=cost_basis or CostBasis.LOGICAL_GATES,
+        strategies=strategies,
+        unknown_policy=unknown_policy or UnknownResourcePolicy.ERROR,
+    )

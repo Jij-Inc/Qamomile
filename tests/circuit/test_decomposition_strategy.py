@@ -111,42 +111,6 @@ class TestQFTStrategies:
         assert strategy is not None
         assert "approximate" in strategy.name
 
-    def test_standard_qft_resources(self):
-        """Test standard QFT resource estimation."""
-        strategy = StandardQFTStrategy()
-        resources = strategy.resources(4)
-
-        assert resources.t_gates == 0
-        assert resources.custom_metadata["num_h_gates"] == 4
-        assert resources.custom_metadata["num_cp_gates"] == 6  # 4*3/2
-        assert resources.custom_metadata["precision"] == "full"
-
-    def test_approximate_qft_resources(self):
-        """Test approximate QFT resource estimation."""
-        strategy = ApproximateQFTStrategy(truncation_depth=2)
-        resources = strategy.resources(4)
-
-        assert resources.t_gates == 0
-        # With k=2, should have fewer CP gates than full QFT
-        assert resources.custom_metadata["num_cp_gates"] < 6
-        assert resources.custom_metadata["truncation_depth"] == 2
-
-    def test_qft_get_resources_for_strategy(self):
-        """Test getting resources for specific strategy."""
-        qft = QFT(5)
-
-        standard_resources = qft.get_resources_for_strategy("standard")
-        approx_resources = qft.get_resources_for_strategy("approximate")
-
-        assert standard_resources is not None
-        assert approx_resources is not None
-
-        # Approximate should have fewer gates
-        standard_gates = standard_resources.custom_metadata["total_gates"]
-        approx_gates = approx_resources.custom_metadata["total_gates"]
-        assert approx_gates <= standard_gates
-
-
 class TestCompositeGateStrategyRegistry:
     """Tests for CompositeGate strategy registry."""
 

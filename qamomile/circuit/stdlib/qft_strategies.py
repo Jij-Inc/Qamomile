@@ -30,7 +30,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.operation.callable import ResourceMetadata
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.handle.primitives import Qubit
@@ -84,38 +83,6 @@ class StandardQFTStrategy:
             )
 
         return tuple(qubits_list)
-
-    def resources(self, num_qubits: int) -> ResourceMetadata:
-        """Return resource estimates for standard QFT.
-
-        Args:
-            num_qubits: Number of qubits
-
-        Returns:
-            ResourceMetadata with gate counts
-        """
-        n = num_qubits
-        num_h_gates = n
-        num_cp_gates = n * (n - 1) // 2
-        num_swap_gates = n // 2
-
-        return ResourceMetadata(
-            t_gates=0,
-            total_gates=num_h_gates + num_cp_gates + num_swap_gates,
-            single_qubit_gates=num_h_gates,
-            two_qubit_gates=num_cp_gates + num_swap_gates,
-            clifford_gates=num_h_gates + num_swap_gates,
-            rotation_gates=num_cp_gates,
-            custom_metadata={
-                "num_h_gates": num_h_gates,
-                "num_cp_gates": num_cp_gates,
-                "num_swap_gates": num_swap_gates,
-                "total_gates": num_h_gates + num_cp_gates + num_swap_gates,
-                "precision": "full",
-                "strategy": "standard",
-            },
-        )
-
 
 @dataclass
 class ApproximateQFTStrategy:
@@ -178,49 +145,6 @@ class ApproximateQFTStrategy:
 
         return tuple(qubits_list)
 
-    def resources(self, num_qubits: int) -> ResourceMetadata:
-        """Return resource estimates for approximate QFT.
-
-        Args:
-            num_qubits: Number of qubits
-
-        Returns:
-            ResourceMetadata with gate counts
-        """
-        n = num_qubits
-        k = self.truncation_depth
-        num_h_gates = n
-        num_swap_gates = n // 2
-
-        # Calculate number of CP gates with truncation
-        # For each qubit j, we apply CP gates to qubits max(0, j-k) to j-1
-        if n > k:
-            # Full truncation benefit
-            num_cp_gates = k * n - k * (k + 1) // 2
-        else:
-            # n <= k, no truncation (same as standard)
-            num_cp_gates = n * (n - 1) // 2
-
-        return ResourceMetadata(
-            t_gates=0,
-            total_gates=num_h_gates + num_cp_gates + num_swap_gates,
-            single_qubit_gates=num_h_gates,
-            two_qubit_gates=num_cp_gates + num_swap_gates,
-            clifford_gates=num_h_gates + num_swap_gates,
-            rotation_gates=num_cp_gates,
-            custom_metadata={
-                "num_h_gates": num_h_gates,
-                "num_cp_gates": num_cp_gates,
-                "num_swap_gates": num_swap_gates,
-                "total_gates": num_h_gates + num_cp_gates + num_swap_gates,
-                "precision": f"truncated_k{k}",
-                "truncation_depth": k,
-                "strategy": "approximate",
-                "error_bound": f"O(n/2^{k})",
-            },
-        )
-
-
 @dataclass
 class StandardIQFTStrategy:
     """Standard inverse QFT decomposition (full precision).
@@ -264,38 +188,6 @@ class StandardIQFTStrategy:
             qubits_list[j] = qmc.h(qubits_list[j])
 
         return tuple(qubits_list)
-
-    def resources(self, num_qubits: int) -> ResourceMetadata:
-        """Return resource estimates for standard IQFT.
-
-        Args:
-            num_qubits: Number of qubits
-
-        Returns:
-            ResourceMetadata with gate counts
-        """
-        n = num_qubits
-        num_h_gates = n
-        num_cp_gates = n * (n - 1) // 2
-        num_swap_gates = n // 2
-
-        return ResourceMetadata(
-            t_gates=0,
-            total_gates=num_h_gates + num_cp_gates + num_swap_gates,
-            single_qubit_gates=num_h_gates,
-            two_qubit_gates=num_cp_gates + num_swap_gates,
-            clifford_gates=num_h_gates + num_swap_gates,
-            rotation_gates=num_cp_gates,
-            custom_metadata={
-                "num_h_gates": num_h_gates,
-                "num_cp_gates": num_cp_gates,
-                "num_swap_gates": num_swap_gates,
-                "total_gates": num_h_gates + num_cp_gates + num_swap_gates,
-                "precision": "full",
-                "strategy": "standard",
-            },
-        )
-
 
 @dataclass
 class ApproximateIQFTStrategy:
@@ -348,41 +240,3 @@ class ApproximateIQFTStrategy:
             qubits_list[j] = qmc.h(qubits_list[j])
 
         return tuple(qubits_list)
-
-    def resources(self, num_qubits: int) -> ResourceMetadata:
-        """Return resource estimates for approximate IQFT.
-
-        Args:
-            num_qubits: Number of qubits
-
-        Returns:
-            ResourceMetadata with gate counts
-        """
-        n = num_qubits
-        k = self.truncation_depth
-        num_h_gates = n
-        num_swap_gates = n // 2
-
-        if n > k:
-            num_cp_gates = k * n - k * (k + 1) // 2
-        else:
-            num_cp_gates = n * (n - 1) // 2
-
-        return ResourceMetadata(
-            t_gates=0,
-            total_gates=num_h_gates + num_cp_gates + num_swap_gates,
-            single_qubit_gates=num_h_gates,
-            two_qubit_gates=num_cp_gates + num_swap_gates,
-            clifford_gates=num_h_gates + num_swap_gates,
-            rotation_gates=num_cp_gates,
-            custom_metadata={
-                "num_h_gates": num_h_gates,
-                "num_cp_gates": num_cp_gates,
-                "num_swap_gates": num_swap_gates,
-                "total_gates": num_h_gates + num_cp_gates + num_swap_gates,
-                "precision": f"truncated_k{k}",
-                "truncation_depth": k,
-                "strategy": "approximate",
-                "error_bound": f"O(n/2^{k})",
-            },
-        )

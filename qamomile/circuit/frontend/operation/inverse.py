@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import dataclasses
 import inspect
 from collections.abc import Callable, Sequence
@@ -35,7 +34,6 @@ from qamomile.circuit.ir.operation.callable import (
     CallTransform,
     CompositeGateType,
     InvokeOperation,
-    ResourceMetadata,
     signature_from_block,
     signature_from_values,
 )
@@ -315,41 +313,6 @@ def _validate_input_shape(
             f"inverse(): argument {name!r} shape does not match the wrapped "
             f"kernel input; expected {expected}, got {got}."
         )
-
-
-def _copy_resource_metadata(
-    resource_metadata: ResourceMetadata | None,
-) -> ResourceMetadata | None:
-    """Copy resource metadata for an inverse opaque composite.
-
-    Args:
-        resource_metadata (ResourceMetadata | None): Metadata attached to
-            the original composite operation.
-
-    Returns:
-        ResourceMetadata | None: Independent metadata object with the same
-            resource values, or None when the original had no metadata.
-    """
-    if resource_metadata is None:
-        return None
-    return dataclasses.replace(
-        resource_metadata,
-        custom_metadata=copy.deepcopy(resource_metadata.custom_metadata),
-    )
-
-
-def _copy_invoke_resource(resource: Any) -> Any:
-    """Copy resource metadata carried by an invoke operation.
-
-    Args:
-        resource (Any): Resource metadata or model attached to an invocation.
-
-    Returns:
-        Any: A detached copy when possible, or ``None`` for a missing resource.
-    """
-    if isinstance(resource, ResourceMetadata):
-        return _copy_resource_metadata(resource)
-    return copy.deepcopy(resource)
 
 
 def _inverse_opaque_name(name: str) -> str:
@@ -813,7 +776,9 @@ class _BlockInverter:
         attrs = dict(op.attrs)
         target = op.target
         body = op.body
-        resource = _copy_invoke_resource(op.resource)
+        resource_models = (
+            list(op.definition.resource_models) if op.definition is not None else []
+        )
         transform = (
             CallTransform.DIRECT
             if op.transform is CallTransform.INVERSE
@@ -869,7 +834,7 @@ class _BlockInverter:
         elif op.body is not None:
             source_block = op.body
             body = self.invert_block(op.body)
-            resource = None
+            resource_models = []
             attrs["gate_type"] = CompositeGateType.CUSTOM.name
             attrs["custom_name"] = f"{op.name}_inverse"
         elif attrs.get("kind") in {"composite", "oracle"}:
@@ -926,7 +891,7 @@ class _BlockInverter:
                         )
                     ),
                     body=body,
-                    resource=resource,
+                    resource_models=resource_models,
                     default_policy=policy,
                     attrs=attrs,
                 ),

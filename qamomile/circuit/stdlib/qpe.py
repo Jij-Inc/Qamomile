@@ -28,7 +28,6 @@ from qamomile.circuit.ir.operation.callable import (
     CallPolicy,
     CompositeGateType,
     InvokeOperation,
-    ResourceMetadata,
     signature_from_values,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
@@ -109,21 +108,6 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
     for i, h in enumerate(qubit_handles):
         qubits[i] = h
 
-    # Create ResourceMetadata for concrete IQFT (skip for symbolic QPE where concrete_n == 0)
-    resource_meta = None
-    if concrete_n > 0:
-        num_h = concrete_n
-        num_cp = concrete_n * (concrete_n - 1) // 2
-        num_swap = concrete_n // 2
-        resource_meta = ResourceMetadata(
-            t_gates=0,
-            total_gates=num_h + num_cp + num_swap,
-            single_qubit_gates=num_h,
-            two_qubit_gates=num_cp + num_swap,
-            clifford_gates=num_h + num_swap,
-            rotation_gates=num_cp,
-        )
-
     iqft_body = None
     if concrete_n > 0:
         from qamomile.circuit.stdlib.qft import IQFT
@@ -159,7 +143,6 @@ def _emit_iqft_and_cast_to_qfixed(qubits: Vector[Qubit]) -> QFixed:
                 result_names=[f"qubit_{i}" for i in range(len(iqft_results))],
             ),
             body=iqft_body,
-            resource=resource_meta,
             default_policy=CallPolicy.NATIVE_FIRST,
             attrs=attrs,
         ),

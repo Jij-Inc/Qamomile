@@ -13,9 +13,6 @@ Example:
             # Full precision QFT implementation
             ...
 
-        def resources(self, num_qubits: int) -> ResourceMetadata:
-            return ResourceMetadata(...)
-
     class ApproximateQFTStrategy:
         def __init__(self, truncation_depth: int = 3):
             self._k = truncation_depth
@@ -40,7 +37,6 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.handle.primitives import Qubit
-    from qamomile.circuit.ir.operation.callable import ResourceMetadata
 
 
 @runtime_checkable
@@ -50,8 +46,6 @@ class DecompositionStrategy(Protocol):
     A decomposition strategy provides:
     1. A unique name for identification
     2. A decompose method that performs the actual decomposition
-    3. Resource estimation for the decomposition
-
     Strategies allow the same composite gate to have multiple implementations
     with different trade-offs (e.g., precision vs. gate count).
     """
@@ -72,17 +66,6 @@ class DecompositionStrategy(Protocol):
 
         Returns:
             Output qubits after decomposition
-        """
-        ...
-
-    def resources(self, num_qubits: int) -> "ResourceMetadata":
-        """Return resource estimates for this decomposition.
-
-        Args:
-            num_qubits: Number of qubits the gate operates on
-
-        Returns:
-            ResourceMetadata with gate counts, depth estimates, etc.
         """
         ...
 

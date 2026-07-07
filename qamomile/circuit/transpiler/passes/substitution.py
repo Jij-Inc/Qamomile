@@ -334,16 +334,9 @@ class SubstitutionPass(Pass[Block, Block]):
 
         attrs = dict(op.attrs)
         attrs["strategy_name"] = rule.strategy
-        resource = _resource_for_composite_strategy(
-            gate_type_name=str(attrs.get("gate_type", "")),
-            num_target_qubits=op.num_target_qubits,
-            strategy=rule.strategy,
-            fallback=op.effective_resource(strategy=rule.strategy),
-        )
         definition = op.definition or CallableDef(ref=op.target)
         new_definition = dataclasses.replace(
             definition,
-            resource=resource,
             attrs={**definition.attrs, **attrs},
         )
         return dataclasses.replace(
@@ -351,38 +344,6 @@ class SubstitutionPass(Pass[Block, Block]):
             attrs=attrs,
             definition=new_definition,
         )
-
-
-def _resource_for_composite_strategy(
-    *,
-    gate_type_name: str,
-    num_target_qubits: int,
-    strategy: str,
-    fallback: object,
-) -> object:
-    """Return resource metadata for a stdlib composite strategy.
-
-    Args:
-        gate_type_name (str): Composite gate type name such as ``"QFT"``.
-        num_target_qubits (int): Number of target qubits.
-        strategy (str): Strategy name to estimate.
-        fallback (object): Existing resource object when no specialized
-            resource model is available.
-
-    Returns:
-        object: Strategy-specific resource metadata when known, otherwise
-        ``fallback``.
-    """
-    if gate_type_name == "QFT":
-        from qamomile.circuit.stdlib.qft import QFT
-
-        return QFT(num_target_qubits).get_resources_for_strategy(strategy) or fallback
-    if gate_type_name == "IQFT":
-        from qamomile.circuit.stdlib.qft import IQFT
-
-        return IQFT(num_target_qubits).get_resources_for_strategy(strategy) or fallback
-    return fallback
-
 
 def create_substitution_pass(
     *,

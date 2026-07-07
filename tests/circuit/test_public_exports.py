@@ -15,6 +15,13 @@ re-imported here, so the test also documents the back-compat contract.
 from __future__ import annotations
 
 import qamomile.circuit as qmc
+from qamomile.circuit.estimator.resource_estimator import (
+    CostBasis,
+    FixedResourceModel,
+    ResourceEstimator,
+    ResourcePolicy,
+    UnknownResourcePolicy,
+)
 from qamomile.circuit.frontend.callable_signature import CallableSignature
 from qamomile.circuit.frontend.composite_gate import (
     CompositeGate,
@@ -22,7 +29,6 @@ from qamomile.circuit.frontend.composite_gate import (
     composite_gate,
 )
 from qamomile.circuit.frontend.oracle import Oracle, opaque
-from qamomile.circuit.ir.operation.callable import ResourceMetadata
 from qamomile.circuit.transpiler import job as _job_module
 
 
@@ -75,14 +81,22 @@ def test_callable_helpers_are_publicly_reexported():
     assert qmc.opaque is opaque
     assert qmc.Oracle is Oracle
     assert qmc.CallableSignature is CallableSignature
-    assert qmc.ResourceMetadata is ResourceMetadata
+    assert qmc.ResourceEstimator is ResourceEstimator
+    assert qmc.ResourcePolicy is ResourcePolicy
+    assert qmc.CostBasis is CostBasis
+    assert qmc.UnknownResourcePolicy is UnknownResourcePolicy
+    assert qmc.FixedResourceModel is FixedResourceModel
 
     for name in (
         "composite_gate",
         "opaque",
         "Oracle",
         "CallableSignature",
-        "ResourceMetadata",
+        "ResourceEstimator",
+        "ResourcePolicy",
+        "CostBasis",
+        "UnknownResourcePolicy",
+        "FixedResourceModel",
     ):
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"

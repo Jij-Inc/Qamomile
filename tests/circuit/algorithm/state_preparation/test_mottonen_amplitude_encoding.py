@@ -231,39 +231,40 @@ class TestCompositeGateMetadata:
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources_real(self, n_qubits: int) -> None:
         """Real input: single-stage RY counts match the Gray-walk formulas."""
-        gate = MottonenAmplitudeEncoding(np.ones(2**n_qubits))
-        assert gate.num_target_qubits == n_qubits
-        r = gate._resources()
-        meta = r.custom_metadata
-        assert meta["num_ry_gates"] == 2**n_qubits - 1
-        assert meta["num_rz_gates"] == 0
-        assert meta["num_cnot_gates"] == 2**n_qubits - 2
-        assert meta["num_qubits"] == n_qubits
-        assert meta["complex_input"] is False
-        assert r.t_gates == 0
-        assert r.total_gates == (2**n_qubits - 1) + (2**n_qubits - 2)
-        assert r.single_qubit_gates == 2**n_qubits - 1
-        assert r.two_qubit_gates == 2**n_qubits - 2
+        amplitudes = np.ones(2**n_qubits)
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(n_qubits, "q")
+            q = amplitude_encoding(q, amplitudes)
+            return q
+
+        estimate = kernel.estimate_resources()
+        assert estimate.gates.t == 0
+        assert estimate.gates.total == (2**n_qubits - 1) + (2**n_qubits - 2)
+        assert estimate.gates.single_qubit == 2**n_qubits - 1
+        assert estimate.gates.two_qubit == 2**n_qubits - 2
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources_complex(self, n_qubits: int) -> None:
         """Complex input: two-stage RY + RZ counts double the gate budget."""
-        amps = np.ones(2**n_qubits, dtype=complex) + 1j * np.arange(2**n_qubits)
-        gate = MottonenAmplitudeEncoding(amps)
-        assert gate.num_target_qubits == n_qubits
-        r = gate._resources()
-        meta = r.custom_metadata
-        assert meta["num_ry_gates"] == 2**n_qubits - 1
-        assert meta["num_rz_gates"] == 2**n_qubits - 1
-        assert meta["num_cnot_gates"] == 2 * (2**n_qubits - 2)
-        assert meta["num_qubits"] == n_qubits
-        assert meta["complex_input"] is True
+        amplitudes = np.ones(2**n_qubits, dtype=complex) + 1j * np.arange(
+            2**n_qubits
+        )
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(n_qubits, "q")
+            q = amplitude_encoding(q, amplitudes)
+            return q
+
+        estimate = kernel.estimate_resources()
         rot = 2 * (2**n_qubits - 1)
         cnot = 2 * (2**n_qubits - 2)
-        assert r.t_gates == 0
-        assert r.total_gates == rot + cnot
-        assert r.single_qubit_gates == rot
-        assert r.two_qubit_gates == cnot
+        assert estimate.gates.t == 0
+        assert estimate.gates.total == rot + cnot
+        assert estimate.gates.single_qubit == rot
+        assert estimate.gates.two_qubit == cnot
 
 
 # ---------------------------------------------------------------------------
@@ -448,13 +449,6 @@ class TestLazyConstruction:
         assert gate.num_target_qubits == 2
         assert gate._is_complex is False
         # Angles are not yet computed.
-        assert gate._ry_angles_per_level_cache is None
-        assert gate._rz_angles_per_level_cache is None
-
-    def test_resources_does_not_compute_angles(self) -> None:
-        """``_resources()`` reads ``_is_complex`` directly; no angle work."""
-        gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
-        _ = gate._resources()
         assert gate._ry_angles_per_level_cache is None
         assert gate._rz_angles_per_level_cache is None
 

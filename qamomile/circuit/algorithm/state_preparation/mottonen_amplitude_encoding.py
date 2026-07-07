@@ -80,16 +80,12 @@ pass eagerly (``O(2^n)``) so input errors — wrong shape, length not a
 power of two, all-zero amplitudes — surface at construction time.  The
 expensive angle precomputation (``O(n * 2^n)``) is deferred: it runs
 lazily on the first ``_decompose()`` call and is cached afterwards.
-``_resources()`` reads ``is_complex`` directly from the cached
-``__init__`` state and never triggers angle precomputation, so
-standalone resource estimation on a ``MottonenAmplitudeEncoding``
-instance pays only the normalisation cost.
 
 In practice the surrounding ``CompositeGate.__call__`` framework
 eagerly invokes ``_decompose()`` when the gate is invoked inside a
 ``@qkernel`` (to populate the invocation's ``CallableDef.body``), so
 kernel-side ``estimate_resources()`` does still pay the angle cost
-today.  The lazy aspect is the right shape for a future framework
+today. The lazy aspect is the right shape for a future framework
 refactor that defers decomposition-body construction until emit time,
 and is verified standalone by
 ``tests.circuit.algorithm.state_preparation.test_mottonen_amplitude_encoding.TestLazyConstruction``.
@@ -105,10 +101,7 @@ from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector
 from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.qubit_gates import cx, ry, rz
-from qamomile.circuit.ir.operation.callable import (
-    CompositeGateType,
-    ResourceMetadata,
-)
+from qamomile.circuit.ir.operation.callable import CompositeGateType
 from qamomile.linalg.mottonen import (
     compute_all_ry_angles_per_level,
     compute_disentangling_angles_per_level,
@@ -399,46 +392,6 @@ class MottonenAmplitudeEncoding(CompositeGate):
             ]
             _emit_mottonen_gates(qubit_list, self._num_qubits, rz_angles, gate="rz")
         return tuple(qubit_list)
-
-    def _resources(self) -> ResourceMetadata:
-        """Return gate counts for the Gray-walk decomposition.
-
-        Reads only ``self._is_complex`` (set in ``__init__``), so this
-        method does NOT trigger angle precomputation.
-
-        Returns:
-            ResourceMetadata: Carries the ``RY`` count
-                (``2**n - 1``), the ``RZ`` count (``0`` for real inputs,
-                ``2**n - 1`` for complex), the ``CNOT`` count
-                (``2**n - 2`` per emitted stage, so ``2 * (2**n - 2)``
-                for complex), and aggregate totals.
-        """
-        n = self._num_qubits
-        num_ry = 2**n - 1
-        cnot_per_stage = 2**n - 2
-        if self._is_complex:
-            num_rz = 2**n - 1
-            num_cnot = 2 * cnot_per_stage
-        else:
-            num_rz = 0
-            num_cnot = cnot_per_stage
-        num_rot = num_ry + num_rz
-        return ResourceMetadata(
-            t_gates=0,
-            total_gates=num_rot + num_cnot,
-            single_qubit_gates=num_rot,
-            two_qubit_gates=num_cnot,
-            rotation_gates=num_rot,
-            clifford_gates=num_cnot,
-            custom_metadata={
-                "num_ry_gates": num_ry,
-                "num_rz_gates": num_rz,
-                "num_cnot_gates": num_cnot,
-                "num_qubits": n,
-                "complex_input": self._is_complex,
-            },
-        )
-
 
 # ---------------------------------------------------------------------------
 # Convenience function wrappers

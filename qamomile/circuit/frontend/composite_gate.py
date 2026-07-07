@@ -7,10 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Sequence
 
 from qamomile.circuit.frontend.handle.primitives import Qubit
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.callable import (
-    CompositeGateType,
-    ResourceMetadata,
-)
+from qamomile.circuit.ir.operation.callable import CompositeGateType
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.decomposition import DecompositionStrategy
@@ -155,25 +152,6 @@ class CompositeGate(abc.ABC):
         """
         return None
 
-    def _resources(self) -> ResourceMetadata | None:
-        """Return resource estimation metadata.
-
-        Override to provide resource hints for the composite gate.
-        This is an alternative to get_resource_metadata() with a simpler name.
-
-        Returns:
-            ResourceMetadata with query_complexity, t_gates, etc.
-
-        Example:
-            def _resources(self) -> ResourceMetadata:
-                n = self._num_qubits
-                return ResourceMetadata(
-                    t_gates=0,
-                    total_gates=n,
-                )
-        """
-        return None
-
     def _decompose_with_strategy(
         self,
         qubits: "tuple[Qubit, ...] | Vector[Qubit]",
@@ -196,25 +174,6 @@ class CompositeGate(abc.ABC):
         # Fall back to _decompose if no strategy registered
         return self._decompose(qubits)
 
-    def get_resources_for_strategy(
-        self,
-        strategy_name: str | None = None,
-    ) -> ResourceMetadata | None:
-        """Get resource metadata for a specific strategy.
-
-        Args:
-            strategy_name (str | None): Strategy to query, or ``None`` for the
-                default strategy.
-
-        Returns:
-            ResourceMetadata | None: Resource metadata for the strategy, or
-            ``None`` if not available.
-        """
-        strategy = self.get_strategy(strategy_name)
-        if strategy is not None:
-            return strategy.resources(self.num_target_qubits)
-        return self._resources()
-
     def get_implementation(self) -> Block | None:
         """Get the implementation Block, if any.
 
@@ -229,18 +188,6 @@ class CompositeGate(abc.ABC):
             method.
         """
         return None
-
-    def get_resource_metadata(self) -> ResourceMetadata | None:
-        """Get resource estimation metadata.
-
-        Returns _resources() if defined, otherwise None.
-        Override _resources() to provide resource hints.
-
-        Returns:
-            ResourceMetadata | None: Resource metadata, or ``None`` if this
-            composite has no fallback metadata.
-        """
-        return self._resources()
 
     def build_decomposition(
         self,

@@ -639,11 +639,10 @@ def _token(obj: Any) -> str:
         items = sorted(obj.items(), key=lambda kv: _token(kv[0]))
         return "{" + ",".join(f"{_token(k)}:{_token(v)}" for k, v in items) + "}"
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        # Dataclass instances (e.g. ``ResourceMetadata`` on
-        # ``InvokeOperation``) get serialized field-by-field in
-        # name-sorted order so canonical bytes are independent of the
-        # declared-field order and of any nested ``dict``'s insertion
-        # order (handled transitively via the dict branch above).
+        # Dataclass instances get serialized field-by-field in name-sorted
+        # order so canonical bytes are independent of the declared-field order
+        # and of any nested ``dict``'s insertion order (handled transitively
+        # via the dict branch above).
         fields = sorted(dataclasses.fields(obj), key=lambda f: f.name)
         body = ",".join(f"{f.name}={_token(getattr(obj, f.name))}" for f in fields)
         return f"{type(obj).__name__}({body})"

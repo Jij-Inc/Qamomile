@@ -66,7 +66,6 @@ def invoke_composite_gate(
 
     operands = [q.value for q in [*consumed_controls, *consumed_targets]]
     results = [q.value.next_version() for q in [*consumed_controls, *consumed_targets]]
-    resource_meta = gate.get_resources_for_strategy(strategy)
     op = _build_invoke_operation(
         gate=gate,
         impl=impl,
@@ -75,7 +74,6 @@ def invoke_composite_gate(
         controls=controls,
         targets=target_qubits,
         strategy=strategy,
-        resource_meta=resource_meta,
         has_controls=bool(consumed_controls),
     )
 
@@ -120,7 +118,6 @@ def _build_invoke_operation(
     controls: Sequence[Qubit],
     targets: tuple[Qubit, ...],
     strategy: str | None,
-    resource_meta: Any,
     has_controls: bool,
 ) -> Any:
     """Build the IR invoke operation for a composite call.
@@ -133,7 +130,6 @@ def _build_invoke_operation(
         controls (Sequence[Qubit]): Control handles supplied at the call site.
         targets (tuple[Qubit, ...]): Target handles supplied at the call site.
         strategy (str | None): Selected strategy name.
-        resource_meta (Any): Selected resource metadata/model.
         has_controls (bool): Whether this call has explicit controls.
 
     Returns:
@@ -166,7 +162,6 @@ def _build_invoke_operation(
             transform=CallTransform.DIRECT,
             strategy=strategy,
             body=impl,
-            resource=resource_meta,
         )
     )
     if transform is CallTransform.CONTROLLED:
@@ -175,7 +170,6 @@ def _build_invoke_operation(
                 transform=CallTransform.CONTROLLED,
                 strategy=strategy,
                 body=impl,
-                resource=resource_meta,
             )
         )
     return InvokeOperation(
@@ -189,7 +183,6 @@ def _build_invoke_operation(
             signature=signature_from_values(operands, results),
             body=impl,
             implementations=implementations,
-            resource=resource_meta,
             default_policy=default_policy,
             attrs=attrs,
         ),

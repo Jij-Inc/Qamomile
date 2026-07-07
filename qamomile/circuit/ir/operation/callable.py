@@ -64,35 +64,6 @@ class CompositeGateType(enum.Enum):
     CUSTOM = "custom"
 
 
-@dataclasses.dataclass
-class ResourceMetadata:
-    """Carry callable resource-estimation metadata.
-
-    Args:
-        query_complexity (int | None): Oracle/unitary queries per invocation.
-        t_gates (int | None): Estimated T-gate count.
-        ancilla_qubits (int): Additional qubits required while the callable runs.
-        total_gates (int | None): Total gate count.
-        single_qubit_gates (int | None): Single-qubit gate count.
-        two_qubit_gates (int | None): Two-qubit gate count.
-        multi_qubit_gates (int | None): Three-or-more-qubit gate count.
-        clifford_gates (int | None): Clifford gate count.
-        rotation_gates (int | None): Rotation gate count.
-        custom_metadata (dict[str, Any]): Extra strategy-specific metadata.
-    """
-
-    query_complexity: int | None = None
-    t_gates: int | None = None
-    ancilla_qubits: int = 0
-    total_gates: int | None = None
-    single_qubit_gates: int | None = None
-    two_qubit_gates: int | None = None
-    multi_qubit_gates: int | None = None
-    clifford_gates: int | None = None
-    rotation_gates: int | None = None
-    custom_metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-
 @dataclasses.dataclass(frozen=True)
 class CallableRef:
     """Identify a callable independently of its Python object.
@@ -138,7 +109,6 @@ class CallableImplementation:
         body_ref (CallableBodyRef | None): Reference to a body that should be
             materialized by a later resolver. Defaults to ``None``.
         emitter (Any): Backend-native emitter object.
-        resource (Any): Resource metadata or model for this implementation.
         attrs (dict[str, Any]): Serializer-friendly implementation metadata.
     """
 
@@ -148,8 +118,26 @@ class CallableImplementation:
     body: Block | None = None
     body_ref: CallableBodyRef | None = None
     emitter: Any = None
-    resource: Any = None
     attrs: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass
+class ResourceModelBinding:
+    """Bind a resource model to a callable strategy or transform.
+
+    Args:
+        model (Any): Object implementing ``estimate(ResourceContext)``.
+        strategy (str | None): Strategy name matched by the estimator.
+            ``None`` means the model is a callable-level fallback.
+        transform (CallTransform | None): Optional direct/inverse/controlled
+            transform this model applies to. ``None`` means every transform.
+        estimate_kind (str): Informational estimate-kind tag.
+    """
+
+    model: Any
+    strategy: str | None = None
+    transform: CallTransform | None = None
+    estimate_kind: str = "strategy_model"
 
 
 @dataclasses.dataclass
@@ -164,7 +152,8 @@ class CallableDef:
             intentionally deferred. Defaults to ``None``.
         implementations (list[CallableImplementation]): Alternative native or
             strategy-specific implementations.
-        resource (Any): Default resource metadata or model.
+        resource_models (list[ResourceModelBinding]): Context-aware resource
+            models selected by the resource estimator.
         default_policy (CallPolicy): Default call lowering policy.
         attrs (dict[str, Any]): Serializer-friendly definition metadata.
     """
@@ -176,7 +165,9 @@ class CallableDef:
     implementations: list[CallableImplementation] = dataclasses.field(
         default_factory=list
     )
-    resource: Any = None
+    resource_models: list[ResourceModelBinding] = dataclasses.field(
+        default_factory=list
+    )
     default_policy: CallPolicy = CallPolicy.INLINE
     attrs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
@@ -419,37 +410,6 @@ class InvokeOperation(Operation):
         return self.definition.body_ref
 
     @property
-    def resource(self) -> Any:
-        """Return the callable's fallback resource object from its definition.
-
-        Returns:
-            Any: Resource metadata/model stored on ``CallableDef``.
-        """
-        if self.definition is None:
-            return None
-        return self.definition.resource
-
-    @resource.setter
-    def resource(self, value: Any) -> None:
-        """Set the callable's fallback resource object on its definition.
-
-        Args:
-            value (Any): Replacement resource metadata/model.
-        """
-        if self.definition is None:
-            self.definition = CallableDef(
-                ref=self.target,
-                signature=(
-                    signature_from_values(self.operands, self.results)
-                    if self.operands or self.results
-                    else None
-                ),
-                default_policy=_policy_from_attrs(self.attrs),
-                attrs=dict(self.attrs),
-            )
-        self.definition.resource = value
-
-    @property
     def name(self) -> str:
         """Return the display name for this invocation.
 
@@ -552,19 +512,6 @@ class InvokeOperation(Operation):
         return str(value)
 
     @property
-    def resource_metadata(self) -> ResourceMetadata | None:
-        """Return resource metadata when this invocation carries it.
-
-        Returns:
-            ResourceMetadata | None: Selected resource metadata, or ``None``
-            when the selected resource object is a different model.
-        """
-        resource = self.effective_resource()
-        if isinstance(resource, ResourceMetadata):
-            return resource
-        return None
-
-    @property
     def default_policy(self) -> CallPolicy:
         """Return the callable's default lowering policy.
 
@@ -627,31 +574,6 @@ class InvokeOperation(Operation):
         if self.transform is not CallTransform.DIRECT:
             return None
         return self.body
-
-    def effective_resource(
-        self,
-        *,
-        backend: str | None = None,
-        strategy: str | None = None,
-    ) -> Any:
-        """Return the resource model selected for this invocation.
-
-        Args:
-            backend (str | None): Backend name to match. Defaults to ``None``.
-            strategy (str | None): Strategy name to match. Defaults to the
-                invocation's ``strategy_name`` attribute.
-
-        Returns:
-            Any: Selected implementation resource, or the callable's default
-            resource object when no selected implementation provides one and
-            the transform can safely reuse direct-call resources.
-        """
-        impl = self.implementation_for(backend=backend, strategy=strategy)
-        if impl is not None and impl.resource is not None:
-            return impl.resource
-        if self.transform is CallTransform.CONTROLLED:
-            return None
-        return self.resource
 
     @property
     def signature(self) -> Signature:

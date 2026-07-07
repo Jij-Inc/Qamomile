@@ -33,7 +33,6 @@ from qamomile.circuit.ir.operation import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
-    ResourceMetadata,
     ReturnOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -1326,7 +1325,6 @@ def _encode_callable_implementation(
         "strategy": impl.strategy,
         "body": _encode_block(impl.body, ctx) if impl.body is not None else None,
         "body_ref": _encode_callable_body_ref(impl.body_ref),
-        "resource": _encode_resource_metadata(impl.resource),
         "attrs": _encode_payload(impl.attrs),
     }
 
@@ -1388,7 +1386,6 @@ def _encode_callable_def(
             _encode_callable_implementation(impl, ctx)
             for impl in definition.implementations
         ],
-        "resource": _encode_resource_metadata(definition.resource),
         "default_policy": definition.default_policy.name,
         "attrs": _encode_payload(definition.attrs),
     }
@@ -1405,7 +1402,7 @@ def _encode_invoke_operation(
 
     Returns:
         dict[str, Any]: Base op dict plus callable identity, transform,
-            attrs, resource metadata, and optional nested body.
+            attrs, definition, and optional nested body.
     """
     d = _base_op_dict("InvokeOperation", op)
     d["target"] = _encode_callable_ref(op.target)
@@ -1445,35 +1442,6 @@ def _encode_inverse_block(
         else None
     )
     return d
-
-
-def _encode_resource_metadata(
-    m: ResourceMetadata | None,
-) -> dict[str, Any] | None:
-    """Encode :class:`ResourceMetadata`.
-
-    Args:
-        m (ResourceMetadata | None): The resource metadata or ``None``.
-
-    Returns:
-        dict[str, Any] | None: ``None`` when absent; else a dict with
-            all numeric fields plus ``custom_metadata`` routed
-            through :func:`_encode_payload`.
-    """
-    if m is None:
-        return None
-    return {
-        "query_complexity": m.query_complexity,
-        "t_gates": m.t_gates,
-        "ancilla_qubits": m.ancilla_qubits,
-        "total_gates": m.total_gates,
-        "single_qubit_gates": m.single_qubit_gates,
-        "two_qubit_gates": m.two_qubit_gates,
-        "multi_qubit_gates": m.multi_qubit_gates,
-        "clifford_gates": m.clifford_gates,
-        "rotation_gates": m.rotation_gates,
-        "custom_metadata": _encode_payload(m.custom_metadata),
-    }
 
 
 _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {

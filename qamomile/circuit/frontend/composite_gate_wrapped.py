@@ -18,7 +18,7 @@ from qamomile.circuit.ir.operation.callable import (
     CallPolicy,
     CompositeGateType,
     InvokeOperation,
-    ResourceMetadata,
+    ResourceModelBinding,
     signature_from_block,
 )
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -47,8 +47,8 @@ class _WrappedCompositeGate(CompositeGate):
         _num_controls (int): Number of scalar control qubits for fixed-arity
             calls.
         _qkernel (Any): Wrapped ``QKernel`` instance.
-        _resource_metadata (ResourceMetadata | None): Optional resource
-            metadata attached to the boxed callable.
+        _resource_models (tuple[ResourceModelBinding, ...]): Context-aware
+            resource models attached to the boxed callable.
         _implementations (tuple[CallableImplementation, ...]): Optional
             implementation candidates attached by the decorator.
     """
@@ -58,7 +58,7 @@ class _WrappedCompositeGate(CompositeGate):
     _num_targets: int = 0
     _num_controls: int = 0
     _qkernel: Any = None
-    _resource_metadata: ResourceMetadata | None = None
+    _resource_models: tuple[ResourceModelBinding, ...] = ()
     _implementations: tuple[CallableImplementation, ...] = ()
 
     @property
@@ -168,20 +168,88 @@ class _WrappedCompositeGate(CompositeGate):
         self,
         *,
         bindings: dict[str, Any] | None = None,
-        backend: str | None = None,
+        parameters: list[str] | None = None,
+        policy: Any = None,
+        cost_basis: Any = None,
+        strategies: dict[str, str] | None = None,
+        unknown_policy: Any = None,
     ) -> ResourceEstimate:
         """Estimate resources for the wrapped qkernel body.
 
         Args:
             bindings (dict[str, Any] | None): Optional compile-time bindings.
                 Defaults to ``None``.
-            backend (str | None): Optional backend name for backend-specific
-                callable resource selection. Defaults to ``None``.
+            parameters (list[str] | None): Runtime parameter names to
+                preserve. Defaults to ``None``.
+            policy (Any): Optional ``ResourcePolicy`` override. Defaults to
+                ``None``.
+            cost_basis (Any): Optional ``CostBasis`` override. Defaults to
+                ``None``.
+            strategies (dict[str, str] | None): Strategy overrides. Defaults
+                to ``None``.
+            unknown_policy (Any): Optional unknown-callable policy. Defaults
+                to ``None``.
 
         Returns:
             ResourceEstimate: Resource estimate for the wrapped qkernel body.
         """
-        return self._qkernel.estimate_resources(bindings=bindings, backend=backend)
+        return self._qkernel.estimate_resources(
+            bindings=bindings,
+            parameters=parameters,
+            policy=policy,
+            cost_basis=cost_basis,
+            strategies=strategies,
+            unknown_policy=unknown_policy,
+        )
+
+    def resource_model(
+        self,
+        func: Callable | None = None,
+        *,
+        strategy: str | None = None,
+        transform: Any | None = None,
+        estimate_kind: str = "strategy_model",
+    ) -> Callable:
+        """Attach a context-aware resource model to this composite callable.
+
+        Args:
+            func (Callable | None): Function implementing
+                ``estimate(ResourceContext)`` when used as a decorator.
+                Defaults to ``None`` for decorator-with-arguments use.
+            strategy (str | None): Optional strategy name. Defaults to
+                ``None``.
+            transform (Any | None): Optional ``CallTransform``. Defaults to
+                ``None``.
+            estimate_kind (str): Informational estimate-kind tag. Defaults to
+                ``"strategy_model"``.
+
+        Returns:
+            Callable: The original model function or a decorator.
+        """
+
+        def decorator(model_func: Callable) -> Callable:
+            """Register the supplied resource model function.
+
+            Args:
+                model_func (Callable): Function accepting ``ResourceContext``.
+
+            Returns:
+                Callable: The same function for normal decorator behavior.
+            """
+            self._resource_models = (
+                *self._resource_models,
+                ResourceModelBinding(
+                    model=_FunctionResourceModel(model_func),
+                    strategy=strategy,
+                    transform=transform,
+                    estimate_kind=estimate_kind,
+                ),
+            )
+            return model_func
+
+        if func is None:
+            return decorator
+        return decorator(func)
 
     def draw(
         self,
@@ -218,15 +286,6 @@ class _WrappedCompositeGate(CompositeGate):
             fold_ifs=fold_ifs,
             **kwargs,
         )
-
-    def _resources(self) -> ResourceMetadata | None:
-        """Return resource metadata attached by the decorator.
-
-        Returns:
-            ResourceMetadata | None: Resource metadata supplied to
-            ``composite``/``composite_gate``.
-        """
-        return self._resource_metadata
 
     def _callable_implementations(self) -> tuple[CallableImplementation, ...]:
         """Return decorator-supplied implementation candidates.
@@ -309,7 +368,7 @@ class _WrappedCompositeGate(CompositeGate):
                 signature=signature_from_block(block),
                 body=block,
                 implementations=list(self._implementations),
-                resource=self._resource_metadata,
+                resource_models=list(self._resource_models),
                 default_policy=CallPolicy.PRESERVE_BOX,
                 attrs=attrs,
             ),
@@ -393,7 +452,8 @@ def composite_gate(
     name: str = "",
     num_controls: int = 0,
     gate_type: Any | None = None,
-    resource: ResourceMetadata | None = None,
+    resource_model: Any | None = None,
+    resource_models: Sequence[Any] | None = None,
     implementations: Sequence[Any] | None = None,
 ) -> Callable[[Callable], _WrappedCompositeGate]:
     """Return a qkernel-to-boxed-callable decorator."""
@@ -406,7 +466,8 @@ def composite_gate(
     name: str = "",
     num_controls: int = 0,
     gate_type: Any | None = None,
-    resource: ResourceMetadata | None = None,
+    resource_model: Any | None = None,
+    resource_models: Sequence[Any] | None = None,
     implementations: Sequence[Any] | None = None,
 ) -> _WrappedCompositeGate | Callable[[Callable], _WrappedCompositeGate]:
     """Create a boxed callable from a qkernel function.
@@ -425,8 +486,10 @@ def composite_gate(
             ``0``.
         gate_type (Any | None): Advanced internal composite classification.
             Defaults to ``None``, which records a custom composite.
-        resource (ResourceMetadata | None): Optional resource metadata attached
-            to the boxed callable. Defaults to ``None``.
+        resource_model (Any | None): Optional context-aware resource model.
+            Defaults to ``None``.
+        resource_models (Sequence[Any] | None): Optional additional resource
+            model bindings or model objects. Defaults to ``None``.
         implementations (Sequence[Any] | None): Optional advanced
             implementation candidates for backend, transform, or strategy
             selection. Defaults to ``None``.
@@ -470,6 +533,10 @@ def composite_gate(
         gate_name = name or qkernel_instance.name
         normalized_gate_type = _normalize_gate_type(gate_type)
         normalized_implementations = _normalize_implementations(implementations)
+        normalized_resource_models = _normalize_resource_models(
+            resource_model,
+            resource_models,
+        )
 
         return _WrappedCompositeGate(
             _gate_type=normalized_gate_type,
@@ -477,7 +544,7 @@ def composite_gate(
             _num_targets=num_targets,
             _num_controls=num_controls,
             _qkernel=qkernel_instance,
-            _resource_metadata=resource,
+            _resource_models=normalized_resource_models,
             _implementations=normalized_implementations,
         )
 
@@ -500,7 +567,8 @@ def composite(
     name: str = "",
     num_controls: int = 0,
     gate_type: Any | None = None,
-    resource: ResourceMetadata | None = None,
+    resource_model: Any | None = None,
+    resource_models: Sequence[Any] | None = None,
     implementations: Sequence[Any] | None = None,
 ) -> Callable[[Callable], _WrappedCompositeGate]:
     """Return a qkernel-to-composite decorator."""
@@ -513,7 +581,8 @@ def composite(
     name: str = "",
     num_controls: int = 0,
     gate_type: Any | None = None,
-    resource: ResourceMetadata | None = None,
+    resource_model: Any | None = None,
+    resource_models: Sequence[Any] | None = None,
     implementations: Sequence[Any] | None = None,
 ) -> _WrappedCompositeGate | Callable[[Callable], _WrappedCompositeGate]:
     """Create a boxed composite callable from a qkernel.
@@ -530,8 +599,10 @@ def composite(
             ``0``.
         gate_type (Any | None): Advanced internal composite classification.
             Defaults to ``None``, which records a custom composite.
-        resource (ResourceMetadata | None): Optional resource metadata.
+        resource_model (Any | None): Optional context-aware resource model.
             Defaults to ``None``.
+        resource_models (Sequence[Any] | None): Optional additional resource
+            model bindings or model objects. Defaults to ``None``.
         implementations (Sequence[Any] | None): Optional advanced
             implementation candidates for backend, transform, or strategy
             selection. Defaults to ``None``.
@@ -545,17 +616,42 @@ def composite(
             name=name,
             num_controls=num_controls,
             gate_type=gate_type,
-            resource=resource,
+            resource_model=resource_model,
+            resource_models=resource_models,
             implementations=implementations,
         )
     decorator = composite_gate(
         name=name,
         num_controls=num_controls,
         gate_type=gate_type,
-        resource=resource,
+        resource_model=resource_model,
+        resource_models=resource_models,
         implementations=implementations,
     )
     return decorator(func)
+
+
+@dataclasses.dataclass(frozen=True)
+class _FunctionResourceModel:
+    """Adapt a function into the resource-model protocol.
+
+    Args:
+        func (Callable): Function accepting a ``ResourceContext`` and returning
+            a ``ResourceEstimate``.
+    """
+
+    func: Callable
+
+    def estimate(self, ctx: Any) -> ResourceEstimate:
+        """Estimate resources by calling the wrapped function.
+
+        Args:
+            ctx (Any): Resource context passed by the estimator.
+
+        Returns:
+            ResourceEstimate: Function result.
+        """
+        return cast(ResourceEstimate, self.func(ctx))
 
 
 def _normalize_gate_type(gate_type: Any | None) -> CompositeGateType:
@@ -601,6 +697,31 @@ def _normalize_implementations(
                 "implementations must contain CallableImplementation objects."
             )
     return cast(tuple[CallableImplementation, ...], tuple(implementations))
+
+
+def _normalize_resource_models(
+    resource_model: Any | None,
+    resource_models: Sequence[Any] | None,
+) -> tuple[ResourceModelBinding, ...]:
+    """Normalize resource model arguments for a composite callable.
+
+    Args:
+        resource_model (Any | None): Single resource model object.
+        resource_models (Sequence[Any] | None): Additional model objects or
+            ``ResourceModelBinding`` instances.
+
+    Returns:
+        tuple[ResourceModelBinding, ...]: Normalized model bindings.
+    """
+    normalized: list[ResourceModelBinding] = []
+    if resource_model is not None:
+        normalized.append(ResourceModelBinding(model=resource_model))
+    for model in resource_models or ():
+        if isinstance(model, ResourceModelBinding):
+            normalized.append(model)
+        else:
+            normalized.append(ResourceModelBinding(model=model))
+    return tuple(normalized)
 
 
 def _count_scalar_target_qubits(qkernel_instance: Any) -> int:

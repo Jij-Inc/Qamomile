@@ -124,7 +124,9 @@ helper_with_literals.draw(n=3, fold_loops=False, inline=True)
 # %%
 @qmc.composite_gate(
     name="h_layer",
-    resource=qmc.ResourceMetadata(total_gates=3, single_qubit_gates=3),
+    resource_model=qmc.FixedResourceModel(
+        gates=qmc.GateResources(total=3, single_qubit=3),
+    ),
 )
 def h_layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     for i in qmc.range(q.shape[0]):
@@ -191,7 +193,7 @@ assert sum(count for _, count in qft_result.results) == 64
 #
 # An opaque callable has no body.
 #
-# It can still carry resource metadata, so resource estimation can count it.
+# It can still carry a resource model, so resource estimation can count it.
 
 
 # %%
@@ -201,9 +203,12 @@ marked_state_oracle = qmc.opaque(
         inputs=[qmc.Vector[qmc.Qubit]],
         outputs=[qmc.Vector[qmc.Qubit]],
     ),
-    resource=qmc.ResourceMetadata(
-        query_complexity=1,
-        t_gates=40,
+    resource_model=qmc.FixedResourceModel(
+        gates=qmc.GateResources(t=40),
+        calls=qmc.CallResources(
+            calls_by_name={"marked_state_oracle": 1},
+            queries_by_name={"marked_state_oracle": 1},
+        ),
     ),
 )
 
@@ -233,15 +238,15 @@ est = grover_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
 print("total gates:", est.gates.total)
 print("T gates:", est.gates.t_gates)
-print("oracle calls:", est.gates.oracle_calls)
-print("oracle queries:", est.gates.oracle_queries)
+print("oracle calls:", est.calls.oracle_calls)
+print("oracle queries:", est.calls.oracle_queries)
 assert est.qubits == 3
 assert str(est.gates.total) == "3*rounds + 3"
 assert str(est.gates.t_gates) == "40*rounds"
-assert {k: str(v) for k, v in est.gates.oracle_calls.items()} == {
+assert {k: str(v) for k, v in est.calls.oracle_calls.items()} == {
     "marked_state_oracle": "rounds"
 }
-assert {k: str(v) for k, v in est.gates.oracle_queries.items()} == {
+assert {k: str(v) for k, v in est.calls.oracle_queries.items()} == {
     "marked_state_oracle": "rounds"
 }
 
@@ -252,7 +257,7 @@ assert {k: str(v) for k, v in est.gates.oracle_queries.items()} == {
 est_4 = est.substitute(rounds=4)
 print("T gates for 4 rounds:", est_4.gates.t_gates)
 assert est_4.gates.t_gates == 160
-assert est_4.gates.oracle_calls == {"marked_state_oracle": 4}
+assert est_4.calls.oracle_calls == {"marked_state_oracle": 4}
 
 # %% [markdown]
 # ## Summary

@@ -1,6 +1,5 @@
 """Tests for the CompositeGate API."""
 
-import dataclasses
 from typing import Any
 
 import numpy as np
@@ -21,7 +20,6 @@ from qamomile.circuit.ir.operation.callable import (
     CallPolicy,
     CallTransform,
     CompositeGateType,
-    ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types import FloatType, QubitType, UIntType
@@ -190,11 +188,9 @@ class TestCallableDefinitionSignatures:
 
     def test_composite_decorator_records_implementation_candidates(self):
         """composite decorators attach user-supplied implementation candidates."""
-        native_resource = ResourceMetadata(total_gates=7)
         implementation = CallableImplementation(
             backend="qiskit",
             strategy="native",
-            resource=native_resource,
         )
 
         @qmc.composite_gate(name="encode", implementations=[implementation])
@@ -238,31 +234,6 @@ class TestCallableDefinitionSignatures:
 
         op = _invoke_ops(circuit.build().operations)[0]
         assert op.default_policy is CallPolicy.PRESERVE_BOX
-
-    def test_fixed_arity_composite_decorator_selects_strategy_resource(self):
-        """fixed-arity composite decorators use implementation resource hints."""
-        fast_resource = ResourceMetadata(total_gates=3)
-
-        @qmc.composite_gate(
-            name="encode",
-            implementations=[
-                CallableImplementation(strategy="fast", resource=fast_resource)
-            ],
-        )
-        @qmc.qkernel
-        def encode(q: qmc.Qubit) -> qmc.Qubit:
-            return qmc.h(q)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Qubit:
-            q = qmc.qubit("q")
-            q = encode(q, strategy="fast")
-            return q
-
-        op = _invoke_ops(circuit.build().operations)[0]
-
-        assert op.strategy_name == "fast"
-        assert op.effective_resource() is fast_resource
 
     def test_composite_decorator_rejects_missing_declared_controls(self):
         """A fixed-control decorator call must not emit inconsistent IR."""
@@ -321,25 +292,22 @@ class TestCallableDefinitionSignatures:
 class TestCompositeGate:
     """Test the CompositeGate API: definition, application, and error handling."""
 
-    def test_invoke_stores_body_and_resource_only_on_definition(self):
-        """InvokeOperation exposes body/resource without duplicating fields."""
+    def test_invoke_stores_body_only_on_definition(self):
+        """InvokeOperation exposes callable body without duplicating fields."""
         body = Block()
-        resource = ResourceMetadata(total_gates=1)
         ref = CallableRef(namespace="user", name="callable")
         op = InvokeOperation(
             target=ref,
-            definition=CallableDef(ref=ref, body=body, resource=resource),
+            definition=CallableDef(ref=ref, body=body),
         )
 
-        field_names = {field.name for field in dataclasses.fields(InvokeOperation)}
+        field_names = set(InvokeOperation.__dataclass_fields__)
 
         assert "body" not in field_names
         assert "resource" not in field_names
         assert op.definition is not None
         assert op.definition.body is body
-        assert op.definition.resource is resource
         assert op.body is body
-        assert op.resource is resource
 
     def test_invoke_effective_body_uses_selected_strategy(self):
         """InvokeOperation selects a strategy-specific implementation body."""
@@ -461,56 +429,6 @@ class TestCompositeGate:
 
         assert op_without_transform.effective_body() is None
         assert op_with_transform.effective_body() is transformed_body
-
-    def test_controlled_invoke_does_not_fallback_to_direct_resource(self):
-        """Controlled InvokeOperation requires controlled resource metadata."""
-        ref = CallableRef(namespace="user", name="selectable")
-        attrs = {
-            "kind": "composite",
-            "gate_type": CompositeGateType.CUSTOM.name,
-            "custom_name": "selectable",
-            "strategy_name": None,
-            "num_control_qubits": 1,
-            "num_target_qubits": 1,
-            "default_policy": CallPolicy.PRESERVE_BOX.name,
-        }
-        direct_resource = ResourceMetadata(total_gates=1, single_qubit_gates=1)
-        controlled_resource = ResourceMetadata(total_gates=3, two_qubit_gates=3)
-        op_without_controlled_resource = InvokeOperation(
-            operands=[],
-            results=[],
-            target=ref,
-            transform=CallTransform.CONTROLLED,
-            attrs=attrs,
-            definition=CallableDef(
-                ref=ref,
-                resource=direct_resource,
-                default_policy=CallPolicy.PRESERVE_BOX,
-                attrs=attrs,
-            ),
-        )
-        op_with_controlled_resource = InvokeOperation(
-            operands=[],
-            results=[],
-            target=ref,
-            transform=CallTransform.CONTROLLED,
-            attrs=attrs,
-            definition=CallableDef(
-                ref=ref,
-                resource=direct_resource,
-                implementations=[
-                    CallableImplementation(
-                        transform=CallTransform.CONTROLLED,
-                        resource=controlled_resource,
-                    ),
-                ],
-                default_policy=CallPolicy.PRESERVE_BOX,
-                attrs=attrs,
-            ),
-        )
-
-        assert op_without_controlled_resource.effective_resource() is None
-        assert op_with_controlled_resource.effective_resource() is controlled_resource
 
     def test_invoke_vector_target_keeps_parameters_after_quantum_operands(self):
         """InvokeOperation separates vector targets from classical parameters."""
@@ -842,52 +760,6 @@ class TestCompositeGate:
         assert gate.gate_type == CompositeGateType.CUSTOM
         assert gate.custom_name == "hadamard_all"
 
-    @pytest.mark.parametrize("n", [1, 2, 5, 10, 100])
-    def test_composite_gate_with_resources(self, n):
-        """CompositeGate can define _resources() for metadata."""
-
-        class MyGate(CompositeGate):
-            custom_name = "my_gate"
-
-            def __init__(self, n: int):
-                self._n = n
-
-            @property
-            def num_target_qubits(self) -> int:
-                return self._n
-
-            def _decompose(
-                self, qubits: Vector[Qubit] | tuple[Qubit, ...]
-            ) -> tuple[Qubit, ...]:
-                return tuple(qmc.h(q) for q in qubits)
-
-            def _resources(self) -> ResourceMetadata:
-                return ResourceMetadata(
-                    t_gates=10,
-                    query_complexity=5,
-                    custom_metadata={"num_qubits": self._n},
-                )
-
-        gate = MyGate(n)
-        assert gate.num_target_qubits == n
-        assert gate.num_control_qubits == 0
-        assert gate.get_resource_metadata() is not None
-        assert gate.custom_name == "my_gate"
-
-        metadata = gate.get_resource_metadata()
-
-        assert metadata is not None
-        assert metadata.t_gates == 10
-        assert metadata.query_complexity == 5
-        assert metadata.custom_metadata["num_qubits"] == n
-        # Unspecified typed fields default to None
-        assert metadata.total_gates is None
-        assert metadata.single_qubit_gates is None
-        assert metadata.two_qubit_gates is None
-        assert metadata.multi_qubit_gates is None
-        assert metadata.clifford_gates is None
-        assert metadata.rotation_gates is None
-
     def test_apply_composite_gate_in_qkernel(self):
         """CompositeGate can be used inside a qkernel."""
         double_h = DoubleH()
@@ -967,8 +839,11 @@ class TestCompositeGate:
 
     def test_opaque_helper_emits_bodyless_invoke(self):
         """opaque() creates an Oracle backed by a bodyless InvokeOperation."""
-        resource = ResourceMetadata(query_complexity=3, ancilla_qubits=2)
-        black_box = qmc.opaque("black_box", 1, resource=resource)
+        model = qmc.FixedResourceModel(
+            width=qmc.WidthResources(clean_ancilla_qubits=2),
+            calls=qmc.CallResources(queries_by_name={"black_box": 3}),
+        )
+        black_box = qmc.opaque("black_box", 1, resource_model=model)
 
         assert isinstance(black_box, qmc.Oracle)
 
@@ -985,16 +860,20 @@ class TestCompositeGate:
         assert op.attrs["kind"] == "oracle"
         assert op.target.name == "black_box"
         assert op.body is None
-        assert op.resource is resource
+        assert op.definition is not None
+        assert op.definition.resource_models[0].model is model
 
     def test_controlled_opaque_records_controlled_transform(self):
         """Controlled opaque calls use the controlled Invoke transform."""
-        resource = ResourceMetadata(query_complexity=1, t_gates=4)
+        model = qmc.FixedResourceModel(
+            gates=qmc.GateResources(t=4),
+            calls=qmc.CallResources(queries_by_name={"controlled_black_box": 1}),
+        )
         black_box = qmc.Oracle(
             "controlled_black_box",
             num_qubits=1,
             num_control_qubits=1,
-            resource=resource,
+            resource_model=model,
         )
 
         @qkernel
@@ -1010,7 +889,8 @@ class TestCompositeGate:
         assert op.attrs["kind"] == "oracle"
         assert op.transform is CallTransform.CONTROLLED
         assert op.num_control_qubits == 1
-        assert op.effective_resource() is resource
+        assert op.definition is not None
+        assert op.definition.resource_models[0].model is model
 
     def test_opaque_accepts_callable_signature(self):
         """opaque() accepts a vector CallableSignature without fixed arity."""
@@ -1039,11 +919,11 @@ class TestCompositeGate:
         assert op.definition.signature is not None
         assert op.body is None
 
-    def test_composite_alias_attaches_resource_metadata(self):
-        """Compatibility alias still attaches resource metadata."""
-        resource = qmc.ResourceMetadata(total_gates=1, single_qubit_gates=1)
+    def test_composite_alias_attaches_resource_model(self):
+        """Compatibility alias attaches callable resource models."""
+        model = qmc.FixedResourceModel(gates=qmc.GateResources(total=1))
 
-        @qmc.composite(name="boxed_h", resource=resource)
+        @qmc.composite(name="boxed_h", resource_model=model)
         @qkernel
         def boxed_h(q: Qubit) -> Qubit:
             q = qmc.h(q)
@@ -1062,13 +942,14 @@ class TestCompositeGate:
         assert op.attrs["kind"] == "composite"
         assert op.target.namespace == "user.composite"
         assert op.target.name == "boxed_h"
-        assert op.resource is resource
+        assert op.definition is not None
+        assert op.definition.resource_models[0].model is model
 
     def test_composite_gate_accepts_raw_function(self):
         """Decorator can qkernel-wrap a raw function before boxing it."""
-        resource = qmc.ResourceMetadata(total_gates=1, single_qubit_gates=1)
+        model = qmc.FixedResourceModel(gates=qmc.GateResources(total=1))
 
-        @qmc.composite_gate(name="raw_boxed_h", resource=resource)
+        @qmc.composite_gate(name="raw_boxed_h", resource_model=model)
         def raw_boxed_h(q: Qubit) -> Qubit:
             q = qmc.h(q)
             return q
@@ -1083,11 +964,12 @@ class TestCompositeGate:
 
         assert len(invokes) == 1
         op = invokes[0]
+        assert op.definition is not None
+        assert op.definition.resource_models[0].model is model
         assert op.attrs["kind"] == "composite"
         assert op.target.namespace == "user.composite"
         assert op.target.name == "raw_boxed_h"
         assert op.body is not None
-        assert op.resource is resource
 
     def test_composite_gate_direct_form_accepts_raw_function(self):
         """@composite_gate without arguments can box a raw function."""
@@ -1144,7 +1026,6 @@ class TestCompositeGate:
         mock_strategy = mocker.MagicMock()
         mock_strategy.name = "mock_strat"
         mock_strategy.decompose.side_effect = lambda qubits: (qmc.x(qubits[0]),)
-        mock_strategy.resources.return_value = None
 
         TestGateForStrategy.register_strategy("mock_strat", mock_strategy)
         decompose_spy = mocker.spy(TestGateForStrategy, "_decompose")
@@ -1248,101 +1129,6 @@ class TestCompositeGate:
         assert op.implementation_for() is not None
         assert op.effective_body() is op.body
 
-    def test_resource_metadata_in_operation(self):
-        """_resources() metadata flows through to the emitted operation."""
-
-        class GateWithResources(CompositeGate):
-            custom_name = "res_gate"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                return (qmc.h(qubits[0]),)
-
-            def _resources(self) -> ResourceMetadata:
-                return ResourceMetadata(
-                    t_gates=42,
-                    query_complexity=7,
-                    custom_metadata={"key": "value"},
-                )
-
-        gate = GateWithResources()
-
-        @qkernel
-        def circuit(q: Qubit) -> Qubit:
-            (q,) = gate(q)
-            return q
-
-        block = circuit.build()
-        ops = block.operations
-        assert len(ops) == 2
-        assert isinstance(ops[0], QInitOperation)
-        op = _assert_composite_invoke(ops[1], name="res_gate", num_targets=1)
-        assert op.resource is not None
-        assert op.resource.t_gates == 42
-        assert op.resource.query_complexity == 7
-        assert op.resource.custom_metadata["key"] == "value"
-        # Unspecified typed fields default to None
-        assert op.resource.total_gates is None
-        assert op.resource.single_qubit_gates is None
-        assert op.resource.two_qubit_gates is None
-        assert op.resource.multi_qubit_gates is None
-        assert op.resource.clifford_gates is None
-        assert op.resource.rotation_gates is None
-
-    def test_strategy_resource_metadata(self, mocker):
-        """Strategy's resources() is used instead of _resources() when strategy is active."""
-
-        class GateForStratRes(CompositeGate):
-            custom_name = "strat_res_gate"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                return (qmc.h(qubits[0]),)
-
-            def _resources(self) -> ResourceMetadata:
-                return ResourceMetadata(t_gates=100)
-
-        gate = GateForStratRes()
-
-        strategy_meta = ResourceMetadata(t_gates=5, query_complexity=3)
-        mock_strategy = mocker.MagicMock()
-        mock_strategy.name = "efficient"
-        mock_strategy.decompose.side_effect = lambda qubits: (qmc.x(qubits[0]),)
-        mock_strategy.resources.return_value = strategy_meta
-
-        GateForStratRes.register_strategy("efficient", mock_strategy)
-
-        @qkernel
-        def circuit(q: Qubit) -> Qubit:
-            (q,) = gate(q, strategy="efficient")
-            return q
-
-        block = circuit.build()
-        ops = block.operations
-        assert len(ops) == 2
-        assert isinstance(ops[0], QInitOperation)
-        op = _assert_composite_invoke(
-            ops[1],
-            name="strat_res_gate",
-            num_targets=1,
-        )
-        assert op.resource is strategy_meta
-        assert op.resource.t_gates == 5
-        impl = op.implementation_for()
-        assert impl is not None
-        assert impl.strategy == "efficient"
-        assert impl.resource is strategy_meta
-        assert op.effective_resource() is strategy_meta
-        assert op.effective_body() is op.body
-
-        del GateForStratRes._strategies["efficient"]
-
     def test_strategy_registry_isolation(self):
         """Strategies registered on one subclass are not visible to another."""
 
@@ -1441,25 +1227,8 @@ class TestQFTAndIQFTClasses:
         assert iqft.gate_type == CompositeGateType.IQFT
         assert iqft.custom_name == "iqft"
 
-    def test_qft_resources(self):
-        """QFT returns correct resource metadata."""
-        from qamomile.circuit.stdlib.qft import QFT
-
-        qft = QFT(4)
-        metadata = qft.get_resource_metadata()
-
-        assert metadata is not None
-        assert metadata.t_gates == 0
-        # n=4: num_h=4, num_cp=6, num_swap=2
-        assert metadata.total_gates == 12
-        assert metadata.single_qubit_gates == 4
-        assert metadata.two_qubit_gates == 8
-        assert metadata.clifford_gates == 6
-        assert metadata.rotation_gates == 6
-        assert metadata.custom_metadata["num_h_gates"] == 4
-
     def test_qft_strategy_is_callable_implementation(self):
-        """QFT strategy body and resources are selected implementations."""
+        """QFT strategy body is selected as an implementation."""
         from qamomile.circuit.stdlib.qft import QFT
 
         @qkernel
@@ -1479,9 +1248,7 @@ class TestQFTAndIQFTClasses:
         assert impl is not None
         assert impl.strategy == "approximate_k2"
         assert impl.body is op.body
-        assert impl.resource is op.resource
         assert op.effective_body() is op.body
-        assert op.effective_resource() is op.resource
 
     def test_qft_in_qkernel(self):
         """QFT can be used in a qkernel."""
@@ -2569,9 +2336,9 @@ class TestVectorQubitCompositeDecorator:
         """Decorating a Vector[Qubit] qkernel preserves it as a box."""
         import qamomile.circuit as qmc
 
-        resource = qmc.ResourceMetadata(total_gates=1, single_qubit_gates=1)
+        model = qmc.FixedResourceModel(gates=qmc.GateResources(total=1))
 
-        @qmc.composite_gate(name="encode", resource=resource)
+        @qmc.composite_gate(name="encode", resource_model=model)
         @qmc.qkernel
         def encode(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
             q[0] = qmc.h(q[0])
@@ -2593,7 +2360,8 @@ class TestVectorQubitCompositeDecorator:
         assert op.default_policy is CallPolicy.PRESERVE_BOX
         assert op.num_target_qubits == 2
         assert op.body is not None
-        assert op.resource is resource
+        assert op.definition is not None
+        assert op.definition.resource_models[0].model is model
 
     def test_vector_qubit_direct_decorator_form_uses_qkernel_name(self):
         """Direct @composite_gate form supports Vector[Qubit] qkernels."""

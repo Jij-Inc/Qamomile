@@ -4130,19 +4130,6 @@ class TestTranspilerConfigAndSubstitution:
         assert cp_approx == 7  # truncated to k=2 neighbors
         assert cp_approx < cp_std
 
-    def test_qft_strategy_resources(self):
-        """QFT strategy resource metadata is consistent."""
-        from qamomile.circuit.stdlib.qft import QFT
-
-        qft_gate = QFT(5)
-        standard_resources = qft_gate.get_resources_for_strategy("standard")
-        approx_resources = qft_gate.get_resources_for_strategy("approximate_k2")
-
-        assert standard_resources.custom_metadata["num_cp_gates"] == 10
-        assert approx_resources.custom_metadata["num_cp_gates"] < 10
-        assert standard_resources.custom_metadata["num_h_gates"] == 5
-        assert approx_resources.custom_metadata["num_h_gates"] == 5
-
     def test_substitute_no_rules_is_noop(self):
         """substitute() with no config rules returns block unchanged."""
         transpiler = QiskitTranspiler()

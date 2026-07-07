@@ -33,7 +33,7 @@ from qamomile.circuit.algorithm.state_preparation import (
     amplitude_encoding_from_angles,
     computational_basis_state,
 )
-from qamomile.circuit.estimator import count_gates
+from qamomile.circuit.estimator import estimate_resources
 from qamomile.circuit.frontend.operation.inverse import (
     _BlockInverter,
     _InverseRotationCallable,
@@ -47,7 +47,6 @@ from qamomile.circuit.ir.operation.callable import (
     CallableRef,
     CompositeGateType,
     InvokeOperation,
-    ResourceMetadata,
 )
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
@@ -1675,14 +1674,10 @@ def test_inverse_qft_rejects_strategy_without_iqft_counterpart(monkeypatch) -> N
         circuit.build()
 
 
-def test_inverse_qft_copies_resource_metadata() -> None:
-    """QFT/IQFT inversion should not share mutable resource metadata."""
+def test_inverse_qft_builds_iqft_invocation() -> None:
+    """QFT inversion should build an IQFT invocation without resource metadata."""
     q = Value(type=QubitType(), name="q")
     q_after = q.next_version()
-    metadata = ResourceMetadata(
-        custom_metadata={"strategy": {"name": "test"}},
-        total_gates=1,
-    )
     ref = CallableRef(namespace="qamomile.stdlib", name="qft")
     attrs = {
         "kind": "composite",
@@ -1696,7 +1691,7 @@ def test_inverse_qft_copies_resource_metadata() -> None:
         results=[q_after],
         target=ref,
         attrs=attrs,
-        definition=CallableDef(ref=ref, resource=metadata, attrs=attrs),
+        definition=CallableDef(ref=ref, attrs=attrs),
     )
     block = Block(
         name="qft_layer",
@@ -1710,10 +1705,10 @@ def test_inverse_qft_copies_resource_metadata() -> None:
     inverse_op = inverted.operations[0]
 
     assert isinstance(inverse_op, InvokeOperation)
-    assert inverse_op.resource is not metadata
-    assert isinstance(inverse_op.resource, ResourceMetadata)
-    inverse_op.resource.custom_metadata["strategy"]["name"] = "mutated"
-    assert metadata.custom_metadata["strategy"]["name"] == "test"
+    assert inverse_op.target.name == "iqft"
+    assert inverse_op.transform.name == "DIRECT"
+    assert inverse_op.definition is not None
+    assert inverse_op.definition.resource_models == []
 
 
 def test_inverse_custom_composite_gate_inverts_implementation() -> None:
@@ -1746,24 +1741,21 @@ def test_inverse_custom_composite_gate_inverts_implementation() -> None:
     assert inner_inverse_ops[0].implementation_block.name.endswith("_inverse")
 
 
-# The oracle and its metadata stay module-level so the opaque-inverse test
-# can assert that resource hints survive inversion.
-_OPAQUE_RESOURCE_METADATA = ResourceMetadata(
-    query_complexity=7,
-    t_gates=3,
-    total_gates=5,
+_OPAQUE_RESOURCE_MODEL = qmc.FixedResourceModel(
+    gates=qmc.GateResources(t=3, total=5),
+    calls=qmc.CallResources(queries_by_name={"opaque_inverse_gate": 7}),
 )
 
 
 _opaque_oracle = qmc.Oracle(
     name="opaque_inverse_gate",
     num_qubits=1,
-    resource=_OPAQUE_RESOURCE_METADATA,
+    resource_model=_OPAQUE_RESOURCE_MODEL,
 )
 
 
 def test_inverse_oracle_builds_opaque_inverse() -> None:
-    """inverse(qkernel) keeps oracle resources on an opaque inverse."""
+    """inverse(qkernel) keeps oracle resource models on an opaque inverse."""
 
     @qmc.qkernel
     def oracle_layer(q: qmc.Qubit) -> qmc.Qubit:
@@ -1793,7 +1785,8 @@ def test_inverse_oracle_builds_opaque_inverse() -> None:
     assert len(inner_invokes) == 1
     assert inner_invokes[0].attrs["custom_name"] == "opaque_inverse_gate_inv"
     assert inner_invokes[0].body is None
-    assert inner_invokes[0].resource == _OPAQUE_RESOURCE_METADATA
+    assert inner_invokes[0].definition is not None
+    assert inner_invokes[0].definition.resource_models[0].model is _OPAQUE_RESOURCE_MODEL
 
 
 def test_inverse_accepts_qkernel_backed_composite_decorator() -> None:
@@ -1886,15 +1879,19 @@ def test_inverse_rejects_native_qpe_composite_marker() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_inverse_gate_counter_binds_mixed_inputs_by_formal_order() -> None:
-    """Gate counting binds classical inverse inputs despite quantum-first IR."""
+def test_inverse_resource_estimator_binds_mixed_inputs_by_formal_order() -> None:
+    """Resource estimation binds classical inverse inputs despite quantum-first IR."""
     repetition_count = Value(type=UIntType(), name="repetition_count")
     formal_q = Value(type=QubitType(), name="formal_q")
     target_q = Value(type=QubitType(), name="target_q")
+    target_q_next = target_q.next_version()
     controlled_block = Block(
         name="controlled",
         input_values=[target_q],
-        output_values=[target_q],
+        output_values=[target_q_next],
+        operations=[
+            GateOperation.fixed(GateOperationType.H, [target_q], [target_q_next])
+        ],
         kind=BlockKind.AFFINE,
     )
     controlled_result = formal_q.next_version()
@@ -1923,7 +1920,7 @@ def test_inverse_gate_counter_binds_mixed_inputs_by_formal_order() -> None:
     )
     block = Block(operations=[inverse_op], kind=BlockKind.AFFINE)
 
-    counts = count_gates(block)
+    counts = estimate_resources(block).gates
     count_expr = str(counts.two_qubit)
 
     assert "repetition_count" in count_expr

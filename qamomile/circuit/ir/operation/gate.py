@@ -172,11 +172,9 @@ class ControlledUOperation(Operation):
             (``int | Value``). The default ``1`` is a dataclass slot
             reservation — ``ControlledUOperation`` is never instantiated
             directly (concrete subclasses are the only producers; see the
-            pattern-match dispatch in
-            ``qamomile/circuit/estimator/qubits_counter.py:262,393`` and
-            ``qamomile/circuit/estimator/gate_counter.py:161``). Every
-            concrete subclass redeclares ``num_controls`` with the correct
-            narrow type and the default it actually wants
+            pattern-match dispatch in the symbolic ``ResourceEstimator``).
+            Every concrete subclass redeclares ``num_controls`` with the
+            correct narrow type and the default it actually wants
             (``ConcreteControlledU``: ``int = 1`` matches the single-control
             shape; ``SymbolicControlledU``: a ``UIntType`` ``Value`` placeholder
             via ``default_factory``).

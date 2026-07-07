@@ -1167,8 +1167,11 @@ class TestControlledOracle:
 
     def test_controlled_oracle_emits_controlled_invoke(self):
         """control(Oracle) emits a controlled bodyless oracle invocation."""
-        resource = qmc.ResourceMetadata(query_complexity=1, t_gates=7)
-        oracle = qmc.opaque("phase_oracle", num_qubits=1, resource=resource)
+        model = qmc.FixedResourceModel(
+            gates=qmc.GateResources(t=7),
+            calls=qmc.CallResources(queries_by_name={"phase_oracle": 1}),
+        )
+        oracle = qmc.opaque("phase_oracle", num_qubits=1, resource_model=model)
 
         @qmc.qkernel
         def circuit(ctrl: qmc.Qubit, target: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
@@ -1187,7 +1190,8 @@ class TestControlledOracle:
         assert op.num_control_qubits == 1
         assert op.num_target_qubits == 1
         assert op.body is None
-        assert op.effective_resource() is resource
+        assert op.definition is not None
+        assert op.definition.resource_models[0].model is model
 
     def test_controlled_oracle_rejects_symbolic_control_count(self):
         """control(Oracle) rejects symbolic control counts for now."""

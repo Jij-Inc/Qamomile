@@ -36,7 +36,6 @@ from qamomile.circuit.ir.operation import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
-    ResourceMetadata,
     ReturnOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -1591,7 +1590,6 @@ def _decode_callable_implementation(d: Any) -> CallableImplementation:
         strategy=d.get("strategy"),
         body=_decode_block(d["body"]) if d.get("body") is not None else None,
         body_ref=_decode_callable_body_ref(d.get("body_ref")),
-        resource=_decode_resource_metadata(d.get("resource")),
         attrs=attrs,
     )
 
@@ -1673,7 +1671,6 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef | None:
             _decode_callable_implementation(impl)
             for impl in d.get("implementations", [])
         ],
-        resource=_decode_resource_metadata(d.get("resource")),
         default_policy=_enum_by_name(CallPolicy, raw_policy, "CallPolicy"),
         attrs=attrs,
     )
@@ -1710,7 +1707,6 @@ def _decode_invoke_operation(d: dict[str, Any], ctx: _DecodeContext) -> InvokeOp
                 else None
             ),
             body=body,
-            resource=_decode_resource_metadata(d.get("resource")),
             attrs=attrs,
         )
     return InvokeOperation(
@@ -1759,35 +1755,6 @@ def _decode_inverse_block(
             else None
         ),
         callable_attrs=_decode_callable_attrs(d.get("callable_attrs")),
-    )
-
-
-def _decode_resource_metadata(d: Any) -> ResourceMetadata | None:
-    """Decode :class:`ResourceMetadata` (or ``None``).
-
-    Args:
-        d (Any): The serialized form.
-
-    Returns:
-        ResourceMetadata | None: ``None`` when absent; else the
-            reconstructed metadata.
-    """
-    if d is None:
-        return None
-    custom = _decode_payload(d.get("custom_metadata"))
-    if custom is None:
-        custom = {}
-    return ResourceMetadata(
-        query_complexity=d.get("query_complexity"),
-        t_gates=d.get("t_gates"),
-        ancilla_qubits=int(d.get("ancilla_qubits", 0)),
-        total_gates=d.get("total_gates"),
-        single_qubit_gates=d.get("single_qubit_gates"),
-        two_qubit_gates=d.get("two_qubit_gates"),
-        multi_qubit_gates=d.get("multi_qubit_gates"),
-        clifford_gates=d.get("clifford_gates"),
-        rotation_gates=d.get("rotation_gates"),
-        custom_metadata=custom,
     )
 
 
