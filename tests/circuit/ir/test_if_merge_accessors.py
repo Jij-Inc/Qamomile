@@ -68,6 +68,14 @@ class TestAddMerge:
         with pytest.raises(RuntimeError, match="condition operand"):
             if_op.add_merge(_uint("t"), _uint("f"), _uint("r"))
 
+    def test_add_merge_type_mismatch_raises(self) -> None:
+        """add_merge rejects branch / result values of differing types."""
+        if_op = IfOperation(operands=[Value(type=BitType(), name="cond")])
+        with pytest.raises(RuntimeError, match="matching branch and result types"):
+            if_op.add_merge(_uint("t"), Value(type=BitType(), name="f"), _uint("r"))
+        with pytest.raises(RuntimeError, match="matching branch and result types"):
+            if_op.add_merge(_uint("t"), _uint("f"), Value(type=BitType(), name="r"))
+
 
 class TestIterMerges:
     """Read contract and strict checks of ``IfOperation.iter_merges``."""
@@ -177,6 +185,19 @@ class TestIterMerges:
         )
 
         with pytest.raises(RuntimeError, match="condition"):
+            list(if_op.iter_merges())
+
+    def test_iter_merges_non_phi_entry_raises(self) -> None:
+        """A non-PhiOp object stored among the merges is IR corruption."""
+        cond = Value(type=BitType(), name="cond")
+        result = _uint("r")
+        if_op = IfOperation(
+            operands=[cond],
+            results=[result],
+            phi_ops=[IfOperation(operands=[cond])],  # type: ignore[list-item]
+        )
+
+        with pytest.raises(RuntimeError, match="expected PhiOp"):
             list(if_op.iter_merges())
 
     def test_iter_merges_missing_condition_with_merges_raises(self) -> None:

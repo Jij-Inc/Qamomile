@@ -615,14 +615,18 @@ class IfOperation(HasNestedOps, Operation):
         Raises:
             RuntimeError: If the stored merge data is internally
                 inconsistent (merge count differs from result count, a
-                merge does not have exactly condition/true/false operands
-                and one result, a merge result does not match the
-                if-operation result at the same position, or a merge's
-                condition operand does not match the if-operation's
-                condition — including a missing condition while merges
-                are attached). Any of these indicates IR corruption, not
-                a user error.
+                stored merge is not a ``PhiOp``, a merge does not have
+                exactly condition/true/false operands and one result, a
+                merge result does not match the if-operation result at
+                the same position, or a merge's condition operand does
+                not match the if-operation's condition — including a
+                missing condition while merges are attached). Any of
+                these indicates IR corruption, not a user error.
         """
+        # Runtime import mirrors the TYPE_CHECKING guard above: PhiOp lives
+        # in a sibling module that also imports from .operation.
+        from .arithmetic_operations import PhiOp
+
         if len(self.phi_ops) != len(self.results):
             raise RuntimeError(
                 "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
@@ -636,6 +640,11 @@ class IfOperation(HasNestedOps, Operation):
             )
         condition = self.operands[0] if self.operands else None
         for i, phi in enumerate(self.phi_ops):
+            if not isinstance(phi, PhiOp):
+                raise RuntimeError(
+                    "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
+                    f"phi_ops[{i}] is {type(phi).__name__}, expected PhiOp."
+                )
             if len(phi.operands) != 3 or len(phi.results) != 1:
                 raise RuntimeError(
                     "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
@@ -684,11 +693,13 @@ class IfOperation(HasNestedOps, Operation):
             false_value (Value): Value selected when the condition is
                 false. Must have the same type as ``true_value``.
             result (Value): Fresh SSA value representing the merged output.
+                Must have the same type as the branch values.
 
         Raises:
             RuntimeError: If the condition operand has not been attached to
                 this operation yet (``operands[0]`` must exist before
-                merges are added).
+                merges are added), or the branch / result types do not
+                match.
         """
         # Runtime import mirrors the TYPE_CHECKING guard above: PhiOp lives
         # in a sibling module that also imports from .operation.
@@ -698,6 +709,14 @@ class IfOperation(HasNestedOps, Operation):
             raise RuntimeError(
                 "[FOR DEVELOPER] IfOperation.add_merge requires the "
                 "condition operand to be attached first."
+            )
+        if false_value.type != true_value.type or result.type != true_value.type:
+            raise RuntimeError(
+                "[FOR DEVELOPER] IfOperation.add_merge requires matching "
+                "branch and result types; got "
+                f"true={true_value.type.label()}, "
+                f"false={false_value.type.label()}, "
+                f"result={result.type.label()}."
             )
         self.phi_ops.append(
             PhiOp(
