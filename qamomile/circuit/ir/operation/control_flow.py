@@ -588,11 +588,27 @@ class IfOperation(HasNestedOps, Operation):
     branch_rebinds: tuple[BranchRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
-        """Return the two branch bodies (merge yields are not operations)."""
+        """Return the two branch bodies (merge yields are not operations).
+
+        Returns:
+            list[list[Operation]]: ``[true_operations, false_operations]``.
+                The branch-merge yields are values, not operations, so
+                they are intentionally absent here.
+        """
         return [self.true_operations, self.false_operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
-        """Return a copy with the true and false branch bodies replaced."""
+        """Return a copy with the true and false branch bodies replaced.
+
+        Args:
+            new_lists (list[list[Operation]]): The replacement branch
+                bodies in ``nested_op_lists`` order
+                (``[true_operations, false_operations]``).
+
+        Returns:
+            Operation: A copy of this if-else with the branch bodies
+                swapped and all other fields (yields, rebinds) preserved.
+        """
         return dataclasses.replace(
             self,
             true_operations=new_lists[0],
