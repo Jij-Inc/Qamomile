@@ -622,7 +622,29 @@ def register_phi_outputs(
     """Register phi output UUIDs via the shared ``map_phi_outputs`` utility.
 
     Uses the full ``ValueResolver.resolve_qubit_index_detailed`` for
-    scalar qubit resolution (handles array element operands).
+    scalar qubit resolution (handles array element operands). Runs at emit
+    time with ``reject_runtime_bit_mux=True`` so an unrepresentable runtime
+    multiplexing of two pre-existing measured bits fails loudly rather than
+    silently binding the merge to the true branch.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass, providing the
+            ``ValueResolver`` used for scalar / array-element resolution.
+        op (IfOperation): The runtime if-else whose merged outputs are
+            registered onto their physical clbits / qubits.
+        qubit_map (QubitMap): Address-to-physical-qubit map, mutated in
+            place.
+        clbit_map (ClbitMap): Address-to-physical-clbit map, mutated in
+            place.
+        bindings (dict[str, Any] | None): Active emit-time bindings used to
+            fold a merge source's symbolic ``Vector[Bit]`` element index
+            (e.g. an unrolled loop variable). Defaults to None (empty).
+
+    Raises:
+        EmitError: If a quantum merge's branches resolve to different
+            physical resources, or a runtime scalar ``Bit`` merge
+            multiplexes two distinct pre-existing measured clbits (see
+            ``map_phi_outputs``).
     """
     resolver_bindings = bindings or {}
 
@@ -639,6 +661,13 @@ def register_phi_outputs(
         _resolve_scalar,
         bindings=resolver_bindings,
         resolver=emit_pass._resolver,
+        # Emit-time only: by now representable Bit merges (branch-local
+        # fresh measurements, while-loop-carried conditions) have been
+        # aliased onto a single shared clbit, so a still-distinct pair of
+        # source clbits marks the unrepresentable runtime pre-measured
+        # multiplexing shape and must fail loudly instead of silently
+        # binding the merge to the true branch.
+        reject_runtime_bit_mux=True,
     )
 
 

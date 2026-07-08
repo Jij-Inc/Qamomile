@@ -261,6 +261,7 @@ def map_phi_outputs(
     resolve_scalar_qubit: Any = None,
     bindings: dict[str, Any] | None = None,
     resolver: ValueResolver | None = None,
+    reject_runtime_bit_mux: bool = False,
 ) -> None:
     """Register phi output UUIDs to the same physical resources as their sources.
 
@@ -291,11 +292,27 @@ def map_phi_outputs(
         resolver (ValueResolver | None): Resolver used with ``bindings``
             to fold non-constant element indices; ``None`` restricts to
             constants. Defaults to None.
+        reject_runtime_bit_mux (bool): When True, raise ``EmitError`` for a
+            runtime scalar ``Bit`` merge whose two branch sources resolve to
+            two distinct, already-registered clbits. That shape is an
+            at-runtime multiplexing of two pre-existing measured bits, which
+            the clbit-aliasing model cannot represent: it would silently
+            bind the merged bit to the true-branch source regardless of the
+            condition. Enable only at emit time (``register_phi_outputs``),
+            where representable merges — branch-local fresh measurements and
+            while-loop-carried conditions — have already been aliased onto a
+            single shared clbit and therefore resolve to equal clbits. Leave
+            False at resource-allocation time, where those representable
+            merges still hold distinct clbits and would be wrongly rejected.
+            Defaults to False.
 
     Raises:
         EmitError: If a quantum merge's branches resolve to different
             physical resources (or only one branch resolves), which a
-            single-execution branch cannot realize.
+            single-execution branch cannot realize; or, when
+            ``reject_runtime_bit_mux`` is True, if a runtime scalar ``Bit``
+            merge multiplexes two distinct pre-existing measured clbits
+            (unrepresentable in the clbit-aliasing model).
     """
     for merge in if_op.iter_merges():
         output = merge.result
@@ -439,6 +456,37 @@ def map_phi_outputs(
                     continue
                 true_clbit = clbit_map.get(true_addr)
                 false_clbit = clbit_map.get(false_addr)
+
+                # A runtime scalar-Bit merge whose two sources resolve to
+                # two distinct already-registered clbits is an at-runtime
+                # multiplexing of two pre-existing measured bits. The
+                # aliasing below binds the merged bit to the true-branch
+                # clbit unconditionally, so it would silently return the
+                # wrong value whenever the condition selects the false
+                # branch. Representable merges (branch-local fresh
+                # measurements, while-loop-carried conditions) have already
+                # been aliased onto a single shared clbit by emit time and
+                # resolve to equal clbits, so this rejects only the
+                # unrepresentable shape. The guard is enabled at emit time
+                # only; at allocation those representable merges still hold
+                # distinct clbits and must not be rejected.
+                if (
+                    reject_runtime_bit_mux
+                    and true_clbit is not None
+                    and false_clbit is not None
+                    and true_clbit != false_clbit
+                ):
+                    from qamomile.circuit.transpiler.errors import EmitError
+
+                    raise EmitError(
+                        "Runtime if-merge of a measured Bit selects between "
+                        f"two distinct pre-existing clbits (true={true_clbit}, "
+                        f"false={false_clbit}); the clbit-aliasing model "
+                        "cannot multiplex two already-measured bits at "
+                        "runtime. Measure the merged bit inside each branch, "
+                        "or make the condition compile-time.",
+                        operation="IfOperation",
+                    )
 
                 if true_clbit is not None:
                     clbit_map[QubitAddress(output.uuid)] = true_clbit

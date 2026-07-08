@@ -2448,25 +2448,32 @@ class TestControlFlowIfElse:
 
 
 class TestLoopIndexedMeasuredBitMerge:
-    """A runtime Bit merge sourced from a loop-indexed measured element.
+    """Loop-indexed / measured Bit merges: representable ones run, the mux is rejected.
 
-    An unrolled loop reuses one merge-output UUID across iterations, so
-    the merged Bit's clbit must be re-pointed to each iteration's source
-    element. If the merge output stayed bound to iteration 0's clbit (the
-    bug — the allocator registered it before the loop variable was known,
-    or the emit pass skipped re-registration), the per-iteration condition
-    would read the wrong bit and the result would deterministically differ.
+    A runtime (measurement-conditioned) if-else that merges two DISTINCT
+    ``Vector[Bit]`` elements both measured BEFORE the branch
+    (``if sel[j]: r = a[j] else: r = b[j]``) is an at-runtime multiplexing
+    of two pre-existing clbits. The clbit-aliasing emit model cannot
+    represent it — it would bind the merged bit to the true-branch source
+    unconditionally and silently return the wrong value whenever the
+    condition selects the false branch — so emit rejects it with
+    ``EmitError`` (``map_phi_outputs(reject_runtime_bit_mux=True)`` from
+    ``register_phi_outputs``). Representable merges still work: a
+    compile-time-selected branch re-points its merged bit per unrolled
+    iteration (one reused merge-output UUID across iterations), and a merge
+    of branch-local fresh measurements aliases both onto one shared clbit.
     """
 
-    def test_loop_indexed_bit_merge_conditions_on_per_iteration_clbit(self):
-        """Each unrolled iteration conditions on its own measured-element clbit.
+    def test_runtime_pre_measured_bit_mux_is_rejected(self):
+        """A runtime mux of two pre-measured elements raises EmitError.
 
-        ``a`` measures to ``(0, 1)``. Inside ``range(2)`` an always-true
-        runtime selector merges the loop-indexed measured element ``a[j]``
-        on both branches, then conditions a per-iteration ``X`` on the
-        merged bit. Correct behavior flips ``q[1]`` only (``a[1] == 1``),
-        giving ``(0, 1)``. Under the mis-binding bug both iterations read
-        ``a[0] == 0`` and nothing flips, giving ``(0, 0)``.
+        ``a`` and ``b`` are measured before the loop; a runtime selector
+        ``sel[j]`` chooses between ``a[j]`` and ``b[j]``. Clbit aliasing
+        would silently bind the merged bit to ``a[j]`` regardless of
+        ``sel[j]`` (returning a wrong measurement), so emit must reject the
+        shape loudly. The always-true selector here would have masked the
+        bug by coincidence, which is exactly why a value-based test cannot
+        guard it — the rejection must be structural.
         """
 
         @qmc.qkernel
@@ -2479,7 +2486,7 @@ class TestLoopIndexedMeasuredBitMerge:
             sel = qmc.qubit_array(2, "sel")
             sel[0] = qmc.x(sel[0])
             sel[1] = qmc.x(sel[1])
-            selbits = qmc.measure(sel)  # (1, 1) — always-true selector
+            selbits = qmc.measure(sel)  # (1, 1)
             q = qmc.qubit_array(2, "q")
             for j in qmc.range(2):
                 if selbits[j]:
@@ -2491,12 +2498,40 @@ class TestLoopIndexedMeasuredBitMerge:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
+        with pytest.raises(EmitError, match="multiplex two already-measured"):
+            transpiler.transpile(circuit)
+
+    def test_branch_local_runtime_bit_merge_executes(self):
+        """A merge of branch-local fresh measurements still executes correctly.
+
+        When each branch freshly measures its own qubit into the merged
+        bit (``if sel: r = measure(t) else: r = measure(f)``), both
+        measurements are aliased onto one shared clbit, so the merge is
+        representable and the guard must not fire. ``sel == 1`` selects the
+        ``|1>`` qubit, so the result is deterministically ``(1,)``.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            sel_q = qmc.qubit("sel")
+            sel_q = qmc.x(sel_q)
+            sel = qmc.measure(sel_q)  # 1
+            t = qmc.qubit("t")
+            t = qmc.x(t)  # |1>
+            f = qmc.qubit("f")  # |0>
+            if sel:
+                r = qmc.measure(t)
+            else:
+                r = qmc.measure(f)
+            return r
+
+        transpiler = QiskitTranspiler()
         exe = transpiler.transpile(circuit)
         result = exe.sample(transpiler.executor(), bindings={}, shots=100).result()
 
         assert result.results, result.results
         for value, count in result.results:
-            assert value == (0, 1), result.results
+            assert value == 1, result.results
             assert count > 0
         assert sum(count for _, count in result.results) == 100
 
