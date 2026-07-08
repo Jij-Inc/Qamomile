@@ -201,7 +201,15 @@ def remap_static_phi_outputs(
         output = merge.result
         selected_val = merge.select(condition_value)
 
-        if (
+        # Scalar Bit merges whose selected source is a loop-indexed
+        # measured element are re-pointed per unrolled iteration inside
+        # the branch below (same rationale as ``map_phi_outputs``: one
+        # merge-output UUID is reused across iterations), so they are
+        # exempt from the "already registered → skip" short-circuit.
+        is_scalar_bit = isinstance(output.type, BitType) and not isinstance(
+            output, ArrayValue
+        )
+        if not is_scalar_bit and (
             QubitAddress(output.uuid) in qubit_map
             or QubitAddress(output.uuid) in clbit_map
         ):
@@ -234,6 +242,13 @@ def remap_static_phi_outputs(
             # Defer a still-symbolic loop-indexed element to emit time
             # (see the runtime counterpart in ``map_phi_outputs``).
             if _is_unresolved_bit_element(selected_val, src_resolved):
+                continue
+            # A resolved element source (``src_resolved``) is a
+            # loop-indexed ``bits[j]`` folded to a concrete clbit for THIS
+            # unrolled iteration, so its merge output must be re-pointed
+            # every iteration; a plain-scalar source keeps
+            # once-registration to avoid clobbering.
+            if not src_resolved and QubitAddress(output.uuid) in clbit_map:
                 continue
             if src_addr in clbit_map:
                 clbit_map[QubitAddress(output.uuid)] = clbit_map[src_addr]

@@ -2500,6 +2500,45 @@ class TestLoopIndexedMeasuredBitMerge:
             assert count > 0
         assert sum(count for _, count in result.results) == 100
 
+    def test_static_if_loop_indexed_merge_reregisters_per_iteration(self):
+        """A compile-time-if per unrolled iteration re-points its merged bit.
+
+        ``if j == 0`` resolves at compile time per unrolled iteration, so
+        the merge is handled by ``remap_static_phi_outputs``. Iteration 0
+        selects ``abits[0]`` and iteration 1 selects ``bbits[1]``; because
+        the unrolled body reuses one merge-output UUID, the static remapper
+        must overwrite the registration each iteration. If it kept
+        iteration 0's ``abits[0]`` clbit, ``q[1]`` would never flip and the
+        result would be ``(0, 0)`` instead of the correct ``(0, 1)``.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            a = qmc.qubit_array(2, "a")
+            abits = qmc.measure(a)  # (0, 0)
+            b = qmc.qubit_array(2, "b")
+            b[1] = qmc.x(b[1])
+            bbits = qmc.measure(b)  # (0, 1)
+            q = qmc.qubit_array(2, "q")
+            for j in qmc.range(2):
+                if j == 0:
+                    r = abits[j]
+                else:
+                    r = bbits[j]
+                if r:
+                    q[j] = qmc.x(q[j])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        result = exe.sample(transpiler.executor(), bindings={}, shots=100).result()
+
+        assert result.results, result.results
+        for value, count in result.results:
+            assert value == (0, 1), result.results
+            assert count > 0
+        assert sum(count for _, count in result.results) == 100
+
 
 class TestIdentityMergeBackstop:
     """Emit must handle non-elided identity merges first-class.
