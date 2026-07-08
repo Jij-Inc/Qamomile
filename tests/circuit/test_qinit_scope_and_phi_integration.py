@@ -15,7 +15,7 @@ Unit tests for the individual passes live in ``tests/transpiler/``:
     - ``test_control_flow_visitor.py`` (merge-slot visitor/transformer traversal)
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
-The @qkernel AST transformer relies on resolved type annotations to identify
+The ``@qkernel`` AST transformer relies on resolved type annotations to identify
 Float vs UInt etc.  PEP 563 deferred annotations turn them into strings, which
 breaks ``_create_bound_input``.
 """
