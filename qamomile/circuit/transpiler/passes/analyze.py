@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
     WhileOperation,
+    genuine_input_values,
 )
 from qamomile.circuit.ir.operation.gate import (
     GateOperation,
@@ -633,8 +634,9 @@ def _op_read_uuids(op: Operation) -> set[str]:
     Loop operations expose their loop-carried rebind records — and
     ``IfOperation``s their branch rebind records — through
     ``all_input_values`` (for cloning); those record values are not
-    reads and must not trigger read-based checks, so they are
-    subtracted before the operands are re-added.
+    reads. ``genuine_input_values`` drops them by last occurrence (so a
+    value that is both a merge yield and a rebind ``before`` keeps its
+    yield read); operands are then re-added defensively.
 
     Args:
         op (Operation): Operation to inspect.
@@ -642,16 +644,7 @@ def _op_read_uuids(op: Operation) -> set[str]:
     Returns:
         set[str]: UUIDs of values the operation reads.
     """
-    excluded: set[str] = set()
-    if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-        for r in op.loop_carried_rebinds:
-            excluded.add(r.before.uuid)
-            excluded.add(r.after.uuid)
-    if isinstance(op, IfOperation):
-        for branch_record in op.branch_rebinds:
-            excluded.add(branch_record.before.uuid)
-    uuids = {v.uuid for v in op.all_input_values()}
-    uuids -= excluded
+    uuids = {v.uuid for v in genuine_input_values(op)}
     for v in op.operands:
         operand_uuid = getattr(v, "uuid", None)
         if operand_uuid is not None:
@@ -1424,7 +1417,7 @@ def _compute_pre_branch_roots(
     # Generic producer (composite gate, controlled block, cast, ...):
     # its outputs may carry any of its genuine quantum inputs.
     roots: set[str] = set()
-    for input_value in op_genuine_input_values(producer):
+    for input_value in genuine_input_values(producer):
         if not isinstance(input_value, Value):
             continue
         if not input_value.type.is_quantum():
@@ -1433,30 +1426,6 @@ def _compute_pre_branch_roots(
             input_value, branch_producers, phi_aliases, visiting, resolved
         )
     return roots
-
-
-def op_genuine_input_values(op: Operation) -> list[ValueBase]:
-    """Return the input values an operation genuinely reads.
-
-    Rebind-record values (loop-carried records on loop operations and
-    branch records on ``IfOperation``s) ride along ``all_input_values``
-    for cloning/substitution but are not reads, so they are excluded.
-
-    Args:
-        op (Operation): Operation to inspect.
-
-    Returns:
-        list[ValueBase]: ``all_input_values`` minus rebind-record values.
-    """
-    excluded: set[str] = set()
-    if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-        for loop_record in op.loop_carried_rebinds:
-            excluded.add(loop_record.before.uuid)
-            excluded.add(loop_record.after.uuid)
-    if isinstance(op, IfOperation):
-        for branch_record in op.branch_rebinds:
-            excluded.add(branch_record.before.uuid)
-    return [v for v in op.all_input_values() if v.uuid not in excluded]
 
 
 def _add_uuid_with_ancestry(value: ValueBase, collected: set[str]) -> None:
@@ -1481,7 +1450,7 @@ def _add_uuid_with_ancestry(value: ValueBase, collected: set[str]) -> None:
 def _op_referenced_uuids_with_ancestry(op: Operation) -> set[str]:
     """Collect the UUIDs one operation genuinely reads, with array ancestry.
 
-    Combines :func:`op_genuine_input_values` (rebind-record values
+    Combines :func:`genuine_input_values` (rebind-record values
     excluded) with :func:`_add_uuid_with_ancestry` (element / view reads
     count as touching the register itself).
 
@@ -1493,7 +1462,7 @@ def _op_referenced_uuids_with_ancestry(op: Operation) -> set[str]:
             array ancestry.
     """
     referenced: set[str] = set()
-    for value in op_genuine_input_values(op):
+    for value in genuine_input_values(op):
         _add_uuid_with_ancestry(value, referenced)
     return referenced
 

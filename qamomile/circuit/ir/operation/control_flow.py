@@ -758,3 +758,49 @@ class IfOperation(HasNestedOps, Operation):
     @property
     def operation_kind(self) -> OperationKind:
         return OperationKind.CONTROL
+
+
+def genuine_input_values(op: Operation) -> list[ValueBase]:
+    """Return an operation's input values that count as genuine reads.
+
+    ``Operation.all_input_values`` also surfaces the bookkeeping values
+    that ride along only for cloning / substitution: the ``before`` /
+    ``after`` of a loop operation's ``loop_carried_rebinds`` and the
+    ``before`` of an ``IfOperation``'s ``branch_rebinds``. Those records
+    are NOT data reads, so read-based analyses (liveness / dead-op
+    elimination, measurement-taint tracing, loop-carried stale-read
+    checks) must exclude them.
+
+    The exclusion is by **last occurrence**, not by UUID set: a single
+    value can be BOTH a genuine input AND a rebind ``before``. The
+    canonical case is an else-less quantum discard (``if cond: q =
+    fresh``): the false side yields the pre-branch ``q``, so that value
+    is simultaneously a ``false_yields`` entry (a genuine read) and the
+    ``branch_rebinds`` ``before`` (a record). ``all_input_values``
+    appends the record values after the genuine ones, so dropping the
+    last matching occurrence strips the record and leaves the read
+    intact — a plain UUID-set subtraction would wrongly drop the yield
+    read too.
+
+    Args:
+        op (Operation): Operation to inspect.
+
+    Returns:
+        list[ValueBase]: ``all_input_values`` with one occurrence per
+            rebind-record value removed.
+    """
+    values = list(op.all_input_values())
+    record_values: list[Value] = []
+    if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+        for loop_record in op.loop_carried_rebinds:
+            record_values.append(loop_record.before)
+            record_values.append(loop_record.after)
+    elif isinstance(op, IfOperation):
+        for branch_record in op.branch_rebinds:
+            record_values.append(branch_record.before)
+    for record_value in record_values:
+        for index in range(len(values) - 1, -1, -1):
+            if values[index].uuid == record_value.uuid:
+                del values[index]
+                break
+    return values

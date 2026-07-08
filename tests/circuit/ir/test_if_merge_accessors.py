@@ -9,8 +9,14 @@ merge storage.
 
 import pytest
 
-from qamomile.circuit.ir.operation.control_flow import IfOperation
-from qamomile.circuit.ir.types.primitives import BitType, UIntType
+from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
+    IfOperation,
+    LoopCarriedRebind,
+    WhileOperation,
+    genuine_input_values,
+)
+from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.ir.value import Value
 
 
@@ -168,3 +174,70 @@ class TestIterMerges:
 
         with pytest.raises(RuntimeError, match="condition operand is missing"):
             list(if_op.iter_merges())
+
+
+def _qubit(name: str) -> Value:
+    """Create a plain Qubit-typed Value.
+
+    Args:
+        name (str): Display name for the value.
+
+    Returns:
+        Value: Fresh Qubit-typed value.
+    """
+    return Value(type=QubitType(), name=name)
+
+
+class TestGenuineInputValues:
+    """Occurrence-based exclusion of rebind-record values from genuine reads."""
+
+    def test_loop_rebind_record_values_are_excluded(self) -> None:
+        """A loop rebind record's before/after are not genuine reads.
+
+        They ride along ``all_input_values`` only for cloning, so a value
+        referenced solely through the record must not count as read.
+        """
+        cond = Value(type=BitType(), name="cond")
+        before = _uint("before")
+        after = _uint("after")
+        while_op = WhileOperation(
+            operands=[cond],
+            operations=[],
+            loop_carried_rebinds=(
+                LoopCarriedRebind(var_name="acc", before=before, after=after),
+            ),
+        )
+
+        read_uuids = {v.uuid for v in genuine_input_values(while_op)}
+
+        assert cond.uuid in read_uuids, "the while condition is a genuine read"
+        assert before.uuid not in read_uuids, "rebind-record before is not a read"
+        assert after.uuid not in read_uuids, "rebind-record after is not a read"
+
+    def test_yield_shared_with_branch_rebind_is_kept(self) -> None:
+        """A value that is both a false yield and a branch-rebind before stays read.
+
+        This is the else-less quantum-discard shape: the false side yields
+        the pre-branch value, which is simultaneously the ``branch_rebinds``
+        before. A plain UUID-set subtraction would drop the yield read too;
+        the occurrence-based removal must keep it.
+        """
+        cond = Value(type=BitType(), name="cond")
+        q_pre = _qubit("q_pre")
+        fresh = _qubit("fresh")
+        merged = _qubit("merged")
+        if_op = IfOperation(operands=[cond], true_operations=[], false_operations=[])
+        if_op.add_merge(fresh, q_pre, merged)
+        if_op.branch_rebinds = (
+            BranchRebind(
+                var_name="q",
+                before=q_pre,
+                rebound_in_true=True,
+                rebound_in_false=False,
+            ),
+        )
+
+        read_uuids = {v.uuid for v in genuine_input_values(if_op)}
+
+        assert q_pre.uuid in read_uuids, "kept via the false yield despite the record"
+        assert fresh.uuid in read_uuids, "the true yield is a genuine read"
