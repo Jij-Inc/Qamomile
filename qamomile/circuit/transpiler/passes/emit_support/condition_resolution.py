@@ -97,6 +97,36 @@ def resolve_condition_address_detailed(
     return QubitAddress(parent.uuid, idx), True
 
 
+def _is_unresolved_bit_element(value: Any, resolved_as_element: bool) -> bool:
+    """Whether a phi/merge source is a not-yet-resolvable ``Vector[Bit]`` element.
+
+    A measured ``Vector[Bit]`` element (``bits[j]``) whose index is still
+    symbolic — e.g. a loop variable that only gets a concrete value once
+    the loop is unrolled at emit time — cannot be mapped to its root clbit
+    during resource allocation (which sees the rolled loop with no index
+    binding). ``resolve_condition_address_detailed`` reports this as
+    ``resolved_as_element=False`` while ``parent_array`` / ``element_indices``
+    are present. Merge-output registration must be deferred for such a
+    source so the emit pass (with the loop variable bound) registers it
+    against the correct per-iteration clbit instead of the element's own
+    unregistered UUID.
+
+    Args:
+        value (Any): The phi / merge source Value.
+        resolved_as_element (bool): The ``resolved_as_element`` flag from
+            :func:`resolve_condition_address_detailed`.
+
+    Returns:
+        bool: ``True`` when ``value`` is a ``Vector`` element whose index
+            did not resolve to a concrete root address.
+    """
+    return (
+        getattr(value, "parent_array", None) is not None
+        and bool(getattr(value, "element_indices", None))
+        and not resolved_as_element
+    )
+
+
 def _coerce_to_bool(value: Any) -> bool | None:
     """Coerce a Python scalar to bool; return None for non-scalar values.
 
@@ -140,6 +170,8 @@ def remap_static_phi_outputs(
     condition_value: bool,
     qubit_map: QubitMap,
     clbit_map: ClbitMap,
+    bindings: dict[str, Any] | None = None,
+    resolver: ValueResolver | None = None,
 ) -> None:
     """Remap phi outputs for a compile-time constant ``IfOperation``.
 
@@ -157,6 +189,13 @@ def remap_static_phi_outputs(
             place.
         clbit_map (ClbitMap): Address-to-physical-clbit map, mutated in
             place.
+        bindings (dict[str, Any] | None): Active bindings used to fold a
+            merge source's symbolic ``Vector[Bit]`` element index / slice
+            bounds (e.g. an unrolled loop variable). Defaults to None
+            (empty), restricting element resolution to constant indices.
+        resolver (ValueResolver | None): Resolver used with ``bindings``
+            to fold non-constant element indices; ``None`` restricts to
+            constants. Defaults to None.
     """
     for merge in if_op.iter_merges():
         output = merge.result
@@ -186,7 +225,16 @@ def remap_static_phi_outputs(
             # Scalar Bit source: resolve vector-element sources (``s[i]``
             # from a measured ``Vector[Bit]``) to their root clbit key, not
             # the element's own UUID (which is not registered in clbit_map).
-            src_addr, _ = resolve_condition_address_detailed(selected_val, {}, None)
+            # A loop-indexed element needs the current bindings / resolver
+            # to fold its index; passing empty ``{}`` would leave it at the
+            # unregistered element UUID and mis-alias the merge output.
+            src_addr, src_resolved = resolve_condition_address_detailed(
+                selected_val, bindings or {}, resolver
+            )
+            # Defer a still-symbolic loop-indexed element to emit time
+            # (see the runtime counterpart in ``map_phi_outputs``).
+            if _is_unresolved_bit_element(selected_val, src_resolved):
+                continue
             if src_addr in clbit_map:
                 clbit_map[QubitAddress(output.uuid)] = clbit_map[src_addr]
 
@@ -196,6 +244,8 @@ def map_phi_outputs(
     qubit_map: QubitMap,
     clbit_map: ClbitMap,
     resolve_scalar_qubit: Any = None,
+    bindings: dict[str, Any] | None = None,
+    resolver: ValueResolver | None = None,
 ) -> None:
     """Register phi output UUIDs to the same physical resources as their sources.
 
@@ -218,6 +268,14 @@ def map_phi_outputs(
             qubit sources that are not directly registered (e.g. array
             elements). Defaults to None, restricting resolution to direct
             and root-array lookups.
+        bindings (dict[str, Any] | None): Active bindings used to fold a
+            classical ``Bit`` merge source's symbolic ``Vector[Bit]``
+            element index / slice bounds (e.g. an unrolled loop variable).
+            Defaults to None (empty), restricting element resolution to
+            constant indices.
+        resolver (ValueResolver | None): Resolver used with ``bindings``
+            to fold non-constant element indices; ``None`` restricts to
+            constants. Defaults to None.
 
     Raises:
         EmitError: If a quantum merge's branches resolve to different
@@ -229,7 +287,16 @@ def map_phi_outputs(
         true_val = merge.true_value
         false_val = merge.false_value
 
-        if (
+        # Scalar Bit merges whose source is a loop-indexed measured
+        # element are re-pointed per unrolled iteration inside the branch
+        # below (the loop body reuses one merge-output UUID across
+        # iterations, so the clbit registration must be overwritten each
+        # iteration), so they are exempt from the "already registered →
+        # skip" short-circuit. Every other output keeps once-registration.
+        is_scalar_bit = isinstance(output.type, BitType) and not isinstance(
+            output, ArrayValue
+        )
+        if not is_scalar_bit and (
             QubitAddress(output.uuid) in qubit_map
             or QubitAddress(output.uuid) in clbit_map
         ):
@@ -326,8 +393,35 @@ def map_phi_outputs(
                 # root clbit key so a measured ``Vector[Bit]`` element merged
                 # through a phi (``if sel: bit = s[0] else: bit = t[0]``)
                 # maps to the right clbit instead of the element's own UUID.
-                true_addr, _ = resolve_condition_address_detailed(true_val, {}, None)
-                false_addr, _ = resolve_condition_address_detailed(false_val, {}, None)
+                # A loop-indexed element (``bits[j]``) needs the current
+                # bindings / resolver to fold ``j``; passing empty ``{}``
+                # leaves it at the unregistered element UUID and mis-aliases
+                # the merge output to the wrong clbit.
+                true_addr, true_resolved = resolve_condition_address_detailed(
+                    true_val, bindings or {}, resolver
+                )
+                false_addr, false_resolved = resolve_condition_address_detailed(
+                    false_val, bindings or {}, resolver
+                )
+                # If a source is still a symbolic ``Vector[Bit]`` element
+                # (rolled loop at allocation time), its clbit is only known
+                # once the loop is unrolled at emit; skip so emit registers
+                # the correct per-iteration clbit rather than a stale
+                # false-branch fallback.
+                if _is_unresolved_bit_element(
+                    true_val, true_resolved
+                ) or _is_unresolved_bit_element(false_val, false_resolved):
+                    continue
+
+                # A resolved element source (``true_resolved`` /
+                # ``false_resolved``) means a loop-indexed ``bits[j]`` that
+                # folded to a concrete clbit for THIS unrolled iteration.
+                # Such a merge output must be re-pointed every iteration.
+                # A plain-scalar merge (both flags False) is stable, so it
+                # keeps once-registration to avoid clobbering.
+                per_iteration = true_resolved or false_resolved
+                if not per_iteration and QubitAddress(output.uuid) in clbit_map:
+                    continue
                 true_clbit = clbit_map.get(true_addr)
                 false_clbit = clbit_map.get(false_addr)
 

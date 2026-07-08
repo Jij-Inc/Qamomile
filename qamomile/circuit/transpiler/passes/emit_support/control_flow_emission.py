@@ -561,7 +561,14 @@ def emit_if(
             emit_pass._emit_operations(
                 circuit, op.false_operations, qubit_map, clbit_map, bindings
             )
-        remap_static_phi_outputs(op, resolved, qubit_map, clbit_map)
+        remap_static_phi_outputs(
+            op,
+            resolved,
+            qubit_map,
+            clbit_map,
+            bindings=bindings,
+            resolver=emit_pass._resolver,
+        )
         register_classical_phi_aliases(emit_pass, op, bindings, resolved)
         return
 
@@ -625,7 +632,14 @@ def register_phi_outputs(
         )
         return result.index if result.success else None
 
-    map_phi_outputs(op, qubit_map, clbit_map, _resolve_scalar)
+    map_phi_outputs(
+        op,
+        qubit_map,
+        clbit_map,
+        _resolve_scalar,
+        bindings=resolver_bindings,
+        resolver=emit_pass._resolver,
+    )
 
 
 def register_classical_phi_aliases(

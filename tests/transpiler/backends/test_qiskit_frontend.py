@@ -2447,6 +2447,60 @@ class TestControlFlowIfElse:
             assert count > 0
 
 
+class TestLoopIndexedMeasuredBitMerge:
+    """A runtime Bit merge sourced from a loop-indexed measured element.
+
+    An unrolled loop reuses one merge-output UUID across iterations, so
+    the merged Bit's clbit must be re-pointed to each iteration's source
+    element. If the merge output stayed bound to iteration 0's clbit (the
+    bug — the allocator registered it before the loop variable was known,
+    or the emit pass skipped re-registration), the per-iteration condition
+    would read the wrong bit and the result would deterministically differ.
+    """
+
+    def test_loop_indexed_bit_merge_conditions_on_per_iteration_clbit(self):
+        """Each unrolled iteration conditions on its own measured-element clbit.
+
+        ``a`` measures to ``(0, 1)``. Inside ``range(2)`` an always-true
+        runtime selector merges the loop-indexed measured element ``a[j]``
+        on both branches, then conditions a per-iteration ``X`` on the
+        merged bit. Correct behavior flips ``q[1]`` only (``a[1] == 1``),
+        giving ``(0, 1)``. Under the mis-binding bug both iterations read
+        ``a[0] == 0`` and nothing flips, giving ``(0, 0)``.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            a = qmc.qubit_array(2, "a")
+            a[1] = qmc.x(a[1])
+            abits = qmc.measure(a)  # (0, 1)
+            bb = qmc.qubit_array(2, "bb")
+            bbits = qmc.measure(bb)  # (0, 0)
+            sel = qmc.qubit_array(2, "sel")
+            sel[0] = qmc.x(sel[0])
+            sel[1] = qmc.x(sel[1])
+            selbits = qmc.measure(sel)  # (1, 1) — always-true selector
+            q = qmc.qubit_array(2, "q")
+            for j in qmc.range(2):
+                if selbits[j]:
+                    r = abits[j]
+                else:
+                    r = bbits[j]
+                if r:
+                    q[j] = qmc.x(q[j])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        result = exe.sample(transpiler.executor(), bindings={}, shots=100).result()
+
+        assert result.results, result.results
+        for value, count in result.results:
+            assert value == (0, 1), result.results
+            assert count > 0
+        assert sum(count for _, count in result.results) == 100
+
+
 class TestIdentityMergeBackstop:
     """Emit must handle non-elided identity merges first-class.
 

@@ -255,7 +255,9 @@ class ResourceAllocator:
                     # branch and remap phi outputs directly.
                     selected = op.true_operations if resolved else op.false_operations
                     self._allocate_recursive(selected, qubit_map, clbit_map, bindings)
-                    self._remap_static_phi_outputs(op, resolved, qubit_map, clbit_map)
+                    self._remap_static_phi_outputs(
+                        op, resolved, qubit_map, clbit_map, bindings
+                    )
                 else:
                     self._allocate_recursive(
                         op.true_operations, qubit_map, clbit_map, bindings
@@ -263,7 +265,7 @@ class ResourceAllocator:
                     self._allocate_recursive(
                         op.false_operations, qubit_map, clbit_map, bindings
                     )
-                    self._allocate_if_merges(op, qubit_map, clbit_map)
+                    self._allocate_if_merges(op, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, WhileOperation):
                 # WhileOperation operands:
@@ -362,8 +364,8 @@ class ResourceAllocator:
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
 
-    @staticmethod
     def _condition_source_address(
+        self,
         value: Any,
         bindings: dict[str, Any],
     ) -> QubitAddress:
@@ -374,23 +376,28 @@ class ResourceAllocator:
         ``QubitAddress(root_array.uuid, index)``, not the element's own
         UUID. Resolving the source the same way the emit-time condition
         lookup does keeps the loop-carried / phi clbit alias consistent
-        with where the clbit was actually allocated. The allocator has no
-        ``ValueResolver``, so only constant indices / slice bounds resolve;
-        an unresolved element falls back to its scalar UUID (which is not
+        with where the clbit was actually allocated. The allocator's
+        ``ValueResolver`` folds symbolic indices / slice bounds through
+        ``bindings`` (e.g. an unrolled loop variable), so a loop-indexed
+        element resolves to its root clbit; a genuinely unresolvable
+        element still falls back to its scalar UUID (which is not
         registered, so the caller's ``clbit_map`` lookup misses and the
-        aliasing is correctly skipped rather than pointed at a wrong slot).
+        aliasing is skipped rather than pointed at a wrong slot).
 
         Args:
             value (Any): The condition / phi source — an IR ``Value`` or, in
                 degenerate cases, a non-Value (handled via ``str``).
-            bindings (dict[str, Any]): Active bindings for constant folding.
+            bindings (dict[str, Any]): Active bindings for folding symbolic
+                element indices / slice bounds via the resolver.
 
         Returns:
             QubitAddress: The address the source's classical bit is
                 registered under.
         """
         if isinstance(value, Value):
-            address, _ = resolve_condition_address_detailed(value, bindings, None)
+            address, _ = resolve_condition_address_detailed(
+                value, bindings, self._resolver
+            )
             return address
         return QubitAddress(str(value))
 
@@ -439,6 +446,7 @@ class ResourceAllocator:
         op: IfOperation,
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
+        bindings: dict[str, Any],
     ) -> None:
         """Register merge output UUIDs via the shared ``map_phi_outputs`` utility.
 
@@ -449,8 +457,14 @@ class ResourceAllocator:
                 (mutated in place).
             clbit_map (ClbitMap): QubitAddress-to-physical-clbit mapping
                 (mutated in place).
+            bindings (dict[str, Any]): Active bindings passed with the
+                allocator's ``ValueResolver`` so a merge source that is a
+                loop-indexed measured ``Vector[Bit]`` element resolves to
+                its root clbit.
         """
-        map_phi_outputs(op, qubit_map, clbit_map)
+        map_phi_outputs(
+            op, qubit_map, clbit_map, bindings=bindings, resolver=self._resolver
+        )
 
     def _remap_static_phi_outputs(
         self,
@@ -458,6 +472,7 @@ class ResourceAllocator:
         condition_value: bool,
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
+        bindings: dict[str, Any],
     ) -> None:
         """Remap phi outputs for a compile-time constant ``IfOperation``.
 
@@ -474,8 +489,19 @@ class ResourceAllocator:
                 (mutated in place).
             clbit_map (ClbitMap): QubitAddress-to-physical-clbit mapping
                 (mutated in place).
+            bindings (dict[str, Any]): Active bindings passed with the
+                allocator's ``ValueResolver`` so a merge source that is a
+                loop-indexed measured ``Vector[Bit]`` element resolves to
+                its root clbit.
         """
-        remap_static_phi_outputs(op, condition_value, qubit_map, clbit_map)
+        remap_static_phi_outputs(
+            op,
+            condition_value,
+            qubit_map,
+            clbit_map,
+            bindings=bindings,
+            resolver=self._resolver,
+        )
 
     def _resolve_size(
         self,
