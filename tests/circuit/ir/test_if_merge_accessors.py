@@ -69,9 +69,33 @@ class TestAddMerge:
         with pytest.raises(RuntimeError, match="condition operand"):
             if_op.add_merge(_uint("t"), _uint("f"), _uint("r"))
 
+    def test_add_merge_type_mismatch_raises(self) -> None:
+        """add_merge rejects branch / result values of differing types."""
+        if_op = IfOperation(operands=[Value(type=BitType(), name="cond")])
+        with pytest.raises(RuntimeError, match="matching branch and result types"):
+            if_op.add_merge(_uint("t"), Value(type=BitType(), name="f"), _uint("r"))
+        with pytest.raises(RuntimeError, match="matching branch and result types"):
+            if_op.add_merge(_uint("t"), _uint("f"), Value(type=BitType(), name="r"))
+
 
 class TestIterMerges:
     """Read contract and strict checks of ``IfOperation.iter_merges``."""
+
+    def test_iter_merges_on_bare_if_yields_nothing(self) -> None:
+        """A condition-less, merge-less IfOperation iterates cleanly."""
+        assert list(IfOperation().iter_merges()) == []
+
+    def test_dependency_graph_tolerates_condition_less_if(self) -> None:
+        """The dependency graph builder skips a missing condition operand.
+
+        A partially-constructed IfOperation (no operands, no merges) must
+        not crash the explicit merge-edge pass with an IndexError.
+        """
+        from qamomile.circuit.transpiler.passes.analyze import (
+            build_dependency_graph,
+        )
+
+        assert build_dependency_graph([IfOperation()]) == {}
 
     def test_iter_merges_yields_slots_in_result_order(self) -> None:
         """Each merge slot exposes its index, branch sources, and result."""
@@ -125,4 +149,22 @@ class TestIterMerges:
         with pytest.raises(
             RuntimeError, match="2 true_yields / 1 false_yields for 1 results"
         ):
+            list(if_op.iter_merges())
+
+    def test_iter_merges_missing_condition_with_merges_raises(self) -> None:
+        """Merges attached to a condition-less if are IR corruption.
+
+        The yield lists are attached directly (bypassing ``add_merge``,
+        which would already reject the missing condition) to simulate
+        hand-built corrupted storage. The old storage's other per-merge
+        corruption modes — a foreign entry among the merges or a merge
+        carrying a different condition — cannot be represented in the
+        yield-list storage and need no counterparts here.
+        """
+        if_op = IfOperation(operands=[])
+        if_op.true_yields.append(_uint("t"))
+        if_op.false_yields.append(_uint("f"))
+        if_op.results.append(_uint("r"))
+
+        with pytest.raises(RuntimeError, match="condition operand is missing"):
             list(if_op.iter_merges())

@@ -352,24 +352,21 @@ def _format_pauli_evolve(op: PauliEvolveOp) -> str:
     return f"{_format_results(op.results)} = pauli_evolve({', '.join(parts)})"
 
 
-def _format_merge(op: IfOperation, merge: IfMerge) -> str:
-    """Format one branch-merge slot as a select expression line.
+def _format_merge(if_op: IfOperation, merge: IfMerge) -> str:
+    """Format one if branch-merge slot as a phi line.
 
     Args:
-        op (IfOperation): The if-else the merge belongs to (supplies the
-            condition operand).
+        if_op (IfOperation): The if-else owning the merge (condition
+            source).
         merge (IfMerge): The merge slot to format.
 
     Returns:
-        str: A ``result = select(cond ? true : false)`` line.
+        str: One ``result = phi(cond ? true : false)`` line.
     """
-    cond = _format_value(op.operands[0]) if op.operands else "<cond>"
-    true_value = _format_value(merge.true_value)
-    false_value = _format_value(merge.false_value)
-    return (
-        f"{_format_results([merge.result])} = "
-        f"select({cond} ? {true_value} : {false_value})"
-    )
+    cond = _format_value(if_op.condition) if if_op.operands else "<cond>"
+    tv = _format_value(merge.true_value)
+    fv = _format_value(merge.false_value)
+    return f"{_format_results([merge.result])} = phi({cond} ? {tv} : {fv})"
 
 
 def _format_binary(op: Operation, table: dict[Any, str]) -> str:

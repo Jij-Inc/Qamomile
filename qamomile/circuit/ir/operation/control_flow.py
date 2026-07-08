@@ -661,8 +661,13 @@ class IfOperation(HasNestedOps, Operation):
         Raises:
             RuntimeError: If the stored merge data is internally
                 inconsistent (the yield-list lengths differ from the
-                result count). This indicates IR corruption, not a user
-                error.
+                result count, or the condition operand is missing while
+                merges are attached). This indicates IR corruption, not
+                a user error. The per-merge corruption modes of the old
+                embedded-operation storage (a foreign entry, a malformed
+                or mismatched condition, a result copy diverging from
+                ``results[i]``) cannot be represented in the yield-list
+                storage and need no checks.
         """
         if not (len(self.true_yields) == len(self.false_yields) == len(self.results)):
             raise RuntimeError(
@@ -671,6 +676,11 @@ class IfOperation(HasNestedOps, Operation):
                 f"{len(self.false_yields)} false_yields for "
                 f"{len(self.results)} results. Merges must be created "
                 "through add_merge()."
+            )
+        if self.results and not self.operands:
+            raise RuntimeError(
+                "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
+                "merges are attached but the condition operand is missing."
             )
         for i, (true_value, false_value, result) in enumerate(
             zip(self.true_yields, self.false_yields, self.results, strict=True)
@@ -694,16 +704,26 @@ class IfOperation(HasNestedOps, Operation):
             false_value (Value): Value selected when the condition is
                 false. Must have the same type as ``true_value``.
             result (Value): Fresh SSA value representing the merged output.
+                Must have the same type as the branch values.
 
         Raises:
             RuntimeError: If the condition operand has not been attached to
                 this operation yet (``operands[0]`` must exist before
-                merges are added).
+                merges are added), or the branch / result types do not
+                match.
         """
         if not self.operands:
             raise RuntimeError(
                 "[FOR DEVELOPER] IfOperation.add_merge requires the "
                 "condition operand to be attached first."
+            )
+        if false_value.type != true_value.type or result.type != true_value.type:
+            raise RuntimeError(
+                "[FOR DEVELOPER] IfOperation.add_merge requires matching "
+                "branch and result types; got "
+                f"true={true_value.type.label()}, "
+                f"false={false_value.type.label()}, "
+                f"result={result.type.label()}."
             )
         self.true_yields.append(true_value)
         self.false_yields.append(false_value)

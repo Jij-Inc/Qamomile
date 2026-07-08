@@ -112,15 +112,14 @@ def test_for_body_is_indented():
             break
 
 
-def test_if_renders_both_branches_and_merge():
+def test_if_renders_both_branches_and_phi():
     transpiler = QiskitTranspiler()
     block = transpiler.to_block(_with_runtime_if)
     out = pretty_print_block(block)
     assert "if " in out
     # The runtime-if kernel has no explicit else, so only the true branch is
-    # required — but a merge line is always emitted for values that survive
-    # the if.
-    assert "select(" in out, f"missing merge select in:\n{out}"
+    # required — but a phi is always emitted for values that survive the if.
+    assert "phi(" in out, f"missing phi in:\n{out}"
 
 
 # ---------------------------------------------------------------------------

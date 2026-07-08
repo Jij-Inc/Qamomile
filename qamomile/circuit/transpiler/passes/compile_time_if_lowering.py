@@ -393,6 +393,11 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     phi_subst.update(nested_subst)
                     dead_uuids.update(nested_dead)
                 op = op.rebuild_nested(new_lists)
+                # The substitution applied at the top of the loop predates
+                # the nested lowering, so phi outputs erased INSIDE this
+                # op's body are still referenced by its rebind records
+                # (and possibly operands). Re-apply with the updated map.
+                op = self._apply_substitution(op, phi_subst)
 
             new_ops.append(op)
 
@@ -401,6 +406,76 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     # ------------------------------------------------------------------
     # Substitution
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _substitute_branch_rebinds(
+        rebinds: tuple[Any, ...],
+        substitutor: "ValueSubstitutor",
+    ) -> tuple[Any, ...]:
+        """Rewrite branch rebind record values through the substitutor.
+
+        Keeps ``IfOperation.branch_rebinds`` coherent when phi outputs
+        referenced by a record are lowered away, so the control-flow
+        discard check's ``AnalyzePass`` safety-net run sees live values.
+
+        Args:
+            rebinds (tuple[Any, ...]): ``BranchRebind`` records.
+            substitutor (ValueSubstitutor): The active substitution.
+
+        Returns:
+            tuple[Any, ...]: Rewritten records; ``rebinds`` itself when
+                nothing changed.
+        """
+        if not rebinds:
+            return rebinds
+        new_records = []
+        changed = False
+        for record in rebinds:
+            new_before = substitutor.substitute_value(record.before)
+            if isinstance(new_before, Value) and new_before is not record.before:
+                record = dataclasses.replace(record, before=new_before)
+                changed = True
+            new_records.append(record)
+        return tuple(new_records) if changed else rebinds
+
+    @staticmethod
+    def _substitute_loop_rebinds(
+        rebinds: tuple[Any, ...],
+        substitutor: "ValueSubstitutor",
+    ) -> tuple[Any, ...]:
+        """Rewrite loop rebind record values through the substitutor.
+
+        Keeps ``loop_carried_rebinds`` coherent when a record's ``after``
+        (or ``before``) was a nested compile-time if's phi output that
+        the lowering erased — without this, the control-flow discard
+        check's ``AnalyzePass`` safety-net run would see a dangling UUID
+        and lose the record's carried-forward lineage.
+
+        Args:
+            rebinds (tuple[Any, ...]): ``LoopCarriedRebind`` records.
+            substitutor (ValueSubstitutor): The active substitution.
+
+        Returns:
+            tuple[Any, ...]: Rewritten records; ``rebinds`` itself when
+                nothing changed.
+        """
+        if not rebinds:
+            return rebinds
+        new_records = []
+        changed = False
+        for record in rebinds:
+            new_before = substitutor.substitute_value(record.before)
+            new_after = substitutor.substitute_value(record.after)
+            replacements: dict[str, Any] = {}
+            if isinstance(new_before, Value) and new_before is not record.before:
+                replacements["before"] = new_before
+            if isinstance(new_after, Value) and new_after is not record.after:
+                replacements["after"] = new_after
+            if replacements:
+                record = dataclasses.replace(record, **replacements)
+                changed = True
+            new_records.append(record)
+        return tuple(new_records) if changed else rebinds
 
     def _apply_substitution(
         self,
@@ -486,6 +561,9 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 false_operations=new_false,
                 true_yields=new_true_yields,
                 false_yields=new_false_yields,
+                branch_rebinds=self._substitute_branch_rebinds(
+                    op.branch_rebinds, substitutor
+                ),
             )
 
         from qamomile.circuit.ir.operation.gate import (
@@ -500,11 +578,18 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 for body in op.nested_op_lists()
             ]
             rebuilt = op.rebuild_nested(new_lists)
-            return dataclasses.replace(
+            rebuilt = dataclasses.replace(
                 cast(Any, rebuilt),
                 operands=new_operands,
                 results=new_results,
             )
+            rebinds = getattr(rebuilt, "loop_carried_rebinds", ())
+            new_rebinds = self._substitute_loop_rebinds(rebinds, substitutor)
+            if new_rebinds is not rebinds:
+                rebuilt = dataclasses.replace(
+                    cast(Any, rebuilt), loop_carried_rebinds=new_rebinds
+                )
+            return rebuilt
 
         result_op = op
         if changed:

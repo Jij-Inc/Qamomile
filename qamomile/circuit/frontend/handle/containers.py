@@ -104,6 +104,11 @@ class Dict(Handle, Generic[K, V]):
     _size: UInt | None = None
     _key_type: type | None = None
     _value_type: type | None = None
+    # True only for dicts explicitly declared in ``parameters=[...]``.
+    # Distinguishes them from visualization / inner-kernel dummy inputs,
+    # which also carry a parameter-marked DictValue without bound data
+    # but MAY be iterated (their entries connect at inline/emit time).
+    _runtime_parameter: bool = False
 
     def items(self) -> DictItemsIterator[K, V]:
         """Return an iterator over (key, value) pairs."""
@@ -114,8 +119,10 @@ class Dict(Handle, Generic[K, V]):
 
         Reads ``_value_type`` (recorded from the ``Dict[K, V]``
         annotation at input-handle creation) and maps the scalar handle
-        types to their IR type and Python coercer. ``None`` falls back
-        to ``Float`` for legacy handles created without the annotation.
+        types — or their Python builtin aliases (``float`` / ``int`` /
+        ``bool``), which annotations elsewhere accept interchangeably —
+        to their IR type and Python coercer. ``None`` falls back to
+        ``Float`` for legacy handles created without the annotation.
 
         Returns:
             tuple[ValueType, type, type]: ``(ir_type, handle_class,
@@ -134,11 +141,11 @@ class Dict(Handle, Generic[K, V]):
 
         from .primitives import Bit, Float
 
-        if self._value_type is None or self._value_type is Float:
+        if self._value_type in (None, Float, float):
             return FloatType(), Float, float
-        if self._value_type is UInt:
+        if self._value_type in (UInt, int):
             return UIntType(), UInt, int
-        if self._value_type is Bit:
+        if self._value_type in (Bit, bool):
             return BitType(), Bit, bool
         raise NotImplementedError(
             f"Dict subscript lookup supports scalar value types "
@@ -260,17 +267,60 @@ class Dict(Handle, Generic[K, V]):
         return handle_class(value=result_value, init_value=coerce(0))  # type: ignore[return-value]
 
     def __len__(self) -> int:
-        """Return the number of entries."""
-        return len(self._entries)
+        """Return the number of entries.
+
+        Returns:
+            int: The entry count. A dict bound at compile time reports the
+                number of bound (key, value) pairs; handles carrying
+                populated ``_entries`` report that count.
+
+        Raises:
+            TypeError: If the entry count is unknown at trace time — the
+                dict is a runtime parameter, or a symbolic input with no
+                bound data (e.g. a sub-kernel's dict argument, which
+                connects to the caller's dict only at inline time, after
+                tracing). ``len()`` is resolved to a Python int during
+                tracing and leaves no IR to lower later, so silently
+                reporting 0 here would bake zero-trip loops into the
+                circuit.
+        """
+        if self._runtime_parameter:
+            raise TypeError(
+                f"Dict '{self.value.name}' is a runtime parameter; its "
+                f"cardinality is unknown at compile time, so len() / "
+                f".size cannot be used. Bind the dict via "
+                f"bindings={{...}}, or drive the loop with a separately "
+                f"bound count."
+            )
+        if self.value.metadata.dict_runtime is not None:
+            return len(self.value.get_bound_data_items())
+        if self._entries:
+            return len(self._entries)
+        raise TypeError(
+            f"Dict '{self.value.name}' carries no bound data at trace "
+            f"time, so its cardinality is unknown and len() / .size "
+            f"cannot be used. Sub-kernel dict arguments trace "
+            f"symbolically (the caller's data connects only at inline "
+            f"time); pass the entry count as an explicit UInt argument "
+            f"instead."
+        )
 
     @property
     def size(self) -> UInt:
-        """Return the number of entries as a UInt handle."""
+        """Return the number of entries as a UInt handle.
+
+        Returns:
+            UInt: A constant handle carrying ``len(self)``.
+
+        Raises:
+            TypeError: If this dict is a runtime parameter (same condition
+                as ``len()``).
+        """
         if self._size is None:
             self._size = UInt(
                 value=Value(
                     type=UIntType(),
                     name=f"{self.value.name}_size",
-                ).with_const(len(self._entries))
+                ).with_const(len(self))
             )
         return self._size
