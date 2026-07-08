@@ -68,6 +68,7 @@ def estimate_qkernel_resources(
     kernel: "QKernel[Any, Any]",
     *,
     bindings: dict[str, Any] | None = None,
+    substitutions: dict[str, Any] | None = None,
     parameters: list[str] | None = None,
     policy: Any = None,
     cost_basis: Any = None,
@@ -79,7 +80,11 @@ def estimate_qkernel_resources(
     Args:
         kernel (QKernel[Any, Any]): Kernel to estimate.
         bindings (dict[str, Any] | None): Optional concrete parameter
-            bindings. Defaults to ``None``.
+            bindings baked into the built circuit. Defaults to ``None``.
+        substitutions (dict[str, Any] | None): Estimation-only substitutions
+            applied to the symbolic estimate (e.g. ``substitutions={"n":
+            2048}``) without constructing a large circuit. Defaults to
+            ``None``.
         parameters (list[str] | None): Runtime parameter names to preserve
             during kernel build. Defaults to ``None``.
         policy (Any): Optional ``ResourcePolicy`` override. Defaults to
@@ -104,6 +109,7 @@ def estimate_qkernel_resources(
     return estimate_resources(
         kernel,
         bindings=bindings,
+        substitutions=substitutions,
         parameters=parameters,
         policy=policy or ResourcePolicy.MODEL_IF_AVAILABLE,
         cost_basis=cost_basis or CostBasis.LOGICAL_GATES,

@@ -81,3 +81,47 @@ def test_symbolic_loop_with_loop_dependent_cost_is_summed() -> None:
     n = sp.Symbol("n", integer=True, positive=True)
 
     assert sp.simplify(estimate.gates.total - (2**n - 1)) == 0
+
+
+def test_controlled_composite_body_counts_own_control() -> None:
+    """A controlled body-backed composite reclassifies its primitives as controlled.
+
+    A body-backed composite (one H gate) with no resource model, invoked with
+    an explicit control, must have its exact-body estimate count the H as a
+    two-qubit (controlled) gate — the body path honors the invocation's own
+    control just like the model path and ``eval_controlled_u`` do.
+    """
+
+    @qm.composite_gate(name="ctrl_one_h", num_controls=1)
+    @qm.qkernel
+    def ctrl_one_h(t: qm.Qubit) -> qm.Qubit:
+        """Apply a single H gate to the target (declares one control)."""
+        return qm.h(t)
+
+    @qm.composite_gate(name="plain_one_h")
+    @qm.qkernel
+    def plain_one_h(t: qm.Qubit) -> qm.Qubit:
+        """Apply a single H gate to the target (no controls)."""
+        return qm.h(t)
+
+    @qm.qkernel
+    def controlled() -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply ctrl_one_h controlled by an explicit control qubit."""
+        c = qm.qubit("c")
+        t = qm.qubit("t")
+        return ctrl_one_h(t, controls=[c])
+
+    @qm.qkernel
+    def uncontrolled() -> qm.Qubit:
+        """Apply plain_one_h directly."""
+        t = qm.qubit("t")
+        return plain_one_h(t)
+
+    ctrl = controlled.estimate_resources(policy=qm.ResourcePolicy.EXACT_BODY)
+    plain = uncontrolled.estimate_resources(policy=qm.ResourcePolicy.EXACT_BODY)
+
+    assert plain.gates.single_qubit == 1
+    assert plain.gates.two_qubit == 0
+    # The control turns the single-qubit H into a two-qubit controlled gate.
+    assert ctrl.gates.single_qubit == 0
+    assert ctrl.gates.two_qubit == 1

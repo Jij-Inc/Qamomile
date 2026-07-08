@@ -326,4 +326,4 @@ except Exception as e:
 # 4. [リソース推定](05_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
 # 5. [実行モデル](06_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序
 # 6. [古典フローパターン](07_classical_flow_patterns.ipynb) — ループ、スパースデータ、条件分岐
-# 7. [再利用パターン](08_reuse_patterns.ipynb) — ヘルパー量子カーネル、composite gate callable、opaque callable
+# 7. [再利用パターン](08_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブ

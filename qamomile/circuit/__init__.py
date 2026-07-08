@@ -71,7 +71,15 @@ from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
-from .stdlib import iqft, qft, qpe
+from .stdlib import (
+    grover_iteration_count,
+    grover_search,
+    iqft,
+    modmul_const,
+    qft,
+    qpe,
+    shor_order_finding,
+)
 
 # Execution result / job types (return values of ExecutableProgram.sample / run)
 from .transpiler.job import (
@@ -181,6 +189,10 @@ __all__ = [
     "qpe",
     "iqft",
     "qft",
+    "modmul_const",
+    "shor_order_finding",
+    "grover_search",
+    "grover_iteration_count",
     "QKernel",
     # Job / result types
     "Job",

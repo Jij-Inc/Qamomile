@@ -22,6 +22,8 @@ Example:
 """
 
 # Advanced class-based stdlib implementations.
+from .arithmetic import modmul_const
+from .grover import grover_iteration_count, grover_search
 from .qft import IQFT, QFT, iqft, qft
 
 # Strategy objects for advanced stdlib configuration.
@@ -32,6 +34,7 @@ from .qft_strategies import (
     StandardQFTStrategy,
 )
 from .qpe import qpe
+from .shor import shor_order_finding
 
 __all__ = [
     # Classes
@@ -46,4 +49,9 @@ __all__ = [
     "qft",
     "iqft",
     "qpe",
+    # Arithmetic and algorithms
+    "modmul_const",
+    "shor_order_finding",
+    "grover_search",
+    "grover_iteration_count",
 ]

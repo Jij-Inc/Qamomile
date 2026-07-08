@@ -17,15 +17,23 @@
 # tags: [tutorial]
 # ---
 #
-# # Reuse Patterns: QKernel, Composite Gate, and Opaque Calls
+# # Reuse Patterns: QKernel Composition and Composite Gates
 #
-# Qamomile has three reuse patterns.
+# As circuits grow, you want to avoid copy-pasting gate sequences. Qamomile offers two complementary reuse mechanisms:
 #
-# A helper `qkernel` is ordinary program structure.
+# 1. **Helper QKernel** — call one `@qkernel` from another, like normal
+#    function composition.
+# 2. **`@composite_gate`** — promote a qkernel to a **named gate**
+#    with customizable settings that appears as a single box in diagrams.
 #
-# `composite_gate()` creates a named quantum box with a Qamomile body.
+# There is also a third pattern for top-down design:
 #
-# `opaque()` creates a bodyless callable for top-down algorithm design and resource estimation.
+# 3. **Stub composite gate** — a gate with no implementation body, used for
+#    resource estimation.
+#    For example, if you are designing a Grover search algorithm,
+#    you know the oracle will use ~40 T-gates, but you haven't implemented it yet.
+#    A stub composite gate lets you estimate the total cost of the algorithm
+#    without the full oracle implementation.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -33,17 +41,15 @@
 
 # %%
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
 
-
 # %% [markdown]
-# ## Pattern 1: helper QKernel
+# ## Pattern 1: Helper QKernel
 #
-# Use a helper qkernel when you want ordinary code reuse.
-#
-# During compilation, helper calls are inlined into the caller.
+# Any `@qkernel` function can be called from another `@qkernel`. The transpiler inlines the call — the result is a flat circuit.
 
 
 # %%
@@ -79,14 +85,23 @@ result = (
 print("GHZ result:", result.results)
 assert result.shots == 128
 assert sum(count for _, count in result.results) == 128
-assert all(outcome in {(0, 0, 0, 0), (1, 1, 1, 1)} for outcome, _ in result.results)
+# 4-qubit GHZ state -> only (0, 0, 0, 0) and (1, 1, 1, 1) outcomes.
+assert all(
+    outcome in {(0, 0, 0, 0), (1, 1, 1, 1)}
+    for outcome, _ in result.results
+)
+
+# %% [markdown]
+# The helper `entangle_once` keeps the call site readable. In the transpiled circuit, it is inlined — you see individual CX gates, not a sub-block.
+
+# %%
+qc = transpiler.to_circuit(ghz_with_helper, bindings={"n": 4})
+print(qc.draw())
 
 # %% [markdown]
 # ### Passing scalar literals to helpers
 #
-# A helper qkernel can declare scalar handles such as `UInt`, `Float`, or `Bit`.
-#
-# At the call site, raw Python literals are promoted to the expected handle type.
+# When a helper qkernel declares a scalar parameter (`UInt`, `Float`, or `Bit`), you can pass a raw Python literal at the call site — Qamomile auto-promotes `int` to `UInt`, `float` to `Float`, and `bool` to `Bit`. Writing `helper(q, 0, 0.5)` is equivalent to `helper(q, qmc.uint(0), qmc.float_(0.5))`. Use the explicit `qmc.uint` / `qmc.float_` / `qmc.bit` constructors only when you want to name the value or share it across multiple call sites.
 
 
 # %%
@@ -103,6 +118,11 @@ def rotate_first(
 @qmc.qkernel
 def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(n, name="q")
+    # Raw int / float literals are auto-promoted to ``qmc.UInt`` / ``qmc.Float``
+    # at runtime, but the static signature keeps the strict handle types so the
+    # kernel contract stays in terms of Qamomile handles. The ignore below
+    # acknowledges the deliberate gap between the static signature and the
+    # runtime literal-acceptance.
     q = rotate_first(q, 0, 0.5)  # type: ignore[arg-type]
     return qmc.measure(q)
 
@@ -110,162 +130,185 @@ def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 helper_with_literals.draw(n=3, fold_loops=False, inline=True)
 
 # %% [markdown]
-# ## Pattern 2: composite gate
+# ## Pattern 2: `@composite_gate`
 #
-# Use a composite gate callable when the reusable unit should remain visible as a
-# named quantum operation.
+# When you want a reusable block to appear as a **named box** in circuit diagrams, promote it with `@composite_gate`. Also, as a more advanced use case, making it a composite gate allows you to give it custom settings such as giving it multiple ways of implementation.
 #
-# The public user-facing form is `@qmc.composite_gate` on a typed Python function.
+# Stack `@composite_gate(name="...")` on top of `@qkernel`:
+
+
+# %%
+@qmc.composite_gate(name="entangle")
+@qmc.qkernel
+def entangle_link(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+    q0, q1 = qmc.cx(q0, q1)
+    return q0, q1
+
+
+@qmc.qkernel
+def ghz_with_composite(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(n, name="q")
+    q[0] = qmc.h(q[0])
+
+    for i in qmc.range(n - 1):
+        q[i], q[i + 1] = entangle_link(q[i], q[i + 1])
+
+    return qmc.measure(q)
+
+
+# %%
+ghz_with_composite.draw(n=4, fold_loops=False)
+
+# %% [markdown]
+# ### When to use which?
 #
-# Qamomile turns the function into a qkernel body internally, while calls to it
-# remain visible as a named box.
+# | Pattern | Appears in `draw()` | Use when |
+# |---------|---------------------|------|
+# | Helper `@qkernel` | Inlined (flat) | Code organization |
+# | `@composite_gate` | Named box | Domain-level abstraction/advanced settings |
+
+# %% [markdown]
+# ## Pattern 3: Stub Composite Gate for Top-Down Design
+#
+# Sometimes you want to design an algorithm's structure before implementing every sub-component. A **stub composite gate** has no implementation body — just a name, qubit count, and optional resource metadata.
+#
+# This lets you estimate the cost of the overall algorithm while the oracle or sub-routine is still under development.
+#
+# To use a stub composite gate, specify `stub=True` in the `@composite_gate` decorator. At the same time, you can also give it resource information as `ResourceMetadata`.
 
 
 # %%
 @qmc.composite_gate(
-    name="h_layer",
-    resource_model=qmc.FixedResourceModel(
-        gates=qmc.GateResources(total=3, single_qubit=3),
+    stub=True,
+    name="oracle",
+    num_qubits=3,
+    resource_metadata=ResourceMetadata(
+        query_complexity=1,
+        t_gates=40,
     ),
 )
-def h_layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    for i in qmc.range(q.shape[0]):
-        q[i] = qmc.h(q[i])
-    return q
+def oracle_box():
+    pass
 
 
 @qmc.qkernel
-def custom_composite_layer() -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(3, name="q")
-    q = h_layer(q)
-    return qmc.measure(q)
-
-
-block = custom_composite_layer.build()
-assert block.name == "custom_composite_layer"
-
-composite_est = custom_composite_layer.estimate_resources().simplify()
-assert composite_est.gates.total == 3
-
-custom_composite_layer.draw(fold_loops=False)
-
-# %% [markdown]
-# QFT is a built-in example.
-#
-# It has a Qamomile body, but a backend may emit it natively.
-
-
-# %%
-@qmc.qkernel
-def qft_round_trip() -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(3, name="q")
-    q = qmc.h(q)
-    q = qmc.qft(q)
-    q = qmc.iqft(q)
-    return qmc.measure(q)
-
-
-block = qft_round_trip.build()
-assert block.name == "qft_round_trip"
-
-qft_est = qft_round_trip.estimate_resources().simplify()
-print("QFT round-trip gates:", qft_est.gates.total)
-assert qft_est.gates.total == 17
-
-qft_round_trip.draw(fold_loops=False)
-
-# %%
-qft_result = (
-    transpiler.transpile(qft_round_trip)
-    .sample(
-        transpiler.executor(),
-        shots=64,
-    )
-    .result()
-)
-print("QFT round-trip result:", qft_result.results)
-assert sum(count for _, count in qft_result.results) == 64
-
-# %% [markdown]
-# ## Pattern 3: Opaque callable
-#
-# Use an opaque callable when the algorithm needs a named operation before its implementation is available.
-#
-# An opaque callable has no body.
-#
-# It can still carry a resource model, so resource estimation can count it.
-
-
-# %%
-marked_state_oracle = qmc.opaque(
-    "marked_state_oracle",
-    signature=qmc.CallableSignature(
-        inputs=[qmc.Vector[qmc.Qubit]],
-        outputs=[qmc.Vector[qmc.Qubit]],
-    ),
-    resource_model=qmc.FixedResourceModel(
-        gates=qmc.GateResources(t=40),
-        calls=qmc.CallResources(
-            calls_by_name={"marked_state_oracle": 1},
-            queries_by_name={"marked_state_oracle": 1},
-        ),
-    ),
-)
-
-
-@qmc.qkernel
-def grover_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
     q = qmc.qubit_array(3, name="q")
     q = qmc.h(q)
 
-    for _ in qmc.range(rounds):
-        q = marked_state_oracle(q)
-        q = qmc.h(q)
-
+    q[0], q[1], q[2] = oracle_box(q[0], q[1], q[2])
     return q
 
 
 # %%
-grover_skeleton.draw(rounds=2, fold_loops=False)
+algorithm_skeleton.draw(fold_loops=False)
 
 # %% [markdown]
-# The callable is opaque, so this qkernel is not executable yet.
+# ### Resource Estimation for QKernels that Include Stub Gates
 #
-# It is still useful for resource estimation.
+# `estimate_resources()` can analyze a full qkernel even when oracle internals are unknown. Known scaffold gates are counted directly, and stub components are tracked through `est.gates.oracle_calls` / `est.gates.oracle_queries`.
 
 # %%
-est = grover_skeleton.estimate_resources().simplify()
+est = algorithm_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
-print("total gates:", est.gates.total)
-print("T gates:", est.gates.t_gates)
-print("oracle calls:", est.calls.oracle_calls)
-print("oracle queries:", est.calls.oracle_queries)
 assert est.qubits == 3
-assert str(est.gates.total) == "3*rounds + 3"
-assert str(est.gates.t_gates) == "40*rounds"
-assert {k: str(v) for k, v in est.calls.oracle_calls.items()} == {
-    "marked_state_oracle": "rounds"
+print("total gates:", est.gates.total)
+# 3 H gates (broadcast over qubit_array(3)); the stub `oracle_box` is
+# counted via gates.oracle_calls, not gates.total.
+assert est.gates.total == 3
+
+# %% [markdown]
+# Next, we build a qkernel that mixes ordinary gates with multiple stub oracles.
+
+
+# %%
+@qmc.composite_gate(
+    stub=True,
+    name="phase_oracle",
+    num_qubits=3,
+    resource_metadata=ResourceMetadata(query_complexity=2),
+)
+def phase_oracle():
+    pass
+
+
+@qmc.composite_gate(
+    stub=True,
+    name="mixing_oracle",
+    num_qubits=3,
+    resource_metadata=ResourceMetadata(query_complexity=1),
+)
+def mixing_oracle():
+    pass
+
+
+@qmc.qkernel
+def iterative_oracle_skeleton(rounds: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+    q = qmc.qubit_array(3, name="q")
+
+    # Known scaffold (non-oracle) gates
+    q[0] = qmc.h(q[0])
+    q[1] = qmc.h(q[1])
+    q[0], q[1] = qmc.cx(q[0], q[1])
+
+    # One oracle call outside the loop
+    q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
+
+    # Each round mixes known gates and unknown oracle blocks
+    for i in qmc.range(rounds):
+        q[1] = qmc.ry(q[1], 0.3)
+        q[1], q[2] = qmc.cx(q[1], q[2])
+        q[0], q[1], q[2] = phase_oracle(q[0], q[1], q[2])
+        q[0], q[1], q[2] = mixing_oracle(q[0], q[1], q[2])
+        q[1], q[2] = qmc.cx(q[1], q[2])
+
+    return q
+
+
+iterative_oracle_skeleton.draw(rounds=4, fold_loops=False)
+
+# %%
+oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
+print("total gates:", oracle_est.gates.total)
+assert str(oracle_est.gates.total) == "3*rounds + 3"
+print("two-qubit gates:", oracle_est.gates.two_qubit)
+assert str(oracle_est.gates.two_qubit) == "2*rounds + 1"
+print("oracle_calls:", oracle_est.gates.oracle_calls)
+assert {k: str(v) for k, v in oracle_est.gates.oracle_calls.items()} == {
+    "phase_oracle": "rounds + 1",
+    "mixing_oracle": "rounds",
 }
-assert {k: str(v) for k, v in est.calls.oracle_queries.items()} == {
-    "marked_state_oracle": "rounds"
+print("oracle_queries:", oracle_est.gates.oracle_queries)
+assert {k: str(v) for k, v in oracle_est.gates.oracle_queries.items()} == {
+    "phase_oracle": "2*rounds + 2",
+    "mixing_oracle": "rounds",
 }
 
 # %% [markdown]
-# Substitute a concrete loop count when you want numeric estimates.
+# Substitute a concrete value for `rounds` to get numeric counts:
 
 # %%
-est_4 = est.substitute(rounds=4)
-print("T gates for 4 rounds:", est_4.gates.t_gates)
-assert est_4.gates.t_gates == 160
-assert est_4.calls.oracle_calls == {"marked_state_oracle": 4}
+oracle_est_4 = oracle_est.substitute(rounds=4)
+print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
+assert oracle_est_4.gates.oracle_calls == {"phase_oracle": 5, "mixing_oracle": 4}
+print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
+assert oracle_est_4.gates.oracle_queries == {"phase_oracle": 10, "mixing_oracle": 4}
+
+# %% [markdown]
+# In this example, resource analysis works without oracle internals: known gates contribute to `total` / `two_qubit`, while unknown oracle blocks are tracked as `oracle_calls` (for example, `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`) and `oracle_queries` (weighted by each stub's `query_complexity`).
+
+# %% [markdown]
+# This lets you reason about algorithm-level costs (such as qubit count, oracle queries) before committing to a full decomposition.
 
 # %% [markdown]
 # ## Summary
 #
-# Use a helper `qkernel` for ordinary code structure.
-#
-# Use `composite_gate()` when the call has a body but should remain visible as a named operation.
-#
-# Use `opaque()` when the call intentionally has no body yet, but should participate in diagrams and resource estimation.
+# - **Helper `@qkernel`**: call one qkernel from another for code reuse.
+#   The transpiler inlines the call into a flat circuit.
+# - **`@composite_gate`**: gives a qkernel a named identity visible in
+#   diagrams. Stack `@composite_gate` on top of `@qkernel`.
+# - **Stub composite gate**: `stub=True` with `ResourceMetadata` for top-down
+#   design and resource estimation without a full implementation.
+# - **`est.gates.oracle_calls`**: even when oracle internals are unknown, this reports per-oracle call counts as a dict (including symbolic call counts).
 #
 # For controlled gates (`qmc.control`), see [Tutorial 04 — Controlled Gates](04_controlled_gates.ipynb).

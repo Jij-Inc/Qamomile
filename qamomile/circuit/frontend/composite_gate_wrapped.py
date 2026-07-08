@@ -60,6 +60,7 @@ class _WrappedCompositeGate(CompositeGate):
     _qkernel: Any = None
     _resource_models: tuple[ResourceModelBinding, ...] = ()
     _implementations: tuple[CallableImplementation, ...] = ()
+    _default_estimate_kind: str | None = None
 
     @property
     def qkernel(self) -> Any:
@@ -168,6 +169,7 @@ class _WrappedCompositeGate(CompositeGate):
         self,
         *,
         bindings: dict[str, Any] | None = None,
+        substitutions: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
         policy: Any = None,
         cost_basis: Any = None,
@@ -179,6 +181,9 @@ class _WrappedCompositeGate(CompositeGate):
         Args:
             bindings (dict[str, Any] | None): Optional compile-time bindings.
                 Defaults to ``None``.
+            substitutions (dict[str, Any] | None): Estimation-only substitutions
+                applied to the symbolic estimate after building. Defaults to
+                ``None``.
             parameters (list[str] | None): Runtime parameter names to
                 preserve. Defaults to ``None``.
             policy (Any): Optional ``ResourcePolicy`` override. Defaults to
@@ -195,6 +200,7 @@ class _WrappedCompositeGate(CompositeGate):
         """
         return self._qkernel.estimate_resources(
             bindings=bindings,
+            substitutions=substitutions,
             parameters=parameters,
             policy=policy,
             cost_basis=cost_basis,
@@ -358,6 +364,8 @@ class _WrappedCompositeGate(CompositeGate):
             "strategy_name": strategy_name,
             "default_policy": CallPolicy.PRESERVE_BOX.name,
         }
+        if self._default_estimate_kind is not None:
+            attrs["default_estimate_kind"] = self._default_estimate_kind
         return InvokeOperation(
             operands=inputs,
             results=results,
@@ -455,6 +463,7 @@ def composite_gate(
     resource_model: Any | None = None,
     resource_models: Sequence[Any] | None = None,
     implementations: Sequence[Any] | None = None,
+    default_estimate_kind: str | None = None,
 ) -> Callable[[Callable], _WrappedCompositeGate]:
     """Return a qkernel-to-boxed-callable decorator."""
     ...
@@ -469,6 +478,7 @@ def composite_gate(
     resource_model: Any | None = None,
     resource_models: Sequence[Any] | None = None,
     implementations: Sequence[Any] | None = None,
+    default_estimate_kind: str | None = None,
 ) -> _WrappedCompositeGate | Callable[[Callable], _WrappedCompositeGate]:
     """Create a boxed callable from a qkernel function.
 
@@ -493,6 +503,11 @@ def composite_gate(
         implementations (Sequence[Any] | None): Optional advanced
             implementation candidates for backend, transform, or strategy
             selection. Defaults to ``None``.
+        default_estimate_kind (str | None): Estimate-kind tag (e.g.
+            ``"literature"``) selected under the default policy when multiple
+            resource models are attached, so the default is not silently
+            dependent on binding order. Defaults to ``None`` (first compatible
+            binding wins).
 
     Returns:
         _WrappedCompositeGate | Callable[[Callable], _WrappedCompositeGate]:
@@ -501,8 +516,12 @@ def composite_gate(
     Raises:
         TypeError: If the decorator is applied to an object that cannot be
             converted into a ``QKernel``.
+        ValueError: If ``default_estimate_kind`` is not a recognized
+            estimate-kind tag.
     """
     from qamomile.circuit.frontend.qkernel import QKernel
+
+    _validate_default_estimate_kind(default_estimate_kind)
 
     def decorator(
         kernel_or_func: Callable,
@@ -546,6 +565,7 @@ def composite_gate(
             _qkernel=qkernel_instance,
             _resource_models=normalized_resource_models,
             _implementations=normalized_implementations,
+            _default_estimate_kind=default_estimate_kind,
         )
 
     if func is not None:
@@ -570,6 +590,7 @@ def composite(
     resource_model: Any | None = None,
     resource_models: Sequence[Any] | None = None,
     implementations: Sequence[Any] | None = None,
+    default_estimate_kind: str | None = None,
 ) -> Callable[[Callable], _WrappedCompositeGate]:
     """Return a qkernel-to-composite decorator."""
     ...
@@ -584,6 +605,7 @@ def composite(
     resource_model: Any | None = None,
     resource_models: Sequence[Any] | None = None,
     implementations: Sequence[Any] | None = None,
+    default_estimate_kind: str | None = None,
 ) -> _WrappedCompositeGate | Callable[[Callable], _WrappedCompositeGate]:
     """Create a boxed composite callable from a qkernel.
 
@@ -606,6 +628,9 @@ def composite(
         implementations (Sequence[Any] | None): Optional advanced
             implementation candidates for backend, transform, or strategy
             selection. Defaults to ``None``.
+        default_estimate_kind (str | None): Estimate-kind tag selected under the
+            default policy when multiple resource models are attached. Defaults
+            to ``None``.
 
     Returns:
         _WrappedCompositeGate | Callable[[Callable], _WrappedCompositeGate]:
@@ -619,6 +644,7 @@ def composite(
             resource_model=resource_model,
             resource_models=resource_models,
             implementations=implementations,
+            default_estimate_kind=default_estimate_kind,
         )
     decorator = composite_gate(
         name=name,
@@ -627,6 +653,7 @@ def composite(
         resource_model=resource_model,
         resource_models=resource_models,
         implementations=implementations,
+        default_estimate_kind=default_estimate_kind,
     )
     return decorator(func)
 
@@ -652,6 +679,30 @@ class _FunctionResourceModel:
             ResourceEstimate: Function result.
         """
         return cast(ResourceEstimate, self.func(ctx))
+
+
+def _validate_default_estimate_kind(default_estimate_kind: str | None) -> None:
+    """Validate a ``default_estimate_kind`` tag at composite-definition time.
+
+    Args:
+        default_estimate_kind (str | None): Estimate-kind tag to validate, or
+            ``None`` to skip.
+
+    Raises:
+        ValueError: If ``default_estimate_kind`` is a non-``None`` string that
+            is not a recognized estimate kind (catches typos at definition time
+            rather than silently ignoring the pin).
+    """
+    if default_estimate_kind is None:
+        return
+    from qamomile.circuit.estimator.resource_estimator import EstimateKind
+
+    valid = {kind.value for kind in EstimateKind}
+    if default_estimate_kind not in valid:
+        raise ValueError(
+            f"default_estimate_kind {default_estimate_kind!r} is not a "
+            f"recognized estimate kind; expected one of {sorted(valid)}."
+        )
 
 
 def _normalize_gate_type(gate_type: Any | None) -> CompositeGateType:

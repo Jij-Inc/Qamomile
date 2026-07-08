@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import numbers
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -16,6 +17,7 @@ from qamomile.circuit.ir.operation.callable import (
     CallTransform,
     CompositeGateType,
     InvokeOperation,
+    ResourceModelBinding,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -111,6 +113,42 @@ class EstimateKind(enum.Enum):
     STRATEGY_MODEL = "strategy_model"
     ASYMPTOTIC = "asymptotic"
     LITERATURE = "literature"
+
+    @staticmethod
+    def from_name(name: str | None) -> "EstimateKind":
+        """Map a ``ResourceModelBinding.estimate_kind`` string to an enum value.
+
+        Args:
+            name (str | None): Estimate-kind tag recorded on a resource model
+                binding. ``None`` defaults to ``STRATEGY_MODEL``.
+
+        Returns:
+            EstimateKind: Matching enum value.
+
+        Raises:
+            ValueError: If ``name`` is a non-``None`` string that does not match
+                any ``EstimateKind`` value. This surfaces typos (e.g.
+                ``"literture"``) that would otherwise silently defeat
+                policy-based model selection.
+        """
+        if name is None:
+            return EstimateKind.STRATEGY_MODEL
+        for kind in EstimateKind:
+            if kind.value == name:
+                return kind
+        valid = ", ".join(repr(kind.value) for kind in EstimateKind)
+        raise ValueError(
+            f"Unknown resource model estimate_kind {name!r}; expected one of {valid}."
+        )
+
+
+# Map a resource policy to the estimate-kind tag it prefers when several
+# resource models are attached to the same callable. Policies not listed here
+# do not express a preference and select the first compatible binding.
+_POLICY_PREFERRED_KIND: dict[ResourcePolicy, str] = {
+    ResourcePolicy.LITERATURE: EstimateKind.LITERATURE.value,
+    ResourcePolicy.ASYMPTOTIC: EstimateKind.ASYMPTOTIC.value,
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -567,7 +605,16 @@ class ResourceEstimate:
         )
 
     def controlled(self, num_controls: ResourceExpr | int) -> ResourceEstimate:
-        """Apply a conservative controlled-call transform.
+        """Record a controlled-call context without scaling cost.
+
+        This deliberately does **not** change gate/width/depth counts. Controlled
+        cost is owned by whatever knows the decomposition: a body gets exact
+        per-primitive reclassification via ``eval_controlled_u``, and a resource
+        model declares its own controlled cost (optionally a distinct model bound
+        with ``transform=CallTransform.CONTROLLED``). This method only attaches an
+        assumption so that surrounding controls a model did not account for are
+        surfaced rather than silently dropped — scaling here would double-count
+        calibrated models whose cost already includes their control.
 
         Args:
             num_controls (ResourceExpr | int): Number of active controls.
@@ -799,6 +846,17 @@ class ResourceEstimate:
 class ResourceContext:
     """Provide call-site information to resource models.
 
+    Controlled-cost contract for model authors: a controlled invocation is its
+    own operation with its own cost, so a model owns the cost of the control it
+    was designed around. ``controls`` counts only *surrounding* controls (from
+    enclosing controlled scopes) that the model did not build in; the
+    invocation's *own* control is signalled by ``transform`` being
+    ``CallTransform.CONTROLLED`` and counted by :attr:`own_controls`. A model
+    that already prices in its own control (like the constant modular
+    multiplication model, calibrated per *controlled* multiplication) should not
+    add anything for ``own_controls``; the estimator records leftover
+    ``controls`` as an assumption but never scales a model's counts.
+
     Args:
         callable_ref (CallableRef | None): Stable callable identity.
         argument_values (tuple[Value, ...]): IR operand values from the call
@@ -807,8 +865,12 @@ class ResourceContext:
             expressions keyed by operand name.
         attrs (Mapping[str, Any]): Callable attrs copied from the invocation.
         loop_symbols (Mapping[str, sp.Symbol]): Loop symbols in scope.
-        controls (ResourceExpr): Number of surrounding controls.
-        power (ResourceExpr): Power for controlled-U or repeated calls.
+        controls (ResourceExpr): Number of surrounding controls (not the
+            invocation's own control).
+        power (ResourceExpr): Power for repeated calls. Reserved: the
+            invoke-model path does not populate it today (powered invokes are
+            handled structurally by ``eval_controlled_u`` above the model), so it
+            stays at the default ``1``.
         transform (CallTransform): Requested call transform.
         strategy (str | None): Selected resource strategy.
         policy (ResourcePolicy): Estimation policy.
@@ -828,6 +890,22 @@ class ResourceContext:
     policy: ResourcePolicy = ResourcePolicy.MODEL_IF_AVAILABLE
     cost_basis: CostBasis = CostBasis.LOGICAL_GATES
     bindings: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+
+    @property
+    def own_controls(self) -> int:
+        """Return the invocation's own control-qubit count.
+
+        Reads ``attrs["num_control_qubits"]`` when the call is controlled. This
+        is the control the callable is applied *with* (e.g. Shor conditioning a
+        modular multiplication on an exponent qubit), distinct from surrounding
+        controls in :attr:`controls`.
+
+        Returns:
+            int: Own control-qubit count, or ``0`` for a direct call.
+        """
+        if self.transform is not CallTransform.CONTROLLED:
+            return 0
+        return int(self.attrs.get("num_control_qubits", 0) or 0)
 
 
 class ResourceModel(Protocol):
@@ -993,6 +1071,7 @@ class ResourceEstimator:
         kernel: "QKernel[Any, Any] | Block | Sequence[Operation]",
         *,
         bindings: dict[str, Any] | None = None,
+        substitutions: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
         strategies: dict[str, str] | None = None,
     ) -> ResourceEstimate:
@@ -1001,8 +1080,15 @@ class ResourceEstimator:
         Args:
             kernel (QKernel[Any, Any] | Block | Sequence[Operation]): Object to
                 estimate. QKernel-like objects are built before traversal.
-            bindings (dict[str, Any] | None): Compile-time values used for
-                symbolic substitution. Defaults to ``None``.
+            bindings (dict[str, Any] | None): Compile-time values baked into the
+                circuit at ``build`` time (they change the constructed IR). Use
+                for genuinely structural values. Defaults to ``None``.
+            substitutions (dict[str, Any] | None): Estimation-only substitutions
+                applied to the *symbolic* estimate after building. The kernel is
+                built with these names left symbolic, so
+                ``substitutions={"n": 2048}`` yields the concrete estimate
+                without constructing a 2048-scale circuit. Values may be numbers
+                or SymPy expressions. Defaults to ``None``.
             parameters (list[str] | None): Runtime parameter names to preserve
                 when a qkernel must be built. Defaults to ``None``.
             strategies (dict[str, str] | None): Per-call override merged over
@@ -1010,16 +1096,44 @@ class ResourceEstimator:
 
         Returns:
             ResourceEstimate: Logical resource estimate.
+
+        Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``substitutions``, or a ``substitutions`` name is neither a free
+                symbol of the estimate nor a declared kernel argument (a kernel
+                argument that affects no resource metric is a recorded no-op).
         """
-        block_or_ops = self._coerce_input(kernel, bindings, parameters)
+        if bindings and substitutions:
+            overlap = set(bindings) & set(substitutions)
+            if overlap:
+                raise ValueError(
+                    f"names {sorted(overlap)} appear in both bindings and "
+                    "substitutions; a name is either baked in at build time "
+                    "(bindings) or substituted into the estimate "
+                    "(substitutions), not both."
+                )
+        block_or_ops = self._coerce_input(kernel, bindings, parameters, substitutions)
         config = dataclasses.replace(
             self.config,
             strategies={**self.config.strategies, **dict(strategies or {})},
         )
-        interpreter = ResourceInterpreter(config=config, bindings=bindings or {})
+        interpreter = ResourceInterpreter(
+            config=config,
+            bindings=bindings or {},
+            condition_values=_scalar_values(
+                {**(bindings or {}), **(substitutions or {})}
+            ),
+        )
         estimate = interpreter.estimate(block_or_ops)
         if bindings:
             estimate = _substitute_bindings(estimate, bindings)
+        if substitutions:
+            estimate = _apply_substitutions(
+                estimate,
+                substitutions,
+                contract_names=_contract_names(block_or_ops),
+                branch_condition_names=interpreter.branch_condition_names,
+            )
         if config.simplify:
             estimate = estimate.simplify()
         estimate.parameters = _collect_parameters(estimate)
@@ -1030,8 +1144,14 @@ class ResourceEstimator:
         kernel: "QKernel[Any, Any] | Block | Sequence[Operation]",
         bindings: dict[str, Any] | None,
         parameters: list[str] | None,
+        substitutions: dict[str, Any] | None = None,
     ) -> Block | Sequence[Operation]:
         """Coerce a supported input into an IR block or operation list.
+
+        When a qkernel is built and ``substitutions`` names classical arguments,
+        those arguments are forced to stay symbolic (added to the build
+        ``parameters``) so a Python-signature default cannot silently bake a
+        value the caller believes they passed via ``substitutions``.
 
         Args:
             kernel (QKernel[Any, Any] | Block | Sequence[Operation]): Input
@@ -1040,6 +1160,9 @@ class ResourceEstimator:
                 build. Defaults to ``None``.
             parameters (list[str] | None): Runtime parameter names for qkernel
                 build. Defaults to ``None``.
+            substitutions (dict[str, Any] | None): Estimation-only substitution
+                names, used to force matching classical arguments symbolic.
+                Defaults to ``None``.
 
         Returns:
             Block | Sequence[Operation]: IR object ready for interpretation.
@@ -1051,6 +1174,9 @@ class ResourceEstimator:
         build = getattr(kernel, "build", None)
         if callable(build):
             kwargs = dict(bindings or {})
+            parameters = _force_symbolic_substitution_params(
+                kernel, kwargs, parameters, substitutions
+            )
             return build(parameters=parameters, **kwargs)
         block = getattr(kernel, "block", None)
         if isinstance(block, Block):
@@ -1069,15 +1195,29 @@ class ResourceInterpreter:
         *,
         config: ResourceEstimatorConfig,
         bindings: Mapping[str, Any],
+        condition_values: Mapping[str, sp.Expr] | None = None,
     ) -> None:
         """Initialize an interpreter.
 
         Args:
             config (ResourceEstimatorConfig): Estimator configuration.
             bindings (Mapping[str, Any]): Concrete user bindings.
+            condition_values (Mapping[str, sp.Expr] | None): Numeric scalar
+                values (from bindings and substitutions) used to decide
+                compile-time ``if`` branches. Defaults to ``None``.
         """
         self.config = config
         self.bindings = bindings
+        self.condition_values: Mapping[str, sp.Expr] = condition_values or {}
+        # Names of classical parameters whose value participated in a
+        # compile-time branch predicate (whether or not it decided the branch),
+        # so downstream substitution reporting does not misfile them as "does
+        # not affect any resource metric".
+        self.branch_condition_names: set[str] = set()
+        # Undecidable-branch messages already reported, so an IfOperation
+        # duplicated at trace time (e.g. a Python-level loop) yields one
+        # assumption, not one per copy.
+        self._reported_undecidable: set[str] = set()
 
     def estimate(self, block_or_ops: Block | Sequence[Operation]) -> ResourceEstimate:
         """Estimate resources for a block or operation sequence.
@@ -1089,6 +1229,16 @@ class ResourceInterpreter:
             ResourceEstimate: Estimated logical resources.
         """
         if isinstance(block_or_ops, Block):
+            # Only genuine classical parameters may decide a branch — a
+            # measurement bit is never a param slot, so this prevents a runtime
+            # ``if bit:`` from being specialized by a same-named value.
+            if self.condition_values:
+                slot_names = {slot.name for slot in block_or_ops.param_slots}
+                self.condition_values = {
+                    name: value
+                    for name, value in self.condition_values.items()
+                    if name in slot_names
+                }
             resolver = ExprResolver(block=block_or_ops)
             body = self.eval_block(block_or_ops, resolver)
             input_qubits = _count_input_qubits(block_or_ops.input_values, resolver)
@@ -1312,7 +1462,13 @@ class ResourceInterpreter:
         *,
         controls: ResourceExpr | int = 0,
     ) -> ResourceEstimate:
-        """Evaluate a conditional as a conservative branch choice.
+        """Evaluate a conditional, specializing decidable compile-time branches.
+
+        When the condition is a compile-time constant (from ``bindings``) or is
+        resolvable from a supplied classical parameter value (from
+        ``substitutions``), only the taken branch is counted. A measurement-backed
+        or otherwise undecidable condition falls back to the conservative maximum
+        of both branches.
 
         Args:
             operation (IfOperation): If operation.
@@ -1321,9 +1477,24 @@ class ResourceInterpreter:
                 zero.
 
         Returns:
-            ResourceEstimate: Maximum of true and false branches.
+            ResourceEstimate: Taken-branch estimate when decidable, otherwise the
+            maximum of the true and false branches.
         """
+        taken, note = self._decide_branch(resolver.resolve(operation.condition))
         true_child, false_child = build_if_scopes(operation, resolver)
+        if taken is not None:
+            branch_ops = (
+                operation.true_operations if taken else operation.false_operations
+            )
+            branch_child = true_child if taken else false_child
+            estimate = self.eval_operations(branch_ops, branch_child, controls=controls)
+            return dataclasses.replace(
+                estimate,
+                trace=_wrap_trace(
+                    f"if[{'true' if taken else 'false'} branch]",
+                    estimate.trace,
+                ),
+            )
         true_estimate = self.eval_operations(
             operation.true_operations,
             true_child,
@@ -1334,7 +1505,68 @@ class ResourceInterpreter:
             false_child,
             controls=controls,
         )
-        return true_estimate.choice(false_estimate)
+        combined = true_estimate.choice(false_estimate)
+        if note is None:
+            return combined
+        trace = combined.trace
+        if trace is not None:
+            trace = dataclasses.replace(trace, assumptions=(*trace.assumptions, note))
+        return dataclasses.replace(
+            combined, assumptions=(*combined.assumptions, note), trace=trace
+        )
+
+    def _decide_branch(
+        self, condition: sp.Basic
+    ) -> tuple[bool | None, ResourceAssumption | None]:
+        """Decide a branch condition from constants and supplied values.
+
+        Substitutes any known classical parameter values into the resolved
+        condition, then tests it for a definite truth value (nonzero is true).
+        Records the names that participated in the predicate so downstream
+        substitution reporting does not misfile them as no-ops, and, when the
+        branch stays undecidable despite a supplied value, produces an
+        assumption naming the unresolved symbols.
+
+        Args:
+            condition (sp.Basic): Resolved condition expression. May be a numeric
+                ``Expr`` or a ``BooleanAtom`` (from a comparison predicate).
+
+        Returns:
+            tuple[bool | None, ResourceAssumption | None]: The branch decision
+            (``True`` / ``False``, or ``None`` when undecidable) and an optional
+            undecidable-branch assumption (only when a supplied value touched an
+            undecidable condition).
+        """
+        original = condition
+        used: set[str] = set()
+        if self.condition_values and condition.free_symbols:
+            subs: dict[Any, Any] = {}
+            for symbol in condition.free_symbols:
+                name = str(symbol)
+                if name in self.condition_values:
+                    subs[symbol] = self.condition_values[name]
+                    used.add(name)
+            if subs:
+                condition = condition.subs(subs, simultaneous=True)
+        if isinstance(condition, sp.logic.boolalg.BooleanAtom):
+            decision: bool | None = bool(condition)
+        elif condition.is_number:
+            decision = bool(condition != 0)
+        else:
+            decision = None
+        self.branch_condition_names |= used
+        if decision is not None or not used:
+            return decision, None
+        unresolved = ", ".join(sorted(str(s) for s in condition.free_symbols))
+        message = (
+            f"branch condition '{original}' is undecidable from the supplied "
+            "values; conservative maximum of both branches used; "
+            f"unresolved: {unresolved}"
+        )
+        if message in self._reported_undecidable:
+            return None, None
+        self._reported_undecidable.add(message)
+        return None, ResourceAssumption(message, source="if")
 
     def eval_for_items(
         self,
@@ -1389,24 +1621,24 @@ class ResourceInterpreter:
             strategy=strategy,
         )
         body = operation.effective_body(strategy=strategy)
-        model = self._resource_model_for(operation, strategy=strategy)
+        binding = self._resource_model_for(operation, strategy=strategy)
 
         if self.config.policy is ResourcePolicy.EXACT_BODY:
             if isinstance(body, Block):
                 return self._estimate_invoke_body(operation, body, resolver, controls)
-            if model is not None:
-                return self._estimate_model(operation, model, ctx)
+            if binding is not None:
+                return self._estimate_model(operation, binding, ctx)
             return self._handle_unknown_invoke(operation, ctx)
 
         if self.config.policy is ResourcePolicy.MODEL_ONLY:
-            if model is None:
+            if binding is None:
                 raise ValueError(
                     f"Callable '{operation.custom_name}' has no resource model."
                 )
-            return self._estimate_model(operation, model, ctx)
+            return self._estimate_model(operation, binding, ctx)
 
-        if model is not None:
-            return self._estimate_model(operation, model, ctx)
+        if binding is not None:
+            return self._estimate_model(operation, binding, ctx)
         if isinstance(body, Block):
             return self._estimate_invoke_body(operation, body, resolver, controls)
         if operation.gate_type in (CompositeGateType.QFT, CompositeGateType.IQFT):
@@ -1552,18 +1784,30 @@ class ResourceInterpreter:
         operation: InvokeOperation,
         *,
         strategy: str | None,
-    ) -> ResourceModel | None:
-        """Select a resource model for an invocation.
+    ) -> "ResourceModelBinding | None":
+        """Select a resource model binding for an invocation.
+
+        Bindings are filtered by strategy and transform compatibility. When the
+        active policy prefers a specific estimate kind (``LITERATURE`` prefers
+        literature-tagged models, ``ASYMPTOTIC`` prefers asymptotic ones), a
+        compatible binding carrying that kind is returned first. Otherwise, under
+        the default policy, a callable may pin its default explicitly via the
+        ``default_estimate_kind`` attr (so the choice is not silently
+        order-dependent); if neither applies, the first compatible binding wins.
+        This keeps callables that ship both a literature-backed formula and a
+        structural/asymptotic model usable under either policy without changing
+        the callable definition.
 
         Args:
             operation (InvokeOperation): Invocation to resolve.
             strategy (str | None): Requested strategy.
 
         Returns:
-            ResourceModel | None: Matching model, if available.
+            ResourceModelBinding | None: Matching binding, if available.
         """
         definition = operation.definition
         bindings = getattr(definition, "resource_models", ()) if definition else ()
+        compatible: list[ResourceModelBinding] = []
         for binding in bindings:
             binding_strategy = getattr(binding, "strategy", None)
             binding_transform = getattr(binding, "transform", None)
@@ -1573,8 +1817,35 @@ class ResourceInterpreter:
             ):
                 model = getattr(binding, "model", None)
                 if _is_resource_model(model):
-                    return cast(ResourceModel, model)
-        return None
+                    compatible.append(cast("ResourceModelBinding", binding))
+        if not compatible:
+            return None
+        # A policy preference (LITERATURE/ASYMPTOTIC) is a soft request: prefer a
+        # matching binding, but fall back gracefully so a callable with only one
+        # model is still usable under either policy.
+        policy_kind = _POLICY_PREFERRED_KIND.get(self.config.policy)
+        if policy_kind is not None:
+            for binding in compatible:
+                if getattr(binding, "estimate_kind", None) == policy_kind:
+                    return binding
+            return compatible[0]
+        # No policy preference: an explicit author pin
+        # (``attrs["default_estimate_kind"]``) makes the default order-independent
+        # and is STRICT — a pin that matches no compatible model is an authoring
+        # error, not a silent fallback.
+        def_attrs: Mapping[str, Any] = getattr(definition, "attrs", None) or {}
+        pinned_kind = def_attrs.get("default_estimate_kind")
+        if pinned_kind is not None:
+            for binding in compatible:
+                if getattr(binding, "estimate_kind", None) == pinned_kind:
+                    return binding
+            name = operation.custom_name or operation.target.name
+            raise ValueError(
+                f"Callable '{name}' pins default_estimate_kind={pinned_kind!r} "
+                "but no compatible resource model has that estimate kind. Attach "
+                "a model tagged with that kind or remove the pin."
+            )
+        return compatible[0]
 
     def _resource_context(
         self,
@@ -1612,20 +1883,32 @@ class ResourceInterpreter:
     def _estimate_model(
         self,
         operation: InvokeOperation,
-        model: ResourceModel,
+        binding: "ResourceModelBinding",
         ctx: ResourceContext,
     ) -> ResourceEstimate:
-        """Estimate an invocation through a resource model.
+        """Estimate an invocation through a resource model binding.
 
         Args:
             operation (InvokeOperation): Invocation operation.
-            model (ResourceModel): Selected resource model.
+            binding (ResourceModelBinding): Selected resource model binding.
+                Its ``estimate_kind`` tag classifies the resulting trace node.
             ctx (ResourceContext): Model context.
 
         Returns:
             ResourceEstimate: Modeled estimate.
         """
+        model = cast(ResourceModel, binding.model)
         estimate = model.estimate(ctx)
+        # Controlled cost is owned by the model (a controlled composite is its
+        # own bloq with its own cost formula), so the estimator never scales a
+        # model's counts. But any *surrounding* controls the model did not
+        # account for are recorded as an assumption via the no-op
+        # ``.controlled`` so a ``qmc.control(...)`` around a modeled box cannot
+        # silently under-report. ``ctx.controls`` is surrounding controls only;
+        # the invoke's own control is visible via ``ctx.transform`` /
+        # ``ctx.own_controls`` and is the model author's responsibility.
+        if ctx.controls != _ZERO:
+            estimate = estimate.controlled(ctx.controls)
         return dataclasses.replace(
             estimate,
             trace=_wrap_trace(
@@ -1633,7 +1916,9 @@ class ResourceInterpreter:
                 estimate.trace,
                 source_kind="model",
                 strategy=ctx.strategy,
-                estimate_kind=EstimateKind.STRATEGY_MODEL,
+                estimate_kind=EstimateKind.from_name(
+                    getattr(binding, "estimate_kind", None)
+                ),
             ),
         )
 
@@ -1646,6 +1931,13 @@ class ResourceInterpreter:
     ) -> ResourceEstimate:
         """Estimate an invocation by traversing its body.
 
+        When the invocation is itself a controlled call
+        (``transform is CallTransform.CONTROLLED``), its own control qubits are
+        added to the surrounding controls so every primitive gate inside the
+        body is classified as controlled — matching how ``eval_controlled_u``
+        treats a block body and keeping the body path symmetric with the model
+        path's own-control contract.
+
         Args:
             operation (InvokeOperation): Invocation operation.
             body (Block): Selected callable body.
@@ -1656,7 +1948,13 @@ class ResourceInterpreter:
             ResourceEstimate: Body-derived estimate.
         """
         child = resolver.call_child_scope(operation, called_block=body)
-        body_estimate = self.eval_operations(body.operations, child, controls=controls)
+        own_controls = 0
+        if operation.transform is CallTransform.CONTROLLED:
+            own_controls = int(operation.attrs.get("num_control_qubits", 0) or 0)
+        total_controls = _expr(controls) + own_controls
+        body_estimate = self.eval_operations(
+            body.operations, child, controls=total_controls
+        )
         if operation.transform is CallTransform.INVERSE:
             body_estimate = body_estimate.inverse()
         return dataclasses.replace(
@@ -1736,6 +2034,7 @@ def estimate_resources(
     kernel: "QKernel[Any, Any] | Block | Sequence[Operation]",
     *,
     bindings: dict[str, Any] | None = None,
+    substitutions: dict[str, Any] | None = None,
     parameters: list[str] | None = None,
     policy: ResourcePolicy = ResourcePolicy.MODEL_IF_AVAILABLE,
     cost_basis: CostBasis = CostBasis.LOGICAL_GATES,
@@ -1747,8 +2046,13 @@ def estimate_resources(
     Args:
         kernel (QKernel[Any, Any] | Block | Sequence[Operation]): QKernel,
             block, or operation sequence to estimate.
-        bindings (dict[str, Any] | None): Compile-time bindings. Defaults to
-            ``None``.
+        bindings (dict[str, Any] | None): Compile-time bindings baked into the
+            circuit at build time. Defaults to ``None``.
+        substitutions (dict[str, Any] | None): Estimation-only substitutions
+            applied to the symbolic estimate after building, so
+            ``substitutions={"n": 2048}`` yields the concrete estimate without
+            constructing a 2048-scale circuit. Values may be numbers or SymPy
+            expressions. Defaults to ``None``.
         parameters (list[str] | None): Runtime parameter names preserved during
             qkernel build. Defaults to ``None``.
         policy (ResourcePolicy): Callable resolution policy. Defaults to
@@ -1762,6 +2066,14 @@ def estimate_resources(
 
     Returns:
         ResourceEstimate: Logical resource estimate.
+
+    Example:
+        >>> from qamomile.circuit.stdlib import shor_order_finding
+        >>> est = estimate_resources(
+        ...     shor_order_finding, substitutions={"n": 2048}
+        ... )
+        >>> int(est.qubits)
+        6144
     """
     estimator = ResourceEstimator(
         policy=policy,
@@ -1772,6 +2084,7 @@ def estimate_resources(
     return estimator.estimate(
         kernel,
         bindings=bindings,
+        substitutions=substitutions,
         parameters=parameters,
     )
 
@@ -2786,6 +3099,202 @@ def _substitute_bindings(
     if not values:
         return estimate
     return estimate.substitute(**values)
+
+
+def _force_symbolic_substitution_params(
+    kernel: Any,
+    kwargs: Mapping[str, Any],
+    parameters: list[str] | None,
+    substitutions: Mapping[str, Any] | None,
+) -> list[str] | None:
+    """Force classical substitution names to stay symbolic when building.
+
+    Names passed via ``substitutions`` that are classical kernel arguments are
+    added to the build ``parameters`` list so they are not baked in by a Python
+    signature default — otherwise ``substitutions={"n": 2048}`` on a kernel
+    where ``n`` has a default would estimate the default and silently ignore the
+    request.
+
+    Args:
+        kernel (Any): QKernel being built.
+        kwargs (Mapping[str, Any]): Compile-time build bindings.
+        parameters (list[str] | None): Explicit runtime parameters, or ``None``
+            to auto-detect.
+        substitutions (Mapping[str, Any] | None): Estimation-only substitution
+            names.
+
+    Returns:
+        list[str] | None: Parameter list to build with. ``None`` when there are
+        no substitutions to force and no explicit parameters (preserving
+        auto-detection).
+    """
+    if not substitutions:
+        return parameters
+    input_types = getattr(kernel, "input_types", None)
+    if not isinstance(input_types, dict):
+        return parameters
+    from qamomile.circuit.frontend.qkernel_inputs import (
+        auto_detect_parameters,
+        is_parameterizable_type,
+    )
+
+    base = (
+        list(parameters)
+        if parameters is not None
+        else auto_detect_parameters(kernel.signature, input_types, dict(kwargs))
+    )
+    forced = [
+        name
+        for name in substitutions
+        if name in input_types
+        and name not in kwargs
+        and is_parameterizable_type(input_types[name])
+    ]
+    if not forced:
+        return parameters
+    return sorted(set(base) | set(forced))
+
+
+def _contract_names(
+    block_or_ops: "Block | Sequence[Operation]",
+) -> frozenset[str] | None:
+    """Return the declared classical argument names of a built block, if any.
+
+    Only classical parameters (``param_slots``) count: ``substitutions`` supplies
+    numeric/expression values, so a quantum port name is never a valid
+    substitution target and must be rejected as a typo rather than accepted as a
+    no-op.
+
+    Args:
+        block_or_ops (Block | Sequence[Operation]): Coerced estimator input.
+
+    Returns:
+        frozenset[str] | None: Classical parameter names when the input is a
+        ``Block``; ``None`` for a raw operation sequence (which carries no
+        user-facing input contract, so substitution stays strict there).
+    """
+    if not isinstance(block_or_ops, Block):
+        return None
+    return frozenset(slot.name for slot in block_or_ops.param_slots)
+
+
+def _scalar_values(values: Mapping[str, Any]) -> dict[str, sp.Expr]:
+    """Keep only numeric scalar values, for deciding compile-time branches.
+
+    Accepts Python and NumPy numeric scalars (anything registered as
+    ``numbers.Real``, normalized via ``.item()`` when present so a ``np.int64``
+    from a notebook works) and SymPy numbers. Dicts, Hamiltonians, and
+    symbolic-expression substitution values are dropped: a branch condition can
+    only be decided by a concrete number, and a non-numeric value simply leaves
+    the branch undecidable (conservative ``choice``).
+
+    Args:
+        values (Mapping[str, Any]): Merged bindings and substitutions.
+
+    Returns:
+        dict[str, sp.Expr]: Name -> numeric SymPy value.
+    """
+    out: dict[str, sp.Expr] = {}
+    for name, value in values.items():
+        if isinstance(value, bool):
+            out[name] = sp.Integer(int(value))
+        elif isinstance(value, numbers.Real):
+            # Normalize NumPy scalars (np.int64, np.float64, ...) to a Python
+            # scalar before sympifying.
+            scalar = value.item() if hasattr(value, "item") else value
+            out[name] = cast(sp.Expr, sp.sympify(scalar))
+        elif isinstance(value, sp.Basic) and value.is_number:
+            out[name] = cast(sp.Expr, value)
+    return out
+
+
+def _apply_substitutions(
+    estimate: ResourceEstimate,
+    substitutions: Mapping[str, Any],
+    *,
+    contract_names: frozenset[str] | None = None,
+    branch_condition_names: set[str] | None = None,
+) -> ResourceEstimate:
+    """Substitute estimation-only values into a symbolic estimate.
+
+    Unlike :func:`_substitute_bindings`, substitution values may be SymPy
+    expressions (e.g. an optimal-iteration formula). Each name is classified:
+
+    - a **free symbol** of the estimate is substituted;
+    - a name that **participated in a compile-time branch predicate** — whether
+      it decided the branch or left it undecidable — is silently accepted; the
+      branch specialization or the undecidable-branch assumption already
+      accounts for it;
+    - any other **declared kernel argument** not appearing in the estimate (e.g.
+      a rotation angle) is a no-op, recorded as an assumption so it stays
+      auditable;
+    - a name that is **none of these** is a typo and raises.
+
+    Args:
+        estimate (ResourceEstimate): Symbolic estimate to rewrite.
+        substitutions (Mapping[str, Any]): Estimation-only substitutions keyed
+            by parameter name. Values may be numbers or SymPy expressions.
+        contract_names (frozenset[str] | None): Declared kernel argument names.
+            ``None`` (raw op sequence, no contract) keeps every name strict.
+        branch_condition_names (set[str] | None): Names that participated in a
+            compile-time branch predicate during interpretation. Defaults to
+            ``None``.
+
+    Returns:
+        ResourceEstimate: Estimate with the substitutions applied.
+
+    Raises:
+        ValueError: If a substitution name is neither a free symbol of the
+            estimate nor a declared kernel argument.
+    """
+    # SymPy treats same-named symbols with different assumptions as distinct, so
+    # a name can map to more than one symbol object; substitute every match.
+    symbols_by_name: dict[str, list[sp.Symbol]] = {}
+    for symbol in _free_symbols(estimate):
+        symbols_by_name.setdefault(str(symbol), []).append(symbol)
+    known = contract_names or frozenset()
+    referenced = branch_condition_names or set()
+    unknown = [
+        name
+        for name in substitutions
+        if name not in symbols_by_name and name not in known
+    ]
+    if unknown:
+        available = ", ".join(sorted(set(symbols_by_name) | set(known))) or "(none)"
+        raise ValueError(
+            f"substitutions names {sorted(unknown)} are neither free symbols of "
+            f"the estimate nor kernel arguments; available: {available}. Use "
+            "bindings for structural build-time values."
+        )
+    subs: dict[sp.Symbol, sp.Expr] = {}
+    ignored: list[str] = []
+    for name, value in substitutions.items():
+        if name not in symbols_by_name:
+            # Not a free symbol: either it participated in a branch predicate
+            # (silent — specialization or undecidable-note covers it) or it
+            # genuinely affects nothing (recorded as an ignored no-op).
+            if name not in referenced:
+                ignored.append(name)
+            continue
+        sympified = sp.sympify(value)
+        for symbol in symbols_by_name[name]:
+            subs[symbol] = sympified
+    # Simultaneous substitution: the only way a requested name survives is that
+    # the caller's own value reintroduced it (a legitimate shift like n -> n+1),
+    # never a partially-applied replacement.
+    substituted = estimate._map_expr(
+        lambda expr: cast(sp.Expr, expr.subs(subs, simultaneous=True).doit())
+    )
+    if ignored:
+        note = ResourceAssumption(
+            "substitution(s) "
+            + ", ".join(repr(name) for name in sorted(ignored))
+            + " do not affect any resource metric; ignored",
+        )
+        substituted = dataclasses.replace(
+            substituted, assumptions=(*substituted.assumptions, note)
+        )
+    return substituted
 
 
 def _count_input_qubits(

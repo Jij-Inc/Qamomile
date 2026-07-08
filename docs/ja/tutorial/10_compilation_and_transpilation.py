@@ -48,7 +48,7 @@
 # Block [HIERARCHICAL]
 #    │  substitute                  (ルールベースの置換、オプション)
 #    │  resolve_parameter_shapes    (Vectorのshape次元を具体化)
-#    │  inline                      (inline対象のInvokeOperationを展開)
+#    │  inline                      (CallBlockOperationsを展開)
 #    ▼
 # Block [AFFINE]
 #    │  unroll_recursion            (inline ↔ partial_evalの反復)
@@ -124,7 +124,7 @@
 # | `GateOperation` | `H`、`RX`、`CX`、… | `ir/operation/gate.py` |
 # | `MeasureOperation` | 測定 | `ir/operation/measurement.py` |
 # | `ForOperation`、`IfOperation`、`WhileOperation` | 制御フロー | `ir/operation/control_flow.py` |
-# | `InvokeOperation` | QKernel、composite gate callable、opaque callableの呼び出し | `ir/operation/callable.py` |
+# | `CallBlockOperation` | 別の`Block`の呼び出し（`inline`で除去） | `ir/operation/call_block_ops.py` |
 #
 # 制御フロー系のOperationはすべて`HasNestedOps`プロトコル（`nested_op_lists()` / `rebuild_nested()`）を実装しているので、パスは各Operationの型を特別扱いせず、ループや分岐の本体へ統一的に踏み込めます。
 #
@@ -133,7 +133,7 @@
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir import pretty_print_block
-from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.qiskit import QiskitTranspiler
 
@@ -187,19 +187,8 @@ def summarise(block):
     )
 
 
-def count_invokes(ops):
-    """制御フロー本体も含めてInvokeOperationを数えます。"""
-    total = 0
-    for op in ops:
-        if isinstance(op, InvokeOperation):
-            total += 1
-        for child in getattr(op, "nested_op_lists", lambda: [])():
-            total += count_invokes(child)
-    return total
-
-
 # %% [markdown]
-# 1行サマリーでは十分でないときのために、`qamomile.circuit.ir.pretty_print_block`が`Block`のMLIR風テキストダンプを返します。各パスの前後で**何がどう変わったか**を目で確認するには、こちらが最速です。`depth`引数でcallable呼び出しの展開深さを制御できるので、たとえば`depth=1`なら「`inline`が実行したら何が起こるか」を先取りして眺められます。
+# 1行サマリーでは十分でないときのために、`qamomile.circuit.ir.pretty_print_block`が`Block`のMLIR風テキストダンプを返します。各パスの前後で**何がどう変わったか**を目で確認するには、こちらが最速です。`depth`引数で`CallBlockOperation`の展開深さを制御できるので、たとえば`depth=1`なら「`inline`が実行したら何が起こるか」を先取りして眺められます。
 
 # %% [markdown]
 # ## 4. ステージごとのウォークスルー
@@ -208,7 +197,7 @@ def count_invokes(ops):
 #
 # ### 4.1 `to_block` — Python関数のトレーシング
 #
-# `to_block`はデコレート済み関数をトレーサコンテキスト下で実行します。`qmc.h(...)`、`qmc.range(...)`、`entangle_pair(...)`の各呼び出しは`Operation`としてBlockに記録されます。他の`@qkernel`への呼び出しはinline-policyの`InvokeOperation`になり、本体は**まだ**インライン展開されません。
+# `to_block`はデコレート済み関数をトレーサコンテキスト下で実行します。`qmc.h(...)`、`qmc.range(...)`、`entangle_pair(...)`の各呼び出しは`Operation`としてBlockに記録されます。他の`@qkernel`への呼び出しは`CallBlockOperation`になり、本体は**まだ**インライン展開されません。
 
 # %%
 bindings = {"n": 3}
@@ -221,43 +210,54 @@ assert block.kind.name == "HIERARCHICAL"
 print("parameters:       ", list(block.parameters))
 assert list(block.parameters) == ["theta"]
 print(
-    "InvokeOps (deep): ",
-    count_invokes(block.operations),
+    "CallBlockOps:     ",
+    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
 )
-# 注意: ヘルパー呼び出しは`ForOperation`の本体内部にも存在しうるので、
+# 注意: `CallBlockOperation`は`ForOperation`の本体内部にも存在しうるので、
 # 必ずしもトップレベルのリストにあるとは限りません。
 
 # %% [markdown]
-# ブロックの中身を実際にテキストで眺めてみましょう。`pretty_print_block`は`Block`をMLIR風のインデント付きテキストへ整形します。`for`本体に`invoke entangle_pair(...)`がまだ生きていることが確認できます。
+# ブロックの中身を実際にテキストで眺めてみましょう。`pretty_print_block`は`Block`をMLIR風のインデント付きテキストへ整形します。`for`本体に`call entangle_pair(...)`がまだ生きていることが確認できます。
 
 # %%
 print(pretty_print_block(block))
 
 # %% [markdown]
-# `depth=1`を付けると、inline対象の呼び出しの先が呼び出し行のブレース内に展開された形で表示されます。これは「`inline`を1回通したらどうなるか」を先読みしているのと同じ見た目で、次の節の内容を予習できます。
+# `depth=1`を付けると、`CallBlockOperation`の先が呼び出し行のブレース内にインライン展開された形で表示されます。これは「`inline`を1回通したらどうなるか」を先読みしているのと同じ見た目で、次の節の内容を予習できます。
 
 # %%
 print(pretty_print_block(block, depth=1))
 
 # %% [markdown]
-# ブロックは`HIERARCHICAL`です。inline対象のヘルパー呼び出しやboxed callableをまだ含む可能性があります。`block.parameters`は渡した引数`parameters=["theta"]`を反映しています。`parameters`に**ない**入力は、`bindings`でバインドする（`n`のように）か、トレース時のPythonコードで消費されなければなりません。
+# ブロックは`HIERARCHICAL`です。他のブロックへの呼び出しや複合ゲートをまだ含む可能性があります。`block.parameters`は渡した引数`parameters=["theta"]`を反映しています。`parameters`に**ない**入力は、`bindings`でバインドする（`n`のように）か、トレース時のPythonコードで消費されなければなりません。
 #
-# ### 4.2 `inline` — inline対象のヘルパー呼び出しの平坦化
+# ### 4.2 `inline` — ネストしたブロック呼び出しの平坦化
 #
-# `inline`はすべてのinline-policy `InvokeOperation`を対象bodyのOperationで置き換え、結果がwell-formedであり続けるようSSA値を置換します。inline対象の呼び出しが残らなくなるとブロックは`AFFINE`へ遷移します。
+# `inline`はすべての`CallBlockOperation`を対象ブロックのOperationで置き換え、結果がwell-formedであり続けるようSSA値を置換します。`CallBlockOperation`が残らなくなるとブロックは`AFFINE`へ遷移します。
 
 
 # %%
+def count_calls(ops):
+    total = 0
+    for op in ops:
+        if isinstance(op, CallBlockOperation):
+            total += 1
+        # ループ内の呼び出しも数えるため、ネストした制御フロー本体を再帰的に辿ります。
+        for child in getattr(op, "nested_op_lists", lambda: [])():
+            total += count_calls(child)
+    return total
+
+
 block = transpiler.inline(block)
 print("after inline:     ", summarise(block))
 assert block.kind.name == "AFFINE"
-print("InvokeOps (deep):", count_invokes(block.operations))
-assert count_invokes(block.operations) == 0
+print("CallBlockOps (deep):", count_calls(block.operations))
+assert count_calls(block.operations) == 0
 print("is_affine:        ", block.is_affine())
 assert block.is_affine()
 
 # %% [markdown]
-# 再度`pretty_print_block`で眺めると、`invoke entangle_pair(...)`が消え、`h`/`cx`が直接`for`本体に並んでいることが確認できます。ブロックの`kind`は`AFFINE`へ進みました。
+# 再度`pretty_print_block`で眺めると、`call entangle_pair(...)`が消え、`h`/`cx`が直接`for`本体に並んでいることが確認できます。ブロックの`kind`は`AFFINE`へ進みました。
 
 # %%
 print(pretty_print_block(block))
@@ -346,7 +346,7 @@ print(executable.quantum_circuit)
 #
 # `transpile()`の一部でありながら明示的に呼ばなかったパスが7つあります:
 #
-# - **`substitute`** — ユーザーが設定した`SubstitutionRule`を適用してブロックのターゲットを置換したり、boxed callableの戦略を上書きします。`TranspilerConfig`にルールがない場合はno-opです。
+# - **`substitute`** — ユーザーが設定した`SubstitutionRule`を適用してブロックのターゲットを置換したり、複合ゲートの戦略を上書きします。`TranspilerConfig`にルールがない場合はno-opです。
 # - **`resolve_parameter_shapes`** — `bindings`が具体的な`Vector`や`Matrix`値を提供する場合、`{name}_dim{i}`のshape次元を埋めます。これにより下流で`arr.shape[0]`が具体的な`UInt`として解決されます。
 # - **`unroll_recursion`** — 自己再帰の`@qkernel`（例: Suzuki–Trotter、チュートリアル08参照）に対する`inline ↔ partial_eval`の固定点ループです。再帰が底まで展開されると終了し、bindingsでベースケースに到達できない場合はエラーになります。
 # - **`affine_validate`** — フロントエンドのチェックをすり抜けたアフィン型違反を捕まえるセーフティネットです。
@@ -502,7 +502,7 @@ print(pretty_print_block(qfixed_block))
 # 内部挙動を目で見たいときは`lower_operations`を直接呼べます。
 
 # %%
-from qamomile.circuit.transpiler.passes.separate import lower_operations  # noqa: E402
+from qamomile.circuit.transpiler.passes.separate import lower_operations
 
 lowered = lower_operations(qfixed_block)
 print(pretty_print_block(lowered))
@@ -544,7 +544,7 @@ print(pretty_print_block(lowered))
 #   | `STATIC` | バックエンドは測定前の状態ベクトル・演算子を受け取り、samplerが測定を外部で処理する。 | QURI Parts |
 #   | `RUNNABLE` | バックエンドがランタイム制御フロー付きのmid-circuit測定をサポートする。 | CUDA-Q (`cudaq.run()`経由) |
 #
-# - **`CompositeGateEmitter[C]`** (`passes/emit.py`): オプションです。バックエンドがboxed stdlib callable（QFT、QPE、…）をネイティブ実装でショートカットできるようにします。`can_emit(gate_type) -> bool` / `emit(...) -> bool`のコントラクトで、オプトアウトするには`False`を返します。その場合emitパスはライブラリレベルの分解にフォールバックします。
+# - **`CompositeGateEmitter[C]`** (`passes/emit.py`): オプションです。バックエンドが複合ゲート（QFT、QPE、…）をネイティブ実装でショートカットできるようにします。`can_emit(gate_type) -> bool` / `emit(...) -> bool`のコントラクトで、オプトアウトするには`False`を返します。その場合emitパスはライブラリレベルの分解にフォールバックします。
 #
 # `Transpiler`のサブクラスは`_create_segmentation_pass`と`_create_emit_pass`をオーバーライドし、ランタイム側のために`executor()`も実装することでこれらを接続します。`qamomile/qiskit/transpiler.py`は約50行の標準的なリファレンス実装です。
 #
@@ -576,7 +576,7 @@ except ModuleNotFoundError:
 #
 # 1. **回路の型。** Qiskitは`Parameter`オブジェクトを埋め込んだ`QuantumCircuit`をemitします。QURI PartsはパラメータがQURI Partsの`Parameter`インスタンスである`LinearMappedParametricQuantumCircuit`をemitします。どちらもQamomileの`parameter_names`を同じ形で往復します。
 # 2. **測定。** Qiskitの回路は`measure`命令で終わります（`measurement_mode=NATIVE`）。QURI Partsの回路は測定ゲートを持ちません。サンプリングは実行時にexecutorが処理します（`measurement_mode=STATIC`）。
-# 3. **Boxed callable。** カーネルが`qmc.qft(...)`を使う場合、Qiskitの`QiskitQFTEmitter`は`QFTGate`ボックスを配置しますが、QURI Parts連携ではライブラリパス経由で分解します。IRは同じですが、実現される回路は異なります。カーネルごとに`TranspilerConfig.with_strategies({"qft": "approximate"})`で上書きできます。
+# 3. **複合ゲート。** カーネルが`qmc.qft(...)`を使う場合、Qiskitの`QiskitQFTEmitter`は`QFTGate`ボックスを配置しますが、QURI Parts連携ではライブラリパス経由で分解します。IRは同じですが、実現される回路は異なります。カーネルごとに`TranspilerConfig.with_strategies({"qft": "approximate"})`で上書きできます。
 
 # %% [markdown]
 # ## 8. コントリビュータ向けのポインタ
@@ -600,15 +600,15 @@ except ModuleNotFoundError:
 # 3. ユーザーが`executor()`を呼べるように`QuantumExecutor[T]`のサブクラスを実装します。
 # 4. オプション: emitされた回路で高レベル構造を保つため、QFT/QPEなどの`CompositeGateEmitter`を追加します。
 #
-# **transpileエラーのデバッグ。** パスを1つずつ実行し、その間に`summarise(block)`で件数の変化を追い、気になるところは`pretty_print_block(block)`で中身を覗きます。`BlockKind`が進まない、Operation数が爆発する、例外が送出される、というステージが最初に見るべき場所です。`pretty_print_block(block, depth=N)`でcallable呼び出しの展開深さを変えながら`inline`前後を比較すると、どこで値が切れたか・どのPhiが漏れたかが読み取りやすくなります。
+# **transpileエラーのデバッグ。** パスを1つずつ実行し、その間に`summarise(block)`で件数の変化を追い、気になるところは`pretty_print_block(block)`で中身を覗きます。`BlockKind`が進まない、Operation数が爆発する、例外が送出される、というステージが最初に見るべき場所です。`pretty_print_block(block, depth=N)`で`CallBlockOperation`の展開深さを変えながら`inline`前後を比較すると、どこで値が切れたか・どのPhiが漏れたかが読み取りやすくなります。
 
 # %% [markdown]
 # ## 9. まとめ
 #
 # パイプラインは4つのkindを遷移していくSSAスタイルのIRです:
 #
-# - `HIERARCHICAL` — 生のトレース、inline対象のヘルパー呼び出しが未展開
-# - `AFFINE` — フラットなOperationと制御フロー、inline対象のヘルパー呼び出しなし
+# - `HIERARCHICAL` — 生のトレース、ブロック呼び出しが未展開
+# - `AFFINE` — フラットなOperationと制御フロー、ブロック呼び出しなし
 # - `ANALYZED` — 検証済み、依存グラフ化済み、セグメント化可能
 # - `ProgramPlan` → `ExecutableProgram[T]` — セグメント化されemit済み
 #

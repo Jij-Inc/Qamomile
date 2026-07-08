@@ -249,12 +249,10 @@ def repeat_until_zero() -> qmc.Bit:
     bit = qmc.measure(q)
 
     while bit:
-        # 0 が得られるまで再準備と再測定を繰り返す。レジスタは body-local な
-        # 名前にする。外側の `q` を本体内で確保したレジスタに再束縛する形は、
-        # runtime ループが単一のレジスタをリセットなしで再実行するため拒否される。
-        q2 = qmc.qubit("q2")
-        q2 = qmc.h(q2)
-        bit = qmc.measure(q2)
+        # 0 が得られるまで再準備と再測定を繰り返す
+        q = qmc.qubit("q2")
+        q = qmc.h(q)
+        bit = qmc.measure(q)
 
     return bit
 
@@ -291,10 +289,10 @@ def measure_and_correct() -> qmc.Bit:
             q1 = qmc.x(q1)
         else:
             q1 = q1
-        # 再準備と再測定(前述と同じく body-local なレジスタ名にする)
-        q0_retry = qmc.qubit("q0_retry")
-        q0_retry = qmc.h(q0_retry)
-        bit = qmc.measure(q0_retry)
+        # 再準備と再測定
+        q0 = qmc.qubit("q0_retry")
+        q0 = qmc.h(q0)
+        bit = qmc.measure(q0)
 
     return qmc.measure(q1)
 
@@ -316,4 +314,4 @@ assert "while_loop" in {instr.operation.name for instr in qc_combined.data}
 # - `if bit:` / `while bit:`で**測定結果**に基づく分岐。両分岐で同じ量子ビットハンドルを扱う必要があります（アフィンルール）。
 # - これらの制御フローは対象の量子SDKのネイティブな命令（例：Qiskitの`if_else`や`while_loop`）にトランスパイルされます。
 #
-# **次へ**：[再利用パターン](08_reuse_patterns.ipynb) — ヘルパー量子カーネル、composite gate callable、opaque callable。
+# **次へ**：[再利用パターン](08_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブゲート。

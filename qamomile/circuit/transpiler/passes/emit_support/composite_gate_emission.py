@@ -153,6 +153,27 @@ def emit_invoke_operation(
             operation=f"InvokeOperation[{op.target.name}]",
         )
 
+    # A custom composite that carries resource models but no executable body
+    # and no native emitter is an estimation-only box (e.g. a general
+    # ``modmul_const`` whose map is not a cyclic bit rotation). Emitting it as a
+    # barrier would silently run it as identity and produce a wrong quantum
+    # result, so reject it here rather than at the estimator (which never
+    # reaches emit).
+    definition = op.definition
+    resource_models = getattr(definition, "resource_models", ()) if definition else ()
+    if (
+        body is None
+        and not has_native_emitter
+        and op.gate_type is CompositeGateType.CUSTOM
+        and resource_models
+    ):
+        raise EmitError(
+            f"Composite '{op.target.name}' has resource models for estimation "
+            "but no executable body or native emitter for this backend; it "
+            "cannot be transpiled to an executable circuit.",
+            operation=f"InvokeOperation[{op.target.name}]",
+        )
+
     emit_composite_gate(emit_pass, circuit, op, qubit_map, bindings)
 
 

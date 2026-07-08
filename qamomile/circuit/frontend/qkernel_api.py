@@ -28,6 +28,7 @@ class QKernelBuildMixin:
         self,
         *,
         bindings: dict[str, Any] | None = None,
+        substitutions: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
         policy: Any = None,
         cost_basis: Any = None,
@@ -40,7 +41,12 @@ class QKernelBuildMixin:
 
         Args:
             bindings (dict[str, Any] | None): Optional concrete parameter
-                bindings. Defaults to ``None``.
+                bindings baked into the built circuit. Defaults to ``None``.
+            substitutions (dict[str, Any] | None): Estimation-only
+                substitutions applied to the symbolic estimate after building,
+                so ``substitutions={"n": 2048}`` yields the concrete estimate
+                without constructing a 2048-scale circuit. Values may be numbers
+                or SymPy expressions. Defaults to ``None``.
             parameters (list[str] | None): Runtime parameter names to preserve
                 while building the kernel. Defaults to ``None``.
             policy (Any): Optional ``ResourcePolicy`` override. Defaults to
@@ -69,6 +75,7 @@ class QKernelBuildMixin:
         return estimate_qkernel_resources(
             kernel,
             bindings=bindings,
+            substitutions=substitutions,
             parameters=parameters,
             policy=policy,
             cost_basis=cost_basis,
