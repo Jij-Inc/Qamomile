@@ -518,14 +518,29 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> None:
-        """Execute a classical if/else."""
+        """Execute a classical if/else.
+
+        Runs the taken branch's operations, then resolves every merged
+        output to its selected branch source.
+
+        Args:
+            op (IfOperation): The if-else to execute.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Mutable results map; merged outputs
+                are recorded under their result UUIDs.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+        """
         condition = bool(self._get_value(op.condition, context, results, scoped_locals))
         branch_scope = scoped_locals.copy()
         branch_ops = op.true_operations if condition else op.false_operations
         self._execute_operations(branch_ops, context, results, branch_scope)
 
-        for phi_op in op.phi_ops:
-            self._execute_phi(phi_op, context, results, branch_scope)
+        for merge in op.iter_merges():
+            selected = merge.select(condition)
+            results[merge.result.uuid] = self._get_value(
+                selected, context, results, branch_scope
+            )
 
     def _execute_while(
         self,
@@ -592,7 +607,16 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> Any:
-        """Get the concrete value from context or results."""
+        """Get the concrete value from context or results.
+
+        Raises:
+            ExecutionError: If the value cannot be resolved from the
+                execution state — with a slice-view-specific diagnostic
+                when the unresolved value is a sliced ``ArrayValue``
+                (most commonly a view merged from different slices
+                across if/else branches, which has no materialized
+                contents).
+        """
         if value.uuid in results:
             return results[value.uuid]
         if context.has(value.uuid):
@@ -610,6 +634,14 @@ class ClassicalExecutor:
             param_name = value.parameter_name()
             if param_name and context.has(param_name):
                 return context.get(param_name)
+        if isinstance(value, ArrayValue) and value.slice_of is not None:
+            raise ExecutionError(
+                f"Array view '{value.name}' could not be resolved in the "
+                f"classical segment. A common cause is merging different "
+                f"slices across if/else branches — such a merged view has "
+                f"no materialized contents. Slice identically in both "
+                f"branches or read the root array instead."
+            )
         raise ExecutionError(f"Value {value.name} not found in context or results")
 
     def _get_array_element_value(

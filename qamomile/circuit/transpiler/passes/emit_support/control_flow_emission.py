@@ -561,8 +561,8 @@ def emit_if(
             emit_pass._emit_operations(
                 circuit, op.false_operations, qubit_map, clbit_map, bindings
             )
-        remap_static_phi_outputs(op.phi_ops, resolved, qubit_map, clbit_map)
-        register_classical_phi_aliases(emit_pass, op.phi_ops, bindings, resolved)
+        remap_static_phi_outputs(op, resolved, qubit_map, clbit_map)
+        register_classical_phi_aliases(emit_pass, op, bindings, resolved)
         return
 
     condition_addr = resolve_condition_address(condition, bindings, emit_pass._resolver)
@@ -592,7 +592,7 @@ def emit_if(
         # Register phi output UUIDs so subsequent operations
         # (e.g., measure) can resolve the merged values.
         register_phi_outputs(emit_pass, op, qubit_map, clbit_map, bindings)
-        register_classical_phi_aliases(emit_pass, op.phi_ops, bindings, None)
+        register_classical_phi_aliases(emit_pass, op, bindings, None)
     else:
         raise EmitError(
             "Backend does not support native if/else control flow. "
@@ -625,12 +625,12 @@ def register_phi_outputs(
         )
         return result.index if result.success else None
 
-    map_phi_outputs(op.phi_ops, qubit_map, clbit_map, _resolve_scalar)
+    map_phi_outputs(op, qubit_map, clbit_map, _resolve_scalar)
 
 
 def register_classical_phi_aliases(
     emit_pass: "StandardEmitPass",
-    phi_ops: list,
+    op: IfOperation,
     bindings: dict[str, Any],
     resolved: bool | None,
 ) -> None:
@@ -638,9 +638,9 @@ def register_classical_phi_aliases(
 
     The frontend creates a phi for *every* variable referenced in an
     if-branch, including read-only ones (e.g. a for-loop index ``j`` that
-    is read but not assigned in the branch). These read-only phis have
-    ``true_value is false_value`` — both inputs reference the same IR
-    Value — so the phi output is deterministically equal to that input.
+    is read but not assigned in the branch). These read-only phis are
+    identity merges — both inputs reference the same IR Value — so the
+    phi output is deterministically equal to that input.
 
     For classical types (UInt / Float / Bit) the phi outputs are not
     captured by ``map_phi_outputs`` / ``remap_static_phi_outputs`` (which
@@ -653,46 +653,40 @@ def register_classical_phi_aliases(
     original loop variable.
 
     Args:
-        emit_pass: The active emit pass (for resolver access).
-        phi_ops: ``IfOperation.phi_ops``.
-        bindings: Current bindings; mutated in place to bind phi outputs.
-        resolved: ``True`` / ``False`` if the if was compile-time resolved
-            (use the selected branch's input); ``None`` if it was a
-            runtime if (only bind when both inputs resolve to the same
-            value).
+        emit_pass (StandardEmitPass): The active emit pass (for resolver
+            access).
+        op (IfOperation): The if-else whose merged classical outputs
+            should be bound; merges are read through ``iter_merges``.
+        bindings (dict[str, Any]): Current bindings; mutated in place to
+            bind phi outputs.
+        resolved (bool | None): ``True`` / ``False`` if the if was
+            compile-time resolved (use the selected branch's input);
+            ``None`` if it was a runtime if (only bind identity merges).
 
     Returns:
         None.
     """
-    from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
-
-    for phi in phi_ops:
-        if not isinstance(phi, PhiOp):
-            continue
-        output = phi.results[0]
+    for merge in op.iter_merges():
+        output = merge.result
         # Only handle classical types; quantum/bit phi physical mapping
         # is the responsibility of map_phi_outputs / remap_static_phi_outputs.
         if output.type.is_quantum() or hasattr(output.type, "_is_bit_marker"):
             continue
-        true_v = phi.true_value
-        false_v = phi.false_value
 
         # Compile-time path: bind to selected branch's input.
-        if resolved is True:
-            value = emit_pass._resolver.resolve_classical_value(true_v, bindings)
-        elif resolved is False:
-            value = emit_pass._resolver.resolve_classical_value(false_v, bindings)
+        if resolved is not None:
+            value = emit_pass._resolver.resolve_classical_value(
+                merge.select(resolved), bindings
+            )
         else:
-            # Runtime path: only bind when both inputs are the same Value
-            # (read-only variable) — otherwise the phi output truly depends
-            # on the runtime branch and we can't pre-bind.
-            if not (
-                hasattr(true_v, "uuid")
-                and hasattr(false_v, "uuid")
-                and true_v.uuid == false_v.uuid
-            ):
+            # Runtime path: only bind identity merges (read-only variable)
+            # — otherwise the phi output truly depends on the runtime
+            # branch and we can't pre-bind.
+            if not merge.is_identity:
                 continue
-            value = emit_pass._resolver.resolve_classical_value(true_v, bindings)
+            value = emit_pass._resolver.resolve_classical_value(
+                merge.true_value, bindings
+            )
 
         if value is None:
             continue

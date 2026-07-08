@@ -292,6 +292,22 @@ class ArrayBase(Handle, Generic[T]):
             instance.element_type = type_map[value.type]  # type: ignore[assignment]
         return instance
 
+    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "ArrayBase[T]":
+        """Wrap a phi-merged array value in this handle's array type.
+
+        Args:
+            value (Value): Fresh ``ArrayValue`` produced for the merge
+                output.
+            counterpart (Value): The false-branch IR value (unused for
+                plain arrays).
+
+        Returns:
+            ArrayBase[T]: A fresh array handle of this handle's concrete
+                type wrapping ``value`` with this handle's shape.
+        """
+        assert isinstance(value, ArrayValue)
+        return type(self)._create_from_value(value=value, shape=self._shape)
+
     def _check_no_consumed_slots(self, operation_name: str) -> None:
         """Raise if any slot has been destroyed by a prior destructive view op.
 
@@ -644,6 +660,18 @@ class ArrayBase(Handle, Generic[T]):
                     and not _is_destroyed_slot_owner(root_owner)
                 ):
                     root_name = self._slice_parent.value.name or "array"
+                    if getattr(self, "_slice_divergent_merge", False):
+                        raise QubitBorrowConflictError(
+                            f"View element '{self.value.name}[{index_str}]' "
+                            f"cannot be accessed: this view merges different "
+                            f"slices across if/else branches, so it has no "
+                            f"single set of physical slots after the if. "
+                            f"Apply gates inside each branch and write the "
+                            f"slice back (``parent[a:b] = view``), or slice "
+                            f"identically in both branches.",
+                            handle_name=f"{self.value.name}[{index_str}]",
+                            operation_name="array element access",
+                        )
                     raise QubitBorrowConflictError(
                         f"View element '{self.value.name}[{index_str}]' "
                         f"resolves to '{root_name}[{root_idx}]', which is "
@@ -1994,6 +2022,22 @@ def _as_int_const(value: int | UInt) -> int | None:
     return None
 
 
+def _slice_root_uuid(av: ArrayValue) -> str:
+    """Return the UUID of the root array a slice chain hangs off.
+
+    Args:
+        av (ArrayValue): A (possibly nested) sliced array value, or a
+            plain array (returned as its own root).
+
+    Returns:
+        str: UUID of the outermost ``slice_of`` ancestor.
+    """
+    cur = av
+    while cur.slice_of is not None:
+        cur = cur.slice_of
+    return cur.uuid
+
+
 def _coverage_from_array_value(av: ArrayValue) -> tuple[int, ...] | None:
     """Recompute concrete coverage from a sliced ``ArrayValue``'s metadata.
 
@@ -2160,6 +2204,11 @@ class VectorView(Vector[T]):
     # the inner→outer→root return order.  ``None`` for top-level views
     # sliced directly from a ``Vector``.
     _slice_outer_view: "VectorView[T] | None"
+    # True when this view was produced by an if-merge whose branches
+    # covered provably different root slots. Diagnostic-only: element
+    # access on such a view fails on the borrow table anyway, and this
+    # flag lets that error name the actual cause.
+    _slice_divergent_merge: bool
 
     @classmethod
     def _wrap(
@@ -2218,6 +2267,7 @@ class VectorView(Vector[T]):
         instance._slice_step = step_uint
         instance._slice_covered_indices = covered_indices
         instance._slice_outer_view = None
+        instance._slice_divergent_merge = False
 
         if covered_indices is not None and parent.value.type.is_quantum():
             # Strict no-multi-view: while a view is live, the parent
@@ -2322,7 +2372,66 @@ class VectorView(Vector[T]):
         instance._slice_step = step_uint
         instance._slice_covered_indices = None
         instance._slice_outer_view = None
+        instance._slice_divergent_merge = False
         return instance
+
+    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "VectorView[T]":
+        """Wrap a phi-merged slice value as a view with this view's lineage.
+
+        Args:
+            value (Value): Fresh sliced ``ArrayValue`` produced for the
+                merge output (already carrying this view's ``slice_of``
+                / ``slice_start`` / ``slice_step`` metadata).
+            counterpart (Value): The false-branch IR value (unused for
+                views).
+
+        Returns:
+            VectorView[T]: An unregistered view over the same parent and
+                affine map, inheriting this view's coverage and nesting
+                fields; borrow ownership is arranged separately by the
+                caller (``_refresh_slice_phi_owner``).
+        """
+        assert isinstance(value, ArrayValue)
+        view = VectorView._wrap_unregistered(
+            parent=self._slice_parent,
+            sliced_av=value,
+            length=self._shape[0],
+            start_uint=self._slice_start,
+            step_uint=self._slice_step,
+        )
+        view._slice_covered_indices = self._slice_covered_indices
+        view._slice_outer_view = self._slice_outer_view
+        view._slice_divergent_merge = self._merge_diverges_from(counterpart)
+        return view
+
+    def _merge_diverges_from(self, counterpart: Value) -> bool:
+        """Whether an if-merge counterpart provably covers different slots.
+
+        Diagnostic-only classification for the merged-view flag: a
+        ``True`` result means the two branch views demonstrably address
+        different root slots (different concrete coverage, or different
+        root arrays), so post-if element access — which fails on the
+        borrow table either way — can name the divergent merge as the
+        cause. Symbolic bounds stay unprovable and return ``False``.
+
+        Args:
+            counterpart (Value): The false-branch IR value of the merge.
+
+        Returns:
+            bool: ``True`` when both sides' coverage is concrete and
+                differs, or the slice roots differ; ``False`` otherwise.
+        """
+        if not isinstance(counterpart, ArrayValue):
+            return False
+        own_coverage = self._slice_covered_indices
+        if own_coverage is None:
+            own_coverage = _coverage_from_array_value(self.value)
+        other_coverage = _coverage_from_array_value(counterpart)
+        if own_coverage is None or other_coverage is None:
+            return False
+        if tuple(own_coverage) != tuple(other_coverage):
+            return True
+        return _slice_root_uuid(self.value) != _slice_root_uuid(counterpart)
 
     def __post_init__(self) -> None:
         """Skip ``ArrayBase.__post_init__``.
