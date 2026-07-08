@@ -16,7 +16,12 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOpKind,
     NotOp,
 )
-from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
+    IfOperation,
+    LoopCarriedRebind,
+    WhileOperation,
+)
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -457,6 +462,61 @@ class TestDeadOpElimination:
         [runtime_if] = _find_ops(lowered.operations, IfOperation)
         [merge] = runtime_if.iter_merges()
         assert merge.false_value.uuid == m.uuid
+
+    def test_collect_used_uuids_excludes_loop_rebind_records(self):
+        """Values referenced only by a loop rebind record are not liveness reads.
+
+        The rebind record's before/after ride along ``all_input_values``
+        for cloning but are not genuine reads, so a producer referenced
+        solely through the record must remain eligible for elimination.
+        """
+        cond = _bit_val("cond")
+        before = _uint_val("before")
+        after = _uint_val("after")
+        while_op = WhileOperation(
+            operands=[cond],
+            operations=[],
+            loop_carried_rebinds=(
+                LoopCarriedRebind(var_name="acc", before=before, after=after),
+            ),
+        )
+
+        used: set[str] = set()
+        CompileTimeIfLoweringPass._collect_used_uuids(while_op, used)
+
+        assert cond.uuid in used, "the while condition is a genuine read"
+        assert before.uuid not in used, "rebind-record before is not a read"
+        assert after.uuid not in used, "rebind-record after is not a read"
+
+    def test_collect_used_uuids_keeps_yield_shared_with_branch_rebind(self):
+        """A value that is both a false yield and a branch-rebind before stays used.
+
+        The canonical branch-discard shape (``if cond: q = fresh`` with no
+        rebinding else) yields the pre-branch ``q`` on the false side, so
+        that value is simultaneously a ``false_yields`` entry and the
+        ``branch_rebinds`` before. It must stay used via the yield; only
+        the record occurrence is dropped.
+        """
+        cond = _bit_val("cond")
+        q_pre = _qubit_val("q_pre")
+        fresh = _qubit_val("fresh")
+        merged = _qubit_val("merged")
+        if_op = IfOperation(operands=[cond], true_operations=[], false_operations=[])
+        if_op.add_merge(fresh, q_pre, merged)
+        if_op.branch_rebinds = (
+            BranchRebind(
+                var_name="q",
+                before=q_pre,
+                rebound_in_true=True,
+                rebound_in_false=False,
+            ),
+        )
+
+        used: set[str] = set()
+        CompileTimeIfLoweringPass._collect_used_uuids(if_op, used)
+
+        assert q_pre.uuid in used, "kept via the false yield despite the record"
+        assert fresh.uuid in used, "the true yield is a genuine read"
 
 
 # ---------------------------------------------------------------------------

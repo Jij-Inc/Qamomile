@@ -21,7 +21,13 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
 )
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
+    HasNestedOps,
+    IfOperation,
+    WhileOperation,
+)
 from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
@@ -799,21 +805,67 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         return result
 
     @staticmethod
-    def _collect_used_uuids(op: Operation, used: set[str]) -> None:
-        """Collect all UUIDs an operation reads (recursive).
+    def _genuine_read_values(op: Operation) -> list[ValueBase]:
+        """Return the input values an operation genuinely reads for liveness.
 
-        Inputs are read via ``all_input_values`` so subclass-specific
-        Value fields count as uses — ``ControlledUOperation.power``,
-        ``SymbolicControlledU.num_controls`` / ``control_indices``, and
-        in particular ``IfOperation`` branch-merge yields, whose
+        ``all_input_values`` surfaces subclass-specific Value fields that
+        ARE genuine reads — ``ControlledUOperation.power``,
+        ``SymbolicControlledU.num_controls`` / ``control_indices``,
+        ``ForOperation.loop_var_value``, ``ForItemsOperation`` key/value
+        vars, and in particular ``IfOperation`` branch-merge yields whose
         producers must stay alive through dead-op elimination even when
-        the yield is the value's only reader.
+        the yield is the value's only reader. It ALSO surfaces
+        loop-carried / branch rebind record values, which ride along only
+        for cloning / substitution and are not reads (mirroring
+        ``analyze.op_genuine_input_values``); those are removed here.
+
+        The removal is by last occurrence rather than by UUID set so that
+        a value which is BOTH a genuine merge yield AND a rebind
+        ``before`` keeps its yield read. That overlap is the canonical
+        branch-discard shape: an ``if cond: q = fresh`` with no rebinding
+        else yields the pre-branch ``q`` on the false side, so that same
+        value is both a ``false_yields`` entry and the ``branch_rebinds``
+        ``before``. ``all_input_values`` appends the record values after
+        the yields, so dropping the last matching occurrence removes the
+        record occurrence and leaves the yield read intact.
+
+        Args:
+            op (Operation): Operation to inspect.
+
+        Returns:
+            list[ValueBase]: ``all_input_values`` with one occurrence per
+                rebind-record value removed.
+        """
+        values = list(op.all_input_values())
+        record_values: list[Value] = []
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            for rebind in op.loop_carried_rebinds:
+                record_values.append(rebind.before)
+                record_values.append(rebind.after)
+        elif isinstance(op, IfOperation):
+            for rebind in op.branch_rebinds:
+                record_values.append(rebind.before)
+        for record_value in record_values:
+            for index in range(len(values) - 1, -1, -1):
+                if values[index].uuid == record_value.uuid:
+                    del values[index]
+                    break
+        return values
+
+    @staticmethod
+    def _collect_used_uuids(op: Operation, used: set[str]) -> None:
+        """Collect all UUIDs an operation genuinely reads (recursive).
+
+        Reads are taken from :meth:`_genuine_read_values` so
+        subclass-specific reads (composite-gate power, symbolic control
+        counts, ``IfOperation`` branch-merge yields) count as uses while
+        rebind-record values — exposed only for cloning — do not.
 
         Args:
             op (Operation): Operation to inspect.
             used (set[str]): Mutable set of used UUIDs, updated in place.
         """
-        for operand in op.all_input_values():
+        for operand in CompileTimeIfLoweringPass._genuine_read_values(op):
             used.add(operand.uuid)
             # Also collect element_indices and parent_array references.
             if isinstance(operand, Value):
