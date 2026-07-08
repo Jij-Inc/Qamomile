@@ -463,13 +463,24 @@ def map_phi_outputs(
                 # aliasing below binds the merged bit to the true-branch
                 # clbit unconditionally, so it would silently return the
                 # wrong value whenever the condition selects the false
-                # branch. Representable merges (branch-local fresh
-                # measurements, while-loop-carried conditions) have already
-                # been aliased onto a single shared clbit by emit time and
-                # resolve to equal clbits, so this rejects only the
-                # unrepresentable shape. The guard is enabled at emit time
-                # only; at allocation those representable merges still hold
-                # distinct clbits and must not be rejected.
+                # branch. This fires precisely and NEVER on a representable
+                # merge: branch-local fresh measurements and
+                # while-loop-carried conditions have, by emit time, already
+                # been aliased onto one shared clbit at allocation, so they
+                # resolve to EQUAL clbits here. The still-distinct pair is
+                # the loop-indexed pre-measured mux, whose sources were
+                # symbolic at allocation and never got that aliasing — the
+                # narrow shape that was silently miscompiling. This is a
+                # precision guard, not a completeness one: a constant-index
+                # or whole-vector pre-measured mux is aliased at allocation
+                # and skips this check, but it does not reach a silent
+                # result either — it is rejected loudly by segmentation or
+                # the classical executor. Catching every unrepresentable
+                # shape with one clear error here would need the
+                # pre-aliasing source identities and is left as a follow-up
+                # robustness nicety. The guard is enabled at emit time only;
+                # at allocation the representable merges still hold distinct
+                # clbits and must not be rejected.
                 if (
                     reject_runtime_bit_mux
                     and true_clbit is not None
