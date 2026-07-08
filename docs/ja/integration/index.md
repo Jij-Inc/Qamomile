@@ -15,7 +15,7 @@ MaxCut QAOAをCUDA-Qへトランスパイルし、サンプリングと期待値
 :::
 
 :::{card}
-:header: **OMMX Quantum Benchmarksの活用 (1): Qamomileによる量子アルゴリズムの実装とベンチマーク**
+:header: **OMMX Quantum Benchmarksの活用: Qamomileによる量子アルゴリズムの実装とベンチマーク**
 :link: ommx_quantum_benchmarks_qaoa
 OMMX Quantum Benchmarksから取得したLABSインスタンス上でQAOAを動かし、SCIPと比較します。
 :::
