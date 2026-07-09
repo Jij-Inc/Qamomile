@@ -16,7 +16,7 @@ from qamomile.circuit.frontend.handle import (
     Vector,
 )
 from qamomile.circuit.frontend.handle.primitives import Float
-from qamomile.circuit.frontend.operation.control_flow import _create_phi_for_values
+from qamomile.circuit.frontend.operation.control_flow import _create_merge_for_values
 from qamomile.circuit.frontend.qkernel import qkernel
 from qamomile.circuit.ir.operation.control_flow import (
     IfMerge,
@@ -103,8 +103,8 @@ class TestIfElseScalarQubit:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: only q1 (reassigned in both branches) gets a
-        # phi; cond is read-only and elided.
+        # Merge-minimization: only q1 (reassigned in both branches) gets a
+        # merge; cond is read-only and elided.
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
         merges = list(if_ops[0].iter_merges())
@@ -137,7 +137,7 @@ class TestIfElseScalarQubit:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        # Phi-minimization: q1 and q2 both reassigned; cond elided.
+        # Merge-minimization: q1 and q2 both reassigned; cond elided.
         assert len(if_ops[0].results) == 2
         results = if_ops[0].results
         assert results[0].type == QubitType()
@@ -171,7 +171,7 @@ class TestIfElseScalarQubit:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        # Phi-minimization: q1 reassigned in both branches; cond elided.
+        # Merge-minimization: q1 reassigned in both branches; cond elided.
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
         merges = list(if_ops[0].iter_merges())
@@ -195,9 +195,9 @@ class TestIfElseScalarQubit:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        # Phi-minimization: q1 reassigned in true branch (else-pass implicit
+        # Merge-minimization: q1 reassigned in true branch (else-pass implicit
         # identity differs by Handle but same Value identity isn't preserved
-        # because true branch reassigned), so q1 phi is created. cond is
+        # because true branch reassigned), so q1 merge is created. cond is
         # read-only and elided.
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
@@ -225,7 +225,7 @@ class TestIfElseScalarQubit:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        # Phi-minimization: q1 reassigned in true branch only; cond elided.
+        # Merge-minimization: q1 reassigned in true branch only; cond elided.
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
         assert len(list(if_ops[0].iter_merges())) == 1
@@ -257,8 +257,8 @@ class TestIfElseScalarQubit:
         assert isinstance(outer_if.true_operations[1], IfOperation)
         assert len(outer_if.false_operations) == 1
         assert outer_if.false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: q1 reassigned in both branches and q2 measured
-        # (consumed) in true branch — both get phis. cond1 is read-only and
+        # Merge-minimization: q1 reassigned in both branches and q2 measured
+        # (consumed) in true branch — both get merges. cond1 is read-only and
         # elided.
         assert len(outer_if.results) == 2
         assert all(r.type == QubitType() for r in outer_if.results)
@@ -280,7 +280,7 @@ class TestIfElseScalarQubit:
         assert inner_if.true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(inner_if.false_operations) == 1
         assert inner_if.false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: only q1 reassigned in both inner branches.
+        # Merge-minimization: only q1 reassigned in both inner branches.
         assert len(inner_if.results) == 1
         assert inner_if.results[0].type == QubitType()
         inner_merges = list(inner_if.iter_merges())
@@ -291,18 +291,18 @@ class TestIfElseScalarQubit:
 class TestIfElseErrorHandling:
     """Error cases for if-else control flow."""
 
-    def test_phi_type_mismatch_raises_type_error(self):
-        """_create_phi_for_values should raise TypeError when branch types differ."""
+    def test_merge_type_mismatch_raises_type_error(self):
+        """_create_merge_for_values should raise TypeError when branch types differ."""
         condition = Value(type=BitType(), name="cond")
         if_op = IfOperation(operands=[condition])
         true_val = Qubit(value=Value(type=QubitType(), name="q_true"))
         false_val = Float(value=Value(type=FloatType(), name="f_false"))
 
         with pytest.raises(TypeError, match="Type mismatch in if-else branches"):
-            _create_phi_for_values(true_val, false_val, if_op)
+            _create_merge_for_values(true_val, false_val, if_op)
 
-    def test_phi_merge_preserves_qfixed_handle_type_and_metadata(self):
-        """QFixed phi merge should keep the QFixed handle and carrier metadata."""
+    def test_merge_preserves_qfixed_handle_type_and_metadata(self):
+        """QFixed merge should keep the QFixed handle and carrier metadata."""
         condition = Value(type=BitType(), name="cond")
         if_op = IfOperation(operands=[condition])
         qfixed_type = QFixedType(integer_bits=1, fractional_bits=2)
@@ -322,15 +322,15 @@ class TestIfElseErrorHandling:
             )
         )
 
-        phi_output, merged = _create_phi_for_values(true_val, false_val, if_op)
+        merge_output, merged = _create_merge_for_values(true_val, false_val, if_op)
 
         assert isinstance(merged, QFixed)
-        assert phi_output.get_qfixed_qubit_uuids() == carriers
-        assert phi_output.get_qfixed_num_bits() == 3
-        assert phi_output.get_qfixed_int_bits() == 1
+        assert merge_output.get_qfixed_qubit_uuids() == carriers
+        assert merge_output.get_qfixed_num_bits() == 3
+        assert merge_output.get_qfixed_int_bits() == 1
 
-    def test_phi_merge_rejects_qfixed_with_different_carriers(self):
-        """QFixed phi merge should reject condition-dependent carrier layouts."""
+    def test_merge_rejects_qfixed_with_different_carriers(self):
+        """QFixed merge should reject condition-dependent carrier layouts."""
         condition = Value(type=BitType(), name="cond")
         if_op = IfOperation(operands=[condition])
         qfixed_type = QFixedType(integer_bits=0, fractional_bits=2)
@@ -350,21 +350,21 @@ class TestIfElseErrorHandling:
         )
 
         with pytest.raises(TypeError, match="identical carrier qubits"):
-            _create_phi_for_values(true_val, false_val, if_op)
+            _create_merge_for_values(true_val, false_val, if_op)
 
-    def test_phi_merge_preserves_observable_handle_type(self):
-        """Observable phi merge should keep the Observable frontend handle."""
+    def test_merge_preserves_observable_handle_type(self):
+        """Observable merge should keep the Observable frontend handle."""
         condition = Value(type=BitType(), name="cond")
         if_op = IfOperation(operands=[condition])
         true_val = Observable(value=Value(type=ObservableType(), name="obs_true"))
         false_val = Observable(value=Value(type=ObservableType(), name="obs_false"))
 
-        _, merged = _create_phi_for_values(true_val, false_val, if_op)
+        _, merged = _create_merge_for_values(true_val, false_val, if_op)
 
         assert isinstance(merged, Observable)
 
-    def test_phi_merge_rejects_unknown_handle_type(self):
-        """Unsupported Handle subclasses should fail at phi creation."""
+    def test_merge_rejects_unknown_handle_type(self):
+        """Unsupported Handle subclasses should fail at merge creation."""
 
         class CustomHandle(Handle):
             pass
@@ -375,7 +375,7 @@ class TestIfElseErrorHandling:
         false_val = CustomHandle(value=Value(type=FloatType(), name="custom_false"))
 
         with pytest.raises(TypeError, match="Unsupported Handle type.*CustomHandle"):
-            _create_phi_for_values(true_val, false_val, if_op)
+            _create_merge_for_values(true_val, false_val, if_op)
 
 
 class TestIfElseWithSymbolicVector:
@@ -400,9 +400,9 @@ class TestIfElseWithSymbolicVector:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: cond is read-only and elided; qs (Vector) is
-        # always preserved as a phi (element writes don't update the
-        # outer ArrayValue identity, so phi creation is conservative).
+        # Merge-minimization: cond is read-only and elided; qs (Vector) is
+        # always preserved as a merge (element writes don't update the
+        # outer ArrayValue identity, so merge creation is conservative).
         assert len(if_ops[0].results) == 1
         assert if_ops[0].results[0].type == QubitType()
         merges = list(if_ops[0].iter_merges())
@@ -428,7 +428,7 @@ class TestIfElseWithSymbolicVector:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -459,7 +459,7 @@ class TestIfElseWithSymbolicVector:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -499,7 +499,7 @@ class TestIfElseWithSymbolicVector:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 2
 
@@ -536,7 +536,7 @@ class TestIfElseWithSymbolicVector:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -578,7 +578,7 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -614,7 +614,7 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -647,7 +647,7 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -687,7 +687,7 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 2
 
@@ -725,7 +725,7 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -760,7 +760,7 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -799,7 +799,7 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].false_operations) == 2
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.X  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 2
 
@@ -816,7 +816,7 @@ class TestIfElseWithQubitArray:
             assert merge.result is if_ops[0].results[merge.index]
 
     def test_if_else_vector_index_after_merge(self):
-        """Indexing Vector after if-else merge must work (directly tests phi merge type)."""
+        """Indexing Vector after if-else merge must work (directly tests merge type)."""
 
         @qkernel
         def circuit(q0: Qubit) -> Qubit:
@@ -837,7 +837,7 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -869,7 +869,7 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].true_operations) == 1
         assert if_ops[0].true_operations[0].gate_type == GateOperationType.X  # type: ignore
         assert len(if_ops[0].false_operations) == 0
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -978,7 +978,7 @@ class TestIfElseWithQubitArray:
         assert len(if_ops[0].false_operations) == 3
         for op in if_ops[0].false_operations:
             assert op.gate_type == GateOperationType.H  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -1015,7 +1015,7 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].true_operations[1].gate_type == GateOperationType.H  # type: ignore
         assert len(if_ops[0].false_operations) == 1
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.X  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 1
 
@@ -1058,7 +1058,7 @@ class TestIfElseWithQubitArray:
         assert if_ops[0].false_operations[0].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[1].gate_type == GateOperationType.H  # type: ignore
         assert if_ops[0].false_operations[2].gate_type == GateOperationType.X  # type: ignore
-        # Phi-minimization: cond (read-only Bit) is elided.
+        # Merge-minimization: cond (read-only Bit) is elided.
 
         assert len(if_ops[0].results) == 2
 
@@ -1317,7 +1317,7 @@ class TestIfBranchVariableMerge:
                 b = qm.measure(q2)
             else:
                 b = qm.measure(q3)
-            # b should be the merged phi, not the original measure
+            # b should be the merged value, not the original measure
             return b
 
         block = circuit.block
@@ -1333,7 +1333,7 @@ class TestIfBranchVariableMerge:
         assert len(bit_merges) >= 1
 
     def test_if_only_store_only_reassignment_affects_following_if(self):
-        """If-only (no else) store-only reassignment should produce a phi merge."""
+        """If-only (no else) store-only reassignment should produce a merge."""
 
         @qkernel
         def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> qm.Bit:
@@ -1341,7 +1341,7 @@ class TestIfBranchVariableMerge:
             cond = qm.measure(q0)
             if cond:
                 b = qm.measure(q2)
-            # b should be phi-merged (true: new measure, false: original)
+            # b should be merged (true: new measure, false: original)
             return b
 
         block = circuit.block
@@ -1430,7 +1430,7 @@ class TestIfNestedInLoop:
         assert graph is not None
 
 
-class TestIfElseDeadPhiFiltering:
+class TestIfElseDeadMergeFiltering:
     """Dead variables (not loaded after if) must not generate merge slots."""
 
     def test_if_dead_shared_new_local_not_merged(self):
@@ -1454,7 +1454,7 @@ class TestIfElseDeadPhiFiltering:
         assert not any("b_new" in name for name in result_names)
 
     def test_if_dead_reassigned_existing_not_merged(self):
-        """Outer qubit reassigned in both branches but dead -> no qubit phi."""
+        """Outer qubit reassigned in both branches but dead -> no qubit merge."""
 
         @qkernel
         def circuit(q0: Qubit, q1: Qubit, q_t: Qubit) -> qm.Bit:
@@ -1478,7 +1478,7 @@ class TestIfElseDeadPhiFiltering:
         assert len(qubit_merges) == 0
 
     def test_if_live_reassigned_existing_is_merged(self):
-        """Outer qubit reassigned and read after if -> phi must exist (regression)."""
+        """Outer qubit reassigned and read after if -> merge must exist (regression)."""
 
         @qkernel
         def circuit(q0: Qubit, q_t: Qubit) -> qm.Bit:
@@ -1501,7 +1501,7 @@ class TestIfElseDeadPhiFiltering:
         assert len(qubit_merges) >= 1
 
     def test_if_only_dead_reassigned_existing_not_merged(self):
-        """If-only (no else): outer qubit reassigned but dead -> no qubit phi."""
+        """If-only (no else): outer qubit reassigned but dead -> no qubit merge."""
 
         @qkernel
         def circuit(q0: Qubit, q_t: Qubit) -> qm.Bit:
@@ -1541,7 +1541,7 @@ class TestIfElseDeadPhiFiltering:
         assert not any("b_new" in name for name in result_names)
 
     def test_if_live_reassigned_existing_non_return_load(self):
-        """Outer qubit reassigned, read after if via measure (not return) -> phi exists."""
+        """Outer qubit reassigned, read after if via measure (not return) -> merge exists."""
 
         @qkernel
         def circuit(q0: Qubit, q_t: Qubit) -> qm.Bit:
@@ -1565,7 +1565,7 @@ class TestIfElseDeadPhiFiltering:
         assert len(qubit_merges) >= 1
 
     def test_if_shared_new_local_used_only_by_augassign_is_merged(self):
-        """Both branches assign angle from parameter, afterward angle += 1.0 -> float phi must exist."""
+        """Both branches assign angle from parameter, afterward angle += 1.0 -> float merge must exist."""
 
         @qkernel
         def circuit(q0: Qubit, theta: Float) -> qm.Float:
@@ -1580,7 +1580,7 @@ class TestIfElseDeadPhiFiltering:
         graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
         assert len(if_ops) == 1
-        # angle (= theta + x) becomes a float_tmp in IR; check FloatType phi exists
+        # angle (= theta + x) becomes a float_tmp in IR; check FloatType merge exists
         float_merges = [
             merge
             for merge in if_ops[0].iter_merges()

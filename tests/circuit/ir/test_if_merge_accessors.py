@@ -1,7 +1,7 @@
 """Tests for the IfOperation branch-merge accessor API.
 
 ``IfOperation.add_merge`` / ``iter_merges`` / ``IfMerge`` are the single
-construction / read surface for phi semantics; these tests pin the
+construction / read surface for merge semantics; these tests pin the
 accessor contract (slot ordering, selection, identity detection) and the
 strict consistency checks that guard against hand-built or corrupted
 merge storage.

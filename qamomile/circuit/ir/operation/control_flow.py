@@ -113,7 +113,7 @@ class LoopCarriedRebind:
             reads; for quantum records, the incoming state a rebinding
             iteration would discard).
         after (Value): The variable's IR value after the loop body ran
-            (typically a ``BinOp`` result, an ``IfOperation`` phi
+            (typically a ``BinOp`` result, an ``IfOperation`` merge
             output, or a fresh quantum allocation).
         before_synthesized (bool): True when the pre-loop value was a
             plain Python number with no IR identity (e.g. ``total = 0``),
@@ -478,7 +478,7 @@ class BranchRebind:
     """Trace-time record of a quantum variable rebound inside an if branch.
 
     The frontend's branch tracing merges only the *new* branch values
-    through phi operations; when both branches rebind a variable, the
+    through merge operations; when both branches rebind a variable, the
     value the variable held before the branch no longer appears anywhere
     in the ``IfOperation``. These records preserve that pre-branch
     binding so the transpiler's control-flow discard check
@@ -492,7 +492,7 @@ class BranchRebind:
             Used only for error messages.
         before (Value): The variable's IR value at branch entry (the
             state that is dropped on a rebinding path unless that branch
-            consumes it or merges it out through a phi).
+            consumes it or merges it out through a merge).
         rebound_in_true (bool): True when the true branch left the
             variable bound to a different IR value.
         rebound_in_false (bool): True when the false branch left the

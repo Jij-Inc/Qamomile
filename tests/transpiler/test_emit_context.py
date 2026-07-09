@@ -1,7 +1,7 @@
 """Tests for ``EmitContext`` — typed bindings container.
 
 The pre-EmitContext design used a single ``bindings: dict[str, Any]`` for
-five distinct semantic categories (params, loop vars, intermediates, phi
+five distinct semantic categories (params, loop vars, intermediates, merge
 aliases, runtime exprs). This caused name-collision bugs (e.g.
 ``"bit_tmp"`` overwrites between chained predicates). ``EmitContext`` is
 a ``dict`` subclass that adds typed methods and slot tracking so writers

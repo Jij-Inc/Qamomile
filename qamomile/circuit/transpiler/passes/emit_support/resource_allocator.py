@@ -30,8 +30,8 @@ from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
-    map_phi_outputs,
-    remap_static_phi_outputs,
+    map_merge_outputs,
+    remap_static_merge_outputs,
     resolve_condition_address_detailed,
     resolve_if_condition,
 )
@@ -252,10 +252,10 @@ class ResourceAllocator:
                 resolved = resolve_if_condition(op.condition, bindings)
                 if resolved is not None:
                     # Compile-time constant: only allocate the selected
-                    # branch and remap phi outputs directly.
+                    # branch and remap merge outputs directly.
                     selected = op.true_operations if resolved else op.false_operations
                     self._allocate_recursive(selected, qubit_map, clbit_map, bindings)
-                    self._remap_static_phi_outputs(
+                    self._remap_static_merge_outputs(
                         op, resolved, qubit_map, clbit_map, bindings
                     )
                 else:
@@ -293,14 +293,14 @@ class ResourceAllocator:
                     # Save the canonical clbit for the initial condition
                     # BEFORE body allocation.  An if-only (no else) inside
                     # the loop body produces a merge whose false_value is
-                    # the pre-if while-condition value.  map_phi_outputs
+                    # the pre-if while-condition value.  map_merge_outputs
                     # will redirect that false-source UUID to the
                     # true-branch clbit,
                     # overwriting clbit_map[init_addr] and making the
                     # post-body mismatch detection ineffective.
                     saved_init_clbit = clbit_map.get(init_addr)
 
-                    # Allocate the loop body so that IfOperation phi
+                    # Allocate the loop body so that IfOperation merge
                     # mappings inside the body are fully resolved.
                     self._allocate_recursive(
                         op.operations, qubit_map, clbit_map, bindings
@@ -369,13 +369,13 @@ class ResourceAllocator:
         value: Any,
         bindings: dict[str, Any],
     ) -> QubitAddress:
-        """Resolve a while / phi condition source to its ``clbit_map`` key.
+        """Resolve a while / merge condition source to its ``clbit_map`` key.
 
         A measured ``Vector[Bit]`` element (``s[i]`` from
         ``s = qmc.measure(register)``) registers its clbit under
         ``QubitAddress(root_array.uuid, index)``, not the element's own
         UUID. Resolving the source the same way the emit-time condition
-        lookup does keeps the loop-carried / phi clbit alias consistent
+        lookup does keeps the loop-carried / merge clbit alias consistent
         with where the clbit was actually allocated. The allocator's
         ``ValueResolver`` folds symbolic indices / slice bounds through
         ``bindings`` (e.g. an unrolled loop variable), so a loop-indexed
@@ -385,7 +385,7 @@ class ResourceAllocator:
         aliasing is skipped rather than pointed at a wrong slot).
 
         Args:
-            value (Any): The condition / phi source — an IR ``Value`` or, in
+            value (Any): The condition / merge source — an IR ``Value`` or, in
                 degenerate cases, a non-Value (handled via ``str``).
             bindings (dict[str, Any]): Active bindings for folding symbolic
                 element indices / slice bounds via the resolver.
@@ -448,7 +448,7 @@ class ResourceAllocator:
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> None:
-        """Register merge output UUIDs via the shared ``map_phi_outputs`` utility.
+        """Register merge output UUIDs via the shared ``map_merge_outputs`` utility.
 
         Args:
             op (IfOperation): The runtime if-else whose merged outputs need
@@ -462,11 +462,11 @@ class ResourceAllocator:
                 loop-indexed measured ``Vector[Bit]`` element resolves to
                 its root clbit.
         """
-        map_phi_outputs(
+        map_merge_outputs(
             op, qubit_map, clbit_map, bindings=bindings, resolver=self._resolver
         )
 
-    def _remap_static_phi_outputs(
+    def _remap_static_merge_outputs(
         self,
         op: IfOperation,
         condition_value: bool,
@@ -474,11 +474,11 @@ class ResourceAllocator:
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> None:
-        """Remap phi outputs for a compile-time constant ``IfOperation``.
+        """Remap merge outputs for a compile-time constant ``IfOperation``.
 
-        Delegates to the module-level ``remap_static_phi_outputs`` helper,
+        Delegates to the module-level ``remap_static_merge_outputs`` helper,
         which is shared with the emit pass to ensure scalar and array
-        quantum phi outputs are handled identically at both allocation
+        quantum merge outputs are handled identically at both allocation
         and emission time.
 
         Args:
@@ -494,7 +494,7 @@ class ResourceAllocator:
                 loop-indexed measured ``Vector[Bit]`` element resolves to
                 its root clbit.
         """
-        remap_static_phi_outputs(
+        remap_static_merge_outputs(
             op,
             condition_value,
             qubit_map,

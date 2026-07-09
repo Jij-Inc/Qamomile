@@ -2374,7 +2374,7 @@ class TestControlFlowIfElse:
           if m1: bell1 = X(bell1)
           if m0: bell1 = Z(bell1)
 
-        The second if's quantum operand (bell1_phi_0) is a phi-merged qubit
+        The second if's quantum operand (bell1_merge_0) is a merged qubit
         from the first if.  The analyze pass must allow this because the
         operand is quantum-typed, not a classical measurement result.
         """
@@ -2457,8 +2457,8 @@ class TestLoopIndexedMeasuredBitMerge:
     represent it — it would bind the merged bit to the true-branch source
     unconditionally and silently return the wrong value whenever the
     condition selects the false branch — so emit rejects it with
-    ``EmitError`` (``map_phi_outputs(reject_runtime_bit_mux=True)`` from
-    ``register_phi_outputs``). Representable merges still work: a
+    ``EmitError`` (``map_merge_outputs(reject_runtime_bit_mux=True)`` from
+    ``register_merge_outputs``). Representable merges still work: a
     compile-time-selected branch re-points its merged bit per unrolled
     iteration (one reused merge-output UUID across iterations), and a merge
     of branch-local fresh measurements aliases both onto one shared clbit.
@@ -2539,7 +2539,7 @@ class TestLoopIndexedMeasuredBitMerge:
         """A compile-time-if per unrolled iteration re-points its merged bit.
 
         ``if j == 0`` resolves at compile time per unrolled iteration, so
-        the merge is handled by ``remap_static_phi_outputs``. Iteration 0
+        the merge is handled by ``remap_static_merge_outputs``. Iteration 0
         selects ``abits[0]`` and iteration 1 selects ``bbits[1]``; because
         the unrolled body reuses one merge-output UUID, the static remapper
         must overwrite the registration each iteration. If it kept
@@ -3225,7 +3225,7 @@ class TestControlFlowWhileStructure:
             )
 
     def test_while_loop_with_nested_if_else(self):
-        """While + nested if-else: recursive phi tracing must work.
+        """While + nested if-else: recursive merge tracing must work.
 
         sel1=1, sel2=1, so the innermost if-branch is taken.
         q3 is |0⟩ → bit=0, loop exits.  Tests that
@@ -3279,7 +3279,7 @@ class TestControlFlowWhileStructure:
         """While loop with if-only (no else): clbit count must not leak.
 
         When the while body contains an if without else, the merge slot's
-        false_value is the pre-if while-condition value.  map_phi_outputs
+        false_value is the pre-if while-condition value.  map_merge_outputs
         redirects this UUID, which used to corrupt the while-condition's
         canonical clbit and cause an extra orphaned clbit to appear.
 
@@ -4012,15 +4012,15 @@ class TestTranspilerPassesPipeline:
         analyzed = transpiler.analyze(folded)
         assert analyzed.kind == BlockKind.ANALYZED
 
-    def test_analyze_allows_quantum_phi_operand_after_measurement_condition(
+    def test_analyze_allows_quantum_merge_operand_after_measurement_condition(
         self, transpiler
     ):
-        """analyze() must NOT reject quantum phi operands from if-else merges.
+        """analyze() must NOT reject quantum merge operands from if-else merges.
 
         When a qubit passes through an if-else block conditioned on a
-        measurement, the phi-merged output (e.g. ``q1_phi_0``) is
+        measurement, the merged output (e.g. ``q1_merge_0``) is
         quantum-typed.  A subsequent quantum gate using that qubit must
-        be allowed even though the phi value transitively depends on a
+        be allowed even though the merge value transitively depends on a
         measurement via the dependency graph.
         """
 
@@ -4034,10 +4034,10 @@ class TestTranspilerPassesPipeline:
             if m0:
                 q1 = qmc.x(q1)
 
-            # q1 is now a phi-merged qubit — quantum-typed
+            # q1 is now a merged qubit — quantum-typed
             m1 = qmc.measure(q2)
             if m1:
-                # Using phi-merged q1 as quantum operand must be allowed
+                # Using merged q1 as quantum operand must be allowed
                 q1 = qmc.z(q1)
 
             return qmc.measure(q1)
@@ -7949,7 +7949,7 @@ class TestLoopBackedgeIfLivenessTranspilation:
             transpiler.transpile(circuit, bindings={})
 
 
-class TestDeadPhiTranspilation:
+class TestDeadMergeTranspilation:
     """Dead quantum variables in if branches must not cause EmitError."""
 
     def test_if_only_dead_reassigned_existing_transpile_ok(self):
@@ -8123,15 +8123,15 @@ class TestBoundConstantIfCondition:
 
 
 # ============================================================================
-# Compile-time constant if with array quantum phi output
+# Compile-time constant if with array quantum merge output
 # ============================================================================
 
 
-class TestCompileTimeIfArrayQuantumPhi:
-    """Compile-time constant if with array quantum phi must not raise EmitError.
+class TestCompileTimeIfArrayQuantumMerge:
+    """Compile-time constant if with array quantum merge must not raise EmitError.
 
     When a compile-time constant ``if`` has a dead branch that rebinds a
-    qubit array to a different array, the emit-time phi registration must
+    qubit array to a different array, the emit-time merge registration must
     use selected-branch-only remap (not the runtime two-branch validator).
     """
 
@@ -8196,16 +8196,16 @@ class TestCompileTimeIfArrayQuantumPhi:
 
 
 # ============================================================================
-# Compile-time if phi propagation (Issue: compile_time_constant_if_phi_propagation)
+# Compile-time if merge propagation (Issue: compile_time_constant_if_merge_propagation)
 # ============================================================================
 
 
-class TestCompileTimeIfPhiPropagation:
+class TestCompileTimeIfMergePropagation:
     """Compile-time IfOperation lowering before SegmentationPass.
 
     Tests that compile-time resolvable IfOperations (including expression-
     derived conditions like ``if flag > 0:``) are lowered before separation,
-    preventing MultipleQuantumSegmentsError and ensuring phi outputs are
+    preventing MultipleQuantumSegmentsError and ensuring merge outputs are
     correctly propagated.
     """
 
@@ -8311,8 +8311,8 @@ class TestCompileTimeIfPhiPropagation:
         else:
             pytest.fail("No RX gate found in circuit")
 
-    def test_bit_vector_phi_merge_flag_true(self):
-        """Branch-local measurement Vector[Bit] phi merge with flag=True."""
+    def test_bit_vector_merge_flag_true(self):
+        """Branch-local measurement Vector[Bit] merge with flag=True."""
         flag = True
 
         @qmc.qkernel
@@ -8336,8 +8336,8 @@ class TestCompileTimeIfPhiPropagation:
         for val, count in results:
             assert val is not None, "Bit vector result should not be None"
 
-    def test_bit_vector_phi_merge_flag_false(self):
-        """Branch-local measurement Vector[Bit] phi merge with flag=False."""
+    def test_bit_vector_merge_flag_false(self):
+        """Branch-local measurement Vector[Bit] merge with flag=False."""
         flag = False
 
         @qmc.qkernel
@@ -8361,8 +8361,8 @@ class TestCompileTimeIfPhiPropagation:
         for val, count in results:
             assert val is not None, "Bit vector result should not be None"
 
-    def test_array_quantum_phi_happy_path_regression(self):
-        """Existing array-quantum phi happy path must not regress."""
+    def test_array_quantum_merge_happy_path_regression(self):
+        """Existing array-quantum merge happy path must not regress."""
         flag = True
 
         @qmc.qkernel
@@ -8517,10 +8517,10 @@ class TestDirectCastMeasure:
         )
         assert measured_qubits == expected_qubits
 
-    def test_inlined_runtime_if_phi_cast_measures_all_qubits(self):
-        """Phi-merged QFixed carriers survive inlining of runtime-if bodies.
+    def test_inlined_runtime_if_merge_cast_measures_all_qubits(self):
+        """Merged QFixed carriers survive inlining of runtime-if bodies.
 
-        The phi output of a measurement-backed ``if`` carries QFixed carrier
+        The merge output of a measurement-backed ``if`` carries QFixed carrier
         metadata referencing the array cast inside the branches; cloning
         during inline must remap those references so the final measurement
         is not silently dropped (1 ancilla measure + 2 carrier measures).
@@ -8631,7 +8631,7 @@ class TestUnresolvedStructuralSize:
         assert "'n'" in str(exc_info.value)
 
 
-class TestWhileIfSharedLocalPhi:
+class TestWhileIfSharedLocalMerge:
     """While-if with quantum shared new locals: dead must transpile, live must error."""
 
     def test_while_loop_with_if_else_same_name_dead_local_transpile(self):

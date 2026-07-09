@@ -292,8 +292,8 @@ class ArrayBase(Handle, Generic[T]):
             instance.element_type = type_map[value.type]  # type: ignore[assignment]
         return instance
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "ArrayBase[T]":
-        """Wrap a phi-merged array value in this handle's array type.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "ArrayBase[T]":
+        """Wrap a merged array value in this handle's array type.
 
         Args:
             value (Value): Fresh ``ArrayValue`` produced for the merge
@@ -2375,8 +2375,8 @@ class VectorView(Vector[T]):
         instance._slice_divergent_merge = False
         return instance
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "VectorView[T]":
-        """Wrap a phi-merged slice value as a view with this view's lineage.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "VectorView[T]":
+        """Wrap a merged slice value as a view with this view's lineage.
 
         Args:
             value (Value): Fresh sliced ``ArrayValue`` produced for the
@@ -2389,7 +2389,7 @@ class VectorView(Vector[T]):
             VectorView[T]: An unregistered view over the same parent and
                 affine map, inheriting this view's coverage and nesting
                 fields; borrow ownership is arranged separately by the
-                caller (``_refresh_slice_phi_owner``).
+                caller (``_refresh_slice_merge_owner``).
         """
         assert isinstance(value, ArrayValue)
         view = VectorView._wrap_unregistered(

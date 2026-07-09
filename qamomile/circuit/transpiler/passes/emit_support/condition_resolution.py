@@ -1,4 +1,4 @@
-"""Helpers for compile-time condition resolution and phi remapping."""
+"""Helpers for compile-time condition resolution and merge remapping."""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ def resolve_condition_address_detailed(
 
     Single source of truth (shared by ``control_flow_emission.emit_if`` /
     ``emit_while``, the Qiskit / CUDA-Q backends, ``ResourceAllocator``'s
-    loop-carried / phi aliasing, and the phi-output mapping helpers here)
-    for turning a runtime control-flow condition — or a phi source Value —
+    loop-carried / merge aliasing, and the merge-output mapping helpers here)
+    for turning a runtime control-flow condition — or a merge source Value —
     into the address its classical bit is registered under.
 
     Scalar measurement results register under ``QubitAddress(bit.uuid)``,
@@ -41,7 +41,7 @@ def resolve_condition_address_detailed(
     view_local_index`` repeated along the chain.
 
     Args:
-        condition (Value): The condition operand or phi source Value.
+        condition (Value): The condition operand or merge source Value.
         bindings (dict[str, Any]): Active emit-time bindings used to fold
             symbolic indices / slice bounds. May be empty for callers that
             only have constant addresses to resolve (e.g. the allocator's
@@ -98,7 +98,7 @@ def resolve_condition_address_detailed(
 
 
 def _is_unresolved_bit_element(value: Any, resolved_as_element: bool) -> bool:
-    """Whether a phi/merge source is a not-yet-resolvable ``Vector[Bit]`` element.
+    """Whether a merge source is a not-yet-resolvable ``Vector[Bit]`` element.
 
     A measured ``Vector[Bit]`` element (``bits[j]``) whose index is still
     symbolic — e.g. a loop variable that only gets a concrete value once
@@ -112,7 +112,7 @@ def _is_unresolved_bit_element(value: Any, resolved_as_element: bool) -> bool:
     unregistered UUID.
 
     Args:
-        value (Any): The phi / merge source Value.
+        value (Any): The merge source Value.
         resolved_as_element (bool): The ``resolved_as_element`` flag from
             :func:`resolve_condition_address_detailed`.
 
@@ -165,7 +165,7 @@ def resolve_if_condition(
     return None
 
 
-def remap_static_phi_outputs(
+def remap_static_merge_outputs(
     if_op: IfOperation,
     condition_value: bool,
     qubit_map: QubitMap,
@@ -173,11 +173,11 @@ def remap_static_phi_outputs(
     bindings: dict[str, Any] | None = None,
     resolver: ValueResolver | None = None,
 ) -> None:
-    """Remap phi outputs for a compile-time constant ``IfOperation``.
+    """Remap merge outputs for a compile-time constant ``IfOperation``.
 
     Registers each merged output under the physical resource of the
     branch selected by the resolved condition, so downstream operations
-    referencing the phi output resolve to the surviving branch's qubit /
+    referencing the merge output resolve to the surviving branch's qubit /
     clbit. Outputs already registered are left untouched.
 
     Args:
@@ -203,7 +203,7 @@ def remap_static_phi_outputs(
 
         # Scalar Bit merges whose selected source is a loop-indexed
         # measured element are re-pointed per unrolled iteration inside
-        # the branch below (same rationale as ``map_phi_outputs``: one
+        # the branch below (same rationale as ``map_merge_outputs``: one
         # merge-output UUID is reused across iterations), so they are
         # exempt from the "already registered → skip" short-circuit.
         is_scalar_bit = isinstance(output.type, BitType) and not isinstance(
@@ -240,7 +240,7 @@ def remap_static_phi_outputs(
                 selected_val, bindings or {}, resolver
             )
             # Defer a still-symbolic loop-indexed element to emit time
-            # (see the runtime counterpart in ``map_phi_outputs``).
+            # (see the runtime counterpart in ``map_merge_outputs``).
             if _is_unresolved_bit_element(selected_val, src_resolved):
                 continue
             # A resolved element source (``src_resolved``) is a
@@ -254,7 +254,7 @@ def remap_static_phi_outputs(
                 clbit_map[QubitAddress(output.uuid)] = clbit_map[src_addr]
 
 
-def map_phi_outputs(
+def map_merge_outputs(
     if_op: IfOperation,
     qubit_map: QubitMap,
     clbit_map: ClbitMap,
@@ -263,9 +263,9 @@ def map_phi_outputs(
     resolver: ValueResolver | None = None,
     reject_runtime_bit_mux: bool = False,
 ) -> None:
-    """Register phi output UUIDs to the same physical resources as their sources.
+    """Register merge output UUIDs to the same physical resources as their sources.
 
-    Runtime-``if`` counterpart of :func:`remap_static_phi_outputs`: both
+    Runtime-``if`` counterpart of :func:`remap_static_merge_outputs`: both
     branches may execute, so quantum merges are validated to sit on
     identical physical resources, and classical Bit merges consolidate
     both branches' clbits onto one physical slot. Outputs already
@@ -298,7 +298,7 @@ def map_phi_outputs(
             at-runtime multiplexing of two pre-existing measured bits, which
             the clbit-aliasing model cannot represent: it would silently
             bind the merged bit to the true-branch source regardless of the
-            condition. Enable only at emit time (``register_phi_outputs``),
+            condition. Enable only at emit time (``register_merge_outputs``),
             where representable merges — branch-local fresh measurements and
             while-loop-carried conditions — have already been aliased onto a
             single shared clbit and therefore resolve to equal clbits. Leave
@@ -421,9 +421,9 @@ def map_phi_outputs(
                             if sec_addr in clbit_map:
                                 clbit_map[sec_addr] = phys_idx
             else:
-                # Scalar Bit phi: resolve vector-element sources to their
+                # Scalar Bit merge: resolve vector-element sources to their
                 # root clbit key so a measured ``Vector[Bit]`` element merged
-                # through a phi (``if sel: bit = s[0] else: bit = t[0]``)
+                # through a merge (``if sel: bit = s[0] else: bit = t[0]``)
                 # maps to the right clbit instead of the element's own UUID.
                 # A loop-indexed element (``bits[j]``) needs the current
                 # bindings / resolver to fold ``j``; passing empty ``{}``
