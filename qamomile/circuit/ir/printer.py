@@ -156,12 +156,34 @@ class _BlockPrinter:
 
     # -- control flow ----------------------------------------------------
 
+    def _region_args_suffix(self, op) -> str:
+        """Format a loop's region arguments as a header suffix.
+
+        Args:
+            op: A loop operation (``ForOperation`` / ``ForItemsOperation``
+                / ``WhileOperation``) carrying ``region_args``.
+
+        Returns:
+            str: `` iter_args(name = %init -> %result, ...)`` when the
+                loop carries region arguments, or ``""`` otherwise.
+        """
+        if not getattr(op, "region_args", ()):
+            return ""
+        parts = [
+            f"{a.var_name or '_'} = {_format_value(a.init)} -> {_format_value(a.result)}"
+            for a in op.region_args
+        ]
+        return " iter_args(" + ", ".join(parts) + ")"
+
     def _emit_for(self, op: ForOperation, *, indent: int, pad: str) -> None:
         start = _format_value(op.operands[0]) if len(op.operands) > 0 else "?"
         stop = _format_value(op.operands[1]) if len(op.operands) > 1 else "?"
         step = _format_value(op.operands[2]) if len(op.operands) > 2 else "?"
         lv = op.loop_var or "_"
-        self.lines.append(f"{pad}for %{lv} in range({start}, {stop}, {step}) {{")
+        iter_args = self._region_args_suffix(op)
+        self.lines.append(
+            f"{pad}for %{lv} in range({start}, {stop}, {step}){iter_args} {{"
+        )
         self._emit_ops(op.operations, indent=indent + 1)
         self.lines.append(f"{pad}}}")
 
@@ -169,7 +191,8 @@ class _BlockPrinter:
         keys = ", ".join(f"%{k}" for k in op.key_vars) if op.key_vars else "%k"
         val = f"%{op.value_var}" if op.value_var else "%v"
         iterable = _format_value(op.operands[0]) if op.operands else "<iterable>"
-        header = f"{pad}for ({keys}), {val} in items({iterable}) {{"
+        iter_args = self._region_args_suffix(op)
+        header = f"{pad}for ({keys}), {val} in items({iterable}){iter_args} {{"
         self.lines.append(header)
         self._emit_ops(op.operations, indent=indent + 1)
         self.lines.append(f"{pad}}}")
@@ -193,7 +216,8 @@ class _BlockPrinter:
             if op.max_iterations is not None
             else ""
         )
-        self.lines.append(f"{pad}while {cond}{max_iter} {{")
+        iter_args = self._region_args_suffix(op)
+        self.lines.append(f"{pad}while {cond}{max_iter}{iter_args} {{")
         self._emit_ops(op.operations, indent=indent + 1)
         self.lines.append(f"{pad}}}")
 

@@ -113,6 +113,24 @@ def _loop_h_twin(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
+def _carried_sum(n: qmc.UInt) -> qmc.UInt:
+    """Kernel whose ForOperation carries a region argument (``total``)."""
+    total = qmc.uint(0)
+    for i in qmc.range(n):
+        total = total + i
+    return total
+
+
+@qmc.qkernel
+def _carried_sum_twin(n: qmc.UInt) -> qmc.UInt:
+    """Twin of ``_carried_sum`` for cross-build determinism on region args."""
+    total = qmc.uint(0)
+    for i in qmc.range(n):
+        total = total + i
+    return total
+
+
+@qmc.qkernel
 def _measure_after_h(q: qmc.Qubit) -> qmc.Bit:
     """Kernel that exercises a measurement-derived classical bit."""
     q = qmc.h(q)
@@ -234,6 +252,19 @@ class TestCanonicalizeDeterminism:
         """Determinism holds for kernels with measurement-backed bits."""
         a = _to_affine(_measure_after_h)
         b = _to_affine(_measure_after_h_twin)
+        assert content_hash(a) == content_hash(b)
+
+    def test_region_arg_loop_twins_same_hash(self):
+        """Determinism holds for loops carrying region arguments.
+
+        The ``RegionArg`` values (init / block_arg / yielded / result)
+        must be remapped in lockstep with the body operations and the
+        loop results for two independent builds to hash equally.
+        """
+        a = _to_affine(_carried_sum)
+        b = _to_affine(_carried_sum_twin)
+        assert a.operations[-1].region_args, "fixture must carry region args"
+        assert to_canonical_bytes(a) == to_canonical_bytes(b)
         assert content_hash(a) == content_hash(b)
 
     def test_controlled_u_twins_same_canonical_bytes(self):

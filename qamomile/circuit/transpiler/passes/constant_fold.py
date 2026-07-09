@@ -11,8 +11,16 @@ from qamomile.circuit.ir.operation import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
 )
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
+    CompOp,
+    CondOp,
+    NotOp,
+    PhiOp,
+)
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
@@ -154,6 +162,20 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         # Just record the mapping for later substitution
                         folded_values[op.results[0].uuid] = folded
                         return None
+
+                # A pure-classical for loop with explicit region args
+                # (loop-carried scalars) and fully static bounds / init
+                # folds its carried results to constants, so downstream
+                # readers (e.g. gate parameters) see constants and the
+                # segmentation pass is not split by the classical loop.
+                # The loop op itself stays in the IR: body-produced
+                # values may still be read after the loop (the supported
+                # loop-invariant rebind shape), and the classical
+                # executor re-runs it harmlessly with region threading.
+                if isinstance(op, ForOperation) and op.region_args:
+                    region_consts = outer_self._try_fold_region_loop(op, folded_values)
+                    if region_consts is not None:
+                        folded_values.update(region_consts)
 
                 # Classical array element stores fold only at the top
                 # level: inside a loop body the store executes once per
@@ -347,6 +369,192 @@ class ConstantFoldingPass(Pass[Block, Block]):
         return UnifiedValueResolver(
             context=folded_values, bindings=self._bindings
         ).resolve(value)
+
+    # Trip-count cap for compile-time evaluation of region-arg loops.
+    # Beyond this the loop is left for the classical executor (correct,
+    # just not pre-folded) rather than spending unbounded compile time.
+    _MAX_REGION_FOLD_TRIPS = 100_000
+
+    def _try_fold_region_loop(
+        self,
+        op: ForOperation,
+        folded_values: dict[str, Value],
+    ) -> dict[str, Value] | None:
+        """Try to evaluate a pure-classical region-arg for loop at compile time.
+
+        Folds when the loop bounds, every region argument's init value,
+        and every body operation are compile-time evaluable (the body
+        must consist solely of scalar ``BinOp``s). The loop is simulated
+        iteration by iteration with the MLIR ``iter_args`` semantics —
+        block arguments seeded from init, rebound to the yielded values
+        after each pass — and each region argument's final carried value
+        is returned as a constant substitution for its ``result`` value.
+
+        Args:
+            op (ForOperation): A for loop carrying ``region_args``.
+            folded_values (dict[str, Value]): Map from already-folded
+                value UUIDs to their constant replacements.
+
+        Returns:
+            dict[str, Value] | None: ``result.uuid`` → constant Value
+                (same UUID, ``const`` metadata) for every region
+                argument, or ``None`` when the loop is not compile-time
+                evaluable (symbolic bounds / init, non-``BinOp`` body
+                operations, or a trip count above the folding cap).
+        """
+        if op.loop_var_value is None or len(op.operands) < 3:
+            return None
+        start = self._resolve_value(op.operands[0], folded_values)
+        stop = self._resolve_value(op.operands[1], folded_values)
+        step = self._resolve_value(op.operands[2], folded_values)
+        if start is None or stop is None or step is None or int(step) == 0:
+            return None
+        trips = range(int(start), int(stop), int(step))
+        if len(trips) > self._MAX_REGION_FOLD_TRIPS:
+            return None
+        if not self._region_body_supported(op.operations):
+            return None
+
+        env: dict[str, Value] = {}
+
+        def _bind_const(target: Value, const: Any) -> None:
+            """Record a constant binding for ``target`` in the loop env.
+
+            Args:
+                target (Value): The value being bound.
+                const (Any): Its concrete scalar value this iteration.
+            """
+            env[target.uuid] = Value(
+                type=target.type, name=target.name, uuid=target.uuid
+            ).with_const(const)
+
+        def _resolve(value: Value) -> Any:
+            """Resolve ``value`` against the loop env, folds, and bindings.
+
+            Args:
+                value (Value): The value to resolve.
+
+            Returns:
+                Any: The concrete scalar, or ``None`` when symbolic.
+            """
+            return UnifiedValueResolver(
+                context={**folded_values, **env}, bindings=self._bindings
+            ).resolve(value)
+
+        carried: dict[str, float | int] = {}
+        for arg in op.region_args:
+            init = self._resolve_value(arg.init, folded_values)
+            if init is None:
+                return None
+            carried[arg.block_arg.uuid] = init
+
+        for trip_value in trips:
+            _bind_const(op.loop_var_value, trip_value)
+            for arg in op.region_args:
+                _bind_const(arg.block_arg, carried[arg.block_arg.uuid])
+            if not self._eval_region_body(op.operations, _resolve, _bind_const):
+                return None
+            for arg in op.region_args:
+                yielded = _resolve(arg.yielded)
+                if yielded is None:
+                    return None
+                carried[arg.block_arg.uuid] = yielded
+
+        region_consts: dict[str, Value] = {}
+        for arg in op.region_args:
+            final = carried[arg.block_arg.uuid]
+            region_consts[arg.result.uuid] = Value(
+                type=arg.result.type,
+                name=f"folded_{arg.var_name}",
+                uuid=arg.result.uuid,
+            ).with_const(final)
+        return region_consts
+
+    def _region_body_supported(self, operations: list[Operation]) -> bool:
+        """Check whether a region loop body is compile-time interpretable.
+
+        Supported operations are scalar classical expressions (``BinOp``
+        / ``CompOp`` / ``CondOp`` / ``NotOp``) and ``IfOperation``s whose
+        branches are themselves supported (their conditions are resolved
+        per iteration during evaluation; branch selection results merge
+        through ``phi_ops``). Anything else — gates, stores, nested
+        loops — declines folding and leaves the loop for the classical
+        executor / emit-time threading.
+
+        Args:
+            operations (list[Operation]): The (possibly nested) body
+                operations.
+
+        Returns:
+            bool: ``True`` when every operation is interpretable.
+        """
+        for body_op in operations:
+            if isinstance(body_op, (BinOp, CompOp, CondOp, NotOp)):
+                continue
+            if isinstance(body_op, IfOperation):
+                if not self._region_body_supported(body_op.true_operations):
+                    return False
+                if not self._region_body_supported(body_op.false_operations):
+                    return False
+                if not all(isinstance(p, PhiOp) for p in body_op.phi_ops):
+                    return False
+                continue
+            return False
+        return True
+
+    def _eval_region_body(
+        self,
+        operations: list[Operation],
+        resolve: Any,
+        bind_const: Any,
+    ) -> bool:
+        """Interpret one iteration of a region loop body at compile time.
+
+        Args:
+            operations (list[Operation]): Body operations (pre-checked by
+                ``_region_body_supported``).
+            resolve (Any): Callable resolving a ``Value`` to a concrete
+                scalar (or ``None``).
+            bind_const (Any): Callable recording a result value's
+                concrete scalar in the iteration env.
+
+        Returns:
+            bool: ``True`` when every operation evaluated; ``False`` on
+                the first unresolvable operand (the caller then declines
+                the fold).
+        """
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            FoldPolicy,
+            fold_classical_op,
+        )
+
+        for body_op in operations:
+            if isinstance(body_op, (BinOp, CompOp, CondOp, NotOp)):
+                folded = fold_classical_op(
+                    body_op, resolve, set(), FoldPolicy.COMPILE_TIME
+                )
+                if folded is None or not body_op.results:
+                    return False
+                bind_const(body_op.results[0], folded)
+                continue
+            if isinstance(body_op, IfOperation):
+                condition = resolve(body_op.condition)
+                if condition is None:
+                    return False
+                taken = (
+                    body_op.true_operations if condition else body_op.false_operations
+                )
+                if not self._eval_region_body(taken, resolve, bind_const):
+                    return False
+                for phi in body_op.phi_ops:
+                    selected = phi.true_value if condition else phi.false_value
+                    merged = resolve(selected)
+                    if merged is None:
+                        return False
+                    bind_const(phi.output, merged)
+                continue
+            return False
+        return True
 
     def _substitute_slice_op_result(
         self,

@@ -125,6 +125,110 @@ def resolve_loop_bounds(
 # ---------------------------------------------------------------------------
 
 
+def _seed_region_args(
+    emit_pass: "StandardEmitPass",
+    op: ForOperation | ForItemsOperation,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve each region argument's init value into a carried-value map.
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        op (ForOperation | ForItemsOperation): The loop carrying
+            ``region_args``.
+        bindings (dict[str, Any]): Current emit-time bindings.
+
+    Returns:
+        dict[str, Any]: ``block_arg.uuid`` → concrete (or backend
+            symbolic ``Parameter``) init value for every region argument.
+
+    Raises:
+        EmitError: If an init value can be neither resolved concretely
+            nor represented as a backend runtime parameter.
+    """
+    carried: dict[str, Any] = {}
+    for arg in op.region_args:
+        init = emit_pass._resolver.resolve_classical_value(arg.init, bindings)
+        if init is None:
+            param_key = emit_pass._resolver.get_parameter_key(arg.init, bindings)
+            if param_key:
+                init = emit_pass._get_or_create_parameter(param_key, arg.init.uuid)
+        if init is None:
+            raise EmitError(
+                f"Loop-carried value '{arg.var_name}' has an initial value "
+                f"that cannot be resolved at emit time. Loop-carried "
+                f"classical scalars must start from a compile-time-"
+                f"resolvable value or a declared runtime parameter.",
+                operation=type(op).__name__,
+            )
+        carried[arg.block_arg.uuid] = init
+    return carried
+
+
+def _advance_region_args(
+    emit_pass: "StandardEmitPass",
+    op: ForOperation | ForItemsOperation,
+    carried: dict[str, Any],
+    loop_bindings: dict[str, Any],
+) -> None:
+    """Carry each region argument's yielded value into the next iteration.
+
+    The body emission has already evaluated classical ops into
+    ``loop_bindings`` (``evaluate_binop`` writes results by UUID), so the
+    yielded value is read from there first and only falls back to the
+    resolver for pass-through shapes (identity carries, constants).
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        op (ForOperation | ForItemsOperation): The loop carrying
+            ``region_args``.
+        carried (dict[str, Any]): The carried-value map from
+            ``_seed_region_args``; updated in place.
+        loop_bindings (dict[str, Any]): The just-emitted iteration's
+            bindings.
+
+    Raises:
+        EmitError: If a yielded value cannot be resolved — e.g. it
+            depends on a mid-circuit measurement outcome, which has no
+            emit-time value.
+    """
+    for arg in op.region_args:
+        nxt = loop_bindings.get(arg.yielded.uuid)
+        if nxt is None:
+            nxt = emit_pass._resolver.resolve_classical_value(
+                arg.yielded, loop_bindings
+            )
+        if nxt is None:
+            raise EmitError(
+                f"Loop-carried value '{arg.var_name}' could not be computed "
+                f"for the next iteration at emit time. Carried classical "
+                f"scalars inside a quantum loop must be computable from "
+                f"compile-time values, runtime parameters, and the loop "
+                f"variable; values derived from measurement results cannot "
+                f"be carried across unrolled iterations.",
+                operation=type(op).__name__,
+            )
+        carried[arg.block_arg.uuid] = nxt
+
+
+def _publish_region_results(
+    op: ForOperation | ForItemsOperation,
+    carried: dict[str, Any],
+    bindings: dict[str, Any],
+) -> None:
+    """Expose each region argument's final carried value as the loop result.
+
+    Args:
+        op (ForOperation | ForItemsOperation): The emitted loop.
+        carried (dict[str, Any]): The final carried-value map (init
+            values for a zero-trip loop).
+        bindings (dict[str, Any]): The enclosing emit bindings; mutated
+            so post-loop operations resolve the loop results.
+    """
+    for arg in op.region_args:
+        _set_emit_value(bindings, arg.result.uuid, carried[arg.block_arg.uuid])
+
+
 def emit_for(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -143,9 +247,18 @@ def emit_for(
 
     indexset = range(start, stop, step)
     if len(indexset) == 0:
+        # Zero-trip loop: region results still need publishing (they
+        # pass the init values through).
+        if op.region_args:
+            carried = _seed_region_args(emit_pass, op, bindings)
+            _publish_region_results(op, carried, bindings)
         return
 
-    if force_unroll:
+    if force_unroll or op.region_args:
+        # Region-carried values must be threaded iteration by iteration,
+        # which only the unrolled path can do — a native backend loop
+        # re-executes one body and cannot rebind a per-iteration
+        # classical carried value.
         emit_for_unrolled(emit_pass, circuit, op, qubit_map, clbit_map, bindings)
         return
 
@@ -250,8 +363,11 @@ def emit_for_unrolled(
             "through the pipeline (report this as a compiler bug)."
         )
 
+    carried = _seed_region_args(emit_pass, op, bindings)
     for i in range(start, stop, step):
         loop_bindings = bindings.copy()
+        for uuid, value in carried.items():
+            _set_emit_value(loop_bindings, uuid, value)
         _bind_loop_var(loop_bindings, op, i)
         emit_pass._emit_operations(
             circuit,
@@ -261,6 +377,8 @@ def emit_for_unrolled(
             loop_bindings,
             emit_qinit_reset=True,
         )
+        _advance_region_args(emit_pass, op, carried, loop_bindings)
+    _publish_region_results(op, carried, bindings)
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +439,11 @@ def emit_for_items(
     key_var_values = op.key_var_values
     value_var_value = op.value_var_value
 
+    carried = _seed_region_args(emit_pass, op, bindings)
     for key, value in entries:
         loop_bindings = bindings.copy()
+        for carried_uuid, carried_value in carried.items():
+            _set_emit_value(loop_bindings, carried_uuid, carried_value)
         push = getattr(loop_bindings, "push_loop_var", None)
 
         def _bind(
@@ -394,6 +515,8 @@ def emit_for_items(
             loop_bindings,
             emit_qinit_reset=True,
         )
+        _advance_region_args(emit_pass, op, carried, loop_bindings)
+    _publish_region_results(op, carried, bindings)
 
 
 # ---------------------------------------------------------------------------

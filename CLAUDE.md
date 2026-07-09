@@ -65,7 +65,7 @@ How the codebase already follows this:
 - **Vector measurement** is a single `MeasureVectorOperation` ([qamomile/circuit/ir/operation/gate.py#L410](qamomile/circuit/ir/operation/gate.py#L410)) — never expanded into N per-qubit `MeasureOperation`s at IR level. How a vector measurement turns into actual measurement instructions is delegated entirely to emit time: a backend with a native vector-measurement primitive can emit it as one operation, while backends without one can iterate per-qubit. The IR does not commit to per-qubit semantics.
 - **`MeasureQFixedOperation`** lives at an even higher abstraction (HYBRID quantum measurement + classical decode). At `plan`'s pre-segmentation lowering, it is split into `MeasureVectorOperation + DecodeQFixedOperation` so segmentation can route the halves into the right (quantum / classical) segment — but **each half stays abstract**: `MeasureVectorOperation` still represents "measure this whole Vector" (not per-qubit), `DecodeQFixedOperation` is a clean classical op.
 - **Composite gates and oracles** (QFT / QPE / IQFT / user callables) stay as `InvokeOperation` boxes with an optional `body`; backends with a native `CompositeGateEmitter` emit a single high-level gate, others fall back to the embedded body or shared decomposition. The IR is identical either way.
-- **Loops** (`qmc.range(...)`) stay as `ForOperation`s with symbolic bounds when possible; `LoopAnalyzer` decides unroll vs. runtime loop at emit time.
+- **Loops** (`qmc.range(...)`) stay as `ForOperation`s with symbolic bounds when possible; `LoopAnalyzer` decides unroll vs. runtime loop at emit time. Loop-carried classical scalars (`total = total + i`) are explicit **region arguments** (`RegionArg` with `init` / `block_arg` / `yielded` / `result`, MLIR-`scf.for`-style `iter_args`/`yield`) on `ForOperation` / `ForItemsOperation` — the IR expresses the carried dependency abstractly, and each evaluation layer (compile-time folding, classical executor, emit-time unrolling) threads it concretely.
 
 When introducing a new IR op or pass:
 
@@ -113,6 +113,8 @@ This is a high-level overview of the layers a `@qkernel` flows through. For the 
 **BlockKind state machine**: `HIERARCHICAL → AFFINE → ANALYZED`. Each pass validates its expected input kind.
 
 **SegmentationStrategy**: Pluggable execution model. `NisqSegmentationStrategy` enforces single quantum segment. Future strategies (JIT, distributed) can be added without core changes.
+
+**RegionArg (loop region arguments)**: Loop-carried classical scalars are explicit `RegionArg(var_name, init, block_arg, yielded, result)` records on `ForOperation` / `ForItemsOperation` (see `qamomile/circuit/ir/operation/control_flow.py`). The frontend's AST probes rebind read-before-write scalar candidates to fresh `block_arg` handles at loop-body entry (`loop_region_enter`) and rebind the post-loop name to `result` (`loop_region_result`); `result` also appears in the loop op's `results` so dependency analysis sees the loop as producer. Loops with region args always unroll at emit. `while` bodies and measurement-backed `Bit` carries are excluded (record-based rejection stays — see LIMITATIONS.md).
 
 **MeasurementMode enum**: Formalizes backend measurement handling (NATIVE / STATIC / RUNNABLE) in the GateEmitter protocol.
 

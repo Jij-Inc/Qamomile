@@ -64,6 +64,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
     LoopCarriedRebind,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
@@ -1303,6 +1304,33 @@ def _decode_loop_carried_rebinds(
     )
 
 
+def _decode_region_args(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+) -> tuple[RegionArg, ...]:
+    """Decode loop region-argument records from a loop op dict.
+
+    Args:
+        d (dict[str, Any]): The loop op dict, possibly carrying a
+            ``region_args`` list.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[RegionArg, ...]: The reconstructed records; empty when
+            the key is absent.
+    """
+    return tuple(
+        RegionArg(
+            var_name=str(r.get("var_name", "")),
+            init=_materialize_as_value(ctx, r["init_ref"]),
+            block_arg=_materialize_as_value(ctx, r["block_arg_ref"]),
+            yielded=_materialize_as_value(ctx, r["yielded_ref"]),
+            result=_materialize_as_value(ctx, r["result_ref"]),
+        )
+        for r in d.get("region_args", ())
+    )
+
+
 def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
     """Decode :class:`ForOperation`.
 
@@ -1326,6 +1354,7 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         loop_var_value=loop_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+        region_args=_decode_region_args(d, ctx),
     )
 
 
@@ -1360,6 +1389,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         value_var_value=value_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+        region_args=_decode_region_args(d, ctx),
     )
 
 
@@ -1382,6 +1412,7 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
         operations=body,
         max_iterations=d.get("max_iterations"),
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+        region_args=_decode_region_args(d, ctx),
     )
 
 

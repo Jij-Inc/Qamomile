@@ -56,6 +56,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
     LoopCarriedRebind,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
@@ -1123,6 +1124,33 @@ def _encode_loop_carried_rebinds(
     ]
 
 
+def _encode_region_args(
+    region_args: tuple[RegionArg, ...],
+) -> list[dict[str, Any]]:
+    """Encode loop region arguments as value references.
+
+    Args:
+        region_args (tuple[RegionArg, ...]): Records attached to a loop
+            operation. Their ``init`` / ``block_arg`` / ``yielded`` /
+            ``result`` values are already registered in the value table
+            via ``all_input_values`` (and ``result`` via ``results``).
+
+    Returns:
+        list[dict[str, Any]]: One dict per record with ``var_name`` and
+            the four UUID refs.
+    """
+    return [
+        {
+            "var_name": a.var_name,
+            "init_ref": a.init.uuid,
+            "block_arg_ref": a.block_arg.uuid,
+            "yielded_ref": a.yielded.uuid,
+            "result_ref": a.result.uuid,
+        }
+        for a in region_args
+    ]
+
+
 def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`ForOperation`.
 
@@ -1141,6 +1169,7 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
         op.loop_var_value.uuid if op.loop_var_value is not None else None
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
+    d["region_args"] = _encode_region_args(op.region_args)
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1168,6 +1197,7 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
         op.value_var_value.uuid if op.value_var_value is not None else None
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
+    d["region_args"] = _encode_region_args(op.region_args)
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1186,6 +1216,7 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
     d = _base_op_dict("WhileOperation", op)
     d["max_iterations"] = op.max_iterations
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
+    d["region_args"] = _encode_region_args(op.region_args)
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 

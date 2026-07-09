@@ -2,6 +2,7 @@ import builtins
 import contextlib
 import contextvars
 import copy
+import dataclasses
 import typing
 
 from qamomile.circuit.frontend.func_to_block import is_array_type
@@ -24,6 +25,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
     LoopCarriedRebind,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.types import QFixedType
@@ -165,6 +167,11 @@ def for_loop(
     with trace(body_tracer):
         yield loop_var
 
+    # Convert pending region entries (loop-carried classical scalars)
+    # into explicit RegionArg records and publish post-loop result
+    # handles for the AST-injected loop_region_result assignments.
+    region_args, region_results = _close_region_entries(body_tracer, parent_tracer)
+
     # Create ForOperation
     # operands: [start, stop, step]
     for_op = ForOperation(
@@ -172,7 +179,9 @@ def for_loop(
         loop_var_value=loop_var_value,
         operations=body_tracer.operations,
         loop_carried_rebinds=body_tracer.loop_carried_rebinds,
+        region_args=region_args,
     )
+    for_op.results.extend(region_results)
     for_op.operands.append(_value_to_ir_value(start, "start"))
     for_op.operands.append(_value_to_ir_value(stop, "stop"))
     for_op.operands.append(_value_to_ir_value(step, "step"))
@@ -625,6 +634,207 @@ def should_trace_items_loop(mapping: typing.Any) -> bool:
     return len(dict_runtime.bound_data) > 0
 
 
+@dataclasses.dataclass
+class _PendingRegionArg:
+    """Working record for a loop region argument during body tracing.
+
+    Created by :func:`loop_region_enter` when the loop body's
+    read-before-write classical scalar candidates are rebound to fresh
+    region-argument handles at body entry, completed by
+    :func:`record_loop_rebinds` (which fills ``yielded``), and consumed
+    by the loop builders, which convert it into an IR ``RegionArg`` and
+    publish the post-loop result handle.
+
+    Attributes:
+        var_name (str): The carried Python variable name.
+        init (Value): The pre-loop IR value entering iteration 0
+            (synthesized as a constant for plain Python numbers).
+        block_arg (Value): The region-argument value the body reads.
+        entry_handle (Handle): The frontend handle wrapping
+            ``block_arg`` that the AST-injected entry assignment bound
+            into the loop body's frame.
+        yielded (Value | None): The body's final IR value for the
+            variable, set by ``record_loop_rebinds``. ``None`` means the
+            body produced no representable update (identity carry).
+        publish_result (bool): Whether the loop builder should publish
+            the post-loop result handle for this variable. ``False``
+            when the body's final Python value is not representable in
+            IR (an opaque object), in which case the Python binding must
+            keep the opaque value.
+    """
+
+    var_name: str
+    init: Value
+    block_arg: Value
+    entry_handle: Handle
+    yielded: Value | None = None
+    publish_result: bool = True
+
+
+def _region_scalar_handle(value: Value, template: Handle | None) -> Handle:
+    """Wrap an IR scalar value in the matching frontend handle.
+
+    Args:
+        value (Value): The IR value to wrap (``UIntType`` or
+            ``FloatType``).
+        template (Handle | None): The handle whose family should be
+            preserved, or ``None`` to dispatch on ``value.type``.
+
+    Returns:
+        Handle: A ``UInt`` or ``Float`` handle wrapping ``value``.
+
+    Raises:
+        TypeError: If ``value`` is neither UInt- nor Float-typed.
+    """
+    if isinstance(template, UInt) or (
+        template is None and isinstance(value.type, UIntType)
+    ):
+        return UInt(value=value, init_value=0)
+    if isinstance(template, Float) or (
+        template is None and isinstance(value.type, FloatType)
+    ):
+        return Float(value=value, init_value=0.0)
+    raise TypeError(
+        f"Loop region arguments support UInt / Float scalars; got value type "
+        f"{value.type!r}"
+    )
+
+
+def loop_region_enter(
+    snapshot: dict[str, typing.Any],
+    name: str,
+) -> typing.Any:
+    """Bind a loop-carried classical scalar to a fresh region argument.
+
+    Called from AST-injected code at the top of a ``for`` /
+    ``for-items`` loop body (immediately after ``loop_rebind_snapshot``)
+    for each read-before-write classical candidate: ``total =
+    loop_region_enter(_qm_rebind_snap_N, "total")``. When the pre-loop
+    binding is a classical ``UInt`` / ``Float`` scalar (or a plain
+    Python ``int`` / ``float``), the body is given a fresh
+    region-argument handle so its reads become explicit loop-carried
+    reads instead of stale pre-loop reads — the MLIR ``iter_args``
+    model. The loop builder later converts the pending entry into a
+    ``RegionArg`` on the loop operation.
+
+    Non-scalar and quantum bindings (arrays, dicts, ``Qubit``, ``Bit``,
+    opaque Python objects, ``bool``) are returned unchanged, so those
+    shapes keep their existing tracing behavior — quantum rebinds keep
+    feeding the discard check, and measurement-backed ``Bit`` carries
+    keep their targeted rejection.
+
+    Args:
+        snapshot (dict[str, typing.Any]): Pre-loop-body bindings from
+            ``loop_rebind_snapshot``.
+        name (str): The candidate variable name.
+
+    Returns:
+        typing.Any: A fresh region-argument handle for supported scalar
+            bindings, or the original binding unchanged.
+
+    Raises:
+        NameError: If ``name`` resolves nowhere — mirroring the
+            ``NameError`` the body's first read would have raised.
+    """
+    if name not in snapshot:
+        raise NameError(f"name '{name}' is not defined")
+    resolved = snapshot[name]
+    tracer = get_current_tracer()
+
+    init_value: Value | None = None
+    template: Handle | None = None
+    if isinstance(resolved, (UInt, Float)):
+        candidate = resolved.value
+        if isinstance(candidate, Value) and not candidate.type.is_quantum():
+            init_value = candidate
+            template = resolved
+    elif not isinstance(resolved, bool) and isinstance(resolved, (int, float)):
+        init_value = _value_to_ir_value(resolved, name)
+    if init_value is None:
+        return resolved
+
+    block_arg = Value(type=init_value.type, name=name)
+    entry_handle = _region_scalar_handle(block_arg, template)
+    tracer.region_entries[name] = _PendingRegionArg(
+        var_name=name,
+        init=init_value,
+        block_arg=block_arg,
+        entry_handle=entry_handle,
+    )
+    return entry_handle
+
+
+def loop_region_result(name: str, current: typing.Any) -> typing.Any:
+    """Rebind a loop-carried variable to its post-loop result handle.
+
+    Called from AST-injected code immediately after a ``for`` /
+    ``for-items`` loop's ``with`` block: ``total =
+    loop_region_result("total", total)``. Consumes the result handle
+    the loop builder published for ``name`` (if any) so post-loop reads
+    reference the loop operation's result value instead of the body's
+    final yielded value.
+
+    Args:
+        name (str): The carried variable name.
+        current (typing.Any): The variable's current binding (the body's
+            final handle), returned unchanged when the closed loop
+            published no result for ``name``.
+
+    Returns:
+        typing.Any: The published result handle, or ``current``.
+    """
+    tracer = get_current_tracer()
+    return tracer.loop_region_results.pop(name, current)
+
+
+def _close_region_entries(
+    body_tracer: Tracer,
+    parent_tracer: Tracer,
+) -> tuple[tuple[RegionArg, ...], list[Value]]:
+    """Convert pending region entries into IR ``RegionArg`` records.
+
+    Called by the ``for`` / ``for-items`` loop builders after the body
+    trace completes. For each pending entry, synthesizes the loop-result
+    ``Value``, builds the ``RegionArg``, and publishes the post-loop
+    result handle on ``parent_tracer.loop_region_results`` (replacing
+    any leftovers from a previously closed loop) for the AST-injected
+    ``loop_region_result`` assignments to consume.
+
+    Args:
+        body_tracer (Tracer): The tracer that captured the loop body
+            (carries ``region_entries``).
+        parent_tracer (Tracer): The tracer the loop operation is being
+            appended to (receives ``loop_region_results``).
+
+    Returns:
+        tuple[tuple[RegionArg, ...], list[Value]]: The region-argument
+            records for the loop operation and the result values to
+            append to its ``results`` list, in entry order.
+    """
+    region_args: list[RegionArg] = []
+    results: list[Value] = []
+    result_handles: dict[str, typing.Any] = {}
+    for entry in body_tracer.region_entries.values():
+        yielded = entry.yielded if entry.yielded is not None else entry.block_arg
+        result = Value(type=entry.block_arg.type, name=entry.var_name)
+        region_args.append(
+            RegionArg(
+                var_name=entry.var_name,
+                init=entry.init,
+                block_arg=entry.block_arg,
+                yielded=yielded,
+                result=result,
+            )
+        )
+        results.append(result)
+        if entry.publish_result:
+            result_handles[entry.var_name] = _region_scalar_handle(
+                result, entry.entry_handle
+            )
+    parent_tracer.loop_region_results = result_handles
+    return tuple(region_args), results
+
+
 def loop_rebind_snapshot(
     frame_locals: dict[str, typing.Any],
     names: tuple[str, ...],
@@ -679,10 +889,14 @@ def record_loop_rebinds(
     - **Classical scalar** (only names in ``classical_names``, the
       read-before-write candidates): the post-body value is a classical
       scalar with a different IR identity — the ``total = total + i``
-      shape whose traced-once IR silently diverges from Python
-      semantics. Store-only classical reassignments (a value recomputed
-      from scratch each iteration) are deliberately not recorded; they
-      trace correctly.
+      shape. Candidates that were region-bound at body entry
+      (``loop_region_enter``) complete their pending ``RegionArg``
+      instead of producing a record — the carry is then explicit and
+      supported. A record is created only for the shapes region binding
+      declined (``while`` bodies, measurement-backed ``Bit`` carries),
+      which the transpiler still rejects. Store-only classical
+      reassignments (a value recomputed from scratch each iteration)
+      are deliberately not recorded; they trace correctly.
 
     No IR operations are emitted; this only annotates the tracer.
 
@@ -698,8 +912,38 @@ def record_loop_rebinds(
     """
     post_bindings = branch_rebind_pre_bindings(frame_locals, names)
     classical_candidates = set(classical_names)
+    tracer = get_current_tracer()
     records: list[LoopCarriedRebind] = []
     for name in names:
+        entry = tracer.region_entries.get(name)
+        if entry is not None:
+            # Region-bound classical scalar: fill in the yielded value
+            # instead of recording a rebind — the carried update is now
+            # an explicit, supported RegionArg, not a staleness hazard.
+            if name not in post_bindings:
+                continue
+            after = post_bindings[name]
+            if after is entry.entry_handle:
+                # Never actually stored on the traced path: identity
+                # carry (yielded defaults to the block argument).
+                continue
+            after_value = _ir_value_from_handle_like(after)
+            if after_value is None and isinstance(after, (bool, int, float)):
+                after_value = _value_to_ir_value(after, name)
+            if (
+                after_value is None
+                or isinstance(after_value, ArrayValue)
+                or after_value.type.is_quantum()
+            ):
+                # The body's final Python value is not representable as
+                # a carried classical scalar (opaque object / array /
+                # quantum). Keep the identity carry for the body's
+                # block-argument reads, but let the Python binding keep
+                # the body's final value after the loop.
+                entry.publish_result = False
+                continue
+            entry.yielded = after_value
+            continue
         if name not in snapshot or name not in post_bindings:
             continue
         before = snapshot[name]
@@ -766,7 +1010,6 @@ def record_loop_rebinds(
             )
         )
     if records:
-        tracer = get_current_tracer()
         tracer.loop_carried_rebinds = tracer.loop_carried_rebinds + tuple(records)
 
 
@@ -1626,6 +1869,11 @@ def for_items(
     with trace(body_tracer):
         yield (key_result, value_handle)
 
+    # Convert pending region entries (loop-carried classical scalars)
+    # into explicit RegionArg records and publish post-loop result
+    # handles for the AST-injected loop_region_result assignments.
+    region_args, region_results = _close_region_entries(body_tracer, parent_tracer)
+
     # Create ForItemsOperation with captured body operations
     for_items_op = ForItemsOperation(
         key_vars=key_var_names,
@@ -1635,7 +1883,9 @@ def for_items(
         value_var_value=value_var_value,
         operations=body_tracer.operations,
         loop_carried_rebinds=body_tracer.loop_carried_rebinds,
+        region_args=region_args,
     )
+    for_items_op.results.extend(region_results)
     for_items_op.operands.append(d.value)  # type: ignore[arg-type]  # DictValue is not Value but stored as operand
 
     parent_tracer.add_operation(for_items_op)

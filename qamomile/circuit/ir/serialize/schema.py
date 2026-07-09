@@ -164,5 +164,10 @@ from __future__ import annotations
 # ``loop_carried_rebinds`` records on loop operations follow the same
 # additive encoding (safety caveat: a reader that predates them drops
 # the records and with them the loop-carried rebind rejection — accepted
-# under the same-revision policy above).
+# under the same-revision policy above).  The ``region_args`` records on
+# loop operations (explicit loop-carried values: ``var_name`` plus
+# ``init_ref`` / ``block_arg_ref`` / ``yielded_ref`` / ``result_ref``)
+# are additive in the same way; a reader that predates them would drop
+# the loop-carried threading entirely, which is accepted only under the
+# same-revision policy above.
 SCHEMA_VERSION: int = 1

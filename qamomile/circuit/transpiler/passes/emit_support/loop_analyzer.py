@@ -59,6 +59,10 @@ class LoopAnalyzer:
         bindings: dict[str, object],
     ) -> bool:
         loop_uuid = op.loop_var_value.uuid if op.loop_var_value is not None else None
+        if op.region_args:
+            # Loop-carried classical scalars must be threaded iteration
+            # by iteration, which only unrolled emission can do.
+            return True
         if self._has_dynamic_nested_loop(op.operations, bindings, loop_uuid):
             return True
         if self._has_array_element_access(op.operations, loop_uuid):

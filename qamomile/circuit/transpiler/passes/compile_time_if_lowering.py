@@ -473,6 +473,44 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             new_records.append(record)
         return tuple(new_records) if changed else rebinds
 
+    @staticmethod
+    def _substitute_region_args(
+        region_args: tuple[Any, ...],
+        substitutor: "ValueSubstitutor",
+    ) -> tuple[Any, ...]:
+        """Rewrite loop region-argument values through the substitutor.
+
+        Keeps ``region_args`` coherent when a region argument's
+        ``yielded`` (or ``init``) was a nested compile-time if's phi
+        output that the lowering erased — without this, the executor and
+        emit-time threading would chase a dangling phi UUID (``Value
+        _phi_N not found``).
+
+        Args:
+            region_args (tuple[Any, ...]): ``RegionArg`` records.
+            substitutor (ValueSubstitutor): The active substitution.
+
+        Returns:
+            tuple[Any, ...]: Rewritten records; ``region_args`` itself
+                when nothing changed.
+        """
+        if not region_args:
+            return region_args
+        new_records = []
+        changed = False
+        for record in region_args:
+            replacements: dict[str, Any] = {}
+            for field in ("init", "block_arg", "yielded", "result"):
+                current = getattr(record, field)
+                substituted = substitutor.substitute_value(current)
+                if isinstance(substituted, Value) and substituted is not current:
+                    replacements[field] = substituted
+            if replacements:
+                record = dataclasses.replace(record, **replacements)
+                changed = True
+            new_records.append(record)
+        return tuple(new_records) if changed else region_args
+
     def _apply_substitution(
         self,
         op: Operation,
@@ -578,6 +616,12 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             if new_rebinds is not rebinds:
                 rebuilt = dataclasses.replace(
                     cast(Any, rebuilt), loop_carried_rebinds=new_rebinds
+                )
+            region_args = getattr(rebuilt, "region_args", ())
+            new_region_args = self._substitute_region_args(region_args, substitutor)
+            if new_region_args is not region_args:
+                rebuilt = dataclasses.replace(
+                    cast(Any, rebuilt), region_args=new_region_args
                 )
             return rebuilt
 
