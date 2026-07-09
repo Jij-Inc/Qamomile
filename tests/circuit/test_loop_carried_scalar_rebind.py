@@ -114,7 +114,7 @@ class TestRejectedRebinds:
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_for_if_accumulation_rejected(self):
-        """Accumulation guarded by a runtime if (phi-mediated) is rejected."""
+        """Accumulation guarded by a runtime if (merge-mediated) is rejected."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.UInt:
@@ -214,7 +214,7 @@ class TestRejectedRebinds:
         """Accumulation feeding a later qmc.range bound gets the targeted error.
 
         Previously this failed at emit with the confusing "Cannot unroll
-        loop: bounds could not be resolved (stop='_phi_0')".
+        loop: bounds could not be resolved (stop='_merge_0')".
         """
 
         @qmc.qkernel

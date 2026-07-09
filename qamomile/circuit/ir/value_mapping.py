@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Mapping, cast
+from typing import Any, Mapping
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
@@ -70,15 +69,6 @@ class ValueSubstitutor:
                     sub_map[value.uuid] = substituted
 
         result = op.replace_values(sub_map) if sub_map else op
-
-        if isinstance(result, IfOperation):
-            from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
-
-            new_phi_ops = cast(
-                list[PhiOp],
-                [self.substitute_operation(phi_op) for phi_op in result.phi_ops],
-            )
-            result = dataclasses.replace(result, phi_ops=new_phi_ops)
 
         # ``CastOperation.qubit_mapping`` holds carrier keys as a bare
         # operation field, so ``replace_values`` does not reach it; substitute

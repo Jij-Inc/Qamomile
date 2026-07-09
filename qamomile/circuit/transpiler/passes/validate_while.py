@@ -2,7 +2,7 @@
 
 Validates that all ``WhileOperation`` conditions are measurement-backed
 ``Bit`` values.  A condition is measurement-backed if it originates from
-``qmc.measure()`` either directly or through phi-merged branches where
+``qmc.measure()`` either directly or through merged branches where
 every leaf is itself measurement-backed (e.g. ``if sel: bit = measure(q1)
 else: bit = measure(q2)``).
 
@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -46,9 +45,9 @@ def build_producer_map(
 
     Args:
         operations (list[Operation]): Operations to walk, recursing into
-            all ``HasNestedOps`` bodies — for ``IfOperation`` that
-            includes ``phi_ops`` (the third nested list), so phi results
-            map to their ``PhiOp`` producers.
+            all ``HasNestedOps`` bodies. ``IfOperation`` merge outputs
+            are on ``results``, so they map to the ``IfOperation``
+            itself.
         producer_map (dict[str, Operation]): Mutable map from result UUID
             to the producing operation; updated in place.
     """
@@ -57,8 +56,7 @@ def build_producer_map(
             if isinstance(result, Value):
                 producer_map[result.uuid] = op
 
-        # Recurse into control flow bodies (IfOperation.nested_op_lists
-        # includes phi_ops, so PhiOp results are registered by this walk).
+        # Recurse into control flow bodies.
         if isinstance(op, HasNestedOps):
             for op_list in op.nested_op_lists():
                 build_producer_map(op_list, producer_map)
@@ -74,12 +72,12 @@ def is_measurement_backed(
     Returns ``True`` if the value is produced by ``MeasureOperation`` /
     ``MeasureVectorOperation`` directly, if it is an element access of a
     measured ``Vector[Bit]`` (its ``parent_array`` — possibly through a
-    ``slice_of`` view chain — is measurement-backed), or if it is produced
-    by ``IfOperation`` / ``PhiOp`` where every reachable leaf source is
+    ``slice_of`` view chain — is measurement-backed), or if it is an
+    ``IfOperation`` merge output where every reachable leaf source is
     itself measurement-backed.
 
     Uses backtracking on ``visiting`` so that the same value can be
-    reached from multiple independent phi branches without false negatives.
+    reached from multiple independent merge branches without false negatives.
 
     Args:
         value (Value): The IR value to trace.
@@ -133,13 +131,6 @@ def is_measurement_backed(
         visiting.discard(value.uuid)
         return False
 
-    if isinstance(producer, PhiOp):
-        result = is_measurement_backed(
-            producer.true_value, producer_map, visiting
-        ) and is_measurement_backed(producer.false_value, producer_map, visiting)
-        visiting.discard(value.uuid)
-        return result
-
     visiting.discard(value.uuid)
     return False
 
@@ -151,8 +142,8 @@ class ValidateWhileContractPass(Pass[Block, Block]):
     checks every WhileOperation operand against it.  A valid condition must be:
 
     1. A ``Value`` with ``BitType``
-    2. Measurement-backed: produced by ``MeasureOperation`` directly, or by
-       ``IfOperation`` / ``PhiOp`` where every reachable leaf source is
+    2. Measurement-backed: produced by ``MeasureOperation`` directly, or an
+       ``IfOperation`` merge output where every reachable leaf source is
        itself measurement-backed.
 
     Both ``operands[0]`` (initial condition) and ``operands[1]``
@@ -211,7 +202,7 @@ class ValidateWhileContractPass(Pass[Block, Block]):
         Both ``operands[0]`` (initial condition) and ``operands[1]``
         (loop-carried condition) are checked.  A condition is
         measurement-backed if it traces back to ``MeasureOperation``
-        through any chain of ``IfOperation`` / ``PhiOp`` merges.
+        through any chain of ``IfOperation`` merges.
         """
         if op.operands:
             self._check_operand(op.operands[0], "condition", producer_map)

@@ -80,26 +80,35 @@ class UUIDRemapper:
                 reassigned a fresh UUID / logical_id, and with
                 ``CastOperation.qubit_mapping`` carrier keys remapped.
         """
-        # Build a uuid -> cloned_value substitution map covering every
-        # Value the operation owns (operands, results, plus subclass
-        # extras exposed via all_input_values).
+        # Build a uuid -> cloned_value substitution map. Operands are
+        # cloned first so nested-body metadata referencing an outer value
+        # (e.g. a parent array passed as an operand) resolves through the
+        # remap tables while the bodies are cloned below.
         sub_map: dict[str, ValueBase] = {}
-        for v in op.all_input_values():
-            sub_map[v.uuid] = self.clone_value(v)
+        for v in op.operands:
+            if isinstance(v, ValueBase):
+                sub_map[v.uuid] = self.clone_value(v)
 
-        # Clone nested bodies BEFORE results. IfOperation results are phi
-        # outputs whose metadata may reference values whose first (and only)
-        # appearance is inside the branch bodies — e.g. QFixed carrier keys
-        # pointing at an array that is cast inside the ``if``. Cloning the
-        # bodies first fills the remap tables so ``_clone_metadata`` can
-        # resolve those references; the phi outputs themselves are cloned
-        # while cloning ``phi_ops`` (the last nested list) and the results
-        # loop below then reuses the cached clones.
+        # Clone nested bodies BEFORE subclass-extra values and results.
+        # IfOperation yields and merge outputs carry metadata that may
+        # reference values whose first (and only) appearance is inside
+        # the branch bodies — e.g. QFixed carrier keys pointing at an
+        # array that is cast inside the ``if``. Cloning the bodies first
+        # fills the remap tables so ``_clone_metadata`` can resolve those
+        # references; the value cache then hands the loops below the same
+        # clones the bodies produced.
         cloned_lists: list[list[Operation]] | None = None
         if isinstance(op, HasNestedOps):
             cloned_lists = [
                 self.clone_operations(op_list) for op_list in op.nested_op_lists()
             ]
+
+        # Subclass extras (loop_var_value, rebind records, if-merge
+        # yields) exposed via all_input_values; already-cloned operands
+        # hit the sub_map guard.
+        for v in op.all_input_values():
+            if v.uuid not in sub_map:
+                sub_map[v.uuid] = self.clone_value(v)
 
         for v in op.results:
             if isinstance(v, ValueBase) and v.uuid not in sub_map:

@@ -156,14 +156,14 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         # base-class runtime contract. ResourceAllocator pre-registers the
         # qubit / clbit merges on this backend (so the physical mapping is
         # mostly a no-op here), but classical identity merges bind into
-        # ``bindings`` only through register_classical_phi_aliases.
+        # ``bindings`` only through register_classical_merge_aliases.
         from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (  # noqa: E501
-            register_classical_phi_aliases,
-            register_phi_outputs,
+            register_classical_merge_aliases,
+            register_merge_outputs,
         )
 
-        register_phi_outputs(self, op, qubit_map, clbit_map, bindings)
-        register_classical_phi_aliases(self, op, bindings, None)
+        register_merge_outputs(self, op, qubit_map, clbit_map, bindings)
+        register_classical_merge_aliases(self, op, bindings, None)
 
     def _emit_while(
         self,
