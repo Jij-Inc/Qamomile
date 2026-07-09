@@ -471,16 +471,20 @@ def map_merge_outputs(
                 # the loop-indexed pre-measured mux, whose sources were
                 # symbolic at allocation and never got that aliasing — the
                 # narrow shape that was silently miscompiling. This is a
-                # precision guard, not a completeness one: a constant-index
-                # or whole-vector pre-measured mux is aliased at allocation
-                # and skips this check, but it does not reach a silent
-                # result either — it is rejected loudly by segmentation or
-                # the classical executor. Catching every unrepresentable
-                # shape with one clear error here would need the
-                # pre-aliasing source identities and is left as a follow-up
-                # robustness nicety. The guard is enabled at emit time only;
-                # at allocation the representable merges still hold distinct
-                # clbits and must not be rejected.
+                # precision guard, NOT a completeness one: a constant-index
+                # or whole-vector pre-measured mux is aliased at allocation,
+                # so it already resolves to EQUAL clbits here and skips this
+                # check. That family is only rejected loudly (by
+                # segmentation / the classical executor) when the mux is a
+                # standalone classical control op; when the if body keeps
+                # the segment quantum (a branch quantum op) it stays in the
+                # quantum segment and STILL silently miscompiles. That is a
+                # pre-existing clbit-aliasing limitation (identical on main)
+                # this guard does not close — only the loop-indexed shape is
+                # covered here; the broader family is tracked as a follow-up
+                # that needs the pre-aliasing source identities. The guard is
+                # enabled at emit time only; at allocation the representable
+                # merges still hold distinct clbits and must not be rejected.
                 if (
                     reject_runtime_bit_mux
                     and true_clbit is not None
