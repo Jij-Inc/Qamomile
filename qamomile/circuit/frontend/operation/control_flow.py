@@ -286,10 +286,13 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     """Create a Handle copy with consumed state reset for branch tracing.
 
     This function intentionally accesses Handle's private ``_consumed`` and
-    ``_consumed_by`` attributes.  This is the **only** place where such access
-    is acceptable: if-else branches are mutually exclusive, so both must be
-    traceable independently.  Exposing a general-purpose copy method on Handle
-    would undermine the affine-type enforcement that prevents qubit reuse bugs.
+    ``_consumed_by`` attributes.  Direct consumed-state manipulation is
+    confined to the phi-merge machinery in this module: here (resetting the
+    per-branch copies so mutually-exclusive branches trace independently) and
+    in ``_mark_conditionally_consumed`` (re-marking the merged handle when a
+    branch consumed the value — the conditional-move rule).  Keeping this off
+    the public Handle surface preserves the affine-type enforcement that
+    prevents qubit reuse bugs.
 
     Non-Handle values (int, float, etc.) are returned unchanged.
     """
@@ -298,6 +301,7 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     c = copy.copy(h)
     c._consumed = False
     c._consumed_by = None
+    c._consumed_at = None
     # Reset borrowed-element tracking for ArrayBase instances so that
     # each branch starts with an empty borrow set.  Without this,
     # shallow copy shares the same _borrowed_indices dict and borrowing
@@ -305,6 +309,139 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     if isinstance(c, ArrayBase):
         c._borrowed_indices = {}
     return c
+
+
+# Marker phrase embedded in the ``_consumed_by`` message a conditional
+# consumption produces. Used to detect a nested-if phrase and avoid
+# re-wrapping it (which would duplicate the suffix).
+_COND_CONSUME_MARKER = "of the preceding if/else"
+
+
+def _merge_branch_element_borrows(
+    merged_handle: typing.Any,
+    true_val: typing.Any,
+    false_val: typing.Any,
+) -> None:
+    """Carry unreturned branch element borrows onto the phi-merged array.
+
+    Each branch traces against a fresh handle copy whose ``_borrowed_indices``
+    starts empty (so mutually-exclusive branches don't conflict). Any entry
+    still outstanding at the end of a branch is an element that was borrowed
+    and never returned on that path — most importantly an element
+    destructively consumed inside the branch (``if sel: _ = measure(qs[0])``).
+    Before this merge, that per-element state was silently dropped: a post-if
+    ``qs[0] = h(qs[0])`` compiled even though on the taken path it acts on a
+    measured wire — the exact program that raises when written without the
+    enclosing ``if``. Union-merging both branches' leftover borrow entries
+    onto the merged handle routes the post-if element access into the
+    existing borrow / destroyed-slot enforcement in
+    ``ArrayBase.__getitem__``, which raises at trace time.
+
+    A borrow that IS returned inside its branch (``if sel: qs[0] =
+    h(qs[0])``) releases its entry before the branch ends and is unaffected.
+    Dropping the array (no post-if element access) also stays legal — the
+    entries only bite on reuse.
+
+    Args:
+        merged_handle (typing.Any): The phi-result handle for this variable.
+        true_val (typing.Any): The true-branch handle/value (its leftover
+            ``_borrowed_indices`` are merged when it is an ``ArrayBase``).
+        false_val (typing.Any): The false-branch handle/value.
+
+    Returns:
+        None
+    """
+    if not isinstance(merged_handle, ArrayBase):
+        return
+    value = getattr(merged_handle, "value", None)
+    if value is None or not value.type.is_quantum():
+        return
+    for branch_val in (true_val, false_val):
+        if isinstance(branch_val, ArrayBase):
+            merged_handle._borrowed_indices.update(branch_val._borrowed_indices)
+
+
+def _mark_conditionally_consumed(
+    merged_handle: typing.Any,
+    true_val: typing.Any,
+    false_val: typing.Any,
+    true_consumed: bool,
+    false_consumed: bool,
+) -> None:
+    """Mark a phi-merged quantum handle consumed if a branch consumed it.
+
+    Implements the conditional-move rule (as in Rust's borrow checker /
+    ``maybe-init`` dataflow): a quantum value consumed on *any* branch of an
+    if/else is treated as consumed after the merge. Without this, a variable
+    consumed on one path (e.g. ``if c: _ = qmc.measure(q)``) but not rebound
+    would still surface after the if as a live handle wrapping the phi result,
+    so a later ``q = qmc.h(q)`` compiled silently — the exact program that
+    raises ``QubitConsumedError`` when written without the enclosing ``if``.
+    Marking the merged handle consumed makes the reuse raise at trace time
+    with an actionable message, restoring affine soundness.
+
+    This intentionally accesses the Handle's private ``_consumed`` /
+    ``_consumed_by`` fields, mirroring ``_fresh_handle_copy_for_tracing``:
+    phi-merge is the one place that must adjust consumed state directly. Only
+    quantum handles are marked (classical values are non-affine and may be
+    reused freely). Dropping the value (never using it after the if) stays
+    legal — affinity permits drop; only *reuse* now raises.
+
+    Args:
+        merged_handle (typing.Any): The phi-result handle returned to the
+            traced Python code for this variable.
+        true_val (typing.Any): The true-branch handle/value for this variable
+            (carries ``_consumed_by`` when it was consumed).
+        false_val (typing.Any): The false-branch handle/value for this
+            variable.
+        true_consumed (bool): Whether the true branch consumed this variable.
+        false_consumed (bool): Whether the false branch consumed this
+            variable.
+
+    Returns:
+        None
+    """
+    _merge_branch_element_borrows(merged_handle, true_val, false_val)
+    if not (true_consumed or false_consumed):
+        return
+    value = getattr(merged_handle, "value", None)
+    if value is None or not value.type.is_quantum():
+        return
+    consuming_op = getattr(true_val, "_consumed_by", None) if true_consumed else None
+    if consuming_op is None:
+        consuming_op = getattr(false_val, "_consumed_by", None)
+    # Carry the consuming branch's source location through the merge so a
+    # later reuse reports where inside the branch the value was consumed.
+    # Each fallback is guarded by that branch's consumed flag so a
+    # non-consuming branch's handle can never contribute a stale location.
+    consumed_at = getattr(true_val, "_consumed_at", None) if true_consumed else None
+    if consumed_at is None and false_consumed:
+        consumed_at = getattr(false_val, "_consumed_at", None)
+    merged_handle._consumed_at = consumed_at
+    # Nested-if case: the branch value was consumed by a deeper merge that
+    # already produced a full conditional-consumption phrase (it contains the
+    # marker below). Re-wrapping it would duplicate the suffix
+    # ("...of the preceding if/else ... of the preceding if/else ..."), so the
+    # inner phrase — which already conveys that the value was conditionally
+    # consumed — is kept verbatim.
+    if consuming_op and _COND_CONSUME_MARKER in consuming_op:
+        merged_handle._consumed = True
+        merged_handle._consumed_by = consuming_op
+        return
+    if true_consumed and false_consumed:
+        which = "both branches"
+    elif true_consumed:
+        which = "the true branch"
+    else:
+        which = "the false branch"
+    op_desc = consuming_op if consuming_op else "a measurement/gate"
+    # ``_consumed_by`` is rendered inside single quotes by the
+    # ``QubitConsumedError`` template, so the phrase is not self-quoted here.
+    merged_handle._consumed = True
+    merged_handle._consumed_by = (
+        f"{op_desc} in {which} {_COND_CONSUME_MARKER} "
+        f"(a quantum value consumed on one branch cannot be used after the if)"
+    )
 
 
 def _value_to_ir_value(val: typing.Any, name_prefix: str = "const") -> Value:
@@ -1231,6 +1368,13 @@ def emit_if(
                 continue
             phi_output, merged_handle = _create_phi_for_values(
                 condition_value, true_val, false_val, if_op
+            )
+            # Conditional-move rule: if the value was consumed on either
+            # branch, the merged handle is consumed after the if. Reusing it
+            # then raises at trace time instead of silently carrying the
+            # consumed value forward through the phi.
+            _mark_conditionally_consumed(
+                merged_handle, true_val, false_val, true_consumed, false_consumed
             )
             merged_results.append(merged_handle)
         elif isinstance(false_val, (Handle, Value)):

@@ -25,7 +25,12 @@ from qamomile.circuit.transpiler.errors import (
     UnreturnedBorrowError,
 )
 
-from .handle import Handle, _emit_binop
+from .handle import (
+    Handle,
+    _describe_consume_sites,
+    _emit_binop,
+    _user_code_frame_ref,
+)
 from .primitives import Bit, Float, Qubit, UInt
 
 T = TypeVar("T", bound=Handle)
@@ -573,12 +578,15 @@ class ArrayBase(Handle, Generic[T]):
         # Check if the array itself has been consumed (e.g., by cast or measure)
         if self._consumed and self.value.type.is_quantum():
             display_name = self.value.name or "array"
+            first_use, reuse, consumed_at = _describe_consume_sites(
+                self, "array element access"
+            )
             raise QubitConsumedError(
                 f"Array '{display_name}' was already consumed by "
-                f"'{self._consumed_by}' and cannot be accessed.",
+                f"{first_use} and cannot be accessed in {reuse}.",
                 handle_name=display_name,
                 operation_name="array element access",
-                first_use_location=self._consumed_by,
+                first_use_location=consumed_at or self._consumed_by,
             )
 
         # Check if already borrowed — same dict covers direct element
@@ -732,12 +740,15 @@ class ArrayBase(Handle, Generic[T]):
         # Check if the array itself has been consumed (e.g., by cast or measure)
         if self._consumed and self.value.type.is_quantum():
             display_name = self.value.name or "array"
+            first_use, reuse, consumed_at = _describe_consume_sites(
+                self, "array element return"
+            )
             raise QubitConsumedError(
                 f"Array '{display_name}' was already consumed by "
-                f"'{self._consumed_by}' and cannot be accessed.",
+                f"{first_use} and cannot be accessed in {reuse}.",
                 handle_name=display_name,
                 operation_name="array element return",
-                first_use_location=self._consumed_by,
+                first_use_location=consumed_at or self._consumed_by,
             )
 
         # Determine the borrow key to release.
@@ -1284,13 +1295,16 @@ class Vector(ArrayBase[T]):
         self_root = self._slice_parent if isinstance(self, VectorView) else self  # type: ignore[attr-defined,unreachable]
         if self_root._consumed and self_root.value.type.is_quantum():
             display_name = self_root.value.name or "array"
+            first_use, reuse, consumed_at = _describe_consume_sites(
+                self_root, "slice assignment"
+            )
             raise QubitConsumedError(
                 f"Slice assignment target '{display_name}' was already "
-                f"consumed by '{self_root._consumed_by}' and cannot be "
-                f"used as the LHS of a slice assignment.",
+                f"consumed by {first_use} and cannot be used as the LHS "
+                f"of a slice assignment in {reuse}.",
                 handle_name=display_name,
                 operation_name="slice assignment",
-                first_use_location=self_root._consumed_by,
+                first_use_location=consumed_at or self_root._consumed_by,
             )
         if (
             isinstance(self, VectorView)  # type: ignore[unreachable]
@@ -1298,12 +1312,16 @@ class Vector(ArrayBase[T]):
             and self.value.type.is_quantum()
         ):
             display_name = self.value.name or "view"  # type: ignore[unreachable]
+            first_use, reuse, consumed_at = _describe_consume_sites(
+                self, "slice assignment"
+            )
             raise QubitConsumedError(
                 f"Slice assignment LHS view '{display_name}' was "
-                f"already consumed by '{self._consumed_by}'.",
+                f"already consumed by {first_use} and cannot be reused "
+                f"in {reuse}.",
                 handle_name=display_name,
                 operation_name="slice assignment",
-                first_use_location=self._consumed_by,
+                first_use_location=consumed_at or self._consumed_by,
             )
 
         # (4) Compute the would-be LHS coverage side-effect-free.  If
@@ -2668,6 +2686,12 @@ class VectorView(Vector[T]):
                 )
         self._consumed = True
         self._consumed_by = operation_name
+        # Mirror ``Handle.consume``: record the user-code location of the
+        # transferring call so a later reuse of this view reports a real
+        # ``file:line`` first-use site. Views are always quantum, so no
+        # linearity guard is needed; line resolution stays deferred to the
+        # error path (see ``_FrameRef`` in ``handle.py``).
+        self._consumed_at = _user_code_frame_ref()
         if self._slice_covered_indices is not None:
             for idx in self._slice_covered_indices:
                 key = (f"const:{idx}",)

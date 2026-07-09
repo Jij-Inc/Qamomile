@@ -32,6 +32,8 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
@@ -1319,6 +1321,10 @@ class ResourceInterpreter:
                 MeasureOperation() | MeasureVectorOperation() | MeasureQFixedOperation()
             ):
                 return self.eval_measure(operation)
+            case ProjectOperation():
+                return self.eval_project(operation)
+            case ResetOperation():
+                return self.eval_reset(operation)
             case ForOperation():
                 return self.eval_for(operation, resolver, controls=controls)
             case WhileOperation():
@@ -1400,6 +1406,34 @@ class ResourceInterpreter:
         return ResourceEstimate(
             depth=DepthResources(depth=_ONE, measurement_depth=_ONE),
             trace=ResourceTraceNode(type(operation).__name__, "primitive"),
+        )
+
+    def eval_project(self, operation: ProjectOperation) -> ResourceEstimate:
+        """Evaluate a projective measurement operation.
+
+        Args:
+            operation (ProjectOperation): Projection operation.
+
+        Returns:
+            ResourceEstimate: Measurement-like resource estimate.
+        """
+        return ResourceEstimate(
+            depth=DepthResources(depth=_ONE, measurement_depth=_ONE),
+            trace=ResourceTraceNode(f"project_{operation.axis}", "primitive"),
+        )
+
+    def eval_reset(self, operation: ResetOperation) -> ResourceEstimate:
+        """Evaluate a reset operation.
+
+        Args:
+            operation (ResetOperation): Reset operation.
+
+        Returns:
+            ResourceEstimate: Reset primitive resource estimate.
+        """
+        return ResourceEstimate.primitive(
+            "reset",
+            GateResources(total=_ONE, single_qubit=_ONE),
         )
 
     def eval_for(

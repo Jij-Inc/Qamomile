@@ -1615,6 +1615,19 @@ def transform_control_flow(func: Callable):
         ) from e
     src = textwrap.dedent(src)
     tree = ast.parse(src)
+    # Re-anchor the tree to the original source file before any transform
+    # runs, so that (a) transform-time diagnostics report absolute line
+    # numbers and (b) frames executing the traced kernel body carry the
+    # user's real ``file:line``. ``getsource`` yields line numbers relative
+    # to the decorator line, so shifting by ``co_firstlineno - 1`` restores
+    # absolute positions (``dedent`` only changes columns, never lines).
+    # Nodes synthesized by the transformer inherit these absolute positions
+    # via ``fix_missing_locations`` below. This gives readable tracebacks
+    # for any error raised while tracing — and lets trace-time diagnostics
+    # such as ``Handle.consume`` report the offending source line — instead
+    # of pointing into an opaque ``<qamomile-dsl>`` buffer.
+    ast.increment_lineno(tree, func.__code__.co_firstlineno - 1)
+    source_filename = inspect.getsourcefile(func) or "<qamomile-dsl>"
 
     # Collect global names (modules, builtins, etc.)
     global_names = set(func.__globals__.keys())
@@ -1686,7 +1699,7 @@ def transform_control_flow(func: Callable):
                     f"This typically happens with forward references in nested functions."
                 ) from None
 
-    code_obj = compile(tree, filename="<qamomile-dsl>", mode="exec")
+    code_obj = compile(tree, filename=source_filename, mode="exec")
     exec(code_obj, name_space)
 
     return name_space[func.__name__]

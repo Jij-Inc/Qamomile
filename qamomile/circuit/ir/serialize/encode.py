@@ -33,6 +33,8 @@ from qamomile.circuit.ir.operation import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
+    ProjectOperation,
+    ResetOperation,
     ReturnOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -774,6 +776,36 @@ def _encode_measure_operation(
     return _base_op_dict("MeasureOperation", op)
 
 
+def _encode_project_operation(
+    op: ProjectOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`ProjectOperation`.
+
+    Args:
+        op (ProjectOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus the projection axis.
+    """
+    d = _base_op_dict("ProjectOperation", op)
+    d["axis"] = op.axis
+    return d
+
+
+def _encode_reset_operation(op: ResetOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode :class:`ResetOperation`.
+
+    Args:
+        op (ResetOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict.
+    """
+    return _base_op_dict("ResetOperation", op)
+
+
 def _encode_measure_vector(
     op: MeasureVectorOperation, ctx: _EncodeContext
 ) -> dict[str, Any]:
@@ -1475,6 +1507,8 @@ def _encode_inverse_block(
 _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     GateOperation: _encode_gate_operation,
     MeasureOperation: _encode_measure_operation,
+    ProjectOperation: _encode_project_operation,
+    ResetOperation: _encode_reset_operation,
     MeasureVectorOperation: _encode_measure_vector,
     MeasureQFixedOperation: _encode_measure_qfixed,
     DecodeQFixedOperation: _encode_decode_qfixed,

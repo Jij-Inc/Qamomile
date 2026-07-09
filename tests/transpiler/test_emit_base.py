@@ -41,6 +41,9 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     GateOperationType,
     MeasureOperation,
+    MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import (
@@ -1040,6 +1043,123 @@ class TestLoopAnalyzerThetaArrayAccess:
         )
 
         assert self.analyzer.should_unroll(for_op, {}) is False
+
+
+# ===========================================================================
+# LoopAnalyzer — measurement / reset / projection array element access (M2)
+# ===========================================================================
+
+
+class TestLoopAnalyzerMeasurementArrayAccess:
+    """Loop-var element access by measurement/reset/projection forces unroll.
+
+    Regression for the silent-measurement-drop bug: ``MeasureOperation``,
+    ``MeasureVectorOperation``, ``ProjectOperation`` and ``ResetOperation``
+    are not ``GateOperation`` subclasses, so the old type-enumerated
+    ``_has_array_element_access`` skipped them. A native backend loop whose
+    only loop-var element access was ``measure(q[i])`` then took the native
+    path and dropped the measurement at emit. The scan is now generic over
+    ``all_input_values()``.
+    """
+
+    def setup_method(self) -> None:
+        self.analyzer = LoopAnalyzer()
+
+    def _loop_with(self, op, loop_idx) -> ForOperation:
+        """Wrap a single op in a ``for i in range(0, 3)`` loop."""
+        return ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=3),
+                _uint_val("step", const=1),
+            ],
+            results=[],
+            loop_var="i",
+            loop_var_value=loop_idx,
+            operations=[op],
+        )
+
+    def _element_qubit(self, loop_idx) -> Value:
+        """Build ``q[i]`` — a qubit element indexed by the loop variable."""
+        q_array = ArrayValue(type=QubitType(), name="q")
+        return Value(
+            type=QubitType(),
+            name="q_i",
+            parent_array=q_array,
+            element_indices=(loop_idx,),
+        )
+
+    def test_measure_of_loop_var_element_triggers_unroll(self) -> None:
+        """``measure(q[i])`` as the only body op must force unrolling."""
+        loop_idx = Value(type=UIntType(), name="i")
+        q_elem = self._element_qubit(loop_idx)
+        measure = MeasureOperation(
+            operands=[q_elem],
+            results=[Value(type=BitType(), name="b")],
+        )
+        assert (
+            self.analyzer.should_unroll(self._loop_with(measure, loop_idx), {}) is True
+        )
+
+    def test_reset_of_loop_var_element_triggers_unroll(self) -> None:
+        """``reset(q[i])`` must force unrolling."""
+        loop_idx = Value(type=UIntType(), name="i")
+        q_elem = self._element_qubit(loop_idx)
+        reset = ResetOperation(
+            operands=[q_elem],
+            results=[Value(type=QubitType(), name="q_i2")],
+        )
+        assert self.analyzer.should_unroll(self._loop_with(reset, loop_idx), {}) is True
+
+    def test_project_of_loop_var_element_triggers_unroll(self) -> None:
+        """``project_z(q[i])`` must force unrolling."""
+        loop_idx = Value(type=UIntType(), name="i")
+        q_elem = self._element_qubit(loop_idx)
+        project = ProjectOperation(
+            operands=[q_elem],
+            results=[
+                Value(type=QubitType(), name="q_i2"),
+                Value(type=BitType(), name="b"),
+            ],
+            axis="z",
+        )
+        assert (
+            self.analyzer.should_unroll(self._loop_with(project, loop_idx), {}) is True
+        )
+
+    def test_measure_vector_of_loop_var_element_triggers_unroll(self) -> None:
+        """A vector measurement whose operand is ``q[i]`` must unroll.
+
+        This builds an ``element_indices``-based operand (``q[i]``), not a
+        ``slice_of``-chain view — the generic ``all_input_values`` scan flags
+        it because the operand carries ``parent_array`` + ``element_indices``
+        depending on the loop variable.
+        """
+        loop_idx = Value(type=UIntType(), name="i")
+        q_elem = self._element_qubit(loop_idx)
+        mvec = MeasureVectorOperation(
+            operands=[q_elem],
+            results=[ArrayValue(type=BitType(), name="bits")],
+        )
+        assert self.analyzer.should_unroll(self._loop_with(mvec, loop_idx), {}) is True
+
+    def test_measure_of_constant_index_does_not_unroll(self) -> None:
+        """``measure(q[0])`` (constant index) does not need unrolling."""
+        loop_idx = Value(type=UIntType(), name="i")
+        q_array = ArrayValue(type=QubitType(), name="q")
+        q_const = Value(
+            type=QubitType(),
+            name="q_0",
+            parent_array=q_array,
+            element_indices=(_uint_val("idx", const=0),),
+        )
+        measure = MeasureOperation(
+            operands=[q_const],
+            results=[Value(type=BitType(), name="b")],
+        )
+        assert (
+            self.analyzer.should_unroll(self._loop_with(measure, loop_idx), {}) is False
+        )
 
 
 # ===========================================================================

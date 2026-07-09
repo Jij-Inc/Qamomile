@@ -55,7 +55,7 @@ def resolve_compile_time_condition(
     classification, so they share this function.
 
     Tries ``resolve_if_condition`` first (plain Python values, constant
-    Values, direct UUID / name bindings), then falls back to the
+    Values, direct UUID / parameter-provenance bindings), then falls back to the
     accumulated ``concrete_values`` map for expression-derived
     conditions (``CompOp`` / ``CondOp`` / ``NotOp`` / ``BinOp`` chains
     evaluated by :func:`evaluate_classical_op_concrete`).
@@ -221,7 +221,11 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # Maps UUID → concrete Python value (int, float, bool).
         concrete_values: dict[str, Any] = {}
 
-        # Seed concrete_values from bindings (by UUID and by name).
+        # Seed concrete_values from UUID-keyed bindings entries. Name-keyed
+        # user bindings also land here but are dead entries: lookups against
+        # ``concrete_values`` are UUID-keyed, and a display name never
+        # collides with a UUID string. Name-based resolution happens only via
+        # parameter provenance in ``_try_seed_value`` below.
         for key, val in self._bindings.items():
             concrete_values[key] = val
 
@@ -831,12 +835,14 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             if const is not None:
                 concrete_values[value.uuid] = const
 
+        # Seed against ``bindings`` only via the sanctioned parameter-name
+        # provenance — never the display ``Value.name``. A bare-name seed would
+        # bind an inlined callee-local value that happened to share a name with
+        # a caller binding key, letting the pass fold an ``if`` on it and delete
+        # a live branch (a silent miscompilation).
         if hasattr(value, "is_parameter") and value.is_parameter():
             param_name = (
                 value.parameter_name() if hasattr(value, "parameter_name") else None
             )
             if param_name and param_name in self._bindings:
                 concrete_values[value.uuid] = self._bindings[param_name]
-
-        if hasattr(value, "name") and value.name and value.name in self._bindings:
-            concrete_values[value.uuid] = self._bindings[value.name]

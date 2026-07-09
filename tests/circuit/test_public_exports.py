@@ -28,6 +28,13 @@ from qamomile.circuit.frontend.composite_gate import (
     composite,
     composite_gate,
 )
+from qamomile.circuit.frontend.operation.measurement import (
+    measure_reset,
+    project_x,
+    project_y,
+    project_z,
+    reset,
+)
 from qamomile.circuit.frontend.oracle import Oracle, opaque
 from qamomile.circuit.transpiler import job as _job_module
 
@@ -97,6 +104,26 @@ def test_callable_helpers_are_publicly_reexported():
         "CostBasis",
         "UnknownResourcePolicy",
         "FixedResourceModel",
+    ):
+        assert name in qmc.__all__, (
+            f"{name!r} should be listed in qamomile.circuit.__all__"
+        )
+
+
+def test_measurement_helpers_are_publicly_reexported():
+    """Measurement/projection helper API is reachable from ``qamomile.circuit``."""
+    assert qmc.project_z is project_z
+    assert qmc.project_x is project_x
+    assert qmc.project_y is project_y
+    assert qmc.reset is reset
+    assert qmc.measure_reset is measure_reset
+
+    for name in (
+        "project_z",
+        "project_x",
+        "project_y",
+        "reset",
+        "measure_reset",
     ):
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"

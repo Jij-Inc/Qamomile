@@ -105,7 +105,9 @@ class QKernelBuildMixin:
         Raises:
             TypeError: If a non-parameterizable type is specified as a
                 parameter.
-            ValueError: If required arguments are missing.
+            ValueError: If required arguments are missing, or if a name appears
+                in both ``parameters`` and ``kwargs``, violating the
+                bindings/parameters disjointness rule.
 
         Example:
             >>> @qm.qkernel

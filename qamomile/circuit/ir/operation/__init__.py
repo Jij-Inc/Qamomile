@@ -30,6 +30,8 @@ from .gate import (
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
     SymbolicControlledU,
 )
 from .inverse_block import InverseBlockOperation
@@ -55,6 +57,8 @@ __all__ = [
     "MeasureOperation",
     "MeasureVectorOperation",
     "MeasureQFixedOperation",
+    "ProjectOperation",
+    "ResetOperation",
     "ControlledUOperation",
     "ConcreteControlledU",
     "SymbolicControlledU",

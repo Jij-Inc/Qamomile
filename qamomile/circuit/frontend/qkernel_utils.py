@@ -8,6 +8,7 @@ from qamomile.circuit.frontend.constructors import bit, float_, uint
 from qamomile.circuit.frontend.func_to_block import is_array_type
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.handle.array import Vector
+from qamomile.circuit.frontend.handle.handle import _describe_consume_sites
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import QubitConsumedError
@@ -118,10 +119,12 @@ def reject_consumed_view_arg(kernel_name: str, handle: Handle) -> None:
     if not handle._consumed:
         return
     display_name = quantum_handle_display_name(handle)
+    first_use, reuse, consumed_at = _describe_consume_sites(
+        handle, f"QKernel[{kernel_name}]"
+    )
     raise QubitConsumedError(
         f"Qubit view '{display_name}' was already consumed by "
-        f"'{handle._consumed_by}' and cannot be used again in "
-        f"'QKernel[{kernel_name}]'.\n\n"
+        f"{first_use} and cannot be used again in {reuse}.\n\n"
         f"Affine type rule: Each qubit handle can only be used once. "
         f"After a gate operation, reassign the result to use the new "
         f"handle.\n\n"
@@ -130,7 +133,7 @@ def reject_consumed_view_arg(kernel_name: str, handle: Handle) -> None:
         f"  {kernel_name}(v)  # Pass the reassigned handle",
         handle_name=display_name,
         operation_name=f"QKernel[{kernel_name}]",
-        first_use_location=handle._consumed_by,
+        first_use_location=consumed_at or handle._consumed_by,
     )
 
 

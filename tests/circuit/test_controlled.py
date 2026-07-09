@@ -1758,8 +1758,9 @@ class TestControlledBuiltinSynthesisInternals:
         cg = qmc.control(_ephemeral_gate)
         assert _ephemeral_gate in _synthesized_kernel_cache
         # Pin the linecache filename for the post-GC check.  The
-        # AST-transformed ``self.func`` is re-compiled under the
-        # ``<qamomile-dsl>`` synthetic filename, so we read the original
+        # AST-transformed ``self.func`` is re-compiled under the filename
+        # ``inspect.getsourcefile`` reports for the wrapper (its
+        # linecache-registered pseudo-filename), so we read the original
         # wrapper's filename from ``raw_func`` instead.
         wrapper_filename = cg._qkernel.raw_func.__code__.co_filename
         assert wrapper_filename in _linecache_module.cache

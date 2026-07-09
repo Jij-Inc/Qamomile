@@ -13,6 +13,9 @@ from qamomile.circuit.frontend.func_to_block import (
 )
 from qamomile.circuit.frontend.handle import Observable
 from qamomile.circuit.frontend.handle.primitives import Handle
+from qamomile.circuit.frontend.param_validation import (
+    validate_bindings_parameters_disjoint,
+)
 from qamomile.circuit.frontend.qkernel_inputs import (
     auto_detect_parameters,
     create_bound_input,
@@ -183,8 +186,17 @@ def build_qkernel(
 
     Raises:
         TypeError: If a non-parameterizable type is listed as a parameter.
-        ValueError: If required arguments are missing.
+        ValueError: If required arguments are missing, or if a name appears in
+            both ``parameters`` and ``kwargs`` (the compile-time-bound values),
+            which violates the bindings/parameters disjointness rule.
     """
+    # Enforce the bindings/parameters disjointness rule against the
+    # *user-provided* ``parameters`` before auto-detection. Auto-detect only
+    # ever picks names absent from ``kwargs``, so it can never introduce an
+    # overlap; the ambiguous case is exactly a name the caller listed in
+    # ``parameters`` while also passing a concrete value for it in ``kwargs``.
+    validate_bindings_parameters_disjoint(kwargs, parameters)
+
     if parameters is None:
         parameters = auto_detect_parameters(
             kernel.signature, kernel.input_types, kwargs

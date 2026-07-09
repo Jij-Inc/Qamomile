@@ -21,6 +21,8 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
@@ -221,6 +223,19 @@ class ResourceAllocator:
                 if clbit_addr not in clbit_map:
                     clbit_map[clbit_addr] = self._next_clbit_index
                     self._next_clbit_index += 1
+
+            elif isinstance(op, ProjectOperation):
+                qubit_in = op.operands[0]
+                qubit_out = op.results[0]
+                bit_out = op.results[1]
+                self._allocate_qubit_list([qubit_in], [qubit_out], qubit_map)
+                clbit_addr = QubitAddress(bit_out.uuid)
+                if clbit_addr not in clbit_map:
+                    clbit_map[clbit_addr] = self._next_clbit_index
+                    self._next_clbit_index += 1
+
+            elif isinstance(op, ResetOperation):
+                self._allocate_qubit_list(op.operands, op.results, qubit_map)
 
             elif isinstance(op, MeasureVectorOperation):
                 result = op.results[0]

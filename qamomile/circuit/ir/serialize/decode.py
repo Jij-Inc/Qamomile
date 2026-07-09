@@ -36,6 +36,8 @@ from qamomile.circuit.ir.operation import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
+    ProjectOperation,
+    ResetOperation,
     ReturnOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -915,6 +917,38 @@ def _decode_measure(d: dict[str, Any], ctx: _DecodeContext) -> MeasureOperation:
     return MeasureOperation(operands=operands, results=results)
 
 
+def _decode_project(d: dict[str, Any], ctx: _DecodeContext) -> ProjectOperation:
+    """Decode :class:`ProjectOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        ProjectOperation: The reconstructed op.
+    """
+    operands, results = _operands_results(d, ctx)
+    return ProjectOperation(
+        operands=operands,
+        results=results,
+        axis=str(d.get("axis", "z")),
+    )
+
+
+def _decode_reset(d: dict[str, Any], ctx: _DecodeContext) -> ResetOperation:
+    """Decode :class:`ResetOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        ResetOperation: The reconstructed op.
+    """
+    operands, results = _operands_results(d, ctx)
+    return ResetOperation(operands=operands, results=results)
+
+
 def _decode_measure_vector(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> MeasureVectorOperation:
@@ -1789,6 +1823,8 @@ def _decode_inverse_block(
 _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] = {
     "GateOperation": _decode_gate_operation,
     "MeasureOperation": _decode_measure,
+    "ProjectOperation": _decode_project,
+    "ResetOperation": _decode_reset,
     "MeasureVectorOperation": _decode_measure_vector,
     "MeasureQFixedOperation": _decode_measure_qfixed,
     "DecodeQFixedOperation": _decode_decode_qfixed,

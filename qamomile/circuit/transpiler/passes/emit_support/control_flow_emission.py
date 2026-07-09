@@ -159,7 +159,12 @@ def emit_for(
         loop_bindings = bindings.copy()
         _bind_loop_var(loop_bindings, op, loop_context)
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            loop_bindings,
+            emit_qinit_reset=True,
         )
         emit_pass._emitter.emit_for_loop_end(circuit, loop_context)
     else:
@@ -249,7 +254,12 @@ def emit_for_unrolled(
         loop_bindings = bindings.copy()
         _bind_loop_var(loop_bindings, op, i)
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            loop_bindings,
+            emit_qinit_reset=True,
         )
 
 
@@ -368,8 +378,21 @@ def emit_for_items(
         value_uuid = value_var_value.uuid if value_var_value is not None else None
         _bind(value_uuid, op.value_var, value)
 
+        # ``emit_qinit_reset=True`` mirrors ``emit_for_unrolled`` and the
+        # native ``for`` / ``if`` / ``while`` branches. Like those paths,
+        # for-items re-emits the *same* ``op.operations`` once per dict entry
+        # without UUID remapping — the ``ResourceAllocator`` registers each
+        # body ``QInitOperation`` exactly once — so a fresh ``qmc.qubit(...)``
+        # allocated in the body maps to one shared physical qubit reused
+        # across entries. Without an explicit reset the second and later
+        # entries would silently reuse it in its post-measurement state.
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            loop_bindings,
+            emit_qinit_reset=True,
         )
 
 
@@ -555,11 +578,21 @@ def emit_if(
     if resolved is not None:
         if resolved:
             emit_pass._emit_operations(
-                circuit, op.true_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.true_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         else:
             emit_pass._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.false_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         remap_static_phi_outputs(op.phi_ops, resolved, qubit_map, clbit_map)
         register_classical_phi_aliases(emit_pass, op.phi_ops, bindings, resolved)
@@ -580,12 +613,22 @@ def emit_if(
     if emit_pass._emitter.supports_if_else():
         context = emit_pass._emitter.emit_if_start(circuit, clbit_idx, 1)
         emit_pass._emit_operations(
-            circuit, op.true_operations, qubit_map, clbit_map, bindings
+            circuit,
+            op.true_operations,
+            qubit_map,
+            clbit_map,
+            bindings,
+            emit_qinit_reset=True,
         )
         if op.false_operations:
             emit_pass._emitter.emit_else_start(circuit, context)
             emit_pass._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.false_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         emit_pass._emitter.emit_if_end(circuit, context)
 
@@ -754,7 +797,12 @@ def emit_while(
     if emit_pass._emitter.supports_while_loop():
         context = emit_pass._emitter.emit_while_start(circuit, clbit_idx, 1)
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            bindings,
+            emit_qinit_reset=True,
         )
         emit_pass._emitter.emit_while_end(circuit, context)
     else:

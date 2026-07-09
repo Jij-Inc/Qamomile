@@ -1478,15 +1478,22 @@ class TestIfElseDeadPhiFiltering:
         assert len(qubit_phis) == 0
 
     def test_if_one_sided_new_local_followed_by_store_only_is_allowed(self):
-        """One-sided new local, only stored (not loaded) after -> allowed."""
+        """One-sided new local, only stored (not loaded) after -> allowed.
+
+        ``q1`` is consumed inside the branch and ``q2`` (a distinct qubit) is
+        consumed afterward: reusing ``q1`` after the branch would violate the
+        conditional-move rule (a value consumed on one branch is consumed
+        after the if), so this test deliberately measures a different qubit
+        to isolate the ``b_new`` dead-phi behaviour it is checking.
+        """
 
         @qkernel
-        def circuit(q0: Qubit, q1: Qubit) -> qm.Bit:
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> qm.Bit:
             cond = qm.measure(q0)
             if cond:
                 b_new = qm.measure(q1)  # noqa: F841
             # b_new is only overwritten, never read
-            b_new = qm.measure(q1)  # noqa: F841
+            b_new = qm.measure(q2)  # noqa: F841
             return cond
 
         graph = circuit.build()

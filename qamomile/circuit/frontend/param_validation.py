@@ -442,3 +442,54 @@ def _validate_bound_handles(
             _validate_param_handle(
                 name, declared, value, context, allow_broadcast=allow_broadcast
             )
+
+
+def validate_bindings_parameters_disjoint(
+    bindings: dict[str, Any] | None,
+    parameters: list[str] | None,
+) -> None:
+    """Enforce the project rule that ``bindings`` and ``parameters`` are disjoint.
+
+    A kernel argument name must be resolved exactly one way: compile-time bound
+    (in ``bindings``, baked into the emitted circuit) or runtime symbolic (in
+    ``parameters``, surviving as a backend parameter). Listing the same name in
+    both is ambiguous and historically caused silent miscompilation — the
+    binding won the resolution race and the runtime parameter was silently
+    dropped from the emitted circuit (see #354). This is the single shared
+    checker so the rule is enforced identically at every entry point
+    (``QKernel.build`` / ``Transpiler.to_block`` / ``Transpiler.emit`` /
+    ``Transpiler.transpile``), not only in the top-level ``transpile`` wrapper.
+
+    Args:
+        bindings (dict[str, Any] | None): Compile-time bindings keyed by
+            argument name, or None. None is treated as empty.
+        parameters (list[str] | None): Argument names to keep as runtime
+            parameters, or None. None is treated as empty.
+
+    Returns:
+        None
+
+    Raises:
+        ValueError: If any name appears in both ``bindings`` and
+            ``parameters``.
+
+    Example:
+        >>> validate_bindings_parameters_disjoint({"theta": 0.5}, ["phi"])
+        >>> validate_bindings_parameters_disjoint({"theta": 0.5}, ["theta"])
+        Traceback (most recent call last):
+            ...
+        ValueError: Parameter name(s) ['theta'] appear in both ...
+    """
+    if not bindings or not parameters:
+        return
+    overlap = set(parameters) & set(bindings.keys())
+    if overlap:
+        raise ValueError(
+            f"Parameter name(s) {sorted(overlap)} appear in both "
+            f"`parameters` and `bindings`. A name must be either "
+            f"compile-time bound (in `bindings`) or runtime symbolic "
+            f"(in `parameters`), not both. "
+            f"If you want this value baked into the circuit, remove "
+            f"it from `parameters`. If you want it as a runtime "
+            f"parameter, remove it from `bindings`."
+        )

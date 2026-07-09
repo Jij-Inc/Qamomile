@@ -70,6 +70,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _expand_quantum_operands_to_phys,
     _quantum_input_operands,
 )
+from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
+    reject_duplicate_physical_indices,
+)
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
     _normalize_inverse_block_op,
@@ -1383,6 +1386,16 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 target_index_groups = []
                 target_indices = []
             if len(target_indices) == op.num_target_qubits:
+                # CUDA-Q's adjoint fast path builds a helper kernel and never
+                # routes through the base ``emit_inverse_block_at_indices``
+                # entry check, so run the shared aliasing check here. This path
+                # is uncontrolled (num_control_qubits == 0), so the combined set
+                # is exactly ``target_indices``: an inverse block applied to
+                # aliased targets (``inverse(u)(qs[i], qs[j])`` on the diagonal)
+                # would otherwise compile silently and crash the simulator.
+                reject_duplicate_physical_indices(
+                    "inverse block (CUDA-Q adjoint)", target_indices
+                )
                 try:
                     self._emit_adjoint_helper(
                         circuit,
@@ -1529,6 +1542,15 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 "CUDA-Q cudaq.control requires at least one control qubit.",
                 operation="ControlledUOperation",
             )
+
+        # CUDA-Q's fallback builds a helper kernel via
+        # ``emit_controlled_kernel_call`` and never routes through
+        # ``append_gate``, so the shared aliasing check must run here. A
+        # control coinciding with a target (or a duplicated target) would make
+        # ``cudaq.control`` act twice on one qubit and crash the simulator.
+        reject_duplicate_physical_indices(
+            "controlled gate (CUDA-Q fallback)", control_indices + target_indices
+        )
 
         _validate_controlled_helper_unitary_ops(block_value.operations, bindings)
 

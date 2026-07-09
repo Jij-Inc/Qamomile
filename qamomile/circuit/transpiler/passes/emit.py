@@ -123,7 +123,25 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             bindings: Values to bind parameters to. If not provided,
                      parameters must be bound at execution time.
             parameters: List of parameter names to preserve as backend parameters.
+
+        Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters``. This is the innermost emit-side choke point:
+                it catches the overlap even when an ``EmitPass`` is constructed
+                directly (e.g. via ``Transpiler._create_emit_pass``), bypassing
+                the ``transpile`` / ``emit`` wrappers. A name in both is
+                ambiguous and would otherwise silently bake the binding while
+                dropping the runtime parameter (see #354).
         """
+        from qamomile.circuit.frontend.param_validation import (
+            validate_bindings_parameters_disjoint,
+        )
+
+        # Validate before wrapping ``bindings`` into an ``EmitContext``: on a
+        # re-entrant call ``bindings`` may already be an ``EmitContext`` (a dict
+        # subclass), but ``.keys()`` still exposes the raw names for the check.
+        validate_bindings_parameters_disjoint(bindings, parameters)
+
         # Wrap user bindings in an ``EmitContext`` so emit-time writers can
         # progressively migrate to typed methods (``set_value``, ``set_runtime_expr``,
         # ``push_loop_var``) while existing dict-style writes continue to

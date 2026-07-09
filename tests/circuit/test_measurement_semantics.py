@@ -1,0 +1,171 @@
+"""Tests for destructive measurement and projection/reset semantics."""
+
+import pytest
+
+import qamomile.circuit as qmc
+from qamomile.circuit.ir.operation.gate import (
+    GateOperation,
+    GateOperationType,
+    MeasureOperation,
+    ProjectOperation,
+    ResetOperation,
+)
+from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+
+def test_measure_consumes_qubit_without_resetting_it():
+    """``measure`` is terminal: the measured qubit handle cannot be reused."""
+
+    @qmc.qkernel
+    def kernel(q: qmc.Qubit) -> qmc.Bit:
+        bit = qmc.measure(q)
+        _ = qmc.x(q)
+        return bit
+
+    with pytest.raises(QubitConsumedError, match="already consumed"):
+        kernel.build()
+
+
+def test_project_z_keeps_projected_qubit_and_reset_returns_fresh_handle():
+    """``project_z`` keeps a projected qubit handle; ``reset`` prepares it."""
+
+    @qmc.qkernel
+    def kernel(q: qmc.Qubit) -> qmc.Bit:
+        q, _bit = qmc.project_z(q)
+        q = qmc.reset(q)
+        q = qmc.x(q)
+        return qmc.measure(q)
+
+    block = kernel.build()
+    project_ops = [op for op in block.operations if isinstance(op, ProjectOperation)]
+    reset_ops = [op for op in block.operations if isinstance(op, ResetOperation)]
+    measure_ops = [op for op in block.operations if isinstance(op, MeasureOperation)]
+
+    assert len(project_ops) == 1
+    assert project_ops[0].axis == "z"
+    assert len(reset_ops) == 1
+    assert len(measure_ops) == 1
+    assert reset_ops[0].operands[0].uuid == project_ops[0].results[0].uuid
+
+
+@pytest.mark.parametrize(
+    ("project_fn", "basis_gates"),
+    [
+        (qmc.project_x, [GateOperationType.H, GateOperationType.H]),
+        (
+            qmc.project_y,
+            [
+                GateOperationType.SDG,
+                GateOperationType.H,
+                GateOperationType.H,
+                GateOperationType.S,
+            ],
+        ),
+    ],
+)
+def test_project_x_and_project_y_lower_through_basis_changes(
+    project_fn,
+    basis_gates,
+):
+    """X/Y projection lower to basis changes around one Z projection."""
+
+    @qmc.qkernel
+    def kernel(q: qmc.Qubit) -> qmc.Bit:
+        q, _bit = project_fn(q)
+        return qmc.measure(q)
+
+    block = kernel.build()
+    project_ops = [op for op in block.operations if isinstance(op, ProjectOperation)]
+    gate_types = [
+        op.gate_type for op in block.operations if isinstance(op, GateOperation)
+    ]
+
+    assert len(project_ops) == 1
+    assert project_ops[0].axis == "z"
+    assert gate_types == basis_gates
+
+
+def test_measure_reset_resource_estimate_counts_reset_as_primitive():
+    """``measure_reset`` is estimable as projective measure plus reset."""
+
+    @qmc.qkernel
+    def kernel() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = qmc.x(q)
+        q, _bit = qmc.measure_reset(q)
+        return qmc.measure(q)
+
+    estimate = kernel.estimate_resources().simplify()
+    assert estimate.gates.total == 2
+    assert estimate.gates.single_qubit == 2
+    assert estimate.depth.measurement_depth == 2
+    assert estimate.trace is not None
+    assert "reset" in estimate.trace.render()
+
+
+def test_qiskit_emit_measure_reset_uses_backend_reset():
+    """Qiskit emission preserves ``measure_reset`` as measurement plus reset."""
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    @qmc.qkernel
+    def kernel() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = qmc.x(q)
+        q, _bit = qmc.measure_reset(q)
+        return qmc.measure(q)
+
+    executable = QiskitTranspiler().transpile(kernel)
+    circuit = executable.compiled_quantum[0].circuit
+    counts = circuit.count_ops()
+
+    assert counts["measure"] == 2
+    assert counts["reset"] == 1
+
+
+class TestResetBackendUnsupported:
+    """A backend without a reset primitive fails with EmitError, not raw Python.
+
+    ``GateEmitter.emit_reset`` raises ``NotImplementedError`` on backends with
+    no reset primitive (e.g. QURI Parts). That raw exception used to escape a
+    normal qkernel compile; ``StandardEmitPass._checked_emit_reset`` now
+    converts it into an actionable ``EmitError``.
+    """
+
+    def test_reset_on_unsupported_backend_raises_emit_error(self, monkeypatch):
+        """qmc.reset on a reset-less emitter raises EmitError with guidance."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.qiskit import QiskitTranspiler
+        from qamomile.qiskit.emitter import QiskitGateEmitter
+
+        def _no_reset(self, circuit, qubit):
+            raise NotImplementedError("This backend does not support reset.")
+
+        monkeypatch.setattr(QiskitGateEmitter, "emit_reset", _no_reset)
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            q = qmc.reset(q)
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="cannot emit a qubit reset"):
+            QiskitTranspiler().transpile(kernel)
+
+    def test_quri_parts_reset_raises_emit_error(self):
+        """The real QURI Parts backend surfaces reset as EmitError."""
+        pytest.importorskip("quri_parts")
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            q = qmc.reset(q)
+            return qmc.measure(q)
+
+        with pytest.raises(EmitError, match="cannot emit a qubit reset"):
+            QuriPartsTranspiler().transpile(kernel)

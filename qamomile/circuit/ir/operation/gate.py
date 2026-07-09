@@ -149,6 +149,47 @@ class MeasureOperation(Operation):
 
 
 @dataclasses.dataclass
+class ProjectOperation(Operation):
+    """Project a qubit in one Pauli basis and keep the projected state."""
+
+    axis: str = "z"
+
+    def __post_init__(self):
+        if self.axis not in {"x", "y", "z"}:
+            raise ValueError("axis must be one of 'x', 'y', or 'z'.")
+
+    @property
+    def signature(self) -> Signature:
+        return Signature(
+            operands=[ParamHint(name="qubit", type=QubitType())],
+            results=[
+                ParamHint(name="qubit", type=QubitType()),
+                ParamHint(name="bit", type=BitType()),
+            ],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        return OperationKind.HYBRID
+
+
+@dataclasses.dataclass
+class ResetOperation(Operation):
+    """Reset a qubit to the |0> state and return the fresh handle."""
+
+    @property
+    def signature(self) -> Signature:
+        return Signature(
+            operands=[ParamHint(name="qubit", type=QubitType())],
+            results=[ParamHint(name="qubit", type=QubitType())],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        return OperationKind.QUANTUM
+
+
+@dataclasses.dataclass
 class ControlledUOperation(Operation):
     """Base class for controlled-U operations.
 

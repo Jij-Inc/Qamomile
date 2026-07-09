@@ -48,6 +48,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     resolve_controlled_u_call,
     resolve_power,
 )
+from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
+    reject_duplicate_physical_indices,
+)
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
     _normalize_inverse_block_op,
@@ -353,6 +356,15 @@ def _emit_quri_controlled_gate(
             operation="ControlledUOperation",
         )
 
+    # QURI Parts always walks controlled-U bodies gate-by-gate here rather than
+    # through ``append_gate``, so this is the choke point for inner-gate
+    # aliasing. A body ``cx(qs[i], qs[j])`` with i == j at runtime, or an inner
+    # control that coincides with a target, is caught here.
+    reject_duplicate_physical_indices(
+        f"controlled {op.gate_type.name if op.gate_type else 'gate'} (QURI Parts)",
+        control_indices + target_indices,
+    )
+
     if len(control_indices) == 1:
         if op.gate_type == GateOperationType.CX:
             if len(target_indices) < 2:
@@ -551,6 +563,13 @@ def _emit_quri_inverse_operation(
     target_indices = [index for group in target_index_groups for index in group]
     input_operands = [*op.target_qubits, *op.parameters]
     effective_controls = outer_control_indices + local_controls
+
+    # An inverse block whose controls/targets alias at runtime is physically
+    # ill-defined; all three sub-paths below (backend inverse, controlled walk,
+    # inline) act on this combined set, so one check covers them.
+    reject_duplicate_physical_indices(
+        "inverse block (QURI Parts)", effective_controls + target_indices
+    )
 
     if not effective_controls and emit_pass._try_emit_backend_inverse(
         circuit,
@@ -985,6 +1004,13 @@ class QuriPartsEmitPass(
                 f"control_indices={control_indices!r}.",
                 operation="ControlledUOperation",
             )
+        # QURI Parts walks the block gate-by-gate rather than routing through
+        # ``append_gate``, so run the shared aliasing check here. A control that
+        # coincides with a target at runtime is physically ill-defined.
+        reject_duplicate_physical_indices(
+            "controlled gate (QURI Parts fallback)",
+            control_indices + target_indices,
+        )
         qubit_map = _build_quri_controlled_qubit_map(
             self, block_value, target_indices, bindings
         )

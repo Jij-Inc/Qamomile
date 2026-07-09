@@ -130,8 +130,15 @@ def resolve_if_condition(
         return _coerce_to_bool(condition.get_const())
     if condition.uuid in bindings:
         return _coerce_to_bool(bindings[condition.uuid])
-    if hasattr(condition, "name") and condition.name and condition.name in bindings:
-        return _coerce_to_bool(bindings[condition.name])
+    # Resolve against ``bindings`` only via UUID (above) or the sanctioned
+    # parameter-name provenance (below) — never the display ``Value.name``. A
+    # bare-name lookup would mis-resolve an inlined callee-local condition that
+    # happened to share a name with a caller binding key, silently pruning a
+    # live branch.
+    if hasattr(condition, "is_parameter") and condition.is_parameter():
+        param_name = condition.parameter_name()
+        if param_name and param_name in bindings:
+            return _coerce_to_bool(bindings[param_name])
     return None
 
 

@@ -30,8 +30,6 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.operation.gate import ControlledUOperation, GateOperation
-from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.value import Value
@@ -265,58 +263,49 @@ class LoopAnalyzer:
         operations: list[Operation],
         loop_var_uuid: str | None,
     ) -> bool:
+        """True when any operation reads an array element indexed by the loop var.
+
+        A native backend loop (e.g. Qiskit ``for_loop``) keeps the loop
+        variable as an opaque backend loop parameter, which cannot index a
+        quantum/classical register at emit time. So any operation that reads
+        ``arr[loop_var]`` — a gate qubit, a rotation angle, a control qubit,
+        a ``pauli_evolve`` gamma/observable, **or a measurement / reset /
+        projection qubit** — forces the loop to be unrolled so the index
+        resolves to a concrete address per iteration.
+
+        The scan is generic over ``op.all_input_values()`` rather than an
+        enumerated set of operation types. Every input Value that carries a
+        ``parent_array`` + ``element_indices`` (gate operands, the rotation
+        angle which lives in ``operands``, ``pauli_evolve`` gamma/observable
+        which are ``operands[1:3]``, and ``ControlledUOperation.power`` which
+        ``all_input_values`` appends) is covered uniformly. The previous
+        type-enumerated implementation omitted ``MeasureOperation`` /
+        ``MeasureVectorOperation`` / ``MeasureQFixedOperation`` /
+        ``ProjectOperation`` / ``ResetOperation`` (none of which are
+        ``GateOperation`` subclasses), so a loop whose only loop-var element
+        access was ``measure(q[i])`` silently took the native path and
+        dropped the measurement at emit. Scanning ``all_input_values``
+        closes that whole class of miscompilation.
+
+        Args:
+            operations (list[Operation]): Loop-body operations to scan.
+            loop_var_uuid (str | None): UUID of the enclosing loop variable,
+                or None for legacy IR without ``loop_var_value``.
+
+        Returns:
+            bool: True if any operation reads an array element whose index
+                depends on the loop variable.
+        """
         from qamomile.circuit.ir.value import Value as _Value
 
         for op in operations:
-            if isinstance(op, GateOperation):
-                for v in op.operands:
-                    if v.parent_array is not None and v.element_indices:
-                        for idx in v.element_indices:
-                            if self._index_depends_on_loop_var(idx, loop_var_uuid):
-                                return True
-
-                if isinstance(op.theta, _Value):
-                    if op.theta.parent_array is not None and op.theta.element_indices:
-                        for idx in op.theta.element_indices:
-                            if self._index_depends_on_loop_var(idx, loop_var_uuid):
-                                return True
-
-            elif isinstance(op, BinOp):
-                for operand in [op.lhs, op.rhs]:
-                    if operand.parent_array is not None and operand.element_indices:
-                        for idx in operand.element_indices:
-                            if self._index_depends_on_loop_var(idx, loop_var_uuid):
-                                return True
-
-            elif isinstance(op, ControlledUOperation):
-                for v in op.operands:
-                    if isinstance(v, _Value):
-                        if v.parent_array is not None and v.element_indices:
-                            for idx in v.element_indices:
-                                if self._index_depends_on_loop_var(idx, loop_var_uuid):
-                                    return True
-
-            elif isinstance(op, PauliEvolveOp):
-                # pauli_evolve gamma may be arr[loop_var], which requires
-                # unrolling to materialise each layer's backend parameter.
-                gamma = op.gamma
+            for v in op.all_input_values():
                 if (
-                    isinstance(gamma, _Value)
-                    and gamma.parent_array is not None
-                    and gamma.element_indices
+                    isinstance(v, _Value)
+                    and v.parent_array is not None
+                    and v.element_indices
                 ):
-                    for idx in gamma.element_indices:
-                        if self._index_depends_on_loop_var(idx, loop_var_uuid):
-                            return True
-                # The observable operand may be Hs[loop_var] — a concrete
-                # Hamiltonian is required at emit, so unroll too.
-                observable = op.observable
-                if (
-                    isinstance(observable, _Value)
-                    and observable.parent_array is not None
-                    and observable.element_indices
-                ):
-                    for idx in observable.element_indices:
+                    for idx in v.element_indices:
                         if self._index_depends_on_loop_var(idx, loop_var_uuid):
                             return True
 

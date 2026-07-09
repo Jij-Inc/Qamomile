@@ -7,6 +7,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from qamomile.circuit.frontend.decomposition import DecompositionConfig
+from qamomile.circuit.frontend.param_validation import (
+    validate_bindings_parameters_disjoint,
+)
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.errors import (
@@ -225,6 +228,11 @@ class Transpiler(ABC, Generic[T]):
 
         Returns:
             Block: Hierarchical block for the frontend object.
+
+        Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters`` (propagated from ``kernel.build``), violating
+                the bindings/parameters disjointness rule.
 
         When bindings or parameters are provided, uses kernel.build() to properly
         resolve array shapes from the bound data. Otherwise uses the cached
@@ -535,7 +543,16 @@ class Transpiler(ABC, Generic[T]):
             separated: The separated program to emit
             bindings: Parameter values to bind at compile time
             parameters: Parameter names to preserve as backend parameters
+
+        Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters``. This check also runs in ``transpile`` and
+                ``to_block``/``build``, but ``emit`` is a public step-by-step
+                entry point that bypasses those, so the guard is repeated here
+                to prevent a name from being silently baked in (its runtime
+                parameter dropped) when the step-by-step API is driven directly.
         """
+        validate_bindings_parameters_disjoint(bindings, parameters)
         emit_pass = self._create_emit_pass(bindings, parameters)
         return emit_pass.run(separated)
 
@@ -600,18 +617,7 @@ class Transpiler(ABC, Generic[T]):
             9. plan: Build ProgramPlan (segment into C->Q->C steps)
             10. emit: Generate backend-specific code
         """
-        if bindings and parameters:
-            overlap = set(parameters) & set(bindings.keys())
-            if overlap:
-                raise ValueError(
-                    f"Parameter name(s) {sorted(overlap)} appear in both "
-                    f"`parameters` and `bindings`. A name must be either "
-                    f"compile-time bound (in `bindings`) or runtime symbolic "
-                    f"(in `parameters`), not both. "
-                    f"If you want this value baked into the circuit, remove "
-                    f"it from `parameters`. If you want it as a runtime "
-                    f"parameter, remove it from `bindings`."
-                )
+        validate_bindings_parameters_disjoint(bindings, parameters)
 
         entrypoint_validator = EntrypointValidationPass()
 

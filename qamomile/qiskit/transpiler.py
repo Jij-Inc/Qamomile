@@ -125,8 +125,19 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             )
 
             _bind_loop_var(loop_bindings, op, loop_param)
+            # ``emit_qinit_reset=True`` mirrors the base ``emit_for`` native
+            # branch (control_flow_emission.py) and the if/else branches
+            # below: a fresh ``qmc.qubit(...)`` allocated inside the loop body
+            # must be reset to |0> at the start of every iteration. Without it
+            # the second and later iterations silently reuse the ancilla in its
+            # post-measurement state, computing a wrong quantum state.
             self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, loop_bindings
+                circuit,
+                op.operations,
+                qubit_map,
+                clbit_map,
+                loop_bindings,
+                emit_qinit_reset=True,
             )
 
     def _emit_if(
@@ -151,11 +162,21 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         with circuit.if_test(if_test_condition) as else_:
             self._emit_operations(
-                circuit, op.true_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.true_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         with else_:
             self._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.false_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
 
     def _emit_while(
@@ -181,7 +202,12 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         with circuit.while_loop(while_condition):  # type: ignore[call-overload]
             self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
 
     def _resolve_runtime_condition(

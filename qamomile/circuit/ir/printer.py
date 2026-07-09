@@ -32,6 +32,8 @@ from qamomile.circuit.ir.operation import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
+    ProjectOperation,
+    ResetOperation,
     ReturnOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -228,6 +230,10 @@ def _format_flat_op(op: Operation) -> str:
         return _format_inverse_block(op)
     if isinstance(op, MeasureOperation):
         return _format_measure(op, "measure")
+    if isinstance(op, ProjectOperation):
+        return _format_measure(op, f"project_{op.axis}")
+    if isinstance(op, ResetOperation):
+        return _format_measure(op, "reset")
     if isinstance(op, MeasureVectorOperation):
         return _format_measure(op, "measure_vector")
     if isinstance(op, MeasureQFixedOperation):

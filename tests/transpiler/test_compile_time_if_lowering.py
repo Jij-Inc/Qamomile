@@ -445,19 +445,22 @@ class TestRuntimeIfPreservation:
 # ---------------------------------------------------------------------------
 
 
-class TestReservedMeasurementBindingNames:
-    """Bindings matching ``<qubit>_measured`` are treated as reserved names.
+class TestMeasurementNameDoesNotCaptureBinding:
+    """A binding sharing a measurement result's generated name does not capture it.
 
-    The frontend generates measurement-result names like ``q_measured``.
-    By current design, ``resolve_if_condition()`` also checks bindings by
-    value name, so a user binding with the same name shadows the runtime
-    measurement result and forces compile-time resolution.  This test
-    documents that contract so callers avoid using these binding names
-    unless they intentionally want static branch selection.
+    The frontend generates measurement-result names like ``q_measured``. A
+    kernel parameter can legitimately share that name (here the unused
+    ``q_measured: UInt``). Resolution against ``bindings`` is keyed only on
+    parameter provenance (``ScalarMetadata.parameter_name``) — never on the
+    display ``Value.name`` — so binding the parameter must NOT hijack the
+    runtime ``measure(q)`` condition that happens to carry the same display
+    name. Before the bare-name fallback was removed, ``q_measured=1`` silently
+    resolved ``if bit:`` to the true branch, pruning the runtime control flow
+    (a miscompilation). This test pins the corrected behavior.
     """
 
-    def test_binding_named_like_measurement_result_forces_static_resolution(self):
-        """``q_measured`` binding shadows runtime ``measure(q)`` condition."""
+    def test_binding_named_like_measurement_result_stays_runtime(self):
+        """A same-named binding leaves the runtime ``measure(q)`` condition intact."""
 
         @qm.qkernel
         def kernel(q_measured: qm.UInt) -> qm.Bit:
@@ -471,13 +474,56 @@ class TestReservedMeasurementBindingNames:
 
         lowered = _lower(kernel, bindings={"q_measured": 1})
 
-        assert not _find_ops(lowered.operations, IfOperation), (
-            "Bindings named like generated measurement results are treated "
-            "as reserved and force compile-time if lowering"
+        # The IfOperation is preserved: the runtime measurement condition is
+        # not captured by the same-named parameter binding.
+        assert _find_ops(lowered.operations, IfOperation), (
+            "A binding sharing the measurement result's generated name must "
+            "not statically resolve the runtime condition"
         )
-        x_gates = _find_gates(lowered.operations, GateOperationType.X)
-        assert len(x_gates) >= 1, (
-            "The reserved-name binding should select the true branch"
+        # The X gate stays nested inside the if body, not hoisted to top level
+        # by a spurious static branch selection.
+        top_level_x = _find_gates(lowered.operations, GateOperationType.X)
+        assert len(top_level_x) == 0, (
+            "The X gate must remain inside the runtime branch, not be hoisted"
+        )
+
+    def test_inlined_callee_measurement_not_captured_by_caller_binding(self):
+        """An inlined callee's measurement condition survives a same-named caller binding.
+
+        This is the cross-inlining form of the capture bug: the callee's
+        ``measure(a)`` result carries the generated name ``a_measured``, and the
+        caller binds an unrelated parameter of the same name. After inlining,
+        the bare-name fallback would have seeded the callee's runtime condition
+        from the caller binding and pruned the branch. Provenance-only
+        resolution keeps the ``if`` runtime.
+        """
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def helper(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
+            a = qm.h(a)
+            bit = qm.measure(a)
+            if bit:
+                b = qm.x(b)
+            return b
+
+        @qm.qkernel
+        def top(a_measured: qm.UInt) -> qm.Bit:
+            a = qm.qubit("a")
+            b = qm.qubit("b")
+            b = helper(a, b)
+            return qm.measure(b)
+
+        transpiler = QiskitTranspiler()
+        block = transpiler.to_block(top, bindings={"a_measured": 1})
+        inlined = transpiler.inline(transpiler.substitute(block))
+        validated = transpiler.affine_validate(inlined)
+        folded = transpiler.constant_fold(validated, bindings={"a_measured": 1})
+        lowered = transpiler.lower_compile_time_ifs(folded, bindings={"a_measured": 1})
+
+        assert _find_ops(lowered.operations, IfOperation), (
+            "An inlined callee's runtime measurement condition must not be "
+            "captured by a caller binding that shares the generated name"
         )
 
 
