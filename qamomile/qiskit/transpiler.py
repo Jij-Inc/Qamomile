@@ -181,7 +181,31 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> None:
-        """Emit while loop using Qiskit's while_loop context manager."""
+        """Emit while loop using Qiskit's while_loop context manager.
+
+        Args:
+            circuit (QuantumCircuit): The circuit being emitted into.
+            op (WhileOperation): The while loop operation to emit.
+            qubit_map (QubitMap): Map from qubit addresses to physical qubits.
+            clbit_map (ClbitMap): Map from qubit addresses to clbit indices.
+            bindings (dict[str, Any]): Current value bindings.
+
+        Raises:
+            EmitError: If the loop carries classical values (no runtime
+                loop can thread them between iterations) or has no
+                condition operand.
+        """
+        if op.carried_names:
+            # Mirror the base emit_while backstop: this override replaces
+            # the base function entirely, and the transpile-time rejection
+            # is the only earlier line of defense.
+            raise EmitError(
+                "Loop-carried classical values in a while loop cannot be "
+                f"emitted ({', '.join(op.carried_names)}): a runtime loop "
+                "re-executes one static body and cannot thread a classical "
+                "value between iterations.",
+                operation="WhileOperation",
+            )
         if not op.operands:
             raise EmitError(
                 "WhileOperation requires a condition operand.",

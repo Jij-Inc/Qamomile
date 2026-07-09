@@ -560,9 +560,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         for segment in segments:
             if isinstance(segment, QuantumSegment):
                 continue
-            outside_reads |= self._segment_read_uuids(
-                list(getattr(segment, "operations", []))
-            )
+            outside_reads |= self._segment_read_uuids(segment.operations)
 
         escaped_names = sorted(
             {
