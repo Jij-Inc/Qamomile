@@ -220,7 +220,7 @@ class Handle(abc.ABC):
 
         Raises:
             TypeError: Always, for handle families without explicit
-                merge-merge support.
+                merge support.
         """
         raise TypeError(
             "Unsupported Handle type for if-else merge: "
