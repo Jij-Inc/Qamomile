@@ -44,6 +44,7 @@ from qamomile.circuit.ir.value import (
     ValueMetadata,
 )
 from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.observable.hamiltonian import Hamiltonian, Pauli, PauliOperator
 
 # ---------------------------------------------------------------------------
 # Fixture helpers
@@ -963,4 +964,164 @@ class TestParamSlotsHashParticipation:
             assert repr(base) == repr(tweaked)
         assert content_hash(_block_with_bound_slot(base)) != content_hash(
             _block_with_bound_slot(tweaked)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Structural payload hashing (I1): no repr dependence for known payload types
+# ---------------------------------------------------------------------------
+
+
+def _block_with_payload_slot(payload: object) -> Block:
+    """Build a minimal AFFINE Block whose manifest carries ``payload``.
+
+    Generic variant of ``_block_with_bound_slot`` for non-ndarray
+    payloads (Hamiltonians, numpy scalars, plain floats). Any
+    content-hash difference between two such Blocks is attributable to
+    the slot's ``bound_value`` alone.
+
+    Args:
+        payload (object): Payload stored on the single
+            ``COMPILE_TIME_BOUND`` slot.
+
+    Returns:
+        Block: An otherwise-empty AFFINE Block with a one-slot
+            ``param_slots`` manifest.
+    """
+    return Block(
+        name="manual",
+        kind=BlockKind.AFFINE,
+        param_slots=(
+            ParamSlot(
+                name="payload",
+                type=FloatType(),
+                kind=ParamKind.COMPILE_TIME_BOUND,
+                ndim=0,
+                bound_value=payload,
+            ),
+        ),
+    )
+
+
+def _block_with_metadata_value(value: Value) -> Block:
+    """Build a minimal AFFINE Block whose sole input carries ``value``.
+
+    Args:
+        value (Value): A Value whose metadata (``array_runtime`` /
+            ``dict_runtime``) is the payload under test.
+
+    Returns:
+        Block: An otherwise-empty AFFINE Block with one input value.
+    """
+    return Block(
+        name="manual",
+        label_args=[value.name],
+        input_values=[value],
+        kind=BlockKind.AFFINE,
+    )
+
+
+def _xz_hamiltonian(*, reverse: bool = False, z_coeff: float = 0.5) -> "Hamiltonian":
+    """Build a two-term Hamiltonian with controllable term insertion order.
+
+    Args:
+        reverse (bool): Insert the Z term before the X term when True, so
+            the term-dict iteration order (and thus ``repr``) differs
+            while ``Hamiltonian.__eq__`` still holds.
+        z_coeff (float): Coefficient of the Z term. Vary it to produce a
+            genuinely different Hamiltonian.
+
+    Returns:
+        Hamiltonian: ``1.0 * X0 + z_coeff * Z1`` with the requested
+            insertion order.
+    """
+    h = Hamiltonian()
+    terms = [
+        ((PauliOperator(Pauli.X, 0),), 1.0),
+        ((PauliOperator(Pauli.Z, 1),), z_coeff),
+    ]
+    if reverse:
+        terms.reverse()
+    for ops, coeff in terms:
+        h.add_term(ops, coeff)
+    return h
+
+
+class TestStructuralPayloadHashing:
+    """Known payload types hash structurally, without ``repr`` dependence.
+
+    Regression class for I1: ``content_hash`` used to stringify
+    Hamiltonian (and other opaque) payloads via ``repr``, making the
+    hash depend on term insertion order and on ``__repr__`` formatting
+    stability. Payloads the wire format supports are now emitted
+    structurally.
+    """
+
+    def test_hamiltonian_bound_value_term_order_independent(self):
+        """Equal Hamiltonians with different term insertion order hash equally."""
+        h_fwd = _xz_hamiltonian()
+        h_rev = _xz_hamiltonian(reverse=True)
+        # Precondition: the two are ==-equal but repr-distinct, so a
+        # repr-based hash would tell them apart.
+        assert h_fwd == h_rev
+        assert repr(h_fwd) != repr(h_rev)
+        assert content_hash(_block_with_payload_slot(h_fwd)) == content_hash(
+            _block_with_payload_slot(h_rev)
+        )
+
+    def test_hamiltonian_bound_value_content_sensitive(self):
+        """Hamiltonians with different coefficients hash differently."""
+        assert content_hash(
+            _block_with_payload_slot(_xz_hamiltonian(z_coeff=0.5))
+        ) != content_hash(_block_with_payload_slot(_xz_hamiltonian(z_coeff=0.7)))
+
+    def test_hamiltonian_declared_width_changes_hash(self):
+        """The declared register width participates in the hash.
+
+        ``Hamiltonian.__eq__`` ignores ``num_qubits``, but the declared
+        width changes circuit behavior, so the hash includes it.
+        """
+        narrow = _xz_hamiltonian()
+        wide = Hamiltonian(num_qubits=5)
+        for ops, coeff in narrow.terms.items():
+            wide.add_term(ops, coeff)
+        assert narrow == wide
+        assert content_hash(_block_with_payload_slot(narrow)) != content_hash(
+            _block_with_payload_slot(wide)
+        )
+
+    def test_hamiltonian_in_const_array_term_order_independent(self):
+        """``const_array`` Hamiltonian payloads hash structurally too."""
+
+        def block_for(h: Hamiltonian) -> Block:
+            value = Value(FloatType(), name="obs_vec").with_array_runtime_metadata(
+                const_array=(h,)
+            )
+            return _block_with_metadata_value(value)
+
+        block_fwd = block_for(_xz_hamiltonian())
+        block_rev = block_for(_xz_hamiltonian(reverse=True))
+        assert content_hash(block_fwd) == content_hash(block_rev)
+        block_other = block_for(_xz_hamiltonian(z_coeff=0.7))
+        assert content_hash(block_fwd) != content_hash(block_other)
+
+    def test_hamiltonian_in_dict_runtime_term_order_independent(self):
+        """``dict_runtime.bound_data`` Hamiltonian payloads hash structurally."""
+
+        def block_for(h: Hamiltonian) -> Block:
+            value = Value(FloatType(), name="coeffs").with_dict_runtime_metadata(
+                {"obs": h}
+            )
+            return _block_with_metadata_value(value)
+
+        block_fwd = block_for(_xz_hamiltonian())
+        block_rev = block_for(_xz_hamiltonian(reverse=True))
+        assert content_hash(block_fwd) == content_hash(block_rev)
+        block_other = block_for(_xz_hamiltonian(z_coeff=0.7))
+        assert content_hash(block_fwd) != content_hash(block_other)
+
+    def test_numpy_scalar_bound_value_matches_python_float(self):
+        """``np.float64(x)`` and ``x`` hash identically (both structural)."""
+        assert content_hash(_block_with_payload_slot(np.float64(0.5))) == content_hash(
+            _block_with_payload_slot(0.5)
         )

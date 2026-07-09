@@ -50,10 +50,15 @@ Limitations:
     - ``ValueMetadata.dict_runtime.bound_data``,
       ``ArrayRuntimeMetadata.const_array``, and
       ``ParamSlot.default`` / ``ParamSlot.bound_value`` may carry
-      arbitrary frozen Python data. ``numpy.ndarray`` payloads (except
-      object-dtype arrays) are hashed from their raw buffer
-      (dtype + shape + bytes) and are therefore exempt; hash stability
-      for any other object type requires a stable ``repr``.
+      arbitrary frozen Python data. Every payload type the wire format
+      supports is hashed structurally: ``numpy.ndarray`` (except
+      object-dtype arrays) from its raw buffer (dtype + shape + bytes),
+      ``numpy`` scalars via their Python value, ``bytes`` via a digest,
+      ``complex`` via its components, and ``Hamiltonian`` via its
+      term structure (order-independent, matching ``Hamiltonian.__eq__``
+      plus the declared register width). Only object types outside that
+      set fall back to ``repr`` and therefore require a stable ``repr``
+      for the hash to be reliable.
 """
 
 from __future__ import annotations
@@ -73,6 +78,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -84,6 +90,7 @@ from qamomile.circuit.ir.value import (
     remap_indexed_identifier,
     remap_value_metadata_references,
 )
+from qamomile.observable.hamiltonian import Hamiltonian
 
 _SUPPORTED_KINDS = frozenset({BlockKind.AFFINE, BlockKind.ANALYZED})
 
@@ -588,16 +595,20 @@ class _Canonicalizer:
 def _token(obj: Any) -> str:
     """Render an arbitrary Python value into a stable string token.
 
-    Handles the small set of types appearing in IR metadata: scalars,
-    enums, ``numpy.ndarray`` (rendered as dtype + shape + a digest of
-    the raw buffer), tuples/lists, dicts (sorted by key), ``ValueBase``
-    instances (rendered as a compact ``<ClassName:UUID>`` reference
-    since the full state is emitted in the value-declaration section),
-    and ``ValueType`` instances (rendered via ``.label()`` to avoid
+    Handles the small set of types appearing in IR metadata: scalars
+    (including ``complex`` and ``numpy`` scalar types), enums,
+    ``bytes``, ``numpy.ndarray`` (rendered as dtype + shape + a digest
+    of the raw buffer), ``Hamiltonian`` (rendered structurally,
+    order-independently over its terms — see ``_hamiltonian_token``),
+    tuples/lists, dicts (sorted by key), ``ValueBase`` instances
+    (rendered as a compact ``<ClassName:UUID>`` reference since the
+    full state is emitted in the value-declaration section), and
+    ``ValueType`` instances (rendered via ``.label()`` to avoid
     embedding memory addresses from the default ``object.__repr__``).
-    Falls back to ``repr`` for anything else; callers that store
-    opaque Python objects in metadata must ensure those objects have a
-    stable ``repr`` for the hash to be reliable.
+    Falls back to ``repr`` only for object types outside that set;
+    callers that store such opaque Python objects in metadata must
+    ensure those objects have a stable ``repr`` for the hash to be
+    reliable.
 
     Args:
         obj (Any): A Python value reachable from canonical IR data
@@ -612,8 +623,21 @@ def _token(obj: Any) -> str:
         return "None"
     if isinstance(obj, bool):
         return "true" if obj else "false"
+    if isinstance(obj, np.generic):
+        # numpy scalars behave like plain numbers; hash their Python
+        # value so np.float64(0.5) and 0.5 produce the same token.
+        # Checked before the int/float branch because numpy float64 /
+        # int scalar types subclass the Python primitives, whose repr
+        # differs (e.g. ``np.float64(0.5)`` vs ``0.5`` under numpy 2).
+        return _token(obj.item())
     if isinstance(obj, (int, float, str)):
         return repr(obj)
+    if isinstance(obj, complex):
+        # Structural components rather than repr so the token does not
+        # depend on complex.__repr__ formatting details.
+        return f"complex({obj.real!r},{obj.imag!r})"
+    if isinstance(obj, (bytes, bytearray)):
+        return f"bytes<sha256={hashlib.sha256(bytes(obj)).hexdigest()}>"
     if isinstance(obj, enum.Enum):
         return f"{type(obj).__name__}.{obj.name}"
     if isinstance(obj, np.ndarray) and not obj.dtype.hasobject:
@@ -629,6 +653,8 @@ def _token(obj: Any) -> str:
         # already guarantees a C-contiguous buffer.
         digest = hashlib.sha256(memoryview(data.reshape(-1)).cast("B")).hexdigest()
         return f"ndarray<dtype={data.dtype.str},shape={data.shape},sha256={digest}>"
+    if isinstance(obj, Hamiltonian):
+        return _hamiltonian_token(obj)
     if isinstance(obj, ValueBase):
         return _value_token(obj)
     if isinstance(obj, ValueType):
@@ -647,6 +673,36 @@ def _token(obj: Any) -> str:
         body = ",".join(f"{f.name}={_token(getattr(obj, f.name))}" for f in fields)
         return f"{type(obj).__name__}({body})"
     return repr(obj)
+
+
+def _hamiltonian_token(h: Hamiltonian) -> str:
+    """Render a ``Hamiltonian`` payload into a structural, stable token.
+
+    Reuses the wire encoding (``hamiltonian_to_dict``) so the token is
+    derived from term structure — Pauli names, qubit indices, and
+    coefficients — rather than from ``Hamiltonian.__repr__``. Term
+    entries are sorted by their token so two Hamiltonians that compare
+    equal (``Hamiltonian.__eq__`` compares the term *dict*, which is
+    insertion-order-insensitive) hash identically regardless of the
+    order terms were added in. The declared register width is included
+    even though ``__eq__`` ignores it, because it changes circuit
+    behavior (``num_qubits`` / ``remap_qubits``).
+
+    Args:
+        h (Hamiltonian): The Hamiltonian payload (e.g. a bound
+            ``Observable`` parameter stored in ``ParamSlot.bound_value``
+            or ``ArrayRuntimeMetadata.const_array``).
+
+    Returns:
+        str: A deterministic ``Hamiltonian(...)`` token.
+    """
+    wire = hamiltonian_to_dict(h)
+    term_tokens = sorted(_token(entry) for entry in wire["terms"])
+    return (
+        "Hamiltonian(terms=[" + ",".join(term_tokens) + "],"
+        f"constant={_token(wire['constant'])},"
+        f"num_qubits={_token(wire['num_qubits'])})"
+    )
 
 
 def _value_token(v: ValueBase) -> str:

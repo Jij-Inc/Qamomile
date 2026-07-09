@@ -116,10 +116,11 @@ encoded with the tagged-dict wrapper defined in
 ``{"$complex": True, "real": <float>, "imag": <float>}``. Term order
 follows the Hamiltonian's own term-dict iteration order and the
 float-vs-complex distinction is preserved, so the reconstructed
-object is ``repr``-identical to the original; both properties feed
-``content_hash``, which stringifies opaque payloads via ``repr``.
-The wrapper contains no raw bytes, so both wire formats carry it
-unchanged.
+object is ``repr``-identical to the original. (``content_hash`` hashes
+Hamiltonian payloads structurally and order-independently via this
+same wrapper — see ``canonical._hamiltonian_token`` — so wire fidelity
+and hash identity are decoupled.) The wrapper contains no raw bytes,
+so both wire formats carry it unchanged.
 
 Forward compatibility
 ---------------------

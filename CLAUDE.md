@@ -192,7 +192,7 @@ Key contract:
 - **Content-only equivalence**: display-only fields (`Block.name`, `Block.output_names`, `Value.name`) are **excluded** from `to_canonical_bytes`. Two structurally-identical kernels with different function names hash equally. `Block.label_args` is functional (it names input ports by position) and is included.
 - **Counter-based UUIDs**: the first `Value` visited gets `00000000-0000-0000-0000-000000000000`, then `…0001`, and so on. `uuid` and `logical_id` share the same monotonically increasing counter; their separate remap tables are exposed via `canonicalize_and_remap`.
 - **Byte format is internal**: `to_canonical_bytes` is intended only to back `content_hash`. It is not a wire format and may change between qamomile releases; do not rely on parsing it. A versioned serialization format is tracked separately.
-- **Hash stability prerequisite**: arbitrary Python objects stored in `ValueMetadata.array_runtime.const_array` / `dict_runtime.bound_data` are stringified via `repr`, so their `repr` must be stable for `content_hash` to be meaningful.
+- **Structural payload hashing**: every payload type the wire format supports (`numpy.ndarray`, numpy scalars, `bytes`, `complex`, `Hamiltonian`) is emitted structurally into the canonical bytes — Hamiltonians hash order-independently over their term structure (matching `Hamiltonian.__eq__`) plus the declared register width. Only object types outside that set (stored in `ValueMetadata.array_runtime.const_array` / `dict_runtime.bound_data` / `ParamSlot.bound_value`) fall back to `repr` and require a stable `repr` for `content_hash` to be meaningful.
 
 ### IR Serialization
 
