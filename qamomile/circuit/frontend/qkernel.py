@@ -657,7 +657,7 @@ class QKernel(Generic[P, R]):
         which preserves ``logical_id`` continuity through the chain of
         sequential self-calls.  Replacing them with values from
         ``self._block.call`` would collapse both calls' results onto the
-        block's ``phi_output`` (which has a fresh ``logical_id``), breaking
+        block's ``merge_output`` (which has a fresh ``logical_id``), breaking
         the qubit-map lookup during backend emit.
         """
         if not self._pending_self_calls:

@@ -7,7 +7,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
     NotOp,
-    PhiOp,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -84,7 +83,7 @@ class _FakeExecutor(QuantumExecutor[str]):
 
 
 class TestClassicalExecutorControlFlow:
-    def test_executes_if_with_phi_merge(self) -> None:
+    def test_executes_if_with_merge(self) -> None:
         cond = Value(type=BitType(), name="cond")
         true_result = Value(type=UIntType(), name="true_result")
         false_result = Value(type=UIntType(), name="false_result")
@@ -92,7 +91,6 @@ class TestClassicalExecutorControlFlow:
 
         if_op = IfOperation(
             operands=[cond],
-            results=[merged],
             true_operations=[
                 BinOp(
                     kind=BinOpKind.ADD,
@@ -107,13 +105,8 @@ class TestClassicalExecutorControlFlow:
                     results=[false_result],
                 )
             ],
-            phi_ops=[
-                PhiOp(
-                    operands=[cond, true_result, false_result],
-                    results=[merged],
-                )
-            ],
         )
+        if_op.add_merge(true_result, false_result, merged)
 
         context = ExecutionContext({cond.uuid: True})
         results = ClassicalExecutor().execute(
@@ -206,7 +199,6 @@ class TestClassicalExecutorControlFlow:
                 )
             ],
             false_operations=[],
-            phi_ops=[],
         )
 
         results = ClassicalExecutor().execute(

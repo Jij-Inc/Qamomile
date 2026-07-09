@@ -199,11 +199,11 @@ class Handle(abc.ABC):
         """Hook for subclasses to copy additional state during consume()."""
         pass
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "Handle":
-        """Wrap a phi-merged IR value in this handle's frontend family.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Handle":
+        """Wrap a merged IR value in this handle's frontend family.
 
         Called on the true-branch handle when an if-else merges branch
-        values. Subclasses that support phi merging override this to wrap
+        values. Subclasses that support merging override this to wrap
         ``value`` in their own handle type — and, where wrapping must
         consider both branches, to validate / copy metadata using
         ``counterpart``.
@@ -220,10 +220,10 @@ class Handle(abc.ABC):
 
         Raises:
             TypeError: Always, for handle families without explicit
-                phi-merge support.
+                merge support.
         """
         raise TypeError(
-            "Unsupported Handle type for if-else phi merge: "
+            "Unsupported Handle type for if-else merge: "
             f"{type(self).__name__}. Add explicit handle wrapping support "
             "before merging this handle type."
         )

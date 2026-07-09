@@ -2,8 +2,8 @@
 
 from .composite_decomposer import CompositeDecomposer
 from .condition_resolution import (
-    map_phi_outputs,
-    remap_static_phi_outputs,
+    map_merge_outputs,
+    remap_static_merge_outputs,
     resolve_if_condition,
 )
 from .control_flow_emission import resolve_condition_address
@@ -21,8 +21,8 @@ __all__ = [
     "QubitResolutionResult",
     "ResourceAllocator",
     "ValueResolver",
-    "map_phi_outputs",
-    "remap_static_phi_outputs",
+    "map_merge_outputs",
+    "remap_static_merge_outputs",
     "resolve_condition_address",
     "resolve_if_condition",
     "resolve_qubit_key",

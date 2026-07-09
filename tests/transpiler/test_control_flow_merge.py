@@ -1,9 +1,9 @@
-"""Regression tests for emit-time classical phi-output binding.
+"""Regression tests for emit-time classical merge-output binding.
 
-The frontend's ``emit_if`` builder creates a ``PhiOp`` for **every**
+The frontend's ``emit_if`` builder creates a merge slot for **every**
 captured variable in an if-branch — including read-only ones. For
-classical phi outputs (UInt loop indices, Float angles, Bit flags) that
-end up identifying the SAME IR Value on both branches, the phi is a
+classical merge outputs (UInt loop indices, Float angles, Bit flags) that
+end up identifying the SAME IR Value on both branches, the merge is a
 no-op merge and the output should be bound to that value at emit time.
 
 The bug this guards against: a pattern like
@@ -14,10 +14,10 @@ The bug this guards against: a pattern like
 
 would fail at emit with ``symbolic_index_not_bound`` because
 ``emit_for_unrolled`` binds ``j`` per iteration but the if-branch
-phi-versions ``j`` to ``j_phi_4``, which has no entry in bindings.
-``register_classical_phi_aliases`` (called from ``emit_if``) now binds
-phi outputs whose true_value and false_value are the same IR Value,
-making subsequent ``data[j_phi_4]`` indexing resolvable.
+merge-versions ``j`` to ``j_merge_4``, which has no entry in bindings.
+``register_classical_merge_aliases`` (called from ``emit_if``) now binds
+merge outputs whose true_value and false_value are the same IR Value,
+making subsequent ``data[j_merge_4]`` indexing resolvable.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ class TestForRangeIfArrayIndex:
 
 class TestRuntimeIfReadOnlyLoopVar:
     """Runtime if (measurement-driven) inside a for-loop, with the loop
-    variable read in the if-condition. The phi alias must bind so emit
+    variable read in the if-condition. The merge alias must bind so emit
     can locate the right qubit per iteration."""
 
     def test_runtime_if_uses_loop_var_in_array_index(self, transpiler):

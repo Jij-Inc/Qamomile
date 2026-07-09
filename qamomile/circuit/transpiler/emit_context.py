@@ -12,8 +12,8 @@ seven distinct semantic purposes simultaneously:
 3. Emit-time-computed intermediates — ``BinOp`` / ``CompOp`` /
    ``CondOp`` / ``NotOp`` results (keyed by Value UUID after Fix B;
    originally also keyed by Value name, which collided across tmps).
-4. Phi-output aliases (keyed by phi-output UUID; written by
-   ``register_classical_phi_aliases``).
+4. Merge-output aliases (keyed by merge-output UUID; written by
+   ``register_classical_merge_aliases``).
 5. Backend runtime expressions (e.g. ``qiskit.circuit.classical.expr.Expr``
    for compound runtime if-conditions).
 6. Array data (keyed by array name; bound iterables passed by user).
@@ -22,7 +22,7 @@ seven distinct semantic purposes simultaneously:
 
 This overloading was the structural cause of every name-collision bug
 class seen in this codebase: ``"bit_tmp"`` chained predicates,
-``j_phi_4`` phi aliases, the inline-pass ``DictValue`` drop, and the
+``j_merge_4`` merge aliases, the inline-pass ``DictValue`` drop, and the
 type-blind ``bool(...)`` coercion in ``resolve_operand``. Each was
 patched locally; the structural overloading remained.
 
@@ -85,7 +85,7 @@ class EmitContext(dict):
             user-chosen variable names in nested or sibling loops never
             collide.
         _values: Emit-time-computed intermediate values (``BinOp``
-            results, ``CompOp``/``CondOp``/``NotOp`` results, phi
+            results, ``CompOp``/``CondOp``/``NotOp`` results, merge
             aliases), keyed by Value UUID.
         _runtime_exprs: Backend runtime-expression objects (e.g. Qiskit
             ``expr.Expr`` for compound classical conditions), keyed by
@@ -194,7 +194,7 @@ class EmitContext(dict):
         """Bind an emit-time-computed intermediate by Value UUID.
 
         Use for ``BinOp`` / ``CompOp`` / ``CondOp`` / ``NotOp`` results,
-        phi aliases, and other UUID-identified intermediates.
+        merge aliases, and other UUID-identified intermediates.
         """
         self._values[uuid] = value
         self[uuid] = value
