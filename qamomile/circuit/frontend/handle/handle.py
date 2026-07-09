@@ -263,6 +263,13 @@ class Handle(abc.ABC):
     _consumed: bool = False
     _consumed_by: str | None = None
     _consumed_at: "_FrameRef | None" = None
+    # Set to True only on branch-tracing copies made by
+    # ``_fresh_handle_copy_for_tracing`` when the source handle was already
+    # consumed BEFORE the branch. Lets the phi-merge machinery distinguish
+    # pre-branch consumption (slot provably untouched by the branch — no
+    # elision block, no conditional-move marking) from in-branch consumption
+    # (which triggers the conditional-move rule).
+    _consumed_pre_branch: bool = False
 
     def _should_enforce_linear(self) -> bool:
         """Check if this handle type requires linear enforcement.
@@ -326,6 +333,7 @@ class Handle(abc.ABC):
         new_handle._consumed = False
         new_handle._consumed_by = None
         new_handle._consumed_at = None
+        new_handle._consumed_pre_branch = False
         self._copy_subclass_state_to(new_handle)
         return new_handle
 

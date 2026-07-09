@@ -283,25 +283,55 @@ def _copy_qfixed_phi_metadata(
 
 
 def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
-    """Create a Handle copy with consumed state reset for branch tracing.
+    """Create a branch-independent Handle copy for if-else branch tracing.
 
-    This function intentionally accesses Handle's private ``_consumed`` and
-    ``_consumed_by`` attributes.  Direct consumed-state manipulation is
-    confined to the phi-merge machinery in this module: here (resetting the
-    per-branch copies so mutually-exclusive branches trace independently) and
-    in ``_mark_conditionally_consumed`` (re-marking the merged handle when a
+    This function intentionally accesses Handle's private ``_consumed`` /
+    ``_consumed_by`` / ``_consumed_at`` / ``_consumed_pre_branch`` attributes.
+    Direct consumed-state manipulation is confined to the phi-merge machinery
+    in this module: here (giving each branch its own consumption state so
+    mutually-exclusive branches trace independently) and in
+    ``_mark_conditionally_consumed`` (re-marking the merged handle when a
     branch consumed the value — the conditional-move rule).  Keeping this off
     the public Handle surface preserves the affine-type enforcement that
     prevents qubit reuse bugs.
 
+    Branch independence means each branch gets its own consumption state so
+    that consuming a handle inside one branch does not poison tracing of the
+    mutually-exclusive branch.  It does NOT mean resurrection: a handle that
+    was already consumed BEFORE the branch stays consumed in both copies, so
+    using it inside a branch raises ``QubitConsumedError`` at trace time with
+    the original consumer's location.  Such copies are marked with
+    ``_consumed_pre_branch`` so the phi-merge machinery can still recognize
+    the slot as untouched by the branch (elision stays valid and the
+    conditional-move rule does not misfire — see ``_consumed_in_branch``).
+
+    Scope note: this preserves *scalar* pre-branch consumption. The array
+    element borrow table is still reset to empty per branch, because the
+    phi-merge element-borrow union (``_merge_branch_element_borrows``)
+    assumes each branch's leftover borrows are in-branch only; seeding it
+    with pre-branch borrows would double-count them onto the merged handle.
+
     Non-Handle values (int, float, etc.) are returned unchanged.
+
+    Args:
+        h (typing.Any): Variable captured for the branch bodies — a Handle
+            or a plain Python value.
+
+    Returns:
+        typing.Any: A branch-local shallow copy for Handles, or ``h``
+            unchanged for non-Handles.
     """
     if not isinstance(h, Handle):
         return h
     c = copy.copy(h)
-    c._consumed = False
-    c._consumed_by = None
-    c._consumed_at = None
+    if c._consumed:
+        # Consumed before the branch: keep the consumed state (no
+        # resurrection) but mark it so the merge machinery can tell it
+        # apart from in-branch consumption.
+        c._consumed_pre_branch = True
+    else:
+        c._consumed_by = None
+        c._consumed_at = None
     # Reset borrowed-element tracking for ArrayBase instances so that
     # each branch starts with an empty borrow set.  Without this,
     # shallow copy shares the same _borrowed_indices dict and borrowing
@@ -315,6 +345,31 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
 # consumption produces. Used to detect a nested-if phrase and avoid
 # re-wrapping it (which would duplicate the suffix).
 _COND_CONSUME_MARKER = "of the preceding if/else"
+
+
+def _consumed_in_branch(val: typing.Any) -> bool:
+    """Check whether a branch-returned value was consumed INSIDE the branch.
+
+    Branch-tracing copies of handles that were already consumed before the
+    if-else carry ``_consumed_pre_branch`` (see
+    ``_fresh_handle_copy_for_tracing``). Their ``_consumed`` flag is True, but
+    the branch itself provably did not touch them, so they must not block
+    merge elision nor trigger the conditional-move rule
+    (``_mark_conditionally_consumed``) — only values consumed by an operation
+    *inside* the branch should. This helper is the single source of truth for
+    "the branch consumed this value".
+
+    Args:
+        val (typing.Any): Value a branch returned for a variable slot
+            (Handle, Value, or primitive).
+
+    Returns:
+        bool: ``True`` when the value was consumed by an operation inside the
+            branch body (as opposed to before the if-else).
+    """
+    return getattr(val, "_consumed", False) and not getattr(
+        val, "_consumed_pre_branch", False
+    )
 
 
 def _merge_branch_element_borrows(
@@ -1335,8 +1390,12 @@ def emit_if(
 
             true_v = true_val.value if hasattr(true_val, "value") else true_val
             false_v = false_val.value if hasattr(false_val, "value") else false_val
-            true_consumed = getattr(true_val, "_consumed", False)
-            false_consumed = getattr(false_val, "_consumed", False)
+            # Only in-branch consumption counts: a handle consumed BEFORE the
+            # if (``_consumed_pre_branch``) must not block elision or trigger
+            # the conditional-move rule — its reuse inside a branch already
+            # raised at trace time (see ``_fresh_handle_copy_for_tracing``).
+            true_consumed = _consumed_in_branch(true_val)
+            false_consumed = _consumed_in_branch(false_val)
             is_array_handle = isinstance(true_val, ArrayBase) or isinstance(
                 false_val, ArrayBase
             )

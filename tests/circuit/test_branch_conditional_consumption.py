@@ -18,6 +18,16 @@ as consumed after the merge, so reusing it raises ``QubitConsumedError``
 with a message that names the consuming operation and branch. Dropping the
 value (never using it after the if) stays legal — affinity permits drop.
 
+The file also covers the mirror-image ``resurrection`` direction: a qubit
+consumed *before* the if and then used *inside* a branch. The per-branch
+handle copies used to reset ``_consumed`` unconditionally, which let such a
+pre-consumed handle be reused inside a branch without error at trace time —
+the affine violation only surfaced later at transpile. The copies now
+preserve pre-branch consumption (marking it ``_consumed_pre_branch`` so the
+phi-merge machinery still treats the slot as untouched by the branch), so
+the reuse raises ``QubitConsumedError`` at trace time pointing at the
+original consumer.
+
 Note: Do NOT use ``from __future__ import annotations`` here — the @qkernel
 AST transformer relies on resolved type annotations.
 """
@@ -290,4 +300,102 @@ def test_element_consume_in_branch_other_element_reuse_stays_legal():
         return qmc.measure(qs[1])
 
     executable = _transpile(circuit, bindings={"n": 2})
+    assert executable is not None
+
+
+# ---------------------------------------------------------------------------
+# Rejected: consume BEFORE the if, use inside a branch (resurrection)
+# ---------------------------------------------------------------------------
+
+
+def test_pre_branch_measured_qubit_used_in_true_branch_raises():
+    """A qubit consumed by measure() before the if cannot be used in the true branch."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = qmc.h(q)
+        _dead = qmc.measure(q)  # q consumed BEFORE the if
+        sel = qmc.measure(qmc.h(qmc.qubit("r")))
+        out = qmc.qubit("fresh")
+        if sel:
+            out = qmc.x(q)  # resurrection: reuse of a pre-consumed handle
+        return qmc.measure(out)
+
+    with pytest.raises(QubitConsumedError, match="already consumed"):
+        _transpile(circuit)
+
+
+def test_pre_branch_measured_qubit_used_in_else_branch_raises():
+    """A qubit consumed before the if cannot be used in the else branch either."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        _dead = qmc.measure(q)  # q consumed BEFORE the if
+        sel = qmc.measure(qmc.h(qmc.qubit("r")))
+        if sel:
+            out = qmc.qubit("fresh")
+        else:
+            out = qmc.z(q)  # resurrection: reuse of a pre-consumed handle
+        return qmc.measure(out)
+
+    with pytest.raises(QubitConsumedError, match="already consumed"):
+        _transpile(circuit)
+
+
+def test_pre_branch_gate_consumed_qubit_used_in_branch_raises():
+    """A qubit consumed by a gate (result not rebound) stays consumed inside a branch."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        _other = qmc.h(q)  # q consumed here; result deliberately not rebound to q
+        sel = qmc.measure(qmc.h(qmc.qubit("r")))
+        out = qmc.qubit("fresh")
+        if sel:
+            out = qmc.x(q)  # resurrection: q was already consumed by H
+        return qmc.measure(out)
+
+    with pytest.raises(QubitConsumedError, match="already consumed"):
+        _transpile(circuit)
+
+
+def test_pre_branch_released_element_reborrow_in_branch_stays_legal():
+    """An element borrowed and RETURNED before the if can be re-borrowed inside a branch."""
+
+    @qmc.qkernel
+    def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        qs = qmc.qubit_array(n, "qs")
+        q0 = qs[0]
+        q0 = qmc.h(q0)
+        qs[0] = q0  # borrow released before the if
+        sel = qmc.measure(qmc.h(qmc.qubit("r")))
+        if sel:
+            qs[0] = qmc.x(qs[0])
+        return qmc.measure(qs)
+
+    executable = _transpile(circuit, bindings={"n": 2})
+    assert executable is not None
+
+
+def test_same_qubit_consumed_independently_in_both_branches_stays_legal():
+    """Consuming the same pre-branch handle independently in each branch still compiles.
+
+    Branch independence (each branch gets its own consumption state) must be
+    preserved: consuming ``q`` in the true branch must not poison tracing of
+    the else branch. Here ``q`` is live before the if, so this is legal.
+    """
+
+    @qmc.qkernel
+    def circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        sel = qmc.measure(qmc.h(qmc.qubit("r")))
+        if sel:
+            q = qmc.x(q)
+        else:
+            q = qmc.z(q)
+        return qmc.measure(q)
+
+    executable = _transpile(circuit)
     assert executable is not None

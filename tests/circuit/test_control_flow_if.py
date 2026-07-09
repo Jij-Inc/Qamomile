@@ -1461,11 +1461,10 @@ class TestIfElseDeadPhiFiltering:
         @qkernel
         def circuit(q0: Qubit, q_t: Qubit) -> qm.Bit:
             cond = qm.measure(q0)
-            b = qm.measure(q_t)
             if cond:
                 q_t = qm.x(q_t)
-            # q_t is dead; only b is returned
-            return b
+            # q_t is dead; only cond is returned
+            return cond
 
         graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]

@@ -44,8 +44,9 @@ def _with_for(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 @qmc.qkernel
 def _with_runtime_if() -> qmc.Bit:
     q = qmc.qubit(name="q")
-    q = qmc.h(q)
-    bit = qmc.measure(q)
+    c = qmc.qubit(name="c")
+    c = qmc.h(c)
+    bit = qmc.measure(c)
     if bit:
         q = qmc.x(q)
     return qmc.measure(q)
