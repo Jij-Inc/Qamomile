@@ -765,6 +765,29 @@ class TestRoundTripIRFeatures:
         with pytest.raises(ValueError, match="merge data is inconsistent"):
             from_dict(payload)
 
+    def test_if_operation_legacy_phi_ops_payload_rejected(self):
+        """A pre-yields payload carrying the removed 'phi_ops' field fails loud.
+
+        The length check only catches a legacy op that also kept its merge
+        outputs in ``results``; an explicit ``phi_ops`` guard is what keeps
+        the "old payloads are rejected, never silently down-decoded"
+        contract true for a ``phi_ops``-only shape.
+        """
+        block = _to_affine(_if_merge_kernel)
+        payload = to_dict(block)
+        injected = False
+        for op_dict in payload["block"]["operations"]:
+            if op_dict.get("$type") == "IfOperation":
+                # Simulate an old-revision IfOperation: the merges lived
+                # under the removed ``phi_ops`` field, not the yield refs.
+                op_dict.pop("true_yield_refs", None)
+                op_dict.pop("false_yield_refs", None)
+                op_dict["phi_ops"] = []
+                injected = True
+        assert injected
+        with pytest.raises(ValueError, match="phi_ops"):
+            from_dict(payload)
+
     def test_if_branch_rebinds_round_trip(self):
         """IfOperation branch-rebind records survive both wire formats."""
         block = _to_affine(_if_branch_rebind_kernel)
