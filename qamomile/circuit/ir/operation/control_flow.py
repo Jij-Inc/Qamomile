@@ -115,11 +115,11 @@ def _replace_region_arg_values(
     changed = False
     for arg in region_args:
         replacements: dict[str, Value] = {}
-        for field in ("init", "block_arg", "yielded", "result"):
-            current = getattr(arg, field)
+        for field_name in ("init", "block_arg", "yielded", "result"):
+            current = getattr(arg, field_name)
             mapped = mapping.get(current.uuid)
             if isinstance(mapped, Value) and mapped is not current:
-                replacements[field] = mapped
+                replacements[field_name] = mapped
         if replacements:
             arg = RegionArg(
                 var_name=arg.var_name,

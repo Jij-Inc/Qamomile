@@ -500,11 +500,11 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         changed = False
         for record in region_args:
             replacements: dict[str, Any] = {}
-            for field in ("init", "block_arg", "yielded", "result"):
-                current = getattr(record, field)
+            for field_name in ("init", "block_arg", "yielded", "result"):
+                current = getattr(record, field_name)
                 substituted = substitutor.substitute_value(current)
                 if isinstance(substituted, Value) and substituted is not current:
-                    replacements[field] = substituted
+                    replacements[field_name] = substituted
             if replacements:
                 record = dataclasses.replace(record, **replacements)
                 changed = True
