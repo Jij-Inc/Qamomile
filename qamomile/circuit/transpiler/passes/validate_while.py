@@ -122,25 +122,18 @@ def is_measurement_backed(
         return False
 
     if isinstance(producer, IfOperation):
-        # Find the PhiOp whose output matches this value
-        for phi in producer.phi_ops:
-            if phi.results and phi.results[0].uuid == value.uuid:
+        # Find the merge whose output matches this value
+        for merge in producer.iter_merges():
+            if merge.result.uuid == value.uuid:
                 result = is_measurement_backed(
-                    phi.true_value, producer_map, visiting
-                ) and is_measurement_backed(phi.false_value, producer_map, visiting)
+                    merge.true_value, producer_map, visiting
+                ) and is_measurement_backed(merge.false_value, producer_map, visiting)
                 visiting.discard(value.uuid)
                 return result
         visiting.discard(value.uuid)
         return False
 
     if isinstance(producer, PhiOp):
-        # A collapsed phi (single operand) is left by dead-branch pruning
-        # in ``analyze.prune_compile_time_ifs``: only the selected source
-        # remains.
-        if len(producer.operands) == 1:
-            result = is_measurement_backed(producer.operands[0], producer_map, visiting)
-            visiting.discard(value.uuid)
-            return result
         result = is_measurement_backed(
             producer.true_value, producer_map, visiting
         ) and is_measurement_backed(producer.false_value, producer_map, visiting)

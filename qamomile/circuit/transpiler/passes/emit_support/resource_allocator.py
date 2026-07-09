@@ -6,7 +6,6 @@ import numbers
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
@@ -256,9 +255,7 @@ class ResourceAllocator:
                     # branch and remap phi outputs directly.
                     selected = op.true_operations if resolved else op.false_operations
                     self._allocate_recursive(selected, qubit_map, clbit_map, bindings)
-                    self._remap_static_phi_outputs(
-                        op.phi_ops, resolved, qubit_map, clbit_map
-                    )
+                    self._remap_static_phi_outputs(op, resolved, qubit_map, clbit_map)
                 else:
                     self._allocate_recursive(
                         op.true_operations, qubit_map, clbit_map, bindings
@@ -266,7 +263,7 @@ class ResourceAllocator:
                     self._allocate_recursive(
                         op.false_operations, qubit_map, clbit_map, bindings
                     )
-                    self._allocate_phi_ops(op.phi_ops, qubit_map, clbit_map)
+                    self._allocate_phi_ops(op, qubit_map, clbit_map)
 
             elif isinstance(op, WhileOperation):
                 # WhileOperation operands:
@@ -419,16 +416,11 @@ class ResourceAllocator:
                 continue
             if not isinstance(op, IfOperation):
                 continue
-            for phi in op.phi_ops:
-                if not isinstance(phi, PhiOp):
+            for merge in op.iter_merges():
+                if merge.result.uuid != target_addr.uuid:
                     continue
-                output = phi.results[0]
-                if output.uuid != target_addr.uuid:
-                    continue
-                true_val = phi.operands[1]
-                false_val = phi.operands[2]
-                true_addr = self._condition_source_address(true_val, {})
-                false_addr = self._condition_source_address(false_val, {})
+                true_addr = self._condition_source_address(merge.true_value, {})
+                false_addr = self._condition_source_address(merge.false_value, {})
                 if true_addr in clbit_map:
                     clbit_map[true_addr] = canonical_clbit
                 if false_addr in clbit_map:
@@ -443,16 +435,25 @@ class ResourceAllocator:
 
     def _allocate_phi_ops(
         self,
-        phi_ops: list,
+        op: IfOperation,
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
     ) -> None:
-        """Register phi output UUIDs via the shared ``map_phi_outputs`` utility."""
-        map_phi_outputs(phi_ops, qubit_map, clbit_map)
+        """Register phi output UUIDs via the shared ``map_phi_outputs`` utility.
+
+        Args:
+            op (IfOperation): The runtime if-else whose merged outputs need
+                physical-resource registration.
+            qubit_map (QubitMap): QubitAddress-to-physical-qubit mapping
+                (mutated in place).
+            clbit_map (ClbitMap): QubitAddress-to-physical-clbit mapping
+                (mutated in place).
+        """
+        map_phi_outputs(op, qubit_map, clbit_map)
 
     def _remap_static_phi_outputs(
         self,
-        phi_ops: list,
+        op: IfOperation,
         condition_value: bool,
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
@@ -465,12 +466,15 @@ class ResourceAllocator:
         and emission time.
 
         Args:
-            phi_ops: Phi operations from the ``IfOperation``.
-            condition_value: The resolved boolean condition.
-            qubit_map: QubitAddress-to-physical-qubit mapping (mutated in place).
-            clbit_map: QubitAddress-to-physical-clbit mapping (mutated in place).
+            op (IfOperation): The if-else whose condition resolved at
+                compile time.
+            condition_value (bool): The resolved boolean condition.
+            qubit_map (QubitMap): QubitAddress-to-physical-qubit mapping
+                (mutated in place).
+            clbit_map (ClbitMap): QubitAddress-to-physical-clbit mapping
+                (mutated in place).
         """
-        remap_static_phi_outputs(phi_ops, condition_value, qubit_map, clbit_map)
+        remap_static_phi_outputs(op, condition_value, qubit_map, clbit_map)
 
     def _resolve_size(
         self,

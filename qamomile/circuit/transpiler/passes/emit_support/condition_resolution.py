@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
+from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
@@ -136,17 +136,31 @@ def resolve_if_condition(
 
 
 def remap_static_phi_outputs(
-    phi_ops: list,
+    if_op: IfOperation,
     condition_value: bool,
     qubit_map: QubitMap,
     clbit_map: ClbitMap,
 ) -> None:
-    """Remap phi outputs for a compile-time constant ``IfOperation``."""
-    for phi in phi_ops:
-        if not isinstance(phi, PhiOp):
-            continue
-        output = phi.results[0]
-        selected_val = phi.operands[1] if condition_value else phi.operands[2]
+    """Remap phi outputs for a compile-time constant ``IfOperation``.
+
+    Registers each merged output under the physical resource of the
+    branch selected by the resolved condition, so downstream operations
+    referencing the phi output resolve to the surviving branch's qubit /
+    clbit. Outputs already registered are left untouched.
+
+    Args:
+        if_op (IfOperation): The if-else whose condition resolved at
+            compile time; merges are read through ``iter_merges``.
+        condition_value (bool): The resolved condition, selecting which
+            branch's source the outputs alias.
+        qubit_map (QubitMap): Address-to-physical-qubit map, mutated in
+            place.
+        clbit_map (ClbitMap): Address-to-physical-clbit map, mutated in
+            place.
+    """
+    for merge in if_op.iter_merges():
+        output = merge.result
+        selected_val = merge.select(condition_value)
 
         if (
             QubitAddress(output.uuid) in qubit_map
@@ -178,18 +192,42 @@ def remap_static_phi_outputs(
 
 
 def map_phi_outputs(
-    phi_ops: list,
+    if_op: IfOperation,
     qubit_map: QubitMap,
     clbit_map: ClbitMap,
     resolve_scalar_qubit: Any = None,
 ) -> None:
-    """Register phi output UUIDs to the same physical resources as their sources."""
-    for phi in phi_ops:
-        if not isinstance(phi, PhiOp):
-            continue
-        output = phi.results[0]
-        true_val = phi.operands[1]
-        false_val = phi.operands[2]
+    """Register phi output UUIDs to the same physical resources as their sources.
+
+    Runtime-``if`` counterpart of :func:`remap_static_phi_outputs`: both
+    branches may execute, so quantum merges are validated to sit on
+    identical physical resources, and classical Bit merges consolidate
+    both branches' clbits onto one physical slot. Outputs already
+    registered are left untouched.
+
+    Args:
+        if_op (IfOperation): The runtime if-else whose merged outputs need
+            physical-resource registration; merges are read through
+            ``iter_merges``.
+        qubit_map (QubitMap): Address-to-physical-qubit map, mutated in
+            place.
+        clbit_map (ClbitMap): Address-to-physical-clbit map, mutated in
+            place.
+        resolve_scalar_qubit (Any): Optional callable
+            ``(source, qubit_map) -> int | None`` used to resolve scalar
+            qubit sources that are not directly registered (e.g. array
+            elements). Defaults to None, restricting resolution to direct
+            and root-array lookups.
+
+    Raises:
+        EmitError: If a quantum merge's branches resolve to different
+            physical resources (or only one branch resolves), which a
+            single-execution branch cannot realize.
+    """
+    for merge in if_op.iter_merges():
+        output = merge.result
+        true_val = merge.true_value
+        false_val = merge.false_value
 
         if (
             QubitAddress(output.uuid) in qubit_map
