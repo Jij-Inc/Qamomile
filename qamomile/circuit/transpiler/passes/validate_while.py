@@ -2,7 +2,7 @@
 
 Validates that all ``WhileOperation`` conditions are measurement-backed
 ``Bit`` values.  A condition is measurement-backed if it originates from
-``qmc.measure()`` either directly or through phi-merged branches where
+``qmc.measure()`` either directly or through merged branches where
 every leaf is itself measurement-backed (e.g. ``if sel: bit = measure(q1)
 else: bit = measure(q2)``).
 
@@ -77,7 +77,7 @@ def is_measurement_backed(
     itself measurement-backed.
 
     Uses backtracking on ``visiting`` so that the same value can be
-    reached from multiple independent phi branches without false negatives.
+    reached from multiple independent merge branches without false negatives.
 
     Args:
         value (Value): The IR value to trace.

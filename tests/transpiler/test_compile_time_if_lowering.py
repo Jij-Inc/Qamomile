@@ -1,7 +1,7 @@
 """Direct tests for CompileTimeIfLoweringPass.
 
 Tests the pass-internal contracts that are not observable from backend
-circuit success alone: exact Block rewrites, phi substitution, recursive
+circuit success alone: exact Block rewrites, merge substitution, recursive
 lowering, dead-op elimination, and runtime IfOperation preservation.
 """
 
@@ -16,7 +16,12 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOpKind,
     NotOp,
 )
-from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
+    IfOperation,
+    LoopCarriedRebind,
+    WhileOperation,
+)
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -90,14 +95,14 @@ def _make_if_with_x_gate(condition_val, qubit_in):
         gate_type=GateOperationType.X,
     )
     q_false = qubit_in
-    phi_out = qubit_in.next_version()
+    merge_out = qubit_in.next_version()
     if_op = IfOperation(
         operands=[condition_val],
         true_operations=[x_gate],
         false_operations=[],
     )
-    if_op.add_merge(q_true, q_false, phi_out)
-    return if_op, phi_out
+    if_op.add_merge(q_true, q_false, merge_out)
+    return if_op, merge_out
 
 
 # ---------------------------------------------------------------------------
@@ -248,11 +253,11 @@ class TestNestedCompileTimeIf:
 
 
 # ---------------------------------------------------------------------------
-# Test: phi substitution into GateOperation.theta
+# Test: merge substitution into GateOperation.theta
 # ---------------------------------------------------------------------------
 
 
-class TestPhiSubstitutionTheta:
+class TestMergeSubstitutionTheta:
     """Symbolic parameter alias through compile-time if survives in gate theta."""
 
     @staticmethod
@@ -321,15 +326,15 @@ class TestPhiSubstitutionTheta:
 
 
 # ---------------------------------------------------------------------------
-# Test: phi substitution into block output_values
+# Test: merge substitution into block output_values
 # ---------------------------------------------------------------------------
 
 
-class TestPhiSubstitutionOutputs:
-    """Block output_values are updated when phi values are substituted."""
+class TestMergeSubstitutionOutputs:
+    """Block output_values are updated when merge values are substituted."""
 
     def test_output_references_resolved_true(self):
-        """flag=1: output UUIDs differ from phi output (substituted)."""
+        """flag=1: output UUIDs differ from merge output (substituted)."""
 
         @qm.qkernel
         def kernel(flag: qm.UInt) -> qm.Vector[qm.Bit]:
@@ -354,25 +359,25 @@ class TestPhiSubstitutionOutputs:
         )
 
     def test_output_substitution_synthetic(self):
-        """Synthetic: phi output UUID in block outputs is replaced by branch value."""
+        """Synthetic: merge output UUID in block outputs is replaced by branch value."""
         q = _qubit_val()
         flag = _uint_val("flag", const=1)
 
-        if_op, phi_out = _make_if_with_x_gate(flag, q)
+        if_op, merge_out = _make_if_with_x_gate(flag, q)
 
         block = Block(
             name="test",
             operations=[if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.AFFINE,
         )
         lowered = _run_pass(block)
 
         assert not _find_ops(lowered.operations, IfOperation)
         assert len(lowered.output_values) == 1
-        # Output should NOT be the phi_out UUID (it was substituted)
-        assert lowered.output_values[0].uuid != phi_out.uuid, (
-            "Block output should be substituted away from phi output UUID"
+        # Output should NOT be the merge_out UUID (it was substituted)
+        assert lowered.output_values[0].uuid != merge_out.uuid, (
+            "Block output should be substituted away from merge output UUID"
         )
 
 
@@ -457,6 +462,61 @@ class TestDeadOpElimination:
         [runtime_if] = _find_ops(lowered.operations, IfOperation)
         [merge] = runtime_if.iter_merges()
         assert merge.false_value.uuid == m.uuid
+
+    def test_collect_used_uuids_excludes_loop_rebind_records(self):
+        """Values referenced only by a loop rebind record are not liveness reads.
+
+        The rebind record's before/after ride along ``all_input_values``
+        for cloning but are not genuine reads, so a producer referenced
+        solely through the record must remain eligible for elimination.
+        """
+        cond = _bit_val("cond")
+        before = _uint_val("before")
+        after = _uint_val("after")
+        while_op = WhileOperation(
+            operands=[cond],
+            operations=[],
+            loop_carried_rebinds=(
+                LoopCarriedRebind(var_name="acc", before=before, after=after),
+            ),
+        )
+
+        used: set[str] = set()
+        CompileTimeIfLoweringPass._collect_used_uuids(while_op, used)
+
+        assert cond.uuid in used, "the while condition is a genuine read"
+        assert before.uuid not in used, "rebind-record before is not a read"
+        assert after.uuid not in used, "rebind-record after is not a read"
+
+    def test_collect_used_uuids_keeps_yield_shared_with_branch_rebind(self):
+        """A value that is both a false yield and a branch-rebind before stays used.
+
+        The canonical branch-discard shape (``if cond: q = fresh`` with no
+        rebinding else) yields the pre-branch ``q`` on the false side, so
+        that value is simultaneously a ``false_yields`` entry and the
+        ``branch_rebinds`` before. It must stay used via the yield; only
+        the record occurrence is dropped.
+        """
+        cond = _bit_val("cond")
+        q_pre = _qubit_val("q_pre")
+        fresh = _qubit_val("fresh")
+        merged = _qubit_val("merged")
+        if_op = IfOperation(operands=[cond], true_operations=[], false_operations=[])
+        if_op.add_merge(fresh, q_pre, merged)
+        if_op.branch_rebinds = (
+            BranchRebind(
+                var_name="q",
+                before=q_pre,
+                rebound_in_true=True,
+                rebound_in_false=False,
+            ),
+        )
+
+        used: set[str] = set()
+        CompileTimeIfLoweringPass._collect_used_uuids(if_op, used)
+
+        assert q_pre.uuid in used, "kept via the false yield despite the record"
+        assert fresh.uuid in used, "the true yield is a genuine read"
 
 
 # ---------------------------------------------------------------------------
@@ -548,12 +608,12 @@ class TestCondOpLowering:
             kind=CondOpKind.AND,
         )
         q = _qubit_val()
-        if_op, phi_out = _make_if_with_x_gate(cond_result, q)
+        if_op, merge_out = _make_if_with_x_gate(cond_result, q)
 
         block = Block(
             name="test",
             operations=[cond_op, if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.AFFINE,
         )
         lowered = _run_pass(block)
@@ -572,12 +632,12 @@ class TestCondOpLowering:
             kind=CondOpKind.AND,
         )
         q = _qubit_val()
-        if_op, phi_out = _make_if_with_x_gate(cond_result, q)
+        if_op, merge_out = _make_if_with_x_gate(cond_result, q)
 
         block = Block(
             name="test",
             operations=[cond_op, if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.AFFINE,
         )
         lowered = _run_pass(block)
@@ -596,12 +656,12 @@ class TestCondOpLowering:
             kind=CondOpKind.OR,
         )
         q = _qubit_val()
-        if_op, phi_out = _make_if_with_x_gate(cond_result, q)
+        if_op, merge_out = _make_if_with_x_gate(cond_result, q)
 
         block = Block(
             name="test",
             operations=[cond_op, if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.AFFINE,
         )
         lowered = _run_pass(block)
@@ -627,12 +687,12 @@ class TestNotOpLowering:
             results=[not_result],
         )
         q = _qubit_val()
-        if_op, phi_out = _make_if_with_x_gate(not_result, q)
+        if_op, merge_out = _make_if_with_x_gate(not_result, q)
 
         block = Block(
             name="test",
             operations=[not_op, if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.AFFINE,
         )
         lowered = _run_pass(block)
@@ -649,12 +709,12 @@ class TestNotOpLowering:
             results=[not_result],
         )
         q = _qubit_val()
-        if_op, phi_out = _make_if_with_x_gate(not_result, q)
+        if_op, merge_out = _make_if_with_x_gate(not_result, q)
 
         block = Block(
             name="test",
             operations=[not_op, if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.AFFINE,
         )
         lowered = _run_pass(block)
@@ -689,12 +749,12 @@ class TestBinOpFedCondition:
             kind=CompOpKind.GT,
         )
         q = _qubit_val()
-        if_op, phi_out = _make_if_with_x_gate(cond_result, q)
+        if_op, merge_out = _make_if_with_x_gate(cond_result, q)
 
         block = Block(
             name="test",
             operations=[binop, comp_op, if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.AFFINE,
         )
         lowered = _run_pass(block)
@@ -720,12 +780,12 @@ class TestBinOpFedCondition:
             kind=CompOpKind.GT,
         )
         q = _qubit_val()
-        if_op, phi_out = _make_if_with_x_gate(cond_result, q)
+        if_op, merge_out = _make_if_with_x_gate(cond_result, q)
 
         block = Block(
             name="test",
             operations=[binop, comp_op, if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.AFFINE,
         )
         lowered = _run_pass(block)
@@ -750,20 +810,20 @@ class TestParentArraySubstitution:
         flag = _uint_val("flag", const=1)
 
         # Merge slot merges two array values
-        phi_out_arr = ArrayValue(type=QubitType(), name="q_phi")
+        merge_out_arr = ArrayValue(type=QubitType(), name="q_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(arr_true, arr_false, phi_out_arr)
+        if_op.add_merge(arr_true, arr_false, merge_out_arr)
 
-        # Downstream value references the phi_out as parent_array
+        # Downstream value references the merge_out as parent_array
         idx = _uint_val("idx", const=0)
         elem = Value(
             type=QubitType(),
             name="q[0]",
-            parent_array=phi_out_arr,
+            parent_array=merge_out_arr,
             element_indices=(idx,),
         )
         # Use elem as operand in a gate
@@ -782,7 +842,7 @@ class TestParentArraySubstitution:
         lowered = _run_pass(block)
 
         assert not _find_ops(lowered.operations, IfOperation)
-        # The gate operand should now reference arr_true (not phi_out_arr)
+        # The gate operand should now reference arr_true (not merge_out_arr)
         x_gates = _find_gates(lowered.operations, GateOperationType.X)
         assert len(x_gates) == 1
         operand = x_gates[0].operands[0]
@@ -802,27 +862,27 @@ class TestElementIndicesSubstitution:
     """Merge slot merging index Values propagates selected index in element_indices."""
 
     def test_element_index_substituted_true_branch(self):
-        """True branch index Value replaces phi index after lowering."""
+        """True branch index Value replaces merge index after lowering."""
         idx_true = _uint_val("idx_true", const=0)
         idx_false = _uint_val("idx_false", const=1)
 
         flag = _uint_val("flag", const=1)
 
-        phi_idx = _uint_val("idx_phi")
+        merge_idx = _uint_val("idx_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(idx_true, idx_false, phi_idx)
+        if_op.add_merge(idx_true, idx_false, merge_idx)
 
-        # Downstream value uses phi_idx as element_indices
+        # Downstream value uses merge_idx as element_indices
         arr = ArrayValue(type=QubitType(), name="q")
         elem = Value(
             type=QubitType(),
-            name="q[phi]",
+            name="q[merge]",
             parent_array=arr,
-            element_indices=(phi_idx,),
+            element_indices=(merge_idx,),
         )
         gate = GateOperation(
             operands=[elem],
@@ -849,26 +909,26 @@ class TestElementIndicesSubstitution:
         )
 
     def test_element_index_substituted_false_branch(self):
-        """False branch index Value replaces phi index when flag=0."""
+        """False branch index Value replaces merge index when flag=0."""
         idx_true = _uint_val("idx_true", const=0)
         idx_false = _uint_val("idx_false", const=1)
 
         flag = _uint_val("flag", const=0)
 
-        phi_idx = _uint_val("idx_phi")
+        merge_idx = _uint_val("idx_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(idx_true, idx_false, phi_idx)
+        if_op.add_merge(idx_true, idx_false, merge_idx)
 
         arr = ArrayValue(type=QubitType(), name="q")
         elem = Value(
             type=QubitType(),
-            name="q[phi]",
+            name="q[merge]",
             parent_array=arr,
-            element_indices=(phi_idx,),
+            element_indices=(merge_idx,),
         )
         gate = GateOperation(
             operands=[elem],
@@ -896,12 +956,12 @@ class TestElementIndicesSubstitution:
 
 
 # ---------------------------------------------------------------------------
-# CC1: Nested scalar phi chain (transitive substitution)
+# CC1: Nested scalar merge chain (transitive substitution)
 # ---------------------------------------------------------------------------
 
 
-class TestNestedScalarPhiChain:
-    """Nested compile-time if: phi_outer -> phi_inner -> terminal must resolve."""
+class TestNestedScalarMergeChain:
+    """Nested compile-time if: merge_outer -> merge_inner -> terminal must resolve."""
 
     def test_transitive_chain_resolves_to_terminal(self):
         """Gate operand UUID must equal terminal qubit UUID after 2-hop chain."""
@@ -909,29 +969,29 @@ class TestNestedScalarPhiChain:
         q_a = _qubit_val("q_a")
         q_b = _qubit_val("q_b")
         flag1 = _uint_val("flag1", const=1)
-        phi_inner = _qubit_val("q_phi_inner")
+        merge_inner = _qubit_val("q_merge_inner")
         if1 = IfOperation(
             operands=[flag1],
             true_operations=[],
             false_operations=[],
         )
-        if1.add_merge(q_a, q_b, phi_inner)
+        if1.add_merge(q_a, q_b, merge_inner)
 
-        # Inner if: flag2=1 selects phi_inner (which should transitively be q_a)
+        # Inner if: flag2=1 selects merge_inner (which should transitively be q_a)
         q_c = _qubit_val("q_c")
         flag2 = _uint_val("flag2", const=1)
-        phi_outer = _qubit_val("q_phi_outer")
+        merge_outer = _qubit_val("q_merge_outer")
         if2 = IfOperation(
             operands=[flag2],
             true_operations=[],
             false_operations=[],
         )
-        if2.add_merge(phi_inner, q_c, phi_outer)
+        if2.add_merge(merge_inner, q_c, merge_outer)
 
-        # Downstream gate uses phi_outer
+        # Downstream gate uses merge_outer
         gate = GateOperation(
-            operands=[phi_outer],
-            results=[phi_outer.next_version()],
+            operands=[merge_outer],
+            results=[merge_outer.next_version()],
             gate_type=GateOperationType.X,
         )
 
@@ -968,25 +1028,25 @@ class TestCombinedArrayAndIndexSubstitution:
         flag = _uint_val("flag", const=1)
 
         # Merge slot for array
-        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
 
         # Merge slot for index
-        phi_idx = _uint_val("idx_phi")
+        merge_idx = _uint_val("idx_merge")
 
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(arr_true, arr_false, phi_arr)
-        if_op.add_merge(idx_true, idx_false, phi_idx)
+        if_op.add_merge(arr_true, arr_false, merge_arr)
+        if_op.add_merge(idx_true, idx_false, merge_idx)
 
-        # Downstream element uses both phi array and phi index
+        # Downstream element uses both merge array and merge index
         elem = Value(
             type=QubitType(),
-            name="elem_phi",
-            parent_array=phi_arr,
-            element_indices=(phi_idx,),
+            name="elem_merge",
+            parent_array=merge_arr,
+            element_indices=(merge_idx,),
         )
         gate = GateOperation(
             operands=[elem],
@@ -1025,13 +1085,13 @@ class TestCombinedArrayAndIndexSubstitution:
 
 
 class TestSymbolicControlledUFieldSubstitution:
-    """Phi-substituted ``SymbolicControlledU`` fields must all resolve.
+    """Merge-substituted ``SymbolicControlledU`` fields must all resolve.
 
     The legacy ``IndexSpecControlledU`` version of this test covered
     ``target_indices`` too; that field was deleted alongside the
     index-spec API.  The redesigned ``SymbolicControlledU`` carries
     ``num_controls``, ``power``, and ``control_indices``, so this
-    test pins phi resolution on the three remaining fields.
+    test pins merge resolution on the three remaining fields.
     """
 
     def test_three_fields_substituted(self):
@@ -1048,11 +1108,11 @@ class TestSymbolicControlledUFieldSubstitution:
 
         # True branch values.  Both branches use ``num_controls=1`` to
         # keep the constructed ``SymbolicControlledU`` well-formed
-        # against its ``control_indices=(ci_phi,)`` (length 1)
+        # against its ``control_indices=(ci_merge,)`` (length 1)
         # field — the API contract is
         # ``len(control_indices) == num_controls`` and the emit
         # pass enforces it.  The two branches are still
-        # distinguishable via their UUIDs (which is what the phi
+        # distinguishable via their UUIDs (which is what the merge
         # substitution assertions below check).
         nc_true = _uint_val("nc_true", const=1)
         power_true = _uint_val("power_true", const=4)
@@ -1064,18 +1124,18 @@ class TestSymbolicControlledUFieldSubstitution:
         ci_false = _uint_val("ci_false", const=3)
 
         # Merge outputs
-        nc_phi = _uint_val("nc_phi")
-        power_phi = _uint_val("power_phi")
-        ci_phi = _uint_val("ci_phi")
+        nc_merge = _uint_val("nc_merge")
+        power_merge = _uint_val("power_merge")
+        ci_merge = _uint_val("ci_merge")
 
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(nc_true, nc_false, nc_phi)
-        if_op.add_merge(power_true, power_false, power_phi)
-        if_op.add_merge(ci_true, ci_false, ci_phi)
+        if_op.add_merge(nc_true, nc_false, nc_merge)
+        if_op.add_merge(power_true, power_false, power_merge)
+        if_op.add_merge(ci_true, ci_false, ci_merge)
 
         # SymbolicControlledU: operands = [pool ArrayValue, target Value]
         unitary_block = Block(name="U")
@@ -1085,9 +1145,9 @@ class TestSymbolicControlledUFieldSubstitution:
         ctrl_u = SymbolicControlledU(
             operands=[pool_av, target_q],
             results=[pool_av.next_version(), target_q.next_version()],
-            num_controls=nc_phi,
-            control_indices=(ci_phi,),
-            power=power_phi,
+            num_controls=nc_merge,
+            control_indices=(ci_merge,),
+            power=power_merge,
             block=unitary_block,
         )
 
@@ -1121,7 +1181,7 @@ class TestSymbolicControlledUFieldSubstitution:
 
 
 class TestForItemsOperationBodySubstitution:
-    """Phi output used in ForItemsOperation body must resolve after lowering."""
+    """Merge output used in ForItemsOperation body must resolve after lowering."""
 
     def test_body_operand_substituted(self):
         """Body operand UUID equals terminal value UUID after lowering."""
@@ -1132,18 +1192,18 @@ class TestForItemsOperationBodySubstitution:
         q_false = _qubit_val("q_false")
         flag = _uint_val("flag", const=1)
 
-        phi_q = _qubit_val("q_phi")
+        merge_q = _qubit_val("q_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(q_true, q_false, phi_q)
+        if_op.add_merge(q_true, q_false, merge_q)
 
-        # ForItemsOperation body uses phi_q
+        # ForItemsOperation body uses merge_q
         body_gate = GateOperation(
-            operands=[phi_q],
-            results=[phi_q.next_version()],
+            operands=[merge_q],
+            results=[merge_q.next_version()],
             gate_type=GateOperationType.X,
         )
         dict_val = DictValue(name="data")
@@ -1194,39 +1254,39 @@ class TestCastSourceProvenanceSync:
         arr_false = ArrayValue(type=QubitType(), name="qb")
         flag = _uint_val("flag", const=1)
 
-        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(arr_true, arr_false, phi_arr)
+        if_op.add_merge(arr_true, arr_false, merge_arr)
 
-        # CastOperation with stale provenance from phi
+        # CastOperation with stale provenance from merge
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         cast_result = (
             Value(type=result_type, name="qf")
             .with_cast_metadata(
-                source_uuid=phi_arr.uuid,
-                source_logical_id=phi_arr.logical_id,
-                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                source_uuid=merge_arr.uuid,
+                source_logical_id=merge_arr.logical_id,
+                qubit_uuids=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
                 qubit_logical_ids=[
-                    f"{phi_arr.logical_id}_0",
-                    f"{phi_arr.logical_id}_1",
+                    f"{merge_arr.logical_id}_0",
+                    f"{merge_arr.logical_id}_1",
                 ],
             )
             .with_qfixed_metadata(
-                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                qubit_uuids=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
                 num_bits=2,
                 int_bits=0,
             )
         )
         cast_op = CastOperation(
-            operands=[phi_arr],
+            operands=[merge_arr],
             results=[cast_result],
             source_type=QubitType(),
             target_type=result_type,
-            qubit_mapping=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+            qubit_mapping=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
         )
 
         block = Block(
@@ -1277,38 +1337,38 @@ class TestCastSourceProvenanceSync:
         arr_false = ArrayValue(type=QubitType(), name="qb")
         flag = _uint_val("flag", const=1)
 
-        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(view_true, arr_false, phi_arr)
+        if_op.add_merge(view_true, arr_false, merge_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         cast_result = (
             Value(type=result_type, name="qf")
             .with_cast_metadata(
-                source_uuid=phi_arr.uuid,
-                source_logical_id=phi_arr.logical_id,
-                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                source_uuid=merge_arr.uuid,
+                source_logical_id=merge_arr.logical_id,
+                qubit_uuids=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
                 qubit_logical_ids=[
-                    f"{phi_arr.logical_id}_0",
-                    f"{phi_arr.logical_id}_1",
+                    f"{merge_arr.logical_id}_0",
+                    f"{merge_arr.logical_id}_1",
                 ],
             )
             .with_qfixed_metadata(
-                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                qubit_uuids=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
                 num_bits=2,
                 int_bits=0,
             )
         )
         cast_op = CastOperation(
-            operands=[phi_arr],
+            operands=[merge_arr],
             results=[cast_result],
             source_type=QubitType(),
             target_type=result_type,
-            qubit_mapping=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+            qubit_mapping=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
         )
         block = Block(
             name="test",
@@ -1375,22 +1435,22 @@ class TestCastSourceProvenanceSync:
         )
         flag = _uint_val("flag", const=0)
 
-        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(view_true, view_false, phi_arr)
+        if_op.add_merge(view_true, view_false, merge_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
-        # Trace-time metadata: source points at the phi output, carriers
+        # Trace-time metadata: source points at the merge output, carriers
         # carry the TRUE branch's root-space indices (q_1, q_3).
         cast_result = (
             Value(type=result_type, name="qf")
             .with_cast_metadata(
-                source_uuid=phi_arr.uuid,
-                source_logical_id=phi_arr.logical_id,
+                source_uuid=merge_arr.uuid,
+                source_logical_id=merge_arr.logical_id,
                 qubit_uuids=[f"{root.uuid}_1", f"{root.uuid}_3"],
                 qubit_logical_ids=[
                     f"{root.logical_id}_1",
@@ -1404,7 +1464,7 @@ class TestCastSourceProvenanceSync:
             )
         )
         cast_op = CastOperation(
-            operands=[phi_arr],
+            operands=[merge_arr],
             results=[cast_result],
             source_type=QubitType(),
             target_type=result_type,
@@ -1470,20 +1530,20 @@ class TestCastSourceProvenanceSync:
         )
         flag = _uint_val("flag", const=0)
 
-        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(view_true, view_false, phi_arr)
+        if_op.add_merge(view_true, view_false, merge_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         cast_result = (
             Value(type=result_type, name="qf")
             .with_cast_metadata(
-                source_uuid=phi_arr.uuid,
-                source_logical_id=phi_arr.logical_id,
+                source_uuid=merge_arr.uuid,
+                source_logical_id=merge_arr.logical_id,
                 qubit_uuids=[f"{root.uuid}_1", f"{root.uuid}_3"],
                 qubit_logical_ids=[
                     f"{root.logical_id}_1",
@@ -1497,7 +1557,7 @@ class TestCastSourceProvenanceSync:
             )
         )
         cast_op = CastOperation(
-            operands=[phi_arr],
+            operands=[merge_arr],
             results=[cast_result],
             source_type=QubitType(),
             target_type=result_type,
@@ -1565,38 +1625,38 @@ class TestCastSourceProvenanceSync:
         arr_false = ArrayValue(type=QubitType(), name="qb")
         flag = _uint_val("flag", const=1)
 
-        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(view, arr_false, phi_arr)
+        if_op.add_merge(view, arr_false, merge_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         cast_result = (
             Value(type=result_type, name="qf")
             .with_cast_metadata(
-                source_uuid=phi_arr.uuid,
-                source_logical_id=phi_arr.logical_id,
-                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                source_uuid=merge_arr.uuid,
+                source_logical_id=merge_arr.logical_id,
+                qubit_uuids=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
                 qubit_logical_ids=[
-                    f"{phi_arr.logical_id}_0",
-                    f"{phi_arr.logical_id}_1",
+                    f"{merge_arr.logical_id}_0",
+                    f"{merge_arr.logical_id}_1",
                 ],
             )
             .with_qfixed_metadata(
-                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                qubit_uuids=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
                 num_bits=2,
                 int_bits=0,
             )
         )
         cast_op = CastOperation(
-            operands=[phi_arr],
+            operands=[merge_arr],
             results=[cast_result],
             source_type=QubitType(),
             target_type=result_type,
-            qubit_mapping=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+            qubit_mapping=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
         )
         block = Block(
             name="test",
@@ -1627,38 +1687,38 @@ class TestCastProvenanceThroughSeparate:
         arr_false = ArrayValue(type=QubitType(), name="qb")
         flag = _uint_val("flag", const=1)
 
-        phi_arr = ArrayValue(type=QubitType(), name="arr_phi")
+        merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
         if_op = IfOperation(
             operands=[flag],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(arr_true, arr_false, phi_arr)
+        if_op.add_merge(arr_true, arr_false, merge_arr)
 
         result_type = QFixedType(integer_bits=0, fractional_bits=2)
         cast_result = (
             Value(type=result_type, name="qf")
             .with_cast_metadata(
-                source_uuid=phi_arr.uuid,
-                source_logical_id=phi_arr.logical_id,
-                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                source_uuid=merge_arr.uuid,
+                source_logical_id=merge_arr.logical_id,
+                qubit_uuids=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
                 qubit_logical_ids=[
-                    f"{phi_arr.logical_id}_0",
-                    f"{phi_arr.logical_id}_1",
+                    f"{merge_arr.logical_id}_0",
+                    f"{merge_arr.logical_id}_1",
                 ],
             )
             .with_qfixed_metadata(
-                qubit_uuids=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+                qubit_uuids=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
                 num_bits=2,
                 int_bits=0,
             )
         )
         cast_op = CastOperation(
-            operands=[phi_arr],
+            operands=[merge_arr],
             results=[cast_result],
             source_type=QubitType(),
             target_type=result_type,
-            qubit_mapping=[f"{phi_arr.uuid}_0", f"{phi_arr.uuid}_1"],
+            qubit_mapping=[f"{merge_arr.uuid}_0", f"{merge_arr.uuid}_1"],
         )
 
         block = Block(
@@ -2071,11 +2131,11 @@ class TestBlockKindAcceptance:
         """A TRACED block (the drawer's input kind) lowers and keeps its kind."""
         q = _qubit_val()
         flag = _uint_val("flag", const=1)
-        if_op, phi_out = _make_if_with_x_gate(flag, q)
+        if_op, merge_out = _make_if_with_x_gate(flag, q)
         block = Block(
             name="traced",
             operations=[if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.TRACED,
         )
 
@@ -2094,11 +2154,11 @@ class TestBlockKindAcceptance:
 
         q = _qubit_val()
         flag = _uint_val("flag", const=1)
-        if_op, phi_out = _make_if_with_x_gate(flag, q)
+        if_op, merge_out = _make_if_with_x_gate(flag, q)
         block = Block(
             name="analyzed",
             operations=[if_op],
-            output_values=[phi_out],
+            output_values=[merge_out],
             kind=BlockKind.ANALYZED,
         )
 

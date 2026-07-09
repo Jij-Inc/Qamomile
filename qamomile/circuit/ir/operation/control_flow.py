@@ -297,7 +297,7 @@ class LoopCarriedRebind:
             reads; for quantum records, the incoming state a rebinding
             iteration would discard).
         after (Value): The variable's IR value after the loop body ran
-            (typically a ``BinOp`` result, an ``IfOperation`` phi
+            (typically a ``BinOp`` result, an ``IfOperation`` merge
             output, or a fresh quantum allocation).
         before_synthesized (bool): True when the pre-loop value was a
             plain Python number with no IR identity (e.g. ``total = 0``),
@@ -722,7 +722,7 @@ class BranchRebind:
     """Trace-time record of a quantum variable rebound inside an if branch.
 
     The frontend's branch tracing merges only the *new* branch values
-    through phi operations; when both branches rebind a variable, the
+    through merge operations; when both branches rebind a variable, the
     value the variable held before the branch no longer appears anywhere
     in the ``IfOperation``. These records preserve that pre-branch
     binding so the transpiler's control-flow discard check
@@ -736,7 +736,7 @@ class BranchRebind:
             Used only for error messages.
         before (Value): The variable's IR value at branch entry (the
             state that is dropped on a rebinding path unless that branch
-            consumes it or merges it out through a phi).
+            consumes it or merges it out through a merge).
         rebound_in_true (bool): True when the true branch left the
             variable bound to a different IR value.
         rebound_in_false (bool): True when the false branch left the
@@ -832,11 +832,27 @@ class IfOperation(HasNestedOps, Operation):
     branch_rebinds: tuple[BranchRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
-        """Return the two branch bodies (merge yields are not operations)."""
+        """Return the two branch bodies (merge yields are not operations).
+
+        Returns:
+            list[list[Operation]]: ``[true_operations, false_operations]``.
+                The branch-merge yields are values, not operations, so
+                they are intentionally absent here.
+        """
         return [self.true_operations, self.false_operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
-        """Return a copy with the true and false branch bodies replaced."""
+        """Return a copy with the true and false branch bodies replaced.
+
+        Args:
+            new_lists (list[list[Operation]]): The replacement branch
+                bodies in ``nested_op_lists`` order
+                (``[true_operations, false_operations]``).
+
+        Returns:
+            Operation: A copy of this if-else with the branch bodies
+                swapped and all other fields (yields, rebinds) preserved.
+        """
         return dataclasses.replace(
             self,
             true_operations=new_lists[0],
@@ -905,8 +921,13 @@ class IfOperation(HasNestedOps, Operation):
         Raises:
             RuntimeError: If the stored merge data is internally
                 inconsistent (the yield-list lengths differ from the
-                result count). This indicates IR corruption, not a user
-                error.
+                result count, or the condition operand is missing while
+                merges are attached). This indicates IR corruption, not
+                a user error. The per-merge corruption modes of the old
+                embedded-operation storage (a foreign entry, a malformed
+                or mismatched condition, a result copy diverging from
+                ``results[i]``) cannot be represented in the yield-list
+                storage and need no checks.
         """
         if not (len(self.true_yields) == len(self.false_yields) == len(self.results)):
             raise RuntimeError(
@@ -915,6 +936,11 @@ class IfOperation(HasNestedOps, Operation):
                 f"{len(self.false_yields)} false_yields for "
                 f"{len(self.results)} results. Merges must be created "
                 "through add_merge()."
+            )
+        if self.results and not self.operands:
+            raise RuntimeError(
+                "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
+                "merges are attached but the condition operand is missing."
             )
         for i, (true_value, false_value, result) in enumerate(
             zip(self.true_yields, self.false_yields, self.results, strict=True)
@@ -938,16 +964,26 @@ class IfOperation(HasNestedOps, Operation):
             false_value (Value): Value selected when the condition is
                 false. Must have the same type as ``true_value``.
             result (Value): Fresh SSA value representing the merged output.
+                Must have the same type as the branch values.
 
         Raises:
             RuntimeError: If the condition operand has not been attached to
                 this operation yet (``operands[0]`` must exist before
-                merges are added).
+                merges are added), or the branch / result types do not
+                match.
         """
         if not self.operands:
             raise RuntimeError(
                 "[FOR DEVELOPER] IfOperation.add_merge requires the "
                 "condition operand to be attached first."
+            )
+        if false_value.type != true_value.type or result.type != true_value.type:
+            raise RuntimeError(
+                "[FOR DEVELOPER] IfOperation.add_merge requires matching "
+                "branch and result types; got "
+                f"true={true_value.type.label()}, "
+                f"false={false_value.type.label()}, "
+                f"result={result.type.label()}."
             )
         self.true_yields.append(true_value)
         self.false_yields.append(false_value)
@@ -966,3 +1002,54 @@ class IfOperation(HasNestedOps, Operation):
     @property
     def operation_kind(self) -> OperationKind:
         return OperationKind.CONTROL
+
+
+def genuine_input_values(op: Operation) -> list[ValueBase]:
+    """Return an operation's input values that count as genuine reads.
+
+    ``Operation.all_input_values`` also surfaces the bookkeeping values
+    that ride along only for cloning / substitution: the ``before`` /
+    ``after`` of a loop operation's ``loop_carried_rebinds``, the
+    ``before`` of an ``IfOperation``'s ``branch_rebinds``, and the
+    body-internal formals of a loop's carry slots (``body_args`` /
+    ``body_yields``). Those are NOT data reads, so read-based analyses
+    (liveness / dead-op elimination, measurement-taint tracing,
+    loop-carried stale-read checks) must exclude them. Carry
+    ``iter_args`` stay: they are genuine reads of pre-loop values.
+
+    The exclusion is by **last occurrence**, not by UUID set: a single
+    value can be BOTH a genuine input AND a rebind ``before``. The
+    canonical case is an else-less quantum discard (``if cond: q =
+    fresh``): the false side yields the pre-branch ``q``, so that value
+    is simultaneously a ``false_yields`` entry (a genuine read) and the
+    ``branch_rebinds`` ``before`` (a record). ``all_input_values``
+    appends the record values after the genuine ones, so dropping the
+    last matching occurrence strips the record and leaves the read
+    intact — a plain UUID-set subtraction would wrongly drop the yield
+    read too.
+
+    Args:
+        op (Operation): Operation to inspect.
+
+    Returns:
+        list[ValueBase]: ``all_input_values`` with one occurrence per
+            rebind-record value removed.
+    """
+    values = list(op.all_input_values())
+    record_values: list[Value] = []
+    if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+        for loop_record in op.loop_carried_rebinds:
+            record_values.append(loop_record.before)
+            record_values.append(loop_record.after)
+        for carry in op.iter_carries():
+            record_values.append(carry.body_arg)
+            record_values.append(carry.body_yield)
+    elif isinstance(op, IfOperation):
+        for branch_record in op.branch_rebinds:
+            record_values.append(branch_record.before)
+    for record_value in record_values:
+        for index in range(len(values) - 1, -1, -1):
+            if values[index].uuid == record_value.uuid:
+                del values[index]
+                break
+    return values

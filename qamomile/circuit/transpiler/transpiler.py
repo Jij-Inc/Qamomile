@@ -406,7 +406,7 @@ class Transpiler(ABC, Generic[T]):
 
         Evaluates IfOperation conditions (including expression-derived
         conditions via CompOp/CondOp/NotOp) and replaces resolved ones
-        with selected-branch operations.  Phi outputs are substituted
+        with selected-branch operations.  Merge outputs are substituted
         with selected-branch values throughout the block.
 
         This prevents SegmentationPass from seeing classical-only compile-time

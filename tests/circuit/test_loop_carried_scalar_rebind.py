@@ -609,6 +609,29 @@ class TestAllowedPatterns:
         # n=3: odd number of X gates flips |0> to |1>.
         assert _sample_single(kernel, bindings={"n": 3}) == 1
 
+    def test_dead_branch_rebind_in_loop_inside_runtime_if_allowed(self):
+        """A dead-branch-only rebind in a loop under a runtime if compiles.
+
+        The pruning walk descends into runtime-if branches with the same
+        per-branch state scoping as the lowering pass, so the
+        compile-time-dead `total = total + i` canonicalizes away and the
+        loop carries no live rebind.
+        """
+
+        @qmc.qkernel
+        def kernel(flag: qmc.UInt, n: qmc.UInt) -> qmc.Bit:
+            q = qmc.qubit("q")
+            q = qmc.h(q)
+            bit = qmc.measure(q)
+            total = qmc.uint(0)
+            if bit:
+                for i in qmc.range(n):
+                    if flag == 1:
+                        total = total + i
+            return bit
+
+        _transpile(kernel, bindings={"flag": 0, "n": 3})
+
     def test_unobserved_post_loop_merge_of_condition_snapshot_allowed(self):
         """A dead post-loop compile-time merge of the condition compiles.
 
@@ -776,6 +799,44 @@ class TestAllowedPatterns:
 
         # native_total(3) == 3: odd number of X gates flips to |1>.
         assert _sample_single(kernel, bindings={"dummy": 0}) == 1
+
+    def test_carried_loop_inside_runtime_if_merges_by_branch(self):
+        """A carried loop under a runtime if merges per-branch totals.
+
+        The loop's carry unrolls to a pure classical sum inside the
+        taken branch, and the runtime merge muxes the branch total
+        against the pre-if initializer on the measured bit. Both
+        deterministic branch outcomes pin the mux: a measured |1>
+        selects the accumulated 0 + 1 + 2 == 3, a measured |0> keeps
+        the initializer 0.
+        """
+
+        @qmc.qkernel
+        def taken(flag: qmc.UInt, n: qmc.UInt) -> qmc.UInt:
+            q = qmc.qubit("q")
+            q = qmc.x(q)
+            bit = qmc.measure(q)
+            total = qmc.uint(0)
+            if bit:
+                for i in qmc.range(n):
+                    if flag == 1:
+                        total = total + i
+            return total
+
+        assert _sample_single(taken, bindings={"flag": 1, "n": 3}) == 3
+
+        @qmc.qkernel
+        def skipped(flag: qmc.UInt, n: qmc.UInt) -> qmc.UInt:
+            q = qmc.qubit("q")
+            bit = qmc.measure(q)
+            total = qmc.uint(0)
+            if bit:
+                for i in qmc.range(n):
+                    if flag == 1:
+                        total = total + i
+            return total
+
+        assert _sample_single(skipped, bindings={"flag": 1, "n": 3}) == 0
 
 
 # ---------------------------------------------------------------------------

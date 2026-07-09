@@ -683,7 +683,16 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> Any:
-        """Get the concrete value from context or results."""
+        """Get the concrete value from context or results.
+
+        Raises:
+            ExecutionError: If the value cannot be resolved from the
+                execution state — with a slice-view-specific diagnostic
+                when the unresolved value is a sliced ``ArrayValue``
+                (most commonly a view merged from different slices
+                across if/else branches, which has no materialized
+                contents).
+        """
         if value.uuid in results:
             return results[value.uuid]
         if context.has(value.uuid):
@@ -701,6 +710,14 @@ class ClassicalExecutor:
             param_name = value.parameter_name()
             if param_name and context.has(param_name):
                 return context.get(param_name)
+        if isinstance(value, ArrayValue) and value.slice_of is not None:
+            raise ExecutionError(
+                f"Array view '{value.name}' could not be resolved in the "
+                f"classical segment. A common cause is merging different "
+                f"slices across if/else branches — such a merged view has "
+                f"no materialized contents. Slice identically in both "
+                f"branches or read the root array instead."
+            )
         raise ExecutionError(f"Value {value.name} not found in context or results")
 
     def _get_array_element_value(

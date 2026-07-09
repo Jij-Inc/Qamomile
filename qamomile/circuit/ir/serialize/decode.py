@@ -1439,10 +1439,25 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
             records.
 
     Raises:
-        ValueError: If the yield-reference lists disagree with each
-            other or with ``results`` in length (corrupted payload).
+        ValueError: If the payload carries the removed pre-yields
+            ``phi_ops`` field, or if the yield-reference lists disagree
+            with each other or with ``results`` in length (corrupted
+            payload).
     """
     operands, results = _operands_results(d, ctx)
+    # Reject a pre-yields payload explicitly. The length check below only
+    # catches a legacy ``phi_ops`` op that also carried its merge outputs
+    # in ``results``; a ``phi_ops``-only op with no ``result_refs`` would
+    # otherwise decode as a merge-less IfOperation. Failing loud here keeps
+    # the "old payloads are rejected, never silently down-decoded" contract
+    # (see serialize/schema.py) true for every pre-yields shape.
+    if "phi_ops" in d:
+        raise ValueError(
+            "IfOperation payload uses the removed 'phi_ops' field, a "
+            "pre-yields serialization that is no longer supported. "
+            "Re-serialize with the current revision, which stores branch "
+            "merges as 'true_yield_refs' / 'false_yield_refs'."
+        )
     true_body = [_decode_operation(child, ctx) for child in d.get("true_body", ())]
     false_body = [_decode_operation(child, ctx) for child in d.get("false_body", ())]
     true_refs = list(d.get("true_yield_refs", ()))

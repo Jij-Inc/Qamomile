@@ -3,12 +3,12 @@
 Section 1: ResourceAllocator if-merge allocation (Bug #6).
     ResourceAllocator._allocate_recursive() registers IfOperation merge
     slots after processing the branches, delegating to the shared
-    map_phi_outputs() utility which:
-    - Maps scalar QubitType phi outputs to the same physical qubit as
+    map_merge_outputs() utility which:
+    - Maps scalar QubitType merge outputs to the same physical qubit as
       the branch source value.
     - Copies composite element keys ``{source_uuid}_{i}`` →
-      ``{output_uuid}_{i}`` for ArrayValue phi outputs.
-    - Maps scalar BitType phi outputs to the same classical bit index.
+      ``{output_uuid}_{i}`` for ArrayValue merge outputs.
+    - Maps scalar BitType merge outputs to the same classical bit index.
 
 Section 2: LoopAnalyzer BinOp dependency detection.
     LoopAnalyzer.should_unroll correctly identifies ForOperation loops
@@ -54,7 +54,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     LoopAnalyzer,
     QubitAddress,
     ResourceAllocator,
-    map_phi_outputs,
+    map_merge_outputs,
     resolve_qubit_key,
 )
 
@@ -193,7 +193,7 @@ def _make_gate(
 
 
 # ===========================================================================
-# Bug #6: Phi output allocation
+# Bug #6: Merge output allocation
 # ===========================================================================
 
 
@@ -246,7 +246,7 @@ class TestIfMergeAllocation:
         assert is_array
         assert key is None
 
-    def test_scalar_phi_merges_root_and_slice_element_aliases(self) -> None:
+    def test_scalar_merges_root_and_slice_element_aliases(self) -> None:
         """Scalar qubit merge should recognize root and slice element aliases."""
         q_array = _make_array_value("q", shape_vals=(_make_const_value("q_dim0", 3),))
         view = ArrayValue(
@@ -260,16 +260,16 @@ class TestIfMergeAllocation:
         cond = _make_value("cond", BitType)
         root_element = _make_array_element(q_array, 1, "q[1]")
         view_element = _make_array_element(view, 0, "q_view[0]")
-        phi_output = _make_value("q_phi", QubitType)
-        if_op = _make_if_with_merge(cond, root_element, view_element, phi_output)
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, root_element, view_element, merge_output)
         qubit_map = {QubitAddress(q_array.uuid, i): i for i in range(3)}
 
-        map_phi_outputs(if_op, qubit_map, {})
+        map_merge_outputs(if_op, qubit_map, {})
 
-        assert qubit_map[QubitAddress(phi_output.uuid)] == 1
+        assert qubit_map[QubitAddress(merge_output.uuid)] == 1
         assert QubitAddress(view.uuid, 0) not in qubit_map
 
-    def test_scalar_phi_defers_unresolved_symbolic_slice_element(self) -> None:
+    def test_scalar_merge_defers_unresolved_symbolic_slice_element(self) -> None:
         """Unresolved symbolic slice elements must not create slice-address aliases."""
         q_array = _make_array_value("q", shape_vals=(_make_const_value("q_dim0", 3),))
         view = ArrayValue(
@@ -282,17 +282,17 @@ class TestIfMergeAllocation:
         )
         cond = _make_value("cond", BitType)
         view_element = _make_array_element(view, 0, "q_view[0]")
-        phi_output = _make_value("q_phi", QubitType)
-        if_op = _make_if_with_merge(cond, view_element, view_element, phi_output)
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, view_element, view_element, merge_output)
         qubit_map = {QubitAddress(q_array.uuid, i): i for i in range(3)}
 
-        map_phi_outputs(if_op, qubit_map, {})
+        map_merge_outputs(if_op, qubit_map, {})
 
-        assert QubitAddress(phi_output.uuid) not in qubit_map
+        assert QubitAddress(merge_output.uuid) not in qubit_map
         assert QubitAddress(view.uuid, 0) not in qubit_map
 
-    def test_phi_output_qubit_is_allocated(self) -> None:
-        """Phi output for a qubit type should be registered in qubit_map."""
+    def test_merge_output_qubit_is_allocated(self) -> None:
+        """Merge output for a qubit type should be registered in qubit_map."""
         # QInit → q
         q_init = _make_value("q", QubitType)
         q_init_out = q_init.next_version()
@@ -310,7 +310,7 @@ class TestIfMergeAllocation:
         bit = _make_value("bit", BitType)
         measure_op = MeasureOperation(operands=[q_after_h], results=[bit])
 
-        # If-else with phi merge
+        # If-else with merge
         q_true = q_after_h.next_version()
         x_gate = GateOperation(
             operands=[q_after_h],
@@ -319,32 +319,32 @@ class TestIfMergeAllocation:
         )
         q_false = q_after_h  # identity in false branch
 
-        phi_output = _make_value("q_phi", QubitType)
+        merge_output = _make_value("q_merge", QubitType)
         if_op = IfOperation(
             operands=[bit],
             true_operations=[x_gate],
             false_operations=[],
         )
-        if_op.add_merge(q_true, q_false, phi_output)
+        if_op.add_merge(q_true, q_false, merge_output)
 
-        # Measure phi output
+        # Measure merge output
         bit2 = _make_value("bit2", BitType)
-        measure2 = MeasureOperation(operands=[phi_output], results=[bit2])
+        measure2 = MeasureOperation(operands=[merge_output], results=[bit2])
 
         operations = [qinit_op, h_gate, measure_op, if_op, measure2]
 
         allocator = ResourceAllocator()
         qubit_map, clbit_map = allocator.allocate(operations, bindings={})
 
-        # phi_output should be in qubit_map, mapped to same physical qubit
-        assert QubitAddress(phi_output.uuid) in qubit_map
+        # merge_output should be in qubit_map, mapped to same physical qubit
+        assert QubitAddress(merge_output.uuid) in qubit_map
         assert (
-            qubit_map[QubitAddress(phi_output.uuid)]
+            qubit_map[QubitAddress(merge_output.uuid)]
             == qubit_map[QubitAddress(q_init_out.uuid)]
         )
 
-    def test_phi_output_bit_is_allocated(self) -> None:
-        """Phi output for a bit type should be registered in clbit_map."""
+    def test_merge_output_bit_is_allocated(self) -> None:
+        """Merge output for a bit type should be registered in clbit_map."""
         # Setup: condition bit
         cond = _make_value("cond", BitType)
 
@@ -356,7 +356,7 @@ class TestIfMergeAllocation:
         # Measure to get condition
         measure_op = MeasureOperation(operands=[q_out], results=[cond])
 
-        # Bit phi: both branches produce the same bit
+        # Bit merge: both branches produce the same bit
         true_bit = _make_value("true_bit", BitType)
         false_bit = _make_value("false_bit", BitType)
         true_measure = MeasureOperation(
@@ -366,27 +366,27 @@ class TestIfMergeAllocation:
             operands=[q_out.next_version()], results=[false_bit]
         )
 
-        phi_bit = _make_value("phi_bit", BitType)
+        merge_bit = _make_value("merge_bit", BitType)
         if_op = IfOperation(
             operands=[cond],
             true_operations=[true_measure],
             false_operations=[false_measure],
         )
-        if_op.add_merge(true_bit, false_bit, phi_bit)
+        if_op.add_merge(true_bit, false_bit, merge_bit)
 
         operations = [qinit_op, measure_op, if_op]
 
         allocator = ResourceAllocator()
         _, clbit_map = allocator.allocate(operations, bindings={})
 
-        # phi_bit should be in clbit_map
-        assert QubitAddress(phi_bit.uuid) in clbit_map
+        # merge_bit should be in clbit_map
+        assert QubitAddress(merge_bit.uuid) in clbit_map
 
     @pytest.mark.parametrize("array_size", [1, 2, 4])
-    def test_phi_output_array_composite_keys_are_allocated(
+    def test_merge_output_array_composite_keys_are_allocated(
         self, array_size: int
     ) -> None:
-        """Phi output for an ArrayValue should copy composite element keys."""
+        """Merge output for an ArrayValue should copy composite element keys."""
         size_val = _make_const_value("size", array_size)
         q_array = _make_array_value("q", shape_vals=(size_val,))
         qinit_op = QInitOperation(operands=[], results=[q_array])
@@ -402,24 +402,24 @@ class TestIfMergeAllocation:
         bit = _make_value("bit", BitType)
         measure_op = MeasureOperation(operands=[q0_elem], results=[bit])
 
-        # If-else with phi on the whole array
-        phi_array = _make_array_value("q_phi", shape_vals=(size_val,))
-        if_op = _make_if_with_merge(bit, q_array, q_array, phi_array)
+        # If-else with merge on the whole array
+        merge_array = _make_array_value("q_merge", shape_vals=(size_val,))
+        if_op = _make_if_with_merge(bit, q_array, q_array, merge_array)
 
         operations = [qinit_op, measure_op, if_op]
 
         allocator = ResourceAllocator()
         qubit_map, _ = allocator.allocate(operations, bindings={})
 
-        # All composite keys for the phi output array should exist
+        # All composite keys for the merge output array should exist
         for i in range(array_size):
-            phi_addr = QubitAddress(phi_array.uuid, i)
+            merge_addr = QubitAddress(merge_array.uuid, i)
             src_addr = QubitAddress(q_array.uuid, i)
-            assert phi_addr in qubit_map, f"phi array element {i} not allocated"
-            assert qubit_map[phi_addr] == qubit_map[src_addr]
+            assert merge_addr in qubit_map, f"merge array element {i} not allocated"
+            assert qubit_map[merge_addr] == qubit_map[src_addr]
 
-    def test_identity_phi_maps_to_same_qubit(self) -> None:
-        """Phi with true_val == false_val (identity) still maps correctly."""
+    def test_identity_merge_maps_to_same_qubit(self) -> None:
+        """Merge with true_val == false_val (identity) still maps correctly."""
         q = _make_value("q", QubitType)
         q_out = q.next_version()
         qinit_op = QInitOperation(operands=[], results=[q_out])
@@ -427,23 +427,23 @@ class TestIfMergeAllocation:
         bit = _make_value("bit", BitType)
         measure_op = MeasureOperation(operands=[q_out], results=[bit])
 
-        # Identity phi: both branches refer to the same qubit
-        phi_output = _make_value("q_phi", QubitType)
-        if_op = _make_if_with_merge(bit, q_out, q_out, phi_output)
+        # Identity merge: both branches refer to the same qubit
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(bit, q_out, q_out, merge_output)
 
         operations = [qinit_op, measure_op, if_op]
 
         allocator = ResourceAllocator()
         qubit_map, _ = allocator.allocate(operations, bindings={})
 
-        assert QubitAddress(phi_output.uuid) in qubit_map
+        assert QubitAddress(merge_output.uuid) in qubit_map
         assert (
-            qubit_map[QubitAddress(phi_output.uuid)]
+            qubit_map[QubitAddress(merge_output.uuid)]
             == qubit_map[QubitAddress(q_out.uuid)]
         )
 
-    def test_phi_output_already_registered_is_skipped(self) -> None:
-        """Phi output UUID already in qubit_map is not overwritten."""
+    def test_merge_output_already_registered_is_skipped(self) -> None:
+        """Merge output UUID already in qubit_map is not overwritten."""
         q = _make_value("q", QubitType)
         q_out = q.next_version()
         qinit_op = QInitOperation(operands=[], results=[q_out])
@@ -451,21 +451,21 @@ class TestIfMergeAllocation:
         bit = _make_value("bit", BitType)
         measure_op = MeasureOperation(operands=[q_out], results=[bit])
 
-        phi_output = _make_value("q_phi", QubitType)
-        if_op = _make_if_with_merge(bit, q_out, q_out, phi_output)
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(bit, q_out, q_out, merge_output)
 
         operations = [qinit_op, measure_op, if_op]
 
         allocator = ResourceAllocator()
         qubit_map, clbit_map = allocator.allocate(operations, bindings={})
 
-        # Pre-register the phi output with a sentinel value
+        # Pre-register the merge output with a sentinel value
         sentinel_idx = 999
-        qubit_map[QubitAddress(phi_output.uuid)] = sentinel_idx
+        qubit_map[QubitAddress(merge_output.uuid)] = sentinel_idx
 
         # Re-running allocation should not overwrite it
-        map_phi_outputs(if_op, qubit_map, clbit_map)
-        assert qubit_map[QubitAddress(phi_output.uuid)] == sentinel_idx
+        map_merge_outputs(if_op, qubit_map, clbit_map)
+        assert qubit_map[QubitAddress(merge_output.uuid)] == sentinel_idx
 
     def test_multiple_merges_all_allocated(self) -> None:
         """Multiple merge slots in a single IfOperation are all allocated."""
@@ -480,39 +480,39 @@ class TestIfMergeAllocation:
         measure_op = MeasureOperation(operands=[q0_out], results=[bit])
 
         # Two merge slots
-        phi_out0 = _make_value("phi0", QubitType)
-        phi_out1 = _make_value("phi1", QubitType)
+        merge_out0 = _make_value("merge0", QubitType)
+        merge_out1 = _make_value("merge1", QubitType)
 
         if_op = IfOperation(
             operands=[bit],
             true_operations=[],
             false_operations=[],
         )
-        if_op.add_merge(q0_out, q0_out, phi_out0)
-        if_op.add_merge(q1_out, q1_out, phi_out1)
+        if_op.add_merge(q0_out, q0_out, merge_out0)
+        if_op.add_merge(q1_out, q1_out, merge_out1)
 
         operations = [qinit0, qinit1, measure_op, if_op]
 
         allocator = ResourceAllocator()
         qubit_map, _ = allocator.allocate(operations, bindings={})
 
-        assert QubitAddress(phi_out0.uuid) in qubit_map
-        assert QubitAddress(phi_out1.uuid) in qubit_map
+        assert QubitAddress(merge_out0.uuid) in qubit_map
+        assert QubitAddress(merge_out1.uuid) in qubit_map
         assert (
-            qubit_map[QubitAddress(phi_out0.uuid)]
+            qubit_map[QubitAddress(merge_out0.uuid)]
             == qubit_map[QubitAddress(q0_out.uuid)]
         )
         assert (
-            qubit_map[QubitAddress(phi_out1.uuid)]
+            qubit_map[QubitAddress(merge_out1.uuid)]
             == qubit_map[QubitAddress(q1_out.uuid)]
         )
 
-    def test_phi_bit_consolidates_both_branches(self) -> None:
+    def test_merge_bit_consolidates_both_branches(self) -> None:
         """Both branches' clbits must be consolidated to the same physical clbit.
 
         Under Qiskit's ``if_test``, only one branch executes, so both
         branches must measure into the same physical clbit. Otherwise
-        the phi output always reads the true branch's result.
+        the merge output always reads the true branch's result.
         """
         q = _make_value("q", QubitType)
         q_out = q.next_version()
@@ -530,31 +530,31 @@ class TestIfMergeAllocation:
             operands=[q_out.next_version()], results=[false_bit]
         )
 
-        phi_bit = _make_value("phi_bit", BitType)
+        merge_bit = _make_value("merge_bit", BitType)
         if_op = IfOperation(
             operands=[cond],
             true_operations=[true_measure],
             false_operations=[false_measure],
         )
-        if_op.add_merge(true_bit, false_bit, phi_bit)
+        if_op.add_merge(true_bit, false_bit, merge_bit)
 
         operations = [qinit_op, measure_cond, if_op]
         allocator = ResourceAllocator()
         _, clbit_map = allocator.allocate(operations, bindings={})
 
-        # All three — true_bit, false_bit, phi_bit — must share the same physical clbit
+        # All three — true_bit, false_bit, merge_bit — must share the same physical clbit
         assert (
             clbit_map[QubitAddress(true_bit.uuid)]
             == clbit_map[QubitAddress(false_bit.uuid)]
         )
         assert (
-            clbit_map[QubitAddress(phi_bit.uuid)]
+            clbit_map[QubitAddress(merge_bit.uuid)]
             == clbit_map[QubitAddress(true_bit.uuid)]
         )
 
     @pytest.mark.parametrize("array_size", [1, 2, 4])
-    def test_phi_bit_array_consolidates_both_branches(self, array_size: int) -> None:
-        """BitType ArrayValue phi must consolidate per-element clbits across branches."""
+    def test_merge_bit_array_consolidates_both_branches(self, array_size: int) -> None:
+        """BitType ArrayValue merge must consolidate per-element clbits across branches."""
         size_val = _make_const_value("size", array_size)
 
         q_array = _make_array_value("q", shape_vals=(size_val,))
@@ -582,10 +582,10 @@ class TestIfMergeAllocation:
         # Simulate allocation of individual array element clbits
         # (MeasureVectorOperation would do this, but for unit test we pre-fill)
 
-        phi_bits = _make_array_value(
-            "phi_bits", shape_vals=(size_val,), type_cls=BitType
+        merge_bits = _make_array_value(
+            "merge_bits", shape_vals=(size_val,), type_cls=BitType
         )
-        if_op = _make_if_with_merge(cond, true_bits, false_bits, phi_bits)
+        if_op = _make_if_with_merge(cond, true_bits, false_bits, merge_bits)
 
         # Pre-fill clbit_map with element keys for both arrays
         clbit_map = {QubitAddress(cond.uuid): 0}
@@ -593,45 +593,45 @@ class TestIfMergeAllocation:
             clbit_map[QubitAddress(true_bits.uuid, i)] = i + 1
             clbit_map[QubitAddress(false_bits.uuid, i)] = array_size + i + 1
 
-        map_phi_outputs(if_op, {}, clbit_map)
+        map_merge_outputs(if_op, {}, clbit_map)
 
-        # Phi output elements should exist AND both branches consolidated
+        # Merge output elements should exist AND both branches consolidated
         for i in range(array_size):
-            phi_addr = QubitAddress(phi_bits.uuid, i)
+            merge_addr = QubitAddress(merge_bits.uuid, i)
             true_addr = QubitAddress(true_bits.uuid, i)
             false_addr = QubitAddress(false_bits.uuid, i)
-            assert phi_addr in clbit_map, f"phi element {i} not allocated"
-            assert clbit_map[phi_addr] == clbit_map[true_addr]
+            assert merge_addr in clbit_map, f"merge element {i} not allocated"
+            assert clbit_map[merge_addr] == clbit_map[true_addr]
             assert clbit_map[false_addr] == clbit_map[true_addr], (
                 f"element {i}: false branch clbit not consolidated"
             )
 
-    # --- Quantum phi merge validation tests ---
+    # --- Quantum merge validation tests ---
 
-    def test_quantum_phi_scalar_different_resources_raises_emit_error(self) -> None:
-        """Scalar qubit phi with different physical resources must raise EmitError."""
+    def test_quantum_merge_scalar_different_resources_raises_emit_error(self) -> None:
+        """Scalar qubit merge with different physical resources must raise EmitError."""
         q0 = _make_value("q0", QubitType)
         q0_out = q0.next_version()
         q1 = _make_value("q1", QubitType)
         q1_out = q1.next_version()
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_value("q_phi", QubitType)
-        if_op = _make_if_with_merge(cond, q0_out, q1_out, phi_output)
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, q0_out, q1_out, merge_output)
 
         qubit_map = {QubitAddress(q0_out.uuid): 0, QubitAddress(q1_out.uuid): 1}
         with pytest.raises(EmitError, match="merge requires identical"):
-            map_phi_outputs(if_op, qubit_map, {})
+            map_merge_outputs(if_op, qubit_map, {})
 
-    def test_quantum_phi_array_different_resources_raises_emit_error(self) -> None:
-        """Array qubit phi with different physical resources must raise EmitError."""
+    def test_quantum_merge_array_different_resources_raises_emit_error(self) -> None:
+        """Array qubit merge with different physical resources must raise EmitError."""
         size_val = _make_const_value("size", 2)
         arr_a = _make_array_value("arr_a", shape_vals=(size_val,))
         arr_b = _make_array_value("arr_b", shape_vals=(size_val,))
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
-        if_op = _make_if_with_merge(cond, arr_a, arr_b, phi_output)
+        merge_output = _make_array_value("merge_arr", shape_vals=(size_val,))
+        if_op = _make_if_with_merge(cond, arr_a, arr_b, merge_output)
 
         qubit_map = {
             QubitAddress(arr_a.uuid, 0): 0,
@@ -640,33 +640,33 @@ class TestIfMergeAllocation:
             QubitAddress(arr_b.uuid, 1): 3,
         }
         with pytest.raises(EmitError, match="merge requires identical"):
-            map_phi_outputs(if_op, qubit_map, {})
+            map_merge_outputs(if_op, qubit_map, {})
 
-    def test_quantum_phi_scalar_unresolved_branch_raises_emit_error(self) -> None:
-        """Scalar qubit phi with one unresolved branch must raise EmitError."""
+    def test_quantum_merge_scalar_unresolved_branch_raises_emit_error(self) -> None:
+        """Scalar qubit merge with one unresolved branch must raise EmitError."""
         q0 = _make_value("q0", QubitType)
         q0_out = q0.next_version()
         q1 = _make_value("q1", QubitType)
         q1_out = q1.next_version()
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_value("q_phi", QubitType)
-        if_op = _make_if_with_merge(cond, q0_out, q1_out, phi_output)
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, q0_out, q1_out, merge_output)
 
         # Only q0_out is in qubit_map; q1_out is unresolved
         qubit_map = {QubitAddress(q0_out.uuid): 0}
         with pytest.raises(EmitError, match="merge requires identical"):
-            map_phi_outputs(if_op, qubit_map, {})
+            map_merge_outputs(if_op, qubit_map, {})
 
-    def test_quantum_phi_array_unresolved_suffix_raises_emit_error(self) -> None:
-        """Array qubit phi with missing suffix in one branch must raise EmitError."""
+    def test_quantum_merge_array_unresolved_suffix_raises_emit_error(self) -> None:
+        """Array qubit merge with missing suffix in one branch must raise EmitError."""
         size_val = _make_const_value("size", 2)
         arr_a = _make_array_value("arr_a", shape_vals=(size_val,))
         arr_b = _make_array_value("arr_b", shape_vals=(size_val,))
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
-        if_op = _make_if_with_merge(cond, arr_a, arr_b, phi_output)
+        merge_output = _make_array_value("merge_arr", shape_vals=(size_val,))
+        if_op = _make_if_with_merge(cond, arr_a, arr_b, merge_output)
 
         # arr_a has both elements, arr_b only has element 0
         qubit_map = {
@@ -675,39 +675,39 @@ class TestIfMergeAllocation:
             QubitAddress(arr_b.uuid, 0): 0,
         }
         with pytest.raises(EmitError, match="merge requires identical"):
-            map_phi_outputs(if_op, qubit_map, {})
+            map_merge_outputs(if_op, qubit_map, {})
 
-    def test_quantum_phi_scalar_identity_still_allowed(self) -> None:
-        """Identity scalar phi (same physical resource) must succeed."""
+    def test_quantum_merge_scalar_identity_still_allowed(self) -> None:
+        """Identity scalar merge (same physical resource) must succeed."""
         q = _make_value("q", QubitType)
         q_out = q.next_version()
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_value("q_phi", QubitType)
-        if_op = _make_if_with_merge(cond, q_out, q_out, phi_output)
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, q_out, q_out, merge_output)
 
         qubit_map = {QubitAddress(q_out.uuid): 0}
-        map_phi_outputs(if_op, qubit_map, {})
-        assert QubitAddress(phi_output.uuid) in qubit_map
-        assert qubit_map[QubitAddress(phi_output.uuid)] == 0
+        map_merge_outputs(if_op, qubit_map, {})
+        assert QubitAddress(merge_output.uuid) in qubit_map
+        assert qubit_map[QubitAddress(merge_output.uuid)] == 0
 
-    def test_quantum_phi_array_identity_still_allowed(self) -> None:
-        """Identity array phi (same physical resources) must succeed."""
+    def test_quantum_merge_array_identity_still_allowed(self) -> None:
+        """Identity array merge (same physical resources) must succeed."""
         size_val = _make_const_value("size", 3)
         arr = _make_array_value("arr", shape_vals=(size_val,))
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
-        if_op = _make_if_with_merge(cond, arr, arr, phi_output)
+        merge_output = _make_array_value("merge_arr", shape_vals=(size_val,))
+        if_op = _make_if_with_merge(cond, arr, arr, merge_output)
 
         qubit_map = {
             QubitAddress(arr.uuid, 0): 0,
             QubitAddress(arr.uuid, 1): 1,
             QubitAddress(arr.uuid, 2): 2,
         }
-        map_phi_outputs(if_op, qubit_map, {})
+        map_merge_outputs(if_op, qubit_map, {})
         for i in range(3):
-            assert qubit_map[QubitAddress(phi_output.uuid, i)] == i
+            assert qubit_map[QubitAddress(merge_output.uuid, i)] == i
 
 
 # ===========================================================================
@@ -1019,10 +1019,10 @@ from qamomile.qiskit.transpiler import QiskitTranspiler  # noqa: E402
 
 
 @qmc.qkernel
-def broken_phi_bit_array_example() -> qmc.Vector[qmc.Bit]:
+def broken_merge_bit_array_example() -> qmc.Vector[qmc.Bit]:
     """Regression: different qubit arrays in true/false branches must not silently merge.
 
-    Before the fix, this returned ``[((0, 0, 0, 0, 1), 200)]`` because the phi
+    Before the fix, this returned ``[((0, 0, 0, 0, 1), 200)]`` because the merge
     always picked the true branch's physical resources regardless of the runtime
     condition. the kernel transpiles and executes successfully.
     """
@@ -1043,10 +1043,10 @@ def broken_phi_bit_array_example() -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
-def broken_phi_bit_scalar_example() -> qmc.Bit:
-    """Regression: scalar bit phi with different source qubits.
+def broken_merge_bit_scalar_example() -> qmc.Bit:
+    """Regression: scalar bit merge with different source qubits.
 
-    Before the fix, the phi always read the true branch's clbit regardless of
+    Before the fix, the merge always read the true branch's clbit regardless of
     the runtime condition.  ``b`` is 0, so the else branch (``measure(q[2])``,
     which is ``|1>``) must be chosen → result ``(1, 200)``.
     Before the fix this returned ``(0, 200)``.
@@ -1066,9 +1066,9 @@ def broken_phi_bit_scalar_example() -> qmc.Bit:
 
 @qmc.qkernel
 def frontend_target_vars_leak_example() -> qmc.Bit:
-    """Regression: Store-only reassignment of ``b`` leaked from phi merge.
+    """Regression: Store-only reassignment of ``b`` leaked from merge.
 
-    Before the fix, ``b = qmc.bit(False)`` was never updated by the phi merge
+    Before the fix, ``b = qmc.bit(False)`` was never updated by the merge
     (Store-only reassignment excluded from ``target_vars``), so the second
     ``if b`` always saw the stale ``False`` value and skipped the X gate.
     Before the fix this returned ``(0, 200)``.
@@ -1188,10 +1188,10 @@ def _extract_rx_angles(qc: "QuantumCircuit") -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-class TestPhiMergeAliasRegression:
-    """End-to-end regression for phi quantum merge alias miscompile.
+class TestMergeAliasRegression:
+    """End-to-end regression for quantum merge alias miscompile.
 
-    ``broken_phi_bit_array_example`` uses distinct qubit arrays (``true_q``,
+    ``broken_merge_bit_array_example`` uses distinct qubit arrays (``true_q``,
     ``false_q``) in the two branches.  Before the fix the transpiler silently
     picked the true branch's physical qubits, producing wrong results
     ``[((0, 0, 0, 0, 1), 200)]``.  After the fix the classical bit
@@ -1200,9 +1200,9 @@ class TestPhiMergeAliasRegression:
     index 1.
     """
 
-    def test_phi_bit_array_produces_correct_result(self) -> None:
+    def test_merge_bit_array_produces_correct_result(self) -> None:
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(broken_phi_bit_array_example)
+        exe = transpiler.transpile(broken_merge_bit_array_example)
         executor = transpiler.executor()
         job = exe.sample(executor, shots=200, bindings={})
         results = job.result().results
@@ -1217,10 +1217,10 @@ class TestPhiMergeAliasRegression:
         )
         assert count == 200
 
-    def test_phi_bit_scalar_produces_correct_result(self) -> None:
-        """Scalar bit phi must pick the else branch (measure q[2] = |1>)."""
+    def test_merge_bit_scalar_produces_correct_result(self) -> None:
+        """Scalar bit merge must pick the else branch (measure q[2] = |1>)."""
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(broken_phi_bit_scalar_example)
+        exe = transpiler.transpile(broken_merge_bit_scalar_example)
         executor = transpiler.executor()
         job = exe.sample(executor, shots=200, bindings={})
         results = job.result().results

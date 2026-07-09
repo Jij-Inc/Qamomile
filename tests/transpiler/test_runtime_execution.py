@@ -83,7 +83,7 @@ class _FakeExecutor(QuantumExecutor[str]):
 
 
 class TestClassicalExecutorControlFlow:
-    def test_executes_if_with_phi_merge(self) -> None:
+    def test_executes_if_with_merge(self) -> None:
         cond = Value(type=BitType(), name="cond")
         true_result = Value(type=UIntType(), name="true_result")
         false_result = Value(type=UIntType(), name="false_result")

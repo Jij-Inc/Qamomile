@@ -1,7 +1,7 @@
 """Compile-time IfOperation lowering pass.
 
 Lowers compile-time resolvable ``IfOperation``s before the segmentation pass,
-replacing them with selected-branch operations and substituting phi outputs
+replacing them with selected-branch operations and substituting merge outputs
 with selected-branch values throughout the block.
 
 This prevents ``SegmentationPass`` from seeing classical-only compile-time
@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
     WhileOperation,
+    genuine_input_values,
 )
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -141,7 +142,7 @@ def _array_carrier_keys(
     stay consistent with every other carrier-key producer and resolver.
 
     Args:
-        source (ValueBase): Selected source value after phi substitution.
+        source (ValueBase): Selected source value after merge substitution.
             Array sources may be plain arrays or strided views.
         num_bits (int): Number of QFixed carrier bits to build.
 
@@ -178,7 +179,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     1. Evaluates conditions including expression-derived ones
        (``CompOp``, ``CondOp``, ``NotOp`` chains).
     2. Replaces resolved ``IfOperation``s with selected-branch operations.
-    3. Substitutes phi output UUIDs with selected-branch values in all
+    3. Substitutes merge output UUIDs with selected-branch values in all
        subsequent operations and block outputs.
     """
 
@@ -202,7 +203,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
         Returns:
             Block: New block with compile-time ``if``s replaced by their
-                selected-branch operations and phi outputs substituted. The
+                selected-branch operations and merge outputs substituted. The
                 input's ``BlockKind`` is preserved.
 
         Raises:
@@ -234,12 +235,12 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             self._try_seed_value(iv, concrete_values)
 
         # Process operations, lowering compile-time ifs.
-        new_ops, phi_subst, dead_uuids = self._lower_operations(
+        new_ops, merge_subst, dead_uuids = self._lower_operations(
             input.operations, concrete_values
         )
 
-        # Apply phi substitution to block output_values.
-        new_outputs = self._substitute_output_values(input.output_values, phi_subst)
+        # Apply merge substitution to block output_values.
+        new_outputs = self._substitute_output_values(input.output_values, merge_subst)
 
         # Remove dead operations whose results are only used by lowered ifs.
         if dead_uuids:
@@ -312,16 +313,16 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         """Process operations, lowering compile-time IfOperations.
 
         Returns:
-            Tuple of (new operations list, phi substitution map,
+            Tuple of (new operations list, merge substitution map,
             dead UUIDs from lowered condition values).
         """
         new_ops: list[Operation] = []
-        phi_subst: dict[str, ValueBase] = {}
+        merge_subst: dict[str, ValueBase] = {}
         dead_uuids: set[str] = set()
 
         for op in operations:
-            # First apply any accumulated phi substitutions to this op.
-            op = self._apply_substitution(op, phi_subst)
+            # First apply any accumulated merge substitutions to this op.
+            op = self._apply_substitution(op, merge_subst)
 
             # Track classical op results for expression-aware evaluation.
             self._try_evaluate_classical_op(op, concrete_values)
@@ -334,9 +335,9 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     if hasattr(op.condition, "uuid"):
                         dead_uuids.add(op.condition.uuid)
 
-                    # Build phi substitution map.
+                    # Build merge substitution map.
                     for merge in op.iter_merges():
-                        phi_subst[merge.result.uuid] = merge.select(resolved)
+                        merge_subst[merge.result.uuid] = merge.select(resolved)
 
                     # Inline selected branch operations.
                     selected_ops = (
@@ -347,7 +348,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     lowered, nested_subst, nested_dead = self._lower_operations(
                         selected_ops, concrete_values
                     )
-                    phi_subst.update(nested_subst)
+                    merge_subst.update(nested_subst)
                     dead_uuids.update(nested_dead)
                     new_ops.extend(lowered)
                     continue
@@ -396,18 +397,18 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                         body, dict(concrete_values)
                     )
                     new_lists.append(lowered_body)
-                    phi_subst.update(nested_subst)
+                    merge_subst.update(nested_subst)
                     dead_uuids.update(nested_dead)
                 op = op.rebuild_nested(new_lists)
                 # The substitution applied at the top of the loop predates
-                # the nested lowering, so phi outputs erased INSIDE this
+                # the nested lowering, so merge outputs erased INSIDE this
                 # op's body are still referenced by its rebind records
                 # (and possibly operands). Re-apply with the updated map.
-                op = self._apply_substitution(op, phi_subst)
+                op = self._apply_substitution(op, merge_subst)
 
             new_ops.append(op)
 
-        return new_ops, phi_subst, dead_uuids
+        return new_ops, merge_subst, dead_uuids
 
     # ------------------------------------------------------------------
     # Substitution
@@ -420,7 +421,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     ) -> tuple[Any, ...]:
         """Rewrite branch rebind record values through the substitutor.
 
-        Keeps ``IfOperation.branch_rebinds`` coherent when phi outputs
+        Keeps ``IfOperation.branch_rebinds`` coherent when merge outputs
         referenced by a record are lowered away, so the control-flow
         discard check's ``AnalyzePass`` safety-net run sees live values.
 
@@ -494,7 +495,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         """Rewrite loop rebind record values through the substitutor.
 
         Keeps ``loop_carried_rebinds`` coherent when a record's ``after``
-        (or ``before``) was a nested compile-time if's phi output that
+        (or ``before``) was a nested compile-time if's merge output that
         the lowering erased — without this, the control-flow discard
         check's ``AnalyzePass`` safety-net run would see a dangling UUID
         and lose the record's carried-forward lineage.
@@ -530,11 +531,11 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         op: Operation,
         subst: dict[str, ValueBase],
     ) -> Operation:
-        """Apply phi substitution map to an operation's operands and results.
+        """Apply merge substitution map to an operation's operands and results.
 
         Args:
             op (Operation): Operation to rewrite through ``subst``.
-            subst (dict[str, ValueBase]): Accumulated phi substitution map.
+            subst (dict[str, ValueBase]): Accumulated merge substitution map.
                 Mutated in place when a CastOperation result is rebuilt with
                 re-synced carrier metadata, so later operations holding the
                 same SSA value pick up the rebuilt metadata.
@@ -556,10 +557,10 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             ],
         )
 
-        # Phi substitution must reach into ``SliceArrayOperation`` result
+        # Merge substitution must reach into ``SliceArrayOperation`` result
         # metadata too.  The result is a sliced ``ArrayValue`` whose
         # ``slice_start`` / ``slice_step`` / ``slice_of`` Values may be
-        # phi-output references when the slice bounds come from an
+        # merge-output references when the slice bounds come from an
         # ``if`` branch.  Without substituting the result fields, the
         # post-fold ``SliceBorrowCheckPass`` sees a still-symbolic
         # ``slice_start`` and silently skips coverage registration,
@@ -785,7 +786,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         output_values: list[Value],
         subst: dict[str, ValueBase],
     ) -> list[Value]:
-        """Apply phi substitution to block output values."""
+        """Apply merge substitution to block output values."""
         if not subst:
             return output_values
 
@@ -850,20 +851,18 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
     @staticmethod
     def _collect_used_uuids(op: Operation, used: set[str]) -> None:
-        """Collect all UUIDs an operation reads (recursive).
+        """Collect all UUIDs an operation genuinely reads (recursive).
 
-        Inputs are read via ``all_input_values`` so subclass-specific
-        Value fields count as uses — ``ControlledUOperation.power``,
-        ``SymbolicControlledU.num_controls`` / ``control_indices``, and
-        in particular ``IfOperation`` branch-merge yields, whose
-        producers must stay alive through dead-op elimination even when
-        the yield is the value's only reader.
+        Reads are taken from :func:`genuine_input_values` so
+        subclass-specific reads (composite-gate power, symbolic control
+        counts, ``IfOperation`` branch-merge yields) count as uses while
+        rebind-record values — exposed only for cloning — do not.
 
         Args:
             op (Operation): Operation to inspect.
             used (set[str]): Mutable set of used UUIDs, updated in place.
         """
-        for operand in op.all_input_values():
+        for operand in genuine_input_values(op):
             used.add(operand.uuid)
             # Also collect element_indices and parent_array references.
             if isinstance(operand, Value):

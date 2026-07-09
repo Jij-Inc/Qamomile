@@ -2605,12 +2605,12 @@ class TestControlledHelperCudaq:
 
 
 # ============================================================================
-# Compile-time constant if with array quantum phi output
+# Compile-time constant if with array quantum merge output
 # ============================================================================
 
 
-class TestCompileTimeIfArrayQuantumPhi:
-    """Compile-time constant if with array quantum phi must not raise EmitError."""
+class TestCompileTimeIfArrayQuantumMerge:
+    """Compile-time constant if with array quantum merge must not raise EmitError."""
 
     def test_dead_branch_different_array(self):
         """Dead branch rebinds qubit array to a different array."""
@@ -3424,7 +3424,7 @@ class TestAlgorithmQAOAModules:
         assert sum(count for _, count in result.results) == 200
 
 
-class TestCompileTimeIfPhiPropagation:
+class TestCompileTimeIfMergePropagation:
     """Compile-time if lowering should preserve selected classical values."""
 
     def test_direct_classical_if_after_qinit_flag_true(self):
@@ -3554,7 +3554,7 @@ class TestCompileTimeIfPhiPropagation:
         assert {value for value, _ in sample.results} == {1}
         assert statevectors_equal(sv, expected)
 
-    def test_bit_vector_phi_merge_flag_true(self):
+    def test_bit_vector_merge_flag_true(self):
         """Branch-local Vector[Bit] values merge correctly for the true branch."""
         flag = True
 
@@ -3582,7 +3582,7 @@ class TestCompileTimeIfPhiPropagation:
         result = exe.sample(transpiler.executor(), shots=32).result()
         assert {value for value, _ in result.results} == {(1, 0)}
 
-    def test_bit_vector_phi_merge_flag_false(self):
+    def test_bit_vector_merge_flag_false(self):
         """Branch-local Vector[Bit] values merge correctly for the false branch."""
         flag = False
 
@@ -4197,7 +4197,7 @@ class TestEntanglementAndParityPatterns:
         assert statevectors_equal(sv, all_zeros_state(3))
 
 
-class TestWhileIfSharedLocalPhi:
+class TestWhileIfSharedLocalMerge:
     """While-if shared locals should preserve dead/live distinction."""
 
     def test_while_loop_with_if_else_same_name_dead_local_transpile(self):

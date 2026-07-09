@@ -31,8 +31,8 @@ from .handle import (
 class Qubit(Handle):
     value: Value[QubitType]
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "Qubit":
-        """Wrap a phi-merged value in a fresh ``Qubit`` handle.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Qubit":
+        """Wrap a merged value in a fresh ``Qubit`` handle.
 
         Args:
             value (Value): Fresh IR value produced for the merge output.
@@ -49,8 +49,8 @@ class Qubit(Handle):
 class QFixed(Handle):
     value: Value[QFixedType]
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "QFixed":
-        """Wrap a phi-merged value, copying validated QFixed carrier metadata.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "QFixed":
+        """Wrap a merged value, copying validated QFixed carrier metadata.
 
         QFixed is a scalar quantum handle backed by multiple physical
         qubit carriers recorded in metadata. A merged QFixed can only
@@ -75,7 +75,7 @@ class QFixed(Handle):
         false_meta = counterpart.metadata.qfixed
         if true_meta is None or false_meta is None:
             raise TypeError(
-                "QFixed if-else phi merge requires QFixed metadata on both branches."
+                "QFixed if-else merge requires QFixed metadata on both branches."
             )
         if (
             true_meta.qubit_uuids != false_meta.qubit_uuids
@@ -83,7 +83,7 @@ class QFixed(Handle):
             or true_meta.int_bits != false_meta.int_bits
         ):
             raise TypeError(
-                "QFixed if-else phi merge requires identical carrier qubits and "
+                "QFixed if-else merge requires identical carrier qubits and "
                 "fixed-point layout across branches."
             )
         return QFixed(
@@ -116,8 +116,8 @@ class UInt(ArithmeticMixin, Handle):
         """Create a Float result for division operations (required by ArithmeticMixin)."""
         return Float(value=Value(type=FloatType(), name=""), init_value=0.0)
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "UInt":
-        """Wrap a phi-merged value in a fresh ``UInt`` handle.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "UInt":
+        """Wrap a merged value in a fresh ``UInt`` handle.
 
         Args:
             value (Value): Fresh IR value produced for the merge output.
@@ -437,8 +437,8 @@ class Float(ArithmeticMixin, Handle):
         """Create a Float result for division (same as _make_result for Float)."""
         return self._make_result()
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "Float":
-        """Wrap a phi-merged value in a fresh ``Float`` handle.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Float":
+        """Wrap a merged value in a fresh ``Float`` handle.
 
         Args:
             value (Value): Fresh IR value produced for the merge output.
@@ -595,8 +595,8 @@ class Bit(Handle):
         """Create a fresh result Bit handle for an op."""
         return Bit(value=Value(type=BitType(), name=""))
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "Bit":
-        """Wrap a phi-merged value in a fresh ``Bit`` handle.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Bit":
+        """Wrap a merged value in a fresh ``Bit`` handle.
 
         Args:
             value (Value): Fresh IR value produced for the merge output.

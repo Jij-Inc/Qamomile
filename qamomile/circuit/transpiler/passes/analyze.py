@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
     WhileOperation,
+    genuine_input_values,
 )
 from qamomile.circuit.ir.operation.gate import (
     GateOperation,
@@ -92,8 +93,10 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
                 # Explicit merge edges: each merged output depends on the
                 # condition and both branch sources. A compile-time-constant
                 # condition may be a raw Python bool (closure constant)
-                # with no IR identity — it contributes no edge.
-                condition = op.condition
+                # with no IR identity — and malformed IR may lack the
+                # operand entirely — so it contributes no edge in either
+                # case.
+                condition = op.operands[0] if op.operands else None
                 condition_uuid = (
                     condition.uuid if isinstance(condition, ValueBase) else None
                 )
@@ -204,19 +207,19 @@ def find_measurement_derived_values(
 
 @dataclasses.dataclass(frozen=True)
 class PrunedIfView:
-    """Pruned view of an operation list plus its dead-branch phi aliases.
+    """Pruned view of an operation list plus its dead-branch merge aliases.
 
     Produced by :func:`prune_compile_time_ifs`. A compile-time-resolved
     ``IfOperation`` disappears from ``operations`` (only its taken branch
     survives, inlined); each of its merge outputs is recorded here as a
-    ``(result, selected_source)`` alias pair so phi-mediated dataflow out
+    ``(result, selected_source)`` alias pair so merge-mediated dataflow out
     of the pruned branch stays visible to dependency scans without any
     synthetic operation in the list.
 
     Attributes:
         operations (list[Operation]): The pruned view of the input
             operations, in program order.
-        phi_aliases (tuple[tuple[Value, Value], ...]): Every
+        merge_aliases (tuple[tuple[Value, Value], ...]): Every
             ``(result, selected_source)`` pair recorded anywhere in the
             walk, in pruning order.
         _loop_aliases (dict[int, tuple[tuple[Value, Value], ...]]): Alias
@@ -227,7 +230,7 @@ class PrunedIfView:
     """
 
     operations: list[Operation]
-    phi_aliases: tuple[tuple[Value, Value], ...]
+    merge_aliases: tuple[tuple[Value, Value], ...]
     _loop_aliases: dict[int, tuple[tuple[Value, Value], ...]]
 
     def aliases_for_loop(self, loop_op: Operation) -> tuple[tuple[Value, Value], ...]:
@@ -251,6 +254,8 @@ def prune_compile_time_ifs(
     ops: list[Operation],
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
+    *,
+    walk_runtime_branches: bool = False,
 ) -> PrunedIfView:
     """Replace compile-time-decidable ``IfOperation``s by their taken branch.
 
@@ -261,9 +266,12 @@ def prune_compile_time_ifs(
     lowering pass will actually keep. For a resolved condition the taken
     branch's operations are inlined (recursively pruned) and each merge
     output is recorded as a ``(result, selected_source)`` alias pair, so
-    phi-mediated dataflow out of the branch stays visible to dependency
-    scans without dead-branch edges. Runtime ``IfOperation``s are kept
-    intact (their branches are not walked).
+    merge-mediated dataflow out of the branch stays visible to dependency
+    scans without dead-branch edges. Runtime ``IfOperation``s are kept by
+    default with their branches untouched; with
+    ``walk_runtime_branches=True`` their branch bodies are pruned in
+    place (each side with its own copy of the accumulated state, exactly
+    like the lowering pass) while the if itself and its merges stay.
 
     Shared by ``reject_self_referential_loop_stores`` and
     ``reject_loop_carried_classical_rebinds`` — both checks must classify
@@ -277,10 +285,18 @@ def prune_compile_time_ifs(
             matching the lowering pass's scoping).
         bindings (dict[str, Any]): Compile-time parameter bindings used
             to resolve conditions.
+        walk_runtime_branches (bool): When ``True``, descend into kept
+            runtime ``IfOperation`` branches so compile-time ifs nested
+            inside them are pruned (and their merge aliases recorded)
+            too — the lowering pass lowers those, so scans that must
+            match its output need this. ``False`` (default) preserves
+            the historical view where runtime branches pass through
+            verbatim, which the quantum discard checks rely on for
+            their own position-aware classification. Defaults to False.
 
     Returns:
         PrunedIfView: The pruned operations together with the recorded
-            dead-branch phi alias pairs (global and per pruned loop op).
+            dead-branch merge alias pairs (global and per pruned loop op).
     """
     global_aliases: list[tuple[Value, Value]] = []
     loop_aliases: dict[int, tuple[tuple[Value, Value], ...]] = {}
@@ -306,10 +322,27 @@ def prune_compile_time_ifs(
         for op in ops:
             evaluate_classical_op_concrete(op, concrete_values, bindings)
             if isinstance(op, IfOperation):
+                # A malformed condition-less if resolves as runtime (None
+                # coerces to no compile-time value) and passes through.
                 taken = resolve_compile_time_condition(
-                    op.condition, concrete_values, bindings
+                    op.operands[0] if op.operands else None,
+                    concrete_values,
+                    bindings,
                 )
                 if taken is None:
+                    if walk_runtime_branches:
+                        # Mirror the lowering pass: each runtime branch is
+                        # classified with its own copy of the accumulated
+                        # state; the if itself and its merges stay.
+                        op = dataclasses.replace(
+                            op,
+                            true_operations=walk(
+                                op.true_operations, dict(concrete_values), sink
+                            ),
+                            false_operations=walk(
+                                op.false_operations, dict(concrete_values), sink
+                            ),
+                        )
                     pruned.append(op)
                     continue
                 branch = op.true_operations if taken else op.false_operations
@@ -344,7 +377,7 @@ def prune_compile_time_ifs(
     pruned_ops = walk(ops, concrete_values, global_aliases)
     return PrunedIfView(
         operations=pruned_ops,
-        phi_aliases=tuple(global_aliases),
+        merge_aliases=tuple(global_aliases),
         _loop_aliases=loop_aliases,
     )
 
@@ -477,7 +510,7 @@ def reject_self_referential_loop_stores(
 
     def check_loop_body(
         body_ops: list[Operation],
-        phi_aliases: tuple[tuple[Value, Value], ...],
+        merge_aliases: tuple[tuple[Value, Value], ...],
     ) -> None:
         """Reject self-referential stores inside one (pruned) loop body.
 
@@ -487,7 +520,7 @@ def reject_self_referential_loop_stores(
         store's value and index operands.  The graph and value table
         cover the full body — including surviving runtime-if internals
         and the alias pairs of pruned compile-time ifs, so a store after
-        an if still sees phi-mediated reads — while the store scan itself
+        an if still sees merge-mediated reads — while the store scan itself
         skips if branches (those stores are rejected by
         ``AnalyzePass._reject_stores_in_if_branches``).
 
@@ -495,7 +528,7 @@ def reject_self_referential_loop_stores(
             body_ops (list[Operation]): The loop's top-level body
                 operations, already pruned of compile-time-decidable
                 if branches.
-            phi_aliases (tuple[tuple[Value, Value], ...]):
+            merge_aliases (tuple[tuple[Value, Value], ...]):
                 ``(result, selected_source)`` pairs of the compile-time
                 ifs pruned inside this loop's body; each contributes a
                 dataflow edge from the merge output to its surviving
@@ -507,7 +540,7 @@ def reject_self_referential_loop_stores(
                 writes.
         """
         dependency_graph = build_dependency_graph(body_ops)
-        for result, source in phi_aliases:
+        for result, source in merge_aliases:
             dependency_graph.setdefault(result.uuid, set()).add(source.uuid)
         flat_ops = flatten_ops(body_ops)
 
@@ -515,7 +548,7 @@ def reject_self_referential_loop_stores(
         for op in flat_ops:
             for value in (*op.all_input_values(), *op.results):
                 register_value(value, value_table)
-        for result, source in phi_aliases:
+        for result, source in merge_aliases:
             register_value(result, value_table)
             register_value(source, value_table)
 
@@ -629,11 +662,13 @@ def _op_read_uuids(op: Operation) -> set[str]:
     Loop operations expose their loop-carried rebind records — and
     ``IfOperation``s their branch rebind records — through
     ``all_input_values`` (for cloning); those record values are not
-    reads and must not trigger read-based checks, so they are
-    subtracted before the operands are re-added. Carry slots follow the
-    same split: ``body_args`` / ``body_yields`` are body-internal
-    formals, while ``iter_args`` are genuine reads of pre-loop values
-    and stay in the set.
+    reads. ``genuine_input_values`` drops them by last occurrence (so a
+    value that is both a merge yield and a rebind ``before`` keeps its
+    yield read); operands are then re-added defensively. Carry slots
+    follow the same split inside the helper: ``body_args`` /
+    ``body_yields`` are body-internal formals (excluded), while
+    ``iter_args`` are genuine reads of pre-loop values and stay in the
+    set (re-added defensively below).
 
     Args:
         op (Operation): Operation to inspect.
@@ -641,19 +676,7 @@ def _op_read_uuids(op: Operation) -> set[str]:
     Returns:
         set[str]: UUIDs of values the operation reads.
     """
-    excluded: set[str] = set()
-    if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-        for r in op.loop_carried_rebinds:
-            excluded.add(r.before.uuid)
-            excluded.add(r.after.uuid)
-        for carry in op.iter_carries():
-            excluded.add(carry.body_arg.uuid)
-            excluded.add(carry.body_yield.uuid)
-    if isinstance(op, IfOperation):
-        for branch_record in op.branch_rebinds:
-            excluded.add(branch_record.before.uuid)
-    uuids = {v.uuid for v in op.all_input_values()}
-    uuids -= excluded
+    uuids = {v.uuid for v in genuine_input_values(op)}
     for v in op.operands:
         operand_uuid = getattr(v, "uuid", None)
         if operand_uuid is not None:
@@ -702,7 +725,7 @@ def _stale_condition_alias_family(
     }
     candidates = [
         (result.uuid, source.uuid)
-        for result, source in pruned.phi_aliases
+        for result, source in pruned.merge_aliases
         if (result.uuid, source.uuid) not in body_pairs
     ]
     family = {initial_uuid}
@@ -724,7 +747,7 @@ def _reject_stale_while_condition_reads(
 
     For a loop-carried while condition, the resource allocator aliases
     the initial condition, every in-loop re-measurement, and the merged
-    phi outputs onto ONE physical classical bit. Reads inside the loop
+    merge outputs onto ONE physical classical bit. Reads inside the loop
     body are correct under that aliasing (they observe the current
     value, matching Python). A read of the *initial* condition value
     AFTER the loop is not: Python semantics promise the pre-loop (or
@@ -789,7 +812,7 @@ def _reject_stale_while_condition_reads(
 
 def _check_loop_carried_rebinds(
     loop_op: ForOperation | ForItemsOperation | WhileOperation,
-    body_phi_aliases: tuple[tuple[Value, Value], ...],
+    body_merge_aliases: tuple[tuple[Value, Value], ...],
 ) -> None:
     """Reject the loop-carried rebind records of one (pruned) loop op.
 
@@ -797,7 +820,7 @@ def _check_loop_carried_rebinds(
         loop_op (ForOperation | ForItemsOperation | WhileOperation): Loop
             operation whose body has already been pruned of
             compile-time-decidable if branches.
-        body_phi_aliases (tuple[tuple[Value, Value], ...]):
+        body_merge_aliases (tuple[tuple[Value, Value], ...]):
             ``(result, selected_source)`` pairs of the compile-time ifs
             pruned inside this loop's body. Body-local by design: the
             canonical chain below must stop at the pre-loop value, so
@@ -820,13 +843,13 @@ def _check_loop_carried_rebinds(
     # Dead-branch merge aliases recorded by pruning:
     # result uuid -> selected source uuid.
     collapsed: dict[str, str] = {
-        result.uuid: source.uuid for result, source in body_phi_aliases
+        result.uuid: source.uuid for result, source in body_merge_aliases
     }
     value_table: dict[str, ValueBase] = {}
     for op in flat_body:
         for v in (*op.all_input_values(), *op.results):
             value_table.setdefault(v.uuid, v)
-    for result, source in body_phi_aliases:
+    for result, source in body_merge_aliases:
         value_table.setdefault(result.uuid, result)
         value_table.setdefault(source.uuid, source)
 
@@ -849,9 +872,9 @@ def _check_loop_carried_rebinds(
     for op in flat_body:
         body_read_uuids |= _op_read_uuids(op)
     # A pruned merge reads its selected source exactly like the collapsed
-    # phi it replaces (e.g. a dead-branch ``y = x`` emits no operation but
+    # merge it replaces (e.g. a dead-branch ``y = x`` emits no operation but
     # still reads the stale pre-loop ``x`` through the merge).
-    body_read_uuids.update(source.uuid for _, source in body_phi_aliases)
+    body_read_uuids.update(source.uuid for _, source in body_merge_aliases)
 
     before_uuids = {r.before.uuid for r in records}
 
@@ -948,7 +971,10 @@ def reject_loop_carried_classical_rebinds(
     only path is a compile-time-dead branch canonicalizes back to the
     pre-loop value and is allowed. Unlike the array-store check, loops
     nested inside *runtime* if branches are scanned too — a loop-carried
-    scalar rebind there miscompiles all the same.
+    scalar rebind there miscompiles all the same — and the pruning walk
+    descends into those branches (``walk_runtime_branches=True``) so
+    dead-branch canonicalization applies to them exactly as the lowering
+    pass will lower them.
 
     The one exempted rebind — the while loop-carried condition pair —
     additionally requires that the condition's pre-loop value is not
@@ -978,12 +1004,14 @@ def reject_loop_carried_classical_rebinds(
     Raises:
         ValidationError: If a loop body rebinds a classical scalar whose
             pre-loop value the body still reads (directly, through
-            classical arithmetic, through a surviving phi, or as an
+            classical arithmetic, through a surviving merge, or as an
             embedded constant from a plain-Python initialization), or if
             a while condition's pre-loop value is read after the loop.
     """
     resolved_bindings = bindings or {}
-    pruned = prune_compile_time_ifs(operations, {}, resolved_bindings)
+    pruned = prune_compile_time_ifs(
+        operations, {}, resolved_bindings, walk_runtime_branches=True
+    )
     output_uuids = {
         v.uuid for v in (output_values or []) if getattr(v, "uuid", None) is not None
     }
@@ -1295,11 +1323,11 @@ def _root_wire_family(
 def _pre_branch_root_candidates(
     value: Value,
     branch_producers: dict[str, Operation],
-    phi_aliases: dict[str, Value],
+    merge_aliases: dict[str, Value],
     visiting: set[str] | None = None,
     resolved: dict[str, set[str]] | None = None,
 ) -> set[str]:
-    """Over-approximate the lineage roots a phi input may carry.
+    """Over-approximate the lineage roots a merge input may carry.
 
     Traces backwards through the branch-local producer map and returns
     the UUIDs of every value the input's lineage *may* start at: values
@@ -1310,13 +1338,13 @@ def _pre_branch_root_candidates(
     quantum inputs, since a quantum operation's outputs can only carry
     wires that flow in. Merges contribute the union of both sides;
     pruned compile-time merges contribute their selected source through
-    ``phi_aliases``.
+    ``merge_aliases``.
 
     The result feeds the discard check's *carried* exemption, so
     over-approximating is sound: a larger candidate set can only exempt
     more (allow more), never reject a valid kernel. Conversely, a
     pre-branch value absent from this over-approximation provably does
-    not flow out through the phi.
+    not flow out through the merge.
 
     Caution for future precision work: refining the generic union to a
     positional model (result ``i`` carries operand ``i``) is NOT valid
@@ -1337,10 +1365,10 @@ def _pre_branch_root_candidates(
     empty (uncached) set on the impossible back-edge.
 
     Args:
-        value (Value): The quantum value to trace (a phi branch input).
+        value (Value): The quantum value to trace (a merge branch input).
         branch_producers (dict[str, Operation]): Result-UUID-to-producer map
             restricted to the branch body (nested control flow included).
-        phi_aliases (dict[str, Value]): Merge-output aliases of the
+        merge_aliases (dict[str, Value]): Merge-output aliases of the
             compile-time ifs pruned from the traced scope (result UUID ->
             selected source); empty when the scope was not pruned.
         visiting (set[str] | None): UUIDs on the current DFS path, used to
@@ -1365,7 +1393,7 @@ def _pre_branch_root_candidates(
     visiting.add(value.uuid)
     try:
         result = _compute_pre_branch_roots(
-            value, branch_producers, phi_aliases, visiting, resolved
+            value, branch_producers, merge_aliases, visiting, resolved
         )
     finally:
         visiting.discard(value.uuid)
@@ -1376,7 +1404,7 @@ def _pre_branch_root_candidates(
 def _compute_pre_branch_roots(
     value: Value,
     branch_producers: dict[str, Operation],
-    phi_aliases: dict[str, Value],
+    merge_aliases: dict[str, Value],
     visiting: set[str],
     resolved: dict[str, set[str]],
 ) -> set[str]:
@@ -1390,7 +1418,7 @@ def _compute_pre_branch_roots(
         value (Value): The quantum value to trace.
         branch_producers (dict[str, Operation]): Result-UUID-to-producer
             map restricted to the branch/loop body.
-        phi_aliases (dict[str, Value]): Merge-output aliases of the
+        merge_aliases (dict[str, Value]): Merge-output aliases of the
             compile-time ifs pruned from the traced scope.
         visiting (set[str]): UUIDs on the current DFS path.
         resolved (dict[str, set[str]]): UUID-to-root-set memo, threaded
@@ -1399,12 +1427,12 @@ def _compute_pre_branch_roots(
     Returns:
         set[str]: UUIDs of every possible lineage root of ``value``.
     """
-    alias_source = phi_aliases.get(value.uuid)
+    alias_source = merge_aliases.get(value.uuid)
     if alias_source is not None:
         # Pruned compile-time merge: the output stands for its selected
         # source (the dead side never executes).
         return _pre_branch_root_candidates(
-            alias_source, branch_producers, phi_aliases, visiting, resolved
+            alias_source, branch_producers, merge_aliases, visiting, resolved
         )
     producer = branch_producers.get(value.uuid)
     if producer is None:
@@ -1418,7 +1446,7 @@ def _compute_pre_branch_roots(
                 return _pre_branch_root_candidates(
                     qubit_operands[index],
                     branch_producers,
-                    phi_aliases,
+                    merge_aliases,
                     visiting,
                     resolved,
                 )
@@ -1428,56 +1456,32 @@ def _compute_pre_branch_roots(
         for merge in producer.iter_merges():
             if merge.result.uuid == value.uuid:
                 return _pre_branch_root_candidates(
-                    merge.true_value, branch_producers, phi_aliases, visiting, resolved
+                    merge.true_value,
+                    branch_producers,
+                    merge_aliases,
+                    visiting,
+                    resolved,
                 ) | _pre_branch_root_candidates(
-                    merge.false_value, branch_producers, phi_aliases, visiting, resolved
+                    merge.false_value,
+                    branch_producers,
+                    merge_aliases,
+                    visiting,
+                    resolved,
                 )
         # The value is a non-merge result of the if (cannot normally
         # happen); fall through to the generic over-approximation below.
     # Generic producer (composite gate, controlled block, cast, ...):
     # its outputs may carry any of its genuine quantum inputs.
     roots: set[str] = set()
-    for input_value in op_genuine_input_values(producer):
+    for input_value in genuine_input_values(producer):
         if not isinstance(input_value, Value):
             continue
         if not input_value.type.is_quantum():
             continue
         roots |= _pre_branch_root_candidates(
-            input_value, branch_producers, phi_aliases, visiting, resolved
+            input_value, branch_producers, merge_aliases, visiting, resolved
         )
     return roots
-
-
-def op_genuine_input_values(op: Operation) -> list[ValueBase]:
-    """Return the input values an operation genuinely reads.
-
-    Rebind-record values (loop-carried records on loop operations and
-    branch records on ``IfOperation``s) ride along ``all_input_values``
-    for cloning/substitution but are not reads, so they are excluded.
-    Carry slots follow the same split as :func:`_op_read_uuids`:
-    ``body_args`` / ``body_yields`` are body-internal formals (not
-    reads), while ``iter_args`` are genuine reads of pre-loop values
-    and stay in the list.
-
-    Args:
-        op (Operation): Operation to inspect.
-
-    Returns:
-        list[ValueBase]: ``all_input_values`` minus rebind-record and
-            carry-formal values.
-    """
-    excluded: set[str] = set()
-    if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-        for loop_record in op.loop_carried_rebinds:
-            excluded.add(loop_record.before.uuid)
-            excluded.add(loop_record.after.uuid)
-        for carry in op.iter_carries():
-            excluded.add(carry.body_arg.uuid)
-            excluded.add(carry.body_yield.uuid)
-    if isinstance(op, IfOperation):
-        for branch_record in op.branch_rebinds:
-            excluded.add(branch_record.before.uuid)
-    return [v for v in op.all_input_values() if v.uuid not in excluded]
 
 
 def _add_uuid_with_ancestry(value: ValueBase, collected: set[str]) -> None:
@@ -1502,7 +1506,7 @@ def _add_uuid_with_ancestry(value: ValueBase, collected: set[str]) -> None:
 def _op_referenced_uuids_with_ancestry(op: Operation) -> set[str]:
     """Collect the UUIDs one operation genuinely reads, with array ancestry.
 
-    Combines :func:`op_genuine_input_values` (rebind-record values
+    Combines :func:`genuine_input_values` (rebind-record values
     excluded) with :func:`_add_uuid_with_ancestry` (element / view reads
     count as touching the register itself).
 
@@ -1514,7 +1518,7 @@ def _op_referenced_uuids_with_ancestry(op: Operation) -> set[str]:
             array ancestry.
     """
     referenced: set[str] = set()
-    for value in op_genuine_input_values(op):
+    for value in genuine_input_values(op):
         _add_uuid_with_ancestry(value, referenced)
     return referenced
 
@@ -1568,6 +1572,7 @@ def _wire_reader_map(ops: list[Operation]) -> dict[str, Operation]:
 def _wire_terminally_consumed(
     value: Value,
     readers: dict[str, Operation],
+    alias_reads: set[str],
 ) -> bool:
     """Whether a scalar wire's final in-scope version is consumed.
 
@@ -1576,8 +1581,10 @@ def _wire_terminally_consumed(
     version inside the scope. The wire counts as consumed when the
     chase ends at a non-gate reader (a measurement consumes the state;
     a composite, controlled block, cast or slice hands it to a producer
-    whose outputs the carried exemption models), or at a gate read with
-    no positional continuation for this wire (an ancestry-level or
+    whose outputs the carried exemption models), a pruned compile-time
+    merge (the executing pass-through selects the value, matching the
+    non-gate outcome its collapsed form used to get), or at a gate read
+    with no positional continuation for this wire (an ancestry-level or
     unmodeled read — over-approximated as consumed, erring toward
     allowing). It is NOT consumed when some version is read by nothing
     in the scope: the gated state is dropped there even though the
@@ -1589,6 +1596,9 @@ def _wire_terminally_consumed(
         value (Value): The wire's version at scope entry.
         readers (dict[str, Operation]): Read-UUID-to-reader map from
             :func:`_wire_reader_map`.
+        alias_reads (set[str]): UUIDs (ancestry included) read by the
+            scope's pruned compile-time merges — selected sources of the
+            scope's ``PrunedIfView.merge_aliases``.
 
     Returns:
         bool: True when the wire's final version has a reader.
@@ -1597,6 +1607,8 @@ def _wire_terminally_consumed(
     seen: set[str] = set()
     while current not in seen:
         seen.add(current)
+        if current in alias_reads:
+            return True
         reader = readers.get(current)
         if reader is None:
             return False
@@ -1690,7 +1702,7 @@ def _check_branch_quantum_discard(
     For each recorded quantum rebind and each rebinding branch side,
     verifies that the pre-branch value survives the path on which that
     branch is taken: it must be consumed inside the taken branch, carried
-    out through some phi merge on that side, or referenced by an
+    out through some merge on that side, or referenced by an
     operation outside the if that executes on the paths reaching it. A
     pre-branch value with none of these owners is silently dropped
     exactly when the branch is taken — the discard this check rejects.
@@ -1719,7 +1731,7 @@ def _check_branch_quantum_discard(
 
     Raises:
         QubitRebindError: If a rebinding branch drops the pre-branch
-            quantum value with no consumer, no carrying phi, and no
+            quantum value with no consumer, no carrying merge, and no
             outside owner.
     """
     side_checks: list[tuple[str, Value, bool]] = []
@@ -1747,19 +1759,23 @@ def _check_branch_quantum_discard(
     }
     referenced: dict[bool, set[str]] = {}
     readers: dict[bool, dict[str, Operation]] = {}
+    alias_reads: dict[bool, set[str]] = {}
     carried: dict[bool, set[str]] = {}
     for side, pruned_branch in pruned_branches.items():
         side_referenced = _branch_referenced_uuids(pruned_branch.operations)
         # A pruned compile-time merge inside the branch reads its selected
         # source exactly like the executing pass-through it models.
-        for _, alias_source in pruned_branch.phi_aliases:
-            _add_uuid_with_ancestry(alias_source, side_referenced)
+        side_alias_reads: set[str] = set()
+        for _, alias_source in pruned_branch.merge_aliases:
+            _add_uuid_with_ancestry(alias_source, side_alias_reads)
+        side_referenced |= side_alias_reads
         referenced[side] = side_referenced
+        alias_reads[side] = side_alias_reads
         readers[side] = _wire_reader_map(pruned_branch.operations)
         side_producers: dict[str, Operation] = {}
         build_producer_map(pruned_branch.operations, side_producers)
         side_aliases = {
-            result.uuid: source for result, source in pruned_branch.phi_aliases
+            result.uuid: source for result, source in pruned_branch.merge_aliases
         }
         carried_roots: set[str] = set()
         for merge in if_op.iter_merges():
@@ -1778,7 +1794,7 @@ def _check_branch_quantum_discard(
             # consumption (LIMITATIONS.md conservative corner).
             if before.uuid in referenced[side]:
                 continue
-        elif _wire_terminally_consumed(before, readers[side]):
+        elif _wire_terminally_consumed(before, readers[side], alias_reads[side]):
             # Scalar consumption is judged at the wire's FINAL in-branch
             # version, so a gate-then-reallocate
             # (``if cond: q = qmc.x(q); q = qmc.qubit("fresh")``) is a
@@ -1816,7 +1832,7 @@ def _scope_element_reads(
 
     Prunes the element with the accumulated compile-time state first, so
     a compile-time-dead branch inside it contributes no reads while its
-    collapsed phis contribute their selected pass-through operands —
+    collapsed merges contribute their selected pass-through operands —
     matching what actually executes. Runtime ifs inside the element keep
     both branches (a non-ancestor runtime if's reads count as potential
     ownership; see the scan docstring). Results are cached per element
@@ -1846,7 +1862,7 @@ def _scope_element_reads(
         reads |= _op_referenced_uuids_with_ancestry(sub_op)
     # Pruned compile-time merges read their selected pass-through
     # source — matching what actually executes.
-    for _, alias_source in pruned.phi_aliases:
+    for _, alias_source in pruned.merge_aliases:
         _add_uuid_with_ancestry(alias_source, reads)
     element_reads_cache[id(op)] = reads
     return reads
@@ -1895,7 +1911,7 @@ class _PathReads:
     read by operations outside a given if subtree on the paths that
     reach it. Each node contributes one scope's element read-counts with
     one element excluded (the if or loop being descended into / checked)
-    plus optional extra reads (the entered side's phi operands); parent
+    plus optional extra reads (the entered side's merge operands); parent
     nodes contribute the enclosing scopes the same way. The set is never
     materialized — the discard check only probes membership for the few
     record UUIDs — so building a node is O(1) beyond the per-scope count
@@ -1908,7 +1924,7 @@ class _PathReads:
         _excluded_reads (set[str]): Reads of the excluded element (its
             containment is subtracted from the counts).
         _extra (set[str]): Additional reads carried on this path (the
-            entered side's phi operands, with array ancestry).
+            entered side's merge operands, with array ancestry).
     """
 
     __slots__ = ("_parent", "_scope_counts", "_excluded_reads", "_extra")
@@ -1945,7 +1961,7 @@ class _PathReads:
 
         Returns:
             bool: True when some non-excluded scope element at any level,
-                or an entered-side phi operand, reads the UUID.
+                or an entered-side merge operand, reads the UUID.
         """
         node: _PathReads | None = self
         while node is not None:
@@ -1960,10 +1976,10 @@ class _PathReads:
         return False
 
 
-def _phi_side_operand_reads(if_op: IfOperation, side: bool) -> set[str]:
-    """Phi operands an if's join carries on one branch side.
+def _merge_side_operand_reads(if_op: IfOperation, side: bool) -> set[str]:
+    """Merge operands an if's join carries on one branch side.
 
-    On the path that takes ``side``, each phi merge selects — and thereby
+    On the path that takes ``side``, each merge selects — and thereby
     keeps alive past the join — its ``side`` operand; the opposite side's
     operands do not execute on that path and must not count as ownership
     for values checked deeper inside the entered branch.
@@ -1973,7 +1989,7 @@ def _phi_side_operand_reads(if_op: IfOperation, side: bool) -> set[str]:
         side (bool): True for the true branch, False for the false branch.
 
     Returns:
-        set[str]: UUIDs (with array ancestry) of the entered side's phi
+        set[str]: UUIDs (with array ancestry) of the entered side's merge
             operands.
     """
     reads: set[str] = set()
@@ -2026,7 +2042,7 @@ def _check_loop_quantum_discards(
       outside the loop (read on the path around it, per the same
       path-sensitive ``_PathReads`` evidence the branch check uses).
       The invariant arm also keeps the ``AnalyzePass`` safety net exact
-      for records whose ``after`` was a compile-time phi that
+      for records whose ``after`` was a compile-time merge that
       if-lowering erased and substituted away. A binding that makes a
       static loop run zero times can only diverge for programs whose
       Python semantics already double-consume the pre-loop value, so no
@@ -2097,28 +2113,29 @@ def _check_loop_quantum_discards(
         )
     # Build the producer map and value table over the COMPILE-TIME-PRUNED
     # body: a compile-time-dead ``if`` inside the body must contribute no
-    # fresh-allocation root (its branch never executes), so its collapsed
-    # phi resolves the post-body value straight through to the incoming
-    # wire — while a runtime ``if`` keeps both branches, so a conditional
-    # rebind's phi still unions in the fresh root and is rejected. Without
-    # pruning here, the two are indistinguishable at the pre-fold hook.
+    # fresh-allocation root (its branch never executes), so its recorded
+    # merge alias resolves the post-body value straight through to the
+    # incoming wire — while a runtime ``if`` keeps both branches, so a
+    # conditional rebind's merge still unions in the fresh root and is
+    # rejected. Without pruning here, the two are indistinguishable at
+    # the pre-fold hook.
     body_producers: dict[str, Operation] = {}
+    body_merge_aliases: dict[str, Value] = {}
     value_table: dict[str, ValueBase] = {}
-    body_aliases: dict[str, Value] = {}
     for body in loop_op.nested_op_lists():
         pruned_body = prune_compile_time_ifs(body, dict(concrete_values), bindings)
+        # A pruned compile-time merge stands for its selected source: the
+        # root trace resolves through the alias, and the wire-family
+        # lookup needs both endpoints' values.
+        for alias_result, alias_source in pruned_body.merge_aliases:
+            body_merge_aliases[alias_result.uuid] = alias_source
+            value_table.setdefault(alias_result.uuid, alias_result)
+            value_table.setdefault(alias_source.uuid, alias_source)
         for body_op in flatten_ops(pruned_body.operations):
             for result in body_op.results:
                 body_producers[result.uuid] = body_op
             for value in (*body_op.all_input_values(), *body_op.results):
                 value_table.setdefault(value.uuid, value)
-        # A pruned compile-time merge stands for its selected source: the
-        # root trace resolves through the alias, and the wire-family
-        # lookup needs both endpoints' values.
-        for result, source in pruned_body.phi_aliases:
-            body_aliases[result.uuid] = source
-            value_table.setdefault(result.uuid, result)
-            value_table.setdefault(source.uuid, source)
 
     def body_reads(uuid: str) -> bool:
         """Whether any pruned body op reads the value (ancestry included).
@@ -2151,7 +2168,7 @@ def _check_loop_quantum_discards(
             # value is same-wire as the incoming value — i.e. each root's
             # own ancestry intersects the incoming value's family. A mere
             # OVERLAP of the unioned root set with the family is unsound:
-            # a conditional rebind whose phi unions the incoming wire
+            # a conditional rebind whose merge unions the incoming wire
             # with a fresh allocation (``if bit: q = qmc.qubit(...)``)
             # produces roots {incoming, fresh}, of which only the
             # incoming root overlaps, yet some paths discard the incoming
@@ -2159,7 +2176,7 @@ def _check_loop_quantum_discards(
             # while still exempting slice-view refreshes, whose single
             # re-sliced root shares the base array.
             roots = _pre_branch_root_candidates(
-                record.after, body_producers, body_aliases
+                record.after, body_producers, body_merge_aliases
             )
             carried = bool(roots) and all(
                 bool(_root_wire_family(root, value_table) & before_family)
@@ -2178,27 +2195,32 @@ def _check_loop_quantum_discards(
             # still binds the post-loop read to different wires. Exempt
             # only the provably SAME-WIRE shapes: the strict-identity
             # record (after IS before, left by if-lowering substituting
-            # a pass-through phi away), and a quantum after whose
+            # a pass-through merge away), and a quantum after whose
             # over-approximated lineage roots are EXACTLY the incoming
-            # value — every dataflow path (gate chains, both phi sides)
+            # value — every dataflow path (gate chains, both merge sides)
             # leads back to the same register, e.g. a gate self-update
             # under an in-body if, so the post-loop read stays on the
             # pre-loop wire even at zero trips.
             same_wire = record.after.type.is_quantum() and _pre_branch_root_candidates(
-                record.after, body_producers, body_aliases
+                record.after, body_producers, body_merge_aliases
             ) == {record.before.uuid}
             if not same_wire:
                 raise _while_zero_trip_rebind_error(record.var_name)
         if carried:
             continue
-        invariant_after = record.after.uuid not in body_producers
+        # A pruned compile-time merge output is body-produced (its if was
+        # in the body) even though no operation remains in the pruned view.
+        invariant_after = (
+            record.after.uuid not in body_producers
+            and record.after.uuid not in body_merge_aliases
+        )
         before_read = body_reads(record.before.uuid)
         owned = record.before.uuid in reads_outside
         if invariant_after and not before_read and owned:
             # Loop-invariant rebind: iterations beyond the first rebind
             # to the same outer value and discard nothing; the outside
             # owner covers the first. Also keeps the AnalyzePass safety
-            # net exact for records whose after was a compile-time phi
+            # net exact for records whose after was a compile-time merge
             # that if-lowering erased and substituted away.
             continue
         # Body-produced rebinds are rejected for BOTH loop kinds:
@@ -2236,9 +2258,9 @@ def _scan_branch_quantum_discards(
     The "referenced outside this if" ownership evidence is assembled
     path-sensitively while descending: ``inherited_reads`` accumulates,
     per enclosing level, the reads of the sibling scope elements around
-    the branch being entered plus the enclosing if's phi operands of the
+    the branch being entered plus the enclosing if's merge operands of the
     entered side only. Reads on the sibling branch of an enclosing if —
-    and the enclosing phis' opposite-side operands — do not execute on
+    and the enclosing merges' opposite-side operands — do not execute on
     the paths that reach this scope, so an ownership claim can no longer
     rest on a branch that is never taken together with the checked one.
     Reads inside non-ancestor runtime ifs elsewhere in a scope still
@@ -2275,7 +2297,7 @@ def _scan_branch_quantum_discards(
             exclude_op (Operation): The scope element being checked or
                 descended into (its subtree is excluded).
             extra (set[str]): Additional reads carried on the path (the
-                entered side's phi operands), empty for checks.
+                entered side's merge operands), empty for checks.
 
         Returns:
             _PathReads: Membership view chaining to ``inherited_reads``.
@@ -2302,7 +2324,7 @@ def _scan_branch_quantum_discards(
                     concrete_values,
                     bindings,
                     measurement_tainted,
-                    path_context(op, _phi_side_operand_reads(op, taken)),
+                    path_context(op, _merge_side_operand_reads(op, taken)),
                     caches,
                 )
                 continue
@@ -2342,7 +2364,7 @@ def _scan_branch_quantum_discards(
                     dict(concrete_values),
                     bindings,
                     measurement_tainted,
-                    path_context(op, _phi_side_operand_reads(op, side)),
+                    path_context(op, _merge_side_operand_reads(op, side)),
                     caches,
                 )
             continue
@@ -2380,13 +2402,13 @@ def reject_control_flow_quantum_discard(
     state exactly when a rebinding branch is taken. The frontend records
     every branch-internal quantum binding change on the ``IfOperation``
     (``BranchRebind``, preserving the pre-branch value even when it no
-    longer appears in any phi); this check verifies each record against
+    longer appears in any merge); this check verifies each record against
     each runtime execution path and raises ``QubitRebindError`` — the
     same ``AffineTypeError`` the decoration-time analyzer raises for a
     top-level rebind from a different quantum source, since this is that
     exact affine violation surfacing at runtime inside a branch — when
     the pre-branch value has no owner on a rebinding path: not consumed
-    inside the taken branch, not carried out through any phi merge of
+    inside the taken branch, not carried out through any merge of
     that side, and not referenced by any operation outside the if.
     Scalar ``Qubit`` and whole-register ``Vector[Qubit]`` rebinds are
     covered alike.
@@ -2425,7 +2447,7 @@ def reject_control_flow_quantum_discard(
     uses, so expression-derived runtime conditions (``~bit``,
     ``a & b``) are covered; a non-measurement, non-compile-time condition
     cannot drive runtime branching and is rejected at emit by the shared
-    condition resolution (though for this discard shape the emit-side phi
+    condition resolution (though for this discard shape the emit-side merge
     physical-resource check can fire first with its generic message).
 
     What stays allowed:
@@ -2439,18 +2461,18 @@ def reject_control_flow_quantum_discard(
       not a consumption; whole-register rebinds keep the coarser
       any-touch granularity, where element or view reads count;
     - ordinary quantum rebinds through gates (``q = qmc.h(q)``) — the
-      pre-branch value is carried out through the phi merge;
+      pre-branch value is carried out through the merge;
     - rebinds whose pre-branch value is still owned outside the if (a
       value consumed before the if, or an alias referenced after it);
     - handle exchanges where every pre-branch value is carried by some
-      phi of the same side (``q1, q2 = q2, q1``).
+      merge of the same side (``q1, q2 = q2, q1``).
 
     The check is deliberately conservative toward allowing where it
-    cannot be exact. Phi lineage is over-approximated: producers without
+    cannot be exact. Merge lineage is over-approximated: producers without
     a positional qubit model (composite gates, controlled blocks, casts)
     contribute all of their quantum inputs as possible roots, so the
     carried exemption can only grow — a rejection requires the
-    pre-branch value to be provably absent from every phi lineage.
+    pre-branch value to be provably absent from every merge lineage.
     Outside-ownership evidence is path-sensitive with respect to
     enclosing ifs (a read on the sibling branch of an enclosing runtime
     if does not exempt), but path-insensitive for non-ancestor runtime
@@ -2492,7 +2514,7 @@ def reject_control_flow_quantum_discard(
 
     Raises:
         QubitRebindError: If a runtime if branch rebinds a quantum variable
-            whose pre-branch value has no consumer in that branch, no phi
+            whose pre-branch value has no consumer in that branch, no merge
             carrying it out of that side, and no reference outside the if —
             or a loop body rebinds a quantum variable whose incoming value
             it never consumes and whose pre-loop value has no owner outside
@@ -2592,7 +2614,7 @@ class AnalyzePass(Pass[Block, Block]):
         """Reject classical element stores nested under a runtime if/else.
 
         A ``StoreArrayElementOperation`` produces a fresh SSA version of
-        the array, but the frontend's branch tracing has no phi merge for
+        the array, but the frontend's branch tracing has no merge for
         array values: post-if reads would reference the branch-local
         version unconditionally, silently diverging from Python semantics
         when the branch is not taken.  Compile-time ``if``s (classical
@@ -2636,7 +2658,7 @@ class AnalyzePass(Pass[Block, Block]):
                     raise ValidationError(
                         "Classical array element assignment inside an "
                         "if/else branch is not supported: array values "
-                        "have no phi merge, so the write would apply "
+                        "have no merge, so the write would apply "
                         "regardless of the branch taken. Restructure the "
                         "kernel to perform the assignment outside the "
                         "branch."
@@ -2730,7 +2752,7 @@ class AnalyzePass(Pass[Block, Block]):
             QubitRebindError: If a runtime if branch or a loop body
                 rebinds a quantum variable whose incoming value has no
                 owner on that path (no in-scope consumer, no carrying
-                phi, and no reference outside the construct).
+                merge, and no reference outside the construct).
         """
         reject_control_flow_quantum_discard(operations)
 
@@ -2785,7 +2807,7 @@ class AnalyzePass(Pass[Block, Block]):
                     if not isinstance(operand, ValueBase):
                         continue
 
-                    # Quantum-typed operands (e.g. phi-merged qubits) are not
+                    # Quantum-typed operands (e.g. merged qubits) are not
                     # subject to the measurement-dependency ban.  Only classical
                     # operands must be free of measurement derivation.
                     if operand.type.is_quantum():

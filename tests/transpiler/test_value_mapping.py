@@ -614,12 +614,12 @@ class TestCarrierMetadataMapping:
         with pytest.raises(ValueError, match="symbolic slice bounds"):
             ValueSubstitutor({formal.uuid: view}).substitute_operation(op)
 
-    def test_uuid_remapper_clones_phi_output_carriers_from_branch_body(
+    def test_uuid_remapper_clones_merge_output_carriers_from_branch_body(
         self,
     ) -> None:
-        """If-phi output carriers track arrays first seen inside branch bodies.
+        """If-merge output carriers track arrays first seen inside branch bodies.
 
-        IfOperation results are phi outputs whose carrier metadata references
+        IfOperation results are merge outputs whose carrier metadata references
         the array cast inside the branches. The array's first appearance is
         inside the nested bodies, so cloning must fill the remap tables from
         the bodies before remapping the result metadata.
@@ -665,7 +665,7 @@ class TestCarrierMetadataMapping:
 
         cast_true = branch_cast("qf_true")
         cast_false = branch_cast("qf_false")
-        merge_out = Value(type=result_type, name="qf_phi").with_qfixed_metadata(
+        merge_out = Value(type=result_type, name="qf_merge").with_qfixed_metadata(
             qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
             num_bits=2,
             int_bits=0,
@@ -748,7 +748,7 @@ class TestIfOperationMergeCloning:
         cond = _make_value("cond", BitType)
         true_q = _make_value("q_true", QubitType)
         false_q = _make_value("q_false", QubitType)
-        merge_output = _make_value("q_phi", QubitType)
+        merge_output = _make_value("q_merge", QubitType)
 
         if_op = IfOperation(
             operands=[cond],
@@ -795,7 +795,7 @@ class TestIfOperationMergeCloning:
         for i in range(3):
             t = _make_value(f"t{i}", QubitType)
             f = _make_value(f"f{i}", QubitType)
-            out = _make_value(f"phi{i}", QubitType)
+            out = _make_value(f"merge{i}", QubitType)
             merge_outputs.append(out)
             if_op.add_merge(t, f, out)
 
@@ -818,7 +818,7 @@ class TestIfOperationMergeSubstitution:
         old_q = _make_value("q_old", QubitType)
         new_q = _make_value("q_new", QubitType)
         false_q = _make_value("q_false", QubitType)
-        merge_output = _make_value("q_phi", QubitType)
+        merge_output = _make_value("q_merge", QubitType)
 
         if_op = IfOperation(
             operands=[cond],

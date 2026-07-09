@@ -35,10 +35,10 @@ class TestWhileContractPositive:
         result = transpiler.transpile(circuit)
         assert result is not None
 
-    def test_phi_merged_measurement_while_transpiles(self):
+    def test_merged_measurement_while_transpiles(self):
         """if sel: bit = measure(q1) else: bit = measure(q2); while bit: succeeds.
 
-        A phi-merged condition where every branch leaf is measurement-backed
+        A merged condition where every branch leaf is measurement-backed
         must be accepted by the validator.
         """
 
