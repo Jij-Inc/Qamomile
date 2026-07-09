@@ -474,7 +474,7 @@ def _create_merge_for_values(
     true_val: typing.Any,
     false_val: typing.Any,
     if_operation: IfOperation,
-) -> typing.Tuple[Value, Handle]:
+) -> Handle:
     """Create a branch-merge slot for a pair of branch values.
 
     Args:
@@ -488,8 +488,10 @@ def _create_merge_for_values(
             ``add_merge``. Its condition operand must already be attached.
 
     Returns:
-        typing.Tuple[Value, Handle]: The merged IR output value and the
-            frontend handle wrapping it.
+        Handle: The frontend handle wrapping the merged IR output value.
+            The merge output value itself is already registered on
+            ``if_operation`` via ``add_merge`` and is reachable as
+            ``merged_handle.value``.
 
     Raises:
         TypeError: If the branch value types differ, if ``true_val`` is
@@ -539,7 +541,7 @@ def _create_merge_for_values(
     if_operation.add_merge(true_v, false_v, merged_handle.value)
     _refresh_slice_merge_owner(true_val, false_val, merged_handle)
 
-    return merged_handle.value, merged_handle
+    return merged_handle
 
 
 def _slice_view_coverage(view: typing.Any) -> tuple[int, ...] | None:
@@ -1206,9 +1208,7 @@ def emit_if(
                     original_val if original_val is not None else true_val
                 )
                 continue
-            merge_output, merged_handle = _create_merge_for_values(
-                true_val, false_val, if_op
-            )
+            merged_handle = _create_merge_for_values(true_val, false_val, if_op)
             merged_results.append(merged_handle)
         elif isinstance(false_val, (Handle, Value)):
             raise TypeError(

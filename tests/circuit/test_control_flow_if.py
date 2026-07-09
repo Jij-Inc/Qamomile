@@ -322,12 +322,12 @@ class TestIfElseErrorHandling:
             )
         )
 
-        merge_output, merged = _create_merge_for_values(true_val, false_val, if_op)
+        merged = _create_merge_for_values(true_val, false_val, if_op)
 
         assert isinstance(merged, QFixed)
-        assert merge_output.get_qfixed_qubit_uuids() == carriers
-        assert merge_output.get_qfixed_num_bits() == 3
-        assert merge_output.get_qfixed_int_bits() == 1
+        assert merged.value.get_qfixed_qubit_uuids() == carriers
+        assert merged.value.get_qfixed_num_bits() == 3
+        assert merged.value.get_qfixed_int_bits() == 1
 
     def test_merge_rejects_qfixed_with_different_carriers(self):
         """QFixed merge should reject condition-dependent carrier layouts."""
@@ -359,7 +359,7 @@ class TestIfElseErrorHandling:
         true_val = Observable(value=Value(type=ObservableType(), name="obs_true"))
         false_val = Observable(value=Value(type=ObservableType(), name="obs_false"))
 
-        _, merged = _create_merge_for_values(true_val, false_val, if_op)
+        merged = _create_merge_for_values(true_val, false_val, if_op)
 
         assert isinstance(merged, Observable)
 
