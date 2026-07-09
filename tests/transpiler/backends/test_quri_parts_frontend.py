@@ -99,6 +99,38 @@ def _double_controlled_unitary(unitary: np.ndarray) -> np.ndarray:
     return matrix
 
 
+def _multi_controlled_unitary(unitary: np.ndarray, num_controls: int) -> np.ndarray:
+    """Build the ``num_controls``-controlled version of a single-qubit unitary.
+
+    Generalizes :func:`_double_controlled_unitary` to any control count.
+    Controls are qubits ``0 .. num_controls-1`` and the target is qubit
+    ``num_controls``, in the little-endian convention used by the
+    gate-spec helpers: the target unitary is applied only on the two
+    basis states where every control bit is 1 (target bit 0 vs 1), and
+    the identity acts everywhere else. This is the exact oracle the
+    Toffoli-cascade lowering must reproduce for arbitrary control
+    bitstrings — including ones with a 0, where the gate must NOT fire.
+
+    Args:
+        unitary (np.ndarray): 2x2 single-qubit unitary.
+        num_controls (int): Number of control qubits (>= 1).
+
+    Returns:
+        np.ndarray: The ``2**(num_controls+1) x 2**(num_controls+1)``
+            controlled unitary.
+    """
+    dim = 2 ** (num_controls + 1)
+    matrix = np.eye(dim, dtype=complex)
+    all_controls_set = (1 << num_controls) - 1  # bits 0..num_controls-1 = 1
+    lo = all_controls_set  # target bit (num_controls) = 0
+    hi = all_controls_set | (1 << num_controls)  # target bit = 1
+    matrix[lo, lo] = unitary[0, 0]
+    matrix[lo, hi] = unitary[0, 1]
+    matrix[hi, lo] = unitary[1, 0]
+    matrix[hi, hi] = unitary[1, 1]
+    return matrix
+
+
 def _run_statevector(circuit, parameter_bindings=None) -> np.ndarray:
     """Run a QURI Parts circuit and return the statevector via Qulacs.
 
@@ -3637,6 +3669,60 @@ class TestControlledGate:
         )
         assert statevectors_equal(sv, expected)
 
+    @pytest.mark.parametrize("num_controls", [3, 4])
+    def test_multi_controlled_ry_superposition_selectivity_statevector(
+        self, num_controls
+    ):
+        """A 3/4-control RY fires only on the all-controls-|1> component.
+
+        Puts every control in a uniform superposition (H on each) so all
+        ``2**num_controls`` control configurations are present at once,
+        then applies the multi-controlled RY and compares against the
+        exact dense controlled-RY unitary. The gate must act as RY on the
+        single all-ones component and as the identity on every other
+        component, so this pins gate *selectivity* across every control
+        configuration simultaneously — a decomposition that fired
+        unconditionally or on the wrong control subset would change the
+        statevector. This is strictly stronger than the all-controls-|1>
+        execution tests, and for four controls it exercises the cascade
+        recurrence rung ``i=3`` (``ancilla[i-1]`` from ``control[i]`` and
+        ``ancilla[i-2]``) that the two- and three-control tests never
+        reach. The clean ancillas must uncompute back to |0> (asserted by
+        ``_strip_zero_ancillas``).
+        """
+        ry_angle = 0.7
+
+        @qmc.qkernel
+        def ry_gate(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
+            return qmc.ry(q, angle)
+
+        controlled_ry = qmc.control(ry_gate, num_controls=num_controls)
+
+        @qmc.qkernel
+        def circuit(angle: qmc.Float) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+            ctrl = qmc.qubit_array(num_controls, "ctrl")
+            t = qmc.qubit("t")
+            for i in qmc.range(num_controls):
+                ctrl[i] = qmc.h(ctrl[i])
+            ctrl, t = controlled_ry(ctrl, t, angle=angle)
+            return qmc.measure(ctrl), qmc.measure(t)
+
+        _, circ = _transpile_and_get_circuit(circuit, bindings={"angle": ry_angle})
+        sv = _strip_zero_ancillas(_run_statevector(circ), num_controls + 1)
+        # Controls occupy the low bits 0..num_controls-1, target the high
+        # bit num_controls; tensor_product lists factors highest-qubit
+        # first, so the target identity comes before the control Hadamards.
+        h_gate = GATE_SPECS["H"].matrix_fn()
+        prep = tensor_product(identity(2), *([h_gate] * num_controls))
+        initial = prep @ all_zeros_state(num_controls + 1)
+        expected = (
+            _multi_controlled_unitary(
+                GATE_SPECS["RY"].matrix_fn(ry_angle), num_controls
+            )
+            @ initial
+        )
+        assert statevectors_equal(sv, expected)
+
     def test_multi_controlled_x_beyond_former_matrix_cap(self):
         """A 10-control X samples correctly despite its 11-local-qubit width.
 
@@ -3667,11 +3753,19 @@ class TestControlledGate:
 
         transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit)
+        circ = exe.compiled_quantum[0].circuit
         # 10 controls need 9 cascade ancillas on top of the 11 data qubits.
-        assert exe.compiled_quantum[0].circuit.qubit_count == 20
+        assert circ.qubit_count == 20
+        # Directly verify the nine ancillas uncompute to |0>: with every
+        # control in |1> the target flips, so all 11 data qubits end in
+        # |1> and every amplitude with an ancilla bit set must be zero.
+        sv = _strip_zero_ancillas(_run_statevector(circ), 11)
+        assert statevectors_equal(sv, computational_basis_state(11, (1 << 11) - 1))
         job = exe.sample(transpiler.executor(), bindings={}, shots=100)
         expected = (tuple(1 for _ in range(10)), 1)
-        for value, count in job.result().results:
+        results = list(job.result().results)
+        assert results, "sampling returned no results"
+        for value, count in results:
             assert value == expected
             assert count == 100
 

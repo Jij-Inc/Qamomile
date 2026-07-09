@@ -150,6 +150,11 @@ def _gate_demand(gate_type: GateOperationType | None, num_controls: int) -> int:
     ``SWAP`` controls the middle CX of its conjugation; ``RZZ`` controls
     only its central RZ), then the single-target residue is lowered.
 
+    Because under-reservation is a real bug (invariant #2 in the module
+    docstring), this ``match`` MUST stay in lockstep with that emitter:
+    any new reducible gate type added there must be mirrored here, or the
+    estimate can fall below the ancillas the emitter actually consumes.
+
     Args:
         gate_type (GateOperationType | None): Gate kind, or None for a
             malformed operation (treated pessimistically as
@@ -464,6 +469,14 @@ def _demand_of_operation(
             return 0
         return _gate_demand(op.gate_type, inherited_controls)
 
+    # Composite/inverse blocks are walked with the OUTER bindings, unlike
+    # ControlledUOperation above which seeds block-local bindings via
+    # _controlled_block_bindings. This is deliberate and cannot
+    # under-reserve: a control count depending on an inner block parameter
+    # would simply fail to resolve and fall back to the control-operand
+    # width, which is still an upper bound. Real composites (QFT/QPE/IQFT)
+    # and inverse bodies carry no parameter-dependent internal
+    # multi-controls, so the distinction is currently dormant.
     if isinstance(op, CompositeGateOperation):
         own = _quantum_width_upper_bound(list(op.control_qubits), resolver, bindings)
         if op.implementation_block is None:
