@@ -11,7 +11,7 @@ This prevents ``SegmentationPass`` from seeing classical-only compile-time
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
@@ -41,6 +41,9 @@ from . import Pass
 from .emit_support import resolve_if_condition
 from .eval_utils import FoldPolicy, fold_classical_op
 from .value_mapping import ValueSubstitutor
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
 
 def resolve_compile_time_condition(
@@ -218,7 +221,32 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 f"CompileTimeIfLoweringPass expects TRACED, AFFINE, or "
                 f"HIERARCHICAL block, got {input.kind}",
             )
+        return self._lower_block(input)
 
+    def _lower_block(self, block: Block) -> Block:
+        """Lower compile-time ifs in one block using this pass's bindings.
+
+        Shared by :meth:`run` (the top-level entry, after the kind
+        precondition check) and the controlled-block recursion in
+        :meth:`_lower_controlled_block`, which calls this directly on the
+        nested unitary block so it is processed regardless of that block's
+        ``kind`` field.
+
+        Args:
+            block (Block): The block whose operations and output values are
+                rewritten in place of lowered compile-time ifs.
+
+        Returns:
+            Block: A copy of ``block`` with compile-time ifs lowered, merge
+                outputs substituted, and dead condition producers removed.
+
+        Raises:
+            ValidationError: If lowering selects a ``CastOperation`` source
+                that is a strided ``Vector`` view with symbolic (not
+                compile-time) slice bounds — propagated from
+                :meth:`_apply_substitution`, which refuses to synthesize
+                view-local QFixed carrier keys the allocator never registers.
+        """
         # Track concrete values produced by classical ops.
         # Maps UUID → concrete Python value (int, float, bool).
         concrete_values: dict[str, Any] = {}
@@ -228,23 +256,23 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             concrete_values[key] = val
 
         # Seed from block input_values that are constants or bound.
-        for iv in input.input_values:
+        for iv in block.input_values:
             self._try_seed_value(iv, concrete_values)
 
         # Process operations, lowering compile-time ifs.
         new_ops, merge_subst, dead_uuids = self._lower_operations(
-            input.operations, concrete_values
+            block.operations, concrete_values
         )
 
         # Apply merge substitution to block output_values.
-        new_outputs = self._substitute_output_values(input.output_values, merge_subst)
+        new_outputs = self._substitute_output_values(block.output_values, merge_subst)
 
         # Remove dead operations whose results are only used by lowered ifs.
         if dead_uuids:
             new_ops = self._eliminate_dead_ops(new_ops, dead_uuids, new_outputs)
 
         return dataclasses.replace(
-            input,
+            block,
             operations=new_ops,
             output_values=new_outputs,
         )
@@ -313,6 +341,8 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             Tuple of (new operations list, merge substitution map,
             dead UUIDs from lowered condition values).
         """
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+
         new_ops: list[Operation] = []
         merge_subst: dict[str, ValueBase] = {}
         dead_uuids: set[str] = set()
@@ -403,9 +433,126 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 # (and possibly operands). Re-apply with the updated map.
                 op = self._apply_substitution(op, merge_subst)
 
+            elif isinstance(op, ControlledUOperation) and op.block is not None:
+                # A controlled-U carries its unitary as a nested ``block``
+                # with its OWN value namespace (fresh input-value UUIDs), not
+                # as HasNestedOps children, so the generic recursion above
+                # never reaches it — and applying the outer phi /
+                # concrete-value maps to it would be unsound, since those are
+                # keyed by outer-namespace UUIDs. Recurse with a binding scope
+                # seeded only from the controlled operands so a compile-time
+                # ``if sel == k`` in the body is resolved here, before emit,
+                # uniformly for every backend. Without this the comparison
+                # survives as an unresolved ``CompOp`` inside the controlled
+                # target, which QURI Parts / CUDA-Q reject at emit.
+                op = self._lower_controlled_block(op, concrete_values)
+
             new_ops.append(op)
 
         return new_ops, merge_subst, dead_uuids
+
+    def _lower_controlled_block(
+        self,
+        op: ControlledUOperation,
+        concrete_values: dict[str, Any],
+    ) -> ControlledUOperation:
+        """Lower compile-time ifs inside a controlled-U's nested unitary block.
+
+        The block is a self-contained unitary with its own value namespace,
+        so it is processed by a fresh pass instance whose bindings are seeded
+        ONLY from the controlled operands — never the outer bindings, which
+        could collide by parameter name and mis-seed an inner parameter. A
+        compile-time ``if`` whose condition depends on a bound classical
+        operand (e.g. ``if sel == 0`` with ``sel`` bound) is resolved here so
+        every backend sees an already-selected branch rather than an
+        unresolved ``CompOp`` inside the controlled target.
+
+        Args:
+            op (ControlledUOperation): The controlled-U operation to descend
+                into. Its ``block`` must not be ``None``.
+            concrete_values (dict[str, Any]): Outer-namespace concrete values
+                used to resolve the controlled operands to compile-time
+                constants.
+
+        Returns:
+            ControlledUOperation: ``op`` with its ``block`` field replaced by
+                the recursively lowered block.
+
+        Raises:
+            AssertionError: If ``op.block`` is ``None``. The sole caller
+                guards this with ``op.block is not None``, so a failure here
+                signals a broken caller contract rather than user error.
+            ValidationError: Propagated from :meth:`_lower_block` when the
+                inner block lowers a ``CastOperation`` whose selected source
+                is a symbolic-bound slice view.
+        """
+        block = op.block
+        assert block is not None
+        inner_bindings = self._controlled_block_bindings(op, concrete_values)
+        new_block = CompileTimeIfLoweringPass(inner_bindings)._lower_block(block)
+        return dataclasses.replace(op, block=new_block)
+
+    def _controlled_block_bindings(
+        self,
+        op: ControlledUOperation,
+        concrete_values: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Seed inner-block bindings from a controlled-U's classical operands.
+
+        Pairs the wrapped block's classical / object input values with the
+        operation's classical / object target operands (both in signature
+        order) and resolves each operand to a compile-time constant via the
+        outer concrete-value map. Resolved entries are keyed by the inner
+        input UUID only. The firewall against outer-namespace name collisions
+        is that this map is a fresh dict seeded exclusively from THIS call's
+        operands — never from the outer bindings — so an outer parameter that
+        happens to share an inner parameter's name cannot mis-seed it.
+
+        The inner UUID key is what carries the value into the fresh inner
+        pass: :meth:`_lower_block` copies it into that pass's
+        ``concrete_values`` (the UUID-keyed context map :class:`ValueResolver`
+        consults first), so a scalar comparison condition resolves by context,
+        and the resolver's compile-time-array path keys a bound ``Vector``
+        container by the same UUID. Operands that do not resolve are skipped,
+        leaving the corresponding inner parameter symbolic so its compile-time
+        ``if`` stays unlowered — the pre-existing loud outcome, never a silent
+        miscompile.
+
+        Args:
+            op (ControlledUOperation): The controlled-U operation whose
+                operands drive the inner block.
+            concrete_values (dict[str, Any]): Outer-namespace concrete values
+                used to resolve the operands to compile-time constants.
+
+        Returns:
+            dict[str, Any]: Inner-namespace bindings keyed by inner input
+                UUID. Empty when the block has no resolvable classical
+                parameters.
+        """
+        block = op.block
+        inner_bindings: dict[str, Any] = {}
+        if block is None:
+            return inner_bindings
+        param_inputs = [
+            iv
+            for iv in block.input_values
+            if iv.type.is_classical() or iv.type.is_object()
+        ]
+        param_operands = [
+            o
+            for o in op.target_operands
+            if isinstance(o, ValueBase)
+            and (o.type.is_classical() or o.type.is_object())
+        ]
+        resolver = UnifiedValueResolver(
+            context=concrete_values, bindings=self._bindings
+        )
+        for inner_iv, operand in zip(param_inputs, param_operands):
+            resolved = resolver.resolve(operand)
+            if resolved is None:
+                continue
+            inner_bindings[inner_iv.uuid] = resolved
+        return inner_bindings
 
     # ------------------------------------------------------------------
     # Substitution

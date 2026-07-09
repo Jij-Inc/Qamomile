@@ -105,14 +105,15 @@ def count_unrollable_call_blocks(operations: list[Operation]) -> int:
 
     This mirrors :func:`count_call_blocks` but **does not** descend into
     a ``ControlledUOperation.block`` or an ``InverseBlockOperation``'s
-    nested blocks. A call trapped inside one of those operation-owned
-    blocks cannot be resolved by the ``unroll_recursion`` fixed-point
-    loop: ``partial_eval`` (``ConstantFoldingPass`` /
-    ``CompileTimeIfLoweringPass``) only recurses into ``HasNestedOps``
-    bodies, never into operation-owned blocks, so a self-recursive
-    kernel's base-case ``if`` is never folded there. Such a call is
-    therefore *not* unrollable. Calls at the top level or inside
-    ``For`` / ``If`` / ``While`` bodies are unrollable and are counted.
+    nested blocks. A call still inside one of those operation-owned blocks
+    after a full ``inline`` pass is a self-recursive call that inline's
+    cycle guard could not unroll — it stops after one layer and does not
+    re-enter the operation-owned block — so no later ``unroll_recursion``
+    iteration can resolve it. Folding compile-time ``if``s there (which
+    ``CompileTimeIfLoweringPass`` does do for a ``ControlledUOperation``'s
+    block) never removes the trapped call itself. Such a call is therefore
+    *not* unrollable. Calls at the top level or inside ``For`` / ``If`` /
+    ``While`` bodies are unrollable and are counted.
 
     The unroll loop uses this to tell two failure modes apart: a non-zero
     :func:`count_call_blocks` with a zero ``count_unrollable_call_blocks``

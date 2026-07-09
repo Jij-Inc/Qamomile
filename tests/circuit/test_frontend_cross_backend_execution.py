@@ -349,6 +349,38 @@ def controlled_qkernel_run(obs: qmc.Observable) -> qmc.Float:
     return qmc.expval(q, obs)
 
 
+@qmc.qkernel
+def _x_if_sel_zero(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
+    """Flip ``q`` only when the compile-time ``sel`` equals zero."""
+    if sel == 0:
+        q = qmc.x(q)
+    return q
+
+
+@qmc.qkernel
+def controlled_if_comparison_sample(sel: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled body whose compile-time ``if sel == 0`` picks a branch.
+
+    The wrapped unitary contains a comparison-conditioned compile-time ``if``;
+    it must be lowered inside the controlled block so every backend sees a
+    plain controlled-X (true branch) or controlled-identity (false branch),
+    rather than an unresolved ``CompOp`` that QURI Parts / CUDA-Q reject.
+    """
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_if_comparison_run(sel: qmc.UInt, obs: qmc.Observable) -> qmc.Float:
+    """Run expval for a controlled body whose compile-time ``if sel == 0`` picks a branch."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
 def _apply_controlled_native_gate_suite(
     q: qmc.Vector[qmc.Qubit],
 ) -> qmc.Vector[qmc.Qubit]:
@@ -1170,6 +1202,33 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 1)},
         expected_expval=-2.0,
         run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    # Compile-time ``if sel == 0`` inside a controlled body must be lowered
+    # before emit. ``sel=0`` selects the true branch (controlled-X -> |11>);
+    # ``sel=1`` selects the empty false branch (controlled-identity -> |10>).
+    # Both must succeed on every backend, including QURI Parts / CUDA-Q whose
+    # controlled-emission walks reject an unresolved ``CompOp``.
+    FrontendExecutionCase(
+        name="controlled-if-comparison-true",
+        sample_kernel=controlled_if_comparison_sample,
+        run_kernel=controlled_if_comparison_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"sel": 0},
+        run_bindings={"sel": 0, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-if-comparison-false",
+        sample_kernel=controlled_if_comparison_sample,
+        run_kernel=controlled_if_comparison_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=0.0,
+        sample_bindings={"sel": 1},
+        run_bindings={"sel": 1, "obs": qm_o.Z(0) + qm_o.Z(1)},
     ),
     FrontendExecutionCase(
         name="controlled-native-gates",

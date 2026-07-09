@@ -337,25 +337,28 @@ class Transpiler(ABC, Generic[T]):
             # After a full inline + partial_eval iteration, if calls remain
             # only inside operation-owned blocks (a ControlledUOperation's
             # ``block`` or an InverseBlockOperation's nested blocks), no
-            # further iteration can make progress: ``inline`` already
-            # unrolled one layer there, but ``partial_eval`` never descends
-            # into those blocks to fold the base-case ``if``. This is the
-            # signature of a self-recursive @qkernel passed to
-            # ``qmc.control`` / ``qmc.inverse``; fail fast with a targeted
-            # message instead of spinning to ``MAX_UNROLL_DEPTH`` and
-            # blaming the bindings.
+            # further iteration can make progress: ``inline`` unrolled the
+            # self-call one layer there and its cycle guard then declined to
+            # re-enter, leaving a residual CallBlockOperation that
+            # ``count_unrollable_call_blocks`` deliberately does not count.
+            # (``CompileTimeIfLoweringPass`` does fold compile-time ``if``s
+            # inside a ControlledUOperation.block, but that never removes the
+            # trapped call itself.) This is the signature of a self-recursive
+            # @qkernel passed to ``qmc.control`` / ``qmc.inverse``; fail fast
+            # with a targeted message instead of spinning to
+            # ``MAX_UNROLL_DEPTH`` and blaming the bindings.
             if count_unrollable_call_blocks(block.operations) == 0:
                 raise FrontendTransformError(
                     "qmc.control / qmc.inverse was given a recursive "
                     "@qkernel: after inlining, a CallBlockOperation still "
-                    "remains inside the controlled / inverted block, and "
-                    "partial_eval cannot fold its base-case `if` there "
-                    "(constant folding does not descend into a "
-                    "ControlledUOperation.block or an InverseBlockOperation "
-                    "block). Controlling or inverting a self-recursive "
-                    "kernel is not supported. Rewrite the kernel "
-                    "non-recursively (manually unrolled to the required "
-                    "depth) before passing it to qmc.control / qmc.inverse."
+                    "remains inside the controlled / inverted block, where "
+                    "the unroll loop cannot resolve it — inline's cycle "
+                    "guard stops after one layer and does not re-enter an "
+                    "operation-owned block. Controlling or inverting a "
+                    "self-recursive kernel is not supported. Rewrite the "
+                    "kernel non-recursively (manually unrolled to the "
+                    "required depth) before passing it to qmc.control / "
+                    "qmc.inverse."
                 )
 
         raise FrontendTransformError(
