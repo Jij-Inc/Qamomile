@@ -1457,7 +1457,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         )
         quantum_operands = _quantum_input_operands(block_value, input_operands)
         _bind_quantum_input_shapes(
-            self,
+            self._resolver,
             block_value,
             quantum_operands,
             bindings,
@@ -2411,7 +2411,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             bindings,
         )
         _bind_quantum_input_shapes(
-            self,
+            self._resolver,
             impl,
             op.target_qubits,
             bindings,

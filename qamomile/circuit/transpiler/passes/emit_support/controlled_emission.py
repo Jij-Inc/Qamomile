@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -54,6 +55,9 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
 )
 
 if TYPE_CHECKING:
+    from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+        ValueResolver,
+    )
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 
 
@@ -223,6 +227,251 @@ def build_controlled_block_qubit_map(
     return {address: target_indices[slot] for address, slot in local_map.items()}
 
 
+_BATCH_MIN_WEIGHT = 2
+
+# Gate types that are already cheap under two composed controls (a native
+# Toffoli / Hadamard-conjugated Toffoli) or that QURI Parts lowers to a
+# Toffoli pair even under a single control (RZZ). Batching a body made up
+# only of these behind one AND ancilla at exactly two controls is a wash
+# or a loss, so the ``num == 2`` fast path skips it.
+_BATCH_NATIVE_AT_TWO_CONTROLS = frozenset(
+    {
+        GateOperationType.X,
+        GateOperationType.Z,
+        GateOperationType.CX,
+        GateOperationType.CZ,
+        GateOperationType.TOFFOLI,
+        GateOperationType.RZZ,
+    }
+)
+
+
+def _batch_op_weight(
+    emit_pass: "StandardEmitPass",
+    op: Operation,
+    bindings: dict[str, Any],
+) -> int:
+    """Return how much a single controlled-body op argues for batching.
+
+    Batching an AND ladder once for the whole body pays off only when the
+    body actually emits two or more gates under the shared controls. This
+    weight distinguishes real work from no-ops so a statically empty loop
+    or a zero-power nested controlled-U does not trigger a wasted ladder.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass (for power / loop
+            bound resolution).
+        op (Operation): One operation of the controlled block body.
+        bindings (dict[str, Any]): Bindings visible inside the block.
+
+    Returns:
+        int: 0 for ops that emit nothing, 1 for a single controlled gate,
+            2 for constructs that on their own justify batching.
+    """
+    if isinstance(op, (BinOp, ReturnOperation)):
+        return 0
+    if isinstance(op, GateOperation):
+        return 1
+    if isinstance(op, ControlledUOperation):
+        try:
+            power = resolve_power(emit_pass, op, bindings)
+        except EmitError:
+            # Unresolvable power fails identically on the non-batch path;
+            # count it as real work so the estimate is not skewed.
+            return 1
+        return 1 if power > 0 else 0
+    if isinstance(op, PauliEvolveOp):
+        return 2
+    if isinstance(op, ForOperation):
+        return _for_batch_weight(emit_pass, op, bindings)
+    if isinstance(op, InvokeOperation):
+        block = op.effective_body(backend=getattr(emit_pass, "backend_name", None))
+        if block is None:
+            return 0
+        return _controlled_body_batch_weight(emit_pass, block.operations, bindings)
+    if isinstance(op, InverseBlockOperation):
+        block = (
+            op.implementation_block
+            if op.implementation_block is not None
+            else op.source_block
+        )
+        if block is None:
+            return 0
+        return _controlled_body_batch_weight(emit_pass, block.operations, bindings)
+    # Unsupported op kinds are rejected by the walker further down; if a
+    # ladder is emitted before that failure the whole transpile aborts, so
+    # counting them as real work here is harmless.
+    return 1
+
+
+def _for_batch_weight(
+    emit_pass: "StandardEmitPass",
+    op: ForOperation,
+    bindings: dict[str, Any],
+) -> int:
+    """Return the batch weight of a for loop in a controlled block body.
+
+    A statically empty loop emits nothing (weight 0); a single iteration
+    contributes its body's weight; two or more iterations that emit any
+    work justify batching on their own (weight 2), because the ladder is
+    hoisted out of the loop and amortised over every iteration.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        op (ForOperation): Loop operation in the controlled body.
+        bindings (dict[str, Any]): Bindings visible inside the block.
+
+    Returns:
+        int: The loop's batch weight (0, 1, or 2).
+    """
+    from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+        resolve_loop_bounds,
+    )
+
+    start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
+    if start is None or stop is None or step is None or step == 0:
+        # Unresolvable bounds make the non-batch walker raise the same
+        # EmitError; do not emit a ladder ahead of that failure.
+        return 0
+    try:
+        iteration_count = len(range(start, stop, step))
+    except OverflowError:
+        iteration_count = 2
+    if iteration_count == 0:
+        return 0
+    body_weight = _controlled_body_batch_weight(emit_pass, op.operations, bindings)
+    if iteration_count == 1:
+        return body_weight
+    return _BATCH_MIN_WEIGHT if body_weight >= 1 else 0
+
+
+def _controlled_body_batch_weight(
+    emit_pass: "StandardEmitPass",
+    operations: list[Operation],
+    bindings: dict[str, Any],
+) -> int:
+    """Sum the batch weights of a controlled block body, capped at the threshold.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        operations (list[Operation]): Controlled block body operations.
+        bindings (dict[str, Any]): Bindings visible inside the block.
+
+    Returns:
+        int: The total weight, clamped to ``_BATCH_MIN_WEIGHT`` once reached
+            (callers only compare against that threshold).
+    """
+    total = 0
+    for op in operations:
+        total += _batch_op_weight(emit_pass, op, bindings)
+        if total >= _BATCH_MIN_WEIGHT:
+            return _BATCH_MIN_WEIGHT
+    return total
+
+
+def _body_has_rotation_like_leaf(operations: list[Operation]) -> bool:
+    """Return True when the body has a gate that batching helps at two controls.
+
+    Used only for the ``num == 2`` guard: X / Z / CX / CZ / TOFFOLI / RZZ
+    gain nothing (or lose) from a two-control AND ladder, but any other
+    single-qubit rotation, or any nested construct that recurses into
+    further controlled lowering, does benefit.
+
+    Args:
+        operations (list[Operation]): Controlled block body operations.
+
+    Returns:
+        bool: True if at least one op benefits from batching at two controls.
+    """
+    for op in operations:
+        if isinstance(op, GateOperation):
+            if op.gate_type not in _BATCH_NATIVE_AT_TWO_CONTROLS:
+                return True
+        elif isinstance(
+            op,
+            (
+                ControlledUOperation,
+                ForOperation,
+                InvokeOperation,
+                InverseBlockOperation,
+                PauliEvolveOp,
+            ),
+        ):
+            return True
+    return False
+
+
+def try_emit_batched_controlled_operations(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    operations: list[Operation],
+    control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+    walker: Callable[..., None],
+) -> bool:
+    """Emit a controlled block body behind a single shared AND ladder.
+
+    When a block body emits several gates under the same composed
+    controls, lowering each gate through its own Toffoli cascade rebuilds
+    the same AND ladder per gate — the uncompute of one gate and the
+    recompute of the next cancel. This helper instead ANDs the controls
+    onto one ancilla once, walks the whole body under that single control,
+    then uncomputes the ladder once. Nested controlled-U operations
+    compose ``[and_ancilla]`` with their own controls and re-enter
+    ``walker``, which batches again from the advanced pool offset; loops
+    are batched before iteration expansion, so the ladder is hoisted out.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass (must hold a
+            ``_mc_ancilla_pool``).
+        circuit (Any): Backend circuit being emitted into.
+        operations (list[Operation]): Controlled block body operations.
+        control_indices (list[int]): Composed physical control qubits.
+        qubit_map (QubitMap): Mutable block-local qubit map.
+        bindings (dict[str, Any]): Bindings visible inside the block.
+        walker (Callable[..., None]): The controlled-body walker to run
+            under the single AND control (its own signature).
+
+    Returns:
+        bool: True when the body was batched, False when the caller should
+            fall back to per-gate emission (fewer than two controls, no
+            pool, insufficient weight, the two-control guard, or a pool
+            that cannot spare the ladder).
+    """
+    num_controls = len(control_indices)
+    if num_controls < 2:
+        return False
+    pool = emit_pass._mc_ancilla_pool
+    if pool is None:
+        return False
+    if (
+        _controlled_body_batch_weight(emit_pass, operations, bindings)
+        < _BATCH_MIN_WEIGHT
+    ):
+        return False
+    if num_controls == 2 and not _body_has_rotation_like_leaf(operations):
+        return False
+    with pool.try_hold(num_controls - 1) as ancillas:
+        if ancillas is None:
+            # The demand estimate legitimately reserved fewer ancillas than
+            # a batch would want (e.g. a sibling whose demand dominates);
+            # fall back to per-gate lowering rather than over-reserving.
+            return False
+        steps = _and_ladder_steps(control_indices, ancillas)
+        _emit_toffoli_steps(emit_pass._emitter, circuit, steps)
+        walker(
+            emit_pass,
+            circuit,
+            operations,
+            [ancillas[num_controls - 2]],
+            qubit_map,
+            bindings,
+        )
+        _emit_toffoli_steps(emit_pass._emitter, circuit, reversed(steps))
+    return True
+
+
 def emit_controlled_operations(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -259,6 +508,16 @@ def emit_controlled_operations(
             transpile time, or an operation kind is unsupported in
             controlled decomposition.
     """
+    if try_emit_batched_controlled_operations(
+        emit_pass,
+        circuit,
+        operations,
+        control_indices,
+        qubit_map,
+        bindings,
+        walker=emit_controlled_operations,
+    ):
+        return
     for op in operations:
         if isinstance(op, GateOperation):
             gate_targets = _resolve_controlled_gate_targets(
@@ -667,7 +926,7 @@ def resolve_controlled_u_call(
         op.block, param_operands, bindings
     )
     _bind_quantum_input_shapes(
-        emit_pass, op.block, target_qubit_operands, bindings, local_bindings
+        emit_pass._resolver, op.block, target_qubit_operands, bindings, local_bindings
     )
 
     return ResolvedControlledU(
@@ -799,13 +1058,95 @@ def emit_controlled_gate(
     target_indices: list[int],
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a controlled version of a gate."""
+    """Emit a controlled version of a gate.
+
+    Resolves the rotation angle for rotation-like gates and dispatches
+    single-target gate kinds through
+    :func:`emit_single_controlled_primitive`; ``SWAP`` is lowered here
+    via its Fredkin conjugation because it needs two targets.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (GateOperation): Gate operation to control.
+        control_idx (int): Physical control qubit.
+        target_indices (list[int]): Physical qubits for the gate's own
+            operands, in operand order. An empty list is a no-op.
+        bindings (dict[str, Any]): Bindings used to resolve rotation
+            angles.
+
+    Raises:
+        EmitError: If the gate type is unsupported in controlled
+            decomposition, or a controlled SWAP has fewer than two
+            targets.
+    """
     if not target_indices:
         return
 
-    target_idx = target_indices[0]
+    if op.gate_type == GateOperationType.SWAP:
+        if len(target_indices) < 2:
+            raise EmitError(
+                "Controlled-SWAP requires at least 2 target qubits.",
+                operation="ControlledGate",
+            )
+        tgt_a = target_indices[0]
+        tgt_b = target_indices[1]
+        # Fredkin gate decomposition:
+        #   CNOT(tgt_b, tgt_a)
+        #   Toffoli(ctrl, tgt_a, tgt_b)
+        #   CNOT(tgt_b, tgt_a)
+        emit_pass._emitter.emit_cx(circuit, tgt_b, tgt_a)
+        emit_pass._emitter.emit_toffoli(circuit, control_idx, tgt_a, tgt_b)
+        emit_pass._emitter.emit_cx(circuit, tgt_b, tgt_a)
+        return
 
-    match op.gate_type:
+    angle: Any = None
+    if op.gate_type in (
+        GateOperationType.P,
+        GateOperationType.RX,
+        GateOperationType.RY,
+        GateOperationType.RZ,
+    ):
+        angle = emit_pass._resolve_angle(op, bindings)
+    emit_single_controlled_primitive(
+        emit_pass, circuit, op.gate_type, control_idx, target_indices[0], angle
+    )
+
+
+def emit_single_controlled_primitive(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    gate_type: GateOperationType | None,
+    control_idx: int,
+    target_idx: int,
+    angle: Any,
+) -> None:
+    """Emit one singly-controlled single-qubit gate from a resolved angle.
+
+    This is the single-control dispatch shared by
+    :func:`emit_controlled_gate` (which resolves the angle from the IR
+    operation first) and the Toffoli-cascade lowering of irreducible
+    multi-controlled gates (which arrives with the angle already
+    resolved). Fixed phase-family gates (``S`` / ``T`` and daggers) are
+    emitted as controlled phases.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        gate_type (GateOperationType | None): Single-qubit gate kind.
+            None (a gate operation without a type) is rejected like any
+            other unsupported kind.
+        control_idx (int): Physical control qubit.
+        target_idx (int): Physical target qubit.
+        angle (Any): Resolved rotation angle (concrete number or backend
+            parameter expression) for ``P`` / ``RX`` / ``RY`` / ``RZ``;
+            ignored for fixed gates.
+
+    Raises:
+        EmitError: If ``gate_type`` is not a single-qubit gate kind
+            supported in controlled decomposition.
+    """
+    match gate_type:
         case GateOperationType.H:
             emit_pass._emitter.emit_ch(circuit, control_idx, target_idx)
         case GateOperationType.X:
@@ -815,16 +1156,12 @@ def emit_controlled_gate(
         case GateOperationType.Z:
             emit_pass._emitter.emit_cz(circuit, control_idx, target_idx)
         case GateOperationType.P:
-            angle = emit_pass._resolve_angle(op, bindings)
             emit_pass._emitter.emit_cp(circuit, control_idx, target_idx, angle)
         case GateOperationType.RX:
-            angle = emit_pass._resolve_angle(op, bindings)
             emit_pass._emitter.emit_crx(circuit, control_idx, target_idx, angle)
         case GateOperationType.RY:
-            angle = emit_pass._resolve_angle(op, bindings)
             emit_pass._emitter.emit_cry(circuit, control_idx, target_idx, angle)
         case GateOperationType.RZ:
-            angle = emit_pass._resolve_angle(op, bindings)
             emit_pass._emitter.emit_crz(circuit, control_idx, target_idx, angle)
         case GateOperationType.S:
             emit_pass._emitter.emit_cp(circuit, control_idx, target_idx, math.pi / 2)
@@ -834,27 +1171,133 @@ def emit_controlled_gate(
             emit_pass._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 2)
         case GateOperationType.TDG:
             emit_pass._emitter.emit_cp(circuit, control_idx, target_idx, -math.pi / 4)
-        case GateOperationType.SWAP:
-            if len(target_indices) < 2:
-                raise EmitError(
-                    "Controlled-SWAP requires at least 2 target qubits.",
-                    operation="ControlledGate",
-                )
-            tgt_a = target_indices[0]
-            tgt_b = target_indices[1]
-            # Fredkin gate decomposition:
-            #   CNOT(tgt_b, tgt_a)
-            #   Toffoli(ctrl, tgt_a, tgt_b)
-            #   CNOT(tgt_b, tgt_a)
-            emit_pass._emitter.emit_cx(circuit, tgt_b, tgt_a)
-            emit_pass._emitter.emit_toffoli(circuit, control_idx, tgt_a, tgt_b)
-            emit_pass._emitter.emit_cx(circuit, tgt_b, tgt_a)
         case _:
             raise EmitError(
-                f"Unsupported gate type {op.gate_type!r} in controlled "
+                f"Unsupported gate type {gate_type!r} in controlled "
                 f"block decomposition.",
                 operation="ControlledGate",
             )
+
+
+def _and_ladder_steps(
+    control_indices: list[int], ancilla_indices: list[int]
+) -> list[tuple[int, int, int]]:
+    """Build the Toffoli chain that ANDs ``control_indices`` onto ancillas.
+
+    The chain combines the first two controls onto ``ancilla_indices[0]``,
+    then folds each subsequent control together with the previous ancilla,
+    so the last ancilla (``ancilla_indices[len(control_indices) - 2]``)
+    holds the logical AND of every control. Emitting the returned steps in
+    order computes the AND; emitting them reversed uncomputes it.
+
+    Args:
+        control_indices (list[int]): Physical control qubits; at least two.
+        ancilla_indices (list[int]): Clean ancilla qubits; at least
+            ``len(control_indices) - 1`` entries.
+
+    Returns:
+        list[tuple[int, int, int]]: ``(control_a, control_b, target)``
+            triples, one per Toffoli, in compute order.
+    """
+    steps: list[tuple[int, int, int]] = [
+        (control_indices[0], control_indices[1], ancilla_indices[0])
+    ]
+    for i in range(2, len(control_indices)):
+        steps.append(
+            (control_indices[i], ancilla_indices[i - 2], ancilla_indices[i - 1])
+        )
+    return steps
+
+
+def _emit_toffoli_steps(
+    emitter: Any, circuit: Any, steps: Iterable[tuple[int, int, int]]
+) -> None:
+    """Emit a sequence of Toffoli gates for the given ``(a, b, target)`` steps.
+
+    Args:
+        emitter (Any): Backend gate emitter.
+        circuit (Any): Backend circuit being emitted into.
+        steps (Iterable[tuple[int, int, int]]): Toffoli triples, in the
+            order they should be emitted (pass ``reversed(steps)`` to
+            uncompute a ladder built by :func:`_and_ladder_steps`).
+
+    Returns:
+        None.
+    """
+    for control_a, control_b, target in steps:
+        emitter.emit_toffoli(circuit, control_a, control_b, target)
+
+
+def emit_multi_controlled_on_clean_ancillas(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    gate_type: GateOperationType,
+    control_indices: list[int],
+    target_idx: int,
+    angle: Any,
+    ancilla_indices: list[int],
+) -> None:
+    """Lower an irreducible multi-controlled gate via a Toffoli cascade.
+
+    Implements the standard clean-ancilla construction (arXiv:2307.07478,
+    Appendix A.3): the logical AND of the ``n`` controls is accumulated
+    onto ``n - 1`` clean ancillas with a cascade of Toffoli gates, the
+    gate is applied once under a single control (the last ancilla)
+    through :func:`emit_single_controlled_primitive`, and the cascade is
+    uncomputed in reverse order. The cost is ``2 * (n - 1)`` Toffoli
+    gates plus one singly-controlled gate, and every ancilla returns to
+    ``|0>``, so the same pool may be reused by subsequent gates.
+
+    Unlike a dense ``2**(n+1)`` unitary-matrix lowering, this scales
+    linearly in the control count and keeps rotation angles symbolic,
+    so runtime-parametric multi-controlled rotations are supported.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        gate_type (GateOperationType): Single-qubit gate kind to apply
+            under the controls.
+        control_indices (list[int]): Physical control qubits; at least
+            two.
+        target_idx (int): Physical target qubit.
+        angle (Any): Resolved rotation angle (concrete number or backend
+            parameter expression) for rotation-like gates, or ``None``
+            for fixed gates.
+        ancilla_indices (list[int]): Clean (``|0>``) ancilla qubits;
+            at least ``len(control_indices) - 1`` entries.
+
+    Raises:
+        EmitError: If fewer than two controls or too few ancillas are
+            supplied (both indicate a caller bug), or the gate type is
+            unsupported by the single-control dispatch.
+    """
+    num_controls = len(control_indices)
+    if num_controls < 2:
+        raise EmitError(
+            "Toffoli-cascade lowering requires at least two controls; "
+            f"got {num_controls}.",
+            operation="ControlledGate",
+        )
+    if len(ancilla_indices) < num_controls - 1:
+        raise EmitError(
+            f"Toffoli-cascade lowering of a {num_controls}-controlled "
+            f"{gate_type.name} needs {num_controls - 1} clean ancilla "
+            f"qubit(s) but only {len(ancilla_indices)} were supplied.",
+            operation="ControlledGate",
+        )
+
+    emitter = emit_pass._emitter
+    cascade = _and_ladder_steps(control_indices, ancilla_indices)
+    _emit_toffoli_steps(emitter, circuit, cascade)
+    emit_single_controlled_primitive(
+        emit_pass,
+        circuit,
+        gate_type,
+        ancilla_indices[num_controls - 2],
+        target_idx,
+        angle,
+    )
+    _emit_toffoli_steps(emitter, circuit, reversed(cascade))
 
 
 def emit_multi_controlled_gate(
@@ -1240,7 +1683,7 @@ def emit_controlled_pauli_evolve(
     ``U_dagger * C[RZ] * U`` with ``U`` / ``U_dagger`` applied
     unconditionally: when every control is ``0`` the central ``RZ``
     becomes the identity and ``U_dagger * I * U = I``. Only the central
-    ``RZ`` therefore carries the controls, which keeps the dense
+    ``RZ`` therefore carries the controls, which keeps the
     multi-controlled cost to a single rotation per Hamiltonian term
     instead of controlling every basis-change and ladder gate.
 
@@ -1256,7 +1699,7 @@ def emit_controlled_pauli_evolve(
     an *observable* relative phase on the all-controls-on subspace, so it
     MUST be emitted here. It is realized as a ``P(-gamma * c)`` on one
     control conditioned on the remaining controls (``emit_p`` for a single
-    control, a controlled / dense ``P`` for more), matching Qiskit's
+    control, a multi-controlled ``P`` for more), matching Qiskit's
     native ``PauliEvolutionGate`` whose ``SparsePauliOp`` carries the
     constant.
 
@@ -1280,10 +1723,10 @@ def emit_controlled_pauli_evolve(
             not resolve to a Hamiltonian, gamma cannot be resolved, the
             Hamiltonian is non-Hermitian (a term or the constant has a
             non-real coefficient), the Hamiltonian is larger than the
-            register, a term qubit cannot be resolved, or (for two or
-            more controls, or a nonzero constant term) the angle is
-            runtime-parametric and the backend's dense multi-controlled
-            path requires a compile-time-numeric angle.
+            register, a term qubit cannot be resolved, or gamma is
+            runtime-parametric and the backend's runtime parameter type
+            does not support the required angle scaling (e.g. QURI
+            Parts' ``Parameter``).
     """
     import qamomile.observable as qm_o
     from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
@@ -1339,9 +1782,7 @@ def emit_controlled_pauli_evolve(
                 ``Parameter``), so the scaling cannot be expressed. The raw
                 ``TypeError`` is converted into a clear compile-time error
                 pointing at binding ``gamma`` to a concrete value. (A
-                concrete ``float`` gamma never raises; two-or-more controls
-                additionally need a numeric angle because the dense
-                multi-controlled matrix bakes the angle in.)
+                concrete ``float`` gamma never raises.)
         """
         try:
             return factor * gamma
@@ -1670,7 +2111,11 @@ def emit_controlled_u_with_symbolic_indices(
         block_value, param_operands, bindings
     )
     _bind_quantum_input_shapes(
-        emit_pass, block_value, target_qubit_operands, bindings, local_bindings
+        emit_pass._resolver,
+        block_value,
+        target_qubit_operands,
+        bindings,
+        local_bindings,
     )
     block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
@@ -1828,7 +2273,11 @@ def emit_controlled_u_multi_arg(
         block_value, param_operands, bindings
     )
     _bind_quantum_input_shapes(
-        emit_pass, block_value, target_qubit_operands, bindings, local_bindings
+        emit_pass._resolver,
+        block_value,
+        target_qubit_operands,
+        bindings,
+        local_bindings,
     )
     block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
@@ -1982,7 +2431,11 @@ def emit_controlled_u(
         block_value, param_operands, bindings
     )
     _bind_quantum_input_shapes(
-        emit_pass, block_value, target_qubit_operands, bindings, local_bindings
+        emit_pass._resolver,
+        block_value,
+        target_qubit_operands,
+        bindings,
+        local_bindings,
     )
     block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
@@ -2470,18 +2923,32 @@ def blockvalue_to_gate(
         )
         sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
 
-        emit_pass._emit_operations(
-            sub_circuit,
-            block_value.operations,
-            local_qubit_map,
-            local_clbit_map,
-            local_bindings,
-            force_unroll=True,
-        )
+        # The segment ancilla pool addresses the parent circuit; suspend
+        # it so a multi-controlled gate inside this block cannot index it
+        # against the narrower sub-circuit. If one is present, the shared
+        # cascade raises EmitError (caught below) and the caller falls
+        # back to gate-by-gate emission on the parent circuit.
+        with emit_pass._suspended_mc_ancilla_pool():
+            emit_pass._emit_operations(
+                sub_circuit,
+                block_value.operations,
+                local_qubit_map,
+                local_clbit_map,
+                local_bindings,
+                force_unroll=True,
+            )
 
         return emit_pass._emitter.circuit_to_gate(sub_circuit, "U")
 
-    except (AttributeError, TypeError, ValueError, KeyError, IndexError, RuntimeError):
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        KeyError,
+        IndexError,
+        RuntimeError,
+        EmitError,
+    ):
         import logging
 
         logging.getLogger(__name__).debug(
@@ -2583,7 +3050,7 @@ def _bind_and_populate_block_inputs(
     )
     quantum_operands = _quantum_input_operands(block_value, input_operands)
     _bind_quantum_input_shapes(
-        emit_pass,
+        emit_pass._resolver,
         block_value,
         quantum_operands,
         bindings,
@@ -3201,7 +3668,7 @@ def _expand_quantum_operands_to_phys(
 
 
 def _bind_quantum_input_shapes(
-    emit_pass: "StandardEmitPass",
+    resolver: "ValueResolver",
     block_value: Any,
     actual_target_operands: list[Any],
     bindings: dict[str, Any],
@@ -3222,8 +3689,8 @@ def _bind_quantum_input_shapes(
     "Cannot resolve ForOperation bounds in controlled block".
 
     Args:
-        emit_pass (StandardEmitPass): Driving emit pass; consulted for
-            its ``_resolver`` to resolve actual operand sizes.
+        resolver (ValueResolver): Emit value resolver used to resolve
+            actual operand sizes.
         block_value (Any): The inner block whose ``input_values`` we
             walk to find the quantum formal parameters.  Objects with
             no ``input_values`` attribute are silently skipped.
@@ -3251,7 +3718,7 @@ def _bind_quantum_input_shapes(
             continue
         if not (actual.shape and formal.shape):
             continue
-        actual_size = emit_pass._resolver.resolve_int_value(actual.shape[0], bindings)
+        actual_size = resolver.resolve_int_value(actual.shape[0], bindings)
         if actual_size is None:
             continue
         formal_dim = formal.shape[0]
