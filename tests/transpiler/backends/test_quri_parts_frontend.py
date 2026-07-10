@@ -4010,6 +4010,36 @@ class TestControlledGate:
         # Controls q0,q1 = |1>, so both targets q2,q3 flip: |1111>.
         assert statevectors_equal(sv, computational_basis_state(4, 0b1111))
 
+    def test_two_sequential_multi_controls_reserve_max_not_sum(self):
+        """Two sequential 3-control X gates reserve the peak ancillas, not the sum.
+
+        The Toffoli cascade uncomputes its ancillas before returning, so two
+        irreducible multi-controlled gates in one segment reuse the same pool
+        rather than each reserving its own. The count-only demand walk
+        reports the peak (two ancillas), so the circuit gains two ancillas,
+        not four — the classic max-not-sum property of the reused pool.
+        """
+        mcx3 = qmc.control(qmc.x, num_controls=3)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+            a = qmc.qubit_array(4, "a")
+            b = qmc.qubit_array(4, "b")
+            for i in qmc.range(3):
+                a[i] = qmc.x(a[i])
+                b[i] = qmc.x(b[i])
+            a[0:3], a[3] = mcx3(a[0:3], a[3])
+            b[0:3], b[3] = mcx3(b[0:3], b[3])
+            return qmc.measure(a), qmc.measure(b)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        # 8 data qubits + 2 shared cascade ancillas (max of the two gates),
+        # not 4 (their sum).
+        assert circ.qubit_count == 10
+        sv = _strip_zero_ancillas(_run_statevector(circ), 8)
+        # Every control is |1>, so both targets flip: all 8 data qubits |1>.
+        assert statevectors_equal(sv, computational_basis_state(8, (1 << 8) - 1))
+
     def test_suspended_mc_ancilla_pool_restores_pool(self):
         """``_suspended_mc_ancilla_pool`` clears then restores the pool."""
         from qamomile.circuit.transpiler.passes.emit_support import (

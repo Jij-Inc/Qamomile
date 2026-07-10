@@ -419,7 +419,7 @@ def test_multi_controlled_ry_two_controls_cascades_with_angle() -> None:
 
 
 def test_multi_controlled_pool_shortfall_raises_estimation_bug() -> None:
-    """A pool smaller than n-1 ancillas raises the estimation-bug error."""
+    """A pool smaller than n-1 ancillas raises the demand-bug error."""
     import pytest
 
     from qamomile.circuit.transpiler.errors import EmitError
@@ -428,7 +428,7 @@ def test_multi_controlled_pool_shortfall_raises_estimation_bug() -> None:
         ancilla_pool=MultiControlAncillaPool(first_index=10, count=1)
     )
     op = _fixed_gate(GateOperationType.X, 1)
-    with pytest.raises(EmitError, match="under-estimated"):
+    with pytest.raises(EmitError, match="under-measured"):
         emit_multi_controlled_gate(emit_pass, object(), op, [4, 5, 6], [9], {})
 
 

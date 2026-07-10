@@ -676,8 +676,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         Raises:
             EmitError: If no ancilla pool was reserved for this segment,
                 or the pool is smaller than ``len(control_indices) - 1``
-                (an estimation bug in
-                ``estimate_multi_control_ancilla_demand``).
+                (a bug in ``_count_multi_control_ancilla_demand``).
         """
         from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
@@ -706,8 +705,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 f"{len(control_indices)} controls needs "
                 f"{len(control_indices) - 1} clean ancilla qubit(s), but "
                 f"only {self._mc_ancilla_pool.count} were reserved for this "
-                f"segment. This means "
-                f"``estimate_multi_control_ancilla_demand`` under-estimated "
+                f"segment. This means the count-only demand walk "
+                f"(``_count_multi_control_ancilla_demand``) under-measured "
                 f"the segment's demand — a compiler bug; please report it.",
                 operation="ControlledGate",
             )
