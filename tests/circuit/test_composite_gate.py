@@ -1121,7 +1121,13 @@ class TestNestedQKernelNoPhantomQubits:
         assert qc.num_qubits == 4, f"Expected 4 qubits, got {qc.num_qubits}"
 
     def test_same_qkernel_called_twice(self, qiskit_transpiler):
-        """No phantom qubits when same qkernel is called twice on same array."""
+        """No phantom qubits when same qkernel is called twice on same array.
+
+        Also pins the ``Block.call`` SSA contract (issue #563): the two
+        call sites must not share result Value identities, even for
+        pass-through outputs.
+        """
+        from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 
         @qkernel
         def apply_h_first(qs: Vector[Qubit]) -> Vector[Qubit]:
@@ -1134,6 +1140,11 @@ class TestNestedQKernelNoPhantomQubits:
             qs = apply_h_first(qs)
             qs = apply_h_first(qs)
             return qmc.measure(qs)
+
+        block = call_twice.build()
+        call_ops = [op for op in block.operations if isinstance(op, CallBlockOperation)]
+        assert len(call_ops) == 2
+        assert call_ops[0].results[0].uuid != call_ops[1].results[0].uuid
 
         qc = qiskit_transpiler.to_circuit(call_twice)
         assert qc.num_qubits == 3, f"Expected 3 qubits, got {qc.num_qubits}"

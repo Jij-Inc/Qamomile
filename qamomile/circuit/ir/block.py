@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
@@ -85,7 +86,36 @@ class Block:
         return self.kind in (BlockKind.AFFINE, BlockKind.ANALYZED)
 
     def call(self, **kwargs: Value) -> "CallBlockOperation":
-        """Create a CallBlockOperation against this block."""
+        """Create a CallBlockOperation against this block.
+
+        SSA contract: every result Value is unique to the call site. A
+        pass-through output (one whose ``logical_id`` matches a block
+        input, i.e. the callee returns an argument it received)
+        continues the caller argument's wire via ``next_version()`` —
+        fresh ``uuid``, caller's ``logical_id``. A non-pass-through
+        output (a value created inside the callee) is re-issued with a
+        fresh ``uuid`` **and** a fresh ``logical_id``: it is a new
+        logical variable in the caller's scope, matching the fresh
+        identities ``UUIDRemapper`` assigns to the callee's internals
+        when the call is inlined. Returning the callee's output Value
+        verbatim would make every call site of this block share one SSA
+        identity, so downstream consumers (inline value mapping, block
+        outputs, clbit allocation) would silently collapse the results
+        of repeated calls onto the last call.
+
+        Args:
+            **kwargs (Value): Call arguments keyed by this block's
+                ``label_args`` names. Every label must be present.
+
+        Returns:
+            CallBlockOperation: Call operation whose ``operands`` follow
+                ``label_args`` order and whose ``results`` are
+                call-site-unique Values mirroring ``output_values``.
+
+        Raises:
+            KeyError: If a name in ``label_args`` is missing from
+                ``kwargs``.
+        """
         from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 
         inputs = [kwargs[label] for label in self.label_args]
@@ -97,7 +127,16 @@ class Block:
                 input_idx = dummy_inputs[dummy_return.logical_id]
                 results.append(inputs[input_idx].next_version())
             else:
-                results.append(dummy_return)
+                # dataclasses.replace keeps every other field (type,
+                # shape, slice metadata, ...) for Value and ArrayValue
+                # alike, unlike the per-class next_version() overrides.
+                results.append(
+                    dataclasses.replace(
+                        dummy_return,
+                        uuid=str(uuid.uuid4()),
+                        logical_id=str(uuid.uuid4()),
+                    )
+                )
 
         return CallBlockOperation(
             block=self,
