@@ -5,8 +5,11 @@ circuit success alone: exact Block rewrites, merge substitution, recursive
 lowering, dead-op elimination, and runtime IfOperation preservation.
 """
 
+import numpy as np
+
 import qamomile.circuit as qm
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -18,11 +21,13 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.control_flow import (
     BranchRebind,
+    ForOperation,
     IfOperation,
     LoopCarriedRebind,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
     ControlledUOperation,
     GateOperation,
     GateOperationType,
@@ -107,6 +112,31 @@ def _make_if_with_x_gate(condition_val, qubit_in):
     )
     if_op.add_merge(q_true, q_false, merge_out)
     return if_op, merge_out
+
+
+def _make_comparison_if_with_x_gate(
+    selector: Value,
+    qubit: Value,
+) -> tuple[CompOp, IfOperation]:
+    """Build ``selector == 0`` followed by a conditional X gate.
+
+    Args:
+        selector (Value): UInt value compared with zero.
+        qubit (Value): Qubit consumed by the true-branch X gate.
+
+    Returns:
+        tuple[CompOp, IfOperation]: The comparison producer and its
+            condition-consuming if operation.
+    """
+    zero = _uint_val("zero", const=0)
+    condition = _bit_val("condition")
+    comparison = CompOp(
+        operands=[selector, zero],
+        results=[condition],
+        kind=CompOpKind.EQ,
+    )
+    if_op, _ = _make_if_with_x_gate(condition, qubit)
+    return comparison, if_op
 
 
 # ---------------------------------------------------------------------------
@@ -261,15 +291,15 @@ class TestNestedCompileTimeIf:
 # ---------------------------------------------------------------------------
 
 
-def _first_controlled_block_ops(block):
+def _first_controlled_block_ops(block: Block) -> list[Operation]:
     """Return the operations of the first ControlledUOperation's nested block.
 
     Args:
         block (Block): A lowered block expected to contain a controlled-U.
 
     Returns:
-        list: The nested ``block.operations`` of the first
-            ControlledUOperation found.
+        list[Operation]: The nested ``block.operations`` of the first
+            ``ControlledUOperation`` found.
     """
     for op in block.operations:
         if isinstance(op, ControlledUOperation):
@@ -290,7 +320,7 @@ class TestControlledBlockIfLowering:
     """
 
     @staticmethod
-    def _comp_if_body():
+    def _comp_if_body() -> qm.QKernel:
         """Build a one-qubit kernel that X-flips its target when ``sel == 0``.
 
         Returns:
@@ -463,6 +493,60 @@ class TestControlledBlockIfLowering:
         )
         assert len(_find_gates(block_ops, GateOperationType.X)) == 1
 
+    def test_array_element_condition_uses_operand_bound_container(self):
+        """An inner Vector element resolves from the call-site array operand."""
+
+        @qm.qkernel
+        def x_if_first_zero(
+            q: qm.Qubit,
+            selectors: qm.Vector[qm.UInt],
+        ) -> qm.Qubit:
+            if selectors[0] == 0:
+                q = qm.x(q)
+            return q
+
+        @qm.qkernel
+        def circ(selectors: qm.Vector[qm.UInt]) -> qm.Vector[qm.Bit]:
+            qs = qm.qubit_array(2, "qs")
+            qs[0] = qm.x(qs[0])
+            qs[0], qs[1] = qm.control(x_if_first_zero)(qs[0], qs[1], selectors)
+            return qm.measure(qs)
+
+        block_ops = _first_controlled_block_ops(
+            _lower(circ, bindings={"selectors": np.array([0], dtype=np.int64)})
+        )
+
+        assert not _find_ops(block_ops, IfOperation)
+        assert not _find_ops(block_ops, CompOp)
+        assert len(_find_gates(block_ops, GateOperationType.X)) == 1
+
+    def test_shared_body_is_lowered_independently_per_call(self):
+        """Two calls to one body keep their different operand bindings isolated."""
+        x_if_cmp = self._comp_if_body()
+
+        @qm.qkernel
+        def circ() -> qm.Vector[qm.Bit]:
+            qs = qm.qubit_array(3, "qs")
+            qs[0] = qm.x(qs[0])
+            qs[0], qs[1] = qm.control(x_if_cmp)(qs[0], qs[1], 0)
+            qs[0], qs[2] = qm.control(x_if_cmp)(qs[0], qs[2], 1)
+            return qm.measure(qs)
+
+        lowered = _lower(circ)
+        controlled_ops = _find_ops(lowered.operations, ControlledUOperation)
+
+        assert len(controlled_ops) == 2
+        first_block = controlled_ops[0].block
+        second_block = controlled_ops[1].block
+        assert first_block is not None
+        assert second_block is not None
+        first_ops = first_block.operations
+        second_ops = second_block.operations
+        assert len(_find_gates(first_ops, GateOperationType.X)) == 1
+        assert not _find_ops(first_ops, IfOperation)
+        assert len(_find_gates(second_ops, GateOperationType.X)) == 0
+        assert not _find_ops(second_ops, IfOperation)
+
     def test_nested_controlled_block_lowered(self):
         """A controlled-U whose body wraps another controlled-U + inner if.
 
@@ -531,6 +615,53 @@ class TestControlledBlockIfLowering:
         assert _find_ops(block_ops, CompOp), (
             "the comparison condition must survive as a CompOp"
         )
+
+    def test_if_inside_controlled_for_body_removes_condition_producer(self):
+        """A folded if nested in a controlled For leaves no dead CompOp.
+
+        Controlled emission supports ``ForOperation`` by walking its body,
+        but rejects standalone ``CompOp`` nodes. Dead-condition elimination
+        must therefore recurse into the loop body after lowering the if.
+        """
+        inner_q = _qubit_val("inner_q")
+        inner_sel = _uint_val("inner_sel")
+        comparison, if_op = _make_comparison_if_with_x_gate(inner_sel, inner_q)
+        loop = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=1),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=_uint_val("i"),
+            operations=[comparison, if_op],
+        )
+        unitary = Block(
+            name="unitary",
+            input_values=[inner_q, inner_sel],
+            operations=[loop],
+            kind=BlockKind.AFFINE,
+        )
+        control = _qubit_val("control")
+        target = _qubit_val("target")
+        controlled = ConcreteControlledU(
+            operands=[control, target, _uint_val("actual_sel", const=0)],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=unitary,
+        )
+        outer = Block(
+            name="outer",
+            operations=[controlled],
+            kind=BlockKind.AFFINE,
+        )
+
+        nested_ops = _first_controlled_block_ops(_run_pass(outer))
+
+        [lowered_loop] = _find_ops(nested_ops, ForOperation)
+        assert not _find_ops(lowered_loop.operations, IfOperation)
+        assert not _find_ops(lowered_loop.operations, CompOp)
+        assert len(_find_gates(lowered_loop.operations, GateOperationType.X)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +820,51 @@ class TestDeadOpElimination:
             "CompOp should be eliminated when its result is only used "
             "by the lowered IfOperation"
         )
+
+    def test_condition_producer_removed_inside_runtime_if_branch(self):
+        """Dead producers are removed inside a surviving runtime-if branch."""
+        comparison, compile_time_if = _make_comparison_if_with_x_gate(
+            _uint_val("selector", const=0), _qubit_val()
+        )
+        runtime_if = IfOperation(
+            operands=[_bit_val("runtime_condition")],
+            true_operations=[comparison, compile_time_if],
+            false_operations=[],
+        )
+        block = Block(
+            name="test",
+            operations=[runtime_if],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        [remaining_if] = _find_ops(lowered.operations, IfOperation)
+        assert not _find_ops(remaining_if.true_operations, IfOperation)
+        assert not _find_ops(remaining_if.true_operations, CompOp)
+        assert len(_find_gates(remaining_if.true_operations, GateOperationType.X)) == 1
+
+    def test_condition_producer_removed_inside_while_body(self):
+        """Dead producers are removed inside a surviving runtime while body."""
+        comparison, compile_time_if = _make_comparison_if_with_x_gate(
+            _uint_val("selector", const=0), _qubit_val()
+        )
+        while_op = WhileOperation(
+            operands=[_bit_val("runtime_condition")],
+            operations=[comparison, compile_time_if],
+        )
+        block = Block(
+            name="test",
+            operations=[while_op],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        [remaining_while] = _find_ops(lowered.operations, WhileOperation)
+        assert not _find_ops(remaining_while.operations, IfOperation)
+        assert not _find_ops(remaining_while.operations, CompOp)
+        assert len(_find_gates(remaining_while.operations, GateOperationType.X)) == 1
 
     def test_runtime_if_yield_keeps_producer_alive(self):
         """A value read only as a runtime-if merge yield survives dead-op elimination.

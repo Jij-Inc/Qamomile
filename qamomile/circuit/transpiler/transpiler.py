@@ -294,10 +294,10 @@ class Transpiler(ABC, Generic[T]):
         ``CallBlockOperation`` and then folds the base-case
         ``IfOperation`` via ``partial_eval``. Terminates when no
         ``CallBlockOperation`` remains (success), when every residual call
-        is trapped inside an operation-owned block where ``partial_eval``
-        cannot fold it (control / inverse of a recursive kernel — raises a
-        targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is reached
-        (genuinely non-terminating top-level recursion — raises).
+        is trapped inside an operation-owned block that ``inline`` cannot
+        re-enter (control / inverse of a recursive kernel — raises a targeted
+        error, see below), or when ``MAX_UNROLL_DEPTH`` is reached (genuinely
+        non-terminating top-level recursion — raises).
 
         Args:
             block (Block): The block to unroll. May be ``HIERARCHICAL``

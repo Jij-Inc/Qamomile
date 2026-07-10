@@ -11,7 +11,7 @@ This prevents ``SegmentationPass`` from seeing classical-only compile-time
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
@@ -26,11 +26,18 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     genuine_input_values,
 )
+from qamomile.circuit.ir.operation.gate import (
+    ControlledUOperation,
+    SymbolicControlledU,
+)
 from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
     ValueBase,
     resolve_root_array_index,
+)
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    pair_block_parameter_operands,
 )
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.value_resolver import (
@@ -41,9 +48,6 @@ from . import Pass
 from .emit_support import resolve_if_condition
 from .eval_utils import FoldPolicy, fold_classical_op
 from .value_mapping import ValueSubstitutor
-
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
 
 def resolve_compile_time_condition(
@@ -221,32 +225,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 f"CompileTimeIfLoweringPass expects TRACED, AFFINE, or "
                 f"HIERARCHICAL block, got {input.kind}",
             )
-        return self._lower_block(input)
-
-    def _lower_block(self, block: Block) -> Block:
-        """Lower compile-time ifs in one block using this pass's bindings.
-
-        Shared by :meth:`run` (the top-level entry, after the kind
-        precondition check) and the controlled-block recursion in
-        :meth:`_lower_controlled_block`, which calls this directly on the
-        nested unitary block so it is processed regardless of that block's
-        ``kind`` field.
-
-        Args:
-            block (Block): The block whose operations and output values are
-                rewritten in place of lowered compile-time ifs.
-
-        Returns:
-            Block: A copy of ``block`` with compile-time ifs lowered, merge
-                outputs substituted, and dead condition producers removed.
-
-        Raises:
-            ValidationError: If lowering selects a ``CastOperation`` source
-                that is a strided ``Vector`` view with symbolic (not
-                compile-time) slice bounds — propagated from
-                :meth:`_apply_substitution`, which refuses to synthesize
-                view-local QFixed carrier keys the allocator never registers.
-        """
         # Track concrete values produced by classical ops.
         # Maps UUID → concrete Python value (int, float, bool).
         concrete_values: dict[str, Any] = {}
@@ -256,23 +234,23 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             concrete_values[key] = val
 
         # Seed from block input_values that are constants or bound.
-        for iv in block.input_values:
+        for iv in input.input_values:
             self._try_seed_value(iv, concrete_values)
 
         # Process operations, lowering compile-time ifs.
         new_ops, merge_subst, dead_uuids = self._lower_operations(
-            block.operations, concrete_values
+            input.operations, concrete_values
         )
 
         # Apply merge substitution to block output_values.
-        new_outputs = self._substitute_output_values(block.output_values, merge_subst)
+        new_outputs = self._substitute_output_values(input.output_values, merge_subst)
 
         # Remove dead operations whose results are only used by lowered ifs.
         if dead_uuids:
             new_ops = self._eliminate_dead_ops(new_ops, dead_uuids, new_outputs)
 
         return dataclasses.replace(
-            block,
+            input,
             operations=new_ops,
             output_values=new_outputs,
         )
@@ -341,8 +319,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             Tuple of (new operations list, merge substitution map,
             dead UUIDs from lowered condition values).
         """
-        from qamomile.circuit.ir.operation.gate import ControlledUOperation
-
         new_ops: list[Operation] = []
         merge_subst: dict[str, ValueBase] = {}
         dead_uuids: set[str] = set()
@@ -437,7 +413,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 # A controlled-U carries its unitary as a nested ``block``
                 # with its OWN value namespace (fresh input-value UUIDs), not
                 # as HasNestedOps children, so the generic recursion above
-                # never reaches it — and applying the outer phi /
+                # never reaches it — and applying the outer merge /
                 # concrete-value maps to it would be unsound, since those are
                 # keyed by outer-namespace UUIDs. Recurse with a binding scope
                 # seeded only from the controlled operands so a compile-time
@@ -482,18 +458,19 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             AssertionError: If ``op.block`` is ``None``. The sole caller
                 guards this with ``op.block is not None``, so a failure here
                 signals a broken caller contract rather than user error.
-            ValidationError: Propagated from :meth:`_lower_block` when the
-                inner block lowers a ``CastOperation`` whose selected source
-                is a symbolic-bound slice view.
+            ValidationError: If the inner block has an unsupported kind, or
+                if lowering selects a ``CastOperation`` source that is a
+                symbolic-bound slice view.
         """
         block = op.block
         assert block is not None
-        inner_bindings = self._controlled_block_bindings(op, concrete_values)
-        new_block = CompileTimeIfLoweringPass(inner_bindings)._lower_block(block)
+        inner_bindings = self._controlled_block_bindings(block, op, concrete_values)
+        new_block = CompileTimeIfLoweringPass(inner_bindings).run(block)
         return dataclasses.replace(op, block=new_block)
 
     def _controlled_block_bindings(
         self,
+        block: Block,
         op: ControlledUOperation,
         concrete_values: dict[str, Any],
     ) -> dict[str, Any]:
@@ -509,7 +486,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         happens to share an inner parameter's name cannot mis-seed it.
 
         The inner UUID key is what carries the value into the fresh inner
-        pass: :meth:`_lower_block` copies it into that pass's
+        pass: :meth:`run` copies it into that pass's
         ``concrete_values`` (the UUID-keyed context map :class:`ValueResolver`
         consults first), so a scalar comparison condition resolves by context,
         and the resolver's compile-time-array path keys a bound ``Vector``
@@ -519,8 +496,9 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         miscompile.
 
         Args:
+            block (Block): The controlled-U's nested unitary block.
             op (ControlledUOperation): The controlled-U operation whose
-                operands drive the inner block.
+                parameter operands follow the wrapped block's signature.
             concrete_values (dict[str, Any]): Outer-namespace concrete values
                 used to resolve the operands to compile-time constants.
 
@@ -529,25 +507,13 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 UUID. Empty when the block has no resolvable classical
                 parameters.
         """
-        block = op.block
         inner_bindings: dict[str, Any] = {}
-        if block is None:
-            return inner_bindings
-        param_inputs = [
-            iv
-            for iv in block.input_values
-            if iv.type.is_classical() or iv.type.is_object()
-        ]
-        param_operands = [
-            o
-            for o in op.target_operands
-            if isinstance(o, ValueBase)
-            and (o.type.is_classical() or o.type.is_object())
-        ]
         resolver = UnifiedValueResolver(
             context=concrete_values, bindings=self._bindings
         )
-        for inner_iv, operand in zip(param_inputs, param_operands):
+        for inner_iv, operand in pair_block_parameter_operands(
+            block, op.param_operands
+        ):
             resolved = resolver.resolve(operand)
             if resolved is None:
                 continue
@@ -716,11 +682,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     op.branch_rebinds, substitutor
                 ),
             )
-
-        from qamomile.circuit.ir.operation.gate import (
-            ControlledUOperation,
-            SymbolicControlledU,
-        )
 
         if isinstance(op, HasNestedOps):
             # Generic recursion for For/ForItems/While bodies.
@@ -928,26 +889,58 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             for ov in output_values:
                 used_uuids.add(ov.uuid)
 
-        result: list[Operation] = []
-        for op in operations:
-            # Check if all results are dead and unused.
-            if op.results and all(
-                r.uuid in dead_uuids and r.uuid not in used_uuids
-                for r in op.results
-                if hasattr(r, "uuid")
-            ):
-                # This op can be safely removed. Mark its operands as
-                # potentially dead too (for iterative propagation).
-                for operand in op.operands:
-                    if hasattr(operand, "uuid"):
-                        dead_uuids.add(operand.uuid)
-                continue
-            result.append(op)
+        result, removed = self._remove_dead_ops_recursive(
+            operations, dead_uuids, used_uuids
+        )
 
         # If we removed anything, do another pass for propagation.
-        if len(result) < len(operations):
+        if removed:
             return self._eliminate_dead_ops(result, dead_uuids, output_values)
         return result
+
+    def _remove_dead_ops_recursive(
+        self,
+        operations: list[Operation],
+        dead_uuids: set[str],
+        used_uuids: set[str],
+    ) -> tuple[list[Operation], bool]:
+        """Remove one wave of dead producers throughout control-flow bodies.
+
+        Args:
+            operations (list[Operation]): Operations to filter recursively.
+            dead_uuids (set[str]): Result UUIDs eligible for removal. The set
+                is extended with inputs of removed operations so the next
+                fixed-point iteration can remove newly dead producers.
+            used_uuids (set[str]): UUIDs still read anywhere in the current
+                operation tree or by the enclosing block outputs.
+
+        Returns:
+            tuple[list[Operation], bool]: The rebuilt operation list and
+                whether at least one operation was removed at any depth.
+        """
+        result: list[Operation] = []
+        removed = False
+        for op in operations:
+            if isinstance(op, HasNestedOps):
+                new_lists: list[list[Operation]] = []
+                for body in op.nested_op_lists():
+                    new_body, body_removed = self._remove_dead_ops_recursive(
+                        body, dead_uuids, used_uuids
+                    )
+                    new_lists.append(new_body)
+                    removed = removed or body_removed
+                op = op.rebuild_nested(new_lists)
+
+            if op.results and all(
+                result_value.uuid in dead_uuids and result_value.uuid not in used_uuids
+                for result_value in op.results
+            ):
+                for operand in op.operands:
+                    dead_uuids.add(operand.uuid)
+                removed = True
+                continue
+            result.append(op)
+        return result, removed
 
     @staticmethod
     def _collect_used_uuids(op: Operation, used: set[str]) -> None:

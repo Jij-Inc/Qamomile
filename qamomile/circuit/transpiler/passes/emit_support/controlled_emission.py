@@ -866,11 +866,10 @@ def resolve_controlled_u_call(
                 operation="ControlledUOperation",
             )
 
-    remaining_operands = op.operands[num_control_args:]
-    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [
-        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    target_qubit_operands = [
+        operand for operand in op.target_operands if operand.type.is_quantum()
     ]
+    param_operands = op.param_operands
 
     target_index_groups = [
         _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
@@ -2034,11 +2033,10 @@ def emit_controlled_u_with_symbolic_indices(
         pool_phys.append(qubit_map[addr])
     control_phys = [pool_phys[i] for i in resolved_indices]
 
-    remaining_operands = op.operands[1:]
-    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [
-        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    target_qubit_operands = [
+        operand for operand in op.target_operands if operand.type.is_quantum()
     ]
+    param_operands = op.param_operands
 
     target_indices: list[int] = []
     target_index_groups: list[list[int]] = []
@@ -2192,11 +2190,10 @@ def emit_controlled_u_multi_arg(
             operation="ControlledUOperation",
         )
 
-    remaining_operands = op.operands[op.num_control_args :]
-    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [
-        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    target_qubit_operands = [
+        operand for operand in op.target_operands if operand.type.is_quantum()
     ]
+    param_operands = op.param_operands
 
     target_indices: list[int] = []
     target_index_groups: list[list[int]] = []
@@ -2304,12 +2301,10 @@ def emit_controlled_u(
     nc: int = op.num_controls
     block_value = op.block
     control_operands = op.control_operands
-    remaining_operands = op.operands[nc:]
-
-    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [
-        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    target_qubit_operands = [
+        operand for operand in op.target_operands if operand.type.is_quantum()
     ]
+    param_operands = op.param_operands
 
     # Resolve controls via ``resolve_qubit_index``: frontend Step 2.a
     # normalises ``operands[:num_controls]`` to one scalar per physical

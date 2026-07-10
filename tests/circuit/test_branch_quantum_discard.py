@@ -55,7 +55,6 @@ from qamomile.circuit.transpiler.passes.analyze import (
     _static_loop_trip_count,
     reject_control_flow_quantum_discard,
 )
-from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 
 pytest.importorskip("qiskit")
 
@@ -1680,10 +1679,11 @@ class TestAllowedLoopPatterns:
 
         assert _sample_single(kernel, bindings={"n": 2, "flag": 0}) == 1
 
-    def test_compile_time_dead_if_inside_loop_accepted_at_analysis(self):
+    def test_compile_time_dead_if_inside_loop_executes(self):
         """A compile-time-dead if inside the loop body passes the variable
         through its collapsed merge — that pass-through read is consumption
-        evidence, so the loop record is exempt at the analysis stage."""
+        evidence, so the loop record is exempt and dead condition producers
+        do not split the quantum segment."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt, flag: qmc.UInt) -> qmc.Bit:
@@ -1696,11 +1696,7 @@ class TestAllowedLoopPatterns:
 
         analyzed = _run_through_analyze(kernel, bindings={"n": 2, "flag": 0})
         assert analyzed is not None
-        # Downstream, plan still splits this shape into multiple quantum
-        # segments (pre-existing on the base branch, verified via git
-        # stash); pin that so a future silent-pass regression is caught.
-        with pytest.raises(MultipleQuantumSegmentsError):
-            _transpile(kernel, bindings={"n": 2, "flag": 0})
+        assert _sample_single(kernel, bindings={"n": 2, "flag": 0}) == 1
 
     @pytest.mark.parametrize(
         ("n", "expected"),

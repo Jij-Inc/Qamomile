@@ -358,6 +358,15 @@ def _x_if_sel_zero(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _x_in_for_if_sel_zero(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
+    """Flip ``q`` in a one-iteration loop when ``sel`` equals zero."""
+    for _ in qmc.range(1):
+        if sel == 0:
+            q = qmc.x(q)
+    return q
+
+
+@qmc.qkernel
 def controlled_if_comparison_sample(sel: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     """Sample a controlled body whose compile-time ``if sel == 0`` picks a branch.
 
@@ -378,6 +387,55 @@ def controlled_if_comparison_run(sel: qmc.UInt, obs: qmc.Observable) -> qmc.Floa
     q = qmc.qubit_array(2, "q")
     q[0] = qmc.x(q[0])
     q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_if_in_for_sample(sel: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled compile-time if nested inside a For body."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_x_in_for_if_sel_zero)(q[0], q[1], sel)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_if_in_for_run(sel: qmc.UInt, obs: qmc.Observable) -> qmc.Float:
+    """Run expval for a controlled compile-time if nested inside a For body."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_x_in_for_if_sel_zero)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_if_symbolic_multi_control_sample(
+    n: qmc.UInt,
+    sel: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Sample a compile-time if under a bound symbolic control count."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    controlled = qmc.control(_x_if_sel_zero, num_controls=n)
+    controls, q[2] = controlled(q[0:2], q[2], sel)
+    q[0:2] = controls
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_if_symbolic_multi_control_run(
+    n: qmc.UInt,
+    sel: qmc.UInt,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval for a compile-time if under a symbolic control count."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    controlled = qmc.control(_x_if_sel_zero, num_controls=n)
+    controls, q[2] = controlled(q[0:2], q[2], sel)
+    q[0:2] = controls
     return qmc.expval(q, obs)
 
 
@@ -1229,6 +1287,32 @@ FRONTEND_EXECUTION_CASES = [
         expected_expval=0.0,
         sample_bindings={"sel": 1},
         run_bindings={"sel": 1, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-if-in-for",
+        sample_kernel=controlled_if_in_for_sample,
+        run_kernel=controlled_if_in_for_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"sel": 0},
+        run_bindings={"sel": 0, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-if-symbolic-multi-control",
+        sample_kernel=controlled_if_symbolic_multi_control_sample,
+        run_kernel=controlled_if_symbolic_multi_control_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1, 1),
+        expected_support={(1, 1, 1)},
+        expected_expval=-3.0,
+        sample_bindings={"n": 2, "sel": 0},
+        run_bindings={
+            "n": 2,
+            "sel": 0,
+            "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2),
+        },
     ),
     FrontendExecutionCase(
         name="controlled-native-gates",

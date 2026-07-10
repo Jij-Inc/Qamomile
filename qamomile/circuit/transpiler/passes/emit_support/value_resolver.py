@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.value import resolve_root_qubit_address
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    pair_block_parameter_operands,
+)
 from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
@@ -463,21 +466,30 @@ class ValueResolver:
         param_operands: list["Value"],
         bindings: dict[str, Any],
     ) -> dict[str, Any]:
-        """Create local bindings by matching block parameter inputs to operands."""
+        """Create local bindings by matching block inputs to call-site operands.
+
+        Args:
+            block_value (Any): Nested block whose classical/object inputs are
+                bound. Objects without ``input_values`` receive no additional
+                local bindings for compatibility with optional backend recipes.
+            param_operands (list[Value]): Classical/object call-site operands
+                in the controlled operation's signature order.
+            bindings (dict[str, Any]): Parent emit-time bindings used to
+                resolve the call-site operands.
+
+        Returns:
+            dict[str, Any]: Parent bindings extended with resolved local
+            bindings under the nested block's formal parameter names.
+        """
         local_bindings = bindings.copy()
         if not hasattr(block_value, "input_values"):
             return local_bindings
-        param_inputs = [
-            iv
-            for iv in block_value.input_values
-            if hasattr(iv, "type") and (iv.type.is_classical() or iv.type.is_object())
-        ]
-        for i, operand in enumerate(param_operands):
-            if i >= len(param_inputs):
-                break
+        for param_input, operand in pair_block_parameter_operands(
+            block_value, param_operands
+        ):
             resolved = self.resolve_operand_for_binding(operand, bindings)
             if resolved is not None:
-                local_bindings[param_inputs[i].name] = resolved
+                local_bindings[param_input.name] = resolved
         return local_bindings
 
     def resolve_bound_value(
