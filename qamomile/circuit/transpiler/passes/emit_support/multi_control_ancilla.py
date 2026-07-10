@@ -89,14 +89,18 @@ class MultiControlAncillaPool:
       block exits, so sibling batches reuse the same range.
     """
 
-    def __init__(self, first_index: int, count: int) -> None:
+    def __init__(self, first_index: int, count: int, *, counting: bool = False) -> None:
         """Initialize the pool.
 
         Args:
             first_index (int): Physical index of the first reserved
                 ancilla qubit.
             count (int): Number of reserved ancilla qubits. Must be
-                non-negative.
+                non-negative. Ignored in counting mode.
+            counting (bool): When True the pool is unbounded and only
+                records the peak concurrent usage (``take`` / ``try_hold``
+                never fail), so a dry-run emission can measure how many
+                ancillas a real emission would need. Defaults to False.
 
         Raises:
             ValueError: If ``count`` is negative.
@@ -106,6 +110,8 @@ class MultiControlAncillaPool:
         self._first_index = first_index
         self._count = count
         self._offset = 0
+        self._counting = counting
+        self._peak = 0
 
     @property
     def count(self) -> int:
@@ -115,6 +121,16 @@ class MultiControlAncillaPool:
             int: Pool size.
         """
         return self._count
+
+    @property
+    def peak(self) -> int:
+        """Return the peak concurrent usage recorded in counting mode.
+
+        Returns:
+            int: The largest ``offset + count`` any ``take`` / ``try_hold``
+                reached; zero for a non-counting pool.
+        """
+        return self._peak
 
     def take(self, count: int) -> list[int] | None:
         """Return ``count`` clean ancilla indices from the current offset.
@@ -126,9 +142,13 @@ class MultiControlAncillaPool:
             list[int] | None: The next ``count`` reserved physical
                 indices starting at the current offset, or None when the
                 unheld remainder of the pool is smaller than the request
-                (an estimation bug surfaced by the caller).
+                (an estimation bug surfaced by the caller). In counting
+                mode the request always succeeds and the peak usage is
+                recorded instead.
         """
-        if self._offset + count > self._count:
+        if self._counting:
+            self._peak = max(self._peak, self._offset + count)
+        elif self._offset + count > self._count:
             return None
         start = self._first_index + self._offset
         return list(range(start, start + count))

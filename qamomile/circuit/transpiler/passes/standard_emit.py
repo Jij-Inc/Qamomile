@@ -14,7 +14,7 @@ from __future__ import annotations
 import contextlib
 import re
 from collections.abc import Iterator
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 from qamomile.circuit.ir.operation import (
     Operation,
@@ -54,6 +54,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.transpiler.emit_context import EmitContext
 from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
 from qamomile.circuit.transpiler.passes.emit import CompositeGateEmitter, EmitPass
@@ -64,7 +65,6 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     MultiControlAncillaPool,
     QubitMap,
     ResourceAllocator,
-    estimate_multi_control_ancilla_demand,
 )
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
@@ -85,6 +85,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     blockvalue_to_gate,
     emit_controlled_fallback,
     emit_controlled_u,
+)
+from qamomile.circuit.transpiler.passes.emit_support.counting_emitter import (
+    CountingEmitter,
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import emit_gate
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
@@ -150,6 +153,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # is True; None on backends with native multi-control support.
         self._mc_ancilla_pool: MultiControlAncillaPool | None = None
 
+        # True only during the count-only dry-run walk in
+        # ``_count_multi_control_ancilla_demand``. Backend paths that build
+        # or manipulate real circuit objects (e.g. QURI Parts' native
+        # inverse) consult this to stay on a counting-safe route.
+        self._counting_emission = False
+
     # ------------------------------------------------------------------
     # Core orchestration (stays on this class)
     # ------------------------------------------------------------------
@@ -203,8 +212,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         self._mc_ancilla_pool = None
         if self._reserves_multi_control_ancillas():
-            ancilla_demand = estimate_multi_control_ancilla_demand(
-                operations, self._resolver, bindings
+            ancilla_demand = self._count_multi_control_ancilla_demand(
+                operations, qubit_count, qubit_map, clbit_map, bindings
             )
             if ancilla_demand > 0:
                 self._mc_ancilla_pool = MultiControlAncillaPool(
@@ -218,6 +227,82 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
 
         return circuit, qubit_map, clbit_map
+
+    def _count_multi_control_ancilla_demand(
+        self,
+        operations: list[Operation],
+        data_qubit_count: int,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> int:
+        """Measure the clean-ancilla demand by a count-only dry-run emission.
+
+        Runs the real ``_emit_operations`` walk once against a
+        :class:`CountingEmitter` (every gate a no-op, every reusable-gate /
+        native path declined) and a counting :class:`MultiControlAncillaPool`
+        that records peak concurrent usage instead of a real circuit. Because
+        the walk is the same code the real emission runs, the count cannot
+        drift from the emitter the way a separate mirror estimate could; the
+        capability answers are biased toward the cascade path so the peak is
+        an upper bound. All pass and context state the walk mutates is
+        snapshotted and restored so the throwaway run leaves no trace.
+
+        Args:
+            operations (list[Operation]): The quantum segment's operations.
+            data_qubit_count (int): Number of data qubits already allocated;
+                the counting pool's indices start here (their exact values
+                are irrelevant, only the peak count matters).
+            qubit_map (QubitMap): Data-qubit map; copied for the dry run.
+            clbit_map (ClbitMap): Classical-bit map; copied for the dry run.
+            bindings (dict[str, Any]): Emit bindings; mutations are rolled
+                back after counting.
+
+        Returns:
+            int: The peak number of clean ancilla qubits a real emission of
+                ``operations`` would hold at once.
+        """
+        saved_emitter = self._emitter
+        saved_pool = self._mc_ancilla_pool
+        saved_composites = self._composite_emitters
+        saved_params = dict(self._parameter_map)
+        saved_sources = dict(self._parameter_sources)
+        saved_measure = dict(self._measurement_qubit_map)
+        saved_context = (
+            bindings.snapshot_state()
+            if isinstance(bindings, EmitContext)
+            else dict(bindings)
+        )
+        counting_pool = MultiControlAncillaPool(data_qubit_count, 0, counting=True)
+        self._emitter = cast("GateEmitter[T]", CountingEmitter(saved_emitter))
+        self._mc_ancilla_pool = counting_pool
+        self._counting_emission = True
+        # Native composite emitters would construct real circuit objects on
+        # the dummy circuit; disable them so counting stays on the library
+        # decomposition path (which reserves the same or more ancillas).
+        self._composite_emitters = []
+        try:
+            dummy = cast("T", self._emitter.create_circuit(0, 0))
+            self._emit_operations(
+                dummy, operations, dict(qubit_map), dict(clbit_map), bindings
+            )
+        finally:
+            self._emitter = saved_emitter
+            self._mc_ancilla_pool = saved_pool
+            self._composite_emitters = saved_composites
+            self._counting_emission = False
+            self._parameter_map.clear()
+            self._parameter_map.update(saved_params)
+            self._parameter_sources.clear()
+            self._parameter_sources.update(saved_sources)
+            self._measurement_qubit_map.clear()
+            self._measurement_qubit_map.update(saved_measure)
+            if isinstance(bindings, EmitContext):
+                bindings.restore_state(saved_context)
+            else:
+                bindings.clear()
+                bindings.update(saved_context)
+        return counting_pool.peak
 
     def _emit_operations(
         self,

@@ -340,3 +340,50 @@ class EmitContext(dict):
         new._dict_data = self._dict_data.copy()
         new._observables = self._observables.copy()
         return new
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """Capture the dict body and every semantic slot for later restore.
+
+        Used to run a throwaway dry-run emission (ancilla demand counting)
+        against the same context object and then roll it back, so the count
+        run's intermediate fold results and parameters do not leak into the
+        real emission. Unlike ``copy`` this records enough to restore *this*
+        object in place, preserving its identity for callers that hold a
+        reference to it.
+
+        Returns:
+            dict[str, Any]: A snapshot passable to ``restore_state``.
+        """
+        return {
+            "body": dict(self),
+            "_params": self._params.copy(),
+            "_loop_vars": self._loop_vars.copy(),
+            "_values": self._values.copy(),
+            "_runtime_exprs": self._runtime_exprs.copy(),
+            "_array_data": self._array_data.copy(),
+            "_dict_data": self._dict_data.copy(),
+            "_observables": self._observables.copy(),
+        }
+
+    def restore_state(self, snapshot: dict[str, Any]) -> None:
+        """Restore the dict body and slots from ``snapshot`` in place.
+
+        The object's identity is preserved (the dict body is cleared and
+        repopulated rather than replaced), so references held elsewhere stay
+        valid.
+
+        Args:
+            snapshot (dict[str, Any]): A snapshot from ``snapshot_state``.
+
+        Returns:
+            None.
+        """
+        dict.clear(self)
+        dict.update(self, snapshot["body"])
+        self._params = snapshot["_params"]
+        self._loop_vars = snapshot["_loop_vars"]
+        self._values = snapshot["_values"]
+        self._runtime_exprs = snapshot["_runtime_exprs"]
+        self._array_data = snapshot["_array_data"]
+        self._dict_data = snapshot["_dict_data"]
+        self._observables = snapshot["_observables"]

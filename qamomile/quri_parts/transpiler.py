@@ -949,27 +949,50 @@ class QuriPartsEmitPass(
                     bindings,
                 )
             )
-        except (AttributeError, TypeError, ValueError, RuntimeError):
-            return False
-
-        emitter = cast(QuriPartsGateEmitter, self._emitter)
-        saved_circuit = emitter._current_circuit
-        saved_param_map = dict(emitter._param_map)
-        try:
             local_qubit_map, local_clbit_map = self._allocator.allocate(
                 block_value.operations,
                 local_bindings,
                 initial_qubit_map=local_qubit_map,
                 initial_clbit_map=local_clbit_map,
             )
-            qubit_count = (
-                max(local_qubit_map.values()) + 1
-                if local_qubit_map
-                else len(qubit_indices)
-            )
-            if qubit_count > len(qubit_indices):
-                return False
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return False
 
+        qubit_count = (
+            max(local_qubit_map.values()) + 1 if local_qubit_map else len(qubit_indices)
+        )
+        if qubit_count > len(qubit_indices):
+            return False
+
+        if self._counting_emission:
+            # A count-only dry run swaps in a no-op emitter that cannot build
+            # or invert a real circuit. The native inverse emits the block
+            # into a sub-circuit with the segment pool suspended, so it never
+            # consumes parent-pool ancillas; reproduce exactly that — emit the
+            # block under suspension so both operand resolution and the
+            # zero-pool contribution match real emission (a pool-needing
+            # multi-controlled gate still raises EmitError and falls back to
+            # the parent-pool path) — then skip the real inversion and append
+            # that a count does not need.
+            try:
+                sub_circuit = self._emitter.create_circuit(qubit_count, 0)
+                with self._suspended_mc_ancilla_pool():
+                    self._emit_operations(
+                        sub_circuit,
+                        block_value.operations,
+                        local_qubit_map,
+                        local_clbit_map,
+                        local_bindings,
+                        force_unroll=True,
+                    )
+            except (AttributeError, TypeError, ValueError, RuntimeError, EmitError):
+                return False
+            return True
+
+        emitter = cast(QuriPartsGateEmitter, self._emitter)
+        saved_circuit = emitter._current_circuit
+        saved_param_map = dict(emitter._param_map)
+        try:
             sub_circuit = self._emitter.create_circuit(qubit_count, 0)
             # The segment ancilla pool addresses the parent circuit;
             # suspend it so a multi-controlled gate inside this inverse
