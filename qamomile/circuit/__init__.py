@@ -1,3 +1,45 @@
+"""Compiler core of Qamomile and its public user-facing API surface.
+
+Design center
+-------------
+
+The central abstraction is the ``qkernel`` decorator (``frontend/``):
+users write quantum programs as plain Python functions, the frontend
+traces them into an IR ``Block`` (``ir/``), the transpiler pipeline
+(``transpiler/``) rewrites the IR through staged, ``BlockKind``-gated
+passes, and a backend package emits an executable program. This module
+re-exports everything a user program needs to be written: the decorator,
+the handle types (``Qubit``, ``Vector``, ``Float``, ...), gate /
+measurement / control-flow builders, meta-operations (``control`` /
+``inverse``), the stdlib and algorithm kernels (QFT, QPE, Grover, Shor,
+modular arithmetic), symbolic resource estimation (``estimator/``), and
+the job / result types returned by ``ExecutableProgram.sample`` / ``run``.
+
+Dependency direction (hard constraint)
+--------------------------------------
+
+``qamomile.circuit`` is the design center of the whole project: every
+other qamomile module depends on it, never the reverse —
+``optimization → circuit ← backends`` (qiskit / quri_parts / cudaq /
+...). Nothing under this package may import a backend package or SDK.
+Backend-specific concretization (native gate sets, per-qubit instruction
+encoding, runtime control-flow lowering) belongs in each backend's emit
+pass / ``GateEmitter``; this package owns only the abstract IR, the
+backend-agnostic pass pipeline, and the shared decomposition recipes
+that backends may fall back on.
+
+Module-local constraints
+------------------------
+
+- stdlib / algorithm kernels are imported *after* the frontend symbols
+  because their implementation modules do
+  ``import qamomile.circuit as qmc`` — keep new kernel imports at the
+  bottom of this file.
+- Visualization (``MatplotlibDrawer`` etc.) is lazy-loaded via module
+  ``__getattr__`` so that importing ``qamomile.circuit`` does not pull
+  in matplotlib.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
