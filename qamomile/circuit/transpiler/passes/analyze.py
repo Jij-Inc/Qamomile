@@ -2451,7 +2451,7 @@ def reject_control_flow_quantum_discard(
 
     Scope contract: the scan recurses through control-flow nesting only
     (``IfOperation`` branches and ``HasNestedOps`` bodies). Boxed
-    implementation blocks — ``CompositeGateOperation.implementation_block``,
+    implementation blocks — ``InvokeOperation`` bodies and implementations,
     ``InverseBlockOperation.implementation_block``,
     ``ControlledUOperation.block`` — are NOT descended into: they stay
     HIERARCHICAL recipe blocks outside the entrypoint pipeline, exactly
