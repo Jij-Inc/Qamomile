@@ -24,6 +24,21 @@ The estimate only needs to be an **upper bound**: over-reservation
 costs unused circuit qubits, while under-reservation is caught at emit
 time by ``StandardEmitPass._emit_irreducible_multi_controlled_gate``
 and reported as a compiler bug.
+
+Batched controlled-block emission (``controlled_emission``
+``try_emit_batched_controlled_operations``) holds one AND ladder for a
+whole block body via ``MultiControlAncillaPool.try_hold`` and walks the
+body under the single AND control, so a nested cascade inside the body
+draws from the qubits *after* the held ladder. The peak this produces
+never exceeds the flatten estimate this module computes: holding
+``k - 1`` ladder ancillas and then lowering the body under one control
+sums to ``(k - 1) + (inner demand under one control)``, which equals the
+flatten demand ``k + inner - 1`` for an irreducible leaf and is strictly
+smaller when the leaf becomes native under a single control. Batching
+also acquires through ``try_hold``, which declines (falling back to
+per-gate emission) rather than raising when the reserved pool is smaller
+than a naive batch would want, so it never demands ancillas the estimate
+did not reserve.
 """
 
 from __future__ import annotations

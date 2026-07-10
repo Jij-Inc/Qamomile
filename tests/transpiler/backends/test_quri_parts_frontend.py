@@ -3839,6 +3839,177 @@ class TestControlledGate:
         sv = _strip_zero_ancillas(_run_statevector(circ), 4)
         assert statevectors_equal(sv, computational_basis_state(4, 0b1111))
 
+    def _count_toffoli(self, circuit) -> int:
+        """Count TOFFOLI gates in a (non-parametric) QURI Parts circuit."""
+        return sum(1 for gate in _get_gates(circuit) if gate.name == "TOFFOLI")
+
+    def test_controlled_multi_gate_body_shares_one_and_ladder(self):
+        """A 3-control kernel body of X then Z emits a single shared AND ladder.
+
+        Lowering each gate through its own Toffoli cascade would build the
+        two-control AND ladder twice and cancel its own uncompute against
+        the next gate's recompute. The batched lowering ANDs the three
+        controls onto one ancilla once, applies X then Z under that single
+        control, and uncomputes once — four Toffolis, not eight. The
+        controls are put in a uniform superposition so all eight control
+        configurations are checked at once against the exact dense
+        three-controlled ``Z @ X`` unitary, and the cascade ancillas must
+        uncompute back to |0> (asserted by ``_strip_zero_ancillas``).
+        """
+
+        @qmc.qkernel
+        def xz_gate(t: qmc.Qubit) -> qmc.Qubit:
+            t = qmc.x(t)
+            t = qmc.z(t)
+            return t
+
+        controlled_xz = qmc.control(xz_gate, num_controls=3)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+            ctrl = qmc.qubit_array(3, "ctrl")
+            t = qmc.qubit("t")
+            for i in qmc.range(3):
+                ctrl[i] = qmc.h(ctrl[i])
+            ctrl, t = controlled_xz(ctrl, t)
+            return qmc.measure(ctrl), qmc.measure(t)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        # 3 controls + 1 target data qubits + 2 shared cascade ancillas.
+        assert circ.qubit_count == 6
+        # One ladder (2 Toffolis up + 2 down), not one cascade per gate (8).
+        assert self._count_toffoli(circ) == 4
+        sv = _strip_zero_ancillas(_run_statevector(circ), 4)
+        h_gate = GATE_SPECS["H"].matrix_fn()
+        prep = tensor_product(identity(2), *([h_gate] * 3))
+        initial = prep @ all_zeros_state(4)
+        composed = GATE_SPECS["Z"].matrix_fn() @ GATE_SPECS["X"].matrix_fn()
+        expected = _multi_controlled_unitary(composed, 3) @ initial
+        assert statevectors_equal(sv, expected)
+
+    def test_controlled_loop_body_hoists_ladder_out_of_loop(self):
+        """A controlled loop body shares one AND ladder across all iterations.
+
+        The batched lowering sees the ``ForOperation`` before it is
+        unrolled, so the two-control AND ladder is emitted once outside the
+        loop and every iteration's rotation is applied under the single AND
+        control. Three ``ry(theta)`` iterations compose to ``ry(3*theta)``
+        on the target; the whole thing is checked against the exact dense
+        two-controlled unitary, and the single ladder is two Toffolis.
+        """
+
+        @qmc.qkernel
+        def loop_gate(t: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
+            for i in qmc.range(3):
+                t = qmc.ry(t, angle)
+            return t
+
+        controlled_loop = qmc.control(loop_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit(angle: qmc.Float) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+            ctrl = qmc.qubit_array(2, "ctrl")
+            t = qmc.qubit("t")
+            for i in qmc.range(2):
+                ctrl[i] = qmc.h(ctrl[i])
+            ctrl, t = controlled_loop(ctrl, t, angle=angle)
+            return qmc.measure(ctrl), qmc.measure(t)
+
+        theta = 0.3
+        _, circ = _transpile_and_get_circuit(circuit, bindings={"angle": theta})
+        # 2 controls + 1 target + 1 shared cascade ancilla.
+        assert circ.qubit_count == 4
+        # One ladder for the whole loop (1 Toffoli up + 1 down), not per-iteration.
+        assert self._count_toffoli(circ) == 2
+        sv = _strip_zero_ancillas(_run_statevector(circ), 3)
+        h_gate = GATE_SPECS["H"].matrix_fn()
+        prep = tensor_product(identity(2), h_gate, h_gate)
+        initial = prep @ all_zeros_state(3)
+        expected = _multi_controlled_unitary(
+            GATE_SPECS["RY"].matrix_fn(3 * theta), 2
+        ) @ (initial)
+        assert statevectors_equal(sv, expected)
+
+    def test_controlled_nested_multi_gate_body_batches_once(self):
+        """A nested controlled multi-gate kernel composes to one batched ladder.
+
+        ``control(control(xz, 1), 2)`` composes to three controls on an X
+        then Z block. The outer controlled-U carries a single body op so it
+        does not batch on its own; the walker composes the outer controls
+        with the inner control and reaches the two-gate body under three
+        controls, where a single shared ladder is emitted. The result is
+        the exact dense three-controlled ``Z @ X`` unitary with four
+        Toffolis.
+        """
+
+        @qmc.qkernel
+        def xz_gate(t: qmc.Qubit) -> qmc.Qubit:
+            t = qmc.x(t)
+            t = qmc.z(t)
+            return t
+
+        inner = qmc.control(xz_gate, num_controls=1)
+
+        @qmc.qkernel
+        def inner_kernel(c: qmc.Qubit, t: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            c, t = inner(c, t)
+            return c, t
+
+        outer = qmc.control(inner_kernel, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+            ctrl = qmc.qubit_array(3, "ctrl")
+            t = qmc.qubit("t")
+            for i in qmc.range(3):
+                ctrl[i] = qmc.h(ctrl[i])
+            ctrl[0:2], ctrl[2], t = outer(ctrl[0:2], ctrl[2], t)
+            return qmc.measure(ctrl), qmc.measure(t)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        assert circ.qubit_count == 6
+        assert self._count_toffoli(circ) == 4
+        sv = _strip_zero_ancillas(_run_statevector(circ), 4)
+        h_gate = GATE_SPECS["H"].matrix_fn()
+        prep = tensor_product(identity(2), *([h_gate] * 3))
+        initial = prep @ all_zeros_state(4)
+        composed = GATE_SPECS["Z"].matrix_fn() @ GATE_SPECS["X"].matrix_fn()
+        expected = _multi_controlled_unitary(composed, 3) @ initial
+        assert statevectors_equal(sv, expected)
+
+    def test_controlled_two_control_all_x_body_skips_batching(self):
+        """A two-control body of native X gates is not batched (no wasted ladder).
+
+        Under exactly two controls an X is already a native Toffoli, so an
+        AND ladder would be a wash or a loss. The two-control guard keeps
+        the per-gate path: the circuit needs no cascade ancillas and emits
+        one Toffoli per X.
+        """
+
+        @qmc.qkernel
+        def xx_gate(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            a = qmc.x(a)
+            b = qmc.x(b)
+            return a, b
+
+        controlled_xx = qmc.control(xx_gate, num_controls=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q[0] = qmc.x(q[0])
+            q[1] = qmc.x(q[1])
+            q[0:2], q[2], q[3] = controlled_xx(q[0:2], q[2], q[3])
+            return qmc.measure(q)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        # No ancillas: two-control X stays a native Toffoli, no batching.
+        assert circ.qubit_count == 4
+        assert self._count_toffoli(circ) == 2
+        sv = _run_statevector(circ)
+        # Controls q0,q1 = |1>, so both targets q2,q3 flip: |1111>.
+        assert statevectors_equal(sv, computational_basis_state(4, 0b1111))
+
     def test_suspended_mc_ancilla_pool_restores_pool(self):
         """``_suspended_mc_ancilla_pool`` clears then restores the pool."""
         from qamomile.circuit.transpiler.passes.emit_support import (

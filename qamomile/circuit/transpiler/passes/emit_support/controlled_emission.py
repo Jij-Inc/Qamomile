@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -183,6 +183,251 @@ def build_controlled_block_qubit_map(
     return {address: target_indices[slot] for address, slot in local_map.items()}
 
 
+_BATCH_MIN_WEIGHT = 2
+
+# Gate types that are already cheap under two composed controls (a native
+# Toffoli / Hadamard-conjugated Toffoli) or that QURI Parts lowers to a
+# Toffoli pair even under a single control (RZZ). Batching a body made up
+# only of these behind one AND ancilla at exactly two controls is a wash
+# or a loss, so the ``num == 2`` fast path skips it.
+_BATCH_NATIVE_AT_TWO_CONTROLS = frozenset(
+    {
+        GateOperationType.X,
+        GateOperationType.Z,
+        GateOperationType.CX,
+        GateOperationType.CZ,
+        GateOperationType.TOFFOLI,
+        GateOperationType.RZZ,
+    }
+)
+
+
+def _batch_op_weight(
+    emit_pass: "StandardEmitPass",
+    op: Operation,
+    bindings: dict[str, Any],
+) -> int:
+    """Return how much a single controlled-body op argues for batching.
+
+    Batching an AND ladder once for the whole body pays off only when the
+    body actually emits two or more gates under the shared controls. This
+    weight distinguishes real work from no-ops so a statically empty loop
+    or a zero-power nested controlled-U does not trigger a wasted ladder.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass (for power / loop
+            bound resolution).
+        op (Operation): One operation of the controlled block body.
+        bindings (dict[str, Any]): Bindings visible inside the block.
+
+    Returns:
+        int: 0 for ops that emit nothing, 1 for a single controlled gate,
+            2 for constructs that on their own justify batching.
+    """
+    if isinstance(op, (BinOp, ReturnOperation)):
+        return 0
+    if isinstance(op, GateOperation):
+        return 1
+    if isinstance(op, ControlledUOperation):
+        try:
+            power = resolve_power(emit_pass, op, bindings)
+        except EmitError:
+            # Unresolvable power fails identically on the non-batch path;
+            # count it as real work so the estimate is not skewed.
+            return 1
+        return 1 if power > 0 else 0
+    if isinstance(op, PauliEvolveOp):
+        return 2
+    if isinstance(op, ForOperation):
+        return _for_batch_weight(emit_pass, op, bindings)
+    if isinstance(op, CompositeGateOperation):
+        block = op.implementation_block
+        if block is None:
+            return 0
+        return _controlled_body_batch_weight(emit_pass, block.operations, bindings)
+    if isinstance(op, InverseBlockOperation):
+        block = (
+            op.implementation_block
+            if op.implementation_block is not None
+            else op.source_block
+        )
+        if block is None:
+            return 0
+        return _controlled_body_batch_weight(emit_pass, block.operations, bindings)
+    # Unsupported op kinds are rejected by the walker further down; if a
+    # ladder is emitted before that failure the whole transpile aborts, so
+    # counting them as real work here is harmless.
+    return 1
+
+
+def _for_batch_weight(
+    emit_pass: "StandardEmitPass",
+    op: ForOperation,
+    bindings: dict[str, Any],
+) -> int:
+    """Return the batch weight of a for loop in a controlled block body.
+
+    A statically empty loop emits nothing (weight 0); a single iteration
+    contributes its body's weight; two or more iterations that emit any
+    work justify batching on their own (weight 2), because the ladder is
+    hoisted out of the loop and amortised over every iteration.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        op (ForOperation): Loop operation in the controlled body.
+        bindings (dict[str, Any]): Bindings visible inside the block.
+
+    Returns:
+        int: The loop's batch weight (0, 1, or 2).
+    """
+    from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+        resolve_loop_bounds,
+    )
+
+    start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
+    if start is None or stop is None or step is None or step == 0:
+        # Unresolvable bounds make the non-batch walker raise the same
+        # EmitError; do not emit a ladder ahead of that failure.
+        return 0
+    try:
+        iteration_count = len(range(start, stop, step))
+    except OverflowError:
+        iteration_count = 2
+    if iteration_count == 0:
+        return 0
+    body_weight = _controlled_body_batch_weight(emit_pass, op.operations, bindings)
+    if iteration_count == 1:
+        return body_weight
+    return _BATCH_MIN_WEIGHT if body_weight >= 1 else 0
+
+
+def _controlled_body_batch_weight(
+    emit_pass: "StandardEmitPass",
+    operations: list[Operation],
+    bindings: dict[str, Any],
+) -> int:
+    """Sum the batch weights of a controlled block body, capped at the threshold.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        operations (list[Operation]): Controlled block body operations.
+        bindings (dict[str, Any]): Bindings visible inside the block.
+
+    Returns:
+        int: The total weight, clamped to ``_BATCH_MIN_WEIGHT`` once reached
+            (callers only compare against that threshold).
+    """
+    total = 0
+    for op in operations:
+        total += _batch_op_weight(emit_pass, op, bindings)
+        if total >= _BATCH_MIN_WEIGHT:
+            return _BATCH_MIN_WEIGHT
+    return total
+
+
+def _body_has_rotation_like_leaf(operations: list[Operation]) -> bool:
+    """Return True when the body has a gate that batching helps at two controls.
+
+    Used only for the ``num == 2`` guard: X / Z / CX / CZ / TOFFOLI / RZZ
+    gain nothing (or lose) from a two-control AND ladder, but any other
+    single-qubit rotation, or any nested construct that recurses into
+    further controlled lowering, does benefit.
+
+    Args:
+        operations (list[Operation]): Controlled block body operations.
+
+    Returns:
+        bool: True if at least one op benefits from batching at two controls.
+    """
+    for op in operations:
+        if isinstance(op, GateOperation):
+            if op.gate_type not in _BATCH_NATIVE_AT_TWO_CONTROLS:
+                return True
+        elif isinstance(
+            op,
+            (
+                ControlledUOperation,
+                ForOperation,
+                CompositeGateOperation,
+                InverseBlockOperation,
+                PauliEvolveOp,
+            ),
+        ):
+            return True
+    return False
+
+
+def try_emit_batched_controlled_operations(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    operations: list[Operation],
+    control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+    walker: Callable[..., None],
+) -> bool:
+    """Emit a controlled block body behind a single shared AND ladder.
+
+    When a block body emits several gates under the same composed
+    controls, lowering each gate through its own Toffoli cascade rebuilds
+    the same AND ladder per gate — the uncompute of one gate and the
+    recompute of the next cancel. This helper instead ANDs the controls
+    onto one ancilla once, walks the whole body under that single control,
+    then uncomputes the ladder once. Nested controlled-U operations
+    compose ``[and_ancilla]`` with their own controls and re-enter
+    ``walker``, which batches again from the advanced pool offset; loops
+    are batched before iteration expansion, so the ladder is hoisted out.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass (must hold a
+            ``_mc_ancilla_pool``).
+        circuit (Any): Backend circuit being emitted into.
+        operations (list[Operation]): Controlled block body operations.
+        control_indices (list[int]): Composed physical control qubits.
+        qubit_map (QubitMap): Mutable block-local qubit map.
+        bindings (dict[str, Any]): Bindings visible inside the block.
+        walker (Callable[..., None]): The controlled-body walker to run
+            under the single AND control (its own signature).
+
+    Returns:
+        bool: True when the body was batched, False when the caller should
+            fall back to per-gate emission (fewer than two controls, no
+            pool, insufficient weight, the two-control guard, or a pool
+            that cannot spare the ladder).
+    """
+    num_controls = len(control_indices)
+    if num_controls < 2:
+        return False
+    pool = emit_pass._mc_ancilla_pool
+    if pool is None:
+        return False
+    if (
+        _controlled_body_batch_weight(emit_pass, operations, bindings)
+        < _BATCH_MIN_WEIGHT
+    ):
+        return False
+    if num_controls == 2 and not _body_has_rotation_like_leaf(operations):
+        return False
+    with pool.try_hold(num_controls - 1) as ancillas:
+        if ancillas is None:
+            # The demand estimate legitimately reserved fewer ancillas than
+            # a batch would want (e.g. a sibling whose demand dominates);
+            # fall back to per-gate lowering rather than over-reserving.
+            return False
+        steps = _and_ladder_steps(control_indices, ancillas)
+        _emit_toffoli_steps(emit_pass._emitter, circuit, steps)
+        walker(
+            emit_pass,
+            circuit,
+            operations,
+            [ancillas[num_controls - 2]],
+            qubit_map,
+            bindings,
+        )
+        _emit_toffoli_steps(emit_pass._emitter, circuit, reversed(steps))
+    return True
+
+
 def emit_controlled_operations(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -219,6 +464,16 @@ def emit_controlled_operations(
             transpile time, or an operation kind is unsupported in
             controlled decomposition.
     """
+    if try_emit_batched_controlled_operations(
+        emit_pass,
+        circuit,
+        operations,
+        control_indices,
+        qubit_map,
+        bindings,
+        walker=emit_controlled_operations,
+    ):
+        return
     for op in operations:
         if isinstance(op, GateOperation):
             gate_targets = _resolve_controlled_gate_targets(

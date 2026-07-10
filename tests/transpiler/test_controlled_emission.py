@@ -469,3 +469,74 @@ def test_resolve_controlled_u_rejects_control_indices_with_multi_arg_prefix() ->
     }
     with pytest.raises(EmitError, match="exactly one control-pool operand"):
         resolve_controlled_u_call(_ResolverOnlyEmitPass(), op, qubit_map, {})
+
+
+def test_batched_multi_gate_body_shares_one_and_ladder() -> None:
+    """A multi-gate body under >=2 controls emits one shared AND ladder.
+
+    The walker ANDs the three controls onto ancilla 11 once, applies RY
+    then RZ under that single control, and uncomputes the ladder once — so
+    the recorded sequence is ladder / cry / crz / reverse-ladder, four
+    Toffolis rather than one full cascade per gate.
+    """
+    pool = MultiControlAncillaPool(first_index=10, count=2)
+    emit_pass = _MultiControlEmitPass(ancilla_pool=pool)
+
+    q = Value(type=QubitType(), name="q")
+    q1 = q.next_version()
+    q2 = q1.next_version()
+    ry = GateOperation.rotation(
+        GateOperationType.RY,
+        [q],
+        Value(type=FloatType(), name="a").with_const(0.5),
+        [q1],
+    )
+    rz = GateOperation.rotation(
+        GateOperationType.RZ,
+        [q1],
+        Value(type=FloatType(), name="b").with_const(0.7),
+        [q2],
+    )
+
+    emit_controlled_operations(
+        emit_pass, object(), [ry, rz], [0, 1, 2], {QubitAddress(q.uuid): 3}, {}
+    )
+
+    assert emit_pass._emitter.calls == [
+        ("toffoli", 0, 1, 10),
+        ("toffoli", 2, 10, 11),
+        ("cry", 11, 3, 0.5),
+        ("crz", 11, 3, 0.7),
+        ("toffoli", 2, 10, 11),
+        ("toffoli", 0, 1, 10),
+    ]
+
+
+def test_batched_two_control_all_native_body_uses_per_gate_toffolis() -> None:
+    """A two-control body of native X gates is not batched.
+
+    Under exactly two controls each X is already a native Toffoli, so the
+    two-control guard keeps the per-gate path: the recorded sequence is one
+    Toffoli per X and no AND ladder / ancilla indirection.
+    """
+    pool = MultiControlAncillaPool(first_index=10, count=1)
+    emit_pass = _MultiControlEmitPass(ancilla_pool=pool)
+
+    qa = Value(type=QubitType(), name="a")
+    qb = Value(type=QubitType(), name="b")
+    xa = GateOperation.fixed(GateOperationType.X, [qa], [qa.next_version()])
+    xb = GateOperation.fixed(GateOperationType.X, [qb], [qb.next_version()])
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        [xa, xb],
+        [0, 1],
+        {QubitAddress(qa.uuid): 3, QubitAddress(qb.uuid): 4},
+        {},
+    )
+
+    assert emit_pass._emitter.calls == [
+        ("toffoli", 0, 1, 3),
+        ("toffoli", 0, 1, 4),
+    ]

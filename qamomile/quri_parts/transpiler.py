@@ -47,6 +47,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     map_nested_controlled_u_results,
     resolve_controlled_u_call,
     resolve_power,
+    try_emit_batched_controlled_operations,
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
@@ -581,6 +582,16 @@ def _emit_quri_controlled_operations(
         EmitError: If an operation cannot be emitted by the guarded QURI
             Parts recursive fallback.
     """
+    if try_emit_batched_controlled_operations(
+        emit_pass,
+        circuit,
+        list(operations),
+        control_indices,
+        qubit_map,
+        bindings,
+        walker=_emit_quri_controlled_operations,
+    ):
+        return
     for op in operations:
         if isinstance(op, ReturnOperation):
             continue
