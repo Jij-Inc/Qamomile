@@ -316,13 +316,26 @@ class CountingEmitter:
         return bool(self._real.supports_for_loop())
 
     def emit_for_loop_start(self, circuit: Any, indexset: range) -> Any:
-        """No-op native for-loop start.
+        """Return a placeholder loop variable for a native-for-loop count.
+
+        Unlike the other control-flow hooks, ``emit_for``'s return value is
+        bound as the loop variable (via ``_bind_loop_var``) and the body is
+        then walked once. A real native-loop emitter returns a symbolic
+        loop parameter, so return the arithmetic-absorbing
+        :class:`_CountingParameter` rather than ``None`` — otherwise a
+        body that carries the loop value into an angle or index expression
+        during counting would see ``None`` and fail. (No pool-reserving
+        backend supports native for loops today, so this is future-proofing.)
+
+        Args:
+            circuit (Any): Ignored.
+            indexset (range): Ignored.
 
         Returns:
-            Any: A null context (the counting walk emits the body once).
+            _CountingParameter: A placeholder loop variable.
         """
         del circuit, indexset
-        return None
+        return _CountingParameter()
 
     def emit_for_loop_end(self, circuit: Any, context: Any) -> None:
         """No-op native for-loop end."""
