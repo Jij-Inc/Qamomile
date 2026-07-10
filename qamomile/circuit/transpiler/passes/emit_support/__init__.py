@@ -8,6 +8,7 @@ from .condition_resolution import (
 )
 from .control_flow_emission import resolve_condition_address
 from .loop_analyzer import LoopAnalyzer
+from .multi_control_ancilla import MultiControlAncillaPool
 from .qubit_address import ClbitMap, QubitAddress, QubitMap
 from .resource_allocator import ResourceAllocator
 from .value_resolver import QubitResolutionResult, ValueResolver, resolve_qubit_key
@@ -16,6 +17,7 @@ __all__ = [
     "ClbitMap",
     "CompositeDecomposer",
     "LoopAnalyzer",
+    "MultiControlAncillaPool",
     "QubitAddress",
     "QubitMap",
     "QubitResolutionResult",
