@@ -110,7 +110,15 @@ class MultiControlAncillaPool:
                 (an estimation bug surfaced by the caller). In counting
                 mode the request always succeeds and the peak usage is
                 recorded instead.
+
+        Raises:
+            ValueError: If ``count`` is negative — a caller bug rather than
+                a shortfall, which a plain ``> count`` check would silently
+                turn into an empty list (and, via ``try_hold``, a negative
+                offset).
         """
+        if count < 0:
+            raise ValueError(f"Ancilla request count must be non-negative, got {count}.")
         if self._counting:
             self._peak = max(self._peak, self._offset + count)
         elif self._offset + count > self._count:

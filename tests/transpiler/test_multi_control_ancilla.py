@@ -28,6 +28,16 @@ def test_pool_take_shortfall_returns_none() -> None:
     assert pool.take(2) is None
 
 
+def test_pool_take_rejects_negative_count() -> None:
+    """A negative request is a caller bug and raises, not a silent empty list."""
+    pool = MultiControlAncillaPool(first_index=7, count=3)
+    with pytest.raises(ValueError, match="non-negative"):
+        pool.take(-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        with pool.try_hold(-1):
+            pass
+
+
 def test_pool_try_hold_advances_offset_so_take_draws_after_held_range() -> None:
     """While a hold is active, take() hands out qubits after the held range."""
     pool = MultiControlAncillaPool(first_index=10, count=5)
