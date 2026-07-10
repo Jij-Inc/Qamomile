@@ -55,53 +55,110 @@ class _CountingParameter:
         return _CountingParameter()
 
     def __add__(self, other: Any) -> "_CountingParameter":
-        """Absorb ``self + other``."""
+        """Absorb ``self + other``.
+
+        Args:
+            other (Any): Ignored right operand.
+
+        Returns:
+            _CountingParameter: A fresh placeholder parameter.
+        """
         return self._absorb(other)
 
     __radd__ = __add__
 
     def __sub__(self, other: Any) -> "_CountingParameter":
-        """Absorb ``self - other``."""
+        """Absorb ``self - other``.
+
+        Args:
+            other (Any): Ignored right operand.
+
+        Returns:
+            _CountingParameter: A fresh placeholder parameter.
+        """
         return self._absorb(other)
 
     __rsub__ = __sub__
 
     def __mul__(self, other: Any) -> "_CountingParameter":
-        """Absorb ``self * other``."""
+        """Absorb ``self * other``.
+
+        Args:
+            other (Any): Ignored right operand.
+
+        Returns:
+            _CountingParameter: A fresh placeholder parameter.
+        """
         return self._absorb(other)
 
     __rmul__ = __mul__
 
     def __truediv__(self, other: Any) -> "_CountingParameter":
-        """Absorb ``self / other``."""
+        """Absorb ``self / other``.
+
+        Args:
+            other (Any): Ignored right operand.
+
+        Returns:
+            _CountingParameter: A fresh placeholder parameter.
+        """
         return self._absorb(other)
 
     __rtruediv__ = __truediv__
 
     def __floordiv__(self, other: Any) -> "_CountingParameter":
-        """Absorb ``self // other``."""
+        """Absorb ``self // other``.
+
+        Args:
+            other (Any): Ignored right operand.
+
+        Returns:
+            _CountingParameter: A fresh placeholder parameter.
+        """
         return self._absorb(other)
 
     __rfloordiv__ = __floordiv__
 
     def __mod__(self, other: Any) -> "_CountingParameter":
-        """Absorb ``self % other``."""
+        """Absorb ``self % other``.
+
+        Args:
+            other (Any): Ignored right operand.
+
+        Returns:
+            _CountingParameter: A fresh placeholder parameter.
+        """
         return self._absorb(other)
 
     __rmod__ = __mod__
 
     def __pow__(self, other: Any) -> "_CountingParameter":
-        """Absorb ``self ** other``."""
+        """Absorb ``self ** other``.
+
+        Args:
+            other (Any): Ignored right operand.
+
+        Returns:
+            _CountingParameter: A fresh placeholder parameter.
+        """
         return self._absorb(other)
 
     __rpow__ = __pow__
 
     def __neg__(self) -> "_CountingParameter":
-        """Absorb ``-self``."""
+        """Absorb ``-self``.
+
+        Returns:
+            _CountingParameter: A fresh placeholder parameter.
+        """
         return _CountingParameter()
 
     def __pos__(self) -> "_CountingParameter":
-        """Absorb ``+self``."""
+        """Absorb ``+self``.
+
+        Returns:
+            _CountingParameter: A fresh placeholder parameter.
+        """
         return _CountingParameter()
 
 
@@ -175,84 +232,235 @@ class CountingEmitter:
         return _CountingParameter()
 
     def emit_h(self, circuit: Any, qubit: int) -> None:
-        """No-op H."""
+        """Count an H gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+        """
 
     def emit_x(self, circuit: Any, qubit: int) -> None:
-        """No-op X."""
+        """Count an X gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+        """
 
     def emit_y(self, circuit: Any, qubit: int) -> None:
-        """No-op Y."""
+        """Count a Y gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+        """
 
     def emit_z(self, circuit: Any, qubit: int) -> None:
-        """No-op Z."""
+        """Count a Z gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+        """
 
     def emit_s(self, circuit: Any, qubit: int) -> None:
-        """No-op S."""
+        """Count an S gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+        """
 
     def emit_t(self, circuit: Any, qubit: int) -> None:
-        """No-op T."""
+        """Count a T gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+        """
 
     def emit_sdg(self, circuit: Any, qubit: int) -> None:
-        """No-op Sdg."""
+        """Count an Sdg gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+        """
 
     def emit_tdg(self, circuit: Any, qubit: int) -> None:
-        """No-op Tdg."""
+        """Count a Tdg gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+        """
 
     def emit_rx(self, circuit: Any, qubit: int, angle: Any) -> None:
-        """No-op RX."""
+        """Count an RX gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+            angle (Any): Ignored rotation angle.
+        """
 
     def emit_ry(self, circuit: Any, qubit: int, angle: Any) -> None:
-        """No-op RY."""
+        """Count an RY gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+            angle (Any): Ignored rotation angle.
+        """
 
     def emit_rz(self, circuit: Any, qubit: int, angle: Any) -> None:
-        """No-op RZ."""
+        """Count an RZ gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+            angle (Any): Ignored rotation angle.
+        """
 
     def emit_p(self, circuit: Any, qubit: int, angle: Any) -> None:
-        """No-op P."""
+        """Count a phase gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored target qubit index.
+            angle (Any): Ignored phase angle.
+        """
 
     def emit_cx(self, circuit: Any, control: int, target: int) -> None:
-        """No-op CX."""
+        """Count a CX gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            control (int): Ignored control qubit index.
+            target (int): Ignored target qubit index.
+        """
 
     def emit_cz(self, circuit: Any, control: int, target: int) -> None:
-        """No-op CZ."""
+        """Count a CZ gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            control (int): Ignored control qubit index.
+            target (int): Ignored target qubit index.
+        """
 
     def emit_swap(self, circuit: Any, qubit1: int, qubit2: int) -> None:
-        """No-op SWAP."""
+        """Count a SWAP gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit1 (int): Ignored first qubit index.
+            qubit2 (int): Ignored second qubit index.
+        """
 
     def emit_cp(self, circuit: Any, control: int, target: int, angle: Any) -> None:
-        """No-op CP."""
+        """Count a controlled-phase gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            control (int): Ignored control qubit index.
+            target (int): Ignored target qubit index.
+            angle (Any): Ignored phase angle.
+        """
 
     def emit_rzz(self, circuit: Any, qubit1: int, qubit2: int, angle: Any) -> None:
-        """No-op RZZ."""
+        """Count an RZZ gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit1 (int): Ignored first qubit index.
+            qubit2 (int): Ignored second qubit index.
+            angle (Any): Ignored rotation angle.
+        """
 
     def emit_toffoli(
         self, circuit: Any, control1: int, control2: int, target: int
     ) -> None:
-        """No-op Toffoli."""
+        """Count a Toffoli gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            control1 (int): Ignored first control qubit index.
+            control2 (int): Ignored second control qubit index.
+            target (int): Ignored target qubit index.
+        """
 
     def emit_ch(self, circuit: Any, control: int, target: int) -> None:
-        """No-op CH."""
+        """Count a CH gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            control (int): Ignored control qubit index.
+            target (int): Ignored target qubit index.
+        """
 
     def emit_cy(self, circuit: Any, control: int, target: int) -> None:
-        """No-op CY."""
+        """Count a CY gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            control (int): Ignored control qubit index.
+            target (int): Ignored target qubit index.
+        """
 
     def emit_crx(self, circuit: Any, control: int, target: int, angle: Any) -> None:
-        """No-op CRX."""
+        """Count a CRX gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            control (int): Ignored control qubit index.
+            target (int): Ignored target qubit index.
+            angle (Any): Ignored rotation angle.
+        """
 
     def emit_cry(self, circuit: Any, control: int, target: int, angle: Any) -> None:
-        """No-op CRY."""
+        """Count a CRY gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            control (int): Ignored control qubit index.
+            target (int): Ignored target qubit index.
+            angle (Any): Ignored rotation angle.
+        """
 
     def emit_crz(self, circuit: Any, control: int, target: int, angle: Any) -> None:
-        """No-op CRZ."""
+        """Count a CRZ gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            control (int): Ignored control qubit index.
+            target (int): Ignored target qubit index.
+            angle (Any): Ignored rotation angle.
+        """
 
     def emit_measure(self, circuit: Any, qubit: int, clbit: int) -> None:
-        """No-op measurement."""
+        """Count a measurement as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubit (int): Ignored measured qubit index.
+            clbit (int): Ignored destination classical bit index.
+        """
 
     def emit_barrier(self, circuit: Any, qubits: list[int]) -> None:
-        """No-op barrier."""
+        """Count a barrier as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            qubits (list[int]): Ignored qubit indices spanned by the barrier.
+        """
 
     def circuit_to_gate(self, circuit: Any, name: str = "U") -> Any:
         """Force the fallback path by declining to build a reusable gate.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            name (str): Ignored gate name. Defaults to ``"U"``.
 
         Returns:
             Any: Always None.
@@ -261,10 +469,20 @@ class CountingEmitter:
         return None
 
     def append_gate(self, circuit: Any, gate: Any, qubits: list[int]) -> None:
-        """No-op append."""
+        """Count appending a prebuilt gate as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            gate (Any): Ignored gate object (never built in counting mode).
+            qubits (list[int]): Ignored qubit indices the gate acts on.
+        """
 
     def gate_power(self, gate: Any, power: int) -> Any:
         """Decline to build a real powered gate.
+
+        Args:
+            gate (Any): Ignored gate object.
+            power (int): Ignored exponent.
 
         Returns:
             Any: Always None.
@@ -275,6 +493,10 @@ class CountingEmitter:
     def gate_controlled(self, gate: Any, num_controls: int) -> Any:
         """Decline to build a real controlled gate.
 
+        Args:
+            gate (Any): Ignored gate object.
+            num_controls (int): Ignored number of control qubits.
+
         Returns:
             Any: Always None.
         """
@@ -283,6 +505,9 @@ class CountingEmitter:
 
     def gate_inverse(self, gate: Any) -> Any:
         """Decline to build a real inverse gate.
+
+        Args:
+            gate (Any): Ignored gate object.
 
         Returns:
             Any: Always None.
@@ -338,7 +563,12 @@ class CountingEmitter:
         return _CountingParameter()
 
     def emit_for_loop_end(self, circuit: Any, context: Any) -> None:
-        """No-op native for-loop end."""
+        """Count the end of a native for loop as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            context (Any): Ignored loop context from ``emit_for_loop_start``.
+        """
 
     def supports_if_else(self) -> bool:
         """Delegate native if/else support to the wrapped emitter.
@@ -349,19 +579,34 @@ class CountingEmitter:
         return bool(self._real.supports_if_else())
 
     def emit_if_start(self, circuit: Any, clbit: int, value: int = 1) -> Any:
-        """No-op native if start.
+        """Count the start of a native if branch as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            clbit (int): Ignored predicate classical bit index.
+            value (int): Ignored predicate value to match. Defaults to 1.
 
         Returns:
-            Any: A null context.
+            Any: Always None (a null branch context).
         """
         del circuit, clbit, value
         return None
 
     def emit_else_start(self, circuit: Any, context: Any) -> None:
-        """No-op native else start."""
+        """Count the start of a native else branch as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            context (Any): Ignored branch context from ``emit_if_start``.
+        """
 
     def emit_if_end(self, circuit: Any, context: Any) -> None:
-        """No-op native if end."""
+        """Count the end of a native if/else block as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            context (Any): Ignored branch context from ``emit_if_start``.
+        """
 
     def supports_while_loop(self) -> bool:
         """Delegate native while-loop support to the wrapped emitter.
@@ -372,13 +617,23 @@ class CountingEmitter:
         return bool(self._real.supports_while_loop())
 
     def emit_while_start(self, circuit: Any, clbit: int, value: int = 1) -> Any:
-        """No-op native while start.
+        """Count the start of a native while loop as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            clbit (int): Ignored predicate classical bit index.
+            value (int): Ignored predicate value to match. Defaults to 1.
 
         Returns:
-            Any: A null context.
+            Any: Always None (a null loop context).
         """
         del circuit, clbit, value
         return None
 
     def emit_while_end(self, circuit: Any, context: Any) -> None:
-        """No-op native while end."""
+        """Count the end of a native while loop as a no-op.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            context (Any): Ignored loop context from ``emit_while_start``.
+        """
