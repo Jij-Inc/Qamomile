@@ -955,7 +955,11 @@ class QuriPartsEmitPass(
                 initial_qubit_map=local_qubit_map,
                 initial_clbit_map=local_clbit_map,
             )
-        except (AttributeError, TypeError, ValueError, RuntimeError):
+        except (AttributeError, TypeError, ValueError, RuntimeError, EmitError):
+            # ``allocate`` raises EmitError on an unresolvable Vector[Qubit]
+            # size or a rank>1 qubit array in the source block; as before the
+            # reorg, that must decline the native inverse and fall back to
+            # the Qamomile inverse decomposition, not abort the transpile.
             return False
 
         qubit_count = (
