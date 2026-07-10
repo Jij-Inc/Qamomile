@@ -161,5 +161,11 @@ from __future__ import annotations
 # ``loop_carried_rebinds`` records on loop operations follow the same
 # additive encoding (safety caveat: a reader that predates them drops
 # the records and with them the loop-carried rebind rejection — accepted
-# under the same-revision policy above).
+# under the same-revision policy above).  ``IfOperation`` branch merges
+# moved from embedded ``phi_ops`` operation dicts to
+# ``true_yield_refs`` / ``false_yield_refs`` UUID lists parallel to
+# ``result_refs`` — the first genuinely breaking reshape under the
+# same-revision policy: pre-change payloads fail loudly (unknown
+# ``PhiOp`` tag or merge-inconsistency ``ValueError``) instead of being
+# migrated.
 SCHEMA_VERSION: int = 1
