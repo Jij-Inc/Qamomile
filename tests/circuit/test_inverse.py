@@ -45,6 +45,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
     CallableRef,
+    CallTransform,
     CompositeGateType,
     InvokeOperation,
 )
@@ -61,7 +62,6 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
-from qamomile.circuit.stdlib import IQFT, QFT
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import CircuitStyle
 from tests.circuit.conftest import run_statevector
@@ -1651,29 +1651,6 @@ def test_inverse_qft_emits_iqft_composite() -> None:
     assert [op.target.name for op in invokes] == ["qft", "iqft"]
 
 
-def test_inverse_qft_rejects_strategy_without_iqft_counterpart(monkeypatch) -> None:
-    """inverse(qkernel) rejects QFT strategies missing on IQFT."""
-    # Register a strategy name that exists only on QFT: inverting to IQFT
-    # must fail because IQFT defines no strategy of the same name.
-    monkeypatch.setitem(QFT._strategies, "qft_only", QFT._strategies["standard"])
-
-    @qmc.qkernel
-    def qft_only_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-        q0, q1 = QFT(2)(qs[0], qs[1], strategy="qft_only")
-        qs[0] = q0
-        qs[1] = q1
-        return qs
-
-    @qmc.qkernel
-    def circuit() -> qmc.Vector[qmc.Qubit]:
-        qs = qmc.qubit_array(2, "qs")
-        qs = qmc.inverse(qft_only_layer)(qs)
-        return qs
-
-    with pytest.raises(NotImplementedError, match="IQFT does not define"):
-        circuit.build()
-
-
 def test_inverse_qft_builds_iqft_invocation() -> None:
     """QFT inversion should build an IQFT invocation without resource metadata."""
     q = Value(type=QubitType(), name="q")
@@ -1792,10 +1769,9 @@ def test_inverse_oracle_builds_opaque_inverse() -> None:
 
 
 def test_inverse_accepts_qkernel_backed_composite_decorator() -> None:
-    """inverse(composite-decorated qkernel) follows the qkernel-like path."""
+    """inverse(composite) preserves one transformed callable invocation."""
 
     @qmc.composite_gate(name="boxed_h")
-    @qmc.qkernel
     def boxed_h(q: qmc.Qubit) -> qmc.Qubit:
         q = qmc.h(q)
         return q
@@ -1807,34 +1783,19 @@ def test_inverse_accepts_qkernel_backed_composite_decorator() -> None:
         return q
 
     block = circuit.build()
-    inverse_ops = [
-        op for op in block.operations if isinstance(op, InverseBlockOperation)
-    ]
+    inverse_ops = [op for op in block.operations if isinstance(op, InvokeOperation)]
 
     assert len(inverse_ops) == 1
-    assert inverse_ops[0].source_block is boxed_h.block
-    assert inverse_ops[0].implementation_block is not None
-    assert inverse_ops[0].callable_ref is not None
-    assert inverse_ops[0].callable_ref.namespace == "user.composite"
-    assert inverse_ops[0].callable_ref.name == "boxed_h"
-    assert inverse_ops[0].callable_attrs["kind"] == "composite"
-    assert inverse_ops[0].callable_attrs["custom_name"] == "boxed_h"
-    assert inverse_ops[0].callable_attrs["default_policy"] == "PRESERVE_BOX"
-
-
-@pytest.mark.parametrize(
-    "gate",
-    [
-        pytest.param(QFT(2), id="qft-instance"),
-        pytest.param(IQFT(2), id="iqft-instance"),
-    ],
-)
-def test_inverse_rejects_direct_composite_gate_instances(
-    gate: qmc.CompositeGate,
-) -> None:
-    """inverse() rejects direct CompositeGate instances with guidance."""
-    with pytest.raises(TypeError, match="CompositeGate objects"):
-        qmc.inverse(gate)
+    op = inverse_ops[0]
+    assert op.transform is CallTransform.INVERSE
+    assert op.target.namespace == "user.composite"
+    assert op.target.name == "boxed_h"
+    assert op.attrs["kind"] == "composite"
+    assert op.attrs["custom_name"] == "boxed_h"
+    assert op.attrs["default_policy"] == "PRESERVE_BOX"
+    assert op.definition is not None
+    assert op.definition.body is boxed_h.block
+    assert op.implementation_for() is not None
 
 
 def test_inverse_rejects_native_qpe_composite_marker() -> None:

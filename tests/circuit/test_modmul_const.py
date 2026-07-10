@@ -58,48 +58,23 @@ def _load_probe(a: int, x: int, n: int, modulus: int, path: str):
     return module.probe
 
 
-def test_modmul_const_non_cyclic_raises_at_transpile(sdk_transpiler, tmp_path) -> None:
-    """A non-rotation modular multiplication has no body and must not emit.
-
-    ``multiplier=7 mod 15`` is not a cyclic bit rotation, so ``modmul_const``
-    produces an estimation-only box with resource models but no executable body.
-    Transpiling it to an executable circuit must raise rather than silently emit
-    a barrier (which would run as identity and give a wrong quantum result).
-    """
-    from qamomile.circuit.transpiler.errors import EmitError
-
-    path = str(tmp_path / "noncyclic.py")
-    src = (
-        "import qamomile.circuit as qmc\n"
-        "from qamomile.circuit.stdlib.arithmetic import modmul_const\n"
-        "@qmc.qkernel\n"
-        "def noncyclic() -> qmc.Vector[qmc.Bit]:\n"
-        "    reg = qmc.qubit_array(4, name='reg')\n"
-        "    reg = modmul_const(reg, multiplier=7, modulus=15)\n"
-        "    return qmc.measure(reg)\n"
-    )
-    with open(path, "w") as handle:
-        handle.write(src)
-    spec = importlib.util.spec_from_file_location("noncyclic_mod", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
+def test_modmul_const_non_cyclic_executes(sdk_transpiler, tmp_path) -> None:
+    """A non-rotation constant uses the reversible permutation body."""
+    probe = _load_probe(7, 2, 4, 15, str(tmp_path / "noncyclic.py"))
     transpiler = sdk_transpiler.transpiler
-    with pytest.raises(EmitError, match="no executable body"):
-        transpiler.transpile(module.noncyclic)
+    executable = transpiler.transpile(probe)
+    result = executable.sample(transpiler.executor(), shots=64).result()
+
+    assert _value_of(result.most_common(1)[0][0]) == 14
 
 
-def test_modmul_const_non_cyclic_still_estimates() -> None:
-    """A non-rotation modular multiplication still produces a resource estimate.
-
-    Only *execution* is unavailable for general constants; the resource model
-    path (which never reaches emit) must remain intact.
-    """
+def test_modmul_const_non_cyclic_uses_attached_model() -> None:
+    """A non-rotation body and its scalable resource model coexist."""
 
     @qmc.qkernel
-    def mul(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-        """Multiply an n-bit register by a non-rotation constant once."""
-        reg = qmc.qubit_array(n, name="reg")
+    def mul() -> qmc.Vector[qmc.Qubit]:
+        """Multiply a four-bit register by a non-rotation constant once."""
+        reg = qmc.qubit_array(4, name="reg")
         reg = modmul_const(reg, multiplier=7, modulus=15)
         return reg
 
@@ -121,7 +96,7 @@ def test_modmul_const_rejects_non_coprime_multiplier() -> None:
 
 
 def test_modmul_const_symbolic_resource_model() -> None:
-    """A symbolic-width modmul reports ~0.15 n^2 non-Clifford via its model."""
+    """A symbolic width asks for a concrete synthesis width explicitly."""
 
     @qmc.qkernel
     def mul(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
@@ -130,15 +105,12 @@ def test_modmul_const_symbolic_resource_model() -> None:
         reg = modmul_const(reg, multiplier=2, modulus=15)
         return reg
 
-    est = mul.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
-    # Leading non-Clifford term is 0.15 n^2 (calibrated modular multiplication).
-    assert sp.limit(est.gates.non_clifford / n**2, n, sp.oo) == sp.Rational(15, 100)
-    assert est.calls.calls_by_name.get("modmul_const") == 1
+    with pytest.raises(ValueError, match="compile-time-known register width"):
+        mul.estimate_resources()
 
 
-def test_modmul_const_abstract_mode_estimates_same_as_concrete() -> None:
-    """Abstract modmul (no constant) reports the same cost as a concrete one."""
+def test_modmul_const_requires_a_real_problem_instance() -> None:
+    """Omitting arithmetic constants is no longer an estimation-only mode."""
 
     @qmc.qkernel
     def abstract(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
@@ -147,10 +119,8 @@ def test_modmul_const_abstract_mode_estimates_same_as_concrete() -> None:
         reg = modmul_const(reg)
         return reg
 
-    est = abstract.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
-    assert sp.limit(est.gates.non_clifford / n**2, n, sp.oo) == sp.Rational(15, 100)
-    assert est.calls.calls_by_name.get("modmul_const") == 1
+    with pytest.raises(TypeError, match="multiplier.*modulus"):
+        abstract.build()
 
 
 def test_modmul_const_control_coverage_assumption_matches_call() -> None:
@@ -162,17 +132,17 @@ def test_modmul_const_control_coverage_assumption_matches_call() -> None:
     """
 
     @qmc.qkernel
-    def uncontrolled(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-        """Multiply an n-bit register by a constant, no control."""
-        reg = qmc.qubit_array(n, name="reg")
+    def uncontrolled() -> qmc.Vector[qmc.Qubit]:
+        """Multiply a four-bit register by a constant, no control."""
+        reg = qmc.qubit_array(4, name="reg")
         reg = modmul_const(reg, multiplier=2, modulus=15)
         return reg
 
     @qmc.qkernel
-    def controlled(n: qmc.UInt) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
-        """Multiply an n-bit register by a constant, conditioned on a control."""
+    def controlled() -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
+        """Multiply a four-bit register, conditioned on a control."""
         ctrl = qmc.qubit("c")
-        reg = qmc.qubit_array(n, name="reg")
+        reg = qmc.qubit_array(4, name="reg")
         ctrl, reg = modmul_const(reg, multiplier=2, modulus=15, control=ctrl)
         return ctrl, reg
 
@@ -191,8 +161,8 @@ def test_modmul_const_control_coverage_assumption_matches_call() -> None:
     assert sp.simplify(plain.gates.non_clifford - ctrl.gates.non_clifford) == 0
 
 
-def test_modmul_const_requires_both_or_neither_constant() -> None:
-    """Supplying only one of multiplier/modulus is rejected."""
+def test_modmul_const_requires_both_constants() -> None:
+    """Supplying only one arithmetic constant is a normal signature error."""
 
     @qmc.qkernel
     def half() -> qmc.Vector[qmc.Qubit]:
@@ -200,13 +170,12 @@ def test_modmul_const_requires_both_or_neither_constant() -> None:
         reg = qmc.qubit_array(4, name="reg")
         return modmul_const(reg, multiplier=2)
 
-    with pytest.raises(ValueError, match="both given"):
+    with pytest.raises(TypeError, match="modulus"):
         half.build()
 
 
-def test_modmul_const_abstract_mode_is_estimation_only(sdk_transpiler) -> None:
-    """Abstract modmul has no executable body and must not transpile."""
-    from qamomile.circuit.transpiler.errors import EmitError
+def test_modmul_const_has_no_abstract_execution_mode(sdk_transpiler) -> None:
+    """The removed no-argument form fails before backend lowering."""
 
     @qmc.qkernel
     def abstract() -> qmc.Vector[qmc.Bit]:
@@ -215,9 +184,8 @@ def test_modmul_const_abstract_mode_is_estimation_only(sdk_transpiler) -> None:
         reg = modmul_const(reg)
         return qmc.measure(reg)
 
-    transpiler = sdk_transpiler.transpiler
-    with pytest.raises(EmitError, match="no executable body"):
-        transpiler.transpile(abstract)
+    with pytest.raises(TypeError, match="multiplier.*modulus"):
+        sdk_transpiler.transpiler.transpile(abstract)
 
 
 @pytest.mark.parametrize("a", [2, 4, 8])

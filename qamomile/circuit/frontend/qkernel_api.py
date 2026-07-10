@@ -33,6 +33,7 @@ class QKernelBuildMixin:
         policy: Any = None,
         cost_basis: Any = None,
         strategies: dict[str, str] | None = None,
+        trace: bool = False,
         unknown_policy: Any = None,
     ) -> ResourceEstimate:
         """Estimate all resources for this kernel's circuit.
@@ -55,6 +56,8 @@ class QKernelBuildMixin:
                 ``None``, meaning the estimator default is used.
             strategies (dict[str, str] | None): Callable strategy overrides.
                 Defaults to ``None``.
+            trace (bool): Whether to retain the explanation tree. Defaults to
+                ``False``.
             unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
                 Defaults to ``None``.
 
@@ -80,6 +83,7 @@ class QKernelBuildMixin:
             policy=policy,
             cost_basis=cost_basis,
             strategies=strategies,
+            trace=trace,
             unknown_policy=unknown_policy,
         )
 

@@ -3641,36 +3641,38 @@ class TestControlledGate:
             QuriPartsTranspiler().transpile(circuit, parameters=["theta"])
 
 
+@qmc.composite_gate(name="bell_pair")
+def _custom_bell_pair(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Prepare a Bell pair through the public composite API.
+
+    Args:
+        q0 (qmc.Qubit): Control qubit.
+        q1 (qmc.Qubit): Target qubit.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Updated Bell-pair qubits.
+    """
+    q0 = qmc.h(q0)
+    return qmc.cx(q0, q1)
+
+
 class TestCustomCompositeGate:
-    """Test custom CompositeGate through the QuriParts pipeline.
+    """Test a custom composite qkernel through the QuriParts pipeline.
 
     When circuit_to_gate() returns None, _emit_custom_composite falls
     back to manually emitting the sub-circuit's operations inline.
     """
 
     def test_custom_composite_transpiles(self):
-        """Custom CompositeGate (BellPair) decomposes and transpiles."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return (q0, q1)
-
-        bell = BellPair()
+        """A custom Bell composite decomposes and transpiles."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit)
@@ -3686,28 +3688,12 @@ class TestCustomCompositeGate:
         )
 
     def test_composite_statevector(self):
-        """BellPair CompositeGate produces Bell state |Φ+⟩."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return (q0, q1)
-
-        bell = BellPair()
+        """The Bell composite produces |Phi+>."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit)
@@ -3719,28 +3705,12 @@ class TestCustomCompositeGate:
         assert statevectors_equal(sv, expected)
 
     def test_composite_gate_counts(self):
-        """BellPair decomposes to exactly 1 H + 1 CNOT."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return (q0, q1)
-
-        bell = BellPair()
+        """The Bell composite decomposes to exactly 1 H + 1 CNOT."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit)

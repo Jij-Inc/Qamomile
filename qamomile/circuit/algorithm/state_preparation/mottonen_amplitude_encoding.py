@@ -28,14 +28,12 @@ complex amplitudes work end-to-end.
     these helpers immediately after ``qmc.qubit_array(n, ...)``
     inside a kernel.
 
-This module hosts only the **gate-emission side** of the algorithm:
-the ``MottonenAmplitudeEncoding`` ``CompositeGate``, the function
-wrappers ``amplitude_encoding`` / ``amplitude_encoding_from_angles``,
-and the Gray-walk emitter ``_emit_mottonen_gates``.  The classical
-angle precomputation lives in :mod:`qamomile.linalg.mottonen` so that
-hybrid loops can call ``compute_mottonen_amplitude_encoding_*_angles``
-outside any kernel and feed the result back through
-``amplitude_encoding_from_angles`` with ``parameters=[...]``.
+This module hosts the gate-emission side of the algorithm. The public
+``amplitude_encoding`` helper creates one QKernel-backed composite for concrete
+amplitudes, while ``amplitude_encoding_from_angles`` emits the parametric
+Gray-walk directly. Classical angle precomputation lives in
+:mod:`qamomile.linalg.mottonen` so hybrid loops can compute angles outside a
+kernel and bind them as runtime parameters.
 
 Pipeline
 --------
@@ -72,23 +70,10 @@ Pipeline
    with arbitrary (non-disentangling) per-level angles.  Within each
    level the order RY-before-RZ is preserved in both schemes.
 
-Lazy angle precomputation
--------------------------
-
-``MottonenAmplitudeEncoding.__init__`` runs the cheap normalisation
-pass eagerly (``O(2^n)``) so input errors — wrong shape, length not a
-power of two, all-zero amplitudes — surface at construction time.  The
-expensive angle precomputation (``O(n * 2^n)``) is deferred: it runs
-lazily on the first ``_decompose()`` call and is cached afterwards.
-
-In practice the surrounding ``CompositeGate.__call__`` framework
-eagerly invokes ``_decompose()`` when the gate is invoked inside a
-``@qkernel`` (to populate the invocation's ``CallableDef.body``), so
-kernel-side ``estimate_resources()`` does still pay the angle cost
-today. The lazy aspect is the right shape for a future framework
-refactor that defers decomposition-body construction until emit time,
-and is verified standalone by
-``tests.circuit.algorithm.state_preparation.test_mottonen_amplitude_encoding.TestLazyConstruction``.
+``_MottonenAngles`` validates and normalizes eagerly, then caches the more
+expensive angle precomputation. It is an internal classical helper rather than a
+second frontend gate type; the only frontend object produced here is a normal
+``QKernel`` decorated with ``@composite_gate``.
 """
 
 from __future__ import annotations
@@ -97,11 +82,11 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from qamomile.circuit.frontend.composite_gate import CompositeGate
+from qamomile.circuit.frontend.composite_gate import composite_gate
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector
 from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.qubit_gates import cx, ry, rz
-from qamomile.circuit.ir.operation.callable import CompositeGateType
+from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.linalg.mottonen import (
     compute_all_ry_angles_per_level,
     compute_disentangling_angles_per_level,
@@ -109,7 +94,6 @@ from qamomile.linalg.mottonen import (
 )
 
 __all__ = [
-    "MottonenAmplitudeEncoding",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
 ]
@@ -228,7 +212,7 @@ def _emit_mottonen_gates(
 # ---------------------------------------------------------------------------
 
 
-class MottonenAmplitudeEncoding(CompositeGate):
+class _MottonenAngles:
     """Möttönen amplitude encoding for normalised real or complex vectors.
 
     Prepares the state :math:`\\sum_i a_i |i\\rangle` from
@@ -269,17 +253,11 @@ class MottonenAmplitudeEncoding(CompositeGate):
 
     Example::
 
-        # Real amplitudes (signed allowed)
-        gate = MottonenAmplitudeEncoding([1.0, 0.0, 0.0, 1.0])
-        q0, q1 = gate(q0, q1)
-
-        # Complex amplitudes
-        gate = MottonenAmplitudeEncoding([1+0j, 1j, -1+0j, -1j])
-        q0, q1 = gate(q0, q1)
+        @qmc.qkernel
+        def prepare() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(2, "q")
+            return amplitude_encoding(q, [1.0, 0.0, 0.0, 1.0])
     """
-
-    gate_type = CompositeGateType.CUSTOM
-    custom_name = "mottonen_amplitude_encoding"
 
     def __init__(self, amplitudes: Sequence[float] | Sequence[complex] | np.ndarray):
         """Initialise the gate with a concrete amplitude vector.
@@ -292,17 +270,9 @@ class MottonenAmplitudeEncoding(CompositeGate):
         (``O(n * 2^n)``) stays deferred: it runs lazily on the first
         ``_decompose()`` call and is cached afterwards.
 
-        This keeps the dominant cost of Möttönen out of
-        kernel-build time when the gate is later only used for
-        resource estimation.  In practice the
-        ``CompositeGate.__call__`` framework eagerly invokes
-        ``_decompose()`` to build the implementation block when the
-        gate is invoked inside a ``@qkernel``, so the lazy aspect
-        currently bites only for code that constructs
-        ``MottonenAmplitudeEncoding`` standalone — but the laziness
-        still matters there, and is the right shape for a future
-        framework refactor that defers ``_decompose()`` until emit
-        time.
+        The helper is internal and independent of frontend tracing. Its cached
+        angles are consumed when ``amplitude_encoding`` builds the executable
+        composite body.
 
         Args:
             amplitudes (Sequence[float] | Sequence[complex] | np.ndarray):
@@ -391,7 +361,44 @@ class MottonenAmplitudeEncoding(CompositeGate):
                 float(a) for a in np.concatenate(self._rz_angles_per_level_cache)
             ]
             _emit_mottonen_gates(qubit_list, self._num_qubits, rz_angles, gate="rz")
+        if isinstance(qubits, Vector):
+            for index, qubit in enumerate(qubit_list):
+                qubits[index] = qubit
         return tuple(qubit_list)
+
+
+def _mottonen_composite(
+    amplitudes: Sequence[float] | Sequence[complex] | np.ndarray,
+) -> tuple[QKernel[..., Vector[Qubit]], int]:
+    """Build a body-backed composite qkernel for concrete amplitudes.
+
+    Args:
+        amplitudes (Sequence[float] | Sequence[complex] | np.ndarray): Target
+            amplitude vector.
+
+    Returns:
+        tuple[QKernel[..., Vector[Qubit]], int]: Named composite qkernel and its
+        required register width.
+
+    Raises:
+        ValueError: If the amplitudes fail Möttönen input validation.
+    """
+    angles = _MottonenAngles(amplitudes)
+
+    @composite_gate(name="mottonen_amplitude_encoding")
+    def kernel(qubits: Vector[Qubit]) -> Vector[Qubit]:
+        """Apply the concrete Möttönen primitive decomposition.
+
+        Args:
+            qubits (Vector[Qubit]): Register to prepare.
+
+        Returns:
+            Vector[Qubit]: Prepared register.
+        """
+        angles._decompose(qubits)
+        return qubits
+
+    return kernel, angles.num_target_qubits
 
 
 # ---------------------------------------------------------------------------
@@ -405,11 +412,10 @@ def amplitude_encoding(
 ) -> Vector[Qubit]:
     """Apply Möttönen amplitude encoding to *qubits* in place.
 
-    Convenience wrapper around :class:`MottonenAmplitudeEncoding` that
-    accepts a ``Vector`` handle and writes the gated qubits back into
-    the same vector.  Real and complex amplitudes are both supported;
-    see the class docstring for the gate-count tradeoff between the two
-    paths.
+    Creates a QKernel-backed composite specialized to the concrete amplitude
+    data, then applies it to the supplied ``Vector``. Real and complex
+    amplitudes are both supported; complex data adds the phase-restoration RZ
+    stage.
 
     .. important::
 
@@ -518,19 +524,14 @@ def amplitude_encoding(
     else:
         concrete_amplitudes = amplitudes
 
-    gate = MottonenAmplitudeEncoding(concrete_amplitudes)
-    if gate.num_target_qubits != n:
+    gate, required_qubits = _mottonen_composite(concrete_amplitudes)
+    if required_qubits != n:
         raise ValueError(
-            f"amplitude_encoding requires {gate.num_target_qubits} qubits "
+            f"amplitude_encoding requires {required_qubits} qubits "
             f"for an amplitude vector of length {len(concrete_amplitudes)}, "
             f"got {n}"
         )
-
-    qubit_list: list[Qubit] = [qubits[i] for i in range(n)]
-    result = gate(*qubit_list)
-    for i in range(n):
-        qubits[i] = result[i]
-    return qubits
+    return gate(qubits)
 
 
 def amplitude_encoding_from_angles(
@@ -564,12 +565,10 @@ def amplitude_encoding_from_angles(
     amplitude vectors without recompilation — useful inside hybrid
     optimisation loops.
 
-    Unlike :func:`amplitude_encoding`, this function does NOT wrap the
-    emission in a :class:`MottonenAmplitudeEncoding` ``CompositeGate``
-    box on the IR side; the Ry / Rz / CNOT Gray-walk gates are emitted
-    directly into the surrounding kernel.  Resource estimation /
-    visualization will therefore see the elementary gates rather than
-    a single high-level op.
+    Unlike :func:`amplitude_encoding`, this function does not create a named
+    composite invocation. The Ry / Rz / CNOT Gray-walk gates are emitted
+    directly into the surrounding kernel, so resource estimation and
+    visualization see the elementary operations.
 
     Args:
         qubits (Vector[Qubit]): Vector of ``n`` qubit handles, expected

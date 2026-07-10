@@ -3,7 +3,6 @@
 import pytest
 
 import qamomile.circuit as qm
-from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
@@ -640,24 +639,14 @@ class TestCallOperationsConsume:
 
     def test_composite_gate_call_consumes_target_qubit(self):
         """Reusing qubit after CompositeGate call should raise QubitConsumedError."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
 
-        class SimpleH(CompositeGate):
-            custom_name = "simple_h"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                (q,) = qubits
-                return (qm.h(q),)
-
-        gate = SimpleH()
+        @qm.composite_gate(name="simple_h")
+        def gate(q: Qubit) -> Qubit:
+            return qm.h(q)
 
         @qkernel
         def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
-            (q2,) = gate(q)
+            q2 = gate(q)
             q3 = qm.x(q)  # ERROR: q consumed by gate call
             return q2, q3
 
@@ -666,25 +655,16 @@ class TestCallOperationsConsume:
 
     def test_composite_gate_call_consumes_control_qubit(self):
         """Reusing control qubit after CompositeGate call should raise QubitConsumedError."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
 
-        class ControlledH(CompositeGate):
-            custom_name = "controlled_h"
-            num_control_qubits = 1
+        @qm.composite_gate(name="controlled_h")
+        def base_gate(q: Qubit) -> Qubit:
+            return qm.h(q)
 
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                (q,) = qubits
-                return (qm.h(q),)
-
-        gate = ControlledH()
+        gate = qm.control(base_gate)
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
-            ctrl_out, tgt_out = gate(tgt, controls=(ctrl,))
+            ctrl_out, tgt_out = gate(ctrl, tgt)
             ctrl_reuse = qm.x(ctrl)  # ERROR: ctrl consumed by gate call
             return ctrl_out, tgt_out, ctrl_reuse
 
@@ -1233,48 +1213,21 @@ class TestCustomCompositeGateAffine:
     """Custom composite gates must enforce affine usage on their qubit arguments."""
 
     def _make_single_qubit_composite(self):
-        class CustomSingleQubit(CompositeGate):
-            custom_name = "custom_h"
+        @qm.composite_gate(name="custom_h")
+        def custom_h(q: Qubit) -> Qubit:
+            return qm.h(q)
 
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                (q,) = qubits
-                return (qm.h(q),)
-
-        return CustomSingleQubit()
+        return custom_h
 
     def _make_two_qubit_composite(self):
-        class CustomTwoQubit(CompositeGate):
-            custom_name = "custom_cx"
+        @qm.composite_gate(name="custom_cx")
+        def custom_cx(q0: Qubit, q1: Qubit) -> tuple[Qubit, Qubit]:
+            return qm.cx(q0, q1)
 
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits):
-                q0, q1 = qubits
-                q0, q1 = qm.cx(q0, q1)
-                return (q0, q1)
-
-        return CustomTwoQubit()
+        return custom_cx
 
     def _make_controlled_composite(self):
-        class CustomControlled(CompositeGate):
-            custom_name = "custom_ctrl_h"
-            num_control_qubits = 1
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                (q,) = qubits
-                return (qm.h(q),)
-
-        return CustomControlled()
+        return qm.control(self._make_single_qubit_composite())
 
     def test_single_qubit_composite_double_use_raises(self):
         """Reusing qubit after single-qubit composite gate should raise QubitConsumedError."""
@@ -1282,7 +1235,7 @@ class TestCustomCompositeGateAffine:
 
         @qkernel
         def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
-            (q2,) = gate(q)
+            q2 = gate(q)
             q3 = qm.x(q)  # q already consumed
             return q2, q3
 
@@ -1295,7 +1248,7 @@ class TestCustomCompositeGateAffine:
 
         @qkernel
         def good_circuit(q: Qubit) -> Qubit:
-            (q,) = gate(q)
+            q = gate(q)
             q = qm.x(q)
             return q
 
@@ -1362,7 +1315,7 @@ class TestCustomCompositeGateAffine:
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
-            ctrl_out, tgt_out = gate(tgt, controls=(ctrl,))
+            ctrl_out, tgt_out = gate(ctrl, tgt)
             ctrl_bad = qm.x(ctrl)  # ctrl already consumed
             return ctrl_out, tgt_out, ctrl_bad
 
@@ -1375,7 +1328,7 @@ class TestCustomCompositeGateAffine:
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
-            ctrl_out, tgt_out = gate(tgt, controls=(ctrl,))
+            ctrl_out, tgt_out = gate(ctrl, tgt)
             tgt_bad = qm.x(tgt)  # tgt already consumed
             return ctrl_out, tgt_out, tgt_bad
 
@@ -1388,7 +1341,7 @@ class TestCustomCompositeGateAffine:
 
         @qkernel
         def good_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit]:
-            ctrl, tgt = gate(tgt, controls=(ctrl,))
+            ctrl, tgt = gate(ctrl, tgt)
             return ctrl, tgt
 
         graph = good_circuit.build()
@@ -1755,47 +1708,20 @@ _DIRECT_ELEMENT_FORBIDDEN_ERRORS = (
 )
 
 
-class _SingleRebindComposite(CompositeGate):
-    custom_name = "single_rebind_comp"
-
-    @property
-    def num_target_qubits(self) -> int:
-        return 1
-
-    def _decompose(self, qubits):
-        (q0,) = qubits
-        q0 = qm.h(q0)
-        return (q0,)
+@qm.composite_gate(name="single_rebind_comp")
+def _single_rebind_composite(q0: qm.Qubit) -> qm.Qubit:
+    return qm.h(q0)
 
 
-class _TwoRebindComposite(CompositeGate):
-    custom_name = "two_rebind_comp"
-
-    @property
-    def num_target_qubits(self) -> int:
-        return 2
-
-    def _decompose(self, qubits):
-        q0, q1 = qubits
-        q0, q1 = qm.cx(q0, q1)
-        return q0, q1
+@qm.composite_gate(name="two_rebind_comp")
+def _two_rebind_composite(
+    q0: qm.Qubit,
+    q1: qm.Qubit,
+) -> tuple[qm.Qubit, qm.Qubit]:
+    return qm.cx(q0, q1)
 
 
-class _ControlledRebindComposite(CompositeGate):
-    custom_name = "controlled_rebind_comp"
-
-    @property
-    def num_target_qubits(self) -> int:
-        return 1
-
-    @property
-    def num_control_qubits(self) -> int:
-        return 1
-
-    def _decompose(self, qubits):
-        (q0,) = qubits
-        q0 = qm.h(q0)
-        return (q0,)
+_controlled_rebind_composite = qm.control(_single_rebind_composite)
 
 
 def _make_rebind_subkernels():
@@ -2353,7 +2279,7 @@ class TestQuantumRebindDetectionComposite:
     """Composite gate rebind behavior and controlled-call regression."""
 
     def test_single_qubit_composite_overwrite_rejected(self):
-        gate = _SingleRebindComposite()
+        gate = _single_rebind_composite
 
         with pytest.raises(QubitRebindError):
 
@@ -2363,7 +2289,7 @@ class TestQuantumRebindDetectionComposite:
                 return a
 
     def test_single_qubit_composite_self_update_allowed(self):
-        gate = _SingleRebindComposite()
+        gate = _single_rebind_composite
 
         @qkernel
         def ok(a: qm.Qubit) -> qm.Qubit:
@@ -2374,7 +2300,7 @@ class TestQuantumRebindDetectionComposite:
         assert graph is not None
 
     def test_single_qubit_composite_new_binding_allowed(self):
-        gate = _SingleRebindComposite()
+        gate = _single_rebind_composite
 
         @qkernel
         def ok(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
@@ -2385,7 +2311,7 @@ class TestQuantumRebindDetectionComposite:
         assert graph is not None
 
     def test_two_qubit_composite_tuple_mismatch_rejected(self):
-        gate = _TwoRebindComposite()
+        gate = _two_rebind_composite
 
         with pytest.raises(QubitRebindError):
 
@@ -2397,7 +2323,7 @@ class TestQuantumRebindDetectionComposite:
                 return q1, q2
 
     def test_two_qubit_composite_self_update_allowed(self):
-        gate = _TwoRebindComposite()
+        gate = _two_rebind_composite
 
         @qkernel
         def ok(q1: qm.Qubit, q2: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
@@ -2408,7 +2334,7 @@ class TestQuantumRebindDetectionComposite:
         assert graph is not None
 
     def test_two_qubit_composite_new_binding_allowed(self):
-        gate = _TwoRebindComposite()
+        gate = _two_rebind_composite
 
         @qkernel
         def ok(
@@ -2420,12 +2346,12 @@ class TestQuantumRebindDetectionComposite:
         graph = ok.build()
         assert graph is not None
 
-    def test_controlled_composite_keyword_controls_allowed(self):
-        gate = _ControlledRebindComposite()
+    def test_controlled_composite_uses_control_transform(self):
+        gate = _controlled_rebind_composite
 
         @qkernel
         def circuit(ctrl: qm.Qubit, tgt: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
-            ctrl, tgt = gate(tgt, controls=(ctrl,))
+            ctrl, tgt = gate(ctrl, tgt)
             return ctrl, tgt
 
         graph = circuit.build()

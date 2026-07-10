@@ -1149,17 +1149,19 @@ class TestControlledAcceptsBuiltinGate:
 
         block = circuit.build()
         controlled_ops = [
-            op for op in block.operations if isinstance(op, ControlledUOperation)
+            op for op in block.operations if isinstance(op, InvokeOperation)
         ]
 
         assert len(controlled_ops) == 1
         op = controlled_ops[0]
-        assert op.callable_ref is not None
-        assert op.callable_ref.namespace == "user.composite"
-        assert op.callable_ref.name == "boxed_h"
-        assert op.callable_attrs["kind"] == "composite"
-        assert op.callable_attrs["custom_name"] == "boxed_h"
-        assert op.callable_attrs["default_policy"] == "PRESERVE_BOX"
+        assert op.target.namespace == "user.composite"
+        assert op.target.name == "boxed_h"
+        assert op.transform is CallTransform.CONTROLLED
+        assert op.attrs["kind"] == "composite"
+        assert op.attrs["custom_name"] == "boxed_h"
+        assert op.attrs["default_policy"] == "PRESERVE_BOX"
+        assert op.definition is not None
+        assert op.definition.body is boxed_h.block
 
 
 class TestControlledOracle:
@@ -2960,26 +2962,14 @@ def _mixed_scalar_vector_targets(
     return head, tail
 
 
-class _BellPairComposite(qmc.CompositeGate):
-    """Custom two-qubit CompositeGate used inside controlled test kernels."""
-
-    custom_name = "controlled_test_bell_pair"
-
-    @property
-    def num_target_qubits(self) -> int:
-        return 2
-
-    def _decompose(
-        self,
-        qubits: qmc.Vector[qmc.Qubit] | tuple[qmc.Qubit, ...],
-    ) -> tuple[qmc.Qubit, ...]:
-        q0, q1 = qubits
-        q0 = qmc.h(q0)
-        q0, q1 = qmc.cx(q0, q1)
-        return q0, q1
-
-
-_BELL_PAIR_COMPOSITE = _BellPairComposite()
+@qmc.composite_gate(name="controlled_test_bell_pair")
+def _bell_pair_composite(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Prepare a Bell pair inside controlled test kernels."""
+    q0 = qmc.h(q0)
+    return qmc.cx(q0, q1)
 
 
 @qmc.qkernel
@@ -2989,7 +2979,7 @@ def _composite_bell_pair(
     """Apply a custom CompositeGate to a two-qubit vector target."""
     q0 = qs[0]
     q1 = qs[1]
-    q0, q1 = _BELL_PAIR_COMPOSITE(q0, q1)
+    q0, q1 = _bell_pair_composite(q0, q1)
     qs[0] = q0
     qs[1] = q1
     return qs

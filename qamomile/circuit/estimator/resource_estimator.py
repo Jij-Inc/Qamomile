@@ -884,7 +884,7 @@ class ResourceContext:
     argument_values: tuple[Value, ...]
     operand_shapes: Mapping[str, ResourceExpr]
     attrs: Mapping[str, Any]
-    loop_symbols: Mapping[str, sp.Symbol]
+    loop_symbols: Mapping[str, sp.Expr]
     controls: ResourceExpr = _ZERO
     power: ResourceExpr = _ONE
     transform: CallTransform = CallTransform.DIRECT
@@ -1027,7 +1027,7 @@ class ResourceEstimatorConfig:
     policy: ResourcePolicy = ResourcePolicy.MODEL_IF_AVAILABLE
     cost_basis: CostBasis = CostBasis.LOGICAL_GATES
     strategies: dict[str, str] = dataclasses.field(default_factory=dict)
-    trace: bool = True
+    trace: bool = False
     simplify: bool = True
     unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR
 
@@ -1041,7 +1041,7 @@ class ResourceEstimator:
         policy: ResourcePolicy = ResourcePolicy.MODEL_IF_AVAILABLE,
         cost_basis: CostBasis = CostBasis.LOGICAL_GATES,
         strategies: dict[str, str] | None = None,
-        trace: bool = True,
+        trace: bool = False,
         simplify: bool = True,
         unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
     ) -> None:
@@ -1053,7 +1053,7 @@ class ResourceEstimator:
             strategies (dict[str, str] | None): Strategy overrides by callable
                 name. Defaults to ``None``.
             trace (bool): Whether to keep explanation traces. Defaults to
-                ``True``.
+                ``False``.
             simplify (bool): Whether to simplify the final estimate. Defaults
                 to ``True``.
             unknown_policy (UnknownResourcePolicy): Handling for unknown
@@ -1138,6 +1138,8 @@ class ResourceEstimator:
             )
         if config.simplify:
             estimate = estimate.simplify()
+        if not config.trace:
+            estimate = dataclasses.replace(estimate, trace=None)
         estimate.parameters = _collect_parameters(estimate)
         return estimate
 
@@ -1460,12 +1462,263 @@ class ResourceInterpreter:
             operation,
             resolver,
         )
+        if operation.region_args:
+            return self._eval_region_for(
+                operation,
+                resolver,
+                start=start,
+                stop=stop,
+                step=step,
+                loop_symbol=loop_symbol,
+                controls=controls,
+            )
         inner = self.eval_operations(
             operation.operations,
             child,
             controls=controls,
         )
         return inner.sum_over(loop_symbol, start, stop, step)
+
+    def _eval_region_for(
+        self,
+        operation: ForOperation,
+        resolver: ExprResolver,
+        *,
+        start: ResourceExpr,
+        stop: ResourceExpr,
+        step: ResourceExpr,
+        loop_symbol: sp.Symbol,
+        controls: ResourceExpr | int,
+    ) -> ResourceEstimate:
+        """Evaluate a for loop with explicit loop-carried values.
+
+        Concrete bounds are interpreted iteration by iteration with the same
+        ``init -> block_arg -> yielded -> result`` rule as execution. Symbolic
+        bounds use a closed form for independent affine recurrences; unsupported
+        coupled or nonlinear recurrences remain explicit symbols with a visible
+        modeling assumption instead of silently resolving to a stale body value.
+
+        Args:
+            operation (ForOperation): Loop carrying region arguments.
+            resolver (ExprResolver): Enclosing symbolic environment.
+            start (ResourceExpr): Inclusive loop start.
+            stop (ResourceExpr): Exclusive loop stop.
+            step (ResourceExpr): Python-range step.
+            loop_symbol (sp.Symbol): Symbol representing the loop variable.
+            controls (ResourceExpr | int): Surrounding controls.
+
+        Returns:
+            ResourceEstimate: Exact concrete or closed-form symbolic estimate.
+
+        Raises:
+            ValueError: If a concrete loop has a zero step.
+        """
+        concrete_bounds = tuple(
+            self._concrete_scalar(bound) for bound in (start, stop, step)
+        )
+        if all(bound is not None for bound in concrete_bounds):
+            concrete_start, concrete_stop, concrete_step = cast(
+                tuple[int, int, int], concrete_bounds
+            )
+            if concrete_step == 0:
+                raise ValueError(
+                    "Resource estimation cannot evaluate a zero-step loop."
+                )
+            return self._eval_concrete_region_for(
+                operation,
+                resolver,
+                range(concrete_start, concrete_stop, concrete_step),
+                controls=controls,
+            )
+        return self._eval_symbolic_region_for(
+            operation,
+            resolver,
+            start=start,
+            stop=stop,
+            step=step,
+            loop_symbol=loop_symbol,
+            controls=controls,
+        )
+
+    def _eval_concrete_region_for(
+        self,
+        operation: ForOperation,
+        resolver: ExprResolver,
+        iterations: range,
+        *,
+        controls: ResourceExpr | int,
+    ) -> ResourceEstimate:
+        """Interpret a concrete region-argument loop exactly.
+
+        Args:
+            operation (ForOperation): Loop carrying region arguments.
+            resolver (ExprResolver): Enclosing symbolic environment.
+            iterations (range): Concrete Python iteration values.
+            controls (ResourceExpr | int): Surrounding controls.
+
+        Returns:
+            ResourceEstimate: Sequential composition of every iteration.
+        """
+        carried = {
+            arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
+            for arg in operation.region_args
+        }
+        estimate = ResourceEstimate.zero()
+        body = _LocalBlock(operation.operations)
+        for loop_value in iterations:
+            loop_expr = sp.Integer(loop_value)
+            context = dict(carried)
+            if operation.loop_var_value is not None:
+                context[operation.loop_var_value.uuid] = loop_expr
+            child = resolver.child_scope(
+                inner_block=body,
+                extra_context=context,
+                extra_loop_vars={operation.loop_var: loop_expr},
+            )
+            estimate = estimate.seq(
+                self.eval_operations(operation.operations, child, controls=controls)
+            )
+            carried = {
+                arg.block_arg.uuid: self._apply_condition_values(
+                    child.resolve(arg.yielded)
+                )
+                for arg in operation.region_args
+            }
+        for arg in operation.region_args:
+            resolver.bind(arg.result, carried[arg.block_arg.uuid])
+        return estimate
+
+    def _eval_symbolic_region_for(
+        self,
+        operation: ForOperation,
+        resolver: ExprResolver,
+        *,
+        start: ResourceExpr,
+        stop: ResourceExpr,
+        step: ResourceExpr,
+        loop_symbol: sp.Symbol,
+        controls: ResourceExpr | int,
+    ) -> ResourceEstimate:
+        """Evaluate independent affine region recurrences in closed form.
+
+        Args:
+            operation (ForOperation): Loop carrying region arguments.
+            resolver (ExprResolver): Enclosing symbolic environment.
+            start (ResourceExpr): Inclusive loop start.
+            stop (ResourceExpr): Exclusive loop stop.
+            step (ResourceExpr): Python-range step.
+            loop_symbol (sp.Symbol): Symbol representing the loop variable.
+            controls (ResourceExpr | int): Surrounding controls.
+
+        Returns:
+            ResourceEstimate: Symbolic loop estimate and recurrence assumptions.
+        """
+        carry_symbols = {
+            arg.block_arg.uuid: sp.Symbol(f"{arg.var_name}_carry", integer=True)
+            for arg in operation.region_args
+        }
+        context: dict[str, sp.Expr] = dict(carry_symbols)
+        if operation.loop_var_value is not None:
+            context[operation.loop_var_value.uuid] = loop_symbol
+        probe = resolver.child_scope(
+            inner_block=_LocalBlock(operation.operations),
+            extra_context=context,
+            extra_loop_vars={operation.loop_var: loop_symbol},
+        )
+        # Evaluate once so branch phi results become available to the resolver
+        # before recurrence expressions are inspected. The estimate itself is
+        # discarded and recomputed with the closed-form carry-at-iteration values.
+        self.eval_operations(operation.operations, probe, controls=controls)
+
+        iterations = symbolic_iterations(start, stop, step)
+        at_iteration: dict[str, sp.Expr] = {}
+        final_values: dict[str, sp.Expr] = {}
+        assumptions: list[ResourceAssumption] = []
+        all_carry_symbols = set(carry_symbols.values())
+        for arg in operation.region_args:
+            init = resolver.resolve(arg.init)
+            yielded = probe.resolve(arg.yielded)
+            carry_symbol = carry_symbols[arg.block_arg.uuid]
+            recurrence = _solve_affine_recurrence(
+                yielded=yielded,
+                carry_symbol=carry_symbol,
+                other_carry_symbols=all_carry_symbols - {carry_symbol},
+                loop_symbol=loop_symbol,
+                start=start,
+                step=step,
+                iterations=iterations,
+                init=init,
+            )
+            if recurrence is None:
+                at_value = sp.Function(f"{arg.var_name}_carry")(loop_symbol)
+                final_value = sp.Symbol(f"{arg.var_name}_after_loop", integer=True)
+                assumptions.append(
+                    ResourceAssumption(
+                        "loop-carried recurrence could not be reduced to an "
+                        "independent affine closed form; its final value remains "
+                        "symbolic",
+                        source=arg.var_name,
+                    )
+                )
+            else:
+                at_value, final_value = recurrence
+            at_iteration[arg.block_arg.uuid] = cast(sp.Expr, at_value)
+            final_values[arg.result.uuid] = cast(sp.Expr, final_value)
+
+        body_context = dict(at_iteration)
+        if operation.loop_var_value is not None:
+            body_context[operation.loop_var_value.uuid] = loop_symbol
+        child = resolver.child_scope(
+            inner_block=_LocalBlock(operation.operations),
+            extra_context=body_context,
+            extra_loop_vars={operation.loop_var: loop_symbol},
+        )
+        inner = self.eval_operations(operation.operations, child, controls=controls)
+        estimate = inner.sum_over(loop_symbol, start, stop, step)
+        for arg in operation.region_args:
+            resolver.bind(arg.result, final_values[arg.result.uuid])
+        if assumptions:
+            estimate = dataclasses.replace(
+                estimate,
+                assumptions=(*estimate.assumptions, *assumptions),
+            )
+        return estimate
+
+    def _apply_condition_values(self, expression: sp.Expr) -> sp.Expr:
+        """Substitute supplied scalar values into an expression.
+
+        Args:
+            expression (sp.Expr): Expression to specialize.
+
+        Returns:
+            sp.Expr: Specialized expression.
+        """
+        substitutions = {
+            symbol: self.condition_values[str(symbol)]
+            for symbol in expression.free_symbols
+            if str(symbol) in self.condition_values
+        }
+        if not substitutions:
+            return expression
+        self.branch_condition_names.update(str(symbol) for symbol in substitutions)
+        return cast(
+            sp.Expr,
+            expression.subs(list(substitutions.items()), simultaneous=True).doit(),
+        )
+
+    def _concrete_scalar(self, expression: sp.Expr) -> int | None:
+        """Resolve an integer expression from supplied scalar values.
+
+        Args:
+            expression (sp.Expr): Symbolic scalar expression.
+
+        Returns:
+            int | None: Concrete integer, or ``None`` when unresolved.
+        """
+        resolved = self._apply_condition_values(expression)
+        if resolved.is_number and resolved.is_integer:
+            return int(resolved)
+        return None
 
     def eval_while(
         self,
@@ -1522,6 +1775,13 @@ class ResourceInterpreter:
             )
             branch_child = true_child if taken else false_child
             estimate = self.eval_operations(branch_ops, branch_child, controls=controls)
+            self._publish_if_results(
+                operation,
+                resolver,
+                true_child,
+                false_child,
+                taken=taken,
+            )
             return dataclasses.replace(
                 estimate,
                 trace=_wrap_trace(
@@ -1539,6 +1799,13 @@ class ResourceInterpreter:
             false_child,
             controls=controls,
         )
+        self._publish_if_results(
+            operation,
+            resolver,
+            true_child,
+            false_child,
+            taken=None,
+        )
         combined = true_estimate.choice(false_estimate)
         if note is None:
             return combined
@@ -1548,6 +1815,42 @@ class ResourceInterpreter:
         return dataclasses.replace(
             combined, assumptions=(*combined.assumptions, note), trace=trace
         )
+
+    def _publish_if_results(
+        self,
+        operation: IfOperation,
+        resolver: ExprResolver,
+        true_resolver: ExprResolver,
+        false_resolver: ExprResolver,
+        *,
+        taken: bool | None,
+    ) -> None:
+        """Publish phi results into the enclosing symbolic environment.
+
+        Args:
+            operation (IfOperation): Conditional carrying the phi records.
+            resolver (ExprResolver): Enclosing resolver to update.
+            true_resolver (ExprResolver): Resolver for the true branch.
+            false_resolver (ExprResolver): Resolver for the false branch.
+            taken (bool | None): Decided branch, or ``None`` when the condition
+                remains symbolic or runtime-dependent.
+        """
+        condition = resolver.resolve(operation.condition)
+        for phi in operation.phi_ops:
+            true_value = true_resolver.resolve(phi.true_value)
+            false_value = false_resolver.resolve(phi.false_value)
+            if taken is True:
+                merged = true_value
+            elif taken is False:
+                merged = false_value
+            elif bool(getattr(condition, "is_Boolean", False)):
+                merged = sp.Piecewise(
+                    (true_value, cast(Any, condition)),
+                    (false_value, True),
+                )
+            else:
+                merged = sp.Symbol(phi.output.name, integer=True)
+            resolver.bind(phi.output, cast(sp.Expr, merged))
 
     def _decide_branch(
         self, condition: sp.Basic
@@ -1620,10 +1923,239 @@ class ResourceInterpreter:
         Returns:
             ResourceEstimate: Repeated body estimate.
         """
-        child = build_for_items_scope(operation, resolver)
         cardinality = resolve_for_items_cardinality(operation)
+        if operation.region_args:
+            return self._eval_region_for_items(
+                operation,
+                resolver,
+                cardinality=cardinality,
+                controls=controls,
+            )
+        child = build_for_items_scope(operation, resolver)
         inner = self.eval_operations(operation.operations, child, controls=controls)
         return inner.repeat(cardinality)
+
+    def _eval_region_for_items(
+        self,
+        operation: ForItemsOperation,
+        resolver: ExprResolver,
+        *,
+        cardinality: ResourceExpr,
+        controls: ResourceExpr | int,
+    ) -> ResourceEstimate:
+        """Evaluate a dictionary-items loop with loop-carried values.
+
+        Args:
+            operation (ForItemsOperation): Items loop carrying region arguments.
+            resolver (ExprResolver): Enclosing symbolic environment.
+            cardinality (ResourceExpr): Symbolic item count.
+            controls (ResourceExpr | int): Surrounding controls.
+
+        Returns:
+            ResourceEstimate: Exact estimate for bound dictionaries, otherwise a
+            cardinality-based symbolic estimate.
+        """
+        entries = self._for_items_entries(operation)
+        if entries is not None:
+            return self._eval_concrete_region_for_items(
+                operation,
+                resolver,
+                entries,
+                controls=controls,
+            )
+
+        item_symbol = sp.Symbol("item_index", integer=True, nonnegative=True)
+        context = self._symbolic_for_items_context(operation)
+        carry_symbols = {
+            arg.block_arg.uuid: sp.Symbol(f"{arg.var_name}_carry", integer=True)
+            for arg in operation.region_args
+        }
+        context.update(carry_symbols)
+        probe = resolver.child_scope(
+            inner_block=_LocalBlock(operation.operations),
+            extra_context=context,
+        )
+        self.eval_operations(operation.operations, probe, controls=controls)
+
+        at_iteration: dict[str, sp.Expr] = {}
+        final_values: dict[str, sp.Expr] = {}
+        assumptions: list[ResourceAssumption] = []
+        all_carry_symbols = set(carry_symbols.values())
+        for arg in operation.region_args:
+            carry_symbol = carry_symbols[arg.block_arg.uuid]
+            recurrence = _solve_affine_recurrence(
+                yielded=probe.resolve(arg.yielded),
+                carry_symbol=carry_symbol,
+                other_carry_symbols=all_carry_symbols - {carry_symbol},
+                loop_symbol=item_symbol,
+                start=_ZERO,
+                step=_ONE,
+                iterations=cardinality,
+                init=resolver.resolve(arg.init),
+            )
+            if recurrence is None:
+                at_value = sp.Function(f"{arg.var_name}_carry")(item_symbol)
+                final_value = sp.Symbol(f"{arg.var_name}_after_items", integer=True)
+                assumptions.append(
+                    ResourceAssumption(
+                        "items-loop carry could not be reduced to an independent "
+                        "affine closed form; its final value remains symbolic",
+                        source=arg.var_name,
+                    )
+                )
+            else:
+                at_value, final_value = recurrence
+            at_iteration[arg.block_arg.uuid] = cast(sp.Expr, at_value)
+            final_values[arg.result.uuid] = cast(sp.Expr, final_value)
+
+        body_context = {**context, **at_iteration}
+        child = resolver.child_scope(
+            inner_block=_LocalBlock(operation.operations),
+            extra_context=body_context,
+        )
+        estimate = self.eval_operations(
+            operation.operations,
+            child,
+            controls=controls,
+        ).repeat(cardinality)
+        for arg in operation.region_args:
+            resolver.bind(arg.result, final_values[arg.result.uuid])
+        if assumptions:
+            estimate = dataclasses.replace(
+                estimate,
+                assumptions=(*estimate.assumptions, *assumptions),
+            )
+        return estimate
+
+    def _eval_concrete_region_for_items(
+        self,
+        operation: ForItemsOperation,
+        resolver: ExprResolver,
+        entries: tuple[tuple[Any, Any], ...],
+        *,
+        controls: ResourceExpr | int,
+    ) -> ResourceEstimate:
+        """Interpret a bound items loop exactly.
+
+        Args:
+            operation (ForItemsOperation): Items loop carrying region arguments.
+            resolver (ExprResolver): Enclosing symbolic environment.
+            entries (tuple[tuple[Any, Any], ...]): Bound key-value entries.
+            controls (ResourceExpr | int): Surrounding controls.
+
+        Returns:
+            ResourceEstimate: Sequential composition of all item iterations.
+        """
+        carried = {
+            arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
+            for arg in operation.region_args
+        }
+        estimate = ResourceEstimate.zero()
+        for key, value in entries:
+            context = {
+                **carried,
+                **self._concrete_for_items_context(operation, key, value),
+            }
+            child = resolver.child_scope(
+                inner_block=_LocalBlock(operation.operations),
+                extra_context=context,
+            )
+            estimate = estimate.seq(
+                self.eval_operations(operation.operations, child, controls=controls)
+            )
+            carried = {
+                arg.block_arg.uuid: self._apply_condition_values(
+                    child.resolve(arg.yielded)
+                )
+                for arg in operation.region_args
+            }
+        for arg in operation.region_args:
+            resolver.bind(arg.result, carried[arg.block_arg.uuid])
+        return estimate
+
+    def _for_items_entries(
+        self,
+        operation: ForItemsOperation,
+    ) -> tuple[tuple[Any, Any], ...] | None:
+        """Return concrete entries available to an items loop.
+
+        Args:
+            operation (ForItemsOperation): Items loop to inspect.
+
+        Returns:
+            tuple[tuple[Any, Any], ...] | None: Bound entries, or ``None`` when
+            the dictionary remains symbolic.
+        """
+        if not operation.operands:
+            return ()
+        operand = operation.operands[0]
+        get_items = getattr(operand, "get_bound_data_items", None)
+        if callable(get_items):
+            items = tuple(get_items())
+            if items:
+                return items
+        parameter_name = getattr(operand, "parameter_name", lambda: None)()
+        bound = self.bindings.get(parameter_name) if parameter_name else None
+        if isinstance(bound, Mapping):
+            return tuple(bound.items())
+        return None
+
+    def _symbolic_for_items_context(
+        self,
+        operation: ForItemsOperation,
+    ) -> dict[str, sp.Expr]:
+        """Build symbolic key and value bindings for an items loop.
+
+        Args:
+            operation (ForItemsOperation): Items loop to bind.
+
+        Returns:
+            dict[str, sp.Expr]: UUID-keyed symbolic loop-variable context.
+        """
+        context: dict[str, sp.Expr] = {}
+        for index, key_value in enumerate(operation.key_var_values or ()):
+            name = (
+                operation.key_vars[index] if index < len(operation.key_vars) else "key"
+            )
+            context[key_value.uuid] = sp.Symbol(name, integer=True)
+        if operation.value_var_value is not None:
+            context[operation.value_var_value.uuid] = sp.Symbol(operation.value_var)
+        return context
+
+    def _concrete_for_items_context(
+        self,
+        operation: ForItemsOperation,
+        key: Any,
+        value: Any,
+    ) -> dict[str, sp.Expr]:
+        """Build concrete key and value bindings for one item iteration.
+
+        Args:
+            operation (ForItemsOperation): Items loop to bind.
+            key (Any): Current dictionary key.
+            value (Any): Current dictionary value.
+
+        Returns:
+            dict[str, sp.Expr]: UUID-keyed scalar iteration context.
+        """
+        context: dict[str, sp.Expr] = {}
+        key_values = list(operation.key_var_values or ())
+        if len(key_values) > 1 and isinstance(key, Sequence):
+            for ir_value, concrete in zip(key_values, key, strict=False):
+                context[ir_value.uuid] = _sympify_resource_value(
+                    concrete, ir_value.name
+                )
+        elif key_values:
+            context[key_values[0].uuid] = _sympify_resource_value(
+                key,
+                key_values[0].name,
+            )
+        if operation.value_var_value is not None:
+            context[operation.value_var_value.uuid] = _sympify_resource_value(
+                value,
+                operation.value_var,
+            )
+        return context
 
     def eval_invoke(
         self,
@@ -1981,15 +2513,31 @@ class ResourceInterpreter:
         Returns:
             ResourceEstimate: Body-derived estimate.
         """
-        child = resolver.call_child_scope(operation, called_block=body)
+        selected_impl = operation.implementation_for(
+            strategy=self._strategy_for(operation)
+        )
+        body_implements_transform = (
+            selected_impl is not None and selected_impl.body is body
+        )
+        child = resolver.call_child_scope(
+            operation,
+            called_block=body,
+            body_implements_transform=body_implements_transform,
+        )
         own_controls = 0
-        if operation.transform is CallTransform.CONTROLLED:
+        if (
+            operation.transform is CallTransform.CONTROLLED
+            and not body_implements_transform
+        ):
             own_controls = int(operation.attrs.get("num_control_qubits", 0) or 0)
         total_controls = _expr(controls) + own_controls
         body_estimate = self.eval_operations(
             body.operations, child, controls=total_controls
         )
-        if operation.transform is CallTransform.INVERSE:
+        if (
+            operation.transform is CallTransform.INVERSE
+            and not body_implements_transform
+        ):
             body_estimate = body_estimate.inverse()
         return dataclasses.replace(
             body_estimate,
@@ -2073,6 +2621,7 @@ def estimate_resources(
     policy: ResourcePolicy = ResourcePolicy.MODEL_IF_AVAILABLE,
     cost_basis: CostBasis = CostBasis.LOGICAL_GATES,
     strategies: dict[str, str] | None = None,
+    trace: bool = False,
     unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
 ) -> ResourceEstimate:
     """Estimate logical resources using the default estimator facade.
@@ -2095,6 +2644,8 @@ def estimate_resources(
             ``LOGICAL_GATES``.
         strategies (dict[str, str] | None): Strategy overrides by callable
             name. Defaults to ``None``.
+        trace (bool): Whether to retain the explanation tree. Defaults to
+            ``False``.
         unknown_policy (UnknownResourcePolicy): Unknown callable handling.
             Defaults to ``ERROR``.
 
@@ -2102,17 +2653,24 @@ def estimate_resources(
         ResourceEstimate: Logical resource estimate.
 
     Example:
-        >>> from qamomile.circuit.stdlib import shor_order_finding
-        >>> est = estimate_resources(
-        ...     shor_order_finding, substitutions={"n": 2048}
-        ... )
-        >>> int(est.qubits)
-        6144
+        >>> import qamomile.circuit as qmc
+        >>> @qmc.qkernel
+        ... def repeated_h(n: qmc.UInt) -> qmc.Qubit:
+        ...     q = qmc.qubit("q")
+        ...     for _ in qmc.range(n):
+        ...         q = qmc.h(q)
+        ...     return q
+        >>> symbolic = estimate_resources(repeated_h)
+        >>> str(symbolic.gates.total)
+        'n'
+        >>> estimate_resources(repeated_h, substitutions={"n": 8}).gates.total
+        8
     """
     estimator = ResourceEstimator(
         policy=policy,
         cost_basis=cost_basis,
         strategies=strategies,
+        trace=trace,
         unknown_policy=unknown_policy,
     )
     return estimator.estimate(
@@ -2137,6 +2695,25 @@ def _expr(value: ResourceExpr | int | float) -> ResourceExpr:
     if isinstance(value, int):
         return sp.Integer(value)
     return sp.Float(value)
+
+
+def _sympify_resource_value(value: Any, fallback_name: str) -> sp.Expr:
+    """Convert a bound loop item to a scalar resource expression.
+
+    Args:
+        value (Any): Bound dictionary key or value.
+        fallback_name (str): Symbol name used for a non-scalar value.
+
+    Returns:
+        sp.Expr: SymPy scalar, or a symbolic placeholder for structural data.
+    """
+    try:
+        expression = sp.sympify(value)
+    except (TypeError, ValueError, sp.SympifyError):
+        return sp.Symbol(fallback_name)
+    if isinstance(expression, sp.Expr):
+        return expression
+    return sp.Symbol(fallback_name)
 
 
 class _LocalBlock:
@@ -2173,13 +2750,22 @@ def build_for_loop_scope(
         Child resolver, start, stop, step, and loop-variable symbol.
     """
     loop_symbol = sp.Symbol(operation.loop_var, integer=True, positive=True)
-    loop_var_names = _collect_loop_var_names(
-        operation.operations,
-        operation.loop_var,
-        loop_symbol,
+    loop_var_names: dict[str, sp.Expr] = {
+        name: symbol
+        for name, symbol in _collect_loop_var_names(
+            operation.operations,
+            operation.loop_var,
+            loop_symbol,
+        ).items()
+    }
+    context: dict[str, sp.Expr] | None = (
+        {operation.loop_var_value.uuid: loop_symbol}
+        if operation.loop_var_value is not None
+        else None
     )
     child = resolver.child_scope(
         inner_block=_LocalBlock(operation.operations),
+        extra_context=context,
         extra_loop_vars=loop_var_names,
     )
     start = child.resolve(operation.operands[0])
@@ -2188,6 +2774,95 @@ def build_for_loop_scope(
         child.resolve(operation.operands[2]) if len(operation.operands) >= 3 else _ONE
     )
     return child, start, stop, step, loop_symbol
+
+
+def _solve_affine_recurrence(
+    *,
+    yielded: sp.Expr,
+    carry_symbol: sp.Symbol,
+    other_carry_symbols: set[sp.Symbol],
+    loop_symbol: sp.Symbol,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+    init: sp.Expr,
+) -> tuple[sp.Expr, sp.Expr] | None:
+    """Solve one independent affine loop-carried recurrence.
+
+    The supported recurrence is ``x[k + 1] = a*x[k] + b(k)`` where ``a``
+    does not depend on the loop index or another carry. This covers counters,
+    arithmetic accumulators, and geometric updates without introducing a
+    special resource-model API for ordinary classical qkernel code.
+
+    Args:
+        yielded (sp.Expr): Expression yielded by one body iteration.
+        carry_symbol (sp.Symbol): Symbol representing the incoming carry.
+        other_carry_symbols (set[sp.Symbol]): Symbols for simultaneously carried
+            values, which are rejected as coupled recurrences.
+        loop_symbol (sp.Symbol): Symbol representing the Python loop value.
+        start (ResourceExpr): Inclusive Python-range start.
+        step (ResourceExpr): Python-range step.
+        iterations (ResourceExpr): Symbolic number of loop iterations.
+        init (sp.Expr): Carry value before iteration zero.
+
+    Returns:
+        tuple[sp.Expr, sp.Expr] | None: Carry at the current loop iteration and
+        final carry after all iterations, or ``None`` when the recurrence is
+        nonlinear, coupled, or has an index-dependent multiplier.
+    """
+    coefficient = sp.simplify(sp.diff(yielded, carry_symbol))
+    remainder = sp.simplify(yielded - coefficient * carry_symbol)
+    if (
+        carry_symbol in coefficient.free_symbols
+        or carry_symbol in remainder.free_symbols
+    ):
+        return None
+    if (coefficient.free_symbols | remainder.free_symbols) & other_carry_symbols:
+        return None
+    if loop_symbol in coefficient.free_symbols:
+        return None
+
+    summation_index = sp.Symbol(
+        f"{loop_symbol}_previous", integer=True, nonnegative=True
+    )
+    previous_loop_value = start + summation_index * step
+    previous_remainder = remainder.subs(loop_symbol, previous_loop_value)
+
+    def value_after(count: sp.Expr) -> sp.Expr:
+        """Return the recurrence value after ``count`` iterations.
+
+        Args:
+            count (sp.Expr): Number of completed iterations.
+
+        Returns:
+            sp.Expr: Closed-form recurrence value.
+        """
+        if coefficient == 1:
+            accumulated = sp.Sum(
+                previous_remainder,
+                (summation_index, 0, count - 1),
+            ).doit()
+            return cast(sp.Expr, sp.simplify(init + accumulated))
+        if coefficient == 0:
+            last_remainder = remainder.subs(
+                loop_symbol,
+                start + (count - 1) * step,
+            )
+            return cast(
+                sp.Expr,
+                sp.Piecewise((init, sp.Eq(count, 0)), (last_remainder, True)),
+            )
+        accumulated = sp.Sum(
+            coefficient ** (count - 1 - summation_index) * previous_remainder,
+            (summation_index, 0, count - 1),
+        ).doit()
+        return cast(
+            sp.Expr,
+            sp.simplify(coefficient**count * init + accumulated),
+        )
+
+    completed_at_loop_value = sp.simplify((loop_symbol - start) / step)
+    return value_after(completed_at_loop_value), value_after(iterations)
 
 
 def _collect_loop_var_names(

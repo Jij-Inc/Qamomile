@@ -34,13 +34,18 @@ from qamomile.circuit.frontend.param_validation import (
 )
 from qamomile.circuit.frontend.qkernel_callable import (
     qkernel_callable_attrs,
+    qkernel_callable_def,
     qkernel_callable_ref,
 )
 from qamomile.circuit.frontend.qkernel_specialization import (
     select_specialized_block,
 )
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.callable import CallableRef, CallPolicy
+from qamomile.circuit.ir.operation.callable import (
+    CallableRef,
+    CallTransform,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
@@ -471,16 +476,42 @@ class ControlledGate:
         num_controls: int | Value,
         power: int | Value,
         block: Any | None = None,
-    ) -> ControlledUOperation:
-        """Create the appropriate ControlledUOperation subclass and add to tracer.
+    ) -> ControlledUOperation | InvokeOperation:
+        """Create the controlled operation and add it to the tracer.
 
-        Used by :meth:`_call_concrete`; the symbolic path constructs
-        its ``SymbolicControlledU`` inline because it needs to pass
-        the ``control_indices`` field directly.
+        Composite qkernels remain callable invocations under control, so their
+        body, implementation candidates, and resource models stay attached to
+        the same ``CallableDef``. Generic qkernels and powered calls continue to
+        use ``ControlledUOperation`` because they represent structural control
+        over an inline program rather than a named callable transform.
+
+        Args:
+            operands (list[Any]): Control, target, and classical operands.
+            results (list[Value]): Quantum results in control-then-target order.
+            num_controls (int | Value): Number of leading control qubits.
+            power (int | Value): Positive application count.
+            block (Any | None): Specialized source body. Defaults to the wrapped
+                qkernel block.
+
+        Returns:
+            ControlledUOperation | InvokeOperation: Emitted controlled
+            operation.
         """
         block = self._qkernel.block if block is None else block
-        op: ControlledUOperation
-        if isinstance(num_controls, Value):
+        is_composite = getattr(self._qkernel, "_callable_kind", None) == "composite"
+        if is_composite and isinstance(num_controls, int) and power == 1:
+            attrs = self._callable_attrs()
+            attrs["num_control_qubits"] = num_controls
+            attrs["num_target_qubits"] = max(0, len(results) - num_controls)
+            op: ControlledUOperation | InvokeOperation = InvokeOperation(
+                operands=operands,
+                results=results,
+                target=self._callable_ref(),
+                transform=CallTransform.CONTROLLED,
+                attrs=attrs,
+                definition=qkernel_callable_def(self._qkernel, block),
+            )
+        elif isinstance(num_controls, Value):
             op = SymbolicControlledU(
                 operands=operands,
                 results=results,
@@ -513,7 +544,7 @@ class ControlledGate:
         """
         if self._target_callable_ref is not None:
             return self._target_callable_ref
-        return qkernel_callable_ref(self._qkernel.name)
+        return qkernel_callable_ref(self._qkernel)
 
     def _callable_attrs(self) -> dict[str, Any]:
         """Return attrs copied from the controlled source callable.
@@ -523,7 +554,7 @@ class ControlledGate:
         """
         if self._target_callable_attrs is not None:
             return dict(self._target_callable_attrs)
-        return qkernel_callable_attrs()
+        return qkernel_callable_attrs(self._qkernel)
 
     def _block_for_sub_call(self, sub_args_resolved: dict[str, Any]) -> Any:
         """Return the controlled block specialized for this call site.
@@ -1821,20 +1852,6 @@ def _qkernel_for_callable(
     if isinstance(fn, QKernel):
         return fn
 
-    from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-    if isinstance(fn, CompositeGate):
-        qkernel_impl = getattr(fn, "_qkernel", None)
-        if isinstance(qkernel_impl, QKernel):
-            return qkernel_impl
-        raise TypeError(
-            f"{caller}(): CompositeGate objects are supported only when "
-            "they were created from a qkernel implementation. Opaque "
-            "or body-free callables cannot be auto-wrapped; call the gate "
-            "with its controls= argument or expose a qkernel implementation "
-            "explicitly."
-        )
-
     # Duck-typed kernel-like objects (e.g. test mocks with a stubbed
     # ``.block``) are passed through unchanged so the existing
     # ``ControlledGate`` consumer continues to work without coupling the
@@ -2138,29 +2155,8 @@ def _control_callable_metadata(
         tuple[CallableRef | None, dict[str, Any] | None]: Optional callable
         ref and attrs to record on emitted ``ControlledUOperation`` nodes.
     """
-    from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-    if not isinstance(fn, CompositeGate):
-        return None, None
-
-    is_stdlib_gate = fn.gate_type.name != "CUSTOM"
-    gate_name = fn.custom_name or qkernel_impl.name
-    callable_ref = CallableRef(
-        namespace="qamomile.stdlib" if is_stdlib_gate else "user.composite",
-        name=gate_name,
-    )
-    default_policy = (
-        CallPolicy.NATIVE_FIRST if is_stdlib_gate else CallPolicy.PRESERVE_BOX
-    )
-    attrs = {
-        "kind": "composite",
-        "gate_type": fn.gate_type.name,
-        "custom_name": gate_name,
-        "num_control_qubits": fn.num_control_qubits,
-        "num_target_qubits": fn.num_target_qubits,
-        "default_policy": default_policy.name,
-    }
-    return callable_ref, attrs
+    del fn
+    return qkernel_callable_ref(qkernel_impl), qkernel_callable_attrs(qkernel_impl)
 
 
 @dataclasses.dataclass

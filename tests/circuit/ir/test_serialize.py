@@ -34,7 +34,7 @@ from qamomile.circuit.ir.operation import (
     InverseBlockOperation,
     InvokeOperation,
 )
-from qamomile.circuit.ir.operation.callable import CompositeGateType
+from qamomile.circuit.ir.operation.callable import CallTransform, CompositeGateType
 from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import (
@@ -639,78 +639,57 @@ class TestRoundTripIRFeatures:
             ]
 
     def test_controlled_composite_callable_ref_and_attrs_round_trip(self):
-        """Controlled-U keeps the source composite callable identity and attrs."""
-        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+        """Controlled composite Invoke keeps one callable definition."""
 
         block = _to_affine(_controlled_boxed_phase)
         controlled_ops = [
-            op for op in block.operations if isinstance(op, ControlledUOperation)
+            op for op in block.operations if isinstance(op, InvokeOperation)
         ]
         assert controlled_ops
-        assert {
-            op.callable_ref.namespace for op in controlled_ops if op.callable_ref
-        } == {"user.composite"}
-        assert {op.callable_ref.name for op in controlled_ops if op.callable_ref} == {
-            "boxed_phase"
-        }
-        assert {op.callable_attrs["kind"] for op in controlled_ops} == {"composite"}
-        assert {op.callable_attrs["default_policy"] for op in controlled_ops} == {
-            "PRESERVE_BOX"
-        }
+        assert {op.target.namespace for op in controlled_ops} == {"user.composite"}
+        assert {op.target.name for op in controlled_ops} == {"boxed_phase"}
+        assert {op.transform for op in controlled_ops} == {CallTransform.CONTROLLED}
+        assert {op.attrs["kind"] for op in controlled_ops} == {"composite"}
+        assert {op.attrs["default_policy"] for op in controlled_ops} == {"PRESERVE_BOX"}
 
         for restored in (
             load_json(dump_json(block)),
             load_msgpack(dump_msgpack(block)),
         ):
             restored_ops = [
-                op for op in restored.operations if isinstance(op, ControlledUOperation)
+                op for op in restored.operations if isinstance(op, InvokeOperation)
             ]
-            assert [
-                op.callable_ref.namespace for op in restored_ops if op.callable_ref
-            ] == ["user.composite"]
-            assert [op.callable_ref.name for op in restored_ops if op.callable_ref] == [
-                "boxed_phase"
-            ]
-            assert [op.callable_attrs["kind"] for op in restored_ops] == ["composite"]
-            assert [op.callable_attrs["default_policy"] for op in restored_ops] == [
+            assert [op.target.namespace for op in restored_ops] == ["user.composite"]
+            assert [op.target.name for op in restored_ops] == ["boxed_phase"]
+            assert [op.transform for op in restored_ops] == [CallTransform.CONTROLLED]
+            assert [op.attrs["kind"] for op in restored_ops] == ["composite"]
+            assert [op.attrs["default_policy"] for op in restored_ops] == [
                 "PRESERVE_BOX"
             ]
 
     def test_inverse_composite_callable_ref_and_attrs_round_trip(self):
-        """Inverse blocks keep the source composite callable identity and attrs."""
+        """Inverse composite Invoke keeps one callable definition."""
         block = _to_affine(_inverse_boxed_phase)
-        inverse_ops = [
-            op for op in block.operations if isinstance(op, InverseBlockOperation)
-        ]
+        inverse_ops = [op for op in block.operations if isinstance(op, InvokeOperation)]
         assert inverse_ops
-        assert {op.callable_ref.namespace for op in inverse_ops if op.callable_ref} == {
-            "user.composite"
-        }
-        assert {op.callable_ref.name for op in inverse_ops if op.callable_ref} == {
-            "boxed_phase"
-        }
-        assert {op.callable_attrs["kind"] for op in inverse_ops} == {"composite"}
-        assert {op.callable_attrs["default_policy"] for op in inverse_ops} == {
-            "PRESERVE_BOX"
-        }
+        assert {op.target.namespace for op in inverse_ops} == {"user.composite"}
+        assert {op.target.name for op in inverse_ops} == {"boxed_phase"}
+        assert {op.transform for op in inverse_ops} == {CallTransform.INVERSE}
+        assert {op.attrs["kind"] for op in inverse_ops} == {"composite"}
+        assert {op.attrs["default_policy"] for op in inverse_ops} == {"PRESERVE_BOX"}
 
         for restored in (
             load_json(dump_json(block)),
             load_msgpack(dump_msgpack(block)),
         ):
             restored_ops = [
-                op
-                for op in restored.operations
-                if isinstance(op, InverseBlockOperation)
+                op for op in restored.operations if isinstance(op, InvokeOperation)
             ]
-            assert [
-                op.callable_ref.namespace for op in restored_ops if op.callable_ref
-            ] == ["user.composite"]
-            assert [op.callable_ref.name for op in restored_ops if op.callable_ref] == [
-                "boxed_phase"
-            ]
-            assert [op.callable_attrs["kind"] for op in restored_ops] == ["composite"]
-            assert [op.callable_attrs["default_policy"] for op in restored_ops] == [
+            assert [op.target.namespace for op in restored_ops] == ["user.composite"]
+            assert [op.target.name for op in restored_ops] == ["boxed_phase"]
+            assert [op.transform for op in restored_ops] == [CallTransform.INVERSE]
+            assert [op.attrs["kind"] for op in restored_ops] == ["composite"]
+            assert [op.attrs["default_policy"] for op in restored_ops] == [
                 "PRESERVE_BOX"
             ]
 
@@ -1868,8 +1847,8 @@ class TestRealAlgorithmRoundTrip:
         )
         assert invoke["definition"]["body"] == invoke_r["definition"]["body"]
 
-    def test_symbolic_qft_round_trip_preserves_body_ref(self):
-        """Symbolic-width QFT keeps its deferred stdlib body reference."""
+    def test_symbolic_qft_round_trip_preserves_body(self):
+        """Symbolic-width QFT serializes its ordinary qkernel body."""
         block = _build_real(_symbolic_qft, {})
         original_d = to_dict(block)
         restored_d = to_dict(load_msgpack(dump_msgpack(block)))
@@ -1886,10 +1865,9 @@ class TestRealAlgorithmRoundTrip:
             and op["attrs"]["gate_type"] == CompositeGateType.QFT.name
         )
 
-        assert invoke["definition"]["body"] is None
-        assert invoke["definition"]["body_ref"]["ref"]["name"] == "qft"
-        assert invoke["definition"]["body_ref"]["kind"] == "symbolic_vector"
-        assert invoke_r["definition"]["body_ref"] == invoke["definition"]["body_ref"]
+        assert invoke["definition"]["body"] is not None
+        assert invoke["definition"]["body_ref"] is None
+        assert invoke_r["definition"]["body"] == invoke["definition"]["body"]
 
 
 # ---------------------------------------------------------------------------

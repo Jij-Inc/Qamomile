@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from typing import (
     TYPE_CHECKING,
+    Any,
     Callable,
     Generic,
     ParamSpec,
@@ -21,6 +22,7 @@ from qamomile.circuit.frontend.qkernel_definition import (
     validate_quantum_rebinds,
 )
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.callable import CallPolicy, CompositeGateType
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.operation.callable import InvokeOperation
@@ -68,6 +70,18 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         # returns.  See _finalize_pending_self_calls.
         self._pending_self_calls: list[InvokeOperation] = []
 
+        # Every frontend callable is a QKernel. ``@composite_gate`` only changes
+        # this compiler metadata; it does not wrap the object or replace its
+        # Python call contract.
+        self._callable_kind = "qkernel"
+        self._callable_name = self.name
+        self._callable_namespace: str | None = None
+        self._callable_policy = CallPolicy.INLINE
+        self._callable_gate_type = CompositeGateType.CUSTOM
+        self._callable_resource_models: tuple[Any, ...] = ()
+        self._callable_implementations: tuple[Any, ...] = ()
+        self._default_estimate_kind: str | None = None
+
         # AST-level quantum rebind analysis: a violation is a structural error
         # in the kernel definition itself, so raise eagerly at decoration time
         # rather than deferring to .block / build().
@@ -102,6 +116,44 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         from qamomile.circuit.frontend.qkernel_invocation import invoke_qkernel
 
         return cast(R, invoke_qkernel(self, *args, **kwargs))
+
+    def resource_model(
+        self,
+        func: Callable[..., Any] | None = None,
+        *,
+        strategy: str | None = None,
+        transform: Any | None = None,
+        estimate_kind: str = "strategy_model",
+    ) -> Callable[..., Any]:
+        """Attach a context-aware resource model to this qkernel.
+
+        The model is consulted while this kernel remains visible as a named
+        composite call. Ordinary inline qkernels may also carry a model for
+        callers that deliberately preserve them through a compiler policy.
+
+        Args:
+            func (Callable[..., Any] | None): Function accepting a
+                ``ResourceContext`` and returning a ``ResourceEstimate``.
+                Defaults to ``None`` for decorator-with-arguments use.
+            strategy (str | None): Optional implementation strategy name.
+                Defaults to ``None``.
+            transform (Any | None): Optional call transform constraint.
+                Defaults to ``None``.
+            estimate_kind (str): Estimate source classification. Defaults to
+                ``"strategy_model"``.
+
+        Returns:
+            Callable[..., Any]: The registered function or its decorator.
+        """
+        from qamomile.circuit.frontend.composite_gate import attach_resource_model
+
+        return attach_resource_model(
+            self,
+            func,
+            strategy=strategy,
+            transform=transform,
+            estimate_kind=estimate_kind,
+        )
 
 
 def qkernel(func: Callable[P, R]) -> QKernel[P, R]:

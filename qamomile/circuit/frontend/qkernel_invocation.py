@@ -161,7 +161,7 @@ def _select_call_operation(
             Returns:
                 Any: Inline-by-default qkernel invocation operation.
             """
-            return qkernel_invoke_block(kernel.name, block, inputs)
+            return qkernel_invoke_block(kernel, block, inputs)
 
     return invoke_block_factory(block_ir, inputs_map), block_ir, formal_input_views
 

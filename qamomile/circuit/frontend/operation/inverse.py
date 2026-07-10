@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 from collections.abc import Callable, Sequence
+from functools import partial
 from numbers import Real
 from typing import TYPE_CHECKING, Any, cast
 
@@ -19,7 +20,9 @@ from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.frontend.qkernel_callable import (
     qkernel_callable_attrs,
     qkernel_callable_ref,
+    qkernel_invoke_block,
 )
+from qamomile.circuit.frontend.qkernel_invocation import invoke_qkernel_with_operation
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.frontend.qkernel_specialization import (
     select_specialized_block,
@@ -29,6 +32,7 @@ from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
+    CallableImplementation,
     CallableRef,
     CallPolicy,
     CallTransform,
@@ -808,21 +812,11 @@ class _BlockInverter:
         )
 
         gate_type_name = str(attrs.get("gate_type", "CUSTOM"))
-        strategy_name = attrs.get("strategy_name")
         source_block = None
 
         if gate_type_name == CompositeGateType.QFT.name:
-            from qamomile.circuit.stdlib.qft import IQFT
+            from qamomile.circuit.stdlib.qft import iqft
 
-            if (
-                strategy_name is not None
-                and IQFT.get_strategy(str(strategy_name)) is None
-            ):
-                raise NotImplementedError(
-                    "inverse() cannot invert QFT with strategy "
-                    f"{strategy_name!r} because IQFT does not define the "
-                    "same strategy."
-                )
             attrs["gate_type"] = CompositeGateType.IQFT.name
             attrs["custom_name"] = "iqft"
             target = CallableRef(
@@ -830,20 +824,11 @@ class _BlockInverter:
                 name="iqft",
                 version=op.target.version,
             )
-            body = None
+            body = iqft.block
             transform = CallTransform.DIRECT
         elif gate_type_name == CompositeGateType.IQFT.name:
-            from qamomile.circuit.stdlib.qft import QFT
+            from qamomile.circuit.stdlib.qft import qft
 
-            if (
-                strategy_name is not None
-                and QFT.get_strategy(str(strategy_name)) is None
-            ):
-                raise NotImplementedError(
-                    "inverse() cannot invert IQFT with strategy "
-                    f"{strategy_name!r} because QFT does not define the "
-                    "same strategy."
-                )
             attrs["gate_type"] = CompositeGateType.QFT.name
             attrs["custom_name"] = "qft"
             target = CallableRef(
@@ -851,7 +836,7 @@ class _BlockInverter:
                 name="qft",
                 version=op.target.version,
             )
-            body = None
+            body = qft.block
             transform = CallTransform.DIRECT
         elif op.body is not None:
             source_block = op.body
@@ -1475,7 +1460,7 @@ class InverseGate:
         """
         if self._target_callable_ref is not None:
             return self._target_callable_ref
-        return qkernel_callable_ref(self._qkernel.name)
+        return qkernel_callable_ref(self._qkernel)
 
     def _callable_attrs(self) -> dict[str, Any]:
         """Return attrs copied from the source callable.
@@ -1485,7 +1470,7 @@ class InverseGate:
         """
         if self._target_callable_attrs is not None:
             return dict(self._target_callable_attrs)
-        return qkernel_callable_attrs()
+        return qkernel_callable_attrs(self._qkernel)
 
     def _bind_arguments(self, *args: Any, **kwargs: Any) -> "BoundArguments":
         """Bind and literal-promote call arguments.
@@ -1757,7 +1742,7 @@ class InverseGate:
 
         Returns:
             Any: Quantum output handle, or a tuple of handles when the
-                wrapped kernel has multiple quantum inputs.
+            wrapped kernel has multiple quantum inputs.
         """
         bound_args = self._bind_arguments(*args, **kwargs)
         block = self._select_block(bound_args.arguments)
@@ -1780,6 +1765,68 @@ class InverseGate:
         if len(outputs) == 1:
             return outputs[0]
         return tuple(outputs)
+
+
+def _inverse_composite_operation(
+    kernel: QKernel,
+    block: Block,
+    inputs: dict[str, Value],
+) -> InvokeOperation:
+    """Build one inverse invocation for a composite qkernel.
+
+    Args:
+        kernel (QKernel): Composite qkernel being inverted.
+        block (Block): Call-site-specialized direct implementation body.
+        inputs (dict[str, Value]): Actual call operands keyed by parameter name.
+
+    Returns:
+        InvokeOperation: Inverse callable invocation retaining the composite's
+        definition, models, and implementation identity.
+    """
+    operation = qkernel_invoke_block(kernel, block, inputs)
+    operation.transform = CallTransform.INVERSE
+    definition = operation.definition
+    assert definition is not None
+    if definition.implementation_for(transform=CallTransform.INVERSE) is None:
+        try:
+            inverse_body = _BlockInverter().invert_block(block)
+        except NotImplementedError:
+            # Keep the semantic inverse call available to analysis. A later
+            # compile with concrete structural bindings may materialize the
+            # inverse body; emit rejects it clearly if it remains unresolved.
+            inverse_body = None
+        if inverse_body is not None:
+            definition.implementations.append(
+                CallableImplementation(
+                    transform=CallTransform.INVERSE,
+                    body=inverse_body,
+                )
+            )
+    return operation
+
+
+@dataclasses.dataclass(frozen=True)
+class _InverseComposite:
+    """Expose inverse composite calls through the normal qkernel call protocol.
+
+    Args:
+        kernel (QKernel): Composite qkernel to invert.
+    """
+
+    kernel: QKernel
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Invoke the inverse composite at the current trace site.
+
+        Args:
+            *args (Any): Positional arguments accepted by the composite.
+            **kwargs (Any): Keyword arguments accepted by the composite.
+
+        Returns:
+            Any: Frontend handle or tuple matching the composite signature.
+        """
+        factory = partial(_inverse_composite_operation, self.kernel)
+        return invoke_qkernel_with_operation(self.kernel, factory, *args, **kwargs)
 
 
 def _inverse_known_qft_target(target: Any) -> Any | None:
@@ -1895,6 +1942,8 @@ def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
     if native_inverse is not None:
         return native_inverse
     qkernel = _qkernel_for_callable(target, caller="inverse")
+    if getattr(qkernel, "_callable_kind", None) == "composite":
+        return _InverseComposite(qkernel)
     callable_ref, callable_attrs = _control_callable_metadata(target, qkernel)
     return InverseGate(
         qkernel,

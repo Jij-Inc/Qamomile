@@ -1,164 +1,24 @@
-"""Tests for decomposition strategy framework."""
+"""Tests for compiler-side callable implementation selection."""
 
-import pytest
-
-from qamomile.circuit.frontend.composite_gate import CompositeGate
-from qamomile.circuit.frontend.decomposition import (
-    DecompositionConfig,
-    StrategyRegistry,
-)
-from qamomile.circuit.stdlib.qft import IQFT, QFT
-from qamomile.circuit.stdlib.qft_strategies import (
-    ApproximateQFTStrategy,
-    StandardIQFTStrategy,
-    StandardQFTStrategy,
-)
+from qamomile.circuit.frontend.decomposition import DecompositionConfig
 
 
-class TestDecompositionConfig:
-    """Tests for DecompositionConfig."""
+def test_decomposition_config_selects_override_or_default() -> None:
+    """Selection is configuration only, without a global strategy registry."""
+    config = DecompositionConfig(
+        strategy_overrides={"qft": "native"},
+        default_strategy="body",
+    )
 
-    def test_default_config(self):
-        """Test default configuration."""
-        config = DecompositionConfig()
-        assert config.strategy_overrides == {}
-        assert config.strategy_params == {}
-        assert config.default_strategy == "standard"
-
-    def test_get_strategy_for_gate_with_override(self):
-        """Test getting strategy with override."""
-        config = DecompositionConfig(
-            strategy_overrides={"qft": "approximate"},
-        )
-        assert config.get_strategy_for_gate("qft") == "approximate"
-        assert config.get_strategy_for_gate("iqft") == "standard"
-
-    def test_get_strategy_params(self):
-        """Test getting strategy parameters."""
-        config = DecompositionConfig(
-            strategy_params={
-                "approximate": {"truncation_depth": 3},
-            },
-        )
-        assert config.get_strategy_params("approximate") == {"truncation_depth": 3}
-        assert config.get_strategy_params("standard") == {}
+    assert config.get_strategy_for_gate("qft") == "native"
+    assert config.get_strategy_for_gate("custom") == "body"
 
 
-class TestStrategyRegistry:
-    """Tests for StrategyRegistry."""
+def test_decomposition_config_returns_parameter_copy() -> None:
+    """Callers cannot mutate the stored strategy parameters accidentally."""
+    config = DecompositionConfig(strategy_params={"approximate": {"degree": 3}})
 
-    def test_register_and_get(self):
-        """Test registering and retrieving strategies."""
-        registry = StrategyRegistry()
-        strategy = StandardQFTStrategy()
+    params = config.get_strategy_params("approximate")
+    params["degree"] = 7
 
-        registry.register("qft", "standard", strategy)
-        retrieved = registry.get("qft", "standard")
-
-        assert retrieved is strategy
-
-    def test_get_nonexistent(self):
-        """Test getting nonexistent strategy."""
-        registry = StrategyRegistry()
-        assert registry.get("qft", "nonexistent") is None
-        assert registry.get("nonexistent", "standard") is None
-
-    def test_list_strategies(self):
-        """Test listing strategies for a gate."""
-        registry = StrategyRegistry()
-        registry.register("qft", "standard", StandardQFTStrategy())
-        registry.register("qft", "approximate", ApproximateQFTStrategy())
-
-        strategies = registry.list_strategies("qft")
-        assert "standard" in strategies
-        assert "approximate" in strategies
-
-    def test_list_gates(self):
-        """Test listing gates with strategies."""
-        registry = StrategyRegistry()
-        registry.register("qft", "standard", StandardQFTStrategy())
-        registry.register("iqft", "standard", StandardIQFTStrategy())
-
-        gates = registry.list_gates()
-        assert "qft" in gates
-        assert "iqft" in gates
-
-
-class TestQFTStrategies:
-    """Tests for QFT strategies."""
-
-    def test_qft_has_strategies(self):
-        """Test that QFT class has strategies registered."""
-        strategies = QFT.list_strategies()
-        assert "standard" in strategies
-        assert "approximate" in strategies
-
-    def test_iqft_has_strategies(self):
-        """Test that IQFT class has strategies registered."""
-        strategies = IQFT.list_strategies()
-        assert "standard" in strategies
-        assert "approximate" in strategies
-
-    def test_get_standard_strategy(self):
-        """Test getting standard strategy."""
-        strategy = QFT.get_strategy("standard")
-        assert strategy is not None
-        assert strategy.name == "standard"
-
-    def test_get_approximate_strategy(self):
-        """Test getting approximate strategy."""
-        strategy = QFT.get_strategy("approximate")
-        assert strategy is not None
-        assert "approximate" in strategy.name
-
-
-class TestCompositeGateStrategyRegistry:
-    """Tests for CompositeGate strategy registry."""
-
-    def test_register_strategy(self):
-        """Test registering a custom strategy."""
-
-        class CustomGate(CompositeGate):
-            _strategies = {}  # Fresh registry
-
-            def __init__(self, n: int):
-                self._n = n
-
-            @property
-            def num_target_qubits(self) -> int:
-                return self._n
-
-        # Register custom strategy
-        custom_strategy = StandardQFTStrategy()
-        CustomGate.register_strategy("my_strategy", custom_strategy)
-
-        assert "my_strategy" in CustomGate.list_strategies()
-        assert CustomGate.get_strategy("my_strategy") is custom_strategy
-
-    def test_set_default_strategy(self):
-        """Test setting default strategy."""
-
-        class AnotherGate(CompositeGate):
-            _strategies = {"a": StandardQFTStrategy(), "b": ApproximateQFTStrategy()}
-            _default_strategy = "a"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-        AnotherGate.set_default_strategy("b")
-        assert AnotherGate._default_strategy == "b"
-
-    def test_set_invalid_default_strategy(self):
-        """Test setting invalid default strategy raises error."""
-
-        class YetAnotherGate(CompositeGate):
-            _strategies = {"a": StandardQFTStrategy()}
-            _default_strategy = "a"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-        with pytest.raises(ValueError):
-            YetAnotherGate.set_default_strategy("nonexistent")
+    assert config.get_strategy_params("approximate") == {"degree": 3}

@@ -23,11 +23,7 @@ from qamomile.circuit.estimator.resource_estimator import (
     UnknownResourcePolicy,
 )
 from qamomile.circuit.frontend.callable_signature import CallableSignature
-from qamomile.circuit.frontend.composite_gate import (
-    CompositeGate,
-    composite,
-    composite_gate,
-)
+from qamomile.circuit.frontend.composite_gate import composite_gate
 from qamomile.circuit.frontend.operation.measurement import (
     measure_reset,
     project_x,
@@ -83,7 +79,6 @@ def test_job_types_listed_in_all():
 
 def test_callable_helpers_are_publicly_reexported():
     """Primary callable helper API is reachable from ``qamomile.circuit``."""
-    assert qmc.composite is composite
     assert qmc.composite_gate is composite_gate
     assert qmc.opaque is opaque
     assert qmc.Oracle is Oracle
@@ -130,12 +125,10 @@ def test_measurement_helpers_are_publicly_reexported():
         )
 
 
-def test_compat_callable_aliases_are_direct_but_not_star_exported():
-    """Compatibility callable aliases stay reachable but not primary."""
-    assert qmc.composite is composite
-    assert qmc.CompositeGate is CompositeGate
-    assert "composite" not in qmc.__all__
-    assert "CompositeGate" not in qmc.__all__
+def test_removed_parallel_composite_api_is_not_exposed() -> None:
+    """Only the QKernel-returning composite_gate decorator is public."""
+    assert not hasattr(qmc, "composite")
+    assert not hasattr(qmc, "CompositeGate")
 
 
 def test_compiler_callable_descriptors_are_not_top_level_api():

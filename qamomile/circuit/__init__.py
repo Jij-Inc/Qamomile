@@ -19,11 +19,7 @@ from .estimator import (
 
 # Frontend API
 from .frontend.callable_signature import CallableSignature
-from .frontend.composite_gate import (
-    CompositeGate as CompositeGate,
-    composite as composite,
-    composite_gate as composite_gate,
-)
+from .frontend.composite_gate import composite_gate as composite_gate
 from .frontend.constructors import bit, float_, qubit, qubit_array, uint
 from .frontend.handle import (
     Bit,

@@ -105,7 +105,9 @@ class CallableImplementation:
         transform (CallTransform): Transform this implementation realizes.
         backend (str | None): Backend name for native implementations.
         strategy (str | None): Strategy name such as ``"standard"``.
-        body (Block | None): IR implementation body.
+        body (Block | None): IR implementation body. A transform-specific body
+            realizes that transform completely; a controlled body therefore
+            includes control operands in its signature.
         body_ref (CallableBodyRef | None): Reference to a body that should be
             materialized by a later resolver. Defaults to ``None``.
         emitter (Any): Backend-native emitter object.
@@ -565,14 +567,13 @@ class InvokeOperation(Operation):
 
         Returns:
             Block | None: Selected implementation body, or the callable's
-            default direct body when this is a direct invocation and no
-            selected implementation provides one.
+            default body when no transform-specific implementation exists.
+            A compiler may synthesize inverse or controlled behavior from this
+            fallback body.
         """
         impl = self.implementation_for(backend=backend, strategy=strategy)
         if impl is not None and impl.body is not None:
             return impl.body
-        if self.transform is not CallTransform.DIRECT:
-            return None
         return self.body
 
     @property

@@ -69,17 +69,17 @@ def emit_self_call_forward_ref(
     op = InvokeOperation(
         operands=operands,
         results=results,
-        target=qkernel_callable_ref(kernel.name),
-        attrs=qkernel_callable_attrs(),
+        target=qkernel_callable_ref(kernel),
+        attrs=qkernel_callable_attrs(kernel),
         definition=CallableDef(
-            ref=qkernel_callable_ref(kernel.name),
+            ref=qkernel_callable_ref(kernel),
             signature=signature_from_values(
                 operands,
                 results,
                 operand_names=label_args,
             ),
-            default_policy=CallPolicy.INLINE,
-            attrs=qkernel_callable_attrs(),
+            default_policy=getattr(kernel, "_callable_policy", CallPolicy.INLINE),
+            attrs=qkernel_callable_attrs(kernel),
         ),
     )
     kernel._pending_self_calls.append(op)
@@ -97,7 +97,7 @@ def finalize_pending_self_calls(kernel: Any) -> None:
         return
     assert kernel._block is not None
 
-    definition = qkernel_callable_def(kernel.name, kernel._block)
+    definition = qkernel_callable_def(kernel, kernel._block)
     for op in kernel._pending_self_calls:
         op.definition = definition
         op.body = kernel._block

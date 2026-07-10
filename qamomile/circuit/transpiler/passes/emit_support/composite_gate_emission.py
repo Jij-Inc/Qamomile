@@ -13,6 +13,7 @@ import math
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.callable import (
+    CallTransform,
     CompositeGateType,
     InvokeOperation,
 )
@@ -111,6 +112,44 @@ def emit_composite_gate(
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
 
+    if op.transform is CallTransform.CONTROLLED:
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            emit_controlled_composite_at_indices,
+        )
+
+        emit_controlled_composite_at_indices(
+            emit_pass,
+            circuit,
+            op,
+            [],
+            qubit_indices,
+            bindings,
+        )
+        update_composite_result_mapping(op, qubit_groups, qubit_map)
+        return
+
+    if op.transform is CallTransform.INVERSE:
+        implementation = op.implementation_for(
+            backend=getattr(emit_pass, "backend_name", None)
+        )
+        if implementation is None or implementation.body is None:
+            raise EmitError(
+                f"Inverse callable '{op.target.name}' has no inverse "
+                "implementation body for this backend. Bind structural "
+                "parameters at compile time so the inverse can be "
+                "materialized, or register an inverse implementation.",
+                operation=f"InvokeOperation[{op.target.name}]",
+            )
+        emit_pass._emit_custom_composite(
+            circuit,
+            op,
+            implementation.body,
+            qubit_indices,
+            bindings,
+        )
+        update_composite_result_mapping(op, qubit_groups, qubit_map)
+        return
+
     # Try backend-global native emitters after callable-specific implementations.
     for emitter in emit_pass._composite_emitters:
         if emitter.can_emit(op.gate_type):
@@ -153,12 +192,8 @@ def emit_invoke_operation(
             operation=f"InvokeOperation[{op.target.name}]",
         )
 
-    # A custom composite that carries resource models but no executable body
-    # and no native emitter is an estimation-only box (e.g. a general
-    # ``modmul_const`` whose map is not a cyclic bit rotation). Emitting it as a
-    # barrier would silently run it as identity and produce a wrong quantum
-    # result, so reject it here rather than at the estimator (which never
-    # reaches emit).
+    # Reject a manually constructed model-only definition instead of silently
+    # emitting it as an identity barrier.
     definition = op.definition
     resource_models = getattr(definition, "resource_models", ()) if definition else ()
     if (
@@ -186,8 +221,8 @@ def emit_composite_fallback(
 ) -> None:
     """Emit composite gate using decomposition.
 
-    If the operation has a strategy_name set, it attempts to use
-    the corresponding strategy from the CompositeGate class.
+    If the operation has a strategy name, resolve it from the callable's own
+    implementation candidates.
     """
     if op.gate_type == CompositeGateType.QPE:
         emit_qpe_manual(emit_pass, circuit, op, qubit_indices, bindings)

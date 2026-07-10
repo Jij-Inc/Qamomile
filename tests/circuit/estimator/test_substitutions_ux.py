@@ -7,11 +7,9 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qmc
-from qamomile.circuit.stdlib.arithmetic import modmul_const
 
 
 @qmc.composite_gate(name="phase_u")
-@qmc.qkernel
 def _phase_u(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
     """Apply a phase rotation (angle does not affect gate counts)."""
     return qmc.p(q, theta)
@@ -33,11 +31,9 @@ def _toy_qpe(bits: qmc.UInt = 4, theta: qmc.Float = 0.1) -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
-def _modmul_kernel(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-    """Apply one abstract modular multiplication on an n-bit register."""
-    reg = qmc.qubit_array(n, name="reg")
-    reg = modmul_const(reg)
-    return reg
+def _sized_kernel(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+    """Allocate an n-bit register for symbolic-size substitution tests."""
+    return qmc.qubit_array(n, name="reg")
 
 
 @qmc.qkernel
@@ -239,6 +235,61 @@ def test_untaken_branch_allocations_are_not_counted() -> None:
     assert int(taken.qubits) == 1
 
 
+@qmc.qkernel
+def _carried_loop_bound(n: qmc.UInt) -> qmc.Qubit:
+    """Use a loop-carried counter as a later quantum-loop bound."""
+    count = qmc.uint(0)
+    for _ in qmc.range(n):
+        count = count + 1
+    q = qmc.qubit("q")
+    for _ in qmc.range(count):
+        q = qmc.x(q)
+    return q
+
+
+@qmc.qkernel
+def _carried_branch(n: qmc.UInt) -> qmc.Qubit:
+    """Use a loop-carried counter as a later branch condition."""
+    count = qmc.uint(0)
+    for _ in qmc.range(n):
+        count = count + 1
+    q = qmc.qubit("q")
+    if count == 1:
+        q = qmc.x(q)
+    else:
+        q = qmc.h(q)
+        q = qmc.z(q)
+    return q
+
+
+def test_region_arg_drives_later_symbolic_loop() -> None:
+    """A carried counter is published as the symbolic result ``n``."""
+    estimate = _carried_loop_bound.estimate_resources()
+    n = sp.Symbol("n", integer=True, positive=True)
+
+    assert sp.simplify(estimate.gates.total - n) == 0
+    assert set(estimate.parameters) == {"n"}
+
+
+@pytest.mark.parametrize("mode", ["bindings", "substitutions"])
+def test_region_arg_drives_later_concrete_loop(mode: str) -> None:
+    """Bindings and substitutions both specialize a carried loop bound."""
+    estimate = _carried_loop_bound.estimate_resources(**{mode: {"n": 3}})
+
+    assert estimate.gates.total == 3
+    assert estimate.parameters == {}
+
+
+@pytest.mark.parametrize("mode", ["bindings", "substitutions"])
+def test_region_arg_drives_later_branch(mode: str) -> None:
+    """A concrete carried value specializes a later compile-time branch."""
+    one = _carried_branch.estimate_resources(**{mode: {"n": 1}})
+    two = _carried_branch.estimate_resources(**{mode: {"n": 2}})
+
+    assert one.gates.total == 1
+    assert two.gates.total == 2
+
+
 def test_substitutions_pass_kernel_inputs_including_noop_angle() -> None:
     """Passing all kernel inputs works; an angle that affects no metric is a no-op.
 
@@ -272,8 +323,8 @@ def test_substitutions_force_symbolic_over_python_default() -> None:
 def test_substitutions_accept_shift_expression() -> None:
     """A substitution value may reintroduce the same symbol name (n -> n+1)."""
     n = sp.Symbol("n", integer=True, positive=True)
-    est = _modmul_kernel.estimate_resources(substitutions={"n": n + 1})
-    # One abstract modmul on an (n+1)-bit register: peak width n+1.
+    est = _sized_kernel.estimate_resources(substitutions={"n": n + 1})
+    # The reintroduced symbol still sizes the register correctly.
     assert sp.simplify(est.qubits - (n + 1)) == 0
 
 
@@ -286,4 +337,4 @@ def test_substitutions_typo_raises() -> None:
 def test_substitutions_bindings_overlap_raises() -> None:
     """A name in both bindings and substitutions is rejected."""
     with pytest.raises(ValueError, match="both bindings and substitutions"):
-        _modmul_kernel.estimate_resources(bindings={"n": 4}, substitutions={"n": 4})
+        _sized_kernel.estimate_resources(bindings={"n": 4}, substitutions={"n": 4})

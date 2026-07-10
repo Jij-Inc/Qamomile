@@ -1,25 +1,15 @@
 """Constant modular arithmetic building blocks with resource models.
 
-This module provides :func:`modmul_const`, the constant modular multiplication
-primitive ``|x> -> |a*x mod N>`` that Shor's order-finding algorithm iterates.
-It is a resource-modeled composite: at estimate time the attached models supply
-the cost of one modular multiplication (``O(n^2)`` non-Clifford gates on an
-``n``-bit register), so a symbolic order-finding kernel reproduces the book's
-``O(n^3)`` non-Clifford / ``O(n)`` qubit scaling without unrolling. The default
-(literature) model uses the calibrated prefactor ``0.15 n^2`` — back-derived
-from the reference's aggregate ``0.3 n^3`` over ``2n`` multiplications, not an
-independent gate count — while ``ResourcePolicy.ASYMPTOTIC`` leaves the
-prefactor as a free symbol. ``modmul_const`` can be called *abstractly* (no
-specific ``multiplier``/``modulus``) — the honest choice for a
-schedule-independent estimate — or with a concrete constant; only the concrete
-cyclic-rotation case (``modulus == 2**n - 1`` and ``multiplier`` a power of two)
-gains an executable SWAP-network body, so every other form is estimation-only
-and raises at transpile time rather than emitting a silently-wrong circuit.
+This module provides :func:`modmul_const`, the reversible primitive
+``|x> -> |a*x mod N>`` used by Shor order finding. Every call is one named,
+executable composite with an attached primitive-level resource model. The
+estimator therefore derives an algorithm's cost by walking its real call graph;
+algorithms do not need to restate an aggregate resource formula.
 
-The design follows the project's IR-abstraction principle: ``modmul_const`` is a
-single abstract box carrying an optional body and a resource model, never
-pre-expanded into per-bit arithmetic at IR level. Backends and the estimator
-choose the concrete realization.
+The default model uses the literature calibration ``0.15 n^2`` per controlled
+modular multiplication, while ``ResourcePolicy.ASYMPTOTIC`` leaves the
+coefficient symbolic. Small concrete instances have executable SWAP-network or
+basis-permutation bodies for cross-backend correctness checks.
 """
 
 from __future__ import annotations
@@ -38,18 +28,9 @@ from qamomile.circuit.estimator import (
     WidthResources,
 )
 from qamomile.circuit.frontend.handle import Qubit, Vector
-from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.callable import (
-    CallableDef,
-    CallableRef,
-    CallPolicy,
-    CallTransform,
-    CompositeGateType,
-    InvokeOperation,
     ResourceModelBinding,
-    signature_from_values,
 )
-from qamomile.circuit.ir.value import Value
 
 # One constant modular multiplication costs ~c * n**2 non-Clifford (Toffoli)
 # gates on an n-bit register. The literature prefactor is chosen so that an
@@ -349,11 +330,162 @@ def _emit_cyclic_shift_body(
     return control, reg
 
 
+def _permutation_transpositions(
+    multiplier: int,
+    modulus: int,
+    num_qubits: int,
+) -> tuple[tuple[int, int], ...]:
+    """Decompose constant modular multiplication into basis transpositions.
+
+    Basis states below ``modulus`` follow ``x -> multiplier*x mod modulus``;
+    states outside that range are fixed so the map is a permutation over the
+    complete register Hilbert space.
+
+    Args:
+        multiplier (int): Coprime multiplier.
+        modulus (int): Arithmetic modulus.
+        num_qubits (int): Register width.
+
+    Returns:
+        tuple[tuple[int, int], ...]: Basis-state swaps in circuit order.
+    """
+    dimension = 1 << num_qubits
+    permutation = [
+        (multiplier * value) % modulus if value < modulus else value
+        for value in range(dimension)
+    ]
+    visited: set[int] = set()
+    transpositions: list[tuple[int, int]] = []
+    for start in range(dimension):
+        if start in visited:
+            continue
+        cycle: list[int] = []
+        value = start
+        while value not in visited:
+            visited.add(value)
+            cycle.append(value)
+            value = permutation[value]
+        for target in cycle[1:]:
+            transpositions.append((cycle[0], target))
+    return tuple(transpositions)
+
+
+def _gray_path(start: int, stop: int) -> tuple[int, ...]:
+    """Return a Hamming-distance-one path between two basis states.
+
+    Args:
+        start (int): Initial basis-state integer.
+        stop (int): Final basis-state integer.
+
+    Returns:
+        tuple[int, ...]: Path including both endpoints.
+    """
+    path = [start]
+    current = start
+    differing = start ^ stop
+    bit = 0
+    while differing:
+        if differing & 1:
+            current ^= 1 << bit
+            path.append(current)
+        differing >>= 1
+        bit += 1
+    return tuple(path)
+
+
+def _emit_adjacent_basis_swap(
+    reg: Vector[Qubit],
+    left: int,
+    right: int,
+    num_qubits: int,
+) -> None:
+    """Swap two basis states that differ in exactly one bit.
+
+    Args:
+        reg (Vector[Qubit]): Register to update.
+        left (int): First basis state.
+        right (int): Second basis state.
+        num_qubits (int): Register width.
+
+    Raises:
+        ValueError: If the states are not Hamming-distance one.
+    """
+    import qamomile.circuit as qmc
+
+    difference = left ^ right
+    if difference == 0 or difference & (difference - 1):
+        raise ValueError("Adjacent basis swap requires Hamming distance one.")
+    target = difference.bit_length() - 1
+    control_indices = [index for index in range(num_qubits) if index != target]
+    zero_controls = [index for index in control_indices if not (left >> index) & 1]
+    for index in zero_controls:
+        reg[index] = qmc.x(reg[index])
+    if control_indices:
+        controlled_x = qmc.control(qmc.x, num_controls=len(control_indices))
+        outputs = controlled_x(
+            *(reg[index] for index in control_indices),
+            reg[target],
+        )
+        for index, output in zip(
+            (*control_indices, target),
+            outputs,
+            strict=True,
+        ):
+            reg[index] = output
+    else:
+        reg[target] = qmc.x(reg[target])
+    for index in reversed(zero_controls):
+        reg[index] = qmc.x(reg[index])
+
+
+def _emit_basis_transposition(
+    reg: Vector[Qubit],
+    left: int,
+    right: int,
+    num_qubits: int,
+) -> None:
+    """Swap two arbitrary computational basis states.
+
+    Args:
+        reg (Vector[Qubit]): Register to update.
+        left (int): First basis state.
+        right (int): Second basis state.
+        num_qubits (int): Register width.
+    """
+    path = _gray_path(left, right)
+    adjacent = list(zip(path, path[1:]))
+    for start, stop in adjacent:
+        _emit_adjacent_basis_swap(reg, start, stop, num_qubits)
+    for start, stop in reversed(adjacent[:-1]):
+        _emit_adjacent_basis_swap(reg, start, stop, num_qubits)
+
+
+def _emit_permutation_body(
+    reg: Vector[Qubit],
+    transpositions: tuple[tuple[int, int], ...],
+    num_qubits: int,
+) -> Vector[Qubit]:
+    """Emit a reversible basis-permutation implementation.
+
+    Args:
+        reg (Vector[Qubit]): Register to update.
+        transpositions (tuple[tuple[int, int], ...]): Basis swaps in circuit
+            order.
+        num_qubits (int): Register width.
+
+    Returns:
+        Vector[Qubit]: Updated register.
+    """
+    for left, right in transpositions:
+        _emit_basis_transposition(reg, left, right, num_qubits)
+    return reg
+
+
 def modmul_const(
     reg: Vector[Qubit],
     *,
-    multiplier: int | None = None,
-    modulus: int | None = None,
+    multiplier: int,
+    modulus: int,
     control: Qubit | None = None,
 ) -> Vector[Qubit] | tuple[Qubit, Vector[Qubit]]:
     """Apply constant modular multiplication ``|x> -> |a*x mod N>``.
@@ -363,27 +495,17 @@ def modmul_const(
     on an ``n``-bit register under the default literature model), so iterating
     it reproduces the book's order-finding scaling symbolically.
 
-    Three modes, all sharing the same resource models:
-
-    - **Abstract** (``multiplier`` and ``modulus`` both omitted): "some constant
-      modular multiplication of this width", carrying no specific constant. This
-      is the honest choice for a schedule-independent resource estimate (the
-      cost is the same for every constant). It has no executable body and raises
-      at transpile time — estimation only.
-    - **Concrete cyclic** (``modulus == 2**n - 1`` with ``multiplier`` a power of
-      two at a concrete width): a real SWAP-network cyclic rotation with an
-      executable body that runs on backends.
-    - **Concrete general** (any other coprime constant): an estimation-only box
-      like the abstract mode, but recording the specific constant in attrs.
+    Every call has an executable body. Cyclic Mersenne multiplications use a
+    compact SWAP network; other constants use an ancilla-free basis-permutation
+    synthesis intended for small correctness tests. The attached literature and
+    asymptotic models remain available for scalable estimation.
 
     Args:
-        reg (Vector[Qubit]): Little-endian register to multiply in place. May
-            have a symbolic width for estimation.
-        multiplier (int | None): Constant multiplier ``a``; must be coprime to
-            ``modulus`` to be reversible. ``None`` (with ``modulus`` also
-            ``None``) selects abstract mode. Defaults to ``None``.
-        modulus (int | None): Modulus ``N``. ``None`` (with ``multiplier`` also
-            ``None``) selects abstract mode. Defaults to ``None``.
+        reg (Vector[Qubit]): Little-endian register to multiply in place. Its
+            width must be known when the qkernel is traced.
+        multiplier (int): Positive constant multiplier ``a``, coprime to
+            ``modulus``.
+        modulus (int): Integer modulus ``N`` of at least two.
         control (Qubit | None): Optional control qubit. When provided the
             multiplication is applied conditionally (as Shor's order finding
             conditions each modular multiplication on an exponent qubit).
@@ -395,9 +517,8 @@ def modmul_const(
         supplied.
 
     Raises:
-        ValueError: If exactly one of ``multiplier`` / ``modulus`` is given, or
-            (in concrete mode) ``modulus`` is not at least 2, or ``multiplier``
-            is not a positive integer coprime to ``modulus``.
+        ValueError: If the modulus or multiplier is invalid, or the register
+            width is symbolic.
 
     Example:
         >>> import qamomile.circuit as qmc
@@ -406,137 +527,68 @@ def modmul_const(
         ... def mul(reg: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         ...     return modmul_const(reg, multiplier=2, modulus=15)
     """
-    if (multiplier is None) != (modulus is None):
+    if modulus < 2:
+        raise ValueError(f"modulus must be >= 2, got {modulus}.")
+    if multiplier <= 0 or sp.igcd(multiplier, modulus) != 1:
         raise ValueError(
-            "modmul_const requires multiplier and modulus to be both given "
-            "(concrete mode) or both omitted (abstract mode); got "
-            f"multiplier={multiplier}, modulus={modulus}."
+            "multiplier must be a positive integer coprime to modulus; "
+            f"got multiplier={multiplier}, modulus={modulus}."
         )
-    abstract = multiplier is None
-    if not abstract:
-        assert modulus is not None and multiplier is not None
-        if modulus < 2:
-            raise ValueError(f"modulus must be >= 2, got {modulus}.")
-        if multiplier <= 0 or sp.igcd(multiplier, modulus) != 1:
-            raise ValueError(
-                f"multiplier must be a positive integer coprime to modulus; "
-                f"got multiplier={multiplier}, modulus={modulus}."
-            )
 
     size = _concrete_size(reg)
-    rotation = None
-    if not abstract and size is not None:
-        assert multiplier is not None and modulus is not None
-        rotation = _is_cyclic_shift(multiplier, modulus, size)
+    if size is None:
+        raise ValueError(
+            "modmul_const requires a compile-time-known register width so its "
+            "reversible implementation can be synthesized. Bind the width before "
+            "calling or transpiling this kernel."
+        )
+    if modulus > 1 << size:
+        raise ValueError(f"modulus {modulus} does not fit in a {size}-qubit register.")
 
+    import qamomile.circuit as qmc
+
+    rotation = _is_cyclic_shift(multiplier, modulus, size)
     if rotation is not None:
-        control_out, reg_out = _emit_cyclic_shift_body(reg, rotation, control)
-        if control is None:
-            return reg_out
-        assert control_out is not None
-        return control_out, reg_out
 
-    # Abstract, symbolic width, or non-rotation constant: emit a resource-modeled
-    # estimation-only box (no executable body).
-    return _emit_modmul_box(
-        reg,
-        multiplier=multiplier,
-        modulus=modulus,
-        size=size,
-        control=control,
-    )
-
-
-def _emit_modmul_box(
-    reg: Vector[Qubit],
-    *,
-    multiplier: int | None,
-    modulus: int | None,
-    size: int | None,
-    control: Qubit | None = None,
-) -> Vector[Qubit] | tuple[Qubit, Vector[Qubit]]:
-    """Emit a bodyless resource-modeled ``modmul_const`` invocation.
-
-    Args:
-        reg (Vector[Qubit]): Register consumed and returned by the box.
-        multiplier (int | None): Constant multiplier ``a`` recorded in attrs,
-            or ``None`` in abstract mode.
-        modulus (int | None): Modulus ``N`` recorded in attrs, or ``None`` in
-            abstract mode.
-        size (int | None): Concrete register width when known, recorded as
-            ``register_bits`` so models can read it without an operand shape.
-        control (Qubit | None): Optional control qubit consumed and returned
-            alongside the register. Defaults to ``None``.
-
-    Returns:
-        Vector[Qubit] | tuple[Qubit, Vector[Qubit]]: Next-version register
-        handle, or ``(control, register)`` when controlled.
-    """
-    label = "abstract" if multiplier is None else f"a={multiplier}"
-    consumed = reg.consume(operation_name=f"modmul_const[{label}]")
-    result = consumed.value.next_version()
-    ref = CallableRef(namespace="qamomile.stdlib", name=_MODMUL_NAME)
-    num_controls = 0 if control is None else 1
-    attrs: dict[str, Any] = {
-        "kind": "composite",
-        "gate_type": CompositeGateType.CUSTOM.name,
-        "num_control_qubits": num_controls,
-        "num_target_qubits": size or 0,
-        "custom_name": _MODMUL_NAME,
-        "strategy_name": None,
-        "default_policy": CallPolicy.PRESERVE_BOX.name,
-        # This box has resource models but no executable body, so it is
-        # estimation-only; the emit guard rejects transpiling it.
-        "estimation_only": True,
-        # Pin the default (literature) model explicitly so the default policy is
-        # not silently dependent on binding order.
-        "default_estimate_kind": "literature",
-        "multiplier": multiplier,
-        "modulus": modulus,
-        "register_bits": size,
-    }
-    operands: list[Value]
-    results: list[Value]
-    if control is None:
-        operands = [consumed.value]
-        results = [result]
-        operand_names = ["reg"]
-        transform = CallTransform.DIRECT
-    else:
-        consumed_control = control.consume(operation_name="modmul_const[control]")
-        control_result = consumed_control.value.next_version()
-        operands = [consumed_control.value, consumed.value]
-        results = [control_result, result]
-        operand_names = ["control", "reg"]
-        transform = CallTransform.CONTROLLED
-    op = InvokeOperation(
-        operands=operands,
-        results=results,
-        target=ref,
-        transform=transform,
-        attrs=attrs,
-        definition=CallableDef(
-            ref=ref,
-            signature=signature_from_values(
-                operands,
-                results,
-                operand_names=operand_names,
-                result_names=operand_names,
-            ),
+        @qmc.composite_gate(
+            name=_MODMUL_NAME,
             resource_models=_modmul_resource_models(),
-            default_policy=CallPolicy.PRESERVE_BOX,
-            attrs=attrs,
-        ),
-    )
-    get_current_tracer().add_operation(op)
-    reg_out = type(reg)._create_from_value(value=result, shape=reg.shape)
+            default_estimate_kind="literature",
+        )
+        def implementation(register: Vector[Qubit]) -> Vector[Qubit]:
+            """Apply the cyclic-shift implementation.
+
+            Args:
+                register (Vector[Qubit]): Register to rotate.
+
+            Returns:
+                Vector[Qubit]: Rotated register.
+            """
+            return _emit_cyclic_shift_body(register, rotation)[1]
+
+    else:
+        transpositions = _permutation_transpositions(multiplier, modulus, size)
+
+        @qmc.composite_gate(
+            name=_MODMUL_NAME,
+            resource_models=_modmul_resource_models(),
+            default_estimate_kind="literature",
+        )
+        def implementation(register: Vector[Qubit]) -> Vector[Qubit]:
+            """Apply the general basis-permutation implementation.
+
+            Args:
+                register (Vector[Qubit]): Register to permute.
+
+            Returns:
+                Vector[Qubit]: Permuted register.
+            """
+            return _emit_permutation_body(register, transpositions, size)
+
     if control is None:
-        return reg_out
-    control_out = Qubit(
-        value=control_result,
-        parent=consumed_control.parent,
-        indices=consumed_control.indices,
-    )
+        return implementation(reg)
+    controlled = qmc.control(implementation)
+    control_out, reg_out = controlled(control, reg)
     return control_out, reg_out
 
 

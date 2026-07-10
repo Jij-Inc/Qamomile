@@ -73,6 +73,7 @@ def estimate_qkernel_resources(
     policy: Any = None,
     cost_basis: Any = None,
     strategies: dict[str, str] | None = None,
+    trace: bool = False,
     unknown_policy: Any = None,
 ) -> "ResourceEstimate":
     """Estimate resources for a kernel.
@@ -93,6 +94,8 @@ def estimate_qkernel_resources(
             ``None``.
         strategies (dict[str, str] | None): Callable strategy overrides.
             Defaults to ``None``.
+        trace (bool): Whether to retain the explanation tree. Defaults to
+            ``False``.
         unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
             Defaults to ``None``.
 
@@ -114,5 +117,6 @@ def estimate_qkernel_resources(
         policy=policy or ResourcePolicy.MODEL_IF_AVAILABLE,
         cost_basis=cost_basis or CostBasis.LOGICAL_GATES,
         strategies=strategies,
+        trace=trace,
         unknown_policy=unknown_policy or UnknownResourcePolicy.ERROR,
     )

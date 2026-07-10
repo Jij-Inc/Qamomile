@@ -11,7 +11,6 @@ from qamomile.circuit.stdlib.grover import grover_iteration_count, grover_search
 
 
 @qmc.composite_gate(name="mark_all_ones")
-@qmc.qkernel
 def mark_all_ones(reg: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     """Flip the phase of the all-ones basis state via a multi-controlled Z."""
     top = reg.shape[0] - 1

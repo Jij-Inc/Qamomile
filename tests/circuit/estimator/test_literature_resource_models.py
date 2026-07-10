@@ -38,23 +38,21 @@ class _ConstModel:
         )
 
 
-def _dual_model_composite() -> qm.CompositeGate:
+def _dual_model_composite() -> qm.QKernel:
     """Build a composite carrying asymptotic and literature models.
 
     Returns:
-        qm.CompositeGate: Composite whose asymptotic model reports total 11 and
+        qm.QKernel: Composite whose asymptotic model reports total 11 and
         whose literature model reports total 23.
     """
-    from qamomile.circuit.frontend.composite_gate_wrapped import composite_gate
 
-    @composite_gate(
+    @qm.composite_gate(
         name="dual_modeled",
         resource_models=[
             ResourceModelBinding(model=_ConstModel(11), estimate_kind="asymptotic"),
             ResourceModelBinding(model=_ConstModel(23), estimate_kind="literature"),
         ],
     )
-    @qm.qkernel
     def dual_modeled(q: qm.Qubit) -> qm.Qubit:
         """Apply one H gate as the fallback body."""
         return qm.h(q)
@@ -62,11 +60,11 @@ def _dual_model_composite() -> qm.CompositeGate:
     return dual_modeled
 
 
-def _call_dual(composite: qm.CompositeGate):
+def _call_dual(composite: qm.QKernel):
     """Return an estimator-ready qkernel calling the dual-model composite.
 
     Args:
-        composite (qm.CompositeGate): Dual-model composite to call.
+        composite (qm.QKernel): Dual-model composite to call.
 
     Returns:
         qm.QKernel: Kernel invoking the composite once.
@@ -82,19 +80,18 @@ def _call_dual(composite: qm.CompositeGate):
     return circuit
 
 
-def _dual_model_composite_with_default() -> qm.CompositeGate:
+def _dual_model_composite_with_default() -> qm.QKernel:
     """Build a dual-model composite pinning literature as the default.
 
     The asymptotic model is listed FIRST, but ``default_estimate_kind`` pins the
     literature model, so the default policy must not fall back to binding order.
 
     Returns:
-        qm.CompositeGate: Composite with asymptotic (total 11) listed first,
+        qm.QKernel: Composite with asymptotic (total 11) listed first,
         literature (total 23) pinned as the default.
     """
-    from qamomile.circuit.frontend.composite_gate_wrapped import composite_gate
 
-    @composite_gate(
+    @qm.composite_gate(
         name="dual_pinned",
         resource_models=[
             ResourceModelBinding(model=_ConstModel(11), estimate_kind="asymptotic"),
@@ -102,7 +99,6 @@ def _dual_model_composite_with_default() -> qm.CompositeGate:
         ],
         default_estimate_kind="literature",
     )
-    @qm.qkernel
     def dual_pinned(q: qm.Qubit) -> qm.Qubit:
         """Apply one H gate as the fallback body."""
         return qm.h(q)
@@ -134,16 +130,13 @@ def test_default_estimate_kind_pin_without_matching_model_raises() -> None:
     """
     import pytest
 
-    from qamomile.circuit.frontend.composite_gate_wrapped import composite_gate
-
-    @composite_gate(
+    @qm.composite_gate(
         name="mispinned",
         resource_models=[
             ResourceModelBinding(model=_ConstModel(11), estimate_kind="asymptotic"),
         ],
         default_estimate_kind="literature",
     )
-    @qm.qkernel
     def mispinned(q: qm.Qubit) -> qm.Qubit:
         """Apply one H gate as the fallback body."""
         return qm.h(q)
@@ -157,12 +150,9 @@ def test_default_estimate_kind_rejects_unknown_tag() -> None:
     """A typo'd default_estimate_kind is rejected at definition time."""
     import pytest
 
-    from qamomile.circuit.frontend.composite_gate_wrapped import composite_gate
-
     with pytest.raises(ValueError, match="not a recognized estimate kind"):
 
-        @composite_gate(name="bad", default_estimate_kind="literture")
-        @qm.qkernel
+        @qm.composite_gate(name="bad", default_estimate_kind="literture")
         def bad(q: qm.Qubit) -> qm.Qubit:
             """Apply one H gate."""
             return qm.h(q)
@@ -171,7 +161,9 @@ def test_default_estimate_kind_rejects_unknown_tag() -> None:
 def test_literature_policy_prefers_literature_model() -> None:
     """ResourcePolicy.LITERATURE selects the literature-tagged binding."""
     circuit = _call_dual(_dual_model_composite())
-    est = qm.ResourceEstimator(policy=ResourcePolicy.LITERATURE).estimate(circuit)
+    est = qm.ResourceEstimator(policy=ResourcePolicy.LITERATURE, trace=True).estimate(
+        circuit
+    )
     assert est.gates.total == 23
 
 
@@ -185,7 +177,9 @@ def test_asymptotic_policy_prefers_asymptotic_model() -> None:
 def test_literature_estimate_kind_tags_trace() -> None:
     """The literature binding tags its trace node with EstimateKind.LITERATURE."""
     circuit = _call_dual(_dual_model_composite())
-    est = qm.ResourceEstimator(policy=ResourcePolicy.LITERATURE).estimate(circuit)
+    est = qm.ResourceEstimator(policy=ResourcePolicy.LITERATURE, trace=True).estimate(
+        circuit
+    )
 
     kinds = _trace_estimate_kinds(est.trace)
     assert EstimateKind.LITERATURE in kinds

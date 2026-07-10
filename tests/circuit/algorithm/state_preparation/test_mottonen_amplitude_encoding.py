@@ -8,15 +8,18 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.state_preparation import (
-    MottonenAmplitudeEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
+)
+from qamomile.circuit.algorithm.state_preparation.mottonen_amplitude_encoding import (
+    _mottonen_composite,
+    _MottonenAngles as MottonenAmplitudeEncoding,
 )
 from qamomile.circuit.ir.operation import InvokeOperation
 from qamomile.circuit.ir.operation.callable import CompositeGateType
 from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.value import resolve_root_qubit_address
+from qamomile.circuit.ir.value import ArrayValue, resolve_root_qubit_address
 from qamomile.circuit.transpiler.passes.emit_support import ResourceAllocator
 from qamomile.circuit.transpiler.segments import QuantumStep
 from qamomile.linalg import (
@@ -224,9 +227,10 @@ class TestCompositeGateMetadata:
 
     def test_gate_identifiers(self) -> None:
         """``gate_type`` and ``custom_name`` match what the IR will tag."""
-        gate = MottonenAmplitudeEncoding([1.0, 0.0])
-        assert gate.gate_type == CompositeGateType.CUSTOM
-        assert gate.custom_name == "mottonen_amplitude_encoding"
+        gate, width = _mottonen_composite([1.0, 0.0])
+        assert width == 1
+        assert gate._callable_gate_type == CompositeGateType.CUSTOM
+        assert gate._callable_name == "mottonen_amplitude_encoding"
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources_real(self, n_qubits: int) -> None:
@@ -458,7 +462,7 @@ class TestLazyConstruction:
         def kernel() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
             # invoking the gate inside a kernel call goes through _decompose
-            q[0], q[1] = gate(q[0], q[1])
+            gate._decompose(q)
             return qmc.measure(q)
 
         kernel.build()
@@ -1060,24 +1064,27 @@ class TestAmplitudeEncodingWrapperBoxing:
             op.results[0] for op in affine.operations if isinstance(op, QInitOperation)
         ]
         assert qinit_arrays
-        qinit_uuid = qinit_arrays[0].uuid
+        qinit_logical_id = qinit_arrays[0].logical_id
 
         invoke_ops = [op for op in affine.operations if isinstance(op, InvokeOperation)]
         assert invoke_ops
 
-        root_addresses: list[tuple[str, int]] = []
+        array_operands: list[ArrayValue] = []
         for op in affine.operations:
             if not isinstance(op, InvokeOperation):
                 continue
             for operand in op.target_qubits:
+                if isinstance(operand, ArrayValue):
+                    array_operands.append(operand)
+                    continue
                 if operand.parent_array is None:
                     continue
                 root_addr = resolve_root_qubit_address(operand)
                 assert root_addr is not None
-                root_addresses.append(root_addr)
+                assert root_addr[0] == qinit_arrays[0].uuid
 
-        assert root_addresses
-        assert {root_uuid for root_uuid, _ in root_addresses} == {qinit_uuid}
+        assert array_operands
+        assert all(operand.logical_id == qinit_logical_id for operand in array_operands)
 
         affine = transpiler.unroll_recursion(affine, None)
         validated = transpiler.affine_validate(affine)

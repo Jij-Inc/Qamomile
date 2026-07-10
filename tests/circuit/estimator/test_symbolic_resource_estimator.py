@@ -7,6 +7,21 @@ import sympy as sp
 import qamomile.circuit as qm
 
 
+def test_trace_is_opt_in_and_honors_the_flag() -> None:
+    """Default estimates stay compact while trace=True retains explanations."""
+
+    @qm.qkernel
+    def circuit() -> qm.Bit:
+        """Apply and measure one H gate."""
+        return qm.measure(qm.h(qm.qubit("q")))
+
+    assert circuit.estimate_resources().trace is None
+    assert circuit.estimate_resources(trace=False).trace is None
+    traced = circuit.estimate_resources(trace=True)
+    assert traced.trace is not None
+    assert "h" in traced.trace.render()
+
+
 def test_composite_resource_model_is_policy_selected() -> None:
     """ResourceEstimator selects callable models unless exact body is requested."""
 
@@ -92,24 +107,23 @@ def test_controlled_composite_body_counts_own_control() -> None:
     control just like the model path and ``eval_controlled_u`` do.
     """
 
-    @qm.composite_gate(name="ctrl_one_h", num_controls=1)
-    @qm.qkernel
-    def ctrl_one_h(t: qm.Qubit) -> qm.Qubit:
-        """Apply a single H gate to the target (declares one control)."""
+    @qm.composite_gate(name="one_h")
+    def one_h(t: qm.Qubit) -> qm.Qubit:
+        """Apply a single H gate to the target."""
         return qm.h(t)
 
     @qm.composite_gate(name="plain_one_h")
-    @qm.qkernel
     def plain_one_h(t: qm.Qubit) -> qm.Qubit:
         """Apply a single H gate to the target (no controls)."""
         return qm.h(t)
 
     @qm.qkernel
     def controlled() -> tuple[qm.Qubit, qm.Qubit]:
-        """Apply ctrl_one_h controlled by an explicit control qubit."""
+        """Apply one_h through the normal higher-order control operator."""
         c = qm.qubit("c")
         t = qm.qubit("t")
-        return ctrl_one_h(t, controls=[c])
+        controlled_one_h = qm.control(one_h)
+        return controlled_one_h(c, t)
 
     @qm.qkernel
     def uncontrolled() -> qm.Qubit:

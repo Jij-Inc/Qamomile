@@ -190,7 +190,6 @@ def _pauli_x_evolve(
 
 
 @qmc.composite_gate(name="bell_pair")
-@qmc.qkernel
 def _bell_pair(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
     """Create a Bell pair as a custom composite gate."""
     q0 = qmc.h(q0)
@@ -199,7 +198,6 @@ def _bell_pair(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
 
 
 @qmc.composite_gate(name="ry_composite")
-@qmc.qkernel
 def _ry_composite(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
     """Apply ``RY`` as a parameterized custom composite gate."""
     return qmc.ry(q, theta)

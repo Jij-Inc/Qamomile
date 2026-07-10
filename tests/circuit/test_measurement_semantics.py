@@ -95,7 +95,7 @@ def test_measure_reset_resource_estimate_counts_reset_as_primitive():
         q, _bit = qmc.measure_reset(q)
         return qmc.measure(q)
 
-    estimate = kernel.estimate_resources().simplify()
+    estimate = kernel.estimate_resources(trace=True).simplify()
     assert estimate.gates.total == 2
     assert estimate.gates.single_qubit == 2
     assert estimate.depth.measurement_depth == 2

@@ -5,10 +5,8 @@ and :func:`qpe` inside qkernels. Internally these functions emit named
 callables with Qamomile bodies, resource metadata, and optional backend-native
 implementations.
 
-The ``QFT`` and ``IQFT`` classes remain public for advanced strategy selection
-and backend tests, but custom user-defined named operations should normally use
-the ``qamomile.circuit.composite_gate`` decorator rather than subclassing
-``CompositeGate`` directly.
+QFT and IQFT use the same ``composite_gate`` mechanism as user callables; there
+is no separate class-based gate hierarchy.
 
 Example:
     ```python
@@ -21,31 +19,13 @@ Example:
     ```
 """
 
-# Advanced class-based stdlib implementations.
 from .arithmetic import modmul_const
 from .grover import grover_iteration_count, grover_search
-from .qft import IQFT, QFT, iqft, qft
-
-# Strategy objects for advanced stdlib configuration.
-from .qft_strategies import (
-    ApproximateIQFTStrategy,
-    ApproximateQFTStrategy,
-    StandardIQFTStrategy,
-    StandardQFTStrategy,
-)
+from .qft import iqft, qft
 from .qpe import qpe
 from .shor import shor_order_finding
 
 __all__ = [
-    # Classes
-    "QFT",
-    "IQFT",
-    # Strategies
-    "StandardQFTStrategy",
-    "ApproximateQFTStrategy",
-    "StandardIQFTStrategy",
-    "ApproximateIQFTStrategy",
-    # Functions
     "qft",
     "iqft",
     "qpe",

@@ -1,291 +1,278 @@
-"""Frontend interface for composite gates."""
+"""Define named composite qkernels without a parallel frontend hierarchy."""
 
 from __future__ import annotations
 
-import abc
-from typing import TYPE_CHECKING, Any, ClassVar, Sequence
+import dataclasses
+from collections.abc import Callable, Sequence
+from typing import Any, cast, overload
 
-from qamomile.circuit.frontend.handle.primitives import Qubit
-from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.callable import CompositeGateType
+from qamomile.circuit.estimator.resource_estimator import EstimateKind, ResourceEstimate
+from qamomile.circuit.frontend.qkernel import QKernel, qkernel
+from qamomile.circuit.ir.operation.callable import (
+    CallableImplementation,
+    CallPolicy,
+    CompositeGateType,
+    ResourceModelBinding,
+)
 
-if TYPE_CHECKING:
-    from qamomile.circuit.frontend.decomposition import DecompositionStrategy
-    from qamomile.circuit.frontend.handle.array import Vector
 
+@dataclasses.dataclass(frozen=True)
+class _FunctionResourceModel:
+    """Adapt a function to the resource-model protocol.
 
-class CompositeGate(abc.ABC):
-    """Provide the advanced base class for boxed composite operations.
-
-    User-defined named operations should normally be written with the
-    :func:`composite_gate` decorator. The decorator keeps the frontend
-    interface close to ordinary qkernel code while the compiler records a
-    named callable with body, resource metadata, and implementation candidates.
-
-    This base class remains public for advanced use cases: stdlib
-    implementations such as QFT/IQFT, strategy registries, backend migration
-    tests, and compatibility with older class-based custom gates. Subclasses
-    may either trace frontend operations from :meth:`_decompose` or provide a
-    pre-built :class:`~qamomile.circuit.ir.block.Block` through
-    :meth:`get_implementation`.
-
-    Example:
-        ```python
-        import qamomile.circuit as qmc
-
-        @qmc.composite_gate(name="h_layer")
-        def h_layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-            for i in qmc.range(q.shape[0]):
-                q[i] = qmc.h(q[i])
-            return q
-        ```
+    Args:
+        func (Callable[..., ResourceEstimate]): Model function accepting a
+            resource context.
     """
 
-    gate_type: CompositeGateType = CompositeGateType.CUSTOM
-    custom_name: str = ""
+    func: Callable[..., ResourceEstimate]
 
-    # Strategy registry: maps strategy name to DecompositionStrategy
-    _strategies: ClassVar[dict[str, "DecompositionStrategy"]] = {}
-    _default_strategy: ClassVar[str] = "standard"
-
-    @classmethod
-    def register_strategy(
-        cls,
-        name: str,
-        strategy: "DecompositionStrategy",
-    ) -> None:
-        """Register a decomposition strategy for this gate type.
+    def estimate(self, ctx: Any) -> ResourceEstimate:
+        """Evaluate the wrapped resource model.
 
         Args:
-            name (str): Strategy identifier such as ``"standard"`` or
-                ``"approximate"``.
-            strategy (DecompositionStrategy): Decomposition strategy instance.
-
-        Example:
-            QFT.register_strategy("approximate", ApproximateQFTStrategy(k=3))
-        """
-        # Create a new dict if inheriting from parent class
-        if "_strategies" not in cls.__dict__:
-            cls._strategies = {}
-        cls._strategies[name] = strategy
-
-    @classmethod
-    def get_strategy(
-        cls,
-        name: str | None = None,
-    ) -> "DecompositionStrategy | None":
-        """Get a registered decomposition strategy.
-
-        Args:
-            name (str | None): Strategy name, or ``None`` for the default
-                strategy.
+            ctx (Any): Resource context supplied by the estimator.
 
         Returns:
-            DecompositionStrategy | None: Strategy instance, or ``None`` if not
-            found.
+            ResourceEstimate: Resource model result.
         """
-        target_name = name or cls._default_strategy
-        return cls._strategies.get(target_name)
+        return self.func(ctx)
 
-    @classmethod
-    def list_strategies(cls) -> list[str]:
-        """List all registered strategy names.
 
-        Returns:
-            list[str]: Strategy names registered on this class.
-        """
-        return list(cls._strategies.keys())
+def _normalize_resource_models(
+    resource_model: Any | None,
+    resource_models: Sequence[Any] | None,
+) -> tuple[ResourceModelBinding, ...]:
+    """Normalize decorator resource models.
 
-    @classmethod
-    def set_default_strategy(cls, name: str) -> None:
-        """Set the default decomposition strategy.
+    Args:
+        resource_model (Any | None): Optional primary resource model.
+        resource_models (Sequence[Any] | None): Optional additional models or
+            bindings.
+
+    Returns:
+        tuple[ResourceModelBinding, ...]: Normalized model bindings.
+    """
+    values = ([resource_model] if resource_model is not None else []) + list(
+        resource_models or ()
+    )
+    return tuple(
+        value
+        if isinstance(value, ResourceModelBinding)
+        else ResourceModelBinding(model=value)
+        for value in values
+    )
+
+
+def _validate_default_estimate_kind(default_estimate_kind: str | None) -> None:
+    """Validate an optional default estimate-kind tag.
+
+    Args:
+        default_estimate_kind (str | None): Tag to validate.
+
+    Raises:
+        ValueError: If the tag is not a recognized estimate kind.
+    """
+    if default_estimate_kind is None:
+        return
+    valid = {kind.value for kind in EstimateKind}
+    if default_estimate_kind not in valid:
+        raise ValueError(
+            f"default_estimate_kind {default_estimate_kind!r} is not a recognized "
+            "estimate kind; "
+            f"expected one of {sorted(valid)}."
+        )
+
+
+def configure_composite(
+    kernel: QKernel[..., Any],
+    *,
+    name: str | None = None,
+    namespace: str = "user.composite",
+    gate_type: CompositeGateType = CompositeGateType.CUSTOM,
+    policy: CallPolicy = CallPolicy.PRESERVE_BOX,
+    resource_model: Any | None = None,
+    resource_models: Sequence[Any] | None = None,
+    implementations: Sequence[CallableImplementation] | None = None,
+    default_estimate_kind: str | None = None,
+) -> QKernel[..., Any]:
+    """Configure a QKernel to remain visible as a named composite call.
+
+    This mutates and returns the same QKernel object. No wrapper class or
+    alternate call protocol is introduced.
+
+    Args:
+        kernel (QKernel[..., Any]): Kernel to configure.
+        name (str | None): Public callable name. Defaults to the kernel name.
+        namespace (str): Stable callable namespace. Defaults to
+            ``"user.composite"``.
+        gate_type (CompositeGateType): Internal stdlib classification.
+            Defaults to ``CUSTOM``.
+        policy (CallPolicy): Lowering policy. Defaults to ``PRESERVE_BOX``.
+        resource_model (Any | None): Optional primary resource model.
+        resource_models (Sequence[Any] | None): Optional additional resource
+            models or bindings.
+        implementations (Sequence[CallableImplementation] | None): Optional
+            implementation candidates.
+        default_estimate_kind (str | None): Preferred resource-model kind.
+
+    Returns:
+        QKernel[..., Any]: The same configured kernel instance.
+
+    Raises:
+        ValueError: If ``default_estimate_kind`` is invalid.
+    """
+    _validate_default_estimate_kind(default_estimate_kind)
+    kernel._callable_kind = "composite"
+    kernel._callable_name = name or kernel.name
+    kernel._callable_namespace = namespace
+    kernel._callable_policy = policy
+    kernel._callable_gate_type = gate_type
+    kernel._callable_resource_models = _normalize_resource_models(
+        resource_model, resource_models
+    )
+    kernel._callable_implementations = tuple(implementations or ())
+    kernel._default_estimate_kind = default_estimate_kind
+    return kernel
+
+
+def attach_resource_model(
+    kernel: QKernel[..., Any],
+    func: Callable[..., ResourceEstimate] | None = None,
+    *,
+    strategy: str | None = None,
+    transform: Any | None = None,
+    estimate_kind: str = "strategy_model",
+) -> Callable[..., Any]:
+    """Attach a resource model to a QKernel.
+
+    Args:
+        kernel (QKernel[..., Any]): Kernel receiving the model.
+        func (Callable[..., ResourceEstimate] | None): Model function, or
+            ``None`` for decorator-with-arguments use.
+        strategy (str | None): Optional strategy constraint.
+        transform (Any | None): Optional transform constraint.
+        estimate_kind (str): Estimate source tag. Defaults to
+            ``"strategy_model"``.
+
+    Returns:
+        Callable[..., Any]: Registered model function or decorator.
+    """
+
+    def decorator(model_func: Callable[..., ResourceEstimate]) -> Callable[..., Any]:
+        """Register one model function.
 
         Args:
-            name (str): Strategy name to use as default.
+            model_func (Callable[..., ResourceEstimate]): Model to register.
+
+        Returns:
+            Callable[..., Any]: The unchanged model function.
+        """
+        kernel._callable_resource_models = (
+            *kernel._callable_resource_models,
+            ResourceModelBinding(
+                model=_FunctionResourceModel(model_func),
+                strategy=strategy,
+                transform=transform,
+                estimate_kind=estimate_kind,
+            ),
+        )
+        return model_func
+
+    if func is None:
+        return decorator
+    return decorator(func)
+
+
+@overload
+def composite_gate(func: Callable[..., Any]) -> QKernel[..., Any]: ...
+
+
+@overload
+def composite_gate(
+    *,
+    name: str = "",
+    resource_model: Any | None = None,
+    resource_models: Sequence[Any] | None = None,
+    implementations: Sequence[CallableImplementation] | None = None,
+    default_estimate_kind: str | None = None,
+) -> Callable[[Callable[..., Any]], QKernel[..., Any]]: ...
+
+
+def composite_gate(
+    func: Callable[..., Any] | None = None,
+    *,
+    name: str = "",
+    resource_model: Any | None = None,
+    resource_models: Sequence[Any] | None = None,
+    implementations: Sequence[CallableImplementation] | None = None,
+    default_estimate_kind: str | None = None,
+) -> QKernel[..., Any] | Callable[[Callable[..., Any]], QKernel[..., Any]]:
+    """Define a named composite using the normal qkernel programming model.
+
+    The decorated object is a ``QKernel``. Calls keep their named box in the IR,
+    while ``build()``, ``draw()``, ``estimate_resources()``, ``control()``, and
+    ``inverse()`` use the same interface as every other qkernel.
+
+    Args:
+        func (Callable[..., Any] | None): Function or qkernel to decorate.
+            Defaults to ``None`` for decorator-with-arguments use.
+        name (str): Public callable name. Defaults to the function name.
+        resource_model (Any | None): Optional primary resource model.
+        resource_models (Sequence[Any] | None): Optional additional resource
+            models or bindings.
+        implementations (Sequence[CallableImplementation] | None): Optional
+            compiler implementation candidates.
+        default_estimate_kind (str | None): Preferred resource-model kind.
+
+    Returns:
+        QKernel[..., Any] | Callable[[Callable[..., Any]], QKernel[..., Any]]:
+            Configured qkernel or decorator.
+
+    Raises:
+        TypeError: If the decorator target is not callable.
+        ValueError: If ``default_estimate_kind`` is invalid.
+
+    Example:
+        >>> import qamomile.circuit as qmc
+        >>> @qmc.composite_gate(name="bell_pair")
+        ... def bell_pair(
+        ...     a: qmc.Qubit, b: qmc.Qubit
+        ... ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        ...     a = qmc.h(a)
+        ...     return qmc.cx(a, b)
+    """
+
+    def decorator(target: Callable[..., Any]) -> QKernel[..., Any]:
+        """Convert and configure one decorator target.
+
+        Args:
+            target (Callable[..., Any]): Raw function or QKernel.
+
+        Returns:
+            QKernel[..., Any]: Configured QKernel.
 
         Raises:
-            ValueError: If the strategy is not registered.
+            TypeError: If ``target`` is not callable.
         """
-        if name not in cls._strategies:
-            raise ValueError(
-                f"Strategy '{name}' not registered. "
-                f"Available: {list(cls._strategies.keys())}"
-            )
-        cls._default_strategy = name
-
-    @property
-    @abc.abstractmethod
-    def num_target_qubits(self) -> int:
-        """Number of target qubits this gate operates on."""
-        pass
-
-    @property
-    def num_control_qubits(self) -> int:
-        """Number of control qubits (default: 0)."""
-        return 0
-
-    def _decompose(
-        self,
-        qubits: "Vector[Qubit] | tuple[Qubit, ...]",
-    ) -> "Vector[Qubit] | tuple[Qubit, ...] | None":
-        """Define an advanced class-based decomposition using frontend syntax.
-
-        Override this method in stdlib or migration subclasses to provide a
-        decomposition. New user-defined named operations should prefer the
-        ``composite_gate`` decorator, which records the same kind of boxed
-        callable without requiring a subclass.
-
-        Args:
-            qubits (Vector[Qubit] | tuple[Qubit, ...]): Input qubits as a
-                vector or tuple.
-
-        Returns:
-            Vector[Qubit] | tuple[Qubit, ...] | None: Output qubits with the
-            same shape as input, or ``None`` if no decomposition is available.
-
-        Example:
-            def _decompose(self, qubits: Vector[Qubit]) -> Vector[Qubit]:
-                n = self._num_qubits
-                for j in qmc.range(n):
-                    qubits[j] = qmc.h(qubits[j])
-                return qubits
-        """
-        return None
-
-    def _decompose_with_strategy(
-        self,
-        qubits: "tuple[Qubit, ...] | Vector[Qubit]",
-        strategy_name: str | None = None,
-    ) -> "tuple[Qubit, ...] | Vector[Qubit] | None":
-        """Decompose using a specific strategy.
-
-        Args:
-            qubits (tuple[Qubit, ...] | Vector[Qubit]): Input qubits.
-            strategy_name (str | None): Strategy to use, or ``None`` for the
-                default strategy.
-
-        Returns:
-            tuple[Qubit, ...] | Vector[Qubit] | None: Output qubits, or
-            ``None`` if no strategy/decomposition is available.
-        """
-        strategy = self.get_strategy(strategy_name)
-        if strategy is not None:
-            return strategy.decompose(qubits)  # type: ignore
-        # Fall back to _decompose if no strategy registered
-        return self._decompose(qubits)
-
-    def get_implementation(self) -> Block | None:
-        """Get the implementation Block, if any.
-
-        Override in subclasses to provide a pre-built implementation block.
-
-        Returns:
-            Block | None: Implementation block, or ``None`` when the
-            composite must be built from ``_decompose`` or is unavailable.
-
-        Note:
-            If ``_decompose()`` is defined, it takes precedence over this
-            method.
-        """
-        return None
-
-    def build_decomposition(
-        self,
-        *qubits: Qubit,
-        **params: Any,
-    ) -> Block | None:
-        """Build the decomposition circuit dynamically.
-
-        Override this method to provide a decomposition that depends on
-        runtime arguments. Backend emit fallback can use this body when no
-        native implementation is selected.
-
-        Args:
-            *qubits (Qubit): Qubits passed to the gate.
-            **params (Any): Additional decomposition parameters.
-
-        Returns:
-            Block | None: Decomposition block, or ``None`` if not available.
-
-        Example:
-            class QPE(CompositeGate):
-                def build_decomposition(self, *qubits, **params):
-                    unitary = params.get("unitary")
-                    # Build QPE circuit using the unitary
-                    return self._build_qpe_impl(qubits, unitary)
-        """
-        # Default: return static implementation if available
-        return self.get_implementation()
-
-    def _build_decomposition_block(
-        self,
-        target_qubits: "tuple[Qubit, ...] | Vector[Qubit]",
-        strategy_name: str | None = None,
-    ) -> Block | None:
-        """Build a Block by tracing _decompose() or a strategy.
-
-        This method creates a Block from the decomposition implementation
-        by running it in a tracing context. If a strategy is specified and
-        registered, it uses the strategy's decompose method.
-
-        Args:
-            target_qubits (tuple[Qubit, ...] | Vector[Qubit]): Target qubits
-                used only to determine decomposition arity and shape.
-            strategy_name (str | None): Optional strategy name to use for
-                decomposition.
-
-        Returns:
-            Block | None: Block containing traced operations, or ``None`` if no
-            decomposition path is available.
-        """
-        from qamomile.circuit.frontend.composite_gate_decomposition import (
-            build_decomposition_block,
+        if isinstance(target, QKernel):
+            kernel = target
+        elif callable(target):
+            kernel = qkernel(target)
+        else:
+            raise TypeError("composite_gate must decorate a function or QKernel.")
+        return configure_composite(
+            cast(QKernel[..., Any], kernel),
+            name=name or None,
+            resource_model=resource_model,
+            resource_models=resource_models,
+            implementations=implementations,
+            default_estimate_kind=default_estimate_kind,
         )
 
-        has_decompose = self._decompose.__func__ is not CompositeGate._decompose  # type: ignore[attr-defined]
-        return build_decomposition_block(
-            self,
-            target_qubits,
-            strategy_name=strategy_name,
-            has_decompose=has_decompose,
-        )
-
-    def __call__(
-        self,
-        *target_qubits: Qubit,
-        controls: Sequence[Qubit] = (),
-        strategy: str | None = None,
-    ) -> tuple[Qubit, ...]:
-        """Apply this composite gate to qubits.
-
-        Args:
-            *target_qubits (Qubit): Target qubits for the gate.
-            controls (Sequence[Qubit]): Optional control qubits.
-            strategy (str | None): Optional strategy name for decomposition.
-                If None, uses the default strategy (or _decompose if no strategies).
-
-        Returns:
-            tuple[Qubit, ...]: Output qubits, with controls first followed by
-            targets.
-
-        Raises:
-            ValueError: If the supplied arity is invalid or the composite has
-            no implementation body.
-        """
-        from qamomile.circuit.frontend.composite_gate_invocation import (
-            invoke_composite_gate,
-        )
-
-        return invoke_composite_gate(
-            self,
-            *target_qubits,
-            controls=controls,
-            strategy=strategy,
-        )
+    if func is None:
+        return decorator
+    return decorator(func)
 
 
-from qamomile.circuit.frontend.composite_gate_wrapped import (  # noqa: E402
-    _WrappedCompositeGate as _WrappedCompositeGate,
-    composite as composite,
-    composite_gate as composite_gate,
-)
+__all__ = ["composite_gate"]

@@ -24,7 +24,7 @@ from qamomile.circuit.ir.operation import (
     SliceArrayOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
-from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -2302,37 +2302,59 @@ def emit_controlled_composite_at_indices(
         EmitError: If the composite has no implementation block or the
             fallback cannot represent the controlled composite.
     """
-    impl = op.effective_body()
+    selected_impl = op.implementation_for(
+        backend=getattr(emit_pass, "backend_name", None)
+    )
+    if selected_impl is not None and selected_impl.body is not None:
+        emit_custom_composite(
+            emit_pass,
+            circuit,
+            op,
+            selected_impl.body,
+            qubit_indices,
+            bindings,
+        )
+        return
+
+    own_control_count = (
+        op.num_control_qubits if op.transform is CallTransform.CONTROLLED else 0
+    )
+    own_controls = qubit_indices[:own_control_count]
+    body_qubits = qubit_indices[own_control_count:]
+    body_operands = op.operands[own_control_count:]
+    all_controls = [*control_indices, *own_controls]
+
+    impl = op.body
     if impl is None:
         raise EmitError(
             "Cannot emit controlled invocation without an implementation block.",
             operation="InvokeOperation",
         )
 
-    num_qubits = len(qubit_indices)
+    num_qubits = len(body_qubits)
     custom_gate = emit_pass._blockvalue_to_gate(
         impl,
         num_qubits,
         bindings,
-        input_operands=op.operands,
+        input_operands=body_operands,
         operation_name="InvokeOperation",
     )
     if custom_gate is not None:
         controlled_gate = custom_gate
-        if control_indices:
+        if all_controls:
             controlled_gate = emit_pass._emitter.gate_controlled(
                 custom_gate,
-                len(control_indices),
+                len(all_controls),
             )
         if controlled_gate is not None and _gate_matches_qubit_count(
             controlled_gate,
-            len(control_indices) + num_qubits,
+            len(all_controls) + num_qubits,
         ):
             _checked_append_gate(
                 emit_pass,
                 circuit,
                 controlled_gate,
-                [*control_indices, *qubit_indices],
+                [*all_controls, *body_qubits],
                 "composite gate",
             )
             return
@@ -2341,7 +2363,7 @@ def emit_controlled_composite_at_indices(
     local_bindings = _bind_and_populate_block_inputs(
         emit_pass,
         impl,
-        op.operands,
+        body_operands,
         num_qubits,
         bindings,
         local_qubit_map,
@@ -2350,9 +2372,9 @@ def emit_controlled_composite_at_indices(
     emit_pass._emit_controlled_fallback(
         circuit,
         impl,
-        len(control_indices),
-        control_indices,
-        qubit_indices,
+        len(all_controls),
+        all_controls,
+        body_qubits,
         1,
         local_bindings,
     )
