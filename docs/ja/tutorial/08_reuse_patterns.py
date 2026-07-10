@@ -157,39 +157,37 @@ ghz_with_composite.draw(n=4, fold_loops=False)
 # %% [markdown]
 # ## パターン3:トップダウン設計のための opaque オラクル
 #
-# オラクルなどを想定する量子アルゴリズムを設計する場合に内部は未知のまま回路を組みたいこともあると思います。**opaque オラクル**は実装本体を持たず、名前・量子ビット数・オプションのリソースモデルだけを持ちます。
+# オラクルなどを想定する量子アルゴリズムを設計する場合に内部は未知のまま回路を組みたいこともあると思います。**opaque オラクル**は実装本体を持たず、名前・量子ビット数・オプションの明示的なコストだけを持ちます。
 #
 # オラクルあるいはサブルーチンが開発中でも、アルゴリズム全体のコストを推定できます。
 #
-# `qmc.opaque(...)` と `FixedResourceModel` を使うと、本体なしで既知のコストだけを与えられます。
+# 既知のコストを `ResourceEstimate` として `cost=` に渡すと、本体なしでコストだけを与えられます。
 
 
 # %%
-def fixed_oracle_model(
+def fixed_oracle_cost(
     name: str,
     *,
     query_complexity: int = 1,
     t_gates: int = 0,
-) -> qmc.FixedResourceModel:
-    return qmc.FixedResourceModel(
-        qmc.ResourceEstimate(
-            gates=qmc.GateResources(
-                total=t_gates,
-                t=t_gates,
-                non_clifford=t_gates,
-            ),
-            calls=qmc.CallResources(
-                calls_by_name={name: 1},
-                queries_by_name={name: query_complexity},
-            ),
-        )
+) -> qmc.ResourceEstimate:
+    return qmc.ResourceEstimate(
+        gates=qmc.GateResources(
+            total=t_gates,
+            t=t_gates,
+            non_clifford=t_gates,
+        ),
+        calls=qmc.CallResources(
+            calls_by_name={name: 1},
+            queries_by_name={name: query_complexity},
+        ),
     )
 
 
 oracle_box = qmc.opaque(
     "oracle",
     num_qubits=3,
-    resource_model=fixed_oracle_model(
+    cost=fixed_oracle_cost(
         "oracle",
         query_complexity=1,
         t_gates=40,
@@ -219,7 +217,7 @@ est = algorithm_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
 assert est.qubits == 3
 print("total gates:", est.gates.total)
-# H ゲート 3 個(qubit_array(3) へのブロードキャスト)と fixed oracle model。
+# H ゲート 3 個(qubit_array(3) へのブロードキャスト)と明示的な oracle cost。
 assert est.gates.total == 43
 
 # %% [markdown]
@@ -230,7 +228,7 @@ assert est.gates.total == 43
 phase_oracle = qmc.opaque(
     "oracle",
     num_qubits=3,
-    resource_model=fixed_oracle_model(
+    cost=fixed_oracle_cost(
         "oracle",
         query_complexity=2,
     ),
@@ -240,7 +238,7 @@ phase_oracle = qmc.opaque(
 mixing_oracle = qmc.opaque(
     "mixing",
     num_qubits=3,
-    resource_model=fixed_oracle_model(
+    cost=fixed_oracle_cost(
         "mixing",
         query_complexity=1,
     ),
@@ -291,10 +289,12 @@ assert {k: str(v) for k, v in oracle_est.calls.queries_by_name.items()} == {
 }
 
 # %% [markdown]
-# `rounds`に具体的な値を代入して、数値的なカウントを確認します：
+# `rounds`に具体的な値を渡して、数値的なカウントを直接取得します：
 
 # %%
-oracle_est_4 = oracle_est.substitute(rounds=4)
+oracle_est_4 = iterative_oracle_skeleton.estimate_resources(
+    inputs={"rounds": 4}
+).simplify()
 print("oracle_calls (rounds=4):", oracle_est_4.calls.calls_by_name)
 assert oracle_est_4.calls.calls_by_name == {"oracle": 5, "mixing": 4}
 print("oracle_queries (rounds=4):", oracle_est_4.calls.queries_by_name)
@@ -311,7 +311,7 @@ assert oracle_est_4.calls.queries_by_name == {"oracle": 10, "mixing": 4}
 #
 # - ヘルパー`@qkernel`：ある量子カーネルから別の量子カーネルを呼び出してコードを再利用できます。トランスパイラがインライン展開し、結果はフラットな回路になります。
 # - `@composite_gate`：量子カーネルに名前付きの識別子を与え、図で一つのゲートとして可視化します。`@qkernel`の上に`@composite_gate`デコレータを重ねて書きます。
-# - **opaque オラクル**：`qmc.opaque(..., resource_model=...)`で、実装なしにトップダウン設計とリソース推定が可能です。
+# - **opaque オラクル**：`qmc.opaque(..., cost=...)`で、実装なしにトップダウン設計とリソース推定が可能です。
 # - `est.calls.calls_by_name`：オラクル内部が不明な状態でも、呼び出し回数を名前別の辞書として確認できます（シンボリックな回数もそのまま扱えます）。
 #
 # 制御ゲート（`qmc.control`）については[チュートリアル04 — 制御ゲート](04_controlled_gates.ipynb)を参照してください。
