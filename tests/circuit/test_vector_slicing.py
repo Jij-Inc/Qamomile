@@ -2041,7 +2041,7 @@ class TestRound2Reviewer:
     """Regression tests for the 2nd-round adversarial review findings.
 
     Covers P1-A (OOB slice clamp), P1-B (destructive view consume),
-    P1-C (if-lowering phi substitution on SliceArrayOp result),
+    P1-C (if-lowering merge substitution on SliceArrayOp result),
     P2-A (frontend/post-fold drain alignment), P2-B (H snapshot),
     P2-C (UInt const negative/zero validation).
     """
@@ -2139,7 +2139,7 @@ class TestRound2Reviewer:
         """``_apply_substitution`` now walks SliceArrayOp result metadata.
 
         Regression (P1-C): for an ``if`` whose branches flow into a
-        slice's bounds, the phi-output references must be substituted
+        slice's bounds, the merge-output references must be substituted
         into ``SliceArrayOperation.results[0].slice_start`` /
         ``slice_step`` — not just operands — so post-fold coverage
         registration sees the concrete bounds.  Directly exercising
@@ -2153,7 +2153,7 @@ class TestRound2Reviewer:
             CompileTimeIfLoweringPass,
         )
 
-        phi_start = Value(type=UIntType(), name="phi_start")
+        merge_start = Value(type=UIntType(), name="merge_start")
         folded_start = Value(type=UIntType(), name="folded").with_const(1)
         step = Value(type=UIntType(), name="step").with_const(1)
         root = ArrayValue(type=QubitType(), name="q")
@@ -2161,15 +2161,15 @@ class TestRound2Reviewer:
             type=QubitType(),
             name="q[slice]",
             slice_of=root,
-            slice_start=phi_start,
+            slice_start=merge_start,
             slice_step=step,
         )
         op = SliceArrayOperation(
-            operands=[root, phi_start, step],
+            operands=[root, merge_start, step],
             results=[sliced],
         )
 
-        subst = {phi_start.uuid: folded_start}
+        subst = {merge_start.uuid: folded_start}
         lowered = CompileTimeIfLoweringPass(bindings={})._apply_substitution(op, subst)
         # Both operand and result-side slice_start must have been
         # substituted to the folded const value.

@@ -1640,7 +1640,7 @@ class TestGateCombinations:
         Note: Full teleportation requires two sequential conditional corrections
         (``if m1: X(bell1); if m0: Z(bell1)``). A single ``if`` correction
         transpiles successfully, but the second ``if`` sees ``bell1`` as a
-        phi-node (SSA merge from the first ``if`` branch), causing the
+        merge node (SSA merge from the first ``if`` branch), causing the
         analyzer to raise ``DependencyError`` because it treats the merged
         value as measurement-dependent.
         """
@@ -6757,12 +6757,12 @@ class TestQubitArrayPatterns:
 
 
 # ============================================================================
-# 30. Compile-time constant if with array quantum phi output
+# 30. Compile-time constant if with array quantum merge output
 # ============================================================================
 
 
-class TestCompileTimeIfArrayQuantumPhi:
-    """Compile-time constant if with array quantum phi must not raise EmitError."""
+class TestCompileTimeIfArrayQuantumMerge:
+    """Compile-time constant if with array quantum merge must not raise EmitError."""
 
     def test_dead_branch_different_array(self):
         """Dead branch rebinds qubit array to a different array."""
@@ -6784,11 +6784,11 @@ class TestCompileTimeIfArrayQuantumPhi:
 
 
 # ============================================================================
-# Compile-time if phi propagation (Issue: compile_time_constant_if_phi_propagation)
+# Compile-time if merge propagation (Issue: compile_time_constant_if_merge_propagation)
 # ============================================================================
 
 
-class TestCompileTimeIfPhiPropagation:
+class TestCompileTimeIfMergePropagation:
     """Compile-time IfOperation lowering before SegmentationPass.
 
     Tests that compile-time resolvable IfOperations (including expression-
