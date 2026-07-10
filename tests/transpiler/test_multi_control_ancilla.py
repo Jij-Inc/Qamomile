@@ -77,6 +77,53 @@ def test_pool_take_shortfall_returns_none() -> None:
     assert pool.take(2) is None
 
 
+def test_pool_try_hold_advances_offset_so_take_draws_after_held_range() -> None:
+    """While a hold is active, take() hands out qubits after the held range."""
+    pool = MultiControlAncillaPool(first_index=10, count=5)
+    with pool.try_hold(2) as held:
+        assert held == [10, 11]
+        # A leaf cascade inside the batched body draws from the offset.
+        assert pool.take(2) == [12, 13]
+
+
+def test_pool_try_hold_rewinds_offset_on_exit() -> None:
+    """Sibling batches reuse the same range because the offset rewinds."""
+    pool = MultiControlAncillaPool(first_index=10, count=5)
+    with pool.try_hold(3) as first:
+        assert first == [10, 11, 12]
+    with pool.try_hold(3) as second:
+        assert second == [10, 11, 12]
+
+
+def test_pool_try_hold_rewinds_offset_on_exception() -> None:
+    """An exception inside the hold still rewinds the offset."""
+    pool = MultiControlAncillaPool(first_index=10, count=5)
+    with pytest.raises(RuntimeError):
+        with pool.try_hold(2):
+            raise RuntimeError("boom")
+    assert pool.take(2) == [10, 11]
+
+
+def test_pool_try_hold_nests() -> None:
+    """Nested holds stack, each drawing after the previous."""
+    pool = MultiControlAncillaPool(first_index=0, count=6)
+    with pool.try_hold(2) as outer:
+        assert outer == [0, 1]
+        with pool.try_hold(2) as inner:
+            assert inner == [2, 3]
+            assert pool.take(2) == [4, 5]
+
+
+def test_pool_try_hold_yields_none_when_remainder_too_small() -> None:
+    """try_hold yields None (no raise) when the unheld remainder is too small."""
+    pool = MultiControlAncillaPool(first_index=0, count=2)
+    with pool.try_hold(1):
+        with pool.try_hold(2) as shortfall:
+            assert shortfall is None
+    # Offset fully rewound: the whole pool is available again.
+    assert pool.take(2) == [0, 1]
+
+
 def test_estimate_no_controlled_operations_is_zero() -> None:
     """A segment without controlled operations needs no ancillas."""
     assert _estimate([_fixed_gate(GateOperationType.X, 1)]) == 0

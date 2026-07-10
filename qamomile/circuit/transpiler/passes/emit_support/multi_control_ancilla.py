@@ -28,7 +28,9 @@ and reported as a compiler bug.
 
 from __future__ import annotations
 
+import contextlib
 import numbers
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
@@ -59,11 +61,17 @@ class MultiControlAncillaPool:
     """A reserved block of clean ancilla qubits for multi-control lowering.
 
     The pool occupies a contiguous range of physical qubit indices
-    appended after a quantum segment's data qubits. Because the
-    Toffoli-cascade decomposition uncomputes every ancilla back to
-    ``|0>`` before it finishes — and never nests inside itself — each
-    multi-controlled gate may simply take the first ``k`` indices of
-    the pool; no acquire/release bookkeeping is needed.
+    appended after a quantum segment's data qubits. A single moving
+    ``_offset`` gives it stack discipline so nested users never collide:
+
+    * A leaf Toffoli cascade uncomputes every ancilla back to ``|0>``
+      before it returns and holds nothing across gates, so it simply
+      ``take``s from the current offset (atomic acquire-and-release).
+    * Batched controlled-block emission ``try_hold``s the block's AND
+      ladder for the duration of the body walk, advancing the offset so
+      the leaf cascades emitted inside the body draw from the qubits
+      *after* the held ladder. The offset is rewound when the ``with``
+      block exits, so sibling batches reuse the same range.
     """
 
     def __init__(self, first_index: int, count: int) -> None:
@@ -82,6 +90,7 @@ class MultiControlAncillaPool:
             raise ValueError(f"Ancilla pool count must be non-negative, got {count}.")
         self._first_index = first_index
         self._count = count
+        self._offset = 0
 
     @property
     def count(self) -> int:
@@ -93,19 +102,53 @@ class MultiControlAncillaPool:
         return self._count
 
     def take(self, count: int) -> list[int] | None:
-        """Return ``count`` clean ancilla indices from the pool.
+        """Return ``count`` clean ancilla indices from the current offset.
 
         Args:
             count (int): Number of ancilla qubits requested.
 
         Returns:
-            list[int] | None: The first ``count`` reserved physical
-                indices, or None when the pool is smaller than the
-                request (an estimation bug surfaced by the caller).
+            list[int] | None: The next ``count`` reserved physical
+                indices starting at the current offset, or None when the
+                unheld remainder of the pool is smaller than the request
+                (an estimation bug surfaced by the caller).
         """
-        if count > self._count:
+        if self._offset + count > self._count:
             return None
-        return list(range(self._first_index, self._first_index + count))
+        start = self._first_index + self._offset
+        return list(range(start, start + count))
+
+    @contextlib.contextmanager
+    def try_hold(self, count: int) -> Iterator[list[int] | None]:
+        """Reserve ``count`` ancillas for the duration of a ``with`` block.
+
+        Used by batched controlled-block emission to keep an AND ladder
+        live while the block body is walked under a single control. The
+        offset advances so that ``take``/``try_hold`` calls made inside
+        the body draw from the qubits after the held range, and it is
+        rewound on exit (including on exception) so sibling batches reuse
+        the same range. When the unheld remainder cannot satisfy the
+        request the caller receives ``None`` and must fall back to
+        per-gate emission rather than treating it as an error — the
+        demand estimate legitimately reserves fewer ancillas than a
+        naive batch would want (e.g. a statically empty loop body).
+
+        Args:
+            count (int): Number of contiguous ancilla qubits to hold.
+
+        Yields:
+            list[int] | None: The held physical indices, or None when the
+                unheld remainder is too small to satisfy the request.
+        """
+        indices = self.take(count)
+        if indices is None:
+            yield None
+            return
+        self._offset += count
+        try:
+            yield indices
+        finally:
+            self._offset -= count
 
 
 def _x_like_demand(num_controls: int) -> int:

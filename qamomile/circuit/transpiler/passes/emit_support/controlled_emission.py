@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -875,6 +876,55 @@ def emit_single_controlled_primitive(
             )
 
 
+def _and_ladder_steps(
+    control_indices: list[int], ancilla_indices: list[int]
+) -> list[tuple[int, int, int]]:
+    """Build the Toffoli chain that ANDs ``control_indices`` onto ancillas.
+
+    The chain combines the first two controls onto ``ancilla_indices[0]``,
+    then folds each subsequent control together with the previous ancilla,
+    so the last ancilla (``ancilla_indices[len(control_indices) - 2]``)
+    holds the logical AND of every control. Emitting the returned steps in
+    order computes the AND; emitting them reversed uncomputes it.
+
+    Args:
+        control_indices (list[int]): Physical control qubits; at least two.
+        ancilla_indices (list[int]): Clean ancilla qubits; at least
+            ``len(control_indices) - 1`` entries.
+
+    Returns:
+        list[tuple[int, int, int]]: ``(control_a, control_b, target)``
+            triples, one per Toffoli, in compute order.
+    """
+    steps: list[tuple[int, int, int]] = [
+        (control_indices[0], control_indices[1], ancilla_indices[0])
+    ]
+    for i in range(2, len(control_indices)):
+        steps.append(
+            (control_indices[i], ancilla_indices[i - 2], ancilla_indices[i - 1])
+        )
+    return steps
+
+
+def _emit_toffoli_steps(
+    emitter: Any, circuit: Any, steps: Iterable[tuple[int, int, int]]
+) -> None:
+    """Emit a sequence of Toffoli gates for the given ``(a, b, target)`` steps.
+
+    Args:
+        emitter (Any): Backend gate emitter.
+        circuit (Any): Backend circuit being emitted into.
+        steps (Iterable[tuple[int, int, int]]): Toffoli triples, in the
+            order they should be emitted (pass ``reversed(steps)`` to
+            uncompute a ladder built by :func:`_and_ladder_steps`).
+
+    Returns:
+        None.
+    """
+    for control_a, control_b, target in steps:
+        emitter.emit_toffoli(circuit, control_a, control_b, target)
+
+
 def emit_multi_controlled_on_clean_ancillas(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -934,16 +984,8 @@ def emit_multi_controlled_on_clean_ancillas(
         )
 
     emitter = emit_pass._emitter
-    cascade: list[tuple[int, int, int]] = [
-        (control_indices[0], control_indices[1], ancilla_indices[0])
-    ]
-    for i in range(2, num_controls):
-        cascade.append(
-            (control_indices[i], ancilla_indices[i - 2], ancilla_indices[i - 1])
-        )
-
-    for ctrl_a, ctrl_b, target in cascade:
-        emitter.emit_toffoli(circuit, ctrl_a, ctrl_b, target)
+    cascade = _and_ladder_steps(control_indices, ancilla_indices)
+    _emit_toffoli_steps(emitter, circuit, cascade)
     emit_single_controlled_primitive(
         emit_pass,
         circuit,
@@ -952,8 +994,7 @@ def emit_multi_controlled_on_clean_ancillas(
         target_idx,
         angle,
     )
-    for ctrl_a, ctrl_b, target in reversed(cascade):
-        emitter.emit_toffoli(circuit, ctrl_a, ctrl_b, target)
+    _emit_toffoli_steps(emitter, circuit, reversed(cascade))
 
 
 def emit_multi_controlled_gate(
