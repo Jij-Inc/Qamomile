@@ -4,6 +4,7 @@ import dataclasses
 import enum
 import typing
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import (
@@ -298,10 +299,10 @@ class ConcreteControlledU(ControlledUOperation):
                 f"carry exactly one 0/1 value per control qubit."
             )
         for value in self.control_values:
-            if value not in (0, 1):
+            if not is_plain_int(value) or value not in (0, 1):
                 raise ValueError(
                     f"ConcreteControlledU.control_values entries must be 0 "
-                    f"or 1, got {value!r}."
+                    f"or 1 as Python ints, got {value!r}."
                 )
         if all(value == 1 for value in self.control_values):
             self.control_values = ()

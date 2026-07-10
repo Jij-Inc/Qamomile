@@ -295,9 +295,9 @@ class Transpiler(ABC, Generic[T]):
         ``IfOperation`` via ``partial_eval``. Terminates when no
         ``CallBlockOperation`` remains (success), when every residual call
         is trapped inside an operation-owned block where ``partial_eval``
-        cannot fold it (control / inverse of a recursive kernel — raises a
-        targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is reached
-        (genuinely non-terminating top-level recursion — raises).
+        cannot fold it (control / select / inverse of a recursive kernel —
+        raises a targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is
+        reached (genuinely non-terminating top-level recursion — raises).
 
         Args:
             block (Block): The block to unroll. May be ``HIERARCHICAL``
@@ -315,8 +315,9 @@ class Transpiler(ABC, Generic[T]):
         Raises:
             FrontendTransformError: If every remaining ``CallBlockOperation``
                 is trapped inside a ``ControlledUOperation.block`` /
-                ``InverseBlockOperation`` block (a self-recursive kernel was
-                passed to ``qmc.control`` / ``qmc.inverse``), or if a
+                ``SelectOperation.case_blocks`` / ``InverseBlockOperation``
+                block (a self-recursive kernel was passed to ``qmc.control`` /
+                ``qmc.select`` / ``qmc.inverse``), or if a
                 genuinely non-terminating top-level recursion does not
                 converge within ``MAX_UNROLL_DEPTH`` iterations. The two
                 cases carry distinct, cause-specific messages.
@@ -336,26 +337,30 @@ class Transpiler(ABC, Generic[T]):
                 return self.inline(block)
             # After a full inline + partial_eval iteration, if calls remain
             # only inside operation-owned blocks (a ControlledUOperation's
-            # ``block`` or an InverseBlockOperation's nested blocks), no
+            # ``block``, a SelectOperation's ``case_blocks``, or an
+            # InverseBlockOperation's nested blocks), no
             # further iteration can make progress: ``inline`` already
             # unrolled one layer there, but ``partial_eval`` never descends
             # into those blocks to fold the base-case ``if``. This is the
             # signature of a self-recursive @qkernel passed to
-            # ``qmc.control`` / ``qmc.inverse``; fail fast with a targeted
+            # ``qmc.control`` / ``qmc.select`` / ``qmc.inverse``; fail fast
+            # with a targeted
             # message instead of spinning to ``MAX_UNROLL_DEPTH`` and
             # blaming the bindings.
             if count_unrollable_call_blocks(block.operations) == 0:
                 raise FrontendTransformError(
-                    "qmc.control / qmc.inverse was given a recursive "
+                    "qmc.control / qmc.select / qmc.inverse was given a recursive "
                     "@qkernel: after inlining, a CallBlockOperation still "
                     "remains inside the controlled / inverted block, and "
                     "partial_eval cannot fold its base-case `if` there "
                     "(constant folding does not descend into a "
-                    "ControlledUOperation.block or an InverseBlockOperation "
-                    "block). Controlling or inverting a self-recursive "
-                    "kernel is not supported. Rewrite the kernel "
+                    "ControlledUOperation.block, SelectOperation.case_blocks, "
+                    "or an InverseBlockOperation block). Controlling, "
+                    "selecting, or inverting a self-recursive kernel is not "
+                    "supported. Rewrite the kernel "
                     "non-recursively (manually unrolled to the required "
-                    "depth) before passing it to qmc.control / qmc.inverse."
+                    "depth) before passing it to qmc.control / qmc.select / "
+                    "qmc.inverse."
                 )
 
         raise FrontendTransformError(

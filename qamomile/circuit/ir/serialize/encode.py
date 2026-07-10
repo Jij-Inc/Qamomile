@@ -222,7 +222,7 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
     ``all_input_values``), nested control-flow op bodies, and nested
     Blocks inside ``CompositeGateOperation`` /
     ``InverseBlockOperation`` /
-    ``ControlledUOperation``.
+    ``ControlledUOperation`` / ``SelectOperation``.
 
     Args:
         op (Operation): The op to walk.
@@ -249,6 +249,9 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
             _walk_block_values(op.implementation_block, ctx)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _walk_block_values(op.block, ctx)
+    if isinstance(op, SelectOperation):
+        for case_block in op.case_blocks:
+            _walk_block_values(case_block, ctx)
 
 
 def _walk_block_values(sub: Block, ctx: _EncodeContext) -> None:

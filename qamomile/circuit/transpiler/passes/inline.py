@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.errors import InliningError, QubitConsumedError
 from qamomile.circuit.transpiler.passes import Pass
@@ -36,8 +37,8 @@ def find_return_operation(operations: list[Operation]) -> ReturnOperation | None
 def _has_any_call_block(operations: list[Operation]) -> bool:
     """Return whether any operation (or nested operation) is a call.
 
-    Recurses into the nested blocks of ``InverseBlockOperation`` and
-    ``ControlledUOperation`` and into ``HasNestedOps``
+    Recurses into the nested blocks of ``InverseBlockOperation``,
+    ``ControlledUOperation``, and ``SelectOperation``, and into ``HasNestedOps``
     bodies, so a call hidden inside a control-flow body or an
     operation-owned block is still detected. ``InlinePass`` uses this to
     decide whether its output block is ``AFFINE`` (no calls remain) or
@@ -60,6 +61,9 @@ def _has_any_call_block(operations: list[Operation]) -> bool:
         if isinstance(op, ControlledUOperation):
             if op.block is not None and _has_any_call_block(op.block.operations):
                 return True
+        if isinstance(op, SelectOperation):
+            if any(_has_any_call_block(block.operations) for block in op.case_blocks):
+                return True
         if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 if _has_any_call_block(body):
@@ -70,8 +74,8 @@ def _has_any_call_block(operations: list[Operation]) -> bool:
 def count_call_blocks(operations: list[Operation]) -> int:
     """Count all CallBlockOperations reachable from an operation list.
 
-    Recurses into ``InverseBlockOperation`` / ``ControlledUOperation``
-    nested blocks and into ``HasNestedOps`` bodies, so
+    Recurses into ``InverseBlockOperation`` / ``ControlledUOperation`` /
+    ``SelectOperation`` nested blocks and into ``HasNestedOps`` bodies, so
     calls hidden inside control flow or operation-owned blocks are
     counted. ``unroll_recursion`` uses this as the primary termination
     signal (``count == 0`` means the block is fully inlined).
@@ -94,6 +98,9 @@ def count_call_blocks(operations: list[Operation]) -> int:
         if isinstance(op, ControlledUOperation):
             if op.block is not None:
                 count += count_call_blocks(op.block.operations)
+        if isinstance(op, SelectOperation):
+            for block in op.case_blocks:
+                count += count_call_blocks(block.operations)
         if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 count += count_call_blocks(body)
@@ -104,8 +111,9 @@ def count_unrollable_call_blocks(operations: list[Operation]) -> int:
     """Count CallBlockOperations the inline/partial-eval loop can still resolve.
 
     This mirrors :func:`count_call_blocks` but **does not** descend into
-    a ``ControlledUOperation.block`` or an ``InverseBlockOperation``'s
-    nested blocks. A call trapped inside one of those operation-owned
+    a ``ControlledUOperation.block``, a ``SelectOperation.case_blocks`` entry,
+    or an ``InverseBlockOperation``'s nested blocks. A call trapped inside one
+    of those operation-owned
     blocks cannot be resolved by the ``unroll_recursion`` fixed-point
     loop: ``partial_eval`` (``ConstantFoldingPass`` /
     ``CompileTimeIfLoweringPass``) only recurses into ``HasNestedOps``
@@ -126,8 +134,8 @@ def count_unrollable_call_blocks(operations: list[Operation]) -> int:
 
     Returns:
         int: Number of CallBlockOperations reachable without entering a
-            ``ControlledUOperation.block`` or ``InverseBlockOperation``
-            nested block.
+            ``ControlledUOperation.block``, ``SelectOperation.case_blocks``,
+            or ``InverseBlockOperation`` nested block.
     """
     count = 0
     for op in operations:
@@ -283,6 +291,26 @@ class InlinePass(Pass[Block, Block]):
                 new_op = dataclasses.replace(
                     op,
                     block=self._inline_nested_block(op.block, visiting_blocks),
+                )
+                substituted = self._substitute_values(new_op, value_map)
+                result.append(substituted)
+
+            elif isinstance(op, SelectOperation):
+                # SELECT stores one unitary block per case outside the
+                # ``HasNestedOps`` protocol. Inline calls in every case so a
+                # pass-through wrapper or a case composed from helper
+                # qkernels cannot leave a residual ``CallBlockOperation``
+                # that the controlled emit fallback would later reject (or,
+                # on a reusable-gate backend, silently collapse to identity).
+                new_op = dataclasses.replace(
+                    op,
+                    case_blocks=[
+                        cast(
+                            Block,
+                            self._inline_nested_block(block, visiting_blocks),
+                        )
+                        for block in op.case_blocks
+                    ],
                 )
                 substituted = self._substitute_values(new_op, value_map)
                 result.append(substituted)

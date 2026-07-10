@@ -86,8 +86,8 @@ def _normalize_control_values(
 ) -> tuple[int, ...]:
     """Normalise a ``control_values`` spec to a per-control ``0``/``1`` tuple.
 
-    Accepts the two surface forms of the ``qmc.control`` /
-    ``qmc.select`` zero-control API and lowers both to the canonical
+    Accepts the two surface forms of the ``qmc.control`` zero-control API
+    (also used by SELECT's emit-time case decomposition) and lowers both to the canonical
     tuple stored on :attr:`ConcreteControlledU.control_values`:
 
     * **int bit-mask** — bit ``j`` (value ``1 << j``) is the activation

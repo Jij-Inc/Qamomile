@@ -45,6 +45,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
 
@@ -1122,8 +1123,9 @@ class CircuitAnalyzer:
                 result.append(node)
                 continue
 
-            # Generic: GateOperation, CallBlock/ControlledU/CompositeGate (box mode),
-            # MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation
+            # Generic: GateOperation, CallBlock/ControlledU/Select/CompositeGate
+            # (box mode), MeasureOperation, MeasureVectorOperation,
+            # MeasureQFixedOperation
             if isinstance(
                 op,
                 (
@@ -1135,6 +1137,7 @@ class CircuitAnalyzer:
                     CompositeGateOperation,
                     InverseBlockOperation,
                     ControlledUOperation,
+                    SelectOperation,
                 ),
             ):
                 node = self._build_vgate(
@@ -1420,6 +1423,25 @@ class CircuitAnalyzer:
                 box_width=box_width,
                 control_count=len(control_indices),
                 power=power_val,
+            )
+
+        if isinstance(op, SelectOperation):
+            qubit_indices: list[int] = []
+            for operand in op.index_operands + op.target_operands:
+                indices = self._resolve_operand_to_qubit_indices(
+                    operand, qubit_map, logical_id_remap, param_values
+                )
+                if indices is not None:
+                    qubit_indices.extend(indices)
+            label = "SELECT"
+            box_width = self._estimate_label_box_width(label)
+            return VGate(
+                node_key=node_key,
+                label=label,
+                qubit_indices=qubit_indices,
+                estimated_width=box_width,
+                kind=VGateKind.COMPOSITE_BOX,
+                box_width=box_width,
             )
 
         raise TypeError(
@@ -2613,7 +2635,15 @@ class CircuitAnalyzer:
             a control-flow construct (For/While/If/ForItems) that the
             caller handles separately.
         """
-        if isinstance(op, (GateOperation, CallBlockOperation, ControlledUOperation)):
+        if isinstance(
+            op,
+            (
+                GateOperation,
+                CallBlockOperation,
+                ControlledUOperation,
+                SelectOperation,
+            ),
+        ):
             return list(op.operands)
         if isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
             return list(op.control_qubits) + list(op.target_qubits)
@@ -4911,6 +4941,30 @@ class CircuitAnalyzer:
             result_str = ",".join(qubit_parts)
             args_str = ",".join(qubit_parts + param_parts)
             return f"{prefix}{result_str} = {block_name}({args_str})"
+
+        elif isinstance(op, SelectOperation):
+            qubit_parts: list[str] = []
+            param_parts: list[str] = []
+            for operand in op.index_operands + op.target_operands:
+                if operand.parent_array is not None:
+                    array_name = operand.parent_array.name or "qubits"
+                    index = self._resolve_index_expression(
+                        operand, loop_vars, body_operations
+                    )
+                    qubit_parts.append(f"{array_name}[{index}]")
+                elif operand.name:
+                    qubit_parts.append(operand.name)
+            for operand in op.param_operands:
+                rendered = self._format_param_for_expression(
+                    operand, loop_vars, param_values, body_operations
+                )
+                if rendered is not None:
+                    param_parts.append(rendered)
+            if not qubit_parts:
+                return f"{prefix}select[{op.num_cases}](...)"
+            result_str = ",".join(qubit_parts)
+            args_str = ",".join(qubit_parts + param_parts)
+            return f"{prefix}{result_str} = select[{op.num_cases}]({args_str})"
 
         elif isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
             block_name = op.name or "composite"

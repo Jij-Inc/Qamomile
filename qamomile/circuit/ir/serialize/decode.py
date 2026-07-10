@@ -1427,6 +1427,11 @@ def _decode_concrete_controlled(
     Returns:
         ConcreteControlledU: The reconstructed op, including its
             nested unitary block.
+
+    Raises:
+        ValueError: If ``control_values`` is not a list/tuple of Python ints,
+            or the reconstructed activation pattern violates the controlled-U
+            width or binary-value invariants.
     """
     operands, results = _operands_results(d, ctx)
     block = (
@@ -1434,13 +1439,21 @@ def _decode_concrete_controlled(
         if d.get("unitary_block") is not None
         else None
     )
+    raw_control_values = d.get("control_values", ())
+    if not isinstance(raw_control_values, (list, tuple)) or not all(
+        is_plain_int(value) for value in raw_control_values
+    ):
+        raise ValueError(
+            "ConcreteControlledU.control_values must be a list of Python "
+            f"int 0/1 values, got {raw_control_values!r}."
+        )
     return ConcreteControlledU(
         operands=operands,
         results=results,
         num_controls=int(d.get("num_controls", 1)),
         power=_decode_power(d.get("power", 1), ctx),
         block=block,
-        control_values=tuple(int(v) for v in d.get("control_values", ())),
+        control_values=tuple(raw_control_values),
     )
 
 
@@ -1520,13 +1533,23 @@ def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
     Returns:
         SelectOperation: The reconstructed op with its nested per-case
             unitary blocks.
+
+    Raises:
+        ValueError: If ``num_index_qubits`` is not a Python int or the
+            reconstructed SELECT violates its case-count invariants.
     """
     operands, results = _operands_results(d, ctx)
     case_blocks = [_decode_block(b) for b in d.get("case_blocks", [])]
+    num_index_qubits = d.get("num_index_qubits", 0)
+    if not is_plain_int(num_index_qubits):
+        raise ValueError(
+            "SelectOperation.num_index_qubits must be a Python int, "
+            f"got {num_index_qubits!r}."
+        )
     return SelectOperation(
         operands=operands,
         results=results,
-        num_index_qubits=int(d.get("num_index_qubits", 0)),
+        num_index_qubits=num_index_qubits,
         case_blocks=case_blocks,
     )
 

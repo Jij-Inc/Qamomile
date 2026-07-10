@@ -117,6 +117,91 @@ def emit_select(
             backend cannot realise a per-case controlled-U (e.g. an
             unsupported multi-control shape).
     """
+    _emit_select_with_outer_controls(
+        emit_pass,
+        circuit,
+        op,
+        [],
+        qubit_map,
+        bindings,
+        allow_native=True,
+    )
+
+
+def emit_controlled_select(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: SelectOperation,
+    outer_control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Emit a SELECT nested inside an enclosing controlled block.
+
+    Each case is controlled on both the enclosing controls and the SELECT
+    index pattern. Native SELECT emitters are intentionally skipped because
+    their protocol emits only the multiplexer itself and has no contract for
+    an additional outer control set.
+
+    Args:
+        emit_pass (StandardEmitPass): The driving emit pass.
+        circuit (Any): The backend circuit being built.
+        op (SelectOperation): The nested SELECT operation.
+        outer_control_indices (list[int]): Physical controls accumulated from
+            enclosing controlled operations.
+        qubit_map (QubitMap): Block-local address-to-physical-qubit map,
+            updated with the SELECT results.
+        bindings (dict[str, Any]): Bindings visible inside the enclosing block.
+
+    Raises:
+        EmitError: If an operand cannot be resolved or a composed controlled
+            case cannot be emitted by the backend.
+    """
+    _emit_select_with_outer_controls(
+        emit_pass,
+        circuit,
+        op,
+        outer_control_indices,
+        qubit_map,
+        bindings,
+        allow_native=False,
+    )
+
+
+def _emit_select_with_outer_controls(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: SelectOperation,
+    outer_control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+    *,
+    allow_native: bool,
+) -> None:
+    """Emit a SELECT with an optional accumulated outer control set.
+
+    Args:
+        emit_pass (StandardEmitPass): The driving emit pass.
+        circuit (Any): The backend circuit being built.
+        op (SelectOperation): The SELECT operation to lower.
+        outer_control_indices (list[int]): Physical controls inherited from
+            enclosing controlled operations.
+        qubit_map (QubitMap): Address-to-physical-qubit map, updated with
+            result aliases.
+        bindings (dict[str, Any]): Active emit bindings.
+        allow_native (bool): Whether registered native SELECT emitters may be
+            used. Must be false when outer controls are present.
+
+    Raises:
+        EmitError: If operands cannot be resolved or the backend cannot emit a
+            composed controlled case.
+    """
+    if allow_native and outer_control_indices:
+        raise EmitError(
+            "Native SELECT emission cannot be combined with outer controls.",
+            operation="SelectOperation",
+        )
+
     num_idx = op.num_index_qubits
     index_operands = op.operands[:num_idx]
     remaining_operands = op.operands[num_idx:]
@@ -152,19 +237,20 @@ def emit_select(
         target_indices.extend(indices)
 
     # Native multiplexer path, when a backend registered one.
-    for emitter in getattr(emit_pass, "_select_emitters", ()):
-        if emitter.can_emit(op) and emitter.emit(
-            circuit, op, index_indices, target_indices, bindings
-        ):
-            _map_select_results(
-                op,
-                num_idx,
-                index_indices,
-                target_qubit_operands,
-                target_index_groups,
-                qubit_map,
-            )
-            return
+    if allow_native:
+        for emitter in emit_pass._select_emitters:
+            if emitter.can_emit(op) and emitter.emit(
+                circuit, op, index_indices, target_indices, bindings
+            ):
+                _map_select_results(
+                    op,
+                    num_idx,
+                    index_indices,
+                    target_qubit_operands,
+                    target_index_groups,
+                    qubit_map,
+                )
+                return
 
     # Gate-by-gate fallback: one controlled-U per case with a mixed 0/1
     # control pattern (big-endian bits of the case index).
@@ -173,6 +259,7 @@ def emit_select(
         zero_phys = [
             index_indices[j] for j, value in enumerate(control_values) if value == 0
         ]
+        composed_controls = [*outer_control_indices, *index_indices]
 
         local_bindings = emit_pass._resolver.bind_block_params(
             case_block, param_operands, bindings
@@ -194,8 +281,8 @@ def emit_select(
                 emit_pass,
                 circuit,
                 prepared_block,
-                num_idx,
-                index_indices,
+                len(composed_controls),
+                composed_controls,
                 target_indices,
                 1,
                 local_bindings,
@@ -205,8 +292,8 @@ def emit_select(
                 emit_pass,
                 circuit,
                 prepared_block,
-                num_idx,
-                index_indices,
+                len(composed_controls),
+                composed_controls,
                 target_indices,
                 1,
                 local_bindings,

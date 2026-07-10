@@ -84,8 +84,8 @@ def _signature_key(qkernel: "Any") -> tuple[tuple[str, Any, Any], ...]:
     )
 
 
-def _quantum_logical_ids(values: Sequence[Any]) -> set[Any]:
-    """Return the logical-id set of the quantum values in a sequence.
+def _quantum_logical_ids(values: Sequence[Any]) -> tuple[Any, ...]:
+    """Return the ordered logical IDs of quantum values in a sequence.
 
     Args:
         values (Sequence[Any]): ``Value`` s (a case block's inputs or
@@ -93,11 +93,11 @@ def _quantum_logical_ids(values: Sequence[Any]) -> set[Any]:
             qubit wire it belongs to, stable across SSA re-versioning.
 
     Returns:
-        set[Any]: The ``logical_id`` of every quantum ``Value`` in
-            ``values`` (scalar ``Qubit`` and whole ``Vector[Qubit]``
+        tuple[Any, ...]: The ``logical_id`` of every quantum ``Value`` in
+            positional order (scalar ``Qubit`` and whole ``Vector[Qubit]``
             wires alike). Classical values are ignored.
     """
-    return {value.logical_id for value in values if value.type.is_quantum()}
+    return tuple(value.logical_id for value in values if value.type.is_quantum())
 
 
 def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
@@ -112,14 +112,15 @@ def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
     return it while dropping the input target — which keeps the same output
     *count* yet miswires against the SELECT's shared result list.
 
-    Each case is checked against ITS OWN inputs by comparing quantum
-    logical-id sets: a proper unitary threads its input wires through to the
-    output (re-versioned, same ``logical_id``), so input and output quantum
-    logical-id sets must be equal. Because ``_signature_key`` already forces
-    a common quantum input arity, this per-case invariant also guarantees a
-    common output arity across cases. Internal ancillas that are allocated
-    and uncomputed (not returned) are fine — they never appear in
-    ``output_values``.
+    Each case is checked against ITS OWN inputs by comparing the ordered
+    quantum logical IDs: a proper unitary threads each input position through
+    to the matching output position (re-versioned, same ``logical_id``).
+    Positional equality rejects duplicates, dropped/fresh wires, and a bare
+    return-value permutation such as ``return q1, q0``. The latter is a free
+    handle relabel for an ordinary qkernel call but cannot be made conditional
+    on a quantum SELECT index; callers must express it as an explicit SWAP
+    gate instead. Internal ancillas that are allocated and uncomputed (not
+    returned) are fine — they never appear in ``output_values``.
 
     Args:
         case_blocks (Sequence[Any]): The specialized case blocks, in index
@@ -138,12 +139,13 @@ def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
         if input_ids != output_ids:
             raise ValueError(
                 f"qmc.select case {position} is not a unitary on the target "
-                f"register: it returns a different set of quantum wires "
-                f"({len(output_ids)}) than the {len(input_ids)} target "
-                f"wire(s) it received. Every case must thread through exactly "
-                f"the target register it is given — a case that allocates, "
-                f"drops, or replaces target state is not a valid selectable "
-                f"unitary."
+                f"register: its ordered quantum outputs do not match its "
+                f"ordered quantum inputs ({len(output_ids)} output value(s), "
+                f"{len(input_ids)} input value(s)). Every case must thread "
+                f"each target position through unchanged — allocate/drop/"
+                f"replace patterns and bare return-value permutations are "
+                f"not valid selectable unitaries; use explicit gates such "
+                f"as qmc.swap for physical permutations."
             )
 
 
@@ -240,8 +242,10 @@ class SelectGate:
                 ``num_index_qubits`` index qubits on an argument boundary,
                 or no target argument is given.
             TypeError: On unknown / mistyped forwarded parameters.
-            QubitConsumedError / QubitBorrowConflictError: On aliasing
-                between the index and target arguments.
+            QubitConsumedError: If an index or target qubit was already
+                consumed by an earlier operation.
+            QubitBorrowConflictError: If index and target array views overlap
+                or otherwise conflict in the borrow tracker.
         """
         # Reuse ``qmc.control``'s concrete prepare choreography: the index
         # register plays the role of the control prefix and the targets /

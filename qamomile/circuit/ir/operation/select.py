@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import Value
@@ -72,9 +73,14 @@ class SelectOperation(Operation):
 
         Raises:
             ValueError: If ``case_blocks`` is empty, ``num_index_qubits``
-                is negative, or there are more case blocks than
+                is not a Python int or is negative, or there are more case blocks than
                 ``2 ** num_index_qubits`` index values can address.
         """
+        if not is_plain_int(self.num_index_qubits):
+            raise ValueError(
+                "SelectOperation.num_index_qubits must be a Python int, "
+                f"got {self.num_index_qubits!r}."
+            )
         if self.num_index_qubits < 0:
             raise ValueError(
                 f"SelectOperation.num_index_qubits must be non-negative, "
@@ -195,8 +201,9 @@ def control_values_for_index(
             ints, most-significant bit first.
 
     Raises:
-        ValueError: If ``num_index_qubits`` is negative or ``index_value``
-            does not fit in ``num_index_qubits`` bits.
+        ValueError: If either argument is not a Python int,
+            ``num_index_qubits`` is negative, or ``index_value`` does not fit
+            in ``num_index_qubits`` bits.
 
     Example:
         >>> control_values_for_index(2, 2)
@@ -204,6 +211,12 @@ def control_values_for_index(
         >>> control_values_for_index(1, 3)
         (0, 0, 1)
     """
+    if not is_plain_int(num_index_qubits):
+        raise ValueError(
+            f"num_index_qubits must be a Python int, got {num_index_qubits!r}."
+        )
+    if not is_plain_int(index_value):
+        raise ValueError(f"index_value must be a Python int, got {index_value!r}.")
     if num_index_qubits < 0:
         raise ValueError(
             f"num_index_qubits must be non-negative, got {num_index_qubits}."

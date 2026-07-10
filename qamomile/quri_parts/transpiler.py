@@ -24,6 +24,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
@@ -43,7 +44,6 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _expand_quantum_operands_to_phys,
     _populate_input_qubit_map,
     _prepare_nested_block_for_emit,
-    _zero_control_phys,
     emit_controlled_gate,
     emit_controlled_pauli_evolve,
     emit_multi_controlled_gate,
@@ -702,24 +702,10 @@ def _emit_quri_nested_controlled_u(
     effective_controls = outer_control_indices + resolved.control_phys
     power = resolve_power(emit_pass, op, bindings)
 
-    # Zero-control (anti-control) bracket for this nested operation's OWN
-    # controls. ``resolve_controlled_u_call`` folds every control into
-    # ``effective_controls`` as a standard ``|1>``-control, so a nested
-    # ``ConcreteControlledU`` carrying ``control_values`` (an anti-control
-    # applied inside a kernel that is then wrapped in ``qmc.control``) would
-    # otherwise silently lose its anti-controls. Single-level anti-controls
-    # are bracketed by the shared ``emit_controlled_u`` before it delegates
-    # to ``_emit_controlled_fallback``, but this QURI Parts recursive walker
-    # is the only place the *nested* case is lowered, so bracket the nested
-    # op's own ``0``-activated physical controls with an X here (wrapping the
-    # whole ``power`` product, since ``X (C-U)^p X == (anti-C-U)^p``).
-    # Symbolic controls never carry ``control_values`` (the frontend rejects
-    # that combination), so ``getattr`` safely yields ``()`` for
-    # ``SymbolicControlledU``.
-    zero_control_phys = _zero_control_phys(
-        getattr(op, "control_values", ()), resolved.control_phys
-    )
-    for phys in zero_control_phys:
+    # Bracket only this nested operation's own anti-controls. The shared
+    # resolver computes the subset once, so this backend-specific walker
+    # cannot diverge from the standard fallback's activation semantics.
+    for phys in resolved.zero_control_phys:
         emit_pass._emitter.emit_x(circuit, phys)
 
     for _ in range(power):
@@ -732,7 +718,7 @@ def _emit_quri_nested_controlled_u(
             resolved.local_bindings,
         )
 
-    for phys in zero_control_phys:
+    for phys in resolved.zero_control_phys:
         emit_pass._emitter.emit_x(circuit, phys)
 
     map_nested_controlled_u_results(op, resolved, qubit_map)
@@ -778,6 +764,20 @@ def _emit_quri_controlled_operations(
         if isinstance(op, ControlledUOperation):
             _emit_quri_nested_controlled_u(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
+            )
+            continue
+        if isinstance(op, SelectOperation):
+            from qamomile.circuit.transpiler.passes.emit_support.select_emission import (
+                emit_controlled_select,
+            )
+
+            emit_controlled_select(
+                emit_pass,
+                circuit,
+                op,
+                control_indices,
+                qubit_map,
+                bindings,
             )
             continue
         if isinstance(op, CompositeGateOperation):
@@ -828,6 +828,7 @@ def _emit_quri_controlled_operations(
         raise EmitError(
             "QURI Parts recursive controlled fallback only supports "
             "primitive gates, nested ControlledUOperation values, "
+            "SelectOperation values, "
             "CompositeGateOperation values, InverseBlockOperation values, "
             "PauliEvolveOp values, "
             "ReturnOperation, and statically resolved ForOperation bodies. "

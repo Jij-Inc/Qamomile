@@ -38,6 +38,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
@@ -229,6 +230,21 @@ def emit_controlled_operations(
         elif isinstance(op, ControlledUOperation):
             _emit_nested_controlled_u(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
+            )
+        elif isinstance(op, SelectOperation):
+            # Imported lazily because select_emission reuses this module's
+            # controlled-block helpers at module import time.
+            from qamomile.circuit.transpiler.passes.emit_support.select_emission import (
+                emit_controlled_select,
+            )
+
+            emit_controlled_select(
+                emit_pass,
+                circuit,
+                op,
+                control_indices,
+                qubit_map,
+                bindings,
             )
         elif isinstance(op, CompositeGateOperation):
             composite_control_groups = [
@@ -453,6 +469,11 @@ class ResolvedControlledU:
         control_phys (list[int]): Active physical control qubits, in
             control-operand order (for the ``control_indices`` form,
             in listed-index order).
+        zero_control_phys (list[int]): The subset of ``control_phys`` whose
+            activation value is ``0``. Empty for symbolic or all-standard
+            controls. Keeping this on the resolved call centralizes
+            anti-control interpretation so backend-specific walkers cannot
+            accidentally drop ``ConcreteControlledU.control_values``.
         control_operand_groups (list[list[int]]): Physical indices per
             control operand slot. For the ``control_indices`` form this
             is the full pool — every element keeps its slot, whether or
@@ -468,6 +489,7 @@ class ResolvedControlledU:
     """
 
     control_phys: list[int]
+    zero_control_phys: list[int]
     control_operand_groups: list[list[int]]
     target_qubit_operands: list[Any]
     target_index_groups: list[list[int]]
@@ -626,8 +648,12 @@ def resolve_controlled_u_call(
         emit_pass, op.block, target_qubit_operands, bindings, local_bindings
     )
 
+    control_values = op.control_values if isinstance(op, ConcreteControlledU) else ()
+    zero_control_phys = _zero_control_phys(control_values, control_phys)
+
     return ResolvedControlledU(
         control_phys=control_phys,
+        zero_control_phys=zero_control_phys,
         control_operand_groups=control_operand_groups,
         target_qubit_operands=target_qubit_operands,
         target_index_groups=target_index_groups,
@@ -714,29 +740,10 @@ def _emit_nested_controlled_u(
     block = _prepare_nested_block_for_emit(resolved.block, resolved.local_bindings)
     power = resolve_power(emit_pass, op, bindings)
 
-    # Zero-control (anti-control) bracket for this nested operation's OWN
-    # controls. ``resolve_controlled_u_call`` folds every control into
-    # ``composed_controls`` as a standard ``|1>``-control, so a nested
-    # ``ConcreteControlledU`` carrying ``control_values`` would otherwise
-    # silently lose its anti-controls on this path (the top-level
-    # ``emit_controlled_u`` path brackets them, but ``_emit_nested_controlled_u``
-    # did not). This path is the gate-by-gate fallback reached whenever the
-    # enclosing controlled block cannot be turned into a reusable gate — it
-    # is the *only* controlled-U path on CUDA-Q, whose ``circuit_to_gate``
-    # always returns ``None``. Bracket each of the nested op's own
-    # ``0``-activated physical controls with an X so the composed
-    # multi-controlled emission below fires on ``|0>`` for those qubits
-    # (``X_c (C-U) X_c == anti-C-U``). Only the nested op's own controls are
-    # bracketed here; enclosing controlled-U operations bracket their own
-    # anti-controls at their own level, and the ``unitary_gate`` sub-path
-    # gates only the inner target block (which never contains this op's
-    # controls), so there is no double bracketing. Symbolic controls never
-    # carry ``control_values`` (the frontend rejects that combination), so
-    # ``getattr`` safely yields ``()`` for ``SymbolicControlledU``.
-    zero_control_phys = _zero_control_phys(
-        getattr(op, "control_values", ()), resolved.control_phys
-    )
-    for phys in zero_control_phys:
+    # Bracket only this nested operation's own anti-controls. Enclosing
+    # operations bracket their controls at their own level, so there is no
+    # double bracketing when the control sets are composed.
+    for phys in resolved.zero_control_phys:
         emit_pass._emitter.emit_x(circuit, phys)
 
     unitary_gate = emit_pass._blockvalue_to_gate(
@@ -765,7 +772,7 @@ def _emit_nested_controlled_u(
                 resolved.local_bindings,
             )
 
-    for phys in zero_control_phys:
+    for phys in resolved.zero_control_phys:
         emit_pass._emitter.emit_x(circuit, phys)
 
     map_nested_controlled_u_results(op, resolved, qubit_map)

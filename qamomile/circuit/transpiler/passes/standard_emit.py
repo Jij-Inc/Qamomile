@@ -96,6 +96,7 @@ from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission impor
     emit_pauli_evolve,
 )
 from qamomile.circuit.transpiler.passes.emit_support.select_emission import (
+    SelectGateEmitter,
     emit_select,
 )
 
@@ -113,10 +114,14 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     module functions in ``emit_support/`` by default.
 
     Args:
-        gate_emitter: Backend-specific gate emitter
-        bindings: Parameter bindings for the circuit
-        parameters: List of parameter names to preserve as backend parameters
-        composite_emitters: Optional list of CompositeGateEmitter for native implementations
+        gate_emitter (GateEmitter[T]): Backend-specific gate emitter.
+        bindings (dict[str, Any] | None): Parameter bindings for the circuit.
+        parameters (list[str] | None): Parameter names to preserve as backend
+            parameters.
+        composite_emitters (list[CompositeGateEmitter[T]] | None): Native
+            composite-gate emitters tried in order.
+        select_emitters (list[SelectGateEmitter] | None): Native SELECT
+            emitters tried in order.
     """
 
     def __init__(
@@ -125,10 +130,28 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
         composite_emitters: list[CompositeGateEmitter[T]] | None = None,
+        select_emitters: list[SelectGateEmitter] | None = None,
     ):
+        """Initialize the standard backend-independent emit orchestration.
+
+        Args:
+            gate_emitter (GateEmitter[T]): Backend-specific primitive gate
+                emitter.
+            bindings (dict[str, Any] | None): Compile-time parameter bindings.
+                Defaults to None.
+            parameters (list[str] | None): Parameters preserved for backend
+                runtime binding. Defaults to None.
+            composite_emitters (list[CompositeGateEmitter[T]] | None): Native
+                composite-gate emitters tried before decomposition. Defaults
+                to None.
+            select_emitters (list[SelectGateEmitter] | None): Native SELECT
+                emitters tried before controlled-case decomposition. Defaults
+                to None.
+        """
         super().__init__(bindings, parameters)
         self._emitter = gate_emitter
         self._composite_emitters = composite_emitters or []
+        self._select_emitters = select_emitters or []
 
         # Helper classes (``_resolver`` is built by ``EmitPass.__init__``).
         self._allocator = ResourceAllocator(self._resolver)
