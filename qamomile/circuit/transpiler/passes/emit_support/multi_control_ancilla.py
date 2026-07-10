@@ -118,7 +118,9 @@ class MultiControlAncillaPool:
                 offset).
         """
         if count < 0:
-            raise ValueError(f"Ancilla request count must be non-negative, got {count}.")
+            raise ValueError(
+                f"Ancilla request count must be non-negative, got {count}."
+            )
         if self._counting:
             self._peak = max(self._peak, self._offset + count)
         elif self._offset + count > self._count:
