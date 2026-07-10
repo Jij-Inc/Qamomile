@@ -24,17 +24,27 @@ def assert_ancillas_uncomputed(statevector: np.ndarray, dim: int) -> np.ndarray:
         dim (int): Number of leading amplitudes to keep — the data-qubit
             dimension (``2**num_data_qubits`` in the little-endian
             convention). Every amplitude at or beyond this index carries an
-            ancilla bit set and is asserted to be zero.
+            ancilla bit set and is asserted to be zero. Must not exceed the
+            statevector length; ``dim == len(statevector)`` is the valid
+            ancilla-free case (no trailing amplitudes to check).
 
     Returns:
         np.ndarray: The statevector restricted to its leading ``dim``
             amplitudes (the data qubits).
 
     Raises:
-        AssertionError: If any amplitude at or beyond ``dim`` is not
-            numerically zero, i.e. an ancilla did not uncompute back to
-            ``|0>``.
+        AssertionError: If ``dim`` exceeds the statevector length — a
+            caller passing a wrong projection would otherwise make the
+            zero-ancilla check pass vacuously, since ``statevector[dim:]``
+            is empty and ``np.allclose`` returns True for it — or if any
+            amplitude at or beyond ``dim`` is not numerically zero, i.e. an
+            ancilla did not uncompute back to ``|0>``.
     """
+    assert dim <= statevector.shape[0], (
+        f"projection dim={dim} exceeds statevector length "
+        f"{statevector.shape[0]}; the zero-ancilla check would pass "
+        "vacuously (the caller passed a wrong dimension)"
+    )
     assert np.allclose(statevector[dim:], 0.0), (
         "multi-control ancilla qubits did not uncompute back to |0>"
     )
