@@ -311,7 +311,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             else dict(bindings)
         )
         counting_pool = MultiControlAncillaPool(data_qubit_count, 0, counting=True)
-        self._emitter = cast("GateEmitter[T]", CountingEmitter(saved_emitter))
+        self._emitter = cast(GateEmitter[T], CountingEmitter(saved_emitter))
         self._mc_ancilla_pool = counting_pool
         self._counting_emission = True
         # Native composite emitters would construct real circuit objects on
@@ -319,7 +319,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # decomposition path (which reserves the same or more ancillas).
         self._composite_emitters = []
         try:
-            dummy = cast("T", self._emitter.create_circuit(0, 0))
+            dummy = self._emitter.create_circuit(0, 0)
             self._emit_operations(
                 dummy, operations, dict(qubit_map), dict(clbit_map), bindings
             )

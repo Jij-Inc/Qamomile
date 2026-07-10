@@ -38,6 +38,9 @@ import qamomile.circuit as qmc  # noqa: E402
 import qamomile.observable as qm_o  # noqa: E402
 from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 from qamomile.qiskit import QiskitTranspiler  # noqa: E402
+from tests.transpiler._ancilla_assertions import (  # noqa: E402
+    assert_ancillas_uncomputed,
+)
 
 pytestmark = pytest.mark.quri_parts
 
@@ -112,9 +115,12 @@ def _strip_zero_ancillas(statevector: np.ndarray, dim: int) -> np.ndarray:
     The QURI Parts lowering of multi-controlled gates appends clean
     ancilla qubits after the data qubits and uncomputes them before the
     circuit ends, so every amplitude beyond the data-qubit dimension
-    must be zero (asserted here). Qiskit's native controlled gates use
-    no ancillas, so trimming to the Qiskit statevector's size aligns
-    the two for fidelity comparison.
+    must be zero. Qiskit's native controlled gates use no ancillas, so
+    trimming to the Qiskit statevector's size aligns the two for
+    fidelity comparison. Thin wrapper over
+    :func:`assert_ancillas_uncomputed` expressing this module's natural
+    unit (the Qiskit statevector size); that helper holds the shared
+    ancilla-uncomputation assertion.
 
     Args:
         statevector (np.ndarray): Full statevector including ancillas.
@@ -123,10 +129,7 @@ def _strip_zero_ancillas(statevector: np.ndarray, dim: int) -> np.ndarray:
     Returns:
         np.ndarray: Statevector restricted to the data qubits.
     """
-    assert np.allclose(statevector[dim:], 0.0), (
-        "multi-control ancilla qubits did not uncompute back to |0>"
-    )
-    return statevector[:dim]
+    return assert_ancillas_uncomputed(statevector, dim)
 
 
 def _fidelity_err(sv_a: np.ndarray, sv_b: np.ndarray) -> float:

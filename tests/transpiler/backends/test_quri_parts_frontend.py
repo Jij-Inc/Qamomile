@@ -16,6 +16,9 @@ import pytest
 pytestmark = pytest.mark.quri_parts
 
 import qamomile.circuit as qmc  # noqa: E402
+from tests.transpiler._ancilla_assertions import (  # noqa: E402
+    assert_ancillas_uncomputed,
+)
 from tests.transpiler.gate_test_specs import (  # noqa: E402
     GATE_SPECS,
     all_zeros_state,
@@ -164,8 +167,11 @@ def _strip_zero_ancillas(statevector: np.ndarray, num_data_qubits: int) -> np.nd
     The shared multi-controlled lowering appends clean ancilla qubits
     after the kernel's data qubits and uncomputes them before the
     circuit ends, so every amplitude with any ancilla bit set must be
-    zero (asserted here) and the data-qubit statevector is the leading
+    zero and the data-qubit statevector is the leading
     ``2**num_data_qubits`` amplitudes in the little-endian convention.
+    Thin wrapper over :func:`assert_ancillas_uncomputed` expressing this
+    module's natural unit (a data-qubit count); that helper holds the
+    shared ancilla-uncomputation assertion.
 
     Args:
         statevector (np.ndarray): Full statevector including ancillas.
@@ -174,11 +180,7 @@ def _strip_zero_ancillas(statevector: np.ndarray, num_data_qubits: int) -> np.nd
     Returns:
         np.ndarray: Statevector restricted to the data qubits.
     """
-    dim = 2**num_data_qubits
-    assert np.allclose(statevector[dim:], 0.0), (
-        "multi-control ancilla qubits did not uncompute back to |0>"
-    )
-    return statevector[:dim]
+    return assert_ancillas_uncomputed(statevector, 2**num_data_qubits)
 
 
 def _transpile_and_get_circuit(
