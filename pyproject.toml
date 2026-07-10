@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "jijmodeling>=2.1.0",
-    "msgpack>=1.0.0",
+    "msgpack>=1.2.1",
     "ommx>=2.3.3",
     "qiskit>=2.3.0",
     "qiskit-aer>=0.17.2",
@@ -58,7 +58,7 @@ dev = [
     "pytest-mpl>=0.17.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.14.11",
-    "torch>=2.0.0",
+    "torch>=2.12.1",
     "torchvision>=0.15.0",
     "zuban>=0.4.1",
     "griffe>=1.0.0",
