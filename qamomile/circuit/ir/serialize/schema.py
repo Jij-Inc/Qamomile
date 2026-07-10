@@ -169,5 +169,11 @@ from __future__ import annotations
 # ``init_ref`` / ``block_arg_ref`` / ``yielded_ref`` / ``result_ref``)
 # are additive in the same way; a reader that predates them would drop
 # the loop-carried threading entirely, which is accepted only under the
-# same-revision policy above.
+# same-revision policy above.  ``IfOperation`` branch merges
+# moved from embedded ``phi_ops`` operation dicts to
+# ``true_yield_refs`` / ``false_yield_refs`` UUID lists parallel to
+# ``result_refs`` — the first genuinely breaking reshape under the
+# same-revision policy: pre-change payloads fail loudly (unknown
+# ``PhiOp`` tag or merge-inconsistency ``ValueError``) instead of being
+# migrated.
 SCHEMA_VERSION: int = 1

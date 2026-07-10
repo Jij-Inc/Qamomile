@@ -1825,10 +1825,10 @@ class ResourceInterpreter:
         *,
         taken: bool | None,
     ) -> None:
-        """Publish phi results into the enclosing symbolic environment.
+        """Publish branch-merge results into the enclosing symbolic environment.
 
         Args:
-            operation (IfOperation): Conditional carrying the phi records.
+            operation (IfOperation): Conditional carrying the merge records.
             resolver (ExprResolver): Enclosing resolver to update.
             true_resolver (ExprResolver): Resolver for the true branch.
             false_resolver (ExprResolver): Resolver for the false branch.
@@ -1836,9 +1836,9 @@ class ResourceInterpreter:
                 remains symbolic or runtime-dependent.
         """
         condition = resolver.resolve(operation.condition)
-        for phi in operation.phi_ops:
-            true_value = true_resolver.resolve(phi.true_value)
-            false_value = false_resolver.resolve(phi.false_value)
+        for merge in operation.iter_merges():
+            true_value = true_resolver.resolve(merge.true_value)
+            false_value = false_resolver.resolve(merge.false_value)
             if taken is True:
                 merged = true_value
             elif taken is False:
@@ -1849,8 +1849,8 @@ class ResourceInterpreter:
                     (false_value, True),
                 )
             else:
-                merged = sp.Symbol(phi.output.name, integer=True)
-            resolver.bind(phi.output, cast(sp.Expr, merged))
+                merged = sp.Symbol(merge.result.name, integer=True)
+            resolver.bind(merge.result, cast(sp.Expr, merged))
 
     def _decide_branch(
         self, condition: sp.Basic

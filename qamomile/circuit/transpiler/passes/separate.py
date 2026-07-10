@@ -12,6 +12,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
+    IfOperation,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
@@ -889,19 +890,66 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         class SegmentIOCollector(ControlFlowVisitor):
             def visit_operation(self, op: Operation) -> None:
+                """Record one operation's reads and definitions.
+
+                Args:
+                    op (Operation): The visited operation.
+                """
                 # Operands not defined in this segment are inputs
                 for operand in op.operands:
-                    if isinstance(operand, ValueBase):
-                        if (
-                            operand.uuid not in value_definitions
-                            or value_definitions[operand.uuid] != segment_index
-                        ):
-                            segment_inputs.add(operand.uuid)
+                    self._record_read(operand)
 
                 # Results are defined by this segment
                 for result in op.results:
-                    value_definitions[result.uuid] = segment_index
-                    segment_outputs.add(result.uuid)
+                    self._record_definition(result)
+
+            def _visit_control_flow(self, op: Operation) -> None:
+                """Recurse into control flow, handling if-merges explicitly.
+
+                Args:
+                    op (Operation): The operation whose nested bodies are
+                        visited.
+                """
+                if isinstance(op, IfOperation):
+                    # Explicit merge handling via iter_merges — the
+                    # collector must not rely on merge storage being
+                    # reachable through the generic nested-list walk.
+                    # Branch bodies are visited first so branch-defined
+                    # merge sources register as in-segment definitions
+                    # before the merges read them.
+                    self.visit_operations(op.true_operations)
+                    self.visit_operations(op.false_operations)
+                    for merge in op.iter_merges():
+                        self._record_read(merge.true_value)
+                        self._record_read(merge.false_value)
+                        self._record_definition(merge.result)
+                    return
+                super()._visit_control_flow(op)
+
+            @staticmethod
+            def _record_read(operand: object) -> None:
+                """Mark a value read as a segment input unless locally defined.
+
+                Args:
+                    operand (object): Candidate operand; ignored unless it
+                        is a ``ValueBase``.
+                """
+                if isinstance(operand, ValueBase):
+                    if (
+                        operand.uuid not in value_definitions
+                        or value_definitions[operand.uuid] != segment_index
+                    ):
+                        segment_inputs.add(operand.uuid)
+
+            @staticmethod
+            def _record_definition(result: Value) -> None:
+                """Mark a value as defined by (and output of) this segment.
+
+                Args:
+                    result (Value): The defined result value.
+                """
+                value_definitions[result.uuid] = segment_index
+                segment_outputs.add(result.uuid)
 
         collector = SegmentIOCollector()
         collector.visit_operations(operations)

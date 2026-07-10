@@ -6,8 +6,8 @@ dead-branch rebinds keep decorating. That used to leave a runtime hole:
 rebinding a quantum variable inside a runtime branch — to a fresh
 allocation or to another quantum value, in one branch or both — silently
 dropped the variable's pre-branch state exactly when a rebinding branch
-was taken, surfacing (at best) as the unhelpful emit-time "Quantum PhiOp
-merge requires identical physical resources across branches" error, or
+was taken, surfacing (at best) as the unhelpful emit-time "Quantum
+if-merge requires identical physical resources across branches" error, or
 (for both-branch external rebinds) executing and silently returning the
 wrong register's state. Loop bodies had the same hole with no error at
 all: ``for _ in qmc.range(n): q = qmc.qubit("fresh")`` compiled and
@@ -17,7 +17,7 @@ the ``IfOperation`` (``BranchRebind``) and every loop-body quantum rebind
 on the loop operation (``LoopCarriedRebind`` with a quantum ``before``),
 and ``reject_control_flow_quantum_discard`` rejects a record whose
 incoming value has no owner on a rebinding path (no in-scope consumer,
-no phi carrying it out of that side, no reference outside the construct)
+no merge carrying it out of that side, no reference outside the construct)
 with a ``QubitRebindError`` (the same ``AffineTypeError`` the
 decoration-time analyzer raises for a top-level rebind from a different
 quantum source), from both ``PartialEvaluationPass`` (pre-fold, with
@@ -264,7 +264,7 @@ class TestRejectedDiscards:
     def test_rebind_to_external_value_in_both_branches_rejected(self):
         """Rebinding to the same external qubit in both branches is caught.
 
-        The pre-branch value of ``q`` then appears in no phi at all (the
+        The pre-branch value of ``q`` then appears in no merge at all (the
         frontend even elides the no-op merge), so only the recorded
         pre-branch binding exposes the discard; before the records this
         shape transpiled, sampled, and silently returned the external
@@ -292,7 +292,7 @@ class TestRejectedDiscards:
         same external register.
 
         ``q``'s pre-branch |1> state is unconditionally dropped while both
-        phi sides carry the external register's lineage; before the
+        merge sides carry the external register's lineage; before the
         records this transpiled and measured the external register (0)
         despite ``q`` being prepared to 1.
         """
@@ -318,7 +318,7 @@ class TestRejectedDiscards:
     def test_both_branches_fresh_rejected(self):
         """Fresh allocations in BOTH branches drop the original either way.
 
-        The pre-branch value appears in no phi, so only the recorded
+        The pre-branch value appears in no merge, so only the recorded
         pre-branch binding exposes the discard.
         """
 
@@ -428,7 +428,7 @@ class TestRejectedDiscards:
     def test_dead_after_fresh_rebind_rejected(self):
         """A rebind whose variable is never read after the if still rejects.
 
-        The variable is dead-store-eliminated from the phi merge, so only
+        The variable is dead-store-eliminated from the merge, so only
         the recorded pre-branch binding (probed from the branch bodies)
         exposes the rebind — matching the decoration-time policy, which
         rejects a top-level rebind regardless of later use.
@@ -496,7 +496,7 @@ class TestRejectedDiscards:
             _transpile(kernel, bindings={"flag": 1})
 
     def test_vector_qubit_fresh_rejected(self):
-        """Whole-register ``Vector[Qubit]`` rebinds merge through a single phi
+        """Whole-register ``Vector[Qubit]`` rebinds merge through a single merge
         and are rejected exactly like scalar ``Qubit`` rebinds."""
 
         @qmc.qkernel
@@ -533,7 +533,7 @@ class TestRejectedDiscards:
         """The discard is diagnosed at the analysis stage, not at emit.
 
         Before this check the same kernel failed only at emit with the
-        unhelpful "Quantum PhiOp merge requires identical physical
+        unhelpful "Quantum if-merge requires identical physical
         resources across branches" ``EmitError``; the targeted
         ``QubitRebindError`` must now fire first. It is an
         ``AffineTypeError`` — the same affine-violation family as the
@@ -634,7 +634,7 @@ class TestRejectedDiscards:
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_live_opaque_overwrite_fails_loudly_at_trace(self):
-        """When the overwritten variable IS used after the if, the phi
+        """When the overwritten variable IS used after the if, the merge
         merge already fails loudly at trace with a type mismatch
         (pre-existing behavior, pinned so the record path is understood
         to cover exactly the dead-after escape)."""
@@ -837,7 +837,7 @@ class TestAllowedPatterns:
         """Consuming the original before re-allocating is not a discard.
 
         The pattern passes the analysis stage (both check hooks). It still
-        fails at emit on Qiskit because a quantum phi merge must reference
+        fails at emit on Qiskit because a quantum merge must reference
         identical physical qubits across branches — the discard check
         diagnoses the discard shape early, it does not make cross-branch
         physical merges compile (see LIMITATIONS.md).
@@ -917,7 +917,7 @@ class TestAllowedPatterns:
         """A pure handle exchange carries both pre-branch values through.
 
         ``q1, q2 = q2, q1`` rebinds both variables, but each pre-branch
-        value is carried out by the other variable's phi on the same
+        value is carried out by the other variable's merge on the same
         side, so nothing is discarded and the analysis stage accepts it.
         (The conditional physical relabeling is not emittable — the
         surviving empty-branch runtime if hits the pre-existing
@@ -1415,7 +1415,7 @@ class TestRejectedLoopDiscards:
     def test_loop_conditional_rebind_union_roots_rejected(self):
         """A loop body that conditionally rebinds to a fresh register is
         rejected even when the rebinding branch consumes the incoming
-        state (so the branch check passes). The post-body phi unions the
+        state (so the branch check passes). The post-body merge unions the
         incoming wire with the fresh allocation; a mere overlap of that
         union with the incoming family would wrongly mark it carried, so
         the carried exemption requires EVERY root to be same-wire
@@ -1681,7 +1681,7 @@ class TestAllowedLoopPatterns:
 
     def test_compile_time_dead_if_inside_loop_accepted_at_analysis(self):
         """A compile-time-dead if inside the loop body passes the variable
-        through its collapsed phi — that pass-through read is consumption
+        through its collapsed merge — that pass-through read is consumption
         evidence, so the loop record is exempt at the analysis stage."""
 
         @qmc.qkernel

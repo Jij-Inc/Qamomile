@@ -108,6 +108,25 @@ def _fix_qft() -> qmc.Vector[qmc.Qubit]:
 
 
 @qmc.qkernel
+def _fix_if_merge() -> qmc.Bit:
+    """Measurement-conditioned if-else — covers ``IfOperation`` yield refs.
+
+    Both branches rebind ``r``, so the ``IfOperation`` carries one branch
+    merge; the fixture pins the ``true_yield_refs`` / ``false_yield_refs``
+    wire shape.
+    """
+    q = qmc.qubit(name="q")
+    q = qmc.h(q)
+    bit = qmc.measure(q)
+    r = qmc.qubit(name="r")
+    if bit:
+        r = qmc.x(r)
+    else:
+        r = qmc.h(r)
+    return qmc.measure(r)
+
+
+@qmc.qkernel
 def _fix_expval(theta: qmc.Float, H: qmc.Observable) -> qmc.Float:
     """A toy VQE-style kernel — covers ``ExpvalOp`` + ``ObservableType`` parameter.
 
@@ -174,6 +193,22 @@ FIXTURE_KERNELS: list[tuple[str, Callable[[], Block], dict[str, Any]]] = [
         {
             "kind": BlockKind.AFFINE,
             "op_types": ["QInitOperation", "InvokeOperation"],
+            "param_slot_count": 0,
+        },
+    ),
+    (
+        "if_merge",
+        lambda: InlinePass().run(_fix_if_merge.block),
+        {
+            "kind": BlockKind.AFFINE,
+            "op_types": [
+                "QInitOperation",
+                "GateOperation",
+                "MeasureOperation",
+                "QInitOperation",
+                "IfOperation",
+                "MeasureOperation",
+            ],
             "param_slot_count": 0,
         },
     ),

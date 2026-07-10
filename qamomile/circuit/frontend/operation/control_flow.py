@@ -8,17 +8,12 @@ import typing
 from qamomile.circuit.frontend.func_to_block import is_array_type
 from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict, DictItemsIterator
-from qamomile.circuit.frontend.handle.hamiltonian import Observable
 from qamomile.circuit.frontend.handle.primitives import (
-    Bit,
     Float,
     Handle,
-    QFixed,
-    Qubit,
     UInt,
 )
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.control_flow import (
     BranchRebind,
     ForItemsOperation,
@@ -28,7 +23,6 @@ from qamomile.circuit.ir.operation.control_flow import (
     RegionArg,
     WhileOperation,
 )
-from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
@@ -187,108 +181,6 @@ def for_loop(
     for_op.operands.append(_value_to_ir_value(step, "step"))
 
     parent_tracer.add_operation(for_op)
-
-
-def _create_handle_from_value(value: Value, template_handle: Handle) -> Handle:
-    """Wrap a phi result in the same frontend handle family.
-
-    Args:
-        value (Value): IR phi result value to expose to the traced Python code.
-        template_handle (Handle): Branch handle whose frontend type should be
-            preserved for the merged value.
-
-    Returns:
-        Handle: Frontend handle of the same supported family as
-            ``template_handle``.
-
-    Raises:
-        TypeError: If ``template_handle`` is not a supported phi-merge handle
-            type.
-    """
-    if isinstance(template_handle, Qubit):
-        return Qubit(value=value)
-    elif isinstance(template_handle, UInt):
-        return UInt(value=value)
-    elif isinstance(template_handle, Float):
-        return Float(value=value)
-    elif isinstance(template_handle, Bit):
-        return Bit(value=value)
-    elif isinstance(template_handle, QFixed):
-        return QFixed(value=value)
-    elif isinstance(template_handle, Observable):
-        return Observable(value=value)
-    elif isinstance(template_handle, ArrayBase):
-        from qamomile.circuit.frontend.handle.array import VectorView
-
-        if isinstance(template_handle, VectorView):
-            assert isinstance(value, ArrayValue)
-            view = VectorView._wrap_unregistered(
-                parent=template_handle._slice_parent,
-                sliced_av=value,
-                length=template_handle._shape[0],
-                start_uint=template_handle._slice_start,
-                step_uint=template_handle._slice_step,
-            )
-            view._slice_covered_indices = template_handle._slice_covered_indices
-            view._slice_outer_view = template_handle._slice_outer_view
-            return view
-        cls = type(template_handle)
-        assert isinstance(value, ArrayValue)
-        return cls._create_from_value(value=value, shape=template_handle._shape)
-    raise TypeError(
-        "Unsupported Handle type for if-else phi merge: "
-        f"{type(template_handle).__name__}. Add explicit handle wrapping support "
-        "before merging this handle type."
-    )
-
-
-def _copy_qfixed_phi_metadata(
-    phi_output: Value,
-    true_v: Value,
-    false_v: Value,
-) -> Value:
-    """Copy QFixed carrier metadata onto a compatible phi result.
-
-    QFixed is a scalar quantum handle backed by multiple physical qubit
-    carriers recorded in metadata. A merged QFixed can only reuse that metadata
-    when both branches describe the exact same carrier layout; otherwise the
-    frontend cannot represent the condition-dependent carrier set safely.
-
-    Args:
-        phi_output (Value): Newly-created phi result value.
-        true_v (Value): True-branch QFixed value.
-        false_v (Value): False-branch QFixed value.
-
-    Returns:
-        Value: ``phi_output`` with QFixed metadata copied when applicable.
-
-    Raises:
-        TypeError: If either branch lacks QFixed metadata or the branch carrier
-            layouts differ.
-    """
-    if not isinstance(true_v.type, QFixedType):
-        return phi_output
-
-    true_meta = true_v.metadata.qfixed
-    false_meta = false_v.metadata.qfixed
-    if true_meta is None or false_meta is None:
-        raise TypeError(
-            "QFixed if-else phi merge requires QFixed metadata on both branches."
-        )
-    if (
-        true_meta.qubit_uuids != false_meta.qubit_uuids
-        or true_meta.num_bits != false_meta.num_bits
-        or true_meta.int_bits != false_meta.int_bits
-    ):
-        raise TypeError(
-            "QFixed if-else phi merge requires identical carrier qubits and "
-            "fixed-point layout across branches."
-        )
-    return phi_output.with_qfixed_metadata(
-        qubit_uuids=true_meta.qubit_uuids,
-        num_bits=true_meta.num_bits,
-        int_bits=true_meta.int_bits,
-    )
 
 
 def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
@@ -1013,22 +905,33 @@ def record_loop_rebinds(
         tracer.loop_carried_rebinds = tracer.loop_carried_rebinds + tuple(records)
 
 
-def _create_phi_for_values(
-    condition_value: Value,
+def _create_merge_for_values(
     true_val: typing.Any,
     false_val: typing.Any,
     if_operation: IfOperation,
-) -> typing.Tuple[Value, Handle]:
-    """Create a Phi operation for merging branch values.
+) -> Handle:
+    """Create a branch-merge slot for a pair of branch values.
 
     Args:
-        condition_value: The condition Value (from if statement)
-        true_val: Value from true branch (Handle, Value, or primitive)
-        false_val: Value from false branch (Handle, Value, or primitive)
-        if_operation: The IfOperation to add Phi result to
+        true_val (typing.Any): The true branch's value. Must be a
+            frontend ``Handle`` at runtime — its family determines how
+            the merge output is wrapped (via ``_wrap_merge_result``); any
+            other object is rejected.
+        false_val (typing.Any): The false branch's value (Handle, Value,
+            or primitive); only its IR value participates in the merge.
+        if_operation (IfOperation): The if-else the merge is added to via
+            ``add_merge``. Its condition operand must already be attached.
 
     Returns:
-        Tuple of (phi_output_value, merged_handle)
+        Handle: The frontend handle wrapping the merged IR output value.
+            The merge output value itself is already registered on
+            ``if_operation`` via ``add_merge`` and is reachable as
+            ``merged_handle.value``.
+
+    Raises:
+        TypeError: If the branch value types differ, if ``true_val`` is
+            not a frontend ``Handle``, or if its handle family does not
+            support merging.
     """
     # Convert both values to IR Values
     true_v = _value_to_ir_value(true_val, "true_const")
@@ -1041,31 +944,39 @@ def _create_phi_for_values(
             f"true branch has {true_v.type}, false branch has {false_v.type}"
         )
 
-    # Create Phi output value (indexed to avoid name collisions)
-    phi_index = len(if_operation.results)
+    # Create merge output value (indexed to avoid name collisions)
+    merge_index = len(if_operation.results)
     if isinstance(true_v, ArrayValue):
-        phi_output = ArrayValue(
+        merge_output = ArrayValue(
             type=true_v.type,
-            name=f"{true_v.name}_phi_{phi_index}",
+            name=f"{true_v.name}_merge_{merge_index}",
             shape=true_v.shape,
             slice_of=true_v.slice_of,
             slice_start=true_v.slice_start,
             slice_step=true_v.slice_step,
         )
     else:
-        phi_output = Value(type=true_v.type, name=f"{true_v.name}_phi_{phi_index}")
-        phi_output = _copy_qfixed_phi_metadata(phi_output, true_v, false_v)
+        merge_output = Value(
+            type=true_v.type, name=f"{true_v.name}_merge_{merge_index}"
+        )
 
-    # Create PhiOp and store in IfOperation
-    _phi_op = PhiOp(operands=[condition_value, true_v, false_v], results=[phi_output])
-    if_operation.phi_ops.append(_phi_op)
-    if_operation.results.append(phi_output)
+    # Wrap the merge output in the true-branch handle's family. The wrap
+    # may rebuild the output value with copied metadata (QFixed carriers),
+    # so the handle's value — not the bare merge_output — is what the merge
+    # must record.
+    if not isinstance(true_val, Handle):
+        raise TypeError(
+            "Unsupported Handle type for if-else merge: "
+            f"{type(true_val).__name__}. Add explicit handle wrapping support "
+            "before merging this handle type."
+        )
+    merged_handle = true_val._wrap_merge_result(merge_output, false_v)
 
-    # Create appropriate Handle type for the merged value
-    merged_handle = _create_handle_from_value(phi_output, true_val)
-    _refresh_slice_phi_owner(true_val, false_val, merged_handle)
+    # Store the merge in the IfOperation through its official accessor
+    if_operation.add_merge(true_v, false_v, merged_handle.value)
+    _refresh_slice_merge_owner(true_val, false_val, merged_handle)
 
-    return phi_output, merged_handle
+    return merged_handle
 
 
 def _slice_view_coverage(view: typing.Any) -> tuple[int, ...] | None:
@@ -1092,22 +1003,22 @@ def _slice_view_coverage(view: typing.Any) -> tuple[int, ...] | None:
     return _coverage_from_array_value(view.value)
 
 
-def _refresh_slice_phi_owner(
+def _refresh_slice_merge_owner(
     true_val: typing.Any,
     false_val: typing.Any,
     merged_handle: typing.Any,
 ) -> None:
-    """Transfer same-slice branch ownership to a merged slice phi handle.
+    """Transfer same-slice branch ownership to a merged slice handle.
 
     Runtime ``if`` tracing uses branch-local handle copies.  When both branches
-    return the same parent slice lineage, the merged phi view is the handle that
+    return the same parent slice lineage, the merged view is the handle that
     should be assignable after the ``if``.  Refreshing the parent borrow table
     here keeps the frontend owner identity aligned with that merged handle.
 
     Args:
-        true_val (typing.Any): True-branch value participating in the phi.
-        false_val (typing.Any): False-branch value participating in the phi.
-        merged_handle (typing.Any): Handle wrapping the phi result.
+        true_val (typing.Any): True-branch value participating in the merge.
+        false_val (typing.Any): False-branch value participating in the merge.
+        merged_handle (typing.Any): Handle wrapping the merge result.
     """
     from qamomile.circuit.frontend.handle.array import VectorView
 
@@ -1166,7 +1077,7 @@ def _operation_touches_array_element(op: typing.Any, array_value: ArrayValue) ->
     Element-level updates such as ``qs[0] = qmc.x(qs[0])`` do not replace the
     outer ``ArrayValue`` handle, but the gate operands/results still carry
     ``parent_array`` metadata.  ``emit_if`` uses this to avoid eliding an array
-    phi merely because both branch handles still point at the same outer array.
+    merge merely because both branch handles still point at the same outer array.
 
     Args:
         op (typing.Any): Operation-like object to inspect.  It may be a normal
@@ -1178,7 +1089,16 @@ def _operation_touches_array_element(op: typing.Any, array_value: ArrayValue) ->
         bool: ``True`` if ``op`` or any nested operation reads/writes an element
         whose ``parent_array`` is ``array_value``; ``False`` otherwise.
     """
-    values = [*getattr(op, "operands", ()), *getattr(op, "results", ())]
+    # ``all_input_values`` (falling back to ``operands`` for op-like test
+    # doubles) keeps subclass-extra references — a nested if's merge
+    # yields in particular — counting as touches, matching the
+    # conservative reach this prover had when merges were stored as
+    # nested merge pseudo-operations.
+    if hasattr(op, "all_input_values"):
+        inputs = op.all_input_values()
+    else:
+        inputs = getattr(op, "operands", ())
+    values = [*inputs, *getattr(op, "results", ())]
     for value in values:
         parent_array = getattr(value, "parent_array", None)
         if (
@@ -1242,7 +1162,7 @@ def _find_original_handle_for_result(
     """Find the input handle that still owns a pass-through result value.
 
     ``visit_If`` may return values that were not passed as inputs, such as new
-    locals defined in both branches.  For array no-op phi elision we still want
+    locals defined in both branches.  For array no-op merge elision we still want
     to reuse the original outer handle when the result is merely a branch copy
     of an existing input array, because that original handle carries live borrow
     state.  Matching by UUID keeps this independent of the differing input and
@@ -1264,6 +1184,102 @@ def _find_original_handle_for_result(
         if variable_value is not None and variable_value.uuid == result_value.uuid:
             return variable
     return None
+
+
+def _can_elide_scalar_merge(true_val: typing.Any, false_val: typing.Any) -> bool:
+    """Decide whether a scalar branch-merge slot can be omitted at trace time.
+
+    The frontend skips a merge only when the trace PROVES it would be a
+    no-op: both branches returned the *same* IR ``Value`` object and
+    neither branch consumed it. Skipping keeps the IR SSA-minimal and
+    avoids generating merge-versioned aliases (e.g. ``j_merge_4``) for
+    read-only scalar loop variables, which downstream emit-time loop
+    unrolling cannot bind.
+
+    Invariant (the belt-and-braces contract with emit): elision is an
+    optimization, never a correctness requirement. Every merge that is
+    NOT elided — including identity merges this prover cannot see, such
+    as consumed-in-branch values or metadata-divergent handles — must be
+    handled first-class by emit (an identity merge trivially resolves to
+    one physical resource). Emit must never assume the frontend elided
+    every identity merge.
+
+    Args:
+        true_val (typing.Any): Value the true branch returned for this
+            variable slot (Handle, Value, or primitive).
+        false_val (typing.Any): Value the false branch returned for the
+            same slot.
+
+    Returns:
+        bool: ``True`` when the merge slot is provably a no-op and may
+            be skipped.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if isinstance(true_val, ArrayBase) or isinstance(false_val, ArrayBase):
+        return False
+    true_v = true_val.value if hasattr(true_val, "value") else true_val
+    false_v = false_val.value if hasattr(false_val, "value") else false_val
+    return (
+        isinstance(true_v, Value)
+        and isinstance(false_v, Value)
+        and true_v is false_v
+        and not getattr(true_val, "_consumed", False)
+        and not getattr(false_val, "_consumed", False)
+    )
+
+
+def _can_elide_array_merge(
+    true_val: typing.Any,
+    false_val: typing.Any,
+    true_tracer: Tracer,
+    false_tracer: Tracer,
+) -> bool:
+    """Decide whether an array branch-merge slot can be omitted at trace time.
+
+    Array handles normally need a merge because whole-array ops can
+    return a fresh ``ArrayValue``. When both branches still point at the
+    exact same quantum ``ArrayValue``, neither branch consumed it, and
+    neither branch touched any of its elements, the array handle
+    provably did not change; the caller then reuses the original outer
+    handle so parent borrow tables (for live slice views captured
+    outside the branch) are not replaced by a merge-root with empty
+    state.
+
+    The same invariant as :func:`_can_elide_scalar_merge` applies:
+    elision is an optimization only, and emit handles every non-elided
+    merge — identity merges included — first-class.
+
+    Args:
+        true_val (typing.Any): Value the true branch returned for this
+            variable slot.
+        false_val (typing.Any): Value the false branch returned for the
+            same slot.
+        true_tracer (Tracer): Tracer holding the true branch's captured
+            operations, scanned for element-level touches.
+        false_tracer (Tracer): Tracer holding the false branch's
+            captured operations.
+
+    Returns:
+        bool: ``True`` when the merge slot is provably a no-op and may
+            be skipped.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if not (isinstance(true_val, ArrayBase) or isinstance(false_val, ArrayBase)):
+        return False
+    true_v = true_val.value if hasattr(true_val, "value") else true_val
+    false_v = false_val.value if hasattr(false_val, "value") else false_val
+    return (
+        isinstance(true_v, ArrayValue)
+        and isinstance(false_v, ArrayValue)
+        and true_v.type.is_quantum()
+        and true_v is false_v
+        and not getattr(true_val, "_consumed", False)
+        and not getattr(false_val, "_consumed", False)
+        and not _branch_touches_array_elements(true_tracer, true_v)
+        and not _branch_touches_array_elements(false_tracer, false_v)
+    )
 
 
 # Sentinel returned by ``dead_rebind_binding`` when a probed name is not
@@ -1393,7 +1409,7 @@ def _collect_branch_rebinds(
 
     Compares each candidate variable's pre-branch IR value (captured at
     the ``emit_if`` call site by the AST transformer) with the value the
-    variable holds after each branch. The phi merge only carries the
+    variable holds after each branch. The merge only carries the
     *new* branch values — and a reassigned variable whose old value is
     dead is not even passed into the branches — so the pre-branch value
     can disappear from the ``IfOperation`` entirely; these records
@@ -1402,7 +1418,7 @@ def _collect_branch_rebinds(
     dead-after candidates (dead-store-eliminated from the outputs) are
     matched through the probe tails the branch bodies append after their
     ordinary return values. Classical variables are not recorded —
-    classical rebinds are ordinary phi-merged dataflow.
+    classical rebinds are ordinary merged dataflow.
 
     Args:
         output_names (tuple): Variable names positionally aligned with
@@ -1497,7 +1513,7 @@ def emit_if(
     rebind_pre_bindings: dict | None = None,
     dead_names: tuple = (),
 ) -> typing.Any:
-    """Builder function for if-else conditional with Phi function merging.
+    """Builder function for if-else conditional with merge function merging.
 
     This function is called from AST-transformed code. The AST transformer
     converts:
@@ -1532,7 +1548,7 @@ def emit_if(
             are no dead candidates.
 
     Returns:
-        Merged variable values after conditional execution (using Phi functions)
+        Merged variable values after conditional execution (using merge functions)
 
     Example:
         ```python
@@ -1579,7 +1595,7 @@ def emit_if(
     )
     if_op.operands.append(condition_value)
 
-    # 4. Create Phi functions for each variable to merge branches
+    # 4. Create merge functions for each variable to merge branches
     # Note: The AST transformer guarantees both branches return the same
     # variable list in the same order, so true_val and false_val always
     # have the same type.
@@ -1610,84 +1626,47 @@ def emit_if(
         if isinstance(true_val, (Handle, Value)):
             if not isinstance(false_val, (Handle, Value)):
                 raise TypeError(
-                    f"Branch value mismatch in phi merge: "
+                    f"Branch value mismatch in merge: "
                     f"true branch returned {type(true_val).__name__}, "
                     f"but false branch returned {type(false_val).__name__}. "
                     f"Both branches of an if-else must return the same variables."
                 )
-            # Phi minimization (scalar handles only): when both branches
-            # return the *same* IR Value AND neither branch consumed it,
-            # the phi would be a no-op merge. Skipping it keeps the IR
-            # SSA-minimal and avoids generating phi-versioned aliases
-            # (e.g. ``j_phi_4``) for read-only scalar loop variables,
-            # which downstream emit-time loop unrolling cannot bind.
-            #
-            # Array handles normally need a phi because whole-array ops
-            # can return a fresh ``ArrayValue``.  When both branches
-            # still point at the exact same ``ArrayValue`` and neither
-            # branch consumed it, however, the array handle itself did
-            # not change.  Reuse the original outer handle so parent
-            # borrow tables (for live slice views captured outside the
-            # branch) are not replaced by a phi-root with empty state.
-            from qamomile.circuit.frontend.handle.array import ArrayBase
-
-            true_v = true_val.value if hasattr(true_val, "value") else true_val
-            false_v = false_val.value if hasattr(false_val, "value") else false_val
             # Only in-branch consumption counts: a handle consumed BEFORE the
             # if (``_consumed_pre_branch``) must not block elision or trigger
             # the conditional-move rule — its reuse inside a branch already
             # raised at trace time (see ``_fresh_handle_copy_for_tracing``).
             true_consumed = _consumed_in_branch(true_val)
             false_consumed = _consumed_in_branch(false_val)
-            is_array_handle = isinstance(true_val, ArrayBase) or isinstance(
-                false_val, ArrayBase
-            )
-            if (
-                not is_array_handle
-                and isinstance(true_v, Value)
-                and isinstance(false_v, Value)
-                and true_v is false_v
-                and not true_consumed
-                and not false_consumed
-            ):
+            # Merge minimization: skip slots the trace proves are no-ops
+            # (see the elision predicates for the exact conditions and
+            # the belt-and-braces invariant they share with emit).
+            if _can_elide_scalar_merge(true_val, false_val):
                 merged_results.append(true_val)
                 continue
-            if (
-                is_array_handle
-                and isinstance(true_v, ArrayValue)
-                and isinstance(false_v, ArrayValue)
-                and true_v.type.is_quantum()
-                and true_v is false_v
-                and not true_consumed
-                and not false_consumed
-                and not _branch_touches_array_elements(true_tracer, true_v)
-                and not _branch_touches_array_elements(false_tracer, false_v)
-            ):
+            if _can_elide_array_merge(true_val, false_val, true_tracer, false_tracer):
                 original_val = _find_original_handle_for_result(true_val, variables)
                 merged_results.append(
                     original_val if original_val is not None else true_val
                 )
                 continue
-            phi_output, merged_handle = _create_phi_for_values(
-                condition_value, true_val, false_val, if_op
-            )
+            merged_handle = _create_merge_for_values(true_val, false_val, if_op)
             # Conditional-move rule: if the value was consumed on either
             # branch, the merged handle is consumed after the if. Reusing it
-            # then raises at trace time instead of silently carrying the
-            # consumed value forward through the phi.
+            # then raises at trace time instead of carrying a consumed value
+            # forward through the branch merge.
             _mark_conditionally_consumed(
                 merged_handle, true_val, false_val, true_consumed, false_consumed
             )
             merged_results.append(merged_handle)
         elif isinstance(false_val, (Handle, Value)):
             raise TypeError(
-                f"Branch value mismatch in phi merge: "
+                f"Branch value mismatch in merge: "
                 f"false branch returned {type(false_val).__name__}, "
                 f"but true branch returned {type(true_val).__name__}. "
                 f"Both branches of an if-else must return the same variables."
             )
         else:
-            # Non-Handle/Value values (int, float, etc.) don't need phi
+            # Non-Handle/Value values (int, float, etc.) don't need merge
             merged_results.append(true_val)
 
     # 5. Add IfOperation to parent tracer

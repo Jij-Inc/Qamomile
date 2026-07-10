@@ -233,11 +233,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
             # Function-wide lexical accumulation for rebind-record
             # candidates: unlike ``_outer_defined_vars`` (deliberately
             # narrowed to each branch's inputs so dead old values never
-            # force phi inputs), Python variables have function scope, so
+            # force merge inputs), Python variables have function scope, so
             # a branch assignment to a name defined anywhere earlier in
             # the function rebinds THAT variable. This set is consulted
             # only by the rebind-record candidate computation and never
-            # feeds the input/output/phi machinery.
+            # feeds the input/output/merge machinery.
             self._lexical_defined_vars |= defined_so_far
 
             # Visit the statement (may call visit_If, visit_For, etc.)
@@ -1389,7 +1389,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         outer_defined = set(self._outer_defined_vars)
         has_else = bool(node.orelse)
 
-        # Existing vars re-assigned in any branch may need phi outputs even
+        # Existing vars re-assigned in any branch may need merge outputs even
         # when the old value is dead and therefore should not be passed in.
         reassigned_existing = (body_assigned | orelse_assigned) & outer_defined
 
@@ -1418,10 +1418,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
         # Filter dead-and-modified variables from output.  A variable that is
         # stored (modified) in a branch but never loaded after the if would
-        # generate an unnecessary PhiOp whose physical resources may differ
-        # across branches, causing EmitError at emit time.
+        # generate an unnecessary merge slot whose physical resources may
+        # differ across branches, causing EmitError at emit time.
         # Variables that are dead but NOT stored in any branch pass through
-        # unchanged (their phi has identical resources) and are harmless.
+        # unchanged (their merge has identical resources) and are harmless.
         stored_in_branches = collector_body.store_vars | collector_orelse.store_vars
         dead_modified = (stored_in_branches & input_vars_set) - after_loads
         live_shared = shared_new_locals & after_loads
@@ -1474,7 +1474,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         orelse_has_return = self._has_top_level_return(orelse_body)
 
         # One-sided return is not supported: when only one branch returns,
-        # the phi merge cannot pair the return value with a corresponding
+        # the merge cannot pair the return value with a corresponding
         # value from the other branch, causing TypeError or silent bugs.
         if body_has_return != orelse_has_return:
             returning_branch = "if" if body_has_return else "else"
@@ -1516,7 +1516,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Dead-rebind probes: a pre-existing variable reassigned in a
         # branch but never read after the if is dead-store-eliminated
         # from ``output_vars`` (and, when its old value is unread, from
-        # ``input_vars`` too), so no phi ever sees it — yet the rebind
+        # ``input_vars`` too), so no merge ever sees it — yet the rebind
         # still drops the pre-branch quantum state on the rebinding
         # path, exactly like the top-level rebind the decoration-time
         # analyzer rejects. Each branch body therefore returns, after
@@ -1595,7 +1595,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Rebind-record probe arguments: pre-branch bindings of every
         # pre-existing variable reassigned in a branch. A reassigned
         # variable whose old value is dead is deliberately NOT in
-        # ``input_vars`` (its old value must not force a phi input), so
+        # ``input_vars`` (its old value must not force a merge input), so
         # ``emit_if`` cannot see its pre-branch binding through
         # ``var_list``; ``branch_rebind_pre_bindings(locals(), ...)``
         # captures it at the call site instead. The candidate analysis

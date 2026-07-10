@@ -24,6 +24,7 @@ from qamomile.circuit.ir.canonical import (
 )
 from qamomile.circuit.ir.operation import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import dump_json, load_json
 from qamomile.circuit.ir.types.primitives import (
@@ -142,6 +143,51 @@ def _measure_after_h_twin(q: qmc.Qubit) -> qmc.Bit:
     """Twin of ``_measure_after_h`` for cross-build determinism with measurement."""
     q = qmc.h(q)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _nested_if_merge() -> qmc.Bit:
+    """Nested measurement-conditioned ifs whose branches rebind a qubit.
+
+    The outer if's true-branch yield is the inner if's merge output, so
+    canonicalize must renumber UUIDs consistently through the
+    ``true_yields`` / ``false_yields`` lists at both nesting levels.
+    """
+    q = qmc.qubit(name="q")
+    q = qmc.h(q)
+    outer = qmc.measure(q)
+    p = qmc.qubit(name="p")
+    p = qmc.h(p)
+    inner = qmc.measure(p)
+    s = qmc.qubit(name="s")
+    if outer:
+        if inner:
+            s = qmc.z(s)
+        else:
+            s = qmc.x(s)
+    else:
+        s = qmc.h(s)
+    return qmc.measure(s)
+
+
+@qmc.qkernel
+def _nested_if_merge_twin() -> qmc.Bit:
+    """Twin of ``_nested_if_merge`` for cross-build determinism on merges."""
+    q = qmc.qubit(name="q")
+    q = qmc.h(q)
+    outer = qmc.measure(q)
+    p = qmc.qubit(name="p")
+    p = qmc.h(p)
+    inner = qmc.measure(p)
+    s = qmc.qubit(name="s")
+    if outer:
+        if inner:
+            s = qmc.z(s)
+        else:
+            s = qmc.x(s)
+    else:
+        s = qmc.h(s)
+    return qmc.measure(s)
 
 
 # Two structurally-identical controlled-U scenarios. Each top-level
@@ -314,6 +360,53 @@ class TestCanonicalizeIdempotence:
         h2 = content_hash(canon)
         h3 = content_hash(canonicalize(canon))
         assert h1 == h2 == h3
+
+
+class TestCanonicalizeIfMerges:
+    """Canonical form covers IfOperation merge yields (nested ifs included)."""
+
+    def test_nested_if_twins_same_canonical_form(self):
+        """Two identical nested-if kernels agree byte-for-byte and by hash."""
+        a = _to_affine(_nested_if_merge)
+        b = _to_affine(_nested_if_merge_twin)
+        assert to_canonical_bytes(a) == to_canonical_bytes(b)
+        assert content_hash(a) == content_hash(b)
+
+    def test_nested_if_idempotent(self):
+        """Canonicalize is idempotent on a block with nested if merges."""
+        block = _to_affine(_nested_if_merge)
+        once = to_canonical_bytes(block)
+        canon = canonicalize(block)
+        assert to_canonical_bytes(canon) == once
+        assert content_hash(canonicalize(canon)) == content_hash(block)
+
+    def test_canonicalize_renumbers_yield_uuids(self):
+        """Yield values carry counter-based UUIDs after canonicalize.
+
+        An unmapped yield would keep its random uuid4, so asserting the
+        counter prefix on every yield proves the UUID rewrite reaches the
+        ``true_yields`` / ``false_yields`` lists at every nesting level.
+        """
+
+        def collect_if_ops(operations) -> list[IfOperation]:
+            """Recursively collect IfOperations from an operation list."""
+            found: list[IfOperation] = []
+            for op in operations:
+                if isinstance(op, IfOperation):
+                    found.append(op)
+                    found.extend(collect_if_ops(op.true_operations))
+                    found.extend(collect_if_ops(op.false_operations))
+            return found
+
+        canon = canonicalize(_to_affine(_nested_if_merge))
+        if_ops = collect_if_ops(canon.operations)
+        assert len(if_ops) == 2
+        for if_op in if_ops:
+            merges = list(if_op.iter_merges())
+            assert merges
+            for merge in merges:
+                assert merge.true_value.uuid.startswith("00000000-0000-0000-0000-")
+                assert merge.false_value.uuid.startswith("00000000-0000-0000-0000-")
 
 
 # ---------------------------------------------------------------------------

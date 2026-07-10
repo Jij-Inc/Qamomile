@@ -17,7 +17,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
-    PhiOp,
 )
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
@@ -477,7 +476,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
         / ``CompOp`` / ``CondOp`` / ``NotOp``) and ``IfOperation``s whose
         branches are themselves supported (their conditions are resolved
         per iteration during evaluation; branch selection results merge
-        through ``phi_ops``). Anything else — gates, stores, nested
+        through the if's merge yields). Anything else — gates, stores, nested
         loops — declines folding and leaves the loop for the classical
         executor / emit-time threading.
 
@@ -496,8 +495,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                     return False
                 if not self._region_body_supported(body_op.false_operations):
                     return False
-                if not all(isinstance(p, PhiOp) for p in body_op.phi_ops):
-                    return False
+                list(body_op.iter_merges())
                 continue
             return False
         return True
@@ -546,12 +544,12 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 )
                 if not self._eval_region_body(taken, resolve, bind_const):
                     return False
-                for phi in body_op.phi_ops:
-                    selected = phi.true_value if condition else phi.false_value
+                for merge in body_op.iter_merges():
+                    selected = merge.select(bool(condition))
                     merged = resolve(selected)
                     if merged is None:
                         return False
-                    bind_const(phi.output, merged)
+                    bind_const(merge.result, merged)
                 continue
             return False
         return True

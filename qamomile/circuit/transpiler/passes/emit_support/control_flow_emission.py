@@ -30,8 +30,8 @@ from qamomile.circuit.transpiler.param_keys import dict_param_key
 
 from .cast_binop_emission import _set_emit_value
 from .condition_resolution import (
-    map_phi_outputs,
-    remap_static_phi_outputs,
+    map_merge_outputs,
+    remap_static_merge_outputs,
     resolve_condition_address_detailed,
     resolve_if_condition,
 )
@@ -695,8 +695,8 @@ def emit_if(
     resolved = resolve_if_condition(condition, bindings)
 
     # Compile-time constant condition: emit only the selected branch.
-    # Use remap_static_phi_outputs (not the runtime map_phi_outputs
-    # validator) so that dead-branch array quantum phi outputs are
+    # Use remap_static_merge_outputs (not the runtime map_merge_outputs
+    # validator) so that dead-branch array quantum merge outputs are
     # aliased from the selected branch only.
     if resolved is not None:
         if resolved:
@@ -717,8 +717,15 @@ def emit_if(
                 bindings,
                 emit_qinit_reset=True,
             )
-        remap_static_phi_outputs(op.phi_ops, resolved, qubit_map, clbit_map)
-        register_classical_phi_aliases(emit_pass, op.phi_ops, bindings, resolved)
+        remap_static_merge_outputs(
+            op,
+            resolved,
+            qubit_map,
+            clbit_map,
+            bindings=bindings,
+            resolver=emit_pass._resolver,
+        )
+        register_classical_merge_aliases(emit_pass, op, bindings, resolved)
         return
 
     condition_addr = resolve_condition_address(condition, bindings, emit_pass._resolver)
@@ -755,10 +762,10 @@ def emit_if(
             )
         emit_pass._emitter.emit_if_end(circuit, context)
 
-        # Register phi output UUIDs so subsequent operations
+        # Register merge output UUIDs so subsequent operations
         # (e.g., measure) can resolve the merged values.
-        register_phi_outputs(emit_pass, op, qubit_map, clbit_map, bindings)
-        register_classical_phi_aliases(emit_pass, op.phi_ops, bindings, None)
+        register_merge_outputs(emit_pass, op, qubit_map, clbit_map, bindings)
+        register_classical_merge_aliases(emit_pass, op, bindings, None)
     else:
         raise EmitError(
             "Backend does not support native if/else control flow. "
@@ -767,21 +774,43 @@ def emit_if(
 
 
 # ---------------------------------------------------------------------------
-# Phi output registration (helper for emit_if)
+# Merge output registration (helper for emit_if)
 # ---------------------------------------------------------------------------
 
 
-def register_phi_outputs(
+def register_merge_outputs(
     emit_pass: "StandardEmitPass",
     op: IfOperation,
     qubit_map: QubitMap,
     clbit_map: ClbitMap,
     bindings: dict[str, Any] | None = None,
 ) -> None:
-    """Register phi output UUIDs via the shared ``map_phi_outputs`` utility.
+    """Register merge output UUIDs via the shared ``map_merge_outputs`` utility.
 
     Uses the full ``ValueResolver.resolve_qubit_index_detailed`` for
-    scalar qubit resolution (handles array element operands).
+    scalar qubit resolution (handles array element operands). Runs at emit
+    time with ``reject_runtime_bit_mux=True`` so an unrepresentable runtime
+    multiplexing of two pre-existing measured bits fails loudly rather than
+    silently binding the merge to the true branch.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass, providing the
+            ``ValueResolver`` used for scalar / array-element resolution.
+        op (IfOperation): The runtime if-else whose merged outputs are
+            registered onto their physical clbits / qubits.
+        qubit_map (QubitMap): Address-to-physical-qubit map, mutated in
+            place.
+        clbit_map (ClbitMap): Address-to-physical-clbit map, mutated in
+            place.
+        bindings (dict[str, Any] | None): Active emit-time bindings used to
+            fold a merge source's symbolic ``Vector[Bit]`` element index
+            (e.g. an unrolled loop variable). Defaults to None (empty).
+
+    Raises:
+        EmitError: If a quantum merge's branches resolve to different
+            physical resources, or a runtime scalar ``Bit`` merge
+            multiplexes two distinct pre-existing measured clbits (see
+            ``map_merge_outputs``).
     """
     resolver_bindings = bindings or {}
 
@@ -791,27 +820,41 @@ def register_phi_outputs(
         )
         return result.index if result.success else None
 
-    map_phi_outputs(op.phi_ops, qubit_map, clbit_map, _resolve_scalar)
+    map_merge_outputs(
+        op,
+        qubit_map,
+        clbit_map,
+        _resolve_scalar,
+        bindings=resolver_bindings,
+        resolver=emit_pass._resolver,
+        # Emit-time only: by now representable Bit merges (branch-local
+        # fresh measurements, while-loop-carried conditions) have been
+        # aliased onto a single shared clbit, so a still-distinct pair of
+        # source clbits marks the unrepresentable runtime pre-measured
+        # multiplexing shape and must fail loudly instead of silently
+        # binding the merge to the true branch.
+        reject_runtime_bit_mux=True,
+    )
 
 
-def register_classical_phi_aliases(
+def register_classical_merge_aliases(
     emit_pass: "StandardEmitPass",
-    phi_ops: list,
+    op: IfOperation,
     bindings: dict[str, Any],
     resolved: bool | None,
 ) -> None:
-    """Bind classical phi outputs to a concrete value when resolvable.
+    """Bind classical merge outputs to a concrete value when resolvable.
 
-    The frontend creates a phi for *every* variable referenced in an
+    The frontend creates a merge for *every* variable referenced in an
     if-branch, including read-only ones (e.g. a for-loop index ``j`` that
-    is read but not assigned in the branch). These read-only phis have
-    ``true_value is false_value`` — both inputs reference the same IR
-    Value — so the phi output is deterministically equal to that input.
+    is read but not assigned in the branch). These read-only merges are
+    identity merges — both inputs reference the same IR Value — so the
+    merge output is deterministically equal to that input.
 
-    For classical types (UInt / Float / Bit) the phi outputs are not
-    captured by ``map_phi_outputs`` / ``remap_static_phi_outputs`` (which
+    For classical types (UInt / Float / Bit) the merge outputs are not
+    captured by ``map_merge_outputs`` / ``remap_static_merge_outputs`` (which
     only handle qubit / clbit phys-resource mapping). Without this
-    binding, downstream uses like ``data[j_phi_4]`` cannot resolve the
+    binding, downstream uses like ``data[j_merge_4]`` cannot resolve the
     index and emit fails with ``symbolic_index_not_bound``.
 
     The alias is written to ``bindings`` by both UUID and (when present)
@@ -819,50 +862,44 @@ def register_classical_phi_aliases(
     original loop variable.
 
     Args:
-        emit_pass: The active emit pass (for resolver access).
-        phi_ops: ``IfOperation.phi_ops``.
-        bindings: Current bindings; mutated in place to bind phi outputs.
-        resolved: ``True`` / ``False`` if the if was compile-time resolved
-            (use the selected branch's input); ``None`` if it was a
-            runtime if (only bind when both inputs resolve to the same
-            value).
+        emit_pass (StandardEmitPass): The active emit pass (for resolver
+            access).
+        op (IfOperation): The if-else whose merged classical outputs
+            should be bound; merges are read through ``iter_merges``.
+        bindings (dict[str, Any]): Current bindings; mutated in place to
+            bind merge outputs.
+        resolved (bool | None): ``True`` / ``False`` if the if was
+            compile-time resolved (use the selected branch's input);
+            ``None`` if it was a runtime if (only bind identity merges).
 
     Returns:
         None.
     """
-    from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
-
-    for phi in phi_ops:
-        if not isinstance(phi, PhiOp):
-            continue
-        output = phi.results[0]
-        # Only handle classical types; quantum/bit phi physical mapping
-        # is the responsibility of map_phi_outputs / remap_static_phi_outputs.
+    for merge in op.iter_merges():
+        output = merge.result
+        # Only handle classical types; quantum/bit merge physical mapping
+        # is the responsibility of map_merge_outputs / remap_static_merge_outputs.
         if output.type.is_quantum() or hasattr(output.type, "_is_bit_marker"):
             continue
-        true_v = phi.true_value
-        false_v = phi.false_value
 
         # Compile-time path: bind to selected branch's input.
-        if resolved is True:
-            value = emit_pass._resolver.resolve_classical_value(true_v, bindings)
-        elif resolved is False:
-            value = emit_pass._resolver.resolve_classical_value(false_v, bindings)
+        if resolved is not None:
+            value = emit_pass._resolver.resolve_classical_value(
+                merge.select(resolved), bindings
+            )
         else:
-            # Runtime path: only bind when both inputs are the same Value
-            # (read-only variable) — otherwise the phi output truly depends
-            # on the runtime branch and we can't pre-bind.
-            if not (
-                hasattr(true_v, "uuid")
-                and hasattr(false_v, "uuid")
-                and true_v.uuid == false_v.uuid
-            ):
+            # Runtime path: only bind identity merges (read-only variable)
+            # — otherwise the merge output truly depends on the runtime
+            # branch and we can't pre-bind.
+            if not merge.is_identity:
                 continue
-            value = emit_pass._resolver.resolve_classical_value(true_v, bindings)
+            value = emit_pass._resolver.resolve_classical_value(
+                merge.true_value, bindings
+            )
 
         if value is None:
             continue
-        # Phi output is a UUID-identified intermediate; route through the
+        # Merge output is a UUID-identified intermediate; route through the
         # typed slot when the bindings is an EmitContext.
         set_value = getattr(bindings, "set_value", None)
         if callable(set_value):
@@ -870,7 +907,7 @@ def register_classical_phi_aliases(
         else:
             bindings[output.uuid] = value
         if output.name:
-            # Phi output names are like ``"j_phi_4"`` — unique per phi op
+            # Merge output names are like ``"j_merge_4"`` — unique per merge op
             # within an if, so name-keyed writes don't collide the way
             # generic ``"uint_tmp"`` tmp names do. Stored under the flat
             # dict for legacy lookups; not a separate semantic slot.

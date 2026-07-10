@@ -341,6 +341,35 @@ class Handle(abc.ABC):
         """Hook for subclasses to copy additional state during consume()."""
         pass
 
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Handle":
+        """Wrap a merged IR value in this handle's frontend family.
+
+        Called on the true-branch handle when an if-else merges branch
+        values. Subclasses that support merging override this to wrap
+        ``value`` in their own handle type — and, where wrapping must
+        consider both branches, to validate / copy metadata using
+        ``counterpart``.
+
+        Args:
+            value (Value): Fresh IR value produced for the merge output.
+            counterpart (Value): The false-branch IR value, for subclasses
+                whose wrapping depends on both branch values (e.g. QFixed
+                carrier-metadata validation).
+
+        Returns:
+            Handle: A handle of this handle's family wrapping ``value``
+                (possibly rebuilt with copied metadata).
+
+        Raises:
+            TypeError: Always, for handle families without explicit
+                merge support.
+        """
+        raise TypeError(
+            "Unsupported Handle type for if-else merge: "
+            f"{type(self).__name__}. Add explicit handle wrapping support "
+            "before merging this handle type."
+        )
+
 
 class ArithmeticMixin:
     """Mixin providing arithmetic operations for numeric Handle types.
