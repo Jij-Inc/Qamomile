@@ -281,8 +281,8 @@ class TestQuriPartsTranspiler:
         assert quri_circuit.parameter_count == 1
         assert len(quri_circuit.gates) > 0
 
-    def test_controlled_toffoli_matrix_path_executes(self) -> None:
-        """Controlled-Toffoli fallback flips only the intended target qubit."""
+    def test_controlled_toffoli_cascade_path_executes(self) -> None:
+        """Controlled-Toffoli cascade flips only the intended target qubit."""
         pytest.importorskip("quri_parts.qulacs")
 
         from qamomile.quri_parts import QuriPartsTranspiler
