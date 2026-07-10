@@ -105,6 +105,41 @@ from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission impor
 T = TypeVar("T")  # Backend circuit type
 
 
+def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
+    """Return True if the segment could reach the multi-control cascade.
+
+    The counting dry-run that sizes the ancilla pool roughly doubles a
+    segment's emission work, so it is only worth running when the segment
+    can actually consume the pool. Only a ``ControlledUOperation`` (a
+    ``qmc.control(...)`` call), an ``InverseBlockOperation`` (whose block
+    may hold controlled gates), or a ``CompositeGateOperation`` (whose
+    decomposition may be controlled) reaches the irreducible
+    multi-controlled hook, directly or after control composition. A segment
+    of plain gates, measurements, and classical ops — the common case —
+    never does, so the dry run is skipped. This is only a presence check,
+    not a demand computation: when it says "maybe", the real count still
+    comes from the dry run, so it cannot drift from the emitter.
+
+    Args:
+        operations (list[Operation]): The quantum segment's operations.
+
+    Returns:
+        bool: True if any operation, recursively through control-flow
+            bodies, is a controlled-U, inverse block, or composite gate.
+    """
+    for op in operations:
+        if isinstance(
+            op,
+            (ControlledUOperation, InverseBlockOperation, CompositeGateOperation),
+        ):
+            return True
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                if _segment_may_reserve_ancillas(body):
+                    return True
+    return False
+
+
 class StandardEmitPass(EmitPass[T], Generic[T]):
     """Standard emit pass implementation using GateEmitter protocol.
 
@@ -211,7 +246,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
 
         self._mc_ancilla_pool = None
-        if self._reserves_multi_control_ancillas():
+        if self._reserves_multi_control_ancillas() and _segment_may_reserve_ancillas(
+            operations
+        ):
             ancilla_demand = self._count_multi_control_ancilla_demand(
                 operations, qubit_count, qubit_map, clbit_map, bindings
             )

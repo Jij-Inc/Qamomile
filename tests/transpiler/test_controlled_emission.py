@@ -540,3 +540,43 @@ def test_batched_two_control_all_native_body_uses_per_gate_toffolis() -> None:
         ("toffoli", 0, 1, 3),
         ("toffoli", 0, 1, 4),
     ]
+
+
+def test_segment_may_reserve_ancillas_gates_the_counting_dry_run() -> None:
+    """The dry-run gate is True only when a segment can reach the cascade."""
+    from qamomile.circuit.ir.operation.control_flow import ForOperation
+    from qamomile.circuit.ir.operation.gate import ConcreteControlledU
+    from qamomile.circuit.ir.types.primitives import UIntType
+    from qamomile.circuit.transpiler.passes.standard_emit import (
+        _segment_may_reserve_ancillas,
+    )
+
+    def _controlled_u() -> ConcreteControlledU:
+        """Build a minimal one-control controlled-U over fresh qubits."""
+        ctrl = Value(type=QubitType(), name="ctrl")
+        target = Value(type=QubitType(), name="tgt")
+        return ConcreteControlledU(
+            operands=[ctrl, target],
+            results=[ctrl.next_version(), target.next_version()],
+            num_controls=1,
+            block=Block(),
+        )
+
+    # Plain gates never reach the multi-control hook.
+    assert not _segment_may_reserve_ancillas(
+        [_fixed_gate(GateOperationType.X, 1), _fixed_gate(GateOperationType.CX, 2)]
+    )
+    # A controlled-U does, directly.
+    assert _segment_may_reserve_ancillas([_controlled_u()])
+    # A controlled-U nested inside a loop body is found recursively.
+    loop = ForOperation(
+        operands=[
+            Value(type=UIntType(), name="start").with_const(0),
+            Value(type=UIntType(), name="stop").with_const(3),
+            Value(type=UIntType(), name="step").with_const(1),
+        ],
+        results=[],
+        loop_var_value=Value(type=UIntType(), name="i"),
+        operations=[_controlled_u()],
+    )
+    assert _segment_may_reserve_ancillas([loop])
