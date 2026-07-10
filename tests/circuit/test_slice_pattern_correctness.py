@@ -257,7 +257,7 @@ class TestEvensOddsCxPattern:
         self, n: int, exp_qubits: int, exp_single: int, exp_two: int
     ):
         """Resource estimate matches H + CX counts inside the loop."""
-        est = estimate_resources(self._kern.block, bindings={"n": n})
+        est = estimate_resources(self._kern.block, inputs={"n": n})
         assert int(est.qubits) == exp_qubits
         assert int(est.gates.single_qubit) == exp_single
         assert int(est.gates.two_qubit) == exp_two
@@ -301,7 +301,7 @@ class TestQftOnView:
         bindings and applies the stdlib QFT formula. The qubit count
         remains the full allocated register size.
         """
-        est = estimate_resources(self._kern.block, bindings={"lo": 1, "hi": 4})
+        est = estimate_resources(self._kern.block, inputs={"lo": 1, "hi": 4})
         assert int(est.qubits) == 8
         assert int(est.gates.total) == 7
 
@@ -380,7 +380,7 @@ class TestInlineSliceAssignBroadcast:
         _assert_backend_matches(sv_backend, self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(self._kern.block, bindings={"n": 6})
+        est = estimate_resources(self._kern.block, inputs={"n": 6})
         assert int(est.qubits) == 6
         assert int(est.gates.single_qubit) == 3
         assert int(est.gates.two_qubit) == 0
@@ -819,7 +819,7 @@ class TestTopLevelSliceWithBodyLoop:
         _assert_backend_matches(sv_backend, self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(self._kern.block, bindings={"n": 4})
+        est = estimate_resources(self._kern.block, inputs={"n": 4})
         assert int(est.qubits) == 4
         assert int(est.gates.single_qubit) == 2
         assert int(est.gates.two_qubit) == 0
@@ -884,7 +884,7 @@ class TestViewPassedToSubKernel:
         _assert_backend_matches(sv_backend, self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(self._kern.block, bindings={"num": 6})
+        est = estimate_resources(self._kern.block, inputs={"num": 6})
         assert int(est.qubits) == 6
         assert int(est.gates.single_qubit) == 3
         assert int(est.gates.two_qubit) == 0

@@ -16,7 +16,6 @@ from qamomile.circuit.ir.operation.callable import (
     CallPolicy,
     CallTransform,
     InvokeOperation,
-    ResourceModelBinding,
     signature_from_values,
 )
 
@@ -35,15 +34,16 @@ class Oracle:
         signature (CallableSignature | None): Optional frontend signature.
             When omitted, a fixed-width scalar/vector-compatible oracle is
             created from ``num_qubits``.
-        resource_model (Any | None): Optional context-aware resource model used
-            by symbolic resource estimation. Defaults to ``None``.
+        cost (Any | None): Optional explicit cost for this bodyless callable.
+            Pass a ``ResourceEstimate`` or a callable accepting an
+            ``OpaqueCallContext``. Defaults to ``None``.
     """
 
     name: str
     num_qubits: int | None = None
     num_control_qubits: int = 0
     signature: CallableSignature | None = None
-    resource_model: Any | None = None
+    cost: Any | None = None
 
     def __init__(
         self,
@@ -52,7 +52,7 @@ class Oracle:
         *,
         num_control_qubits: int = 0,
         signature: CallableSignature | None = None,
-        resource_model: Any | None = None,
+        cost: Any | None = None,
     ) -> None:
         """Initialize an opaque oracle callable.
 
@@ -64,7 +64,7 @@ class Oracle:
                 Defaults to ``0``.
             signature (CallableSignature | None): Optional frontend signature.
                 Defaults to ``None``.
-            resource_model (Any | None): Optional context-aware resource model.
+            cost (Any | None): Optional fixed or context-dependent opaque cost.
                 Defaults to ``None``.
 
         Raises:
@@ -84,7 +84,7 @@ class Oracle:
         self.num_qubits = num_qubits
         self.num_control_qubits = num_control_qubits
         self.signature = signature
-        self.resource_model = resource_model
+        self.cost = cost
 
     def __call__(
         self,
@@ -178,7 +178,7 @@ class Oracle:
             definition=CallableDef(
                 ref=oracle_ref,
                 signature=signature,
-                resource_models=_oracle_resource_models(self.resource_model),
+                opaque_cost=self.cost,
                 default_policy=CallPolicy.PRESERVE_BOX,
                 attrs=attrs,
             ),
@@ -280,7 +280,7 @@ class Oracle:
             definition=CallableDef(
                 ref=oracle_ref,
                 signature=signature,
-                resource_models=_oracle_resource_models(self.resource_model),
+                opaque_cost=self.cost,
                 default_policy=CallPolicy.PRESERVE_BOX,
                 attrs=attrs,
             ),
@@ -300,7 +300,7 @@ def opaque(
     *,
     num_control_qubits: int = 0,
     signature: CallableSignature | None = None,
-    resource_model: Any | None = None,
+    cost: Any | None = None,
 ) -> Oracle:
     """Create an opaque callable for top-down circuit design.
 
@@ -313,8 +313,8 @@ def opaque(
             required by scalar calls. Defaults to ``0``.
         signature (CallableSignature | None): Optional frontend signature.
             Defaults to ``None``.
-        resource_model (Any | None): Optional context-aware resource model used
-            by symbolic resource estimation. Defaults to ``None``.
+        cost (Any | None): Optional ``ResourceEstimate`` or callable accepting
+            an ``OpaqueCallContext``. Defaults to ``None``.
 
     Returns:
         Oracle: Opaque callable backed by ``InvokeOperation`` with no body.
@@ -324,19 +324,5 @@ def opaque(
         num_qubits=num_qubits,
         num_control_qubits=num_control_qubits,
         signature=signature,
-        resource_model=resource_model,
+        cost=cost,
     )
-
-
-def _oracle_resource_models(model: Any | None) -> list[ResourceModelBinding]:
-    """Normalize an optional oracle resource model.
-
-    Args:
-        model (Any | None): Model object implementing ``estimate(ctx)``.
-
-    Returns:
-        list[ResourceModelBinding]: Callable definition resource models.
-    """
-    if model is None:
-        return []
-    return [ResourceModelBinding(model=model)]

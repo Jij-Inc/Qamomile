@@ -64,7 +64,7 @@ def test_qft_resource_formula(n_value: int) -> None:
     expected = n * (n + 1) / 2 + sp.floor(n / 2)
     assert sp.simplify(symbolic.gates.total - expected) == 0
 
-    concrete = circuit.estimate_resources(substitutions={"n": n_value})
+    concrete = circuit.estimate_resources(inputs={"n": n_value})
     assert concrete.gates.total == n_value * (n_value + 1) // 2 + n_value // 2
     assert concrete.qubits == n_value
 

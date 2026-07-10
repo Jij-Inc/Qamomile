@@ -1685,7 +1685,7 @@ def test_inverse_qft_builds_iqft_invocation() -> None:
     assert inverse_op.target.name == "iqft"
     assert inverse_op.transform.name == "DIRECT"
     assert inverse_op.definition is not None
-    assert inverse_op.definition.resource_models == []
+    assert inverse_op.definition.opaque_cost is None
 
 
 def test_inverse_custom_composite_gate_inverts_implementation() -> None:
@@ -1718,7 +1718,7 @@ def test_inverse_custom_composite_gate_inverts_implementation() -> None:
     assert inner_inverse_ops[0].implementation_block.name.endswith("_inverse")
 
 
-_OPAQUE_RESOURCE_MODEL = qmc.FixedResourceModel(
+_OPAQUE_COST = qmc.ResourceEstimate(
     gates=qmc.GateResources(t=3, total=5),
     calls=qmc.CallResources(queries_by_name={"opaque_inverse_gate": 7}),
 )
@@ -1727,12 +1727,12 @@ _OPAQUE_RESOURCE_MODEL = qmc.FixedResourceModel(
 _opaque_oracle = qmc.Oracle(
     name="opaque_inverse_gate",
     num_qubits=1,
-    resource_model=_OPAQUE_RESOURCE_MODEL,
+    cost=_OPAQUE_COST,
 )
 
 
 def test_inverse_oracle_builds_opaque_inverse() -> None:
-    """inverse(qkernel) keeps oracle resource models on an opaque inverse."""
+    """inverse(qkernel) keeps an oracle cost on an opaque inverse."""
 
     @qmc.qkernel
     def oracle_layer(q: qmc.Qubit) -> qmc.Qubit:
@@ -1763,9 +1763,7 @@ def test_inverse_oracle_builds_opaque_inverse() -> None:
     assert inner_invokes[0].attrs["custom_name"] == "opaque_inverse_gate_inv"
     assert inner_invokes[0].body is None
     assert inner_invokes[0].definition is not None
-    assert (
-        inner_invokes[0].definition.resource_models[0].model is _OPAQUE_RESOURCE_MODEL
-    )
+    assert inner_invokes[0].definition.opaque_cost is _OPAQUE_COST
 
 
 def test_inverse_accepts_qkernel_backed_composite_decorator() -> None:

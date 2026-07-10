@@ -802,9 +802,7 @@ class _BlockInverter:
         attrs = dict(op.attrs)
         target = op.target
         body = op.body
-        resource_models = (
-            list(op.definition.resource_models) if op.definition is not None else []
-        )
+        opaque_cost = op.definition.opaque_cost if op.definition is not None else None
         transform = (
             CallTransform.DIRECT
             if op.transform is CallTransform.INVERSE
@@ -841,7 +839,7 @@ class _BlockInverter:
         elif op.body is not None:
             source_block = op.body
             body = self.invert_block(op.body)
-            resource_models = []
+            opaque_cost = None
             attrs["gate_type"] = CompositeGateType.CUSTOM.name
             attrs["custom_name"] = f"{op.name}_inverse"
         elif attrs.get("kind") in {"composite", "oracle"}:
@@ -898,7 +896,7 @@ class _BlockInverter:
                         )
                     ),
                     body=body,
-                    resource_models=resource_models,
+                    opaque_cost=opaque_cost,
                     default_policy=policy,
                     attrs=attrs,
                 ),

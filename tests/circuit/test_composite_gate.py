@@ -154,27 +154,20 @@ def test_inverse_accepts_a_composite_qkernel() -> None:
     assert inverse.implementation_for() is not None
 
 
-def test_resource_model_is_attached_to_the_same_qkernel() -> None:
-    """A model augments a composite without replacing its executable body."""
+def test_composite_resource_estimate_is_derived_from_its_body() -> None:
+    """A body-backed composite has no second resource-definition surface."""
 
     @qmc.composite_gate
-    def modeled(q: qmc.Qubit) -> qmc.Qubit:
+    def two_gates(q: qmc.Qubit) -> qmc.Qubit:
         """Apply one H gate."""
-        return qmc.h(q)
-
-    @modeled.resource_model
-    def resources(ctx: qmc.ResourceContext) -> qmc.ResourceEstimate:
-        """Return a deliberately distinct model estimate."""
-        return qmc.ResourceEstimate(gates=qmc.GateResources(total=7))
+        return qmc.x(qmc.h(q))
 
     @qmc.qkernel
     def circuit() -> qmc.Qubit:
-        """Call the modeled composite."""
-        return modeled(qmc.qubit("q"))
+        """Call the body-derived composite."""
+        return two_gates(qmc.qubit("q"))
 
-    assert circuit.estimate_resources().gates.total == 7
-    exact = circuit.estimate_resources(policy=qmc.ResourcePolicy.EXACT_BODY)
-    assert exact.gates.total == 1
+    assert circuit.estimate_resources().gates.total == 2
 
 
 def test_symbolic_composite_transforms_remain_estimable() -> None:
@@ -198,7 +191,7 @@ def test_symbolic_composite_transforms_remain_estimable() -> None:
         return control, target
 
     estimate = algorithm.estimate_resources()
-    concrete = algorithm.estimate_resources(substitutions={"rounds": 3})
+    concrete = algorithm.estimate_resources(inputs={"rounds": 3})
     invokes = _invokes(algorithm)
 
     assert str(estimate.gates.total) == "3*rounds"

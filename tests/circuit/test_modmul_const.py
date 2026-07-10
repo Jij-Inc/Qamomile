@@ -59,17 +59,17 @@ def _load_probe(a: int, x: int, n: int, modulus: int, path: str):
 
 
 def test_modmul_const_non_cyclic_executes(sdk_transpiler, tmp_path) -> None:
-    """A non-rotation constant uses the reversible permutation body."""
-    probe = _load_probe(7, 2, 4, 15, str(tmp_path / "noncyclic.py"))
+    """A small non-rotation instance executes the polynomial reversible body."""
+    probe = _load_probe(3, 2, 3, 7, str(tmp_path / "noncyclic.py"))
     transpiler = sdk_transpiler.transpiler
     executable = transpiler.transpile(probe)
     result = executable.sample(transpiler.executor(), shots=64).result()
 
-    assert _value_of(result.most_common(1)[0][0]) == 14
+    assert _value_of(result.most_common(1)[0][0]) == 6
 
 
-def test_modmul_const_non_cyclic_uses_attached_model() -> None:
-    """A non-rotation body and its scalable resource model coexist."""
+def test_modmul_const_non_cyclic_estimates_its_executable_body() -> None:
+    """A non-rotation estimate traverses the reversible implementation."""
 
     @qmc.qkernel
     def mul() -> qmc.Vector[qmc.Qubit]:
@@ -79,7 +79,8 @@ def test_modmul_const_non_cyclic_uses_attached_model() -> None:
         return reg
 
     est = mul.estimate_resources()
-    assert est.calls.calls_by_name.get("modmul_const") == 1
+    assert est.gates.total > 0
+    assert "modmul_const" not in est.calls.calls_by_name
 
 
 def test_modmul_const_rejects_non_coprime_multiplier() -> None:
@@ -95,8 +96,8 @@ def test_modmul_const_rejects_non_coprime_multiplier() -> None:
         bad.build()
 
 
-def test_modmul_const_symbolic_resource_model() -> None:
-    """A symbolic width asks for a concrete synthesis width explicitly."""
+def test_modmul_const_symbolic_body_estimate() -> None:
+    """The executable multiplier body yields a symbolic quadratic estimate."""
 
     @qmc.qkernel
     def mul(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
@@ -105,8 +106,14 @@ def test_modmul_const_symbolic_resource_model() -> None:
         reg = modmul_const(reg, multiplier=2, modulus=15)
         return reg
 
-    with pytest.raises(ValueError, match="compile-time-known register width"):
-        mul.estimate_resources()
+    estimate = mul.estimate_resources()
+    n = sp.Symbol("n", integer=True, positive=True)
+    assert sp.Poly(estimate.gates.total, n).degree() == 2
+    assert sp.Poly(estimate.gates.toffoli, n).degree() == 2
+
+    concrete = mul.estimate_resources(inputs={"n": 2048})
+    assert concrete.gates.total == estimate.gates.total.subs(n, 2048)
+    assert concrete.gates.toffoli == estimate.gates.toffoli.subs(n, 2048)
 
 
 def test_modmul_const_requires_a_real_problem_instance() -> None:
@@ -123,13 +130,8 @@ def test_modmul_const_requires_a_real_problem_instance() -> None:
         abstract.build()
 
 
-def test_modmul_const_control_coverage_assumption_matches_call() -> None:
-    """The control-coverage assumption is honest about whether the call is controlled.
-
-    An uncontrolled ``modmul_const`` must not claim its cost "includes the single
-    control", while a controlled one must; the gate counts are identical either
-    way (the control is lower-order against the O(n^2) leading term).
-    """
+def test_modmul_const_control_is_derived_from_the_controlled_body() -> None:
+    """Controlled multiplication reclassifies its actual controlled swaps."""
 
     @qmc.qkernel
     def uncontrolled() -> qmc.Vector[qmc.Qubit]:
@@ -149,16 +151,10 @@ def test_modmul_const_control_coverage_assumption_matches_call() -> None:
     plain = uncontrolled.estimate_resources()
     ctrl = controlled.estimate_resources()
 
-    def messages(est):
-        return [a.message for a in est.assumptions if a.source == "modmul_const"]
-
-    plain_msgs = " ".join(messages(plain))
-    ctrl_msgs = " ".join(messages(ctrl))
-    assert "includes the single control" not in plain_msgs
-    assert "overestimate" in plain_msgs
-    assert "includes the single control" in ctrl_msgs
-    # Same cost regardless of control (control is lower-order).
-    assert sp.simplify(plain.gates.non_clifford - ctrl.gates.non_clifford) == 0
+    assert plain.assumptions == ()
+    assert ctrl.assumptions == ()
+    assert plain.gates.two_qubit > 0
+    assert ctrl.gates.multi_qubit > 0
 
 
 def test_modmul_const_requires_both_constants() -> None:
@@ -188,18 +184,17 @@ def test_modmul_const_has_no_abstract_execution_mode(sdk_transpiler) -> None:
         sdk_transpiler.transpiler.transpile(abstract)
 
 
-@pytest.mark.parametrize("a", [2, 4, 8])
-@pytest.mark.parametrize("x", [0, 1, 2, 5, 7, 14, 15])
-def test_modmul_const_cyclic_shift_is_correct(
-    sdk_transpiler, a: int, x: int, tmp_path
+@pytest.mark.parametrize("x", [0, 1, 2, 3])
+def test_modmul_const_small_instance_is_correct(
+    sdk_transpiler, x: int, tmp_path
 ) -> None:
-    """Executing modmul on a cyclic-shift constant computes ``a*x mod 15``.
+    """Execute the smallest nontrivial modular multiplication on every backend.
 
-    Multiplication by a power of two modulo ``2**4 - 1 = 15`` is a cyclic bit
-    rotation with an executable SWAP-network body, verified across every SDK
-    backend for a spread of basis states.
+    The n=2 instance exercises the same polynomial reversible body used by
+    larger problems without allocating the n=4 workspace statevector. The
+    29-qubit Shor benchmark separately verifies large-instance transpilation.
     """
-    n, modulus = 4, 15
+    a, n, modulus = 2, 2, 3
     path = str(tmp_path / f"probe_{a}_{x}.py")
     probe = _load_probe(a, x, n, modulus, path)
     transpiler = sdk_transpiler.transpiler
@@ -214,19 +209,19 @@ def test_modmul_const_cyclic_shift_is_correct(
 
 @qmc.qkernel
 def _modmul_expval(obs: qmc.Observable) -> qmc.Float:
-    """Estimate ``<obs>`` after multiplying ``|1>`` by 2 modulo 15 (n=4)."""
-    reg = qmc.qubit_array(4, name="reg")
+    """Estimate ``<obs>`` after multiplying ``|1>`` by 2 modulo 3 (n=2)."""
+    reg = qmc.qubit_array(2, name="reg")
     reg[0] = qmc.x(reg[0])  # prepare |1>
-    reg = modmul_const(reg, multiplier=2, modulus=15)  # -> |2> (rotate by one)
+    reg = modmul_const(reg, multiplier=2, modulus=3)  # -> |2>
     return qmc.expval(reg, obs)
 
 
-@pytest.mark.parametrize("qubit", [0, 1, 2, 3])
-def test_modmul_const_cyclic_shift_expval_cross_backend(sdk_transpiler, qubit) -> None:
+@pytest.mark.parametrize("qubit", [0, 1])
+def test_modmul_const_expval_cross_backend(sdk_transpiler, qubit) -> None:
     """modmul_const's expectation-value path agrees across SDK backends.
 
     Exercises the estimator (expval) primitive, which regresses independently
-    from sampling, on the concrete cyclic-shift modmul at n=4. ``|1> -> |2>``, a
+    from sampling, on the concrete polynomial modmul at n=2. ``|1> -> |2>``, a
     computational-basis state, so ``<Z_q>`` is analytically +/-1: qubit 1 (set in
     ``|2> = 0b0010``) gives -1, the others +1. Also cross-checked against a
     Qiskit statevector reference.

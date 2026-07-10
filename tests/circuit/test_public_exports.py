@@ -16,10 +16,8 @@ from __future__ import annotations
 
 import qamomile.circuit as qmc
 from qamomile.circuit.estimator.resource_estimator import (
-    CostBasis,
-    FixedResourceModel,
+    OpaqueCallContext,
     ResourceEstimator,
-    ResourcePolicy,
     UnknownResourcePolicy,
 )
 from qamomile.circuit.frontend.callable_signature import CallableSignature
@@ -84,10 +82,8 @@ def test_callable_helpers_are_publicly_reexported():
     assert qmc.Oracle is Oracle
     assert qmc.CallableSignature is CallableSignature
     assert qmc.ResourceEstimator is ResourceEstimator
-    assert qmc.ResourcePolicy is ResourcePolicy
-    assert qmc.CostBasis is CostBasis
     assert qmc.UnknownResourcePolicy is UnknownResourcePolicy
-    assert qmc.FixedResourceModel is FixedResourceModel
+    assert qmc.OpaqueCallContext is OpaqueCallContext
 
     for name in (
         "composite_gate",
@@ -95,10 +91,8 @@ def test_callable_helpers_are_publicly_reexported():
         "Oracle",
         "CallableSignature",
         "ResourceEstimator",
-        "ResourcePolicy",
-        "CostBasis",
         "UnknownResourcePolicy",
-        "FixedResourceModel",
+        "OpaqueCallContext",
     ):
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"

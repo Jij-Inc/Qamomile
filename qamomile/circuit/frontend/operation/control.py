@@ -2213,7 +2213,7 @@ class _ControlledOracle:
             self.oracle.num_qubits,
             num_control_qubits=total_controls,
             signature=self.oracle.signature,
-            resource_model=self.oracle.resource_model,
+            cost=self.oracle.cost,
         )
         return cast(tuple[Qubit, ...], controlled(*targets, controls=controls))
 

@@ -93,9 +93,6 @@ def qkernel_callable_attrs(kernel: Any) -> dict[str, Any]:
                 "strategy_name": None,
             }
         )
-        estimate_kind = getattr(kernel, "_default_estimate_kind", None)
-        if estimate_kind is not None:
-            attrs["default_estimate_kind"] = estimate_kind
     return attrs
 
 
@@ -132,7 +129,6 @@ def qkernel_callable_def(kernel: Any, block: Block) -> CallableDef:
         signature=signature_from_block(block),
         body=block,
         implementations=list(getattr(kernel, "_callable_implementations", ())),
-        resource_models=list(getattr(kernel, "_callable_resource_models", ())),
         default_policy=getattr(kernel, "_callable_policy", CallPolicy.INLINE),
         attrs=attrs,
     )

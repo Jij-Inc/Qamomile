@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import math
 
-import sympy as sp
-
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import configure_composite
 from qamomile.circuit.frontend.handle import Qubit, Vector
@@ -50,35 +48,6 @@ configure_composite(
 )
 
 
-def _qft_resource_estimate(ctx: qmc.ResourceContext) -> qmc.ResourceEstimate:
-    """Return the closed-form resources of QFT or inverse QFT.
-
-    Args:
-        ctx (qmc.ResourceContext): Invocation context carrying the target shape.
-
-    Returns:
-        qmc.ResourceEstimate: Exact logical gate and width formulas.
-    """
-    n = next(
-        iter(ctx.operand_shapes.values()), sp.Symbol("n", integer=True, positive=True)
-    )
-    swaps = sp.floor(n / 2)
-    controlled_phases = n * (n - 1) / 2
-    return qmc.ResourceEstimate(
-        gates=qmc.GateResources(
-            total=n + controlled_phases + swaps,
-            single_qubit=n,
-            two_qubit=controlled_phases + swaps,
-            rotation=controlled_phases,
-            non_clifford=controlled_phases,
-        ),
-        depth=qmc.DepthResources(depth=n + controlled_phases + swaps),
-    )
-
-
-qft.resource_model(_qft_resource_estimate, estimate_kind="exact_decomposed")
-
-
 @qmc.composite_gate(name="iqft")
 def iqft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     """Apply the inverse quantum Fourier transform.
@@ -109,8 +78,5 @@ configure_composite(
     gate_type=CompositeGateType.IQFT,
     policy=CallPolicy.NATIVE_FIRST,
 )
-
-iqft.resource_model(_qft_resource_estimate, estimate_kind="exact_decomposed")
-
 
 __all__ = ["qft", "iqft"]

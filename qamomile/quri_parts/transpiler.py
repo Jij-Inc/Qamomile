@@ -771,10 +771,7 @@ def _emit_quri_controlled_operations(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
             continue
-        if isinstance(op, InvokeOperation) and op.attrs.get("kind") in {
-            "composite",
-            "oracle",
-        }:
+        if isinstance(op, InvokeOperation):
             _emit_quri_composite_operation(
                 emit_pass,
                 circuit,

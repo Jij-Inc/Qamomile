@@ -27,39 +27,31 @@ class QKernelBuildMixin:
     def estimate_resources(
         self,
         *,
-        bindings: dict[str, Any] | None = None,
-        substitutions: dict[str, Any] | None = None,
-        parameters: list[str] | None = None,
-        policy: Any = None,
-        cost_basis: Any = None,
+        inputs: dict[str, Any] | None = None,
         strategies: dict[str, str] | None = None,
         trace: bool = False,
         unknown_policy: Any = None,
+        basis: Any = None,
+        precision: float = 1e-10,
     ) -> ResourceEstimate:
         """Estimate all resources for this kernel's circuit.
 
         Convenience wrapper around ``ResourceEstimator().estimate(...)``.
 
         Args:
-            bindings (dict[str, Any] | None): Optional concrete parameter
-                bindings baked into the built circuit. Defaults to ``None``.
-            substitutions (dict[str, Any] | None): Estimation-only
-                substitutions applied to the symbolic estimate after building,
-                so ``substitutions={"n": 2048}`` yields the concrete estimate
-                without constructing a 2048-scale circuit. Values may be numbers
-                or SymPy expressions. Defaults to ``None``.
-            parameters (list[str] | None): Runtime parameter names to preserve
-                while building the kernel. Defaults to ``None``.
-            policy (Any): Optional ``ResourcePolicy`` override. Defaults to
-                ``None``, meaning the estimator default is used.
-            cost_basis (Any): Optional ``CostBasis`` override. Defaults to
-                ``None``, meaning the estimator default is used.
+            inputs (dict[str, Any] | None): QKernel input values used to
+                specialize the symbolic estimate without constructing a
+                problem-sized circuit. Defaults to ``None``.
             strategies (dict[str, str] | None): Callable strategy overrides.
                 Defaults to ``None``.
             trace (bool): Whether to retain the explanation tree. Defaults to
                 ``False``.
             unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
                 Defaults to ``None``.
+            basis (Any): Optional ``GateBasis`` override. Defaults to logical
+                gates when ``None``.
+            precision (float): Rotation-synthesis precision for a lowered
+                basis. Defaults to ``1e-10``.
 
         Returns:
             ResourceEstimate: Logical symbolic resource estimate.
@@ -77,14 +69,12 @@ class QKernelBuildMixin:
         kernel = cast("QKernel[..., Any]", self)
         return estimate_qkernel_resources(
             kernel,
-            bindings=bindings,
-            substitutions=substitutions,
-            parameters=parameters,
-            policy=policy,
-            cost_basis=cost_basis,
+            inputs=inputs,
             strategies=strategies,
             trace=trace,
             unknown_policy=unknown_policy,
+            basis=basis,
+            precision=precision,
         )
 
     def build(

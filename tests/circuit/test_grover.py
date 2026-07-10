@@ -21,14 +21,14 @@ def mark_all_ones(reg: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     return reg
 
 
-class _QueryModel:
-    """Resource model reporting one query of cost ``l + n`` per oracle call."""
+class _QueryCost:
+    """Report one opaque query of cost ``l + n`` per oracle call."""
 
-    def estimate(self, ctx: qmc.ResourceContext) -> qmc.ResourceEstimate:
+    def __call__(self, ctx: qmc.OpaqueCallContext) -> qmc.ResourceEstimate:
         """Return an ``O(l + n)`` gate + one-query estimate.
 
         Args:
-            ctx (qmc.ResourceContext): Call-site context; the register width is
+            ctx (qmc.OpaqueCallContext): Call-site context; the register width is
                 read from the operand shape.
 
         Returns:
@@ -51,7 +51,7 @@ _query_oracle = qmc.opaque(
         inputs=[qmc.Vector[qmc.Qubit]],
         outputs=[qmc.Vector[qmc.Qubit]],
     ),
-    resource_model=_QueryModel(),
+    cost=_QueryCost(),
 )
 
 
@@ -111,17 +111,17 @@ def test_grover_symbolic_query_complexity() -> None:
     assert est.calls.queries_by_name["query_oracle"] == iterations
 
 
-def test_grover_optimal_query_complexity_via_substitutions() -> None:
+def test_grover_optimal_query_complexity_via_inputs() -> None:
     """Substituting the optimal iteration count yields O(sqrt(N/m)) directly.
 
-    Uses the ``substitutions`` estimation UX to plug the optimal iteration
+    Uses the ``inputs`` estimation UX to plug the optimal iteration
     formula straight into the estimate, so the universal Grover query complexity
     ``floor((pi/4) sqrt(2^n/m))`` comes out of one estimate call.
     """
     n = sp.Symbol("n", positive=True)
     m = sp.Symbol("m", positive=True)
     est = _grover_estimate_kernel.estimate_resources(
-        substitutions={"iterations": grover_iteration_count(n, m)}
+        inputs={"iterations": grover_iteration_count(n, m)}
     )
     queries = est.calls.queries_by_name["query_oracle"]
     # It is a floor of the optimal continuous count; compare the floor argument

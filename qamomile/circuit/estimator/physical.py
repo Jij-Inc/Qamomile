@@ -195,7 +195,7 @@ def estimate_physical_resources(
 
     Example:
         >>> import qamomile.circuit as qmc
-        >>> # est = kernel.estimate_resources(bindings={"n": 2048})
+        >>> # est = kernel.estimate_resources(inputs={"n": 2048})
         >>> # phys = estimate_physical_resources(est)
     """
     n = estimate.qubits if logical_qubits is None else logical_qubits

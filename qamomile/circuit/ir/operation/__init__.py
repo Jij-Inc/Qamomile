@@ -38,7 +38,7 @@ Design principles
 - **Composite gates and callables stay boxed.** QFT / QPE / user
   kernels are ``InvokeOperation``s referencing a ``CallableDef``
   (``callable.py``) with an optional ``body``, alternative
-  ``implementations``, and ``resource_models``; whether a backend emits
+  ``implementations``, and an optional bodyless ``opaque_cost``; whether a backend emits
   a native gate, the embedded body, or a shared decomposition is
   decided at emit time, not here.
 - **Typed construction over raw operand lists.** ``GateOperation``
@@ -56,7 +56,6 @@ from .callable import (
     CallTransform,
     CompositeGateType,
     InvokeOperation,
-    ResourceModelBinding,
 )
 from .cast import CastOperation
 from .classical_ops import (
@@ -100,7 +99,6 @@ __all__ = [
     "InvokeOperation",
     "InverseBlockOperation",
     "CompositeGateType",
-    "ResourceModelBinding",
     "GateOperation",
     "GateOperationType",
     "MeasureOperation",

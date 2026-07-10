@@ -195,15 +195,15 @@ def emit_invoke_operation(
     # Reject a manually constructed model-only definition instead of silently
     # emitting it as an identity barrier.
     definition = op.definition
-    resource_models = getattr(definition, "resource_models", ()) if definition else ()
+    opaque_cost = getattr(definition, "opaque_cost", None) if definition else None
     if (
         body is None
         and not has_native_emitter
         and op.gate_type is CompositeGateType.CUSTOM
-        and resource_models
+        and opaque_cost is not None
     ):
         raise EmitError(
-            f"Composite '{op.target.name}' has resource models for estimation "
+            f"Composite '{op.target.name}' has an opaque cost for estimation "
             "but no executable body or native emitter for this backend; it "
             "cannot be transpiled to an executable circuit.",
             operation=f"InvokeOperation[{op.target.name}]",

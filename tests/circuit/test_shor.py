@@ -1,9 +1,10 @@
-"""Tests for executable, resource-modeled Shor order finding."""
+"""Tests for executable, body-derived Shor order finding."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
+import sympy as sp
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.qkernel import QKernel
@@ -27,27 +28,17 @@ def test_shor_factory_returns_one_executable_qkernel() -> None:
 
     assert isinstance(kernel, QKernel)
     estimate = kernel.estimate_resources()
-    assert estimate.qubits == 12
-    assert estimate.width.dirty_ancilla_qubits == 4
-    # Eight primitive modmul models compose to the reference 0.3*n^3 term.
-    # IQFT rotations are reported separately and also contribute to the broader
-    # non-Clifford total.
-    assert estimate.gates.toffoli == pytest.approx(19.2)
-    assert estimate.gates.rotation == 28
-    assert estimate.gates.non_clifford == pytest.approx(47.2)
-    assert estimate.calls.calls_by_name["modmul_const"] == 8
+    n = sp.Symbol("n", integer=True, positive=True)
+    assert estimate.qubits == 6 * n + 5
+    assert estimate.width.dirty_ancilla_qubits == 0
+    assert sp.Poly(estimate.gates.total, n).degree() == 3
+    assert sp.Poly(estimate.gates.toffoli, n).degree() == 3
+    assert "modmul_const" not in estimate.calls.calls_by_name
     assert estimate.trace is None
 
-
-def test_shor_exact_body_uses_the_executable_implementation() -> None:
-    """EXACT_BODY traverses real gates instead of an estimation-only stub."""
-    kernel = qmc.shor_order_finding(base=2, modulus=15)
-
-    exact = kernel.estimate_resources(policy=qmc.ResourcePolicy.EXACT_BODY)
-
-    assert exact.qubits == 12
-    assert exact.gates.total > 0
-    assert "modmul_const" not in exact.calls.calls_by_name
+    concrete = kernel.estimate_resources(inputs={"n": 2048})
+    assert concrete.gates.total == estimate.gates.total.subs(n, 2048)
+    assert concrete.gates.toffoli == estimate.gates.toffoli.subs(n, 2048)
 
 
 @pytest.mark.parametrize(
@@ -74,63 +65,71 @@ def test_shor_rejects_invalid_problem_instances(
         qmc.shor_order_finding(base=base, modulus=modulus)
 
 
-def test_shor_order_finding_recovers_period_four(sdk_transpiler) -> None:
-    """The public kernel recovers the four phase peaks for 2 mod 15."""
-    kernel = qmc.shor_order_finding(base=2, modulus=15)
+def test_small_shor_order_finding_recovers_period_two(sdk_transpiler) -> None:
+    """The simulatable two-bit instance recovers the period-two peaks."""
+    kernel = qmc.shor_order_finding(base=2, modulus=3)
     transpiler = sdk_transpiler.transpiler
-    executable = transpiler.transpile(kernel)
-    result = executable.sample(transpiler.executor(), shots=2048).result()
+    executable = transpiler.transpile(kernel, bindings={"n": 2})
+    result = executable.sample(transpiler.executor(), shots=128).result()
 
     counts = {_basis_value(bits): count for bits, count in result.results}
-    targets = {0, 64, 128, 192}
+    targets = {0, 8}
     on_peak = sum(counts.get(value, 0) for value in targets)
 
-    assert on_peak / result.shots > 0.7
-    assert all(counts.get(value, 0) / result.shots > 0.1 for value in targets)
+    assert on_peak / result.shots > 0.9
+    assert all(counts.get(value, 0) / result.shots > 0.3 for value in targets)
+
+
+def test_four_bit_shor_transpiles_without_statevector_execution(
+    sdk_transpiler,
+) -> None:
+    """Transpile the 29-qubit benchmark without allocating its statevector.
+
+    A dense 29-qubit statevector needs at least 8 GiB before simulator
+    workspaces, so local sampling is intentionally outside this test's scope.
+
+    Args:
+        sdk_transpiler: Parametrized supported backend fixture.
+    """
+    kernel = qmc.shor_order_finding(base=2, modulus=15)
+    executable = sdk_transpiler.transpiler.transpile(kernel, bindings={"n": 4})
+
+    assert kernel.estimate_resources(inputs={"n": 4}).qubits == 29
+    assert executable.compiled_quantum
+    assert executable.plan.steps
 
 
 @qmc.qkernel
 def _shor_state_expval(observable: qmc.Observable) -> qmc.Float:
-    """Evaluate an observable before measurement for the 2 mod 15 schedule."""
-    counting = qmc.qubit_array(8, "counting")
-    work = qmc.qubit_array(4, "work")
+    """Evaluate an observable for the simulatable 2 mod 3 schedule."""
+    counting = qmc.qubit_array(4, "counting")
+    work = qmc.qubit_array(2, "work")
     work[0] = qmc.x(work[0])
     counting = qmc.h(counting)
     counting[0], work = qmc.modmul_const(
         work,
         multiplier=2,
-        modulus=15,
+        modulus=3,
         control=counting[0],
-    )
-    counting[1], work = qmc.modmul_const(
-        work,
-        multiplier=4,
-        modulus=15,
-        control=counting[1],
     )
     counting = qmc.iqft(counting)
     return qmc.expval(counting, observable)
 
 
-@pytest.mark.parametrize("qubit", [0, 1, 3])
-def test_shor_cross_backend_expval(sdk_transpiler, qubit: int) -> None:
-    """The modular-exponentiation state agrees on the expval path.
+def test_shor_cross_backend_expval(sdk_transpiler) -> None:
+    """The modular-exponentiation state has its analytic high-bit expval.
+
+    For the two-bit ``2 mod 3`` instance, the four-qubit counting register has
+    ``<Z_3> = 0`` after IQFT. One observable is sufficient to exercise each
+    backend's expval path; the sampling test validates the complete output
+    distribution independently.
 
     Args:
         sdk_transpiler: Parametrized supported backend fixture.
-        qubit (int): Counting-register Z observable index.
     """
-    pytest.importorskip("qiskit")
     import qamomile.observable as qm_o
-    from qamomile.qiskit import QiskitTranspiler
 
-    observable = qm_o.Z(qubit)
-    reference_transpiler = QiskitTranspiler()
-    reference_executable = reference_transpiler.transpile(
-        _shor_state_expval,
-        bindings={"observable": observable},
-    )
-    reference = reference_executable.run(reference_transpiler.executor()).result()
+    observable = qm_o.Z(3)
 
     transpiler = sdk_transpiler.transpiler
     executable = transpiler.transpile(
@@ -140,4 +139,4 @@ def test_shor_cross_backend_expval(sdk_transpiler, qubit: int) -> None:
     actual = executable.run(transpiler.executor()).result()
 
     tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-    assert np.isclose(actual, reference, atol=tolerance)
+    assert np.isclose(actual, 0.0, atol=tolerance)

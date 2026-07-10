@@ -14,7 +14,6 @@ from qamomile.circuit.ir.operation.callable import (
     CallableRef,
     CompositeGateType,
     InvokeOperation,
-    ResourceModelBinding,
 )
 
 
@@ -38,7 +37,7 @@ class QKernelEntry:
 def __emit_oracle(
     *qubits: qmc.Vector[qmc.Qubit] | qmc.Qubit,
     name: str,
-    resource_model: qmc.FixedResourceModel,
+    cost: qmc.ResourceEstimate,
 ) -> None:
     """Emit an opaque oracle invocation directly to the tracer.
 
@@ -64,7 +63,7 @@ def __emit_oracle(
         attrs=attrs,
         definition=CallableDef(
             ref=ref,
-            resource_models=[ResourceModelBinding(model=resource_model)],
+            opaque_cost=cost,
             attrs=attrs,
         ),
     )
@@ -74,9 +73,9 @@ def __emit_oracle(
 def _over_oracle(
     *qubits: qmc.Vector[qmc.Qubit] | qmc.Qubit,
     name: str,
-    resource_model: qmc.FixedResourceModel,
+    cost: qmc.ResourceEstimate,
 ) -> tuple[qmc.Vector[qmc.Qubit] | qmc.Qubit, ...]:
-    __emit_oracle(*qubits, name=name, resource_model=resource_model)
+    __emit_oracle(*qubits, name=name, cost=cost)
     return qubits
 
 
@@ -457,7 +456,7 @@ _controlled_oracle = qmc.Oracle(
     name="controlled_oracle",
     num_qubits=1,
     num_control_qubits=1,
-    resource_model=qmc.FixedResourceModel(
+    cost=qmc.ResourceEstimate(
         gates=qmc.GateResources(total=1, two_qubit=1),
         calls=qmc.CallResources(queries_by_name={"controlled_oracle": 1}),
     ),
@@ -467,7 +466,7 @@ _controlled_oracle = qmc.Oracle(
 _one_qubit_oracle = qmc.Oracle(
     name="one_qubit_oracle",
     num_qubits=1,
-    resource_model=qmc.FixedResourceModel(
+    cost=qmc.ResourceEstimate(
         calls=qmc.CallResources(queries_by_name={"one_qubit_oracle": 1}),
     ),
 )
@@ -476,7 +475,7 @@ _one_qubit_oracle = qmc.Oracle(
 _two_qubit_oracle = qmc.Oracle(
     name="two_qubit_oracle",
     num_qubits=2,
-    resource_model=qmc.FixedResourceModel(
+    cost=qmc.ResourceEstimate(
         gates=qmc.GateResources(two_qubit=1),
         calls=qmc.CallResources(queries_by_name={"two_qubit_oracle": 1}),
     ),
@@ -547,7 +546,7 @@ def deutsch_jozsa(n: qmc.UInt) -> qmc.Bit:
         targets,
         ancilla,
         name="deutsch_jozsa_oracle",
-        resource_model=qmc.FixedResourceModel(
+        cost=qmc.ResourceEstimate(
             calls=qmc.CallResources(queries_by_name={"deutsch_jozsa_oracle": 1}),
         ),
     )  # type: ignore
@@ -566,7 +565,7 @@ def _simon(
         qs1,
         qs2,
         name="simon_oracle",
-        resource_model=qmc.FixedResourceModel(
+        cost=qmc.ResourceEstimate(
             calls=qmc.CallResources(queries_by_name={"simon_oracle": 1}),
         ),
     )  # type: ignore
@@ -639,7 +638,7 @@ _controlled_u = qmc.Oracle(
     name="controlled_u",
     num_qubits=1,
     num_control_qubits=1,
-    resource_model=qmc.FixedResourceModel(
+    cost=qmc.ResourceEstimate(
         gates=qmc.GateResources(total=1, two_qubit=1),
         calls=qmc.CallResources(queries_by_name={"controlled_u": 1}),
     ),
@@ -792,7 +791,7 @@ def _grover_operator_network_decomposition(
         qs,
         q,
         name="grover_oracle",
-        resource_model=qmc.FixedResourceModel(
+        cost=qmc.ResourceEstimate(
             calls=qmc.CallResources(queries_by_name={"grover_oracle": 1}),
         ),
     )  # type: ignore
@@ -848,7 +847,7 @@ def _grover_naive_multi_controlled_z(
             qs,
             q,
             name="grover_oracle",
-            resource_model=qmc.FixedResourceModel(
+            cost=qmc.ResourceEstimate(
                 calls=qmc.CallResources(queries_by_name={"grover_oracle": 1}),
             ),
         )  # type: ignore

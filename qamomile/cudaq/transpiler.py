@@ -1884,10 +1884,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 )
                 self._propagate_cudaq_gate_results(op, qubit_map)
                 continue
-            if isinstance(op, InvokeOperation) and op.attrs.get("kind") in {
-                "composite",
-                "oracle",
-            }:
+            if isinstance(op, InvokeOperation):
                 self._emit_cudaq_controlled_composite(
                     circuit,
                     op,

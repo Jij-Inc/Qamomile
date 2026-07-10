@@ -67,56 +67,43 @@ def _return_element_name(element: ast.expr) -> str:
 def estimate_qkernel_resources(
     kernel: "QKernel[Any, Any]",
     *,
-    bindings: dict[str, Any] | None = None,
-    substitutions: dict[str, Any] | None = None,
-    parameters: list[str] | None = None,
-    policy: Any = None,
-    cost_basis: Any = None,
+    inputs: dict[str, Any] | None = None,
     strategies: dict[str, str] | None = None,
     trace: bool = False,
     unknown_policy: Any = None,
+    basis: Any = None,
+    precision: float = 1e-10,
 ) -> "ResourceEstimate":
     """Estimate resources for a kernel.
 
     Args:
         kernel (QKernel[Any, Any]): Kernel to estimate.
-        bindings (dict[str, Any] | None): Optional concrete parameter
-            bindings baked into the built circuit. Defaults to ``None``.
-        substitutions (dict[str, Any] | None): Estimation-only substitutions
-            applied to the symbolic estimate (e.g. ``substitutions={"n":
-            2048}``) without constructing a large circuit. Defaults to
-            ``None``.
-        parameters (list[str] | None): Runtime parameter names to preserve
-            during kernel build. Defaults to ``None``.
-        policy (Any): Optional ``ResourcePolicy`` override. Defaults to
-            ``None``.
-        cost_basis (Any): Optional ``CostBasis`` override. Defaults to
-            ``None``.
+        inputs (dict[str, Any] | None): QKernel input values used to specialize
+            the symbolic estimate. Defaults to ``None``.
         strategies (dict[str, str] | None): Callable strategy overrides.
             Defaults to ``None``.
         trace (bool): Whether to retain the explanation tree. Defaults to
             ``False``.
         unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
             Defaults to ``None``.
+        basis (Any): Optional ``GateBasis`` override. Defaults to ``None``.
+        precision (float): Rotation-synthesis precision. Defaults to ``1e-10``.
 
     Returns:
         ResourceEstimate: Estimated qubit, gate, and parameter resources.
     """
     from qamomile.circuit.estimator.resource_estimator import (
-        CostBasis,
-        ResourcePolicy,
+        GateBasis,
         UnknownResourcePolicy,
         estimate_resources,
     )
 
     return estimate_resources(
         kernel,
-        bindings=bindings,
-        substitutions=substitutions,
-        parameters=parameters,
-        policy=policy or ResourcePolicy.MODEL_IF_AVAILABLE,
-        cost_basis=cost_basis or CostBasis.LOGICAL_GATES,
+        inputs=inputs,
         strategies=strategies,
         trace=trace,
         unknown_policy=unknown_policy or UnknownResourcePolicy.ERROR,
+        basis=basis or GateBasis.LOGICAL,
+        precision=precision,
     )

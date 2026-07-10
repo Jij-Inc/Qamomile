@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import math
 import numbers
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
 
@@ -15,9 +16,7 @@ from qamomile.circuit.estimator._resolver import ExprResolver
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
     CallTransform,
-    CompositeGateType,
     InvokeOperation,
-    ResourceModelBinding,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -40,6 +39,11 @@ from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.passes.analyze import (
+    build_dependency_graph,
+    find_measurement_derived_values,
+    find_measurement_results,
+)
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
@@ -50,48 +54,32 @@ _ZERO = sp.Integer(0)
 _ONE = sp.Integer(1)
 
 
-class ResourcePolicy(enum.Enum):
-    """Select how callable resources are resolved.
+def _combine_quality(
+    left: EstimateQuality,
+    right: EstimateQuality,
+) -> EstimateQuality:
+    """Return the least exact of two estimate-quality values.
 
-    Values:
-        EXACT_BODY: Prefer abstract interpretation of callable bodies.
-        MODEL_IF_AVAILABLE: Prefer a matching resource model, then body.
-        MODEL_ONLY: Require a matching resource model.
-        ASYMPTOTIC: Prefer asymptotic or strategy models when present.
-        LITERATURE: Prefer literature-backed models when present.
+    Args:
+        left (EstimateQuality): Left quality.
+        right (EstimateQuality): Right quality.
+
+    Returns:
+        EstimateQuality: Combined quality classification.
     """
-
-    EXACT_BODY = "exact_body"
-    MODEL_IF_AVAILABLE = "model_if_available"
-    MODEL_ONLY = "model_only"
-    ASYMPTOTIC = "asymptotic"
-    LITERATURE = "literature"
-
-
-class CostBasis(enum.Enum):
-    """Describe the logical resource basis requested by the user.
-
-    Values:
-        LOGICAL_GATES: Count logical gates without decomposition to a
-            fault-tolerant basis.
-        CLIFFORD_T: Track Clifford, rotation, and T resources.
-        TOFFOLI: Track Toffoli-oriented arithmetic costs.
-        QUERY: Track oracle and subroutine query complexity.
-        LITERATURE: Use literature-level formulas when available.
-    """
-
-    LOGICAL_GATES = "logical_gates"
-    CLIFFORD_T = "clifford_t"
-    TOFFOLI = "toffoli"
-    QUERY = "query"
-    LITERATURE = "literature"
+    rank = {
+        EstimateQuality.EXACT: 0,
+        EstimateQuality.UPPER_BOUND: 1,
+        EstimateQuality.MODELED: 2,
+    }
+    return left if rank[left] >= rank[right] else right
 
 
 class UnknownResourcePolicy(enum.Enum):
     """Control how the estimator handles bodyless unknown callables.
 
     Values:
-        ERROR: Raise when a callable has no body or resource model.
+        ERROR: Raise when a callable has neither a body nor an opaque cost.
         OPAQUE_CALL: Count one opaque call/query and continue.
         ZERO_WITH_WARNING: Record an assumption and continue with zero cost.
     """
@@ -101,56 +89,19 @@ class UnknownResourcePolicy(enum.Enum):
     ZERO_WITH_WARNING = "zero_with_warning"
 
 
-class EstimateKind(enum.Enum):
-    """Classify the source of a resource estimate.
+class GateBasis(enum.StrEnum):
+    """Select the gate basis reported by resource estimation."""
 
-    Values:
-        EXACT_DECOMPOSED: Estimate obtained from IR body traversal.
-        STRATEGY_MODEL: Estimate obtained from a strategy-specific model.
-        ASYMPTOTIC: Estimate obtained from an asymptotic model.
-        LITERATURE: Estimate obtained from a literature-backed model.
-    """
-
-    EXACT_DECOMPOSED = "exact_decomposed"
-    STRATEGY_MODEL = "strategy_model"
-    ASYMPTOTIC = "asymptotic"
-    LITERATURE = "literature"
-
-    @staticmethod
-    def from_name(name: str | None) -> "EstimateKind":
-        """Map a ``ResourceModelBinding.estimate_kind`` string to an enum value.
-
-        Args:
-            name (str | None): Estimate-kind tag recorded on a resource model
-                binding. ``None`` defaults to ``STRATEGY_MODEL``.
-
-        Returns:
-            EstimateKind: Matching enum value.
-
-        Raises:
-            ValueError: If ``name`` is a non-``None`` string that does not match
-                any ``EstimateKind`` value. This surfaces typos (e.g.
-                ``"literture"``) that would otherwise silently defeat
-                policy-based model selection.
-        """
-        if name is None:
-            return EstimateKind.STRATEGY_MODEL
-        for kind in EstimateKind:
-            if kind.value == name:
-                return kind
-        valid = ", ".join(repr(kind.value) for kind in EstimateKind)
-        raise ValueError(
-            f"Unknown resource model estimate_kind {name!r}; expected one of {valid}."
-        )
+    LOGICAL = "logical"
+    CLIFFORD_T = "clifford_t"
 
 
-# Map a resource policy to the estimate-kind tag it prefers when several
-# resource models are attached to the same callable. Policies not listed here
-# do not express a preference and select the first compatible binding.
-_POLICY_PREFERRED_KIND: dict[ResourcePolicy, str] = {
-    ResourcePolicy.LITERATURE: EstimateKind.LITERATURE.value,
-    ResourcePolicy.ASYMPTOTIC: EstimateKind.ASYMPTOTIC.value,
-}
+class EstimateQuality(enum.StrEnum):
+    """Describe how directly an estimate follows executable semantics."""
+
+    EXACT = "exact"
+    UPPER_BOUND = "upper_bound"
+    MODELED = "modeled"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -406,10 +357,8 @@ class ResourceTraceNode:
     Args:
         name (str): Operation or callable name.
         source_kind (str): Source type such as ``"primitive"``, ``"body"``,
-            ``"model"``, or ``"opaque"``.
+            ``"opaque_cost"``, or ``"opaque"``.
         strategy (str | None): Selected resource strategy. Defaults to
-            ``None``.
-        estimate_kind (EstimateKind | None): Estimate-kind tag. Defaults to
             ``None``.
         summary (str): Short expression summary. Defaults to an empty string.
         assumptions (tuple[ResourceAssumption, ...]): Assumptions local to the
@@ -421,7 +370,6 @@ class ResourceTraceNode:
     name: str
     source_kind: str
     strategy: str | None = None
-    estimate_kind: EstimateKind | None = None
     summary: str = ""
     assumptions: tuple[ResourceAssumption, ...] = ()
     children: tuple[ResourceTraceNode, ...] = ()
@@ -437,9 +385,8 @@ class ResourceTraceNode:
         """
         prefix = " " * indent
         strategy = f" strategy={self.strategy}" if self.strategy else ""
-        kind = f" kind={self.estimate_kind.value}" if self.estimate_kind else ""
         summary = f" {self.summary}" if self.summary else ""
-        lines = [f"{prefix}{self.name} [{self.source_kind}{strategy}{kind}]{summary}"]
+        lines = [f"{prefix}{self.name} [{self.source_kind}{strategy}]{summary}"]
         for assumption in self.assumptions:
             source = f" ({assumption.source})" if assumption.source else ""
             lines.append(f"{prefix}  assumption: {assumption.message}{source}")
@@ -462,6 +409,8 @@ class ResourceEstimate:
             ``None``.
         parameters (dict[str, sp.Symbol]): Symbols present in the estimate.
             Defaults to an empty dict.
+        quality (EstimateQuality): Confidence classification. Defaults to
+            ``EXACT`` for body-derived logical estimates.
     """
 
     width: WidthResources = dataclasses.field(default_factory=WidthResources.zero)
@@ -471,6 +420,7 @@ class ResourceEstimate:
     assumptions: tuple[ResourceAssumption, ...] = ()
     trace: ResourceTraceNode | None = None
     parameters: dict[str, sp.Symbol] = dataclasses.field(default_factory=dict)
+    quality: EstimateQuality = EstimateQuality.EXACT
 
     @property
     def qubits(self) -> ResourceExpr:
@@ -549,6 +499,7 @@ class ResourceEstimate:
             calls=_add_calls(self.calls, other.calls),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("seq", self.trace, other.trace),
+            quality=_combine_quality(self.quality, other.quality),
         )
 
     def parallel(self, other: ResourceEstimate) -> ResourceEstimate:
@@ -567,6 +518,7 @@ class ResourceEstimate:
             calls=_add_calls(self.calls, other.calls),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("parallel", self.trace, other.trace),
+            quality=_combine_quality(self.quality, other.quality),
         )
 
     def choice(self, other: ResourceEstimate) -> ResourceEstimate:
@@ -585,6 +537,32 @@ class ResourceEstimate:
             calls=_max_calls(self.calls, other.calls),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("choice", self.trace, other.trace),
+            quality=EstimateQuality.UPPER_BOUND,
+        )
+
+    def conditional(
+        self,
+        other: ResourceEstimate,
+        condition: sp.Basic,
+    ) -> ResourceEstimate:
+        """Select this estimate or another with a symbolic condition.
+
+        Args:
+            other (ResourceEstimate): Estimate for the false branch.
+            condition (sp.Basic): SymPy Boolean selecting this estimate when
+                true and ``other`` when false.
+
+        Returns:
+            ResourceEstimate: Field-wise exact piecewise branch estimate.
+        """
+        return ResourceEstimate(
+            width=_conditional_width(self.width, other.width, condition),
+            gates=_conditional_gates(self.gates, other.gates, condition),
+            depth=_conditional_depth(self.depth, other.depth, condition),
+            calls=_conditional_calls(self.calls, other.calls, condition),
+            assumptions=(*self.assumptions, *other.assumptions),
+            trace=_merge_trace(f"if[{condition}]", self.trace, other.trace),
+            quality=_combine_quality(self.quality, other.quality),
         )
 
     def repeat(self, factor: ResourceExpr | int) -> ResourceEstimate:
@@ -604,6 +582,7 @@ class ResourceEstimate:
             calls=_scale_calls(self.calls, f),
             assumptions=self.assumptions,
             trace=_wrap_trace(f"repeat({f})", self.trace),
+            quality=self.quality,
         )
 
     def controlled(self, num_controls: ResourceExpr | int) -> ResourceEstimate:
@@ -611,12 +590,10 @@ class ResourceEstimate:
 
         This deliberately does **not** change gate/width/depth counts. Controlled
         cost is owned by whatever knows the decomposition: a body gets exact
-        per-primitive reclassification via ``eval_controlled_u``, and a resource
-        model declares its own controlled cost (optionally a distinct model bound
-        with ``transform=CallTransform.CONTROLLED``). This method only attaches an
-        assumption so that surrounding controls a model did not account for are
-        surfaced rather than silently dropped — scaling here would double-count
-        calibrated models whose cost already includes their control.
+        per-primitive reclassification via ``eval_controlled_u``, while an opaque
+        cost callable receives its control context directly. This method only
+        attaches an assumption for a fixed opaque cost so controls that cost did
+        not account for are surfaced rather than silently dropped.
 
         Args:
             num_controls (ResourceExpr | int): Number of active controls.
@@ -627,7 +604,7 @@ class ResourceEstimate:
         controls = _expr(num_controls)
         assumption = ResourceAssumption(
             message=(
-                "controlled transform reuses the selected body/model cost; "
+                "controlled transform reuses the selected body/opaque cost; "
                 f"primitive gates inside available bodies see {controls} controls"
             )
         )
@@ -717,6 +694,7 @@ class ResourceEstimate:
             calls=self.calls.simplify(),
             assumptions=self.assumptions,
             trace=self.trace,
+            quality=self.quality,
         )
         simplified.parameters = _collect_parameters(simplified)
         return simplified
@@ -789,6 +767,7 @@ class ResourceEstimate:
             "parameters": {
                 name: str(symbol) for name, symbol in self.parameters.items()
             },
+            "quality": self.quality.value,
         }
 
     def _map_expr(self, fn: Any) -> ResourceEstimate:
@@ -839,25 +818,21 @@ class ResourceEstimate:
             ),
             assumptions=self.assumptions,
             trace=self.trace,
+            quality=self.quality,
         )
         mapped.parameters = _collect_parameters(mapped)
         return mapped
 
 
 @dataclasses.dataclass(frozen=True)
-class ResourceContext:
-    """Provide call-site information to resource models.
+class OpaqueCallContext:
+    """Describe one bodyless callable invocation for cost evaluation.
 
-    Controlled-cost contract for model authors: a controlled invocation is its
-    own operation with its own cost, so a model owns the cost of the control it
-    was designed around. ``controls`` counts only *surrounding* controls (from
-    enclosing controlled scopes) that the model did not build in; the
+    A controlled opaque invocation owns the cost of its explicit control.
+    ``controls`` counts only surrounding controls that the cost callable did not
+    build in; the
     invocation's *own* control is signalled by ``transform`` being
-    ``CallTransform.CONTROLLED`` and counted by :attr:`own_controls`. A model
-    that already prices in its own control (like the constant modular
-    multiplication model, calibrated per *controlled* multiplication) should not
-    add anything for ``own_controls``; the estimator records leftover
-    ``controls`` as an assumption but never scales a model's counts.
+    ``CallTransform.CONTROLLED`` and counted by :attr:`own_controls`.
 
     Args:
         callable_ref (CallableRef | None): Stable callable identity.
@@ -869,14 +844,9 @@ class ResourceContext:
         loop_symbols (Mapping[str, sp.Symbol]): Loop symbols in scope.
         controls (ResourceExpr): Number of surrounding controls (not the
             invocation's own control).
-        power (ResourceExpr): Power for repeated calls. Reserved: the
-            invoke-model path does not populate it today (powered invokes are
-            handled structurally by ``eval_controlled_u`` above the model), so it
-            stays at the default ``1``.
+        power (ResourceExpr): Repetition power. Defaults to one.
         transform (CallTransform): Requested call transform.
         strategy (str | None): Selected resource strategy.
-        policy (ResourcePolicy): Estimation policy.
-        cost_basis (CostBasis): Requested cost basis.
         bindings (Mapping[str, Any]): Concrete bindings supplied by the user.
     """
 
@@ -889,8 +859,6 @@ class ResourceContext:
     power: ResourceExpr = _ONE
     transform: CallTransform = CallTransform.DIRECT
     strategy: str | None = None
-    policy: ResourcePolicy = ResourcePolicy.MODEL_IF_AVAILABLE
-    cost_basis: CostBasis = CostBasis.LOGICAL_GATES
     bindings: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
     @property
@@ -910,126 +878,27 @@ class ResourceContext:
         return int(self.attrs.get("num_control_qubits", 0) or 0)
 
 
-class ResourceModel(Protocol):
-    """Protocol for context-aware callable resource models."""
-
-    def estimate(self, ctx: ResourceContext) -> ResourceEstimate:
-        """Estimate resources for a callable invocation.
-
-        Args:
-            ctx (ResourceContext): Call-site resource context.
-
-        Returns:
-            ResourceEstimate: Estimated logical resources.
-        """
-        ...
-
-
-@dataclasses.dataclass(frozen=True, init=False)
-class FixedResourceModel:
-    """Return a fixed resource estimate for bodyless callables.
-
-    Args:
-        estimate_value (ResourceEstimate | None): Estimate returned for every
-            call. When omitted, an estimate is built from the resource parts.
-        width (WidthResources | None): Width resources for the fixed estimate.
-            Defaults to ``None``.
-        gates (GateResources | None): Gate resources for the fixed estimate.
-            Defaults to ``None``.
-        depth (DepthResources | None): Depth resources for the fixed estimate.
-            Defaults to ``None``.
-        calls (CallResources | None): Call/query resources for the fixed
-            estimate. Defaults to ``None``.
-        assumptions (Sequence[ResourceAssumption]): Assumptions attached to the
-            fixed estimate. Defaults to an empty tuple.
-
-    Raises:
-        ValueError: If ``estimate_value`` is supplied together with explicit
-            resource parts.
-    """
-
-    estimate_value: ResourceEstimate
-
-    def __init__(
-        self,
-        estimate_value: ResourceEstimate | None = None,
-        *,
-        width: WidthResources | None = None,
-        gates: GateResources | None = None,
-        depth: DepthResources | None = None,
-        calls: CallResources | None = None,
-        assumptions: Sequence[ResourceAssumption] = (),
-    ) -> None:
-        """Initialize a fixed resource model.
-
-        Args:
-            estimate_value (ResourceEstimate | None): Complete estimate to
-                return. Defaults to ``None``.
-            width (WidthResources | None): Width resources to include when
-                building an estimate from parts. Defaults to ``None``.
-            gates (GateResources | None): Gate resources to include when
-                building an estimate from parts. Defaults to ``None``.
-            depth (DepthResources | None): Depth resources to include when
-                building an estimate from parts. Defaults to ``None``.
-            calls (CallResources | None): Call/query resources to include when
-                building an estimate from parts. Defaults to ``None``.
-            assumptions (Sequence[ResourceAssumption]): Assumptions to attach
-                when building an estimate from parts. Defaults to ``()``.
-
-        Raises:
-            ValueError: If a complete estimate and explicit parts are both
-                supplied.
-        """
-        has_parts = any(
-            part is not None for part in (width, gates, depth, calls)
-        ) or bool(assumptions)
-        if estimate_value is not None and has_parts:
-            raise ValueError(
-                "FixedResourceModel accepts either estimate_value or resource "
-                "parts, not both."
-            )
-        if estimate_value is None:
-            estimate_value = ResourceEstimate(
-                width=width or WidthResources(),
-                gates=gates or GateResources(),
-                depth=depth or DepthResources(),
-                calls=calls or CallResources(),
-                assumptions=tuple(assumptions),
-            )
-        object.__setattr__(self, "estimate_value", estimate_value)
-
-    def estimate(self, ctx: ResourceContext) -> ResourceEstimate:
-        """Return the fixed estimate scaled by call power.
-
-        Args:
-            ctx (ResourceContext): Call-site context carrying ``power``.
-
-        Returns:
-            ResourceEstimate: Fixed estimate repeated by ``ctx.power``.
-        """
-        return self.estimate_value.repeat(ctx.power)
-
-
 @dataclasses.dataclass
 class ResourceEstimatorConfig:
     """Configure ``ResourceEstimator`` behavior.
 
     Args:
-        policy (ResourcePolicy): Callable resolution policy.
-        cost_basis (CostBasis): Logical cost basis.
         strategies (dict[str, str]): Strategy overrides by callable name.
         trace (bool): Whether estimates should carry trace nodes.
         simplify (bool): Whether to simplify the final estimate.
         unknown_policy (UnknownResourcePolicy): Handling for unknown opaque
             callables.
+        basis (GateBasis): Output gate basis. Defaults to ``LOGICAL``.
+        precision (float): Approximation precision for rotation synthesis in
+            ``CLIFFORD_T`` basis. Defaults to ``1e-10``.
     """
 
-    policy: ResourcePolicy = ResourcePolicy.MODEL_IF_AVAILABLE
-    cost_basis: CostBasis = CostBasis.LOGICAL_GATES
     strategies: dict[str, str] = dataclasses.field(default_factory=dict)
     trace: bool = False
     simplify: bool = True
     unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR
+    basis: GateBasis = GateBasis.LOGICAL
+    precision: float = 1e-10
 
 
 class ResourceEstimator:
@@ -1038,18 +907,16 @@ class ResourceEstimator:
     def __init__(
         self,
         *,
-        policy: ResourcePolicy = ResourcePolicy.MODEL_IF_AVAILABLE,
-        cost_basis: CostBasis = CostBasis.LOGICAL_GATES,
         strategies: dict[str, str] | None = None,
         trace: bool = False,
         simplify: bool = True,
         unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
+        basis: str | GateBasis = GateBasis.LOGICAL,
+        precision: float = 1e-10,
     ) -> None:
         """Initialize a resource estimator.
 
         Args:
-            policy (ResourcePolicy): Callable resolution policy.
-            cost_basis (CostBasis): Logical cost basis.
             strategies (dict[str, str] | None): Strategy overrides by callable
                 name. Defaults to ``None``.
             trace (bool): Whether to keep explanation traces. Defaults to
@@ -1058,23 +925,37 @@ class ResourceEstimator:
                 to ``True``.
             unknown_policy (UnknownResourcePolicy): Handling for unknown
                 bodyless callables. Defaults to ``ERROR``.
+            basis (str | GateBasis): Output gate basis. Defaults to ``LOGICAL``.
+            precision (float): Rotation-synthesis precision for
+                ``CLIFFORD_T`` basis. Defaults to ``1e-10``.
+
+        Raises:
+            ValueError: If ``basis`` is unknown or ``precision`` is outside
+                ``(0, 1)``.
         """
+        if not 0 < precision < 1:
+            raise ValueError("precision must satisfy 0 < precision < 1.")
+        try:
+            normalized_basis = GateBasis(basis)
+        except ValueError as error:
+            valid = ", ".join(member.value for member in GateBasis)
+            raise ValueError(
+                f"unknown gate basis {basis!r}; expected one of: {valid}"
+            ) from error
         self.config = ResourceEstimatorConfig(
-            policy=policy,
-            cost_basis=cost_basis,
             strategies=dict(strategies or {}),
             trace=trace,
             simplify=simplify,
             unknown_policy=unknown_policy,
+            basis=normalized_basis,
+            precision=precision,
         )
 
     def estimate(
         self,
         kernel: "QKernel[Any, Any] | Block | Sequence[Operation]",
         *,
-        bindings: dict[str, Any] | None = None,
-        substitutions: dict[str, Any] | None = None,
-        parameters: list[str] | None = None,
+        inputs: dict[str, Any] | None = None,
         strategies: dict[str, str] | None = None,
     ) -> ResourceEstimate:
         """Estimate logical resources for a qkernel, block, or operation list.
@@ -1082,17 +963,9 @@ class ResourceEstimator:
         Args:
             kernel (QKernel[Any, Any] | Block | Sequence[Operation]): Object to
                 estimate. QKernel-like objects are built before traversal.
-            bindings (dict[str, Any] | None): Compile-time values baked into the
-                circuit at ``build`` time (they change the constructed IR). Use
-                for genuinely structural values. Defaults to ``None``.
-            substitutions (dict[str, Any] | None): Estimation-only substitutions
-                applied to the *symbolic* estimate after building. The kernel is
-                built with these names left symbolic, so
-                ``substitutions={"n": 2048}`` yields the concrete estimate
-                without constructing a 2048-scale circuit. Values may be numbers
-                or SymPy expressions. Defaults to ``None``.
-            parameters (list[str] | None): Runtime parameter names to preserve
-                when a qkernel must be built. Defaults to ``None``.
+            inputs (dict[str, Any] | None): QKernel input values used to
+                specialize the symbolic estimate without constructing a
+                problem-sized circuit. Defaults to ``None``.
             strategies (dict[str, str] | None): Per-call override merged over
                 estimator-level strategies. Defaults to ``None``.
 
@@ -1100,39 +973,31 @@ class ResourceEstimator:
             ResourceEstimate: Logical resource estimate.
 
         Raises:
-            ValueError: If a name appears in both ``bindings`` and
-                ``substitutions``, or a ``substitutions`` name is neither a free
-                symbol of the estimate nor a declared kernel argument (a kernel
-                argument that affects no resource metric is a recorded no-op).
+            ValueError: If an input name is neither a free symbol nor a declared
+                kernel argument.
         """
-        if bindings and substitutions:
-            overlap = set(bindings) & set(substitutions)
-            if overlap:
-                raise ValueError(
-                    f"names {sorted(overlap)} appear in both bindings and "
-                    "substitutions; a name is either baked in at build time "
-                    "(bindings) or substituted into the estimate "
-                    "(substitutions), not both."
-                )
-        block_or_ops = self._coerce_input(kernel, bindings, parameters, substitutions)
+        build_inputs, estimation_inputs = _partition_estimation_inputs(kernel, inputs)
+        block_or_ops = self._coerce_input(
+            kernel,
+            build_inputs,
+            estimation_inputs,
+        )
         config = dataclasses.replace(
             self.config,
             strategies={**self.config.strategies, **dict(strategies or {})},
         )
         interpreter = ResourceInterpreter(
             config=config,
-            bindings=bindings or {},
-            condition_values=_scalar_values(
-                {**(bindings or {}), **(substitutions or {})}
-            ),
+            bindings=build_inputs,
+            condition_values=_scalar_values({**build_inputs, **estimation_inputs}),
         )
         estimate = interpreter.estimate(block_or_ops)
-        if bindings:
-            estimate = _substitute_bindings(estimate, bindings)
-        if substitutions:
-            estimate = _apply_substitutions(
+        if build_inputs:
+            estimate = _substitute_bindings(estimate, build_inputs)
+        if estimation_inputs:
+            estimate = _apply_inputs(
                 estimate,
-                substitutions,
+                _expand_array_shape_inputs(block_or_ops, estimation_inputs),
                 contract_names=_contract_names(block_or_ops),
                 branch_condition_names=interpreter.branch_condition_names,
             )
@@ -1146,27 +1011,22 @@ class ResourceEstimator:
     def _coerce_input(
         self,
         kernel: "QKernel[Any, Any] | Block | Sequence[Operation]",
-        bindings: dict[str, Any] | None,
-        parameters: list[str] | None,
-        substitutions: dict[str, Any] | None = None,
+        build_inputs: dict[str, Any],
+        estimation_inputs: dict[str, Any],
     ) -> Block | Sequence[Operation]:
         """Coerce a supported input into an IR block or operation list.
 
-        When a qkernel is built and ``substitutions`` names classical arguments,
-        those arguments are forced to stay symbolic (added to the build
-        ``parameters``) so a Python-signature default cannot silently bake a
-        value the caller believes they passed via ``substitutions``.
+        Parameterizable inputs stay symbolic while non-parameterizable inputs
+        are supplied during tracing. This keeps problem sizes scalable without
+        requiring users to distinguish build-time from estimation-time inputs.
 
         Args:
             kernel (QKernel[Any, Any] | Block | Sequence[Operation]): Input
                 object.
-            bindings (dict[str, Any] | None): Compile-time values for qkernel
-                build. Defaults to ``None``.
-            parameters (list[str] | None): Runtime parameter names for qkernel
-                build. Defaults to ``None``.
-            substitutions (dict[str, Any] | None): Estimation-only substitution
-                names, used to force matching classical arguments symbolic.
-                Defaults to ``None``.
+            build_inputs (dict[str, Any]): Structural values supplied while
+                tracing the qkernel.
+            estimation_inputs (dict[str, Any]): Parameterizable values kept
+                symbolic until after interpretation.
 
         Returns:
             Block | Sequence[Operation]: IR object ready for interpretation.
@@ -1177,11 +1037,8 @@ class ResourceEstimator:
             return kernel
         build = getattr(kernel, "build", None)
         if callable(build):
-            kwargs = dict(bindings or {})
-            parameters = _force_symbolic_substitution_params(
-                kernel, kwargs, parameters, substitutions
-            )
-            return build(parameters=parameters, **kwargs)
+            parameters = _estimator_parameters(kernel, build_inputs)
+            return build(parameters=parameters, **build_inputs)
         block = getattr(kernel, "block", None)
         if isinstance(block, Block):
             return block
@@ -1207,7 +1064,7 @@ class ResourceInterpreter:
             config (ResourceEstimatorConfig): Estimator configuration.
             bindings (Mapping[str, Any]): Concrete user bindings.
             condition_values (Mapping[str, sp.Expr] | None): Numeric scalar
-                values (from bindings and substitutions) used to decide
+                concrete input values used to decide
                 compile-time ``if`` branches. Defaults to ``None``.
         """
         self.config = config
@@ -1222,6 +1079,7 @@ class ResourceInterpreter:
         # duplicated at trace time (e.g. a Python-level loop) yields one
         # assumption, not one per copy.
         self._reported_undecidable: set[str] = set()
+        self._measurement_derived: set[str] = set()
 
     def estimate(self, block_or_ops: Block | Sequence[Operation]) -> ResourceEstimate:
         """Estimate resources for a block or operation sequence.
@@ -1244,12 +1102,20 @@ class ResourceInterpreter:
                     if name in slot_names
                 }
             resolver = ExprResolver(block=block_or_ops)
-            body = self.eval_block(block_or_ops, resolver)
-            input_qubits = _count_input_qubits(block_or_ops.input_values, resolver)
+            input_allocations = {
+                value.logical_id: _qubit_value_size(value, resolver)
+                for value in block_or_ops.input_values
+                if value.type.is_quantum()
+            }
+            body = self.eval_operations(
+                block_or_ops.operations,
+                resolver,
+                initial_allocations=input_allocations,
+            )
+            input_qubits = sum(input_allocations.values(), _ZERO)
             width = dataclasses.replace(
                 body.width,
                 input_qubits=input_qubits,
-                peak_qubits=sp.simplify(input_qubits + body.width.allocated_qubits),
             )
             return dataclasses.replace(
                 body,
@@ -1277,6 +1143,7 @@ class ResourceInterpreter:
         resolver: ExprResolver,
         *,
         controls: ResourceExpr | int = 0,
+        initial_allocations: Mapping[str, ResourceExpr] | None = None,
     ) -> ResourceEstimate:
         """Evaluate a list of operations sequentially.
 
@@ -1285,16 +1152,62 @@ class ResourceInterpreter:
             resolver (ExprResolver): Value resolver for this scope.
             controls (ResourceExpr | int): Surrounding control count. Defaults
                 to zero.
+            initial_allocations (Mapping[str, ResourceExpr] | None): Live
+                quantum inputs keyed by logical wire ID. Defaults to ``None``.
 
         Returns:
             ResourceEstimate: Sequential composition of operation resources.
         """
-        estimate = ResourceEstimate.zero()
-        for operation in operations:
-            estimate = estimate.seq(
-                self.eval_operation(operation, resolver, controls=controls)
+        previous_taint = self._measurement_derived
+        graph = build_dependency_graph(operations)
+        local_taint = find_measurement_derived_values(
+            graph,
+            find_measurement_results(operations),
+        )
+        self._measurement_derived = previous_taint | local_taint
+        try:
+            estimate = ResourceEstimate.zero()
+            scheduled: list[tuple[Operation, ResourceEstimate]] = []
+            for operation in operations:
+                operation_estimate = self.eval_operation(
+                    operation,
+                    resolver,
+                    controls=controls,
+                )
+                scheduled.append((operation, operation_estimate))
+                estimate = estimate.seq(operation_estimate)
+            primitive_only = all(
+                isinstance(
+                    operation,
+                    (
+                        GateOperation,
+                        QInitOperation,
+                        MeasureOperation,
+                        MeasureVectorOperation,
+                        MeasureQFixedOperation,
+                        ProjectOperation,
+                        ResetOperation,
+                    ),
+                )
+                for operation, _ in scheduled
             )
-        return estimate
+            return dataclasses.replace(
+                estimate,
+                depth=(
+                    _dependency_depth(scheduled) if primitive_only else estimate.depth
+                ),
+                width=_liveness_width(scheduled, initial_allocations or {}),
+                quality=(
+                    estimate.quality
+                    if primitive_only
+                    else _combine_quality(
+                        estimate.quality,
+                        EstimateQuality.UPPER_BOUND,
+                    )
+                ),
+            )
+        finally:
+            self._measurement_derived = previous_taint
 
     def eval_operation(
         self,
@@ -1368,9 +1281,39 @@ class ResourceInterpreter:
         Returns:
             ResourceEstimate: Primitive gate resources.
         """
-        gates = _classify_gate(operation, num_controls=controls)
+        gates = _classify_gate(
+            operation,
+            num_controls=controls,
+            basis=self.config.basis,
+            precision=self.config.precision,
+        )
         name = operation.gate_type.name.lower() if operation.gate_type else "gate"
-        return ResourceEstimate.primitive(name, gates)
+        depth = (
+            _clifford_t_gate_depth(operation, _expr(controls), self.config.precision)
+            if self.config.basis is GateBasis.CLIFFORD_T
+            else None
+        )
+        estimate = ResourceEstimate.primitive(name, gates, depth=depth)
+        if self.config.basis is GateBasis.CLIFFORD_T:
+            clean_ancillas = _clifford_t_clean_ancillas(operation, _expr(controls))
+            if clean_ancillas != _ZERO:
+                estimate = dataclasses.replace(
+                    estimate,
+                    width=WidthResources(
+                        clean_ancilla_qubits=clean_ancillas,
+                        peak_qubits=clean_ancillas,
+                    ),
+                )
+        if self.config.basis is GateBasis.CLIFFORD_T and gates.rotation == 0:
+            return dataclasses.replace(
+                estimate,
+                quality=(
+                    EstimateQuality.UPPER_BOUND
+                    if _gate_has_rotation(operation)
+                    else EstimateQuality.EXACT
+                ),
+            )
+        return estimate
 
     def eval_qinit(
         self,
@@ -1693,21 +1636,27 @@ class ResourceInterpreter:
         Returns:
             sp.Expr: Specialized expression.
         """
-        substitutions = {
+        condition_inputs = {
             symbol: self.condition_values[str(symbol)]
             for symbol in expression.free_symbols
             if str(symbol) in self.condition_values
         }
-        if not substitutions:
+        if not condition_inputs:
             return expression
-        self.branch_condition_names.update(str(symbol) for symbol in substitutions)
+        self.branch_condition_names.update(str(symbol) for symbol in condition_inputs)
         return cast(
             sp.Expr,
-            expression.subs(list(substitutions.items()), simultaneous=True).doit(),
+            expression.subs(list(condition_inputs.items()), simultaneous=True).doit(),
         )
 
     def _concrete_scalar(self, expression: sp.Expr) -> int | None:
-        """Resolve an integer expression from supplied scalar values.
+        """Resolve an integer expression already concrete in the traced IR.
+
+        Estimation ``inputs`` deliberately do not participate here. They are
+        applied after symbolic loop summarization, preventing a large concrete
+        problem size from turning a compact parametric loop into thousands of
+        interpreter iterations. Structural inputs still reach this path as
+        constants because they are baked into the built block.
 
         Args:
             expression (sp.Expr): Symbolic scalar expression.
@@ -1715,9 +1664,8 @@ class ResourceInterpreter:
         Returns:
             int | None: Concrete integer, or ``None`` when unresolved.
         """
-        resolved = self._apply_condition_values(expression)
-        if resolved.is_number and resolved.is_integer:
-            return int(resolved)
+        if expression.is_number and expression.is_integer:
+            return int(expression)
         return None
 
     def eval_while(
@@ -1753,7 +1701,7 @@ class ResourceInterpreter:
 
         When the condition is a compile-time constant (from ``bindings``) or is
         resolvable from a supplied classical parameter value (from
-        ``substitutions``), only the taken branch is counted. A measurement-backed
+        ``inputs``), only the taken branch is counted. A measurement-backed
         or otherwise undecidable condition falls back to the conservative maximum
         of both branches.
 
@@ -1806,6 +1754,13 @@ class ResourceInterpreter:
             false_child,
             taken=None,
         )
+        condition = resolver.resolve(operation.condition)
+        if operation.condition.uuid not in self._measurement_derived:
+            combined = true_estimate.conditional(
+                false_estimate,
+                _boolean_condition(condition),
+            )
+            return combined
         combined = true_estimate.choice(false_estimate)
         if note is None:
             return combined
@@ -2164,7 +2119,7 @@ class ResourceInterpreter:
         *,
         controls: ResourceExpr | int = 0,
     ) -> ResourceEstimate:
-        """Evaluate a callable invocation using policy-driven resolution.
+        """Evaluate a callable invocation from its selected implementation.
 
         Args:
             operation (InvokeOperation): Callable invocation.
@@ -2176,39 +2131,26 @@ class ResourceInterpreter:
             ResourceEstimate: Invocation resource estimate.
 
         Raises:
-            ValueError: If the invocation cannot be estimated under the
-                configured policy.
+            ValueError: If the invocation has neither an implementation body nor
+                an explicit opaque cost.
         """
         strategy = self._strategy_for(operation)
-        ctx = self._resource_context(
+        body = operation.effective_body(strategy=strategy)
+        if isinstance(body, Block):
+            return self._estimate_invoke_body(operation, body, resolver, controls)
+        ctx = self._opaque_call_context(
             operation,
             resolver,
             controls=_expr(controls),
             strategy=strategy,
         )
-        body = operation.effective_body(strategy=strategy)
-        binding = self._resource_model_for(operation, strategy=strategy)
-
-        if self.config.policy is ResourcePolicy.EXACT_BODY:
-            if isinstance(body, Block):
-                return self._estimate_invoke_body(operation, body, resolver, controls)
-            if binding is not None:
-                return self._estimate_model(operation, binding, ctx)
-            return self._handle_unknown_invoke(operation, ctx)
-
-        if self.config.policy is ResourcePolicy.MODEL_ONLY:
-            if binding is None:
-                raise ValueError(
-                    f"Callable '{operation.custom_name}' has no resource model."
-                )
-            return self._estimate_model(operation, binding, ctx)
-
-        if binding is not None:
-            return self._estimate_model(operation, binding, ctx)
-        if isinstance(body, Block):
-            return self._estimate_invoke_body(operation, body, resolver, controls)
-        if operation.gate_type in (CompositeGateType.QFT, CompositeGateType.IQFT):
-            return self._estimate_qft_iqft(operation, resolver)
+        opaque_cost = (
+            operation.definition.opaque_cost
+            if operation.definition is not None
+            else None
+        )
+        if opaque_cost is not None:
+            return self._estimate_opaque_cost(operation, opaque_cost, ctx)
         return self._handle_unknown_invoke(operation, ctx)
 
     def eval_controlled_u(
@@ -2345,83 +2287,15 @@ class ResourceInterpreter:
                 return self.config.strategies[name]
         return operation.strategy_name
 
-    def _resource_model_for(
-        self,
-        operation: InvokeOperation,
-        *,
-        strategy: str | None,
-    ) -> "ResourceModelBinding | None":
-        """Select a resource model binding for an invocation.
-
-        Bindings are filtered by strategy and transform compatibility. When the
-        active policy prefers a specific estimate kind (``LITERATURE`` prefers
-        literature-tagged models, ``ASYMPTOTIC`` prefers asymptotic ones), a
-        compatible binding carrying that kind is returned first. Otherwise, under
-        the default policy, a callable may pin its default explicitly via the
-        ``default_estimate_kind`` attr (so the choice is not silently
-        order-dependent); if neither applies, the first compatible binding wins.
-        This keeps callables that ship both a literature-backed formula and a
-        structural/asymptotic model usable under either policy without changing
-        the callable definition.
-
-        Args:
-            operation (InvokeOperation): Invocation to resolve.
-            strategy (str | None): Requested strategy.
-
-        Returns:
-            ResourceModelBinding | None: Matching binding, if available.
-        """
-        definition = operation.definition
-        bindings = getattr(definition, "resource_models", ()) if definition else ()
-        compatible: list[ResourceModelBinding] = []
-        for binding in bindings:
-            binding_strategy = getattr(binding, "strategy", None)
-            binding_transform = getattr(binding, "transform", None)
-            if binding_strategy in (None, strategy) and binding_transform in (
-                None,
-                operation.transform,
-            ):
-                model = getattr(binding, "model", None)
-                if _is_resource_model(model):
-                    compatible.append(cast("ResourceModelBinding", binding))
-        if not compatible:
-            return None
-        # A policy preference (LITERATURE/ASYMPTOTIC) is a soft request: prefer a
-        # matching binding, but fall back gracefully so a callable with only one
-        # model is still usable under either policy.
-        policy_kind = _POLICY_PREFERRED_KIND.get(self.config.policy)
-        if policy_kind is not None:
-            for binding in compatible:
-                if getattr(binding, "estimate_kind", None) == policy_kind:
-                    return binding
-            return compatible[0]
-        # No policy preference: an explicit author pin
-        # (``attrs["default_estimate_kind"]``) makes the default order-independent
-        # and is STRICT — a pin that matches no compatible model is an authoring
-        # error, not a silent fallback.
-        def_attrs: Mapping[str, Any] = getattr(definition, "attrs", None) or {}
-        pinned_kind = def_attrs.get("default_estimate_kind")
-        if pinned_kind is not None:
-            for binding in compatible:
-                if getattr(binding, "estimate_kind", None) == pinned_kind:
-                    return binding
-            name = operation.custom_name or operation.target.name
-            raise ValueError(
-                f"Callable '{name}' pins default_estimate_kind={pinned_kind!r} "
-                "but no compatible resource model has that estimate kind. Attach "
-                "a model tagged with that kind or remove the pin."
-            )
-        return compatible[0]
-
-    def _resource_context(
+    def _opaque_call_context(
         self,
         operation: InvokeOperation,
         resolver: ExprResolver,
         *,
         controls: ResourceExpr,
         strategy: str | None,
-    ) -> ResourceContext:
-        """Build a resource model context for an invocation.
+    ) -> OpaqueCallContext:
+        """Build an opaque-cost context for a bodyless invocation.
 
         Args:
             operation (InvokeOperation): Invocation operation.
@@ -2430,9 +2304,9 @@ class ResourceInterpreter:
             strategy (str | None): Selected strategy.
 
         Returns:
-            ResourceContext: Model context.
+            OpaqueCallContext: Opaque call context.
         """
-        return ResourceContext(
+        return OpaqueCallContext(
             callable_ref=operation.target,
             argument_values=tuple(operation.operands),
             operand_shapes=_operand_shapes(operation.operands, resolver),
@@ -2441,50 +2315,53 @@ class ResourceInterpreter:
             controls=controls,
             transform=operation.transform,
             strategy=strategy,
-            policy=self.config.policy,
-            cost_basis=self.config.cost_basis,
             bindings=self.bindings,
         )
 
-    def _estimate_model(
+    def _estimate_opaque_cost(
         self,
         operation: InvokeOperation,
-        binding: "ResourceModelBinding",
-        ctx: ResourceContext,
+        cost: Any,
+        ctx: OpaqueCallContext,
     ) -> ResourceEstimate:
-        """Estimate an invocation through a resource model binding.
+        """Evaluate an explicit cost attached to a bodyless callable.
 
         Args:
             operation (InvokeOperation): Invocation operation.
-            binding (ResourceModelBinding): Selected resource model binding.
-                Its ``estimate_kind`` tag classifies the resulting trace node.
-            ctx (ResourceContext): Model context.
+            cost (Any): ``ResourceEstimate`` or callable accepting ``ctx``.
+            ctx (OpaqueCallContext): Opaque call context.
 
         Returns:
-            ResourceEstimate: Modeled estimate.
+            ResourceEstimate: Explicit opaque estimate.
+
+        Raises:
+            TypeError: If ``cost`` is neither a ``ResourceEstimate`` nor a
+                callable returning one.
         """
-        model = cast(ResourceModel, binding.model)
-        estimate = model.estimate(ctx)
-        # Controlled cost is owned by the model (a controlled composite is its
-        # own bloq with its own cost formula), so the estimator never scales a
-        # model's counts. But any *surrounding* controls the model did not
-        # account for are recorded as an assumption via the no-op
-        # ``.controlled`` so a ``qmc.control(...)`` around a modeled box cannot
-        # silently under-report. ``ctx.controls`` is surrounding controls only;
-        # the invoke's own control is visible via ``ctx.transform`` /
-        # ``ctx.own_controls`` and is the model author's responsibility.
+        if isinstance(cost, ResourceEstimate):
+            estimate = cost.repeat(ctx.power)
+        elif callable(cost):
+            estimate = cost(ctx)
+            if not isinstance(estimate, ResourceEstimate):
+                raise TypeError(
+                    f"Opaque cost for '{operation.custom_name}' must return "
+                    "ResourceEstimate."
+                )
+        else:
+            raise TypeError(
+                f"Opaque cost for '{operation.custom_name}' must be a "
+                "ResourceEstimate or callable."
+            )
         if ctx.controls != _ZERO:
             estimate = estimate.controlled(ctx.controls)
         return dataclasses.replace(
             estimate,
+            quality=EstimateQuality.MODELED,
             trace=_wrap_trace(
                 operation.custom_name,
                 estimate.trace,
-                source_kind="model",
+                source_kind="opaque_cost",
                 strategy=ctx.strategy,
-                estimate_kind=EstimateKind.from_name(
-                    getattr(binding, "estimate_kind", None)
-                ),
             ),
         )
 
@@ -2500,9 +2377,8 @@ class ResourceInterpreter:
         When the invocation is itself a controlled call
         (``transform is CallTransform.CONTROLLED``), its own control qubits are
         added to the surrounding controls so every primitive gate inside the
-        body is classified as controlled — matching how ``eval_controlled_u``
-        treats a block body and keeping the body path symmetric with the model
-        path's own-control contract.
+        body is classified as controlled, matching how ``eval_controlled_u``
+        treats a block body.
 
         Args:
             operation (InvokeOperation): Invocation operation.
@@ -2545,42 +2421,19 @@ class ResourceInterpreter:
                 operation.custom_name,
                 body_estimate.trace,
                 source_kind="body",
-                estimate_kind=EstimateKind.EXACT_DECOMPOSED,
             ),
-        )
-
-    def _estimate_qft_iqft(
-        self,
-        operation: InvokeOperation,
-        resolver: ExprResolver,
-    ) -> ResourceEstimate:
-        """Estimate standard QFT/IQFT when only a symbolic box is present.
-
-        Args:
-            operation (InvokeOperation): QFT or IQFT invocation.
-            resolver (ExprResolver): Call-site resolver.
-
-        Returns:
-            ResourceEstimate: Standard logical gate estimate.
-        """
-        n = _resolve_qft_n(operation, resolver)
-        gates = _qft_iqft_resources(n)
-        return ResourceEstimate(
-            gates=gates,
-            depth=DepthResources(depth=gates.total, rotation_depth=gates.rotation),
-            trace=ResourceTraceNode(operation.custom_name, "model", summary=f"n={n}"),
         )
 
     def _handle_unknown_invoke(
         self,
         operation: InvokeOperation,
-        ctx: ResourceContext,
+        ctx: OpaqueCallContext,
     ) -> ResourceEstimate:
-        """Handle an invocation without body or resource model.
+        """Handle an invocation without a body or opaque cost.
 
         Args:
             operation (InvokeOperation): Invocation operation.
-            ctx (ResourceContext): Call-site context.
+            ctx (OpaqueCallContext): Call-site context.
 
         Returns:
             ResourceEstimate: Opaque or zero estimate when policy permits.
@@ -2596,6 +2449,7 @@ class ResourceInterpreter:
                     queries_by_name={name: ctx.power},
                 ),
                 trace=ResourceTraceNode(name, "opaque", summary=f"power={ctx.power}"),
+                quality=EstimateQuality.MODELED,
             )
         if self.config.unknown_policy is UnknownResourcePolicy.ZERO_WITH_WARNING:
             assumption = ResourceAssumption(
@@ -2605,49 +2459,41 @@ class ResourceInterpreter:
             return ResourceEstimate(
                 assumptions=(assumption,),
                 trace=ResourceTraceNode(name, "opaque", assumptions=(assumption,)),
+                quality=EstimateQuality.MODELED,
             )
         raise ValueError(
-            f"Cannot estimate resources for callable '{name}': no resource "
-            f"model or body is available."
+            f"Cannot estimate resources for callable '{name}': no body or "
+            "opaque cost is available."
         )
 
 
 def estimate_resources(
     kernel: "QKernel[Any, Any] | Block | Sequence[Operation]",
     *,
-    bindings: dict[str, Any] | None = None,
-    substitutions: dict[str, Any] | None = None,
-    parameters: list[str] | None = None,
-    policy: ResourcePolicy = ResourcePolicy.MODEL_IF_AVAILABLE,
-    cost_basis: CostBasis = CostBasis.LOGICAL_GATES,
+    inputs: dict[str, Any] | None = None,
     strategies: dict[str, str] | None = None,
     trace: bool = False,
     unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
+    basis: str | GateBasis = GateBasis.LOGICAL,
+    precision: float = 1e-10,
 ) -> ResourceEstimate:
     """Estimate logical resources using the default estimator facade.
 
     Args:
         kernel (QKernel[Any, Any] | Block | Sequence[Operation]): QKernel,
             block, or operation sequence to estimate.
-        bindings (dict[str, Any] | None): Compile-time bindings baked into the
-            circuit at build time. Defaults to ``None``.
-        substitutions (dict[str, Any] | None): Estimation-only substitutions
-            applied to the symbolic estimate after building, so
-            ``substitutions={"n": 2048}`` yields the concrete estimate without
-            constructing a 2048-scale circuit. Values may be numbers or SymPy
-            expressions. Defaults to ``None``.
-        parameters (list[str] | None): Runtime parameter names preserved during
-            qkernel build. Defaults to ``None``.
-        policy (ResourcePolicy): Callable resolution policy. Defaults to
-            ``MODEL_IF_AVAILABLE``.
-        cost_basis (CostBasis): Logical cost basis. Defaults to
-            ``LOGICAL_GATES``.
+        inputs (dict[str, Any] | None): QKernel input values used to specialize
+            the symbolic estimate without building a problem-sized circuit.
+            Defaults to ``None``.
         strategies (dict[str, str] | None): Strategy overrides by callable
             name. Defaults to ``None``.
         trace (bool): Whether to retain the explanation tree. Defaults to
             ``False``.
         unknown_policy (UnknownResourcePolicy): Unknown callable handling.
             Defaults to ``ERROR``.
+        basis (str | GateBasis): Output gate basis. Defaults to ``LOGICAL``.
+        precision (float): Rotation-synthesis precision for ``CLIFFORD_T``.
+            Defaults to ``1e-10``.
 
     Returns:
         ResourceEstimate: Logical resource estimate.
@@ -2663,21 +2509,19 @@ def estimate_resources(
         >>> symbolic = estimate_resources(repeated_h)
         >>> str(symbolic.gates.total)
         'n'
-        >>> estimate_resources(repeated_h, substitutions={"n": 8}).gates.total
+        >>> estimate_resources(repeated_h, inputs={"n": 8}).gates.total
         8
     """
     estimator = ResourceEstimator(
-        policy=policy,
-        cost_basis=cost_basis,
         strategies=strategies,
         trace=trace,
         unknown_policy=unknown_policy,
+        basis=basis,
+        precision=precision,
     )
     return estimator.estimate(
         kernel,
-        bindings=bindings,
-        substitutions=substitutions,
-        parameters=parameters,
+        inputs=inputs,
     )
 
 
@@ -2695,6 +2539,29 @@ def _expr(value: ResourceExpr | int | float) -> ResourceExpr:
     if isinstance(value, int):
         return sp.Integer(value)
     return sp.Float(value)
+
+
+def _resource_expr(value: sp.Basic) -> ResourceExpr:
+    """Narrow a SymPy scalar expression to the resource expression type.
+
+    SymPy annotates relational ``Piecewise`` results as ``Basic`` even though
+    they participate in the same scalar arithmetic as ``Expr`` throughout the
+    estimator.
+
+    Args:
+        value (sp.Basic): SymPy scalar expression to narrow.
+
+    Returns:
+        ResourceExpr: Expression accepted by resource result records.
+
+    Raises:
+        TypeError: If ``value`` is not a scalar SymPy expression.
+    """
+    if not isinstance(value, sp.Expr):
+        raise TypeError(
+            f"Expected a scalar SymPy expression, got {type(value).__name__}"
+        )
+    return value
 
 
 def _sympify_resource_value(value: Any, fallback_name: str) -> sp.Expr:
@@ -2791,8 +2658,8 @@ def _solve_affine_recurrence(
 
     The supported recurrence is ``x[k + 1] = a*x[k] + b(k)`` where ``a``
     does not depend on the loop index or another carry. This covers counters,
-    arithmetic accumulators, and geometric updates without introducing a
-    special resource-model API for ordinary classical qkernel code.
+    arithmetic accumulators, and geometric updates without requiring users to
+    write separate resource equations for ordinary classical qkernel code.
 
     Args:
         yielded (sp.Expr): Expression yielded by one body iteration.
@@ -3039,6 +2906,8 @@ def _classify_gate(
     operation: GateOperation,
     *,
     num_controls: ResourceExpr | int = 0,
+    basis: GateBasis = GateBasis.LOGICAL,
+    precision: float = 1e-10,
 ) -> GateResources:
     """Classify one primitive gate into logical gate resources.
 
@@ -3046,6 +2915,9 @@ def _classify_gate(
         operation (GateOperation): Primitive gate operation.
         num_controls (ResourceExpr | int): Surrounding controls. Defaults to
             zero.
+        basis (GateBasis): Gate basis to report. Defaults to ``LOGICAL``.
+        precision (float): Rotation-synthesis precision in ``CLIFFORD_T``
+            basis. Defaults to ``1e-10``.
 
     Returns:
         GateResources: Resource contribution of the primitive gate.
@@ -3053,9 +2925,296 @@ def _classify_gate(
     gate_name = operation.gate_type.name.lower() if operation.gate_type else "unknown"
     if gate_name == "ccx":
         gate_name = "toffoli"
+    if basis is GateBasis.CLIFFORD_T:
+        return _classify_clifford_t_gate(
+            gate_name,
+            _expr(num_controls),
+            precision,
+        )
     if _expr(num_controls) == 0:
         return _classify_uncontrolled_gate(gate_name)
     return _classify_controlled_gate(gate_name, _expr(num_controls))
+
+
+def _gate_has_rotation(operation: GateOperation) -> bool:
+    """Return whether a primitive gate carries an arbitrary rotation.
+
+    Args:
+        operation (GateOperation): Primitive gate operation.
+
+    Returns:
+        bool: Whether the gate requires approximate Clifford+T synthesis.
+    """
+    name = operation.gate_type.name.lower() if operation.gate_type else "unknown"
+    return name in _ROTATION_GATES
+
+
+def _classify_clifford_t_gate(
+    gate_name: str,
+    num_controls: ResourceExpr,
+    precision: float,
+) -> GateResources:
+    """Lower one logical primitive to aggregate Clifford+T resources.
+
+    Exact canonical decompositions are used for SWAP and Toffoli. Arbitrary
+    axial rotations use the Ross-Selinger asymptotic upper bound
+    ``ceil(3 log2(1 / precision))`` T gates. A controlled phase is first
+    decomposed into three axial rotations and two CNOTs.
+
+    Args:
+        gate_name (str): Lowercase logical gate name.
+        num_controls (ResourceExpr): Number of surrounding controls.
+        precision (float): Rotation-synthesis precision.
+
+    Returns:
+        GateResources: Clifford+T aggregate counts.
+    """
+    inherent_controls = {"x": 0, "cx": 1, "toffoli": 2}
+    if gate_name in inherent_controls:
+        return _multi_controlled_x_clifford_t(
+            num_controls + inherent_controls[gate_name]
+        )
+    if gate_name == "swap":
+        if num_controls != 0:
+            middle = _multi_controlled_x_clifford_t(num_controls + 1)
+            return _add_gates(
+                middle,
+                GateResources(
+                    total=sp.Integer(2),
+                    two_qubit=sp.Integer(2),
+                    clifford=sp.Integer(2),
+                ),
+            )
+        return GateResources(
+            total=sp.Integer(3),
+            two_qubit=sp.Integer(3),
+            clifford=sp.Integer(3),
+        )
+    rotation_t = sp.Integer(math.ceil(3 * math.log2(1 / precision)))
+    rotation_multiplicity = 0
+    extra_clifford = 0
+    if gate_name in {"rz", "p"}:
+        rotation_multiplicity = 1
+    elif gate_name == "rx":
+        rotation_multiplicity = 1
+        extra_clifford = 2
+    elif gate_name == "ry":
+        rotation_multiplicity = 1
+        extra_clifford = 4
+    elif gate_name == "cp":
+        rotation_multiplicity = 3
+        extra_clifford = 2
+    elif gate_name == "rzz":
+        rotation_multiplicity = 1
+        extra_clifford = 2
+    if rotation_multiplicity:
+        t_count = rotation_multiplicity * rotation_t
+        return GateResources(
+            total=t_count + extra_clifford,
+            single_qubit=t_count,
+            two_qubit=sp.Integer(extra_clifford),
+            clifford=sp.Integer(extra_clifford),
+            t=t_count,
+            non_clifford=t_count,
+        )
+    if num_controls != 0:
+        raise ValueError(
+            "No canonical Clifford+T lowering is defined for controlled "
+            f"gate '{gate_name}' with {num_controls} surrounding control(s)."
+        )
+    return _classify_uncontrolled_gate(gate_name)
+
+
+def _multi_controlled_x_clifford_t(
+    num_controls: ResourceExpr,
+) -> GateResources:
+    """Lower a multi-controlled X using a clean-ancilla Toffoli ladder.
+
+    Args:
+        num_controls (ResourceExpr): Number of controls on the X target.
+
+    Returns:
+        GateResources: Exact aggregate Clifford+T counts for the selected
+            ladder decomposition.
+    """
+    toffolis = sp.Max(_ZERO, 2 * num_controls - 3)
+    return GateResources(
+        total=_resource_expr(
+            sp.Piecewise(
+                (_ONE, num_controls <= 1),
+                (15 * toffolis, True),
+            )
+        ),
+        single_qubit=_resource_expr(
+            sp.Piecewise(
+                (_ONE, sp.Eq(num_controls, 0)),
+                (_ZERO, sp.Eq(num_controls, 1)),
+                (9 * toffolis, True),
+            )
+        ),
+        two_qubit=_resource_expr(
+            sp.Piecewise(
+                (_ZERO, sp.Eq(num_controls, 0)),
+                (_ONE, sp.Eq(num_controls, 1)),
+                (6 * toffolis, True),
+            )
+        ),
+        clifford=_resource_expr(
+            sp.Piecewise(
+                (_ONE, num_controls <= 1),
+                (8 * toffolis, True),
+            )
+        ),
+        t=_resource_expr(
+            sp.Piecewise(
+                (_ZERO, num_controls <= 1),
+                (7 * toffolis, True),
+            )
+        ),
+        non_clifford=_resource_expr(
+            sp.Piecewise(
+                (_ZERO, num_controls <= 1),
+                (7 * toffolis, True),
+            )
+        ),
+    )
+
+
+def _clifford_t_clean_ancillas(
+    operation: GateOperation,
+    surrounding_controls: ResourceExpr,
+) -> ResourceExpr:
+    """Return clean ancillas required by the selected basis decomposition.
+
+    Args:
+        operation (GateOperation): Logical primitive being lowered.
+        surrounding_controls (ResourceExpr): Additional enclosing controls.
+
+    Returns:
+        ResourceExpr: Peak clean-ancilla requirement.
+    """
+    name = operation.gate_type.name.lower() if operation.gate_type else "unknown"
+    if name == "ccx":
+        name = "toffoli"
+    inherent_controls = {"x": 0, "cx": 1, "toffoli": 2}
+    if name in inherent_controls:
+        controls = surrounding_controls + inherent_controls[name]
+        return sp.Max(_ZERO, controls - 2)
+    if name == "swap" and surrounding_controls != 0:
+        return sp.Max(_ZERO, surrounding_controls - 1)
+    return _ZERO
+
+
+def _clifford_t_gate_depth(
+    operation: GateOperation,
+    surrounding_controls: ResourceExpr,
+    precision: float,
+) -> DepthResources:
+    """Return depth for the selected canonical Clifford+T decomposition.
+
+    Args:
+        operation (GateOperation): Logical primitive being lowered.
+        surrounding_controls (ResourceExpr): Additional enclosing controls.
+        precision (float): Rotation-synthesis precision.
+
+    Returns:
+        DepthResources: Conservative decomposition critical path.
+    """
+    name = operation.gate_type.name.lower() if operation.gate_type else "unknown"
+    if name == "ccx":
+        name = "toffoli"
+    inherent_controls = {"x": 0, "cx": 1, "toffoli": 2}
+    if name in inherent_controls:
+        controls = surrounding_controls + inherent_controls[name]
+        toffolis = sp.Max(_ZERO, 2 * controls - 3)
+        return DepthResources(
+            depth=_resource_expr(
+                sp.Piecewise((_ONE, controls <= 1), (15 * toffolis, True))
+            ),
+            clifford_depth=_resource_expr(
+                sp.Piecewise(
+                    (_ONE, controls <= 1),
+                    (8 * toffolis, True),
+                )
+            ),
+            t_depth=_resource_expr(
+                sp.Piecewise(
+                    (_ZERO, controls <= 1),
+                    (3 * toffolis, True),
+                )
+            ),
+            non_clifford_depth=_resource_expr(
+                sp.Piecewise(
+                    (_ZERO, controls <= 1),
+                    (3 * toffolis, True),
+                )
+            ),
+        )
+    if name == "swap":
+        if surrounding_controls == 0:
+            return DepthResources(depth=sp.Integer(3), clifford_depth=sp.Integer(3))
+        middle = _clifford_t_gate_depth_for_mcx(surrounding_controls + 1)
+        return dataclasses.replace(
+            middle,
+            depth=middle.depth + 2,
+            clifford_depth=middle.clifford_depth + 2,
+        )
+    rotation_t = sp.Integer(math.ceil(3 * math.log2(1 / precision)))
+    extra_clifford = {
+        "rz": 0,
+        "p": 0,
+        "rx": 2,
+        "ry": 4,
+        "cp": 2,
+        "rzz": 2,
+    }.get(name)
+    multiplicity = 3 if name == "cp" else 1
+    if extra_clifford is not None:
+        t_depth = multiplicity * rotation_t
+        return DepthResources(
+            depth=t_depth + extra_clifford,
+            clifford_depth=sp.Integer(extra_clifford),
+            t_depth=t_depth,
+            non_clifford_depth=t_depth,
+        )
+    return DepthResources(depth=_ONE, clifford_depth=_ONE)
+
+
+def _clifford_t_gate_depth_for_mcx(
+    controls: ResourceExpr,
+) -> DepthResources:
+    """Return the Toffoli-ladder depth for a multi-controlled X.
+
+    Args:
+        controls (ResourceExpr): Number of controls.
+
+    Returns:
+        DepthResources: Canonical ladder depth.
+    """
+    toffolis = sp.Max(_ZERO, 2 * controls - 3)
+    return DepthResources(
+        depth=_resource_expr(
+            sp.Piecewise((_ONE, controls <= 1), (15 * toffolis, True))
+        ),
+        clifford_depth=_resource_expr(
+            sp.Piecewise(
+                (_ONE, controls <= 1),
+                (8 * toffolis, True),
+            )
+        ),
+        t_depth=_resource_expr(
+            sp.Piecewise(
+                (_ZERO, controls <= 1),
+                (3 * toffolis, True),
+            )
+        ),
+        non_clifford_depth=_resource_expr(
+            sp.Piecewise(
+                (_ZERO, controls <= 1),
+                (3 * toffolis, True),
+            )
+        ),
+    )
 
 
 def _classify_uncontrolled_gate(gate_name: str) -> GateResources:
@@ -3129,32 +3288,6 @@ def _classify_controlled_gate(
     )
 
 
-def _qft_iqft_resources(n: ResourceExpr) -> GateResources:
-    """Return standard QFT/IQFT logical resources.
-
-    Args:
-        n (ResourceExpr): Number of target qubits.
-
-    Returns:
-        GateResources: Standard decomposition resources.
-    """
-    h_count = n
-    cp_count = n * (n - 1) / 2
-    swap_count = n // 2
-    total = h_count + cp_count + swap_count
-    return GateResources(
-        total=total,
-        single_qubit=h_count,
-        two_qubit=cp_count + swap_count,
-        multi_qubit=_ZERO,
-        clifford=h_count + swap_count,
-        rotation=cp_count,
-        t=_ZERO,
-        toffoli=_ZERO,
-        non_clifford=cp_count,
-    )
-
-
 def _classify_pauli_evolve(hamiltonian: Any) -> GateResources:
     """Estimate Pauli evolution resources from a concrete Hamiltonian.
 
@@ -3215,6 +3348,172 @@ def _add_maps(
     for name, value in right.items():
         merged[name] = merged.get(name, _ZERO) + value
     return merged
+
+
+def _boolean_condition(condition: sp.Basic) -> sp.Basic:
+    """Normalize a symbolic branch predicate to a SymPy Boolean.
+
+    Args:
+        condition (sp.Basic): Boolean or numeric branch expression.
+
+    Returns:
+        sp.Basic: Boolean predicate with numeric truth represented as nonzero.
+    """
+    if isinstance(condition, sp.logic.boolalg.Boolean):
+        return condition
+    return sp.Ne(condition, 0)
+
+
+def _piecewise(
+    true_value: ResourceExpr,
+    false_value: ResourceExpr,
+    condition: sp.Basic,
+) -> ResourceExpr:
+    """Select one resource expression with a symbolic Boolean.
+
+    Args:
+        true_value (ResourceExpr): Value when ``condition`` is true.
+        false_value (ResourceExpr): Value when ``condition`` is false.
+        condition (sp.Basic): SymPy Boolean predicate.
+
+    Returns:
+        ResourceExpr: Simplified piecewise expression.
+    """
+    return cast(
+        ResourceExpr,
+        sp.Piecewise((true_value, cast(Any, condition)), (false_value, True)),
+    )
+
+
+def _conditional_width(
+    true_value: WidthResources,
+    false_value: WidthResources,
+    condition: sp.Basic,
+) -> WidthResources:
+    """Select width resources with a symbolic condition.
+
+    Args:
+        true_value (WidthResources): True-branch width.
+        false_value (WidthResources): False-branch width.
+        condition (sp.Basic): SymPy Boolean predicate.
+
+    Returns:
+        WidthResources: Field-wise piecewise width.
+    """
+    return WidthResources(
+        **{
+            field.name: _piecewise(
+                getattr(true_value, field.name),
+                getattr(false_value, field.name),
+                condition,
+            )
+            for field in dataclasses.fields(WidthResources)
+        }
+    )
+
+
+def _conditional_gates(
+    true_value: GateResources,
+    false_value: GateResources,
+    condition: sp.Basic,
+) -> GateResources:
+    """Select gate resources with a symbolic condition.
+
+    Args:
+        true_value (GateResources): True-branch gates.
+        false_value (GateResources): False-branch gates.
+        condition (sp.Basic): SymPy Boolean predicate.
+
+    Returns:
+        GateResources: Field-wise piecewise gate resources.
+    """
+    return GateResources(
+        **{
+            field.name: _piecewise(
+                getattr(true_value, field.name),
+                getattr(false_value, field.name),
+                condition,
+            )
+            for field in dataclasses.fields(GateResources)
+        }
+    )
+
+
+def _conditional_depth(
+    true_value: DepthResources,
+    false_value: DepthResources,
+    condition: sp.Basic,
+) -> DepthResources:
+    """Select depth resources with a symbolic condition.
+
+    Args:
+        true_value (DepthResources): True-branch depth.
+        false_value (DepthResources): False-branch depth.
+        condition (sp.Basic): SymPy Boolean predicate.
+
+    Returns:
+        DepthResources: Field-wise piecewise depth resources.
+    """
+    return DepthResources(
+        **{
+            field.name: _piecewise(
+                getattr(true_value, field.name),
+                getattr(false_value, field.name),
+                condition,
+            )
+            for field in dataclasses.fields(DepthResources)
+        }
+    )
+
+
+def _conditional_calls(
+    true_value: CallResources,
+    false_value: CallResources,
+    condition: sp.Basic,
+) -> CallResources:
+    """Select callable counts with a symbolic condition.
+
+    Args:
+        true_value (CallResources): True-branch calls.
+        false_value (CallResources): False-branch calls.
+        condition (sp.Basic): SymPy Boolean predicate.
+
+    Returns:
+        CallResources: Key-wise piecewise callable counts.
+    """
+
+    def select_maps(
+        true_map: Mapping[str, ResourceExpr],
+        false_map: Mapping[str, ResourceExpr],
+    ) -> dict[str, ResourceExpr]:
+        """Select two call-count mappings key by key.
+
+        Args:
+            true_map (Mapping[str, ResourceExpr]): True-branch mapping.
+            false_map (Mapping[str, ResourceExpr]): False-branch mapping.
+
+        Returns:
+            dict[str, ResourceExpr]: Piecewise mapping over the union of keys.
+        """
+        return {
+            name: _piecewise(
+                true_map.get(name, _ZERO),
+                false_map.get(name, _ZERO),
+                condition,
+            )
+            for name in set(true_map) | set(false_map)
+        }
+
+    return CallResources(
+        calls_by_name=select_maps(
+            true_value.calls_by_name,
+            false_value.calls_by_name,
+        ),
+        queries_by_name=select_maps(
+            true_value.queries_by_name,
+            false_value.queries_by_name,
+        ),
+    )
 
 
 def _max_maps(
@@ -3302,6 +3601,117 @@ def _scale_gates(gates: GateResources, factor: ResourceExpr) -> GateResources:
         t=gates.t * factor,
         toffoli=gates.toffoli * factor,
         non_clifford=gates.non_clifford * factor,
+    )
+
+
+def _quantum_wire_keys(operation: Operation) -> tuple[set[str], set[str]]:
+    """Collect quantum logical wires read and written by one operation.
+
+    Args:
+        operation (Operation): Operation whose dependency footprint is needed.
+
+    Returns:
+        tuple[set[str], set[str]]: Logical IDs read and written. Nested control
+            flow conservatively treats every touched wire as both read and
+            written at the enclosing boundary.
+    """
+    reads = {
+        value.logical_id
+        for value in operation.all_input_values()
+        if isinstance(value, Value) and value.type.is_quantum()
+    }
+    writes = {
+        value.logical_id for value in operation.results if value.type.is_quantum()
+    }
+    if isinstance(operation, HasNestedOps):
+        nested_keys: set[str] = set()
+        for body in operation.nested_op_lists():
+            for child in body:
+                child_reads, child_writes = _quantum_wire_keys(child)
+                nested_keys |= child_reads | child_writes
+        reads |= nested_keys
+        writes |= nested_keys
+    return reads, writes
+
+
+def _dependency_depth(
+    scheduled: Sequence[tuple[Operation, ResourceEstimate]],
+) -> DepthResources:
+    """Schedule operation summaries by their quantum wire dependencies.
+
+    Args:
+        scheduled (Sequence[tuple[Operation, ResourceEstimate]]): Operations in
+            program order paired with their internally computed summaries.
+
+    Returns:
+        DepthResources: Critical-path depth for every tracked gate family.
+    """
+    fields = tuple(field.name for field in dataclasses.fields(DepthResources))
+    availability: dict[str, dict[str, ResourceExpr]] = {field: {} for field in fields}
+    peaks: dict[str, ResourceExpr] = {field: _ZERO for field in fields}
+    for operation, estimate in scheduled:
+        reads, writes = _quantum_wire_keys(operation)
+        touched = reads | writes
+        for field in fields:
+            wire_depth = availability[field]
+            start = (
+                sp.Max(*(wire_depth.get(key, _ZERO) for key in reads))
+                if reads
+                else _ZERO
+            )
+            duration = cast(ResourceExpr, getattr(estimate.depth, field))
+            finish = start + duration
+            peaks[field] = sp.Max(peaks[field], finish)
+            for key in touched:
+                wire_depth[key] = finish
+    return DepthResources(**peaks)
+
+
+def _liveness_width(
+    scheduled: Sequence[tuple[Operation, ResourceEstimate]],
+    initial_allocations: Mapping[str, ResourceExpr],
+) -> WidthResources:
+    """Compute peak width from affine allocation and consumption lifetimes.
+
+    Args:
+        scheduled (Sequence[tuple[Operation, ResourceEstimate]]): Operations and
+            their nested width summaries in program order.
+        initial_allocations (Mapping[str, ResourceExpr]): Live input wire sizes
+            keyed by logical ID.
+
+    Returns:
+        WidthResources: Total body allocations and liveness-aware peak width.
+    """
+    live = dict(initial_allocations)
+    current = sum(live.values(), _ZERO)
+    peak = current
+    allocated = _ZERO
+    clean = _ZERO
+    dirty = _ZERO
+    for operation, estimate in scheduled:
+        allocated += estimate.width.allocated_qubits
+        clean = sp.Max(clean, estimate.width.clean_ancilla_qubits)
+        dirty = sp.Max(dirty, estimate.width.dirty_ancilla_qubits)
+        if isinstance(operation, QInitOperation):
+            result = operation.results[0]
+            amount = estimate.width.allocated_qubits
+            live[result.logical_id] = amount
+            current += amount
+            peak = sp.Max(peak, current)
+        else:
+            peak = sp.Max(peak, current + estimate.width.peak_qubits)
+        if isinstance(
+            operation,
+            (MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation),
+        ):
+            for value in operation.all_input_values():
+                released = live.pop(value.logical_id, _ZERO)
+                current -= released
+    return WidthResources(
+        allocated_qubits=allocated,
+        clean_ancilla_qubits=clean,
+        dirty_ancilla_qubits=dirty,
+        peak_qubits=peak,
     )
 
 
@@ -3511,7 +3921,64 @@ def _sum_expr(
     """
     k = sp.Dummy("k", integer=True, nonnegative=True)
     transformed = expr.subs(loop_symbol, start + step * k)
+    transformed = _simplify_sum_range_guards(
+        transformed,
+        symbol=k,
+        lower=_ZERO,
+        upper=iterations - 1,
+    )
     return cast(ResourceExpr, sp.Sum(transformed, (k, 0, iterations - 1)).doit())
+
+
+def _simplify_sum_range_guards(
+    expression: sp.Expr,
+    *,
+    symbol: sp.Symbol,
+    lower: sp.Expr,
+    upper: sp.Expr,
+) -> sp.Expr:
+    """Remove nonnegative affine guards proven by a finite sum range.
+
+    Nested ``qmc.range`` loops produce exact trip counts such as
+    ``Max(0, n - 1 - k)``. SymPy does not use the enclosing summation bound
+    ``0 <= k <= n - 1`` when simplifying that guard, so triangular loops stay
+    as unevaluated sums. This helper removes only guards whose affine argument
+    is provably nonnegative at the endpoint where it reaches its minimum.
+
+    Args:
+        expression (sp.Expr): Summand to simplify.
+        symbol (sp.Symbol): Summation index.
+        lower (sp.Expr): Inclusive lower index bound.
+        upper (sp.Expr): Inclusive upper index bound.
+
+    Returns:
+        sp.Expr: Expression with range-proven ``Max(0, affine)`` guards removed.
+    """
+    replacements: dict[sp.Basic, sp.Basic] = {}
+    for node in sp.preorder_traversal(expression):
+        if (
+            not isinstance(node, sp.Max)
+            or len(node.args) != 2
+            or _ZERO not in node.args
+        ):
+            continue
+        guarded = node.args[0] if node.args[1] == _ZERO else node.args[1]
+        try:
+            polynomial = sp.Poly(guarded, symbol)
+        except sp.PolynomialError:
+            continue
+        if polynomial.degree() > 1:
+            continue
+        slope = sp.diff(guarded, symbol)
+        if slope.is_nonnegative:
+            minimum = guarded.subs(symbol, lower)
+        elif slope.is_nonpositive:
+            minimum = guarded.subs(symbol, upper)
+        else:
+            continue
+        if sp.simplify(minimum).is_nonnegative:
+            replacements[node] = guarded
+    return cast(sp.Expr, expression.xreplace(replacements))
 
 
 def _sum_gates(
@@ -3698,7 +4165,6 @@ def _wrap_trace(
     *,
     source_kind: str = "algebra",
     strategy: str | None = None,
-    estimate_kind: EstimateKind | None = None,
 ) -> ResourceTraceNode:
     """Wrap an optional child trace with a parent node.
 
@@ -3707,8 +4173,6 @@ def _wrap_trace(
         child (ResourceTraceNode | None): Optional child.
         source_kind (str): Parent source kind. Defaults to ``"algebra"``.
         strategy (str | None): Selected strategy. Defaults to ``None``.
-        estimate_kind (EstimateKind | None): Estimate kind. Defaults to
-            ``None``.
 
     Returns:
         ResourceTraceNode: Parent trace node.
@@ -3718,7 +4182,6 @@ def _wrap_trace(
         name=name,
         source_kind=source_kind,
         strategy=strategy,
-        estimate_kind=estimate_kind,
         children=children,
     )
 
@@ -3810,58 +4273,90 @@ def _substitute_bindings(
     return estimate.substitute(**values)
 
 
-def _force_symbolic_substitution_params(
+def _partition_estimation_inputs(
+    kernel: Any,
+    inputs: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Partition one user input mapping by its role during estimation.
+
+    Scalar and numeric-array qkernel inputs remain symbolic until after
+    interpretation. Structural values such as observables and dictionaries are
+    supplied while tracing. Blocks and raw operation lists have no Python input
+    annotations, so all supplied values specialize their symbolic estimate.
+
+    Args:
+        kernel (Any): QKernel, block, or operation sequence being estimated.
+        inputs (Mapping[str, Any] | None): User-provided input values.
+
+    Returns:
+        tuple[dict[str, Any], dict[str, Any]]: Build-time structural inputs and
+        post-interpretation estimation inputs.
+    """
+    values = dict(inputs or {})
+    input_types = getattr(kernel, "input_types", None)
+    if not isinstance(input_types, dict):
+        return {}, values
+
+    from qamomile.circuit.frontend.func_to_block import is_array_type
+    from qamomile.circuit.frontend.handle.primitives import Qubit
+    from qamomile.circuit.frontend.qkernel_inputs import is_parameterizable_type
+    from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
+
+    def is_quantum_port(input_type: Any) -> bool:
+        """Return whether an annotation denotes a quantum input port.
+
+        Args:
+            input_type (Any): Resolved qkernel input annotation.
+
+        Returns:
+            bool: Whether the annotation is a qubit or qubit vector.
+        """
+        if input_type is Qubit:
+            return True
+        return is_array_type(input_type) and get_array_element_type(input_type) is Qubit
+
+    build_inputs = {
+        name: value
+        for name, value in values.items()
+        if name in input_types
+        and not is_parameterizable_type(input_types[name])
+        and not is_quantum_port(input_types[name])
+    }
+    estimation_inputs = {
+        name: value for name, value in values.items() if name not in build_inputs
+    }
+    return build_inputs, estimation_inputs
+
+
+def _estimator_parameters(
     kernel: Any,
     kwargs: Mapping[str, Any],
-    parameters: list[str] | None,
-    substitutions: Mapping[str, Any] | None,
 ) -> list[str] | None:
-    """Force classical substitution names to stay symbolic when building.
+    """Choose symbolic classical parameters for resource estimation.
 
-    Names passed via ``substitutions`` that are classical kernel arguments are
-    added to the build ``parameters`` list so they are not baked in by a Python
-    signature default — otherwise ``substitutions={"n": 2048}`` on a kernel
-    where ``n`` has a default would estimate the default and silently ignore the
-    request.
+    Resource estimation is symbolic-first: unless callers provide explicit
+    Every unbound parameterizable classical argument remains a symbol, including
+    arguments with Python defaults. Estimation inputs are substituted only after
+    interpretation.
 
     Args:
         kernel (Any): QKernel being built.
         kwargs (Mapping[str, Any]): Compile-time build bindings.
-        parameters (list[str] | None): Explicit runtime parameters, or ``None``
-            to auto-detect.
-        substitutions (Mapping[str, Any] | None): Estimation-only substitution
-            names.
-
     Returns:
-        list[str] | None: Parameter list to build with. ``None`` when there are
-        no substitutions to force and no explicit parameters (preserving
-        auto-detection).
+        list[str] | None: Parameter list used to build the estimator IR.
     """
-    if not substitutions:
-        return parameters
     input_types = getattr(kernel, "input_types", None)
     if not isinstance(input_types, dict):
-        return parameters
+        return None
     from qamomile.circuit.frontend.qkernel_inputs import (
-        auto_detect_parameters,
         is_parameterizable_type,
     )
 
-    base = (
-        list(parameters)
-        if parameters is not None
-        else auto_detect_parameters(kernel.signature, input_types, dict(kwargs))
-    )
-    forced = [
+    return [
         name
-        for name in substitutions
-        if name in input_types
-        and name not in kwargs
-        and is_parameterizable_type(input_types[name])
+        for name, input_type in input_types.items()
+        if name not in kwargs and is_parameterizable_type(input_type)
     ]
-    if not forced:
-        return parameters
-    return sorted(set(base) | set(forced))
 
 
 def _contract_names(
@@ -3869,10 +4364,9 @@ def _contract_names(
 ) -> frozenset[str] | None:
     """Return the declared classical argument names of a built block, if any.
 
-    Only classical parameters (``param_slots``) count: ``substitutions`` supplies
-    numeric/expression values, so a quantum port name is never a valid
-    substitution target and must be rejected as a typo rather than accepted as a
-    no-op.
+    Only classical parameters (``param_slots``) count: ``inputs`` supplies
+    numeric or expression values, so a quantum port name is never a valid input
+    target and must be rejected as a typo rather than accepted as a no-op.
 
     Args:
         block_or_ops (Block | Sequence[Operation]): Coerced estimator input.
@@ -3887,6 +4381,56 @@ def _contract_names(
     return frozenset(slot.name for slot in block_or_ops.param_slots)
 
 
+def _expand_array_shape_inputs(
+    block_or_ops: "Block | Sequence[Operation]",
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Expand supplied array shapes into their IR dimension symbols.
+
+    Args:
+        block_or_ops (Block | Sequence[Operation]): Coerced estimator input.
+        inputs (Mapping[str, Any]): User-provided estimation inputs.
+
+    Returns:
+        dict[str, Any]: Inputs plus one concrete value for each matching array
+        dimension symbol.
+    """
+    expanded = dict(inputs)
+    if not isinstance(block_or_ops, Block):
+        return expanded
+    for name, ir_value in zip(block_or_ops.label_args, block_or_ops.input_values):
+        if name not in inputs or not isinstance(ir_value, ArrayValue):
+            continue
+        shape = _concrete_input_shape(inputs[name])
+        for dimension, size in zip(ir_value.shape, shape):
+            if dimension.name:
+                expanded[dimension.name] = size
+    return expanded
+
+
+def _concrete_input_shape(value: Any) -> tuple[int, ...]:
+    """Return the concrete shape of an array-like estimation input.
+
+    Args:
+        value (Any): Array-like user input.
+
+    Returns:
+        tuple[int, ...]: Concrete dimensions, or an empty tuple when the value
+        has no discoverable array shape.
+    """
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        return tuple(int(dimension) for dimension in shape)
+    dimensions: list[int] = []
+    current = value
+    while isinstance(current, Sequence) and not isinstance(current, (str, bytes)):
+        dimensions.append(len(current))
+        if not current:
+            break
+        current = current[0]
+    return tuple(dimensions)
+
+
 def _scalar_values(values: Mapping[str, Any]) -> dict[str, sp.Expr]:
     """Keep only numeric scalar values, for deciding compile-time branches.
 
@@ -3898,7 +4442,7 @@ def _scalar_values(values: Mapping[str, Any]) -> dict[str, sp.Expr]:
     the branch undecidable (conservative ``choice``).
 
     Args:
-        values (Mapping[str, Any]): Merged bindings and substitutions.
+        values (Mapping[str, Any]): Concrete input values.
 
     Returns:
         dict[str, sp.Expr]: Name -> numeric SymPy value.
@@ -3917,14 +4461,14 @@ def _scalar_values(values: Mapping[str, Any]) -> dict[str, sp.Expr]:
     return out
 
 
-def _apply_substitutions(
+def _apply_inputs(
     estimate: ResourceEstimate,
-    substitutions: Mapping[str, Any],
+    inputs: Mapping[str, Any],
     *,
     contract_names: frozenset[str] | None = None,
     branch_condition_names: set[str] | None = None,
 ) -> ResourceEstimate:
-    """Substitute estimation-only values into a symbolic estimate.
+    """Specialize a symbolic estimate with qkernel input values.
 
     Unlike :func:`_substitute_bindings`, substitution values may be SymPy
     expressions (e.g. an optimal-iteration formula). Each name is classified:
@@ -3941,8 +4485,8 @@ def _apply_substitutions(
 
     Args:
         estimate (ResourceEstimate): Symbolic estimate to rewrite.
-        substitutions (Mapping[str, Any]): Estimation-only substitutions keyed
-            by parameter name. Values may be numbers or SymPy expressions.
+        inputs (Mapping[str, Any]): Input values keyed by parameter name. Values
+            may be numbers or SymPy expressions.
         contract_names (frozenset[str] | None): Declared kernel argument names.
             ``None`` (raw op sequence, no contract) keeps every name strict.
         branch_condition_names (set[str] | None): Names that participated in a
@@ -3950,10 +4494,10 @@ def _apply_substitutions(
             ``None``.
 
     Returns:
-        ResourceEstimate: Estimate with the substitutions applied.
+        ResourceEstimate: Estimate with the inputs applied.
 
     Raises:
-        ValueError: If a substitution name is neither a free symbol of the
+        ValueError: If an input name is neither a free symbol of the
             estimate nor a declared kernel argument.
     """
     # SymPy treats same-named symbols with different assumptions as distinct, so
@@ -3964,20 +4508,18 @@ def _apply_substitutions(
     known = contract_names or frozenset()
     referenced = branch_condition_names or set()
     unknown = [
-        name
-        for name in substitutions
-        if name not in symbols_by_name and name not in known
+        name for name in inputs if name not in symbols_by_name and name not in known
     ]
     if unknown:
         available = ", ".join(sorted(set(symbols_by_name) | set(known))) or "(none)"
         raise ValueError(
-            f"substitutions names {sorted(unknown)} are neither free symbols of "
+            f"input names {sorted(unknown)} are neither free symbols of "
             f"the estimate nor kernel arguments; available: {available}. Use "
-            "bindings for structural build-time values."
+            "the qkernel's declared input names."
         )
     subs: dict[sp.Symbol, sp.Expr] = {}
     ignored: list[str] = []
-    for name, value in substitutions.items():
+    for name, value in inputs.items():
         if name not in symbols_by_name:
             # Not a free symbol: either it participated in a branch predicate
             # (silent — specialization or undecidable-note covers it) or it
@@ -3996,7 +4538,7 @@ def _apply_substitutions(
     )
     if ignored:
         note = ResourceAssumption(
-            "substitution(s) "
+            "input(s) "
             + ", ".join(repr(name) for name in sorted(ignored))
             + " do not affect any resource metric; ignored",
         )
@@ -4028,6 +4570,26 @@ def _count_input_qubits(
         elif isinstance(value.type, QubitType):
             count += _ONE
     return count
+
+
+def _qubit_value_size(value: Value, resolver: ExprResolver) -> ResourceExpr:
+    """Return the logical width represented by one quantum value.
+
+    Args:
+        value (Value): Scalar or array quantum value.
+        resolver (ExprResolver): Resolver for symbolic array dimensions.
+
+    Returns:
+        ResourceExpr: Number of represented qubits.
+    """
+    if isinstance(value, ArrayValue) and isinstance(value.type, QubitType):
+        count: ResourceExpr = _ONE
+        for dim in value.shape:
+            count *= resolver.resolve(dim)
+        return count
+    if isinstance(value.type, QubitType):
+        return _ONE
+    return _ZERO
 
 
 def _count_qinit(operation: QInitOperation, resolver: ExprResolver) -> ResourceExpr:
@@ -4073,18 +4635,6 @@ def _operand_shapes(
                 count *= resolver.resolve(dim)
             shapes[operand.name] = count
     return shapes
-
-
-def _is_resource_model(value: Any) -> bool:
-    """Return whether an object implements the resource-model protocol.
-
-    Args:
-        value (Any): Object to inspect.
-
-    Returns:
-        bool: ``True`` when ``value.estimate`` is callable.
-    """
-    return callable(getattr(value, "estimate", None))
 
 
 def _controlled_u_child_resolver(
@@ -4170,28 +4720,3 @@ def _inverse_block_child_resolver(
         loop_var_names=resolver.loop_var_names,
         parent_blocks=[],
     )
-
-
-def _resolve_qft_n(operation: InvokeOperation, resolver: ExprResolver) -> ResourceExpr:
-    """Resolve QFT/IQFT width from invocation operands or attrs.
-
-    Args:
-        operation (InvokeOperation): QFT or IQFT invocation.
-        resolver (ExprResolver): Call-site resolver.
-
-    Returns:
-        ResourceExpr: Number of target qubits.
-    """
-    targets = operation.target_qubits
-    if targets:
-        first = targets[0]
-        if isinstance(first, ArrayValue) and first.shape:
-            return resolver.resolve(first.shape[0])
-        parent = getattr(first, "parent_array", None)
-        if isinstance(parent, ArrayValue) and parent.shape:
-            return resolver.resolve(parent.shape[0])
-        return sp.Integer(len(targets))
-    raw = operation.attrs.get("num_target_qubits")
-    if isinstance(raw, int) and raw > 0:
-        return sp.Integer(raw)
-    return sp.Symbol("n", integer=True, positive=True)

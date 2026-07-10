@@ -274,10 +274,7 @@ def emit_controlled_operations(
             _emit_nested_controlled_u(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
-        elif isinstance(op, InvokeOperation) and op.attrs.get("kind") in {
-            "composite",
-            "oracle",
-        }:
+        elif isinstance(op, InvokeOperation):
             composite_control_groups = [
                 _expand_quantum_operands_to_phys(
                     emit_pass,

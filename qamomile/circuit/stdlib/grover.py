@@ -6,17 +6,17 @@ compute the optimal iteration count. Grover search over ``N = 2**n`` items with
 ``m`` marked solutions needs ``O(sqrt(N/m))`` iterations, each applying one
 oracle query and one diffusion (reflection about the uniform superposition).
 
-The oracle is supplied by the caller as a resource-modeled box (e.g.
-``qmc.opaque(..., resource_model=...)``), so the total gate cost is
+The oracle is supplied by the caller as a costed opaque box (e.g.
+``qmc.opaque(..., cost=...)``), so the total gate cost is
 ``iterations x (oracle_cost + diffusion_cost)`` while the *query* complexity is
 the universal ``O(sqrt(N/m))``. Leaving the iteration count symbolic makes
 ``estimate_resources`` report that scaling directly; :func:`grover_iteration_count`
 returns the concrete or symbolic ``floor((pi/4) sqrt(N/m))``. Plug it in with the
-estimation-only ``substitutions`` argument to get the optimal query complexity
+``inputs`` argument to get the optimal query complexity
 straight from one estimate call::
 
     est = kernel.estimate_resources(
-        substitutions={"iterations": grover_iteration_count(n, m)}
+        inputs={"iterations": grover_iteration_count(n, m)}
     )
     est.calls.queries_by_name[oracle_name]  # floor((pi/4) sqrt(2^n / m))
 """
@@ -119,14 +119,14 @@ def grover_search(
     Prepares the uniform superposition, then applies ``iterations`` rounds of
     ``oracle`` followed by the diffusion operator. Leaving ``iterations``
     symbolic makes resource estimation report the universal ``O(sqrt(N/m))``
-    query complexity: the oracle's resource model contributes the per-query gate
+    query complexity: the oracle's opaque cost contributes the per-query gate
     cost and the diffusion contributes ``O(n)`` gates, both summed over the
     symbolic iteration count.
 
     Args:
         reg (Vector[Qubit]): Search register in the all-zero state on entry.
         oracle (QKernelLike): Phase oracle marking the solution(s). Supply a
-            resource-modeled box (e.g. ``qmc.opaque(..., resource_model=...)``)
+            costed opaque box (e.g. ``qmc.opaque(..., cost=...)``)
             so the estimator can cost each query.
         iterations (int | qmc.UInt): Number of Grover iterations. Use
             :func:`grover_iteration_count` to obtain the optimal value; leave it

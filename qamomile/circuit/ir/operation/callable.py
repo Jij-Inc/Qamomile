@@ -124,25 +124,6 @@ class CallableImplementation:
 
 
 @dataclasses.dataclass
-class ResourceModelBinding:
-    """Bind a resource model to a callable strategy or transform.
-
-    Args:
-        model (Any): Object implementing ``estimate(ResourceContext)``.
-        strategy (str | None): Strategy name matched by the estimator.
-            ``None`` means the model is a callable-level fallback.
-        transform (CallTransform | None): Optional direct/inverse/controlled
-            transform this model applies to. ``None`` means every transform.
-        estimate_kind (str): Informational estimate-kind tag.
-    """
-
-    model: Any
-    strategy: str | None = None
-    transform: CallTransform | None = None
-    estimate_kind: str = "strategy_model"
-
-
-@dataclasses.dataclass
 class CallableDef:
     """Describe a compiler-facing callable definition.
 
@@ -154,8 +135,8 @@ class CallableDef:
             intentionally deferred. Defaults to ``None``.
         implementations (list[CallableImplementation]): Alternative native or
             strategy-specific implementations.
-        resource_models (list[ResourceModelBinding]): Context-aware resource
-            models selected by the resource estimator.
+        opaque_cost (Any | None): Explicit cost contract for a bodyless
+            callable. Body-backed callables must leave this as ``None``.
         default_policy (CallPolicy): Default call lowering policy.
         attrs (dict[str, Any]): Serializer-friendly definition metadata.
     """
@@ -167,9 +148,7 @@ class CallableDef:
     implementations: list[CallableImplementation] = dataclasses.field(
         default_factory=list
     )
-    resource_models: list[ResourceModelBinding] = dataclasses.field(
-        default_factory=list
-    )
+    opaque_cost: Any | None = None
     default_policy: CallPolicy = CallPolicy.INLINE
     attrs: dict[str, Any] = dataclasses.field(default_factory=dict)
 

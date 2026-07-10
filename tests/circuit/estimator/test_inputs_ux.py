@@ -1,4 +1,4 @@
-"""Tests for the contract-aware ``substitutions`` estimation UX."""
+"""Tests for the contract-aware resource-estimation input UX."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
 
 
 @qmc.composite_gate(name="phase_u")
@@ -90,11 +91,10 @@ def _measurement_branch() -> qmc.Bit:
     return qmc.measure(r)
 
 
-@pytest.mark.parametrize("mode", ["bindings", "substitutions"])
-def test_branch_specialized_on_concrete_flag(mode: str) -> None:
+def test_branch_specialized_on_concrete_flag() -> None:
     """A decidable compile-time branch counts only the taken branch."""
-    true_est = _branch_probe.estimate_resources(**{mode: {"flag": 1}})
-    false_est = _branch_probe.estimate_resources(**{mode: {"flag": 0}})
+    true_est = _branch_probe.estimate_resources(inputs={"flag": 1})
+    false_est = _branch_probe.estimate_resources(inputs={"flag": 0})
     assert true_est.gates.total == 1  # only qmc.x
     assert false_est.gates.total == 2  # qmc.h + qmc.z
 
@@ -109,29 +109,20 @@ def test_branch_specialized_on_numpy_scalar(value: object) -> None:
     compile-time branch rather than being silently dropped to the conservative
     estimate.
     """
-    assert (
-        _branch_probe.estimate_resources(substitutions={"flag": value}).gates.total == 1
-    )
-    assert (
-        _cmp_branch.estimate_resources(substitutions={"n": np.int64(8)}).gates.total
-        == 1
-    )
+    assert _branch_probe.estimate_resources(inputs={"flag": value}).gates.total == 1
+    assert _cmp_branch.estimate_resources(inputs={"n": np.int64(8)}).gates.total == 1
 
 
-def test_branch_undecidable_stays_conservative() -> None:
-    """Without a value, an unbound predicate keeps the conservative maximum.
-
-    (The default ``flag=0`` is baked here, so this also confirms the default
-    path; the symbolic-max path is covered by the measurement-branch test.)
-    """
+def test_symbolic_compile_time_branch_stays_piecewise() -> None:
+    """A Python default remains a symbolic exact branch during estimation."""
     est = _branch_probe.estimate_resources()
-    assert est.gates.total == 2  # max(1, 2), default flag=0
+    assert str(est.gates.total) == "Piecewise((1, flag), (2, True))"
 
 
 def test_comparison_branch_specialized() -> None:
     """A comparison predicate is decided from a substituted value."""
-    assert _cmp_branch.estimate_resources(substitutions={"n": 8}).gates.total == 1
-    assert _cmp_branch.estimate_resources(substitutions={"n": 3}).gates.total == 3
+    assert _cmp_branch.estimate_resources(inputs={"n": 8}).gates.total == 1
+    assert _cmp_branch.estimate_resources(inputs={"n": 3}).gates.total == 3
 
 
 @qmc.qkernel
@@ -163,17 +154,12 @@ def _messages(est) -> list[str]:
     return [a.message for a in est.assumptions]
 
 
-def test_partially_supplied_branch_reports_undecidable() -> None:
-    """A branch left undecidable by a missing value records why, not a false no-op.
-
-    ``if n > m:`` with only ``n`` supplied cannot be decided, so the estimate
-    stays conservative AND records an assumption naming the unresolved ``m`` —
-    and must NOT claim the supplied ``n`` "does not affect any resource metric".
-    """
-    est = _two_param_branch.estimate_resources(substitutions={"n": 8})
-    assert est.gates.total == 2  # conservative max(1, 2)
+def test_partially_supplied_branch_remains_exact_piecewise() -> None:
+    """A partially specialized compile-time branch keeps its exact predicate."""
+    est = _two_param_branch.estimate_resources(inputs={"n": 8})
+    m = sp.Symbol("m", integer=True, positive=True)
+    assert est.gates.total == sp.Piecewise((1, m < 8), (2, True))
     messages = _messages(est)
-    assert any("undecidable" in m and "unresolved: m" in m for m in messages), messages
     assert not any("'n'" in m and "ignored" in m for m in messages)
 
 
@@ -185,25 +171,25 @@ def test_symbolic_branch_has_no_undecidable_noise() -> None:
 
 def test_fully_supplied_branch_specializes_without_assumption() -> None:
     """Supplying every predicate operand decides the branch, with no assumption."""
-    est = _two_param_branch.estimate_resources(substitutions={"n": 8, "m": 3})
+    est = _two_param_branch.estimate_resources(inputs={"n": 8, "m": 3})
     assert est.gates.total == 1
     assert not any("undecidable" in m for m in _messages(est))
 
 
 def test_pre_decided_predicate_has_no_undecidable_assumption() -> None:
     """A predicate decided by SymPy assumptions does not report undecidable."""
-    est = _positive_branch.estimate_resources(substitutions={"n": 8})
+    est = _positive_branch.estimate_resources(inputs={"n": 8})
     assert est.gates.total == 1
     assert not any("undecidable" in m for m in _messages(est))
 
 
 def test_dual_role_symbol_is_consistent() -> None:
     """A symbol driving both a branch and a size specializes both consistently."""
-    est5 = _dual_role.estimate_resources(substitutions={"n": 5})
+    est5 = _dual_role.estimate_resources(inputs={"n": 5})
     assert est5.gates.total == 6  # 5 H + 1 (n>3 true branch)
     assert int(est5.qubits) == 6  # 5 reg + 1 extra
 
-    est2 = _dual_role.estimate_resources(substitutions={"n": 2})
+    est2 = _dual_role.estimate_resources(inputs={"n": 2})
     assert est2.gates.total == 4  # 2 H + 2 (n>3 false branch)
     assert int(est2.qubits) == 3  # 2 reg + 1 extra
 
@@ -230,7 +216,7 @@ def test_untaken_branch_allocations_are_not_counted() -> None:
             q = qmc.cx(anc, q)[1]
         return q
 
-    taken = alloc_branch.estimate_resources(substitutions={"flag": 1})
+    taken = alloc_branch.estimate_resources(inputs={"flag": 1})
     # Only |q> is live on the true branch; the false-branch ancilla is gone.
     assert int(taken.qubits) == 1
 
@@ -271,70 +257,132 @@ def test_region_arg_drives_later_symbolic_loop() -> None:
     assert set(estimate.parameters) == {"n"}
 
 
-@pytest.mark.parametrize("mode", ["bindings", "substitutions"])
-def test_region_arg_drives_later_concrete_loop(mode: str) -> None:
-    """Bindings and substitutions both specialize a carried loop bound."""
-    estimate = _carried_loop_bound.estimate_resources(**{mode: {"n": 3}})
+def test_region_arg_drives_later_concrete_loop() -> None:
+    """Inputs specialize a carried loop bound."""
+    estimate = _carried_loop_bound.estimate_resources(inputs={"n": 3})
 
     assert estimate.gates.total == 3
     assert estimate.parameters == {}
 
 
-@pytest.mark.parametrize("mode", ["bindings", "substitutions"])
-def test_region_arg_drives_later_branch(mode: str) -> None:
+def test_large_input_keeps_region_loop_symbolic(monkeypatch) -> None:
+    """A large estimation input is substituted after loop summarization."""
+    from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
+
+    def fail_concrete_iteration(*args, **kwargs):
+        raise AssertionError("estimation input triggered concrete loop execution")
+
+    monkeypatch.setattr(
+        ResourceInterpreter,
+        "_eval_concrete_region_for",
+        fail_concrete_iteration,
+    )
+
+    estimate = _carried_loop_bound.estimate_resources(inputs={"n": 2048})
+    assert estimate.gates.total == 2048
+
+
+def test_region_arg_drives_later_branch() -> None:
     """A concrete carried value specializes a later compile-time branch."""
-    one = _carried_branch.estimate_resources(**{mode: {"n": 1}})
-    two = _carried_branch.estimate_resources(**{mode: {"n": 2}})
+    one = _carried_branch.estimate_resources(inputs={"n": 1})
+    two = _carried_branch.estimate_resources(inputs={"n": 2})
 
     assert one.gates.total == 1
     assert two.gates.total == 2
 
 
-def test_substitutions_pass_kernel_inputs_including_noop_angle() -> None:
+def test_inputs_include_noop_angle() -> None:
     """Passing all kernel inputs works; an angle that affects no metric is a no-op.
 
-    ``theta`` never appears in any resource expression, so substituting it is a
+    ``theta`` never appears in any resource expression, so supplying it is a
     recorded no-op rather than an error — the user simply passed the kernel's
     declared inputs.
     """
-    est = _toy_qpe.estimate_resources(substitutions={"bits": 5, "theta": 0.25})
+    est = _toy_qpe.estimate_resources(inputs={"bits": 5, "theta": 0.25})
 
     assert int(est.qubits) == 6  # 5 counting + 1 target
     ignored = [a.message for a in est.assumptions if "ignored" in a.message]
     assert any("theta" in message for message in ignored)
 
 
-def test_substitutions_force_symbolic_over_python_default() -> None:
-    """A substitution overrides a Python-signature default instead of baking it.
+def test_inputs_force_symbolic_over_python_default() -> None:
+    """Estimation keeps Python defaults symbolic until inputs specialize them.
 
-    ``bits`` has default 4; ``substitutions={"bits": 5}`` must estimate 5, not
-    silently use the default (which would build a 4-bit circuit and ignore the
-    request).
+    ``bits`` has default 4, but the symbolic-first estimator must expose the
+    expression rather than silently baking the execution default.
     """
-    # Without substitutions, the Python default (bits=4) is baked -> 5 qubits.
     default = _toy_qpe.estimate_resources()
-    assert int(default.qubits) == 5
+    bits = sp.Symbol("bits", integer=True, positive=True)
+    assert sp.simplify(default.qubits - (bits + 1)) == 0
 
-    # substitutions={"bits": 5} overrides the default -> 6 qubits (not 5).
-    est = _toy_qpe.estimate_resources(substitutions={"bits": 5})
+    est = _toy_qpe.estimate_resources(inputs={"bits": 5})
     assert int(est.qubits) == 6
 
 
-def test_substitutions_accept_shift_expression() -> None:
-    """A substitution value may reintroduce the same symbol name (n -> n+1)."""
+def test_inputs_accept_shift_expression() -> None:
+    """An input expression may reintroduce the same symbol name (n -> n+1)."""
     n = sp.Symbol("n", integer=True, positive=True)
-    est = _sized_kernel.estimate_resources(substitutions={"n": n + 1})
+    est = _sized_kernel.estimate_resources(inputs={"n": n + 1})
     # The reintroduced symbol still sizes the register correctly.
     assert sp.simplify(est.qubits - (n + 1)) == 0
 
 
-def test_substitutions_typo_raises() -> None:
+def test_input_typo_raises() -> None:
     """A name that is neither a free symbol nor a kernel argument raises."""
     with pytest.raises(ValueError, match="neither free symbols"):
-        _toy_qpe.estimate_resources(substitutions={"bti": 5})
+        _toy_qpe.estimate_resources(inputs={"bti": 5})
 
 
-def test_substitutions_bindings_overlap_raises() -> None:
-    """A name in both bindings and substitutions is rejected."""
-    with pytest.raises(ValueError, match="both bindings and substitutions"):
-        _sized_kernel.estimate_resources(bindings={"n": 4}, substitutions={"n": 4})
+def test_quantum_port_is_not_an_estimation_input() -> None:
+    """Quantum port names are rejected instead of treated as structural data."""
+
+    @qmc.qkernel
+    def quantum_input(q: qmc.Qubit) -> qmc.Qubit:
+        """Apply one gate to a caller-owned quantum input."""
+        return qmc.h(q)
+
+    with pytest.raises(ValueError, match="neither free symbols"):
+        quantum_input.estimate_resources(inputs={"q": 0})
+
+
+def test_inputs_trace_structural_values_and_specialize_scalars() -> None:
+    """One input mapping handles structural and symbolic qkernel arguments."""
+
+    @qmc.qkernel
+    def observable_probe(n: qmc.UInt, observable: qmc.Observable) -> qmc.Float:
+        """Apply ``n`` gates and evaluate one supplied observable."""
+        reg = qmc.qubit_array(n, "reg")
+        for index in qmc.range(n):
+            reg[index] = qmc.h(reg[index])
+        return qmc.expval(reg, observable)
+
+    estimate = observable_probe.estimate_resources(
+        inputs={"n": 3, "observable": qm_o.Z(0)}
+    )
+
+    assert estimate.qubits == 3
+    assert estimate.gates.total == 3
+    assert estimate.parameters == {}
+
+
+@pytest.mark.parametrize(
+    "angles",
+    [np.array([0.1, 0.2, 0.3]), [0.1, 0.2, 0.3]],
+    ids=["numpy", "list"],
+)
+def test_numeric_vector_input_specializes_shape(angles: object) -> None:
+    """A numeric vector input determines symbolic loop and register sizes."""
+
+    @qmc.qkernel
+    def vector_probe(angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Apply one rotation for every supplied angle."""
+        reg = qmc.qubit_array(angles.shape[0], "reg")
+        for index in qmc.range(angles.shape[0]):
+            reg[index] = qmc.rx(reg[index], angles[index])
+        return reg
+
+    estimate = vector_probe.estimate_resources(inputs={"angles": angles})
+
+    assert estimate.qubits == 3
+    assert estimate.gates.total == 3
+    assert estimate.parameters == {}
