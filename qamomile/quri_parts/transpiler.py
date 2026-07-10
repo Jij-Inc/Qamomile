@@ -1100,6 +1100,7 @@ class QuriPartsEmitPass(
             bindings (dict[str, Any]): Active compile-time and runtime
                 parameter bindings.
         """
+        impl = _prepare_nested_block_for_emit(impl, bindings)
         self._emit_block_inline(
             circuit,
             impl,
