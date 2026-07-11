@@ -34,6 +34,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm import amplitude_encoding
+from qamomile.circuit.stdlib.qft import QFT
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.qiskit import QiskitTranspiler
 
@@ -213,7 +214,7 @@ plt.show()
 # %% [markdown]
 # ### 多次元QFT
 #
-# Qamomileの`qmc.qft` composite qkernelを用いて、多次元QFTを実装しましょう。
+# Qamomileの`QFT`クラスを用いて、多次元QFTを実装しましょう。
 
 
 # %%

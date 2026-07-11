@@ -48,7 +48,7 @@
 # Block [HIERARCHICAL]
 #    │  substitute                  (ルールベースの置換、オプション)
 #    │  resolve_parameter_shapes    (Vectorのshape次元を具体化)
-#    │  inline                      (inline対象のInvokeOperationsを展開)
+#    │  inline                      (CallBlockOperationsを展開)
 #    ▼
 # Block [AFFINE]
 #    │  unroll_recursion            (inline ↔ partial_evalの反復)
@@ -124,7 +124,7 @@
 # | `GateOperation` | `H`、`RX`、`CX`、… | `ir/operation/gate.py` |
 # | `MeasureOperation` | 測定 | `ir/operation/measurement.py` |
 # | `ForOperation`、`IfOperation`、`WhileOperation` | 制御フロー | `ir/operation/control_flow.py` |
-# | `InvokeOperation` | 別のqkernel / composite / oracleの呼び出し | `ir/operation/callable.py` |
+# | `CallBlockOperation` | 別の`Block`の呼び出し（`inline`で除去） | `ir/operation/call_block_ops.py` |
 #
 # 制御フロー系のOperationはすべて`HasNestedOps`プロトコル（`nested_op_lists()` / `rebuild_nested()`）を実装しているので、パスは各Operationの型を特別扱いせず、ループや分岐の本体へ統一的に踏み込めます。
 #
@@ -133,7 +133,7 @@
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir import pretty_print_block
-from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.qiskit import QiskitTranspiler
 
@@ -188,7 +188,7 @@ def summarise(block):
 
 
 # %% [markdown]
-# 1行サマリーでは十分でないときのために、`qamomile.circuit.ir.pretty_print_block`が`Block`のMLIR風テキストダンプを返します。各パスの前後で**何がどう変わったか**を目で確認するには、こちらが最速です。`depth`引数で`InvokeOperation`の展開深さを制御できるので、たとえば`depth=1`なら「`inline`が実行したら何が起こるか」を先取りして眺められます。
+# 1行サマリーでは十分でないときのために、`qamomile.circuit.ir.pretty_print_block`が`Block`のMLIR風テキストダンプを返します。各パスの前後で**何がどう変わったか**を目で確認するには、こちらが最速です。`depth`引数で`CallBlockOperation`の展開深さを制御できるので、たとえば`depth=1`なら「`inline`が実行したら何が起こるか」を先取りして眺められます。
 
 # %% [markdown]
 # ## 4. ステージごとのウォークスルー
@@ -197,7 +197,7 @@ def summarise(block):
 #
 # ### 4.1 `to_block` — Python関数のトレーシング
 #
-# `to_block`はデコレート済み関数をトレーサコンテキスト下で実行します。`qmc.h(...)`、`qmc.range(...)`、`entangle_pair(...)`の各呼び出しは`Operation`としてBlockに記録されます。他の`@qkernel`への呼び出しは`InvokeOperation`になり、本体は**まだ**インライン展開されません。
+# `to_block`はデコレート済み関数をトレーサコンテキスト下で実行します。`qmc.h(...)`、`qmc.range(...)`、`entangle_pair(...)`の各呼び出しは`Operation`としてBlockに記録されます。他の`@qkernel`への呼び出しは`CallBlockOperation`になり、本体は**まだ**インライン展開されません。
 
 # %%
 bindings = {"n": 3}
@@ -210,10 +210,10 @@ assert block.kind.name == "HIERARCHICAL"
 print("parameters:       ", list(block.parameters))
 assert list(block.parameters) == ["theta"]
 print(
-    "InvokeOps:        ",
-    sum(1 for op in block.operations if isinstance(op, InvokeOperation)),
+    "CallBlockOps:     ",
+    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
 )
-# 注意: `InvokeOperation`は`ForOperation`の本体内部にも存在しうるので、
+# 注意: `CallBlockOperation`は`ForOperation`の本体内部にも存在しうるので、
 # 必ずしもトップレベルのリストにあるとは限りません。
 
 # %% [markdown]
@@ -223,7 +223,7 @@ print(
 print(pretty_print_block(block))
 
 # %% [markdown]
-# `depth=1`を付けると、`InvokeOperation`の先が呼び出し行のブレース内にインライン展開された形で表示されます。これは「`inline`を1回通したらどうなるか」を先読みしているのと同じ見た目で、次の節の内容を予習できます。
+# `depth=1`を付けると、`CallBlockOperation`の先が呼び出し行のブレース内にインライン展開された形で表示されます。これは「`inline`を1回通したらどうなるか」を先読みしているのと同じ見た目で、次の節の内容を予習できます。
 
 # %%
 print(pretty_print_block(block, depth=1))
@@ -233,14 +233,14 @@ print(pretty_print_block(block, depth=1))
 #
 # ### 4.2 `inline` — ネストしたブロック呼び出しの平坦化
 #
-# `inline`はinline対象の`InvokeOperation`を対象ブロックのOperationで置き換え、結果がwell-formedであり続けるようSSA値を置換します。inline対象のqkernel呼び出しが残らなくなるとブロックは`AFFINE`へ遷移します。
+# `inline`はすべての`CallBlockOperation`を対象ブロックのOperationで置き換え、結果がwell-formedであり続けるようSSA値を置換します。`CallBlockOperation`が残らなくなるとブロックは`AFFINE`へ遷移します。
 
 
 # %%
 def count_calls(ops):
     total = 0
     for op in ops:
-        if isinstance(op, InvokeOperation):
+        if isinstance(op, CallBlockOperation):
             total += 1
         # ループ内の呼び出しも数えるため、ネストした制御フロー本体を再帰的に辿ります。
         for child in getattr(op, "nested_op_lists", lambda: [])():
@@ -251,7 +251,7 @@ def count_calls(ops):
 block = transpiler.inline(block)
 print("after inline:     ", summarise(block))
 assert block.kind.name == "AFFINE"
-print("InvokeOps (deep):", count_calls(block.operations))
+print("CallBlockOps (deep):", count_calls(block.operations))
 assert count_calls(block.operations) == 0
 print("is_affine:        ", block.is_affine())
 assert block.is_affine()
@@ -502,7 +502,7 @@ print(pretty_print_block(qfixed_block))
 # 内部挙動を目で見たいときは`lower_operations`を直接呼べます。
 
 # %%
-from qamomile.circuit.transpiler.passes.separate import lower_operations  # noqa: E402
+from qamomile.circuit.transpiler.passes.separate import lower_operations
 
 lowered = lower_operations(qfixed_block)
 print(pretty_print_block(lowered))
@@ -560,10 +560,7 @@ try:
     )
 
     print("backend circuit type: ", type(quri_exe.quantum_circuit).__name__)
-    assert (
-        type(quri_exe.quantum_circuit).__name__
-        == "LinearMappedParametricQuantumCircuit"
-    )
+    assert type(quri_exe.quantum_circuit).__name__ == "LinearMappedParametricQuantumCircuit"
     print("parameter_names:      ", quri_exe.parameter_names)
     assert list(quri_exe.parameter_names) == ["theta"]
     print()
@@ -603,7 +600,7 @@ except ModuleNotFoundError:
 # 3. ユーザーが`executor()`を呼べるように`QuantumExecutor[T]`のサブクラスを実装します。
 # 4. オプション: emitされた回路で高レベル構造を保つため、QFT/QPEなどの`CompositeGateEmitter`を追加します。
 #
-# **transpileエラーのデバッグ。** パスを1つずつ実行し、その間に`summarise(block)`で件数の変化を追い、気になるところは`pretty_print_block(block)`で中身を覗きます。`BlockKind`が進まない、Operation数が爆発する、例外が送出される、というステージが最初に見るべき場所です。`pretty_print_block(block, depth=N)`で`InvokeOperation`の展開深さを変えながら`inline`前後を比較すると、どこで値が切れたか・どのPhiが漏れたかが読み取りやすくなります。
+# **transpileエラーのデバッグ。** パスを1つずつ実行し、その間に`summarise(block)`で件数の変化を追い、気になるところは`pretty_print_block(block)`で中身を覗きます。`BlockKind`が進まない、Operation数が爆発する、例外が送出される、というステージが最初に見るべき場所です。`pretty_print_block(block, depth=N)`で`CallBlockOperation`の展開深さを変えながら`inline`前後を比較すると、どこで値が切れたか・どのPhiが漏れたかが読み取りやすくなります。
 
 # %% [markdown]
 # ## 9. まとめ
