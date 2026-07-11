@@ -1008,16 +1008,16 @@ class TestSliceArrayOperation:
         assert av.slice_step is not None
 
 
-class TestViewAsKernelOperandViaCallBlock:
-    """View flows through ``CallBlockOperation`` (V6 removes inline-trace)."""
+class TestViewAsKernelOperandViaInvoke:
+    """View flows through inline ``InvokeOperation`` calls."""
 
-    def test_view_arg_routes_through_callblock(self):
+    def test_view_arg_routes_through_invoke(self):
         """Kernel called with a view now uses the standard call path.
 
         Previously (V1), views forced ``_inline_trace_call`` because
         they had no IR representation.  V6 makes the sliced
         ``ArrayValue`` first-class, so the callee receives the view
-        through the normal ``CallBlockOperation`` operand chain.  The
+        through the normal inline ``InvokeOperation`` operand chain.  The
         user-facing behaviour (gates land on the right qubits) is
         unchanged; this test pins the IR-level path.
         """

@@ -2,7 +2,7 @@
 
 ``InverseBlockOperation`` represents "apply the inverse of this block"
 as a single IR operation. It shares the operand layout convention of
-:class:`~qamomile.circuit.ir.operation.composite_gate.CompositeGateOperation`
+:class:`~qamomile.circuit.ir.operation.callable.InvokeOperation`
 (control qubits, then quantum targets, then classical/object
 parameters) but is an independent :class:`Operation` subclass, not a
 composite-gate variant.
@@ -11,9 +11,10 @@ composite-gate variant.
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.callable import CallableRef
 from qamomile.circuit.ir.types.primitives import BlockType, QubitType
 from qamomile.circuit.ir.value import ArrayValue
 
@@ -48,6 +49,10 @@ class InverseBlockOperation(Operation):
         source_block (Block): Forward block whose inverse should be emitted.
         implementation_block (Block): Fallback block that already contains
             the gate-by-gate inverse implementation.
+        callable_ref (CallableRef | None): Stable identity of the source
+            callable being inverted.
+        callable_attrs (dict[str, Any]): Serializer-friendly attrs copied from
+            the source callable definition.
     """
 
     num_control_qubits: int = 0
@@ -55,6 +60,8 @@ class InverseBlockOperation(Operation):
     custom_name: str = ""
     source_block: Block | None = None
     implementation_block: Block | None = None
+    callable_ref: CallableRef | None = None
+    callable_attrs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate inverse-block operand and result layout invariants.

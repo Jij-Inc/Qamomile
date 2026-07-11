@@ -468,10 +468,88 @@ class ClassicalExecutor:
         self._materialize_loop_store_defaults(
             op.operations, context, results, scoped_locals
         )
+        self._seed_region_args(op, context, results, scoped_locals)
         for loop_value in range(start, stop, step):
             loop_scope = scoped_locals.copy()
             loop_scope[op.loop_var] = loop_value
             self._execute_operations(op.operations, context, results, loop_scope)
+            self._advance_region_args(op, context, results, scoped_locals)
+        self._publish_region_results(op, results)
+
+    def _seed_region_args(
+        self,
+        op: ForOperation | ForItemsOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Bind each region argument's block argument to its init value.
+
+        Runs once before iteration 0 so the body's loop-carried reads
+        (which reference ``block_arg``) observe the pre-loop value on
+        the first pass.
+
+        Args:
+            op (ForOperation | ForItemsOperation): The loop being
+                executed.
+            context (ExecutionContext): Execution context.
+            results (dict[str, Any]): Intermediate results by UUID.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+        """
+        for arg in op.region_args:
+            results[arg.block_arg.uuid] = self._get_value(
+                arg.init, context, results, scoped_locals
+            )
+
+    def _advance_region_args(
+        self,
+        op: ForOperation | ForItemsOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Carry each region argument's yielded value into the next iteration.
+
+        Runs after each body execution: the block argument is rebound to
+        the value the body just yielded, exactly the MLIR
+        ``iter_args`` / ``yield`` step.
+
+        Args:
+            op (ForOperation | ForItemsOperation): The loop being
+                executed.
+            context (ExecutionContext): Execution context.
+            results (dict[str, Any]): Intermediate results by UUID.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+        """
+        # Two-phase: resolve every yielded value against the CURRENT
+        # iteration's state before rebinding any block argument, so
+        # simultaneous carries (``a, b = b, a``) read the pre-advance
+        # values instead of a partially updated mix.
+        advanced = {
+            arg.block_arg.uuid: self._get_value(
+                arg.yielded, context, results, scoped_locals
+            )
+            for arg in op.region_args
+        }
+        results.update(advanced)
+
+    def _publish_region_results(
+        self,
+        op: ForOperation | ForItemsOperation,
+        results: dict[str, Any],
+    ) -> None:
+        """Expose each region argument's final carried value as the loop result.
+
+        Runs once after the last iteration (or immediately for a
+        zero-trip loop, in which case the result is the init value the
+        seed step stored).
+
+        Args:
+            op (ForOperation | ForItemsOperation): The executed loop.
+            results (dict[str, Any]): Intermediate results by UUID.
+        """
+        for arg in op.region_args:
+            results[arg.result.uuid] = results[arg.block_arg.uuid]
 
     def _execute_for_items(
         self,
@@ -489,11 +567,14 @@ class ClassicalExecutor:
         self._materialize_loop_store_defaults(
             op.operations, context, results, scoped_locals
         )
+        self._seed_region_args(op, context, results, scoped_locals)
         for key, value in iterable:
             loop_scope = scoped_locals.copy()
             self._bind_for_items_key(loop_scope, op, key)
             loop_scope[op.value_var] = value
             self._execute_operations(op.operations, context, results, loop_scope)
+            self._advance_region_args(op, context, results, scoped_locals)
+        self._publish_region_results(op, results)
 
     def _execute_if(
         self,

@@ -17,7 +17,7 @@ from qamomile.qiskit import QiskitTranspiler
 
 @qmc.qkernel
 def _bell(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-    """Helper used to exercise CallBlockOperation."""
+    """Helper used to exercise inline InvokeOperation."""
     q0 = qmc.h(q0)
     q0, q1 = qmc.cx(q0, q1)
     return q0, q1
@@ -44,8 +44,9 @@ def _with_for(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 @qmc.qkernel
 def _with_runtime_if() -> qmc.Bit:
     q = qmc.qubit(name="q")
-    q = qmc.h(q)
-    bit = qmc.measure(q)
+    c = qmc.qubit(name="c")
+    c = qmc.h(c)
+    bit = qmc.measure(c)
     if bit:
         q = qmc.x(q)
     return qmc.measure(q)
@@ -123,37 +124,37 @@ def test_if_renders_both_branches_and_merge():
 
 
 # ---------------------------------------------------------------------------
-# CallBlockOperation depth expansion
+# InvokeOperation depth expansion
 # ---------------------------------------------------------------------------
 
 
-def test_call_block_depth_zero_shows_name_only():
+def test_invoke_depth_zero_shows_name_only():
     transpiler = QiskitTranspiler()
     block = transpiler.to_block(_with_for, bindings={"n": 3}, parameters=["theta"])
     out = pretty_print_block(block, depth=0)
-    # The callee name must appear in a "call" line.
-    call_lines = [ln for ln in out.splitlines() if "call " in ln]
-    assert any("_bell" in ln for ln in call_lines), (
-        f"expected callee name in call line, got:\n{out}"
+    # The callee name must appear in an "invoke" line.
+    invoke_lines = [ln for ln in out.splitlines() if "invoke " in ln]
+    assert any("_bell" in ln for ln in invoke_lines), (
+        f"expected callee name in invoke line, got:\n{out}"
     )
-    # Depth 0 must not open a nested block after the call.
-    for ln in call_lines:
+    # Depth 0 must not open a nested block after the invocation.
+    for ln in invoke_lines:
         assert not ln.rstrip().endswith("{"), (
-            f"depth=0 should not open a nested call block:\n{out}"
+            f"depth=0 should not open a nested invoke block:\n{out}"
         )
 
 
-def test_call_block_depth_one_expands_body():
+def test_invoke_depth_one_expands_body():
     transpiler = QiskitTranspiler()
     block = transpiler.to_block(_with_for, bindings={"n": 3}, parameters=["theta"])
     out = pretty_print_block(block, depth=1)
     # At depth=1 we expect to see the callee body (h + cx) expanded inline.
     assert " = h(" in out
     assert " = cx(" in out
-    # A nested open brace should appear on a call line.
+    # A nested open brace should appear on an invoke line.
     assert any(
-        "call " in ln and ln.rstrip().endswith("{") for ln in out.splitlines()
-    ), f"depth=1 should open a nested call block:\n{out}"
+        "invoke " in ln and ln.rstrip().endswith("{") for ln in out.splitlines()
+    ), f"depth=1 should open a nested invoke block:\n{out}"
 
 
 # ---------------------------------------------------------------------------

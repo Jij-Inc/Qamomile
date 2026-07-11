@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
 
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
+    InvokeOperation,
 )
 
 
@@ -39,7 +39,7 @@ class QiskitQFTEmitter:
     def emit(
         self,
         circuit: "QuantumCircuit",
-        op: CompositeGateOperation,
+        op: InvokeOperation,
         qubit_indices: list[int],
         bindings: dict[str, Any],
     ) -> bool:
@@ -47,7 +47,7 @@ class QiskitQFTEmitter:
 
         Args:
             circuit: The Qiskit QuantumCircuit to emit to
-            op: The CompositeGateOperation (QFT or IQFT)
+            op: The invocation (QFT or IQFT)
             qubit_indices: Physical qubit indices for the operation
             bindings: Parameter bindings (unused for QFT/IQFT)
 
@@ -85,7 +85,7 @@ class QiskitQFTEmitter:
         circuit: "QuantumCircuit",
         qubit_indices: list[int],
     ) -> bool:
-        """Emit IQFT directly without CompositeGateOperation.
+        """Emit IQFT directly without an InvokeOperation wrapper.
 
         Used for recursive native emit within other composite gates (e.g., QPE).
 
@@ -113,7 +113,7 @@ class QiskitQFTEmitter:
         circuit: "QuantumCircuit",
         qubit_indices: list[int],
     ) -> bool:
-        """Emit QFT directly without CompositeGateOperation.
+        """Emit QFT directly without an InvokeOperation wrapper.
 
         Used for recursive native emit within other composite gates.
 

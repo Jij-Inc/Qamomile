@@ -135,6 +135,10 @@ class QiskitGateEmitter:
     def emit_measure(self, circuit: "QuantumCircuit", qubit: int, clbit: int) -> None:
         circuit.measure(qubit, clbit)
 
+    def emit_reset(self, circuit: "QuantumCircuit", qubit: int) -> None:
+        """Emit reset to the |0> state."""
+        circuit.reset(qubit)
+
     # Barrier
     def emit_barrier(self, circuit: "QuantumCircuit", qubits: list[int]) -> None:
         if qubits:

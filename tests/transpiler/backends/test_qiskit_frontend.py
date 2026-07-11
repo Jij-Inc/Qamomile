@@ -2700,7 +2700,7 @@ class TestControlFlowWhileStructure:
         assert isinstance(qc.data[2].operation, WhileLoopOp)
 
     def test_while_loop_structure(self):
-        """While loop body sub-circuit: H(q0) → Measure(q0→c)."""
+        """While loop body sub-circuit: reset → H(q0) → Measure(q0→c)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2720,17 +2720,22 @@ class TestControlFlowWhileStructure:
         assert isinstance(while_inst.operation, WhileLoopOp)
         body = while_inst.operation.params[0]
 
-        # Body has exactly 2 instructions
-        assert len(body.data) == 2
+        # Body has exactly 3 instructions. The leading reset prepares a
+        # nested fresh allocation as |0> on every runtime iteration.
+        assert len(body.data) == 3
         assert body.num_qubits == 1
 
-        # Body[0]: H on body-qubit 0
-        assert isinstance(body.data[0].operation, HGate)
+        # Body[0]: reset on body-qubit 0
+        assert body.data[0].operation.name == "reset"
         assert [body.find_bit(q).index for q in body.data[0].qubits] == [0]
 
-        # Body[1]: Measure on body-qubit 0
-        assert isinstance(body.data[1].operation, Measure)
+        # Body[1]: H on body-qubit 0
+        assert isinstance(body.data[1].operation, HGate)
         assert [body.find_bit(q).index for q in body.data[1].qubits] == [0]
+
+        # Body[2]: Measure on body-qubit 0
+        assert isinstance(body.data[2].operation, Measure)
+        assert [body.find_bit(q).index for q in body.data[2].qubits] == [0]
 
     def test_while_loop_circuit_structure(self):
         """Top-level resource counts for a while-loop circuit."""
@@ -2789,7 +2794,7 @@ class TestControlFlowWhileStructure:
         assert isinstance(qc.data[2].operation, WhileLoopOp)
 
     def test_while_loop_body_gate_verification(self):
-        """Body sub-circuit has H then Measure, both targeting body-qubit 0."""
+        """Body sub-circuit resets, gates, and measures body-qubit 0."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2808,21 +2813,26 @@ class TestControlFlowWhileStructure:
         assert isinstance(qc.data[2].operation, WhileLoopOp)
         body = qc.data[2].operation.params[0]
 
-        # Body has exactly 2 instructions
-        assert len(body.data) == 2
+        # Body has exactly 3 instructions
+        assert len(body.data) == 3
 
-        # Body[0]: H on body-qubit 0
-        assert isinstance(body.data[0].operation, HGate)
+        # Body[0]: reset on body-qubit 0
+        assert body.data[0].operation.name == "reset"
         assert [body.find_bit(q).index for q in body.data[0].qubits] == [0]
 
-        # Body[1]: Measure on body-qubit 0
-        assert isinstance(body.data[1].operation, Measure)
+        # Body[1]: H on body-qubit 0
+        assert isinstance(body.data[1].operation, HGate)
         assert [body.find_bit(q).index for q in body.data[1].qubits] == [0]
 
-        # H and Measure target the same qubit
-        h_target = [body.find_bit(q).index for q in body.data[0].qubits]
-        m_target = [body.find_bit(q).index for q in body.data[1].qubits]
-        assert h_target == m_target
+        # Body[2]: Measure on body-qubit 0
+        assert isinstance(body.data[2].operation, Measure)
+        assert [body.find_bit(q).index for q in body.data[2].qubits] == [0]
+
+        # Reset, H and Measure target the same qubit
+        reset_target = [body.find_bit(q).index for q in body.data[0].qubits]
+        h_target = [body.find_bit(q).index for q in body.data[1].qubits]
+        m_target = [body.find_bit(q).index for q in body.data[2].qubits]
+        assert reset_target == h_target == m_target
 
     # -- clbit aliasing (the root cause of the infinite-loop bug) ----------
     # NOTE: clbit aliasing and single-clbit tests are in the X-body section
@@ -2831,7 +2841,7 @@ class TestControlFlowWhileStructure:
     # -- body gate ordering -----------------------------------------------
 
     def test_while_loop_body_gate_order(self):
-        """Body gates must appear in source order: H → measure."""
+        """Body gates must appear in emitted order: reset → H → measure."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2847,9 +2857,10 @@ class TestControlFlowWhileStructure:
         _, qc = _transpile_and_get_circuit(circuit)
         assert isinstance(qc.data[2].operation, WhileLoopOp)
         body = qc.data[2].operation.params[0]
-        assert len(body.data) == 2
-        assert isinstance(body.data[0].operation, HGate)
-        assert isinstance(body.data[1].operation, Measure)
+        assert len(body.data) == 3
+        assert body.data[0].operation.name == "reset"
+        assert isinstance(body.data[1].operation, HGate)
+        assert isinstance(body.data[2].operation, Measure)
 
     # -- outer circuit gate ordering --------------------------------------
 
@@ -2906,7 +2917,7 @@ class TestControlFlowWhileStructure:
     # -- X-body structure: initial X, body has H + measure ----------------
 
     def test_while_loop_x_init_body_contains_expected_gates(self):
-        """X-initialized while loop body must contain H and measure."""
+        """X-initialized while loop body must contain reset, H and measure."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2922,9 +2933,10 @@ class TestControlFlowWhileStructure:
         _, qc = _transpile_and_get_circuit(circuit)
         assert isinstance(qc.data[2].operation, WhileLoopOp)
         body = qc.data[2].operation.params[0]
-        assert len(body.data) == 2
-        assert isinstance(body.data[0].operation, HGate)
-        assert isinstance(body.data[1].operation, Measure)
+        assert len(body.data) == 3
+        assert body.data[0].operation.name == "reset"
+        assert isinstance(body.data[1].operation, HGate)
+        assert isinstance(body.data[2].operation, Measure)
 
     def test_while_loop_body_measure_same_clbit(self):
         """Body measurement must write to the same clbit as the condition.
@@ -3327,8 +3339,9 @@ class TestControlFlowWhileStructure:
         assert isinstance(while_body.data[0].operation, IfElseOp)
         if_inst = while_body.data[0]
         if_body = if_inst.operation.blocks[0]
-        assert len(if_body.data) == 1  # measure
-        assert isinstance(if_body.data[0].operation, Measure)
+        assert len(if_body.data) == 2  # reset + measure
+        assert if_body.data[0].operation.name == "reset"
+        assert isinstance(if_body.data[1].operation, Measure)
 
         # Test if the initial measurement writes to the clbit used by the while condition.
         while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
@@ -3343,7 +3356,7 @@ class TestControlFlowWhileStructure:
         assert if_cond_clbit_idx == second_measure_clbit_idx
 
         # Test if the third measurement (in the if body) writes to the same clbit as the while condition.
-        if_body_measure = if_body.data[0]
+        if_body_measure = if_body.data[1]
         if_body_measure_clbit_idx = qc.clbits.index(if_body_measure.clbits[0])
         assert if_body_measure_clbit_idx == while_cond_clbit_idx
 
@@ -3418,8 +3431,9 @@ class TestControlFlowWhileStructure:
         inner_if_body = inner_if_inst.operation.blocks[0]
         inner_else_body = inner_if_inst.operation.blocks[1]
         assert len(inner_else_body.data) == 0  # no else
-        assert len(inner_if_body.data) == 1  # measure
-        assert isinstance(inner_if_body.data[0].operation, Measure)
+        assert len(inner_if_body.data) == 2  # reset + measure
+        assert inner_if_body.data[0].operation.name == "reset"
+        assert isinstance(inner_if_body.data[1].operation, Measure)
 
         # Clbit mapping checks
         while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
@@ -3437,7 +3451,7 @@ class TestControlFlowWhileStructure:
         third_measure_clbit_idx = qc.clbits.index(third_measure.clbits[0])
         assert inner_if_cond_clbit_idx == third_measure_clbit_idx
 
-        inner_if_body_measure = inner_if_body.data[0]
+        inner_if_body_measure = inner_if_body.data[1]
         inner_if_body_measure_clbit_idx = qc.clbits.index(
             inner_if_body_measure.clbits[0]
         )
@@ -3946,7 +3960,7 @@ class TestTranspilerPassesPipeline:
         assert len(block.operations) > 0
 
     def test_inline(self, transpiler):
-        """inline() flattens CallBlockOperations from sub-kernel calls."""
+        """inline() flattens inline invocations from sub-kernel calls."""
 
         @qmc.qkernel
         def sub_kernel(q: qmc.Qubit) -> qmc.Qubit:
@@ -4135,7 +4149,7 @@ class TestTranspilerConfigAndSubstitution:
         assert transpiler.config is config
 
     def test_substitute_pass_sets_strategy(self):
-        """substitute() pass sets strategy_name on CompositeGateOperation."""
+        """substitute() pass sets strategy_name on InvokeOperation."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4341,19 +4355,6 @@ class TestTranspilerConfigAndSubstitution:
         )
         assert cp_approx == 7  # truncated to k=2 neighbors
         assert cp_approx < cp_std
-
-    def test_qft_strategy_resources(self):
-        """QFT strategy resource metadata is consistent."""
-        from qamomile.circuit.stdlib.qft import QFT
-
-        qft_gate = QFT(5)
-        standard_resources = qft_gate.get_resources_for_strategy("standard")
-        approx_resources = qft_gate.get_resources_for_strategy("approximate_k2")
-
-        assert standard_resources.custom_metadata["num_cp_gates"] == 10
-        assert approx_resources.custom_metadata["num_cp_gates"] < 10
-        assert standard_resources.custom_metadata["num_h_gates"] == 5
-        assert approx_resources.custom_metadata["num_h_gates"] == 5
 
     def test_substitute_no_rules_is_noop(self):
         """substitute() with no config rules returns block unchanged."""
@@ -4853,41 +4854,39 @@ class TestControlledGate:
         assert qc.num_qubits == 2
 
 
+@qmc.composite_gate(name="bell_pair")
+def _custom_bell_pair(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Prepare a Bell pair through the public composite API.
+
+    Args:
+        q0 (qmc.Qubit): Control qubit.
+        q1 (qmc.Qubit): Target qubit.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Updated Bell-pair qubits.
+    """
+    q0 = qmc.h(q0)
+    return qmc.cx(q0, q1)
+
+
 class TestCustomCompositeGate:
-    """Test custom CompositeGate through the full pipeline."""
+    """Test a custom composite qkernel through the full pipeline."""
 
     def test_custom_gate_transpiles(self):
-        """Custom CompositeGate decomposes and transpiles."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return (q0, q1)
-
-        bell = BellPair()
+        """A custom composite is boxed, decomposable, and executable."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
-        # CompositeGate may allocate extra qubits internally
+        sv = _run_statevector(qc, decompose=True)
         num_q = qc.num_qubits
-        # This test assumes the Bell pair occupies the only two qubits.
-        # If CompositeGate ever allocates ancillas, update the expected-state
-        # construction instead of relaxing this assertion.
         assert num_q == 2
         expected = np.zeros(2**num_q, dtype=complex)
         expected[0] = 1.0 / np.sqrt(2)  # |00>
