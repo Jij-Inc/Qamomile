@@ -29,6 +29,7 @@ class CircuitStyle:
         block_box_edge_color: Edge color for block mode boxes.
         font_size: Font size for gate labels.
         subfont_size: Font size for subscripts and smaller text.
+        folded_marker_radius: Radius of folded-block participation markers.
         margin: Margins around the circuit (left, right, top, bottom).
     """
 
@@ -59,7 +60,7 @@ class CircuitStyle:
     for_loop_text_color: str = "#000000"  # Black
     for_loop_edge_color: str = "#C4A882"  # Warm tan
 
-    # While-loop box colors (future use: not yet dispatched)
+    # While-loop box colors
     while_loop_face_color: str = "#E0D4F0"  # Light lavender
     while_loop_text_color: str = "#000000"  # Black
     while_loop_edge_color: str = "#A88BC8"  # Muted purple
@@ -69,7 +70,7 @@ class CircuitStyle:
     for_items_text_color: str = "#000000"  # Black
     for_items_edge_color: str = "#90B890"  # Muted green
 
-    # If-operation box colors (future use: not yet dispatched)
+    # If-operation box colors
     if_face_color: str = "#F0D8D0"  # Light coral
     if_text_color: str = "#000000"  # Black
     if_edge_color: str = "#C8A898"  # Muted tan
@@ -158,6 +159,7 @@ class CircuitStyle:
 
     # Folded box vertical padding for text
     folded_box_text_v_padding: float = 0.15
+    folded_marker_radius: float = 0.05
 
     # Max characters for folded loop body text (truncated with ellipsis)
     max_folded_body_chars: int = 40
@@ -171,7 +173,9 @@ class CircuitStyle:
     qubit_y_label_height: float = 0.25  # Height reserved for block labels in y-spacing
 
     # Figure size constants
-    figure_scale_factor: float = 0.8  # Scaling factor for figure dimensions
+    # Minimum physical inches per layout unit. Renderer clamps values below
+    # one so measured text dimensions remain conservative in data space.
+    figure_scale_factor: float = 1.0
     figure_min_width: float = 4.0  # Minimum figure width in inches
     figure_min_height: float = 2.0  # Minimum figure height in inches
     x_left_min_bound: float = -1.0  # Minimum allowed x_left value

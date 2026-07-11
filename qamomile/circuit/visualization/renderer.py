@@ -8,27 +8,26 @@ from __future__ import annotations
 
 import io
 import math
-from collections import defaultdict
 from typing import TYPE_CHECKING
 
 import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-from matplotlib.font_manager import FontProperties
 
-from .geometry import (
-    compute_block_box_bounds,
-    compute_border_padding,
-    compute_nested_block_box_bounds,
-)
 from .style import CircuitStyle
 from .types import (
     PORDER_GATE,
     PORDER_LINE,
     PORDER_TEXT,
     PORDER_WIRE,
+    ControlFlowLayout,
+    FoldedBlockLayout,
+    InlineBlockLayout,
     LayoutResult,
+    LineSegment,
+    PoweredGateLayout,
+    Rect,
 )
 from .visual_ir import (
     GateOperationType,
@@ -46,24 +45,32 @@ from .visual_ir import (
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
-    from matplotlib.transforms import Bbox
 
 
 class MatplotlibRenderer:
-    """Renders circuit diagrams using matplotlib.
+    """Render circuit diagrams using matplotlib.
 
     Takes pre-computed layout coordinates and draws the circuit
     using matplotlib primitives.
+
+    Args:
+        style (CircuitStyle): Visual style used for patches, text, and figure
+            sizing.
     """
 
-    def __init__(self, style: CircuitStyle):
+    def __init__(self, style: CircuitStyle) -> None:
+        """Initialize a renderer with immutable style settings.
+
+        Args:
+            style (CircuitStyle): Visual style used for patches, text, and
+                figure sizing.
+        """
         self.style = style
         # These are set during render()
         self.layout: LayoutResult | None = None
         self.qubit_y: list[float] = []
         self.qubit_end_positions: dict[int, float] = {}
         self.qubit_names: dict[int, str] = {}
-        self._inlined_op_keys: set[tuple] = set()
 
     def render(self, vc: VisualCircuit, layout: LayoutResult) -> Figure:
         """Render the circuit from a VisualCircuit.
@@ -71,21 +78,19 @@ class MatplotlibRenderer:
         Uses the Visual IR tree which carries all pre-resolved information.
 
         Args:
-            vc: VisualCircuit containing pre-resolved Visual IR nodes.
-            layout: Pre-computed layout result.
+            vc (VisualCircuit): Circuit containing pre-resolved visual nodes.
+            layout (LayoutResult): Pre-computed authoritative geometry.
 
         Returns:
-            matplotlib Figure.
+            Figure: Configured matplotlib figure.
         """
         self.layout = layout
         self.qubit_y = layout.qubit_y
         self.qubit_end_positions = layout.qubit_end_positions
         self.qubit_names = vc.qubit_names
-        self._inlined_op_keys = layout.inlined_op_keys
-        self._output_names = vc.output_names
 
         fig = self._create_figure(vc.num_qubits)
-        self._draw_wires(fig, vc.num_qubits, vc.qubit_map)
+        self._draw_wires(fig, vc.num_qubits)
         self._draw_operations(fig, vc)
         self._add_jupyter_display_support(fig)
         return fig
@@ -97,796 +102,425 @@ class MatplotlibRenderer:
         eliminating all Analyzer dependencies during drawing.
 
         Args:
-            fig: matplotlib Figure.
-            vc: VisualCircuit containing pre-resolved Visual IR nodes.
+            fig (Figure): Target matplotlib figure.
+            vc (VisualCircuit): Visual circuit containing pre-resolved nodes.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If any non-empty visual node lacks layout-owned
+                geometry required for rendering.
         """
         assert self.layout is not None
-        positions = self.layout.positions
-        block_ranges = self.layout.block_ranges
-        block_widths = self.layout.block_widths
-        gate_widths = self.layout.gate_widths
+        self._draw_visual_nodes(fig, vc.children)
 
-        # First, draw block borders (behind gates)
-        max_depth = max((b["depth"] for b in block_ranges), default=0)
-
-        # Pre-expand outer block boundaries to contain inner blocks
-        for inner in sorted(block_ranges, key=lambda b: -b["depth"]):
-            for outer in block_ranges:
-                if outer["depth"] < inner["depth"]:
-                    inner_qubits = set(inner["qubit_indices"])
-                    outer_qubits = set(outer["qubit_indices"])
-                    if inner_qubits.issubset(outer_qubits):
-                        if (
-                            inner["end_x"] < outer["start_x"]
-                            or inner["start_x"] > outer["end_x"]
-                        ):
-                            continue
-                        inner_mgw = inner.get("max_gate_width", self.style.gate_width)
-                        inner_box_left, inner_box_right = compute_block_box_bounds(
-                            self.style,
-                            inner.get("name", "block"),
-                            inner["start_x"],
-                            inner["end_x"],
-                            inner["depth"],
-                            inner_mgw,
-                            inner.get("power", 1),
-                        )
-                        outer_mgw = outer.get("max_gate_width", self.style.gate_width)
-                        outer_padding = compute_border_padding(
-                            self.style, outer["depth"]
-                        )
-                        outer_gtp = self.style.gate_text_padding
-                        outer_box_left = (
-                            outer["start_x"] - outer_mgw / 2 - outer_padding - outer_gtp
-                        )
-                        _, outer_box_right = compute_block_box_bounds(
-                            self.style,
-                            outer.get("name", "block"),
-                            outer["start_x"],
-                            outer["end_x"],
-                            outer["depth"],
-                            outer_mgw,
-                            outer.get("power", 1),
-                        )
-                        margin = 0.1
-                        if inner_box_left - margin < outer_box_left:
-                            outer["start_x"] = (
-                                inner_box_left
-                                - margin
-                                + outer_mgw / 2
-                                + outer_padding
-                                + outer_gtp
-                            )
-                        if inner_box_right + margin > outer_box_right:
-                            outer["end_x"] = (
-                                inner_box_right
-                                + margin
-                                - outer_mgw / 2
-                                - outer_padding
-                                - outer_gtp
-                            )
-
-        # Group blocks by topmost qubit for overlap calculation
-        qubit_blocks: dict[int, list[dict]] = defaultdict(list)
-        for block_info in block_ranges:
-            top_qubit = min(block_info["qubit_indices"])
-            qubit_blocks[top_qubit].append(block_info)
-
-        for qubit, blocks in qubit_blocks.items():
-            blocks.sort(key=lambda b: b["start_x"])
-            for i, block_info in enumerate(blocks):
-                overlap_count = 0
-                block_x_start = block_info["start_x"]
-                block_x_end = block_info["end_x"]
-                for j in range(i):
-                    prev_block = blocks[j]
-                    prev_x_start = prev_block["start_x"]
-                    prev_x_end = prev_block["end_x"]
-                    if block_x_start < prev_x_end + 0.5:
-                        if (
-                            prev_x_start <= block_x_start and prev_x_end >= block_x_end
-                        ) or (
-                            block_x_start <= prev_x_start and block_x_end >= prev_x_end
-                        ):
-                            continue
-                        overlap_count += 1
-
-                ctrl_indices = block_info.get("control_qubit_indices", [])
-                if ctrl_indices:
-                    target_only = [
-                        q for q in block_info["qubit_indices"] if q not in ctrl_indices
-                    ]
-                    border_qubits = (
-                        target_only if target_only else block_info["qubit_indices"]
-                    )
-                else:
-                    border_qubits = block_info["qubit_indices"]
-
-                box_bottom, box_top = self._draw_inlined_block_border(
-                    fig._qm_ax,  # type: ignore[attr-defined]
-                    name=block_info["name"],
-                    start_x=block_info["start_x"],
-                    end_x=block_info["end_x"],
-                    qubit_indices=border_qubits,
-                    depth=block_info["depth"],
-                    max_gate_width=block_info.get("max_gate_width"),
-                    max_depth=max_depth,
-                    overlap_index=overlap_count,
-                    is_controlled=bool(ctrl_indices),
-                    power=block_info.get("power", 1),
-                )
-
-                # Draw control dots and vertical line for ControlledUOperation
-                if ctrl_indices:
-                    ax = fig._qm_ax  # type: ignore[attr-defined]
-                    mgw = block_info.get("max_gate_width", self.style.gate_width)
-                    bl, br = compute_block_box_bounds(
-                        self.style,
-                        block_info["name"],
-                        block_info["start_x"],
-                        block_info["end_x"],
-                        block_info["depth"],
-                        mgw,
-                        block_info.get("power", 1),
-                    )
-                    block_center_x = (bl + br) / 2
-                    ctrl_y_list = [self.qubit_y[q] for q in ctrl_indices]
-                    min_ctrl = min(ctrl_y_list)
-                    max_ctrl = max(ctrl_y_list)
-
-                    # The connection line must stop at the target box's
-                    # outer border so the box visually contains the
-                    # whole wrapped gate, and so the line never appears
-                    # to bleed through the box.  When controls live on
-                    # only one side of the box (top *or* bottom) a
-                    # single segment from the far control to the
-                    # nearest box edge does this directly.  When
-                    # controls sit on *both* sides, draw two segments
-                    # so the box's interior region (between
-                    # ``box_top`` and ``box_bottom``) stays empty.
-                    crosses_above = max_ctrl > box_top
-                    crosses_below = min_ctrl < box_bottom
-                    line_segments: list[tuple[float, float]] = []
-                    if crosses_above and crosses_below:
-                        line_segments.append((box_top, max_ctrl))
-                        line_segments.append((min_ctrl, box_bottom))
-                    elif crosses_above:
-                        line_segments.append((box_top, max_ctrl))
-                    elif crosses_below:
-                        line_segments.append((min_ctrl, box_bottom))
-                    else:
-                        # All controls lie inside the box's vertical
-                        # span (degenerate; only happens for malformed
-                        # IR).  Fall back to spanning the controls
-                        # themselves so something is drawn.
-                        line_segments.append((min_ctrl, max_ctrl))
-                    for y_lo, y_hi in line_segments:
-                        ax.add_line(
-                            mlines.Line2D(
-                                [block_center_x, block_center_x],
-                                [y_lo, y_hi],
-                                color=self.style.wire_color,
-                                linewidth=1.5,
-                                zorder=PORDER_LINE,
-                            )
-                        )
-
-                    for ctrl_idx in ctrl_indices:
-                        ctrl_y = self.qubit_y[ctrl_idx]
-                        self._draw_control_dot(ax, block_center_x, ctrl_y)
-
-        # Draw operations from Visual IR tree
-        self._draw_visual_nodes(fig, vc.children, positions, block_widths, gate_widths)
-
-    def _draw_inlined_block_border(
+    def _draw_inline_block(
         self,
         ax: Axes,
-        name: str,
-        start_x: float,
-        end_x: float,
-        qubit_indices: list[int],
-        depth: int = 0,
-        max_gate_width: float | None = None,
-        max_depth: int = 0,
-        overlap_index: int = 0,
-        is_controlled: bool = False,
-        power: int = 1,
-    ) -> tuple[float, float]:
-        """Draw dashed border around inlined block operations.
+        node: VInlineBlock,
+        placement: InlineBlockLayout,
+    ) -> None:
+        """Draw an inline block from layout-owned rectangles.
 
-        When power > 1, draws nested boxes: an outer wrapper with "pow=N"
-        and an inner box with the block name.
+        Args:
+            ax (Axes): Axes to draw on.
+            node (VInlineBlock): Visual block carrying label and style metadata.
+            placement (InlineBlockLayout): Final block geometry produced by the
+                layout engine.
+
+        Returns:
+            None
         """
-        if max_gate_width is None:
-            max_gate_width = self.style.gate_width
-
-        y_coords = [self.qubit_y[q] for q in qubit_indices]
-        min_y = min(y_coords)
-        max_y = max(y_coords)
-
-        text_height = self._calculate_text_height(ax, name, self.style.subfont_size)
-        padding = compute_border_padding(self.style, depth)
-
-        lp = self.style.label_padding
-        label_height = text_height + 2 * lp
-
-        depth_label_offset = (max_depth - depth) * (
-            label_height + self.style.label_step_gap
-        )
-        overlap_label_offset = overlap_index * (
-            label_height + self.style.overlap_step_gap
-        )
-        label_vertical_offset = depth_label_offset + overlap_label_offset
-
-        (inner_left, inner_right), (outer_left, outer_right) = (
-            compute_nested_block_box_bounds(
-                self.style, name, start_x, end_x, depth, max_gate_width, power
-            )
-        )
-
-        inner_bottom = min_y - self.style.gate_height / 2 - padding
-        inner_top = (
-            max_y
-            + self.style.gate_height / 2
-            + padding
-            + label_height
-            + label_vertical_offset
-        )
-
-        block_zorder = PORDER_WIRE + 0.5 + depth * 0.1
+        inner = placement.inner_rect
+        outer = placement.outer_rect
+        is_controlled = bool(node.control_qubit_indices)
+        block_zorder = PORDER_WIRE + 0.5 + node.depth * 0.1
         linestyle = "-" if is_controlled else "--"
         facecolor = self.style.background_color if is_controlled else "none"
 
-        if power > 1:
-            # Outer wrapper box for "pow=N"
-            margin = self.style.power_wrapper_margin
-            pow_text_height = self._calculate_text_height(
-                ax, f"pow={power}", self.style.subfont_size
-            )
-            pow_label_height = pow_text_height + 2 * lp
-
-            outer_bottom = inner_bottom - margin
-            outer_top = inner_top + pow_label_height + margin
-
-            outer_zorder = block_zorder - 0.01
-            outer_rect = mpatches.Rectangle(
-                (outer_left, outer_bottom),
-                outer_right - outer_left,
-                outer_top - outer_bottom,
+        if node.power > 1:
+            outer_patch = mpatches.Rectangle(
+                (outer.left, outer.bottom),
+                outer.right - outer.left,
+                outer.top - outer.bottom,
                 facecolor=facecolor,
                 edgecolor=self.style.block_border_color,
                 linewidth=1.5,
                 linestyle=linestyle,
-                zorder=outer_zorder,
+                zorder=block_zorder - 0.01,
             )
-            ax.add_patch(outer_rect)
-
-            # "pow=N" label on outer box (right-aligned)
-            pow_right = outer_right - self.style.label_horizontal_padding
+            ax.add_patch(outer_patch)
             ax.text(
-                pow_right,
-                outer_top - lp,
-                f"pow={power}",
+                outer.right - self.style.label_horizontal_padding,
+                outer.top - self.style.label_padding,
+                f"pow={node.power}",
                 ha="right",
                 va="top",
                 fontsize=self.style.subfont_size,
+                fontweight="normal",
                 color=self.style.block_border_color,
                 zorder=PORDER_TEXT,
             )
 
-        # Inner box
-        inner_rect = mpatches.Rectangle(
-            (inner_left, inner_bottom),
-            inner_right - inner_left,
-            inner_top - inner_bottom,
+        inner_patch = mpatches.Rectangle(
+            (inner.left, inner.bottom),
+            inner.right - inner.left,
+            inner.top - inner.bottom,
             facecolor=facecolor,
             edgecolor=self.style.block_border_color,
             linewidth=1.5,
             linestyle=linestyle,
             zorder=block_zorder,
         )
-        ax.add_patch(inner_rect)
+        ax.add_patch(inner_patch)
 
         if is_controlled:
-            wire_zorder = block_zorder + 0.05
-            for q in qubit_indices:
-                wire_y = self.qubit_y[q]
+            target_qubits = [
+                qubit
+                for qubit in node.affected_qubits
+                if qubit not in node.control_qubit_indices
+            ]
+            for qubit in target_qubits or node.affected_qubits:
+                wire_y = self.qubit_y[qubit]
                 ax.add_line(
                     mlines.Line2D(
-                        [inner_left, inner_right],
+                        [inner.left, inner.right],
                         [wire_y, wire_y],
                         color=self.style.wire_color,
                         linewidth=1.0,
-                        zorder=wire_zorder,
+                        zorder=block_zorder + 0.05,
                     )
                 )
 
-        # Block name on inner box label bar
-        inner_label_left = inner_left + self.style.label_horizontal_padding
         ax.text(
-            inner_label_left,
-            inner_top - lp,
-            name,
+            inner.left + self.style.label_horizontal_padding,
+            inner.top - self.style.label_padding,
+            node.label,
             ha="left",
             va="top",
             fontsize=self.style.subfont_size,
+            fontweight="normal",
             color=self.style.block_border_color,
             zorder=PORDER_TEXT,
         )
 
-        # Return outermost bounds for control dot logic
-        if power > 1:
-            return outer_bottom, outer_top
-        return inner_bottom, inner_top
+        for segment in placement.control_segments:
+            self._draw_line_segment(
+                ax,
+                segment,
+                color=self.style.wire_color,
+                linewidth=1.5,
+                zorder=PORDER_LINE,
+            )
+
+        if node.control_qubit_indices:
+            control_x = (outer.left + outer.right) / 2
+            for qubit in node.control_qubit_indices:
+                self._draw_control_dot(ax, control_x, self.qubit_y[qubit])
 
     def _draw_visual_nodes(
         self,
         fig: Figure,
         nodes: list[VisualNode],
-        positions: dict[tuple, float],
-        block_widths: dict[tuple, float],
-        gate_widths: dict[tuple, float],
     ) -> None:
-        """Recursively draw Visual IR nodes."""
+        """Recursively draw nodes using layout-owned geometry.
+
+        Args:
+            fig (Figure): Target matplotlib figure.
+            nodes (list[VisualNode]): Visual nodes to draw in traversal order.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If a non-empty visual node lacks required layout-owned
+                geometry.
+        """
+        assert self.layout is not None
+        ax = fig._qm_ax  # type: ignore[attr-defined]
+
         for node in nodes:
             if isinstance(node, VSkip):
                 continue
 
             if isinstance(node, VGate):
-                if node.node_key in positions:
-                    self._draw_vgate(
-                        fig,
-                        node,
-                        positions[node.node_key],
-                        block_widths.get(node.node_key),
-                        gate_widths.get(node.node_key),
+                if node.node_key not in self.layout.positions:
+                    raise ValueError(
+                        f"Missing gate position for visual node {node.node_key!r}"
                     )
+                self._draw_vgate(
+                    fig,
+                    node,
+                    self.layout.positions[node.node_key],
+                    self.layout.gate_box_rects.get(node.node_key),
+                    self.layout.powered_gate_layouts.get(node.node_key),
+                )
                 continue
 
             if isinstance(node, VInlineBlock):
-                # Children are drawn recursively
-                self._draw_visual_nodes(
-                    fig, node.children, positions, block_widths, gate_widths
-                )
+                placement = self.layout.inline_block_layouts.get(node.node_key)
+                if placement is None:
+                    raise ValueError(
+                        f"Missing inline-block geometry for {node.node_key!r}"
+                    )
+                self._draw_inline_block(ax, node, placement)
+                self._draw_visual_nodes(fig, node.children)
                 continue
 
             if isinstance(node, VFoldedBlock):
-                if node.node_key in positions:
-                    self._draw_vfolded_block(
-                        fig,
-                        node,
-                        positions[node.node_key],
-                        block_widths.get(node.node_key),
-                        positions,
-                        gate_widths,
+                placement = self.layout.folded_block_layouts.get(node.node_key)
+                if placement is None:
+                    raise ValueError(
+                        f"Missing folded-block geometry for {node.node_key!r}"
                     )
+                self._draw_vfolded_block(fig, node, placement)
                 continue
 
             if isinstance(node, VUnfoldedSequence):
-                if node.kind == VUnfoldedKind.IF:
-                    # Draw the if/else branch boxes first (behind gates), then
-                    # the gates of each branch on top, so the boxes read as
-                    # mutually exclusive alternatives rather than a sequence.
-                    self._draw_vif_branch_boxes(
-                        fig, node, positions, block_widths, gate_widths
-                    )
+                if node.kind in (VUnfoldedKind.IF, VUnfoldedKind.WHILE):
+                    placement = self.layout.control_flow_layouts.get(node.node_key)
+                    if placement is None:
+                        raise ValueError(
+                            f"Missing control-flow geometry for {node.node_key!r}"
+                        )
+                    self._draw_control_flow(ax, node, placement)
                 for iteration_children in node.iterations:
-                    self._draw_visual_nodes(
-                        fig,
-                        iteration_children,
-                        positions,
-                        block_widths,
-                        gate_widths,
-                    )
+                    self._draw_visual_nodes(fig, iteration_children)
                 continue
 
-    def _draw_vif_branch_boxes(
-        self,
-        fig: Figure,
-        node: VUnfoldedSequence,
-        positions: dict[tuple, float],
-        block_widths: dict[tuple, float],
-        gate_widths: dict[tuple, float],
-    ) -> None:
-        """Draw the if/else branch boxes for an unfolded IfOperation.
-
-        The true branch (``iterations[0]``) and, when present, the else branch
-        (``iterations[1]``) are wrapped in dash-dot rounded boxes spanning their
-        gates' x-ranges and the if's affected wires. The boxes are labelled
-        ``if <cond>:`` and ``else:`` respectively, and are drawn behind the
-        gates so the gates remain legible; gates themselves are drawn by the
-        caller after this method returns.
-
-        Args:
-            fig (Figure): Target matplotlib figure (carries ``_qm_ax``).
-            node (VUnfoldedSequence): The unfolded IF sequence to box.
-            positions (dict[tuple, float]): Node-key to center-x mapping.
-            block_widths (dict[tuple, float]): Node-key to block width mapping.
-            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
-
-        Returns:
-            None
-        """
-        affected_qubits = node.affected_qubits
-        if not affected_qubits:
-            return
-
-        ax = fig._qm_ax  # type: ignore[attr-defined]
-        pad = compute_border_padding(self.style, depth=0)
-        y_coords = [self.qubit_y[q] for q in affected_qubits]
-        min_y = min(y_coords)
-        max_y = max(y_coords)
-
-        text_height = self._calculate_text_height(ax, "if", self.style.subfont_size)
-        label_height = text_height + 2 * self.style.label_padding
-        box_bottom = min_y - self.style.gate_height / 2 - pad
-        box_top = max_y + self.style.gate_height / 2 + pad + label_height
-
-        labels = [node.condition_label or "if cond:", "else:"]
-        label_widths = node.branch_label_widths
-        spans = [
-            self._visual_x_span(children, positions, block_widths, gate_widths)
-            for children in node.iterations
-        ]
-
-        # Lay the branch boxes out left-to-right with no gap between them: each
-        # box starts exactly where the previous one ended. A box is widened to
-        # hold its header label using the same width estimate the layout
-        # reserved, so the label never overflows and the next branch's gates
-        # always sit clear of this box.
-        prev_right: float | None = None
-        for i, span in enumerate(spans):
-            label = labels[i] if i < len(labels) else ""
-            label_width = label_widths[i] if i < len(label_widths) else 0.0
-
-            if span is None:
-                empty_span = self._empty_branch_x_span(
-                    i, spans, prev_right, pad, label_width
-                )
-                if empty_span is None and i == 0:
-                    empty_span = self._standalone_empty_branch_x_span(
-                        node, positions, block_widths, label_width
-                    )
-                if empty_span is None and i == 0:
-                    empty_span = self._condition_measure_empty_branch_x_span(
-                        node, positions, gate_widths, label_width
-                    )
-                if empty_span is None:
-                    continue
-                box_left, box_right = empty_span
-                if i == 0:
-                    self._draw_condition_measure_connector(
-                        ax,
-                        node,
-                        box_left,
-                        box_bottom,
-                        box_top,
-                        positions,
-                        gate_widths,
-                    )
-                self._draw_if_branch_box(
-                    ax, box_left, box_right, box_bottom, box_top, label
-                )
-                prev_right = box_right
-                continue
-
-            gate_left, gate_right = span
-
-            box_left = gate_left - pad if prev_right is None else prev_right
-            box_right = gate_right + pad
-            if label_width > 0:
-                box_right = max(box_right, box_left + label_width)
-
-            if i == 0:
-                self._draw_condition_measure_connector(
-                    ax,
-                    node,
-                    box_left,
-                    box_bottom,
-                    box_top,
-                    positions,
-                    gate_widths,
-                )
-            self._draw_if_branch_box(
-                ax, box_left, box_right, box_bottom, box_top, label
-            )
-            prev_right = box_right
-
-    def _draw_condition_measure_connector(
+    def _draw_control_flow(
         self,
         ax: Axes,
-        node: VFoldedBlock | VUnfoldedSequence,
-        box_left: float,
-        box_bottom: float,
-        box_top: float,
-        positions: dict[tuple, float],
-        gate_widths: dict[tuple, float],
+        node: VUnfoldedSequence,
+        placement: ControlFlowLayout,
     ) -> None:
-        """Draw a solid connector from a condition measurement to its IF box.
+        """Draw an unfolded IF or WHILE from final layout geometry.
 
         Args:
             ax (Axes): Axes to draw on.
-            node (VFoldedBlock | VUnfoldedSequence): IF visual node carrying
-                condition-measurement metadata.
-            box_left (float): Left edge of the target IF box.
-            box_bottom (float): Bottom edge of the target IF box.
-            box_top (float): Top edge of the target IF box.
-            positions (dict[tuple, float]): Node-key to center-x mapping.
-            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
+            node (VUnfoldedSequence): Conditional node carrying its visual kind.
+            placement (ControlFlowLayout): Final branch and connector geometry.
 
         Returns:
             None
         """
-        measure_key = node.condition_measure_node_key
-        if measure_key is None or measure_key not in positions:
-            return
-        # Ambiguous vector-measurement elements cannot identify one source wire.
-        if len(node.condition_measure_qubit_indices) != 1:
-            return
-
-        measure_qubit = node.condition_measure_qubit_indices[0]
-        if measure_qubit < 0 or measure_qubit >= len(self.qubit_y):
-            return
-
-        measure_width = gate_widths.get(measure_key, self.style.gate_width)
-        start_x = positions[measure_key] + measure_width / 2
-        if box_left <= start_x:
-            return
-
-        source_y = self.qubit_y[measure_qubit]
-        target_y = min(max(source_y, box_bottom), box_top)
-        ax.add_line(
-            mlines.Line2D(
-                [start_x, box_left],
-                [source_y, target_y],
-                color=self.style.if_edge_color,
+        edge_color, text_color, linestyle = self._control_flow_box_style(node.kind)
+        if placement.connector_segments:
+            self._draw_connector_segments(
+                ax,
+                placement.connector_segments,
+                color=edge_color,
                 linewidth=1.5,
-                linestyle="-",
-                solid_capstyle="butt",
                 zorder=PORDER_LINE,
             )
-        )
 
-    def _condition_measure_empty_branch_x_span(
-        self,
-        node: VUnfoldedSequence,
-        positions: dict[tuple, float],
-        gate_widths: dict[tuple, float],
-        label_width: float,
-    ) -> tuple[float, float] | None:
-        """Anchor an empty first IF branch to its condition measurement.
+        for box in placement.boxes:
+            self._draw_control_flow_box(
+                ax,
+                box.rect,
+                box.label,
+                edge_color=edge_color,
+                text_color=text_color,
+                linestyle=linestyle,
+            )
 
-        Args:
-            node (VUnfoldedSequence): IF node carrying condition-measurement
-                metadata.
-            positions (dict[tuple, float]): Node-key to center-x mapping.
-            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
-            label_width (float): Reserved width for the branch header label.
+    def _control_flow_box_style(
+        self, kind: VUnfoldedKind | VFoldedKind
+    ) -> tuple[str, str, str]:
+        """Resolve the (edge, text, linestyle) triple for a control-flow box.
 
-        Returns:
-            tuple[float, float] | None: ``(left, right)`` extent for the empty
-                branch box, or None when no condition measurement is positioned.
-        """
-        measure_key = node.condition_measure_node_key
-        if measure_key is None or measure_key not in positions:
-            return None
-        measure_width = gate_widths.get(measure_key, self.style.gate_width)
-        measure_right = positions[measure_key] + measure_width / 2
-        box_left = measure_right + self.style.gate_gap
-        min_width = max(label_width, self.style.gate_width)
-        return box_left, box_left + min_width
-
-    def _standalone_empty_branch_x_span(
-        self,
-        node: VUnfoldedSequence,
-        positions: dict[tuple, float],
-        block_widths: dict[tuple, float],
-        label_width: float,
-    ) -> tuple[float, float] | None:
-        """Return an x-span for an empty IF with no child or measurement anchor.
+        A ``while`` box uses the while-loop palette and a dashed border; every
+        other boxed control-flow node (``if``/``else``) uses the if palette and
+        a dash-dot border. This keeps the unfolded ``while`` visually distinct
+        from an ``if`` while sharing the same layout machinery.
 
         Args:
-            node (VUnfoldedSequence): IF node whose layout position was reserved.
-            positions (dict[tuple, float]): Node-key to center-x mapping.
-            block_widths (dict[tuple, float]): Node-key to block width mapping.
-            label_width (float): Reserved width for the branch header label.
+            kind (VUnfoldedKind | VFoldedKind): The control-flow node kind.
 
         Returns:
-            tuple[float, float] | None: ``(left, right)`` extent for the empty
-                branch box, or None when layout did not reserve the IF node.
+            tuple[str, str, str]: ``(edge_color, text_color, linestyle)`` for
+                the box border and its header label.
         """
-        if node.node_key not in positions:
-            return None
-        min_width = max(
-            block_widths.get(node.node_key, 0.0), label_width, self.style.gate_width
-        )
-        center = positions[node.node_key]
-        return center - min_width / 2, center + min_width / 2
+        if kind in (VUnfoldedKind.WHILE, VFoldedKind.WHILE):
+            return (
+                self.style.while_loop_edge_color,
+                self.style.while_loop_text_color,
+                "--",
+            )
+        return self.style.if_edge_color, self.style.if_text_color, "-."
 
-    def _empty_branch_x_span(
-        self,
-        branch_index: int,
-        spans: list[tuple[float, float] | None],
-        prev_right: float | None,
-        pad: float,
-        label_width: float,
-    ) -> tuple[float, float] | None:
-        """Compute a minimal x-span for an empty IF branch label box.
-
-        Args:
-            branch_index (int): Index of the empty branch within ``spans``.
-            spans (list[tuple[float, float] | None]): Per-branch positioned
-                child extents. Empty branches have ``None`` entries.
-            prev_right (float | None): Right edge of the previously drawn
-                branch box, if any.
-            pad (float): Horizontal border padding used by branch boxes.
-            label_width (float): Reserved width for this branch's header label.
-
-        Returns:
-            tuple[float, float] | None: ``(left, right)`` extent for the empty
-                branch box, or None when no neighboring positioned branch can
-                anchor it.
-        """
-        min_width = max(label_width, self.style.gate_width)
-        if prev_right is not None:
-            return prev_right, prev_right + min_width
-
-        for next_span in spans[branch_index + 1 :]:
-            if next_span is None:
-                continue
-            next_left, _ = next_span
-            box_right = next_left - pad
-            return box_right - min_width, box_right
-
-        return None
-
-    def _draw_if_branch_box(
+    def _draw_line_segment(
         self,
         ax: Axes,
-        box_left: float,
-        box_right: float,
-        box_bottom: float,
-        box_top: float,
-        label: str,
+        segment: LineSegment,
+        *,
+        color: str,
+        linewidth: float,
+        zorder: float,
     ) -> None:
-        """Draw one dash-dot branch box with a top-left header label.
+        """Draw a line segment whose endpoints were fixed by layout.
 
         Args:
             ax (Axes): Axes to draw on.
-            box_left (float): Left data-x edge of the box.
-            box_right (float): Right data-x edge of the box.
-            box_bottom (float): Bottom data-y edge of the box.
-            box_top (float): Top data-y edge of the box.
-            label (str): Header label drawn at the box's top-left (e.g.
-                ``"if flag == 1:"`` or ``"else:"``). Empty string draws no label.
+            segment (LineSegment): Final line endpoints.
+            color (str): Matplotlib line color.
+            linewidth (float): Line width in points.
+            zorder (float): Matplotlib drawing order.
 
         Returns:
             None
         """
-        rect = mpatches.FancyBboxPatch(
-            (box_left, box_bottom),
-            box_right - box_left,
-            box_top - box_bottom,
+        ax.add_line(
+            mlines.Line2D(
+                [segment.start_x, segment.end_x],
+                [segment.start_y, segment.end_y],
+                color=color,
+                linewidth=linewidth,
+                linestyle="-",
+                solid_capstyle="butt",
+                zorder=zorder,
+            )
+        )
+
+    def _draw_connector_segments(
+        self,
+        ax: Axes,
+        segments: tuple[LineSegment, ...],
+        *,
+        color: str,
+        linewidth: float,
+        zorder: float,
+    ) -> None:
+        """Draw contiguous layout segments as one polyline artist.
+
+        Args:
+            ax (Axes): Axes to draw on.
+            segments (tuple[LineSegment, ...]): Ordered contiguous segments.
+            color (str): Matplotlib line color.
+            linewidth (float): Line width in points.
+            zorder (float): Matplotlib drawing order.
+        """
+        if not segments:
+            return
+        x_values = [segments[0].start_x, *(segment.end_x for segment in segments)]
+        y_values = [segments[0].start_y, *(segment.end_y for segment in segments)]
+        ax.add_line(
+            mlines.Line2D(
+                x_values,
+                y_values,
+                color=color,
+                linewidth=linewidth,
+                linestyle="-",
+                solid_capstyle="butt",
+                solid_joinstyle="miter",
+                zorder=zorder,
+            )
+        )
+
+    def _draw_control_flow_box(
+        self,
+        ax: Axes,
+        rect: Rect,
+        label: str,
+        *,
+        edge_color: str,
+        text_color: str,
+        linestyle: str,
+    ) -> None:
+        """Draw one conditional branch from a final rectangle.
+
+        Args:
+            ax (Axes): Axes to draw on.
+            rect (Rect): Final branch rectangle.
+            label (str): Header label drawn at the top-left.
+            edge_color (str): Branch border color.
+            text_color (str): Header text color.
+            linestyle (str): Matplotlib border style.
+
+        Returns:
+            None
+        """
+        patch = mpatches.FancyBboxPatch(
+            (rect.left, rect.bottom),
+            rect.right - rect.left,
+            rect.top - rect.bottom,
             boxstyle=mpatches.BoxStyle.Round(
                 pad=0, rounding_size=self.style.gate_corner_radius
             ),
             facecolor="none",
-            edgecolor=self.style.if_edge_color,
+            edgecolor=edge_color,
             linewidth=1.5,
-            linestyle="-.",
+            linestyle=linestyle,
             zorder=PORDER_WIRE + 0.5,
         )
-        ax.add_patch(rect)
+        ax.add_patch(patch)
 
         if label:
             ax.text(
-                box_left + self.style.label_horizontal_padding,
-                box_top - self.style.label_padding,
+                rect.left + self.style.label_horizontal_padding,
+                rect.top - self.style.label_padding,
                 label,
                 ha="left",
                 va="top",
                 fontsize=self.style.subfont_size,
-                color=self.style.if_text_color,
+                color=text_color,
                 fontweight="bold",
                 zorder=PORDER_TEXT,
             )
 
-    def _visual_x_span(
-        self,
-        nodes: list[VisualNode],
-        positions: dict[tuple, float],
-        block_widths: dict[tuple, float],
-        gate_widths: dict[tuple, float],
-    ) -> tuple[float, float] | None:
-        """Compute the combined x-extent of a list of visual nodes.
-
-        Recurses into containers (``VInlineBlock`` children, nested
-        ``VUnfoldedSequence`` iterations) and bottoms out at ``VGate`` /
-        ``VFoldedBlock`` leaves, using each leaf's center position and width.
+    @staticmethod
+    def _require_box_rect(
+        node: VGate,
+        box_rect: Rect | None,
+        *,
+        geometry_name: str,
+    ) -> Rect:
+        """Return required layout-owned box geometry for a gate node.
 
         Args:
-            nodes (list[VisualNode]): Nodes to bound.
-            positions (dict[tuple, float]): Node-key to center-x mapping.
-            block_widths (dict[tuple, float]): Node-key to block width mapping.
-            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
+            node (VGate): Gate-like node whose geometry is required.
+            box_rect (Rect | None): Rectangle supplied by the layout engine.
+            geometry_name (str): Human-readable geometry role used in errors.
 
         Returns:
-            tuple[float, float] | None: ``(left, right)`` data-x extent, or None
-                when ``nodes`` contains no positioned leaf.
+            Rect: The supplied layout-owned rectangle.
+
+        Raises:
+            ValueError: If ``box_rect`` is None.
         """
-        left: float | None = None
-        right: float | None = None
-        for node in nodes:
-            span = self._single_node_x_span(node, positions, block_widths, gate_widths)
-            if span is None:
-                continue
-            node_left, node_right = span
-            left = node_left if left is None else min(left, node_left)
-            right = node_right if right is None else max(right, node_right)
-        if left is None or right is None:
-            return None
-        return left, right
-
-    def _single_node_x_span(
-        self,
-        node: VisualNode,
-        positions: dict[tuple, float],
-        block_widths: dict[tuple, float],
-        gate_widths: dict[tuple, float],
-    ) -> tuple[float, float] | None:
-        """Compute the x-extent of a single visual node.
-
-        Args:
-            node (VisualNode): Node to bound.
-            positions (dict[tuple, float]): Node-key to center-x mapping.
-            block_widths (dict[tuple, float]): Node-key to block width mapping.
-            gate_widths (dict[tuple, float]): Node-key to gate width mapping.
-
-        Returns:
-            tuple[float, float] | None: ``(left, right)`` data-x extent, or None
-                for zero-space nodes (``VSkip``) and unpositioned nodes.
-        """
-        if isinstance(node, VSkip):
-            return None
-        if isinstance(node, VInlineBlock):
-            return self._visual_x_span(
-                node.children, positions, block_widths, gate_widths
+        if box_rect is None:
+            raise ValueError(
+                f"Missing {geometry_name} geometry for visual node {node.node_key!r}"
             )
-        if isinstance(node, VUnfoldedSequence):
-            left: float | None = None
-            right: float | None = None
-            for branch_children in node.iterations:
-                span = self._visual_x_span(
-                    branch_children, positions, block_widths, gate_widths
-                )
-                if span is None:
-                    continue
-                node_left, node_right = span
-                left = node_left if left is None else min(left, node_left)
-                right = node_right if right is None else max(right, node_right)
-            if left is None or right is None:
-                return None
-            return left, right
-
-        key = node.node_key
-        if key not in positions:
-            return None
-        center = positions[key]
-        if isinstance(node, VFoldedBlock):
-            width = block_widths.get(key) or node.folded_width
-        else:  # VGate
-            width = gate_widths.get(key) or node.estimated_width
-        return center - width / 2, center + width / 2
+        return box_rect
 
     def _draw_vgate(
         self,
         fig: Figure,
         node: VGate,
         x_pos: float,
-        block_width: float | None = None,
-        layout_width: float | None = None,
+        box_rect: Rect | None = None,
+        powered_layout: PoweredGateLayout | None = None,
     ) -> None:
-        """Draw a VGate node using pre-resolved fields."""
+        """Draw a gate-like node using pre-resolved fields and placement.
+
+        Args:
+            fig (Figure): Target matplotlib figure.
+            node (VGate): Visual gate node to draw.
+            x_pos (float): Center x-coordinate assigned by layout.
+            box_rect (Rect | None): Exact text-bearing box bounds. Defaults to
+                None for nodes rendered as native symbols.
+            powered_layout (PoweredGateLayout | None): Target and wrapper
+                rectangles for a powered controlled gate. Defaults to None.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If layout omitted geometry required by the gate's
+                rendering strategy.
+        """
         ax = fig._qm_ax  # type: ignore[attr-defined]
         qubit_indices = node.qubit_indices
 
@@ -896,42 +530,87 @@ class MatplotlibRenderer:
         y_coords = [self.qubit_y[q] for q in qubit_indices]
 
         if node.kind == VGateKind.GATE:
-            width = layout_width or node.estimated_width
             if len(qubit_indices) == 1:
-                self._draw_vgate_single(ax, node, x_pos, y_coords[0], width)
+                self._draw_vgate_single(
+                    ax,
+                    node,
+                    x_pos,
+                    y_coords[0],
+                    box_rect,
+                )
             else:
-                self._draw_vgate_multi(ax, node, x_pos, y_coords, width)
+                self._draw_vgate_multi(
+                    ax,
+                    node,
+                    x_pos,
+                    y_coords,
+                    box_rect,
+                )
 
-        elif node.kind == VGateKind.MEASURE:
-            for y in y_coords:
-                self._draw_measurement_box(ax, x_pos, y)
-
-        elif node.kind == VGateKind.MEASURE_VECTOR:
+        elif node.kind in (VGateKind.MEASURE, VGateKind.MEASURE_VECTOR):
             for y in y_coords:
                 self._draw_measurement_box(ax, x_pos, y)
 
         elif node.kind == VGateKind.BLOCK_BOX:
-            self._draw_vblock_box(ax, node, x_pos, block_width, is_call_block=True)
+            self._draw_vblock_box(
+                ax,
+                node,
+                x_pos,
+                box_rect,
+                is_call_block=True,
+            )
 
         elif node.kind == VGateKind.COMPOSITE_BOX:
-            self._draw_vblock_box(ax, node, x_pos, block_width, is_call_block=False)
+            self._draw_vblock_box(
+                ax,
+                node,
+                x_pos,
+                box_rect,
+                is_call_block=False,
+            )
 
         elif node.kind == VGateKind.CONTROLLED_U_BOX:
-            self._draw_vcontrolled_u_box(ax, node, x_pos, block_width)
+            self._draw_vcontrolled_u_box(
+                ax,
+                node,
+                x_pos,
+                box_rect,
+                powered_layout,
+            )
 
         elif node.kind == VGateKind.EXPVAL:
-            self._draw_vexpval(ax, node, x_pos, block_width)
+            self._draw_vexpval(ax, node, x_pos, box_rect)
 
     def _draw_vgate_single(
-        self, ax: Axes, node: VGate, x: float, y: float, width: float
+        self,
+        ax: Axes,
+        node: VGate,
+        x: float,
+        y: float,
+        box_rect: Rect | None,
     ) -> None:
-        """Draw a single-qubit gate from VGate."""
-        height = self.style.gate_height
+        """Draw a single-qubit gate from a visual node.
+
+        Args:
+            ax (Axes): Axes to draw on.
+            node (VGate): Gate node carrying label and style metadata.
+            x (float): Gate center x-coordinate.
+            y (float): Gate center y-coordinate.
+            box_rect (Rect | None): Layout-owned box bounds.
+
+        Raises:
+            ValueError: If layout omitted the required gate-box rectangle.
+        """
+        bounds = self._require_box_rect(
+            node,
+            box_rect,
+            geometry_name="single-gate box",
+        )
 
         rect = mpatches.FancyBboxPatch(
-            (x - width / 2, y - height / 2),
-            width,
-            height,
+            (bounds.left, bounds.bottom),
+            bounds.width,
+            bounds.height,
             boxstyle=mpatches.BoxStyle.Round(
                 pad=0, rounding_size=self.style.gate_corner_radius
             ),
@@ -950,13 +629,32 @@ class MatplotlibRenderer:
             va="center",
             color=self.style.gate_text_color,
             fontsize=self.style.font_size,
+            fontweight="normal",
             zorder=PORDER_TEXT,
         )
 
     def _draw_vgate_multi(
-        self, ax: Axes, node: VGate, x: float, y_coords: list[float], width: float
+        self,
+        ax: Axes,
+        node: VGate,
+        x: float,
+        y_coords: list[float],
+        box_rect: Rect | None,
     ) -> None:
-        """Draw a multi-qubit gate from VGate."""
+        """Draw a multi-qubit gate and its connection symbols.
+
+        Args:
+            ax (Axes): Axes to draw on.
+            node (VGate): Gate node carrying type and label metadata.
+            x (float): Shared center x-coordinate.
+            y_coords (list[float]): Operand wire y-coordinates in gate order.
+            box_rect (Rect | None): Layout-owned generic box bounds, or None
+                for a native multi-qubit symbol.
+
+        Raises:
+            ValueError: If layout omitted a required generic gate-box
+                rectangle.
+        """
         min_y = min(y_coords)
         max_y = max(y_coords)
 
@@ -989,13 +687,16 @@ class MatplotlibRenderer:
                 self._draw_swap_x(ax, x, y)
         else:
             # Generic multi-qubit gate box
-            height = max_y - min_y + self.style.gate_height
-            y_center = (min_y + max_y) / 2
+            bounds = self._require_box_rect(
+                node,
+                box_rect,
+                geometry_name="multi-gate box",
+            )
 
             rect = mpatches.FancyBboxPatch(
-                (x - width / 2, min_y - self.style.gate_height / 2),
-                width,
-                height,
+                (bounds.left, bounds.bottom),
+                bounds.width,
+                bounds.height,
                 boxstyle=mpatches.BoxStyle.Round(
                     pad=0, rounding_size=self.style.gate_corner_radius
                 ),
@@ -1008,21 +709,21 @@ class MatplotlibRenderer:
 
             ax.text(
                 x,
-                y_center,
+                bounds.center_y,
                 node.label,
                 ha="center",
                 va="center",
                 color=self.style.gate_text_color,
                 fontsize=self.style.font_size,
+                fontweight="normal",
                 zorder=PORDER_TEXT,
             )
 
             # Semicircle connection dots
-            half_w = width / 2
             dot_radius = 0.05
             for y in y_coords:
                 left_dot = mpatches.Wedge(
-                    (x - half_w, y),
+                    (bounds.left + dot_radius, y),
                     dot_radius,
                     theta1=90,
                     theta2=270,
@@ -1032,7 +733,7 @@ class MatplotlibRenderer:
                 )
                 ax.add_patch(left_dot)
                 right_dot = mpatches.Wedge(
-                    (x + half_w, y),
+                    (bounds.right - dot_radius, y),
                     dot_radius,
                     theta1=270,
                     theta2=90,
@@ -1047,21 +748,30 @@ class MatplotlibRenderer:
         ax: Axes,
         node: VGate,
         x_pos: float,
-        block_width: float | None,
+        box_rect: Rect | None,
         is_call_block: bool,
     ) -> None:
-        """Draw a block-box (CallBlock or CompositeGate) from VGate."""
+        """Draw a collapsed call-block or composite-gate box.
+
+        Args:
+            ax (Axes): Axes to draw on.
+            node (VGate): Block-like visual node.
+            x_pos (float): Box center x-coordinate.
+            box_rect (Rect | None): Layout-owned box bounds.
+            is_call_block (bool): Whether to use call-block colors and border.
+
+        Raises:
+            ValueError: If layout omitted the required block-box rectangle.
+        """
         qubit_indices = node.qubit_indices
         if not qubit_indices:
             return
 
-        y_coords = [self.qubit_y[q] for q in qubit_indices]
-        min_y = min(y_coords)
-        max_y = max(y_coords)
-
-        width = block_width or self.style.gate_width
-        height = max_y - min_y + self.style.gate_height
-        y_center = (min_y + max_y) / 2
+        bounds = self._require_box_rect(
+            node,
+            box_rect,
+            geometry_name="block box",
+        )
 
         if is_call_block:
             face_color = self.style.block_face_color
@@ -1075,9 +785,9 @@ class MatplotlibRenderer:
             linestyle = "-"
 
         rect = mpatches.FancyBboxPatch(
-            (x_pos - width / 2, min_y - self.style.gate_height / 2),
-            width,
-            height,
+            (bounds.left, bounds.bottom),
+            bounds.width,
+            bounds.height,
             boxstyle=mpatches.BoxStyle.Round(
                 pad=0, rounding_size=self.style.gate_corner_radius
             ),
@@ -1091,12 +801,13 @@ class MatplotlibRenderer:
 
         ax.text(
             x_pos,
-            y_center,
+            bounds.center_y,
             node.label,
             ha="center",
             va="center",
             color=text_color,
             fontsize=self.style.font_size,
+            fontweight="normal",
             zorder=PORDER_TEXT,
         )
 
@@ -1105,9 +816,27 @@ class MatplotlibRenderer:
         ax: Axes,
         node: VGate,
         x_pos: float,
-        block_width: float | None,
+        box_rect: Rect | None,
+        powered_layout: PoweredGateLayout | None,
     ) -> None:
-        """Draw a ControlledU box from VGate with control dots."""
+        """Draw a controlled-U box with controls and an optional power wrapper.
+
+        Args:
+            ax (Axes): Axes to draw on.
+            node (VGate): Controlled-U visual node.
+            x_pos (float): Center x-coordinate assigned by layout.
+            box_rect (Rect | None): Layout-owned target box bounds, or None
+                when a native controlled symbol is rendered.
+            powered_layout (PoweredGateLayout | None): Layout-owned target and
+                wrapper rectangles, or None for an unpowered gate.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If layout omitted required generic or powered gate
+                geometry.
+        """
         qubit_indices = node.qubit_indices
         if not qubit_indices:
             return
@@ -1144,16 +873,22 @@ class MatplotlibRenderer:
 
         # Draw target box
         if target_y:
-            width = block_width or self.style.gate_width
-            min_target_y = min(target_y)
-            max_target_y = max(target_y)
-            height = max_target_y - min_target_y + self.style.gate_height
-            y_center = (min_target_y + max_target_y) / 2
+            if box_rect is not None:
+                target_bounds = box_rect
+            elif powered_layout is not None:
+                target_bounds = powered_layout.target_rect
+            else:
+                target_bounds = self._require_box_rect(
+                    node,
+                    box_rect,
+                    geometry_name="controlled target box",
+                )
+            y_center = target_bounds.center_y
 
             rect = mpatches.FancyBboxPatch(
-                (x_pos - width / 2, min_target_y - self.style.gate_height / 2),
-                width,
-                height,
+                (target_bounds.left, target_bounds.bottom),
+                target_bounds.width,
+                target_bounds.height,
                 boxstyle=mpatches.BoxStyle.Round(
                     pad=0, rounding_size=self.style.gate_corner_radius
                 ),
@@ -1172,6 +907,7 @@ class MatplotlibRenderer:
                 va="center",
                 color=self.style.gate_text_color,
                 fontsize=self.style.font_size,
+                fontweight="normal",
                 zorder=PORDER_TEXT,
             )
 
@@ -1183,24 +919,14 @@ class MatplotlibRenderer:
             # controlled-U (``VInlineBlock``) renders the same op, so
             # the collapsed and inline views look like the same shape
             # at two different zoom levels.
-            if getattr(node, "power", 1) > 1:
-                margin = self.style.power_wrapper_margin
+            if node.power > 1:
+                if powered_layout is None:
+                    raise ValueError(
+                        "Powered controlled gates require layout-owned geometry"
+                    )
                 lp = self.style.label_padding
                 pow_text = f"pow={node.power}"
-                pow_text_height = self._calculate_text_height(
-                    ax, pow_text, self.style.subfont_size
-                )
-                pow_label_height = pow_text_height + 2 * lp
-
-                outer_left = x_pos - width / 2 - margin
-                outer_right = x_pos + width / 2 + margin
-                outer_bottom = min_target_y - self.style.gate_height / 2 - margin
-                outer_top = (
-                    max_target_y
-                    + self.style.gate_height / 2
-                    + margin
-                    + pow_label_height
-                )
+                wrapper = powered_layout.wrapper_rect
 
                 # ``facecolor=background_color`` (rather than ``"none"``)
                 # so the wrapper *visually* stays transparent but
@@ -1212,12 +938,12 @@ class MatplotlibRenderer:
                 # top label band where the ``pow=N`` annotation lives,
                 # contradicting the wrapper's intent of containing
                 # the powered gate.  The matching inline-block border
-                # in ``_draw_inlined_block_border`` already uses the
+                # in ``_draw_inline_block`` already uses the
                 # same ``background_color`` trick.
                 outer_rect = mpatches.Rectangle(
-                    (outer_left, outer_bottom),
-                    outer_right - outer_left,
-                    outer_top - outer_bottom,
+                    (wrapper.left, wrapper.bottom),
+                    wrapper.width,
+                    wrapper.height,
                     facecolor=self.style.background_color,
                     edgecolor=self.style.block_border_color,
                     linewidth=1.5,
@@ -1227,12 +953,13 @@ class MatplotlibRenderer:
                 ax.add_patch(outer_rect)
 
                 ax.text(
-                    outer_right - self.style.label_horizontal_padding,
-                    outer_top - lp,
+                    wrapper.right - self.style.label_horizontal_padding,
+                    wrapper.top - lp,
                     pow_text,
                     ha="right",
                     va="top",
                     fontsize=self.style.subfont_size,
+                    fontweight="normal",
                     color=self.style.block_border_color,
                     zorder=PORDER_TEXT,
                 )
@@ -1293,25 +1020,34 @@ class MatplotlibRenderer:
         ax: Axes,
         node: VGate,
         x_pos: float,
-        block_width: float | None,
+        box_rect: Rect | None,
     ) -> None:
-        """Draw an expectation value operation from VGate."""
+        """Draw an expectation-value box over its operand wires.
+
+        Args:
+            ax (Axes): Axes to draw on.
+            node (VGate): Expectation-value visual node.
+            x_pos (float): Box center x-coordinate.
+            box_rect (Rect | None): Layout-owned box bounds.
+
+        Raises:
+            ValueError: If layout omitted the required expectation-box
+                rectangle.
+        """
         qubit_indices = node.qubit_indices
         if not qubit_indices:
             return
 
-        y_coords = [self.qubit_y[q] for q in qubit_indices]
-        min_y = min(y_coords)
-        max_y = max(y_coords)
-
-        width = block_width or self.style.gate_width
-        height = max_y - min_y + self.style.gate_height
-        y_center = (min_y + max_y) / 2
+        bounds = self._require_box_rect(
+            node,
+            box_rect,
+            geometry_name="expectation box",
+        )
 
         rect = mpatches.FancyBboxPatch(
-            (x_pos - width / 2, min_y - self.style.gate_height / 2),
-            width,
-            height,
+            (bounds.left, bounds.bottom),
+            bounds.width,
+            bounds.height,
             boxstyle=mpatches.BoxStyle.Round(
                 pad=0, rounding_size=self.style.gate_corner_radius
             ),
@@ -1324,12 +1060,13 @@ class MatplotlibRenderer:
 
         ax.text(
             x_pos,
-            y_center,
+            bounds.center_y,
             node.label,
             ha="center",
             va="center",
             color=self.style.expval_text_color,
             fontsize=self.style.font_size,
+            fontweight="normal",
             zorder=PORDER_TEXT,
         )
 
@@ -1337,23 +1074,14 @@ class MatplotlibRenderer:
         self,
         fig: Figure,
         node: VFoldedBlock,
-        x_pos: float,
-        block_width: float | None,
-        positions: dict[tuple, float],
-        gate_widths: dict[tuple, float],
+        placement: FoldedBlockLayout,
     ) -> None:
-        """Draw a folded control-flow block from a ``VFoldedBlock``.
+        """Draw a folded control-flow block from final layout geometry.
 
         Args:
             fig (Figure): Target matplotlib figure carrying ``_qm_ax``.
             node (VFoldedBlock): Folded block node to render.
-            x_pos (float): Center x-coordinate for the folded block.
-            block_width (float | None): Precomputed block width, or None to use
-                the width stored on ``node``.
-            positions (dict[tuple, float]): Node-key to center-x mapping, used
-                for IF condition-measurement connectors.
-            gate_widths (dict[tuple, float]): Node-key to gate width mapping,
-                used for IF condition-measurement connectors.
+            placement (FoldedBlockLayout): Final box and connector geometry.
 
         Returns:
             None
@@ -1363,13 +1091,13 @@ class MatplotlibRenderer:
             return
 
         ax = fig._qm_ax  # type: ignore[attr-defined]
-        y_coords = [self.qubit_y[q] for q in affected_qubits]
-        min_y = min(y_coords)
-        max_y = max(y_coords)
-
         header = node.header_label
         body_lines = node.body_lines
-        width = block_width or node.folded_width
+        bounds = placement.rect
+        x_pos = (bounds.left + bounds.right) / 2
+        y_center = (bounds.bottom + bounds.top) / 2
+        width = bounds.right - bounds.left
+        height = bounds.top - bounds.bottom
 
         # Select colors based on kind
         if node.kind == VFoldedKind.FOR:
@@ -1377,15 +1105,15 @@ class MatplotlibRenderer:
             edge_color = self.style.for_loop_edge_color
             text_color = self.style.for_loop_text_color
             linestyle = "-"
-        elif node.kind == VFoldedKind.WHILE:  # Future use: not yet dispatched
+        elif node.kind == VFoldedKind.WHILE:
             face_color = self.style.while_loop_face_color
             edge_color = self.style.while_loop_edge_color
             text_color = self.style.while_loop_text_color
             linestyle = "--"
         elif node.kind == VFoldedKind.FOR_ITEMS:
-            face_color = self.style.for_loop_face_color
-            edge_color = self.style.for_loop_edge_color
-            text_color = self.style.for_loop_text_color
+            face_color = self.style.for_items_face_color
+            edge_color = self.style.for_items_edge_color
+            text_color = self.style.for_items_text_color
             linestyle = "-"
         elif node.kind == VFoldedKind.IF:
             face_color = self.style.if_face_color
@@ -1398,26 +1126,17 @@ class MatplotlibRenderer:
             text_color = self.style.for_loop_text_color
             linestyle = "-"
 
-        # Calculate box dimensions
-        num_text_lines = 1 + len(body_lines)
-        min_text_height = (
-            num_text_lines * self.style.line_height
-            + 2 * self.style.folded_box_text_v_padding
-        )
-        qubit_span_height = max_y - min_y + self.style.gate_height
-        height = max(qubit_span_height, min_text_height)
-        y_center = (min_y + max_y) / 2
-        box_top = y_center + height / 2
-        box_bottom = y_center - height / 2
-        box_left = x_pos - width / 2
-
-        if node.kind == VFoldedKind.IF:
-            self._draw_condition_measure_connector(
-                ax, node, box_left, box_bottom, box_top, positions, gate_widths
+        if placement.connector_segments:
+            self._draw_connector_segments(
+                ax,
+                placement.connector_segments,
+                color=edge_color,
+                linewidth=1.5,
+                zorder=PORDER_LINE,
             )
 
         rect = mpatches.FancyBboxPatch(
-            (box_left, box_bottom),
+            (bounds.left, bounds.bottom),
             width,
             height,
             boxstyle=mpatches.BoxStyle.Round(
@@ -1433,7 +1152,7 @@ class MatplotlibRenderer:
 
         # For ForOperation: header at top + body text below
         if node.kind in (VFoldedKind.FOR, VFoldedKind.FOR_ITEMS) and body_lines:
-            header_y = box_top - self.style.label_vertical_offset - 0.15
+            header_y = bounds.top - self.style.label_vertical_offset - 0.15
             header_text = ax.text(
                 x_pos,
                 header_y,
@@ -1449,7 +1168,7 @@ class MatplotlibRenderer:
             header_text.set_clip_path(rect)
 
             body_text = "\n".join(body_lines)
-            body_center_y = (box_bottom + header_y) / 2
+            body_center_y = (bounds.bottom + header_y) / 2
             body_text_obj = ax.text(
                 x_pos,
                 body_center_y,
@@ -1459,6 +1178,7 @@ class MatplotlibRenderer:
                 color=text_color,
                 fontsize=self.style.subfont_size,
                 family="monospace",
+                fontweight="normal",
                 zorder=PORDER_TEXT,
                 clip_on=True,
             )
@@ -1476,6 +1196,7 @@ class MatplotlibRenderer:
                 va="center",
                 color=text_color,
                 fontsize=self.style.subfont_size,
+                fontweight="normal",
                 zorder=PORDER_TEXT,
             )
 
@@ -1495,14 +1216,12 @@ class MatplotlibRenderer:
         # hidden behind the dot). Raising the zorder would reveal the
         # full circle stuck on each edge — not the intended look.
         if node.affected_qubits_precise:
-            x_left = x_pos - width / 2
-            x_right = x_pos + width / 2
             for q in affected_qubits:
                 y = self.qubit_y[q]
-                for x in (x_left, x_right):
+                for x in (bounds.left, bounds.right):
                     circle = mpatches.Circle(
                         (x, y),
-                        radius=0.05,
+                        radius=self.style.folded_marker_radius,
                         facecolor=self.style.wire_color,
                         edgecolor=self.style.wire_color,
                         zorder=PORDER_GATE - 1,
@@ -1512,14 +1231,21 @@ class MatplotlibRenderer:
     def _add_jupyter_display_support(self, fig: Figure) -> None:
         """Add Jupyter display support to the figure.
 
-        This adds _repr_png_() method to enable automatic display in Jupyter notebooks.
+        Adds ``_repr_png_()`` so notebooks can display the returned figure.
 
         Args:
-            fig: matplotlib Figure to enhance.
+            fig (Figure): Matplotlib figure to enhance.
+
+        Returns:
+            None
         """
 
         def _repr_png_() -> bytes:
-            """Return PNG representation for Jupyter display."""
+            """Return a PNG representation for Jupyter display.
+
+            Returns:
+                bytes: Encoded PNG data for ``fig``.
+            """
             buf = io.BytesIO()
             fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
             buf.seek(0)
@@ -1528,83 +1254,14 @@ class MatplotlibRenderer:
         # Attach the method to the figure instance
         fig._repr_png_ = _repr_png_  # type: ignore[attr-defined]
 
-    def _measure_text_bbox(self, ax: Axes, text: str, fontsize: int) -> Bbox:
-        """Measure rendered text bbox in display pixels.
-
-        Args:
-            ax: matplotlib Axes used for rendering.
-            text: Text string to measure.
-            fontsize: Font size in points.
-
-        Returns:
-            matplotlib Bbox of the text in display coordinates.
-        """
-        if ax.figure.canvas is None or not hasattr(ax.figure.canvas, "get_renderer"):
-            FigureCanvasAgg(ax.figure)  # type: ignore[arg-type]
-
-        renderer = ax.figure.canvas.get_renderer()  # type: ignore[attr-defined]
-        font_props = FontProperties(size=fontsize)
-        temp_text = ax.text(
-            0, 0, text, fontsize=fontsize, fontproperties=font_props, visible=False
-        )
-        bbox = temp_text.get_window_extent(renderer=renderer)
-        temp_text.remove()
-        return bbox
-
-    def _calculate_text_width(self, ax: Axes, text: str, fontsize: int) -> float:
-        """Calculate actual rendered text width in data coordinates.
-
-        Args:
-            ax: matplotlib Axes used for rendering.
-            text: Text string to measure.
-            fontsize: Font size in points.
-
-        Returns:
-            Text width in data coordinate units.
-        """
-        bbox = self._measure_text_bbox(ax, text, fontsize)
-
-        xlim = ax.get_xlim()
-        ax_bbox = ax.get_position()
-        ax_width_inches = ax_bbox.width * ax.figure.get_figwidth()  # type: ignore[union-attr]
-        data_range = xlim[1] - xlim[0]
-        pixels_per_data_unit = ax.figure.dpi * ax_width_inches / data_range
-
-        if pixels_per_data_unit > 0:
-            return bbox.width / pixels_per_data_unit
-        return len(text) * self.style.fallback_char_width
-
-    def _calculate_text_height(self, ax: Axes, text: str, fontsize: int) -> float:
-        """Calculate actual rendered text height in data coordinates.
-
-        Args:
-            ax: matplotlib Axes used for rendering.
-            text: Text string to measure.
-            fontsize: Font size in points.
-
-        Returns:
-            Text height in data coordinate units.
-        """
-        bbox = self._measure_text_bbox(ax, text, fontsize)
-
-        ylim = ax.get_ylim()
-        ax_bbox = ax.get_position()
-        ax_height_inches = ax_bbox.height * ax.figure.get_figheight()  # type: ignore[union-attr]
-        data_range = ylim[1] - ylim[0]
-        pixels_per_data_unit = ax.figure.dpi * ax_height_inches / data_range
-
-        if pixels_per_data_unit > 0:
-            return bbox.height / pixels_per_data_unit
-        return self.style.fallback_text_height
-
     def _create_figure(self, num_qubits: int) -> Figure:
         """Create matplotlib figure with appropriate size.
 
         Args:
-            num_qubits: Number of qubits.
+            num_qubits (int): Number of qubit wires.
 
         Returns:
-            matplotlib Figure.
+            Figure: Configured matplotlib figure.
         """
         if num_qubits == 0:
             fig = Figure(figsize=(4, 2))
@@ -1623,113 +1280,27 @@ class MatplotlibRenderer:
             return fig
 
         assert self.layout is not None
-        width = self.layout.width
-        block_ranges = self.layout.block_ranges
+        viewport = self.layout.viewport
 
-        # Use Figure directly to avoid pyplot auto-display in Jupyter
-        fig = Figure(figsize=(6, 2))  # Temporary size, will be updated
-        # Attach canvas for Jupyter display
+        x_range = max(viewport.width, 1e-9)
+        y_range = max(viewport.height, 1e-9)
+        coordinate_scale = max(
+            1.0,
+            self.style.figure_scale_factor,
+            self.style.figure_min_width / x_range,
+            self.style.figure_min_height / y_range,
+        )
+
+        # Fill the physical canvas with the axes and use one common scale for
+        # x and y. Text metrics measured in inches are then conservative data
+        # widths, independent of subplot margins and circuit aspect ratio.
+        fig = Figure(figsize=(x_range * coordinate_scale, y_range * coordinate_scale))
         FigureCanvasAgg(fig)
-        ax = fig.add_subplot(111)
-
-        # Dynamic vertical margins based on actual block border extents
-        base_margin = 0.6  # minimum: gate half-height + comfortable padding
-        clearance = 0.2  # extra breathing room beyond the border edge
-
-        if self.layout.max_above:
-            y_margin_top = max(self.layout.max_above.get(0, 0), base_margin) + clearance
-        else:
-            y_margin_top = base_margin
-
-        if self.layout.max_below:
-            y_margin_bottom = (
-                max(self.layout.max_below.get(num_qubits - 1, 0), base_margin)
-                + clearance
-            )
-        else:
-            y_margin_bottom = base_margin
-
-        y_top = self.qubit_y[0] + y_margin_top
-        y_bottom = self.qubit_y[num_qubits - 1] - y_margin_bottom
-
-        # Dynamic horizontal limits based on block border extents
-        # Use first gate position and wire extension for symmetric left margin
-        first_gate_x = self.layout.first_gate_x
-        wire_ext = self.style.wire_extension
-        # Left limit: wire extends wire_extension past first gate, plus label space
-        first_gate_hw = self.layout.first_gate_half_width
-        x_left = first_gate_x - first_gate_hw - wire_ext - 0.7
-        x_right = max(width + 0.5, self.layout.actual_width + wire_ext + 0.2)
-
-        if block_ranges:
-            for br in block_ranges:
-                block_name = br.get("name", "block")
-                block_power = br.get("power", 1)
-                mgw = br.get("max_gate_width", self.style.gate_width)
-                border_left, border_right = compute_block_box_bounds(
-                    self.style,
-                    block_name,
-                    br["start_x"],
-                    br["end_x"],
-                    br["depth"],
-                    mgw,
-                    block_power,
-                )
-
-                x_right = max(x_right, border_right + 0.3)
-                x_left = min(x_left, border_left - 0.3)
-
-        # Account for folded ForOperation boxes in figure sizing
-        positions = self.layout.positions
-        block_widths_dict = self.layout.block_widths
-        for key, bw in block_widths_dict.items():
-            if key in positions:
-                box_left = positions[key] - bw / 2
-                box_right = positions[key] + bw / 2
-                x_left = min(x_left, box_left - 0.3)
-                x_right = max(x_right, box_right + 0.3)
-
-        # Account for folded block vertical extents in figure sizing
-        for key, info in self.layout.folded_block_extents.items():
-            if key not in positions:
-                continue
-            qubits = info["affected_qubits"]
-            if not qubits:
-                continue
-            y_coords = [self.qubit_y[q] for q in qubits]
-            min_qy, max_qy = min(y_coords), max(y_coords)
-            y_center_fb = (min_qy + max_qy) / 2
-            num_lines = info["num_text_lines"]
-            min_text_height = (
-                num_lines * self.style.line_height
-                + 2 * self.style.folded_box_text_v_padding
-            )
-            qubit_span = max_qy - min_qy + self.style.gate_height
-            box_height = max(qubit_span, min_text_height)
-            box_top_fb = y_center_fb + box_height / 2
-            box_bottom_fb = y_center_fb - box_height / 2
-            y_top = max(y_top, box_top_fb + 0.3)
-            y_bottom = min(y_bottom, box_bottom_fb - 0.3)
-
-        # Extend x_right if output_names are present (for right-side labels)
-        if self._output_names:
-            max_label_len = max(len(name) for name in self._output_names)
-            x_right += max_label_len * 0.12 + 0.5
-
-        # Set axis limits
-        ax.set_xlim(x_left, x_right)
-        ax.set_ylim(y_bottom, y_top)
-
-        # Calculate figure size from axis limits
-        x_range = x_right - x_left
-        y_range = y_top - y_bottom
-        fig_width = max(6, x_range * 1.0)
-        fig_height = max(2, y_range * 0.8)
-
-        # Update figure size
-        fig.set_size_inches(fig_width, fig_height)
+        ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+        ax.set_xlim(viewport.left, viewport.right)
+        ax.set_ylim(viewport.bottom, viewport.top)
         ax.axis("off")
-        ax.set_aspect("equal")
+        ax.set_aspect("equal", adjustable="box")
 
         # Store ax in figure for later access
         fig._qm_ax = ax  # type: ignore[attr-defined]
@@ -1740,35 +1311,27 @@ class MatplotlibRenderer:
         self,
         fig: Figure,
         num_qubits: int,
-        qubit_map: dict[str, int],
     ) -> None:
         """Draw qubit wires and labels.
 
         Args:
-            fig: matplotlib Figure.
-            num_qubits: Number of qubits.
-            qubit_map: Qubit to wire index mapping.
+            fig (Figure): Target matplotlib figure.
+            num_qubits (int): Number of qubit wires.
+
+        Returns:
+            None
         """
         ax = fig._qm_ax  # type: ignore[attr-defined]
-        # Compute wire start/end symmetrically from gate edges
         assert self.layout is not None
-        actual_width = self.layout.actual_width
-        first_gate_x = self.layout.first_gate_x
-        wire_ext = self.style.wire_extension
-        first_gate_hw = self.layout.first_gate_half_width
-        wire_start = first_gate_x - first_gate_hw - wire_ext
-        default_wire_end = actual_width + wire_ext
 
-        # Draw horizontal wires for each qubit
         for i in range(num_qubits):
             y = self.qubit_y[i]
-            # Use measurement position if available, otherwise default
-            wire_end = self.qubit_end_positions.get(i, default_wire_end)
+            wire_span = self.layout.wire_spans[i]
             # Measurement-terminated wires use "butt" capstyle to prevent
             # the half-linewidth overhang past the measurement box edge.
             capstyle: str = "butt" if i in self.qubit_end_positions else "projecting"
             line = mlines.Line2D(
-                [wire_start, wire_end],
+                [wire_span.left, wire_span.right],
                 [y, y],
                 color=self.style.wire_color,
                 linewidth=1,
@@ -1780,12 +1343,13 @@ class MatplotlibRenderer:
             # Draw left qubit label
             label = self.qubit_names.get(i, f"q{i}")
             ax.text(
-                wire_start - 0.2,
+                wire_span.left - 0.2,
                 y,
                 label,
                 ha="right",
                 va="center",
                 fontsize=self.style.font_size,
+                fontweight="normal",
                 zorder=PORDER_TEXT,
             )
 
@@ -1796,9 +1360,9 @@ class MatplotlibRenderer:
         """Draw a control dot for controlled gates.
 
         Args:
-            ax: matplotlib Axes.
-            x: X coordinate of the dot center.
-            y: Y coordinate of the dot center.
+            ax (Axes): Axes to draw on.
+            x (float): X coordinate of the dot center.
+            y (float): Y coordinate of the dot center.
         """
         circle = mpatches.Circle(
             (x, y),
@@ -1813,9 +1377,9 @@ class MatplotlibRenderer:
         """Draw a target X (plus sign in circle) for CNOT.
 
         Args:
-            ax: matplotlib Axes.
-            x: X coordinate of the target center.
-            y: Y coordinate of the target center.
+            ax (Axes): Axes to draw on.
+            x (float): X coordinate of the target center.
+            y (float): Y coordinate of the target center.
         """
         # Outer circle
         circle = mpatches.Circle(
@@ -1850,9 +1414,9 @@ class MatplotlibRenderer:
         """Draw an X marker for SWAP gate.
 
         Args:
-            ax: matplotlib Axes.
-            x: X coordinate of the marker center.
-            y: Y coordinate of the marker center.
+            ax (Axes): Axes to draw on.
+            x (float): X coordinate of the marker center.
+            y (float): Y coordinate of the marker center.
         """
         size = 0.15
         line1 = mlines.Line2D(
@@ -1878,11 +1442,11 @@ class MatplotlibRenderer:
         """Draw a meter symbol (half-circle arc + needle) for measurement.
 
         Args:
-            ax: matplotlib Axes.
-            x_pos: X center position.
-            y: Y center position.
-            width: Width of the containing box.
-            height: Height of the containing box.
+            ax (Axes): Axes to draw on.
+            x_pos (float): X center position.
+            y (float): Y center position.
+            width (float): Width of the containing box.
+            height (float): Height of the containing box.
         """
         # Calculate arc radius based on box size
         arc_radius = min(width, height) * 0.25
@@ -1920,9 +1484,9 @@ class MatplotlibRenderer:
         """Draw a single measurement box with meter symbol at the given position.
 
         Args:
-            ax: matplotlib Axes.
-            x_pos: X coordinate of the box center.
-            y: Y coordinate of the box center.
+            ax (Axes): Axes to draw on.
+            x_pos (float): X coordinate of the box center.
+            y (float): Y coordinate of the box center.
         """
         width = self.style.gate_width
         height = self.style.gate_height

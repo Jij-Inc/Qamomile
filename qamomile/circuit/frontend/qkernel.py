@@ -2037,6 +2037,7 @@ class QKernel(Generic[P, R]):
         expand_composite: bool = False,
         inline_depth: int | None = None,
         fold_ifs: bool = False,
+        fold_whiles: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Visualize the circuit using Matplotlib.
@@ -2059,6 +2060,9 @@ class QKernel(Generic[P, R]):
                 ControlledU nodes, not CompositeGate.
             fold_ifs (bool): If True, display IfOperation as folded summary
                 blocks. If False (default), show if/else branches side by side.
+            fold_whiles (bool): If True, display WhileOperation as a folded
+                summary block. If False (default), show the loop body inside a
+                ``while <cond>:`` box, mirroring a single-branch if.
             **kwargs (Any): Concrete values for arguments. Arguments not
                 provided here and without defaults will be shown as symbolic
                 parameters.
@@ -2106,6 +2110,9 @@ class QKernel(Generic[P, R]):
             # Draw with if/else folded into a summary box
             fig = circuit.draw(fold_ifs=True)
 
+            # Draw with a while loop folded into a summary box
+            fig = circuit.draw(fold_whiles=True)
+
             # Draw with composite gates expanded
             fig = circuit.draw(expand_composite=True)
             ```
@@ -2117,6 +2124,7 @@ class QKernel(Generic[P, R]):
             inline=inline,
             fold_loops=fold_loops,
             fold_ifs=fold_ifs,
+            fold_whiles=fold_whiles,
             expand_composite=expand_composite,
             inline_depth=inline_depth,
             **kwargs,

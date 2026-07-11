@@ -272,6 +272,51 @@ def nested_if(q0: Qubit, q1: Qubit, q2: Qubit) -> Qubit:
     return q2
 
 
+@qmc.qkernel
+def measure_after_if() -> qmc.Bit:
+    """Build an if that rebinds a qubit, then measures the merged result.
+
+    An if-else that rebinds ``q1`` produces a phi-merged output whose
+    ``logical_id`` is freshly minted, distinct from the pre-branch qubit's
+    logical_id. The trailing ``measure(q1)`` reads that merged value, so the
+    analyzer must map the phi result back onto the pre-branch wire — otherwise
+    the measurement resolves to an empty wire list and silently vanishes.
+
+    Returns:
+        qmc.Bit: Measurement outcome of the conditionally flipped qubit.
+    """
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
+    q0 = qmc.x(q0)
+    bit = qmc.measure(q0)
+    if bit:
+        q1 = qmc.x(q1)
+    else:
+        pass
+    return qmc.measure(q1)
+
+
+@qmc.qkernel
+def gate_and_measure_after_if() -> qmc.Bit:
+    """Build an if whose merged qubit feeds a later gate and measurement.
+
+    Exercises the same phi-merge wire resolution as ``measure_after_if`` but
+    for a post-if gate (``h``) as well as the trailing measurement, so both
+    kinds of consumer of the merged qubit are covered.
+
+    Returns:
+        qmc.Bit: Measurement outcome after a post-if gate on the merged qubit.
+    """
+    q0 = qmc.qubit("q0")
+    q1 = qmc.qubit("q1")
+    q0 = qmc.x(q0)
+    bit = qmc.measure(q0)
+    if bit:
+        q1 = qmc.x(q1)
+    q1 = qmc.h(q1)
+    return qmc.measure(q1)
+
+
 def _walk(nodes: Iterable[VisualNode]) -> Iterator[VisualNode]:
     """Yield every VisualNode reachable from a list of root nodes.
 
@@ -853,6 +898,67 @@ class TestNestedIf:
         assert _branch_gate_types(inner[0].iterations[0]) == [GateOperationType.X]
         assert _branch_gate_types(inner[0].iterations[1]) == [GateOperationType.H]
         assert _branch_gate_types(top_level[0].iterations[1]) == [GateOperationType.Z]
+
+
+class TestOperationAfterIf:
+    """Operations after an if resolve the branch-merged qubit to its wire.
+
+    An if-else that rebinds a qubit hands the continuation a phi-merged value
+    with a fresh ``logical_id``. Any operation after the if that reads that
+    value (a trailing measurement, a later gate) must still map onto the
+    pre-branch wire; a regression here drops the operation from the drawing.
+    """
+
+    def _top_level_gates(self, vc: VisualCircuit) -> list[VGate]:
+        """Collect the top-level (non-nested) VGate nodes of a circuit.
+
+        Args:
+            vc (VisualCircuit): Visual circuit to scan.
+
+        Returns:
+            list[VGate]: Top-level gate nodes in traversal order.
+        """
+        return [n for n in vc.children if isinstance(n, VGate)]
+
+    def test_measure_after_if_keeps_merged_qubit_wire(self):
+        """The trailing measure of a branch-merged qubit draws on its wire."""
+        vc = _visual_circuit(measure_after_if)
+        measures = [n for n in self._top_level_gates(vc) if n.kind == VGateKind.MEASURE]
+        # q0's measurement feeds the if (wire 0); q1's trailing measurement
+        # reads the phi-merged qubit and must resolve to wire 1, not [].
+        assert [m.qubit_indices for m in measures] == [[0], [1]]
+
+    def test_no_top_level_gate_loses_its_wire(self):
+        """Every top-level gate keeps a non-empty wire list after the if."""
+        vc = _visual_circuit(gate_and_measure_after_if)
+        assert all(gate.qubit_indices for gate in self._top_level_gates(vc))
+
+    def test_gate_and_measure_after_if_land_on_merged_wire(self):
+        """Both the post-if gate and measurement land on the merged qubit's wire."""
+        vc = _visual_circuit(gate_and_measure_after_if)
+        # After the if, both the H gate and the measurement read the merged
+        # q1, so both resolve to wire 1.
+        post_if_wires = [
+            gate.qubit_indices
+            for gate in self._top_level_gates(vc)
+            if gate.qubit_indices == [1]
+        ]
+        assert post_if_wires == [[1], [1]]
+
+    def test_measure_after_if_draws(self):
+        """The reported kernel draws with the trailing measurement present."""
+        fig = measure_after_if.draw()
+        assert isinstance(fig, Figure)
+        # Both measurements draw on a real wire: q0's (feeds the if) and q1's
+        # (reads the merged qubit). Before the fix the trailing measurement had
+        # an empty wire list and never reached the figure.
+        measure_gates = [
+            n
+            for n in self._top_level_gates(_visual_circuit(measure_after_if))
+            if n.kind == VGateKind.MEASURE
+        ]
+        assert len(measure_gates) == 2
+        assert all(m.qubit_indices for m in measure_gates)
 
 
 class TestDrawEndToEnd:

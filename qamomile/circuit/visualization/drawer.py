@@ -56,7 +56,7 @@ class MatplotlibDrawer:
     - Inline mode (inline=True): Expands CallBlockOperation contents
     """
 
-    def __init__(self, graph: Block, style: CircuitStyle | None = None):
+    def __init__(self, graph: Block, style: CircuitStyle | None = None) -> None:
         """Initialize the drawer.
 
         Args:
@@ -78,6 +78,7 @@ class MatplotlibDrawer:
         expand_composite: bool = False,
         inline_depth: int | None = None,
         fold_ifs: bool = False,
+        fold_whiles: bool = False,
     ) -> Figure:
         """Generate a matplotlib Figure of the circuit.
 
@@ -86,7 +87,8 @@ class MatplotlibDrawer:
                 calls as boxes.
             fold_loops (bool): If True (default), display ForOperation as
                 blocks instead of unrolling. If False, expand loops and show
-                all iterations.
+                all iterations. Does not affect WhileOperation (see
+                ``fold_whiles``).
             expand_composite (bool): If True, expand CompositeGateOperation
                 nodes. If False (default), show them as boxes.
             inline_depth (int | None): Maximum nesting depth for inline
@@ -94,6 +96,9 @@ class MatplotlibDrawer:
                 ControlledU nodes, not CompositeGate.
             fold_ifs (bool): If True, display IfOperation as folded summary
                 blocks. If False (default), show if/else branches side by side.
+            fold_whiles (bool): If True, display WhileOperation as a folded
+                summary block. If False (default), show the loop body inside a
+                ``while <cond>:`` box, mirroring a single-branch if.
 
         Returns:
             Figure: Matplotlib figure object.
@@ -106,6 +111,7 @@ class MatplotlibDrawer:
             expand_composite=expand_composite,
             inline_depth=inline_depth,
             fold_ifs=fold_ifs,
+            fold_whiles=fold_whiles,
         )
         qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(self.graph)
 
@@ -125,6 +131,7 @@ class MatplotlibDrawer:
         inline: bool = False,
         fold_loops: bool = True,
         fold_ifs: bool = False,
+        fold_whiles: bool = False,
         expand_composite: bool = False,
         inline_depth: int | None = None,
         style: CircuitStyle | None = None,
@@ -142,6 +149,9 @@ class MatplotlibDrawer:
                 blocks.
             fold_ifs (bool): If True, display IfOperation as folded summary
                 blocks. If False (default), show if/else branches side by side.
+            fold_whiles (bool): If True, display WhileOperation as a folded
+                summary block. If False (default), show the loop body inside a
+                ``while <cond>:`` box, mirroring a single-branch if.
             expand_composite (bool): If True, expand CompositeGateOperation.
             inline_depth (int | None): Maximum nesting depth for inline
                 expansion.
@@ -158,6 +168,7 @@ class MatplotlibDrawer:
             inline=inline,
             fold_loops=fold_loops,
             fold_ifs=fold_ifs,
+            fold_whiles=fold_whiles,
             expand_composite=expand_composite,
             inline_depth=inline_depth,
         )

@@ -1,7 +1,7 @@
 """Circuit analysis: IR inspection, value resolution, and label generation.
 
 This module provides CircuitAnalyzer, which handles all IR-level analysis
-for the circuit visualization pipeline. It has no matplotlib dependency.
+for the circuit visualization pipeline without depending on renderer state.
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
 
 from .geometry import compute_border_padding
 from .style import CircuitStyle
+from .text_metrics import measure_text_width
 from .types import _TEX_SYMBOLS
 from .visual_ir import (
     VFoldedBlock,
@@ -222,20 +223,28 @@ class CircuitAnalyzer:
         expand_composite: bool = False,
         inline_depth: int | None = None,
         fold_ifs: bool = False,
-    ):
+        fold_whiles: bool = False,
+    ) -> None:
         """Initialize the visualization analyzer.
 
         Args:
             graph (Block): Computation graph to analyze for rendering.
             style (CircuitStyle): Visual style configuration.
             inline (bool): Whether to inline CallBlockOperation contents.
-            fold_loops (bool): Whether to render loop operations as folded
-                summary blocks instead of materialized iterations.
+            fold_loops (bool): Whether to render ``for`` loop operations as
+                folded summary blocks instead of materialized iterations. Does
+                not affect ``while`` loops, which are governed by
+                ``fold_whiles``.
             expand_composite (bool): Whether to expand composite gates.
             inline_depth (int | None): Maximum nesting depth for inline
                 expansion, or None for unlimited depth.
             fold_ifs (bool): Whether to render IfOperation nodes as folded
                 summary blocks instead of side-by-side branches.
+            fold_whiles (bool): Whether to render WhileOperation nodes as
+                folded summary blocks instead of an expanded body-in-box.
+                Defaults to False, mirroring ``fold_ifs``: a ``while`` is
+                measurement-backed control flow and reads best with its body
+                shown, so it expands by default.
         """
         self.graph = graph
         self.style = style
@@ -244,6 +253,7 @@ class CircuitAnalyzer:
         self.expand_composite = expand_composite
         self.inline_depth = inline_depth
         self.fold_ifs = fold_ifs
+        self.fold_whiles = fold_whiles
 
     def _should_inline_at_depth(self, depth: int) -> bool:
         """Whether to inline CallBlock/ControlledU at this nesting depth."""
@@ -892,6 +902,24 @@ class CircuitAnalyzer:
                         depth + 1,
                         param_values,
                     )
+                    # An if-else that rebinds a qubit produces a phi-merged
+                    # output whose ``logical_id`` is fresh (e.g. ``q1_phi_0``),
+                    # distinct from the pre-branch qubit's logical_id.  Map each
+                    # quantum merge result onto the same wire as its branch
+                    # value so operations after the if-else that read the
+                    # merged qubit (a trailing ``qmc.measure(q)``, a later
+                    # gate) resolve to the right wire instead of an empty
+                    # ``qubit_indices`` list and silently vanish from the
+                    # drawing.
+                    for merge in op.iter_merges():
+                        if not isinstance(merge.result.type, QubitType):
+                            continue
+                        map_block_results(
+                            [merge.true_value],
+                            [merge.result],
+                            logical_id_remap,
+                            param_values,
+                        )
 
                 elif isinstance(op, ForItemsOperation):
                     dict_value = op.operands[0] if op.operands else None
@@ -1014,10 +1042,18 @@ class CircuitAnalyzer:
                 continue
 
             if isinstance(op, WhileOperation):
-                raise NotImplementedError(
-                    "Circuit visualization does not yet support WhileOperation. "
-                    "This feature will be added in a future release."
+                node = self._build_vwhile(
+                    op,
+                    node_key,
+                    qubit_map,
+                    logical_id_remap,
+                    param_values,
+                    depth,
+                    scope_path,
+                    body_operations=ops,
                 )
+                result.append(node)
+                continue
 
             if isinstance(op, IfOperation):
                 node = self._build_vif(
@@ -1173,7 +1209,26 @@ class CircuitAnalyzer:
         logical_id_remap: dict[str, str],
         param_values: dict,
     ) -> VGate:
-        """Build a VGate node for gates, measurements, and block boxes."""
+        """Build a visual node for a gate-like IR operation.
+
+        Args:
+            op (Operation): Gate, measurement, block, composite, inverse, or
+                controlled operation to convert.
+            node_key (tuple): Stable identity key used by layout and rendering.
+            qubit_map (dict[str, int]): Mapping from logical qubit identifiers
+                to display-wire indices.
+            logical_id_remap (dict[str, str]): Mapping from callee-local logical
+                identifiers to caller identifiers for inline expansion.
+            param_values (dict): Concrete or symbolic parameter values available
+                in the current analysis scope.
+
+        Returns:
+            VGate: Pre-resolved visual gate node with display metadata and
+                layout dimensions.
+
+        Raises:
+            TypeError: If ``op`` is not a supported gate-like operation.
+        """
         if isinstance(op, GateOperation):
             label, has_param = self._get_gate_label(op, param_values)
             estimated_width = self._estimate_gate_width(op, param_values)
@@ -1362,14 +1417,20 @@ class CircuitAnalyzer:
             param_suffix = self._format_controlled_param_suffix(op, param_values)
             label = f"{u_name}{param_suffix}"
             if controlled_gate_type is not None:
-                box_width = self.style.gate_width
+                inner_box_width = self.style.gate_width
             else:
-                box_width = self._estimate_label_box_width(label)
-                if power_val > 1:
-                    # Reserve a little extra horizontal space so the
-                    # outer wrapper box does not clip into adjacent
-                    # gates.
-                    box_width += 2 * self.style.power_wrapper_margin
+                inner_box_width = self._estimate_label_box_width(label)
+            # ``box_width`` is consumed by the renderer for the inner target
+            # rectangle.  Layout instead reserves ``estimated_width``, which
+            # must include the powered wrapper's margin on both sides.  Keeping
+            # these dimensions separate prevents the renderer from applying
+            # the wrapper margin twice to the visible patch.
+            estimated_width = inner_box_width
+            if power_val > 1:
+                estimated_width = max(
+                    inner_box_width + 2 * self.style.power_wrapper_margin,
+                    self._estimate_label_box_width(f"pow={power_val}"),
+                )
             # Control qubits first, then target qubits
             control_indices: list[int] = []
             for qval in op.control_operands:
@@ -1414,10 +1475,10 @@ class CircuitAnalyzer:
                 node_key=node_key,
                 label=label,
                 qubit_indices=control_indices + target_indices,
-                estimated_width=box_width,
+                estimated_width=estimated_width,
                 kind=VGateKind.CONTROLLED_U_BOX,
                 gate_type=controlled_gate_type,
-                box_width=box_width,
+                box_width=inner_box_width,
                 control_count=len(control_indices),
                 power=power_val,
             )
@@ -1776,44 +1837,129 @@ class CircuitAnalyzer:
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str],
         param_values: dict,
-    ) -> VFoldedBlock:
-        """Build a VFoldedBlock for a WhileOperation (always folded).
+        depth: int,
+        scope_path: tuple,
+        body_operations: list[Operation] | None = None,
+    ) -> VFoldedBlock | VUnfoldedSequence:
+        """Build a Visual IR node for a WhileOperation.
 
-        Note: This method is implemented for future use but currently not called,
-        because ``_build_visual_nodes`` raises ``NotImplementedError`` for
-        ``WhileOperation``.  It will be connected once While-loop visualization
-        is fully enabled.
+        A ``while`` loop is measurement-backed (its condition is a ``Bit``
+        produced by ``qmc.measure``) and cannot be unrolled at compile time,
+        so it is drawn like a single-branch ``if``: the loop body is shown
+        once inside a ``while <cond>:`` box, connected to the measurement that
+        produces the condition. This is the default. When ``fold_whiles`` is
+        enabled the body collapses to a compact summary box instead, matching
+        the folded ``for`` rendering.
+
+        Args:
+            op (WhileOperation): The while loop to visualize.
+            node_key (tuple): Stable identity key for layout/render lookup.
+            qubit_map (dict[str, int]): Mapping from logical_id to wire index.
+            logical_id_remap (dict[str, str]): Mapping from formal-parameter
+                logical_ids to actual-argument logical_ids in scope.
+            param_values (dict): Resolved loop/parameter values in scope.
+            depth (int): Current nesting depth for child expansion.
+            scope_path (tuple): Path of enclosing scope keys for child node keys.
+            body_operations (list[Operation] | None): Operations of the scope
+                enclosing ``op``, used to spell the condition predicate and
+                locate the measurement that feeds it. Defaults to None, which
+                falls back to the anonymous ``while cond:`` label with no
+                measurement connector.
+
+        Returns:
+            VFoldedBlock | VUnfoldedSequence: A folded summary box when
+                ``fold_whiles`` is set, otherwise an unfolded sequence carrying
+                the loop body as its single iteration.
         """
         affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
-        header = "while cond:"
-        local_param_values = dict(param_values)
-        self._evaluate_loop_body_intermediates(op.operations, local_param_values)
-        body_lines: list[str] = []
-        for body_op in op.operations:
-            expr = self._format_operation_as_expression(
-                body_op,
-                set(),
-                body_operations=op.operations,
-                param_values=local_param_values,
+
+        condition = op.operands[0] if op.operands else None
+        condition_expr = self._format_condition_expr(
+            condition, body_operations, param_values
+        )
+        condition_label = (
+            f"while {condition_expr}:" if condition_expr else "while cond:"
+        )
+        condition_measure_node_key: tuple | None = None
+        condition_measure_qubit_indices: list[int] = []
+        condition_measure_info = self._condition_measure_info(
+            condition,
+            body_operations,
+            qubit_map,
+            logical_id_remap,
+            param_values,
+            scope_path,
+        )
+        if condition_measure_info is not None:
+            condition_measure_node_key, condition_measure_qubit_indices = (
+                condition_measure_info
             )
-            if expr:
-                body_lines.extend(expr.split("\n"))
-        # Truncate to 3 lines
-        if len(body_lines) > 3:
-            body_lines = body_lines[:3] + ["..."]
+        if not affected_qubits and condition_measure_qubit_indices:
+            affected_qubits = list(dict.fromkeys(condition_measure_qubit_indices))
+            affected_qubits_precise = True
+        elif not affected_qubits and qubit_map:
+            # An empty-bodied while still needs a display wire for its box.
+            affected_qubits = [min(qubit_map.values())]
+            affected_qubits_precise = False
 
-        folded_width = self._compute_folded_text_width(header, body_lines)
+        if self.fold_whiles:
+            local_param_values = dict(param_values)
+            self._evaluate_loop_body_intermediates(op.operations, local_param_values)
+            body_lines: list[str] = []
+            for body_op in op.operations:
+                expr = self._format_operation_as_expression(
+                    body_op,
+                    set(),
+                    body_operations=op.operations,
+                    param_values=local_param_values,
+                )
+                if expr:
+                    body_lines.extend(expr.split("\n"))
+            if len(body_lines) > 3:
+                body_lines = body_lines[:3] + ["..."]
 
-        return VFoldedBlock(
+            folded_width = self._compute_folded_text_width(condition_label, body_lines)
+
+            return VFoldedBlock(
+                node_key=node_key,
+                header_label=condition_label,
+                body_lines=body_lines,
+                affected_qubits=affected_qubits,
+                folded_width=folded_width,
+                kind=VFoldedKind.WHILE,
+                affected_qubits_precise=affected_qubits_precise,
+                condition_measure_node_key=condition_measure_node_key,
+                condition_measure_qubit_indices=condition_measure_qubit_indices,
+            )
+
+        # Unfolded: show the loop body once inside a ``while <cond>:`` box.
+        body_param_values = dict(param_values)
+        self._evaluate_loop_body_intermediates(op.operations, body_param_values)
+        body_children = self._build_visual_nodes(
+            op.operations,
+            qubit_map,
+            logical_id_remap,
+            body_param_values,
+            depth + 1,
+            (*node_key, "body"),
+        )
+        body_width = self._sum_visual_widths(body_children)
+        branch_label_widths = [self._estimate_label_box_width(condition_label)]
+
+        return VUnfoldedSequence(
             node_key=node_key,
-            header_label=header,
-            body_lines=body_lines,
+            iterations=[body_children],
             affected_qubits=affected_qubits,
-            folded_width=folded_width,
-            kind=VFoldedKind.WHILE,
+            kind=VUnfoldedKind.WHILE,
+            iteration_widths=[body_width],
+            condition_label=condition_label,
             affected_qubits_precise=affected_qubits_precise,
+            condition_label_width=branch_label_widths[0],
+            branch_label_widths=branch_label_widths,
+            condition_measure_node_key=condition_measure_node_key,
+            condition_measure_qubit_indices=condition_measure_qubit_indices,
         )
 
     def _build_vif(
@@ -2505,11 +2651,40 @@ class CircuitAnalyzer:
         return header, body_lines, folded_width
 
     def _compute_folded_text_width(self, header: str, body_lines: list[str]) -> float:
-        """Compute the width needed for a folded block's text content."""
-        scale = self.style.subfont_size / self.style.font_size
-        header_width = len(header) * self.style.char_width_bold * scale
-        max_body_chars = max((len(line) for line in body_lines), default=0)
-        body_width = max_body_chars * self.style.char_width_monospace * scale
+        """Compute the width needed for a folded block's text content.
+
+        Args:
+            header (str): Bold header drawn at the top of the folded block.
+            body_lines (list[str]): Body lines drawn below or with the header.
+
+        Returns:
+            float: Minimum folded-box width in layout units.
+        """
+        header_width = measure_text_width(
+            header,
+            font_size=self.style.subfont_size,
+            font_weight="bold",
+            fallback_char_width=self.style.char_width_bold,
+        )
+        body_width = max(
+            (
+                max(
+                    measure_text_width(
+                        line,
+                        font_size=self.style.subfont_size,
+                        fallback_char_width=self.style.char_width_gate,
+                    ),
+                    measure_text_width(
+                        line,
+                        font_size=self.style.subfont_size,
+                        font_family="monospace",
+                        fallback_char_width=self.style.char_width_monospace,
+                    ),
+                )
+                for line in body_lines
+            ),
+            default=0.0,
+        )
         text_width = max(header_width, body_width)
         margin = 0.15  # Extra margin for folded blocks
         return max(
@@ -4402,65 +4577,69 @@ class CircuitAnalyzer:
     def _estimate_gate_width(
         self, op: GateOperation, param_values: dict | None = None
     ) -> float:
-        """Estimate gate box width from label text without matplotlib axes.
-
-        Uses character-based estimation suitable for layout phase
-        (before figure creation). Also serves as floor for drawing phase.
+        """Measure a gate box width before figure creation.
 
         Args:
-            op: GateOperation whose width to estimate.
-            param_values: Parameter values for resolving gate labels.
+            op (GateOperation): Gate whose rendered label determines the width.
+            param_values (dict | None): Parameter values used to resolve the
+                label. Defaults to None.
 
         Returns:
-            Estimated gate width in data coordinate units.
+            float: Gate width in layout coordinate units.
         """
         label, has_param = self._get_gate_label(op, param_values)
         if not has_param:
             return self.style.gate_width
 
-        # Strip TeX $ delimiters (not rendered)
-        visual = label.replace("$", "")
-        # TeX commands like \theta render as ~1 wide character
-        visual = re.sub(r"\\[a-zA-Z]+", "X", visual)
-        effective_len = len(visual)
-        # Use style settings for width calculation
-        char_width = self.style.char_width_gate  # 0.14 default, configurable
-        text_width = effective_len * char_width
-        padding = self.style.text_padding  # match drawing phase
+        text_width = measure_text_width(
+            label,
+            font_size=self.style.font_size,
+            fallback_char_width=self.style.char_width_gate,
+        )
+        padding = self.style.text_padding
         return max(self.style.gate_width, text_width + 2 * padding)
 
     def _estimate_label_box_width(self, label: str) -> float:
-        """Estimate box width for a text label (blocks, composite gates, controlled-U).
-
-        Strips TeX formatting for visual length estimation.
+        """Measure a general text-label box width.
 
         Args:
-            label: Text label to estimate width for.
+            label (str): Text label rendered inside a gate or block box.
 
         Returns:
-            Estimated box width in data coordinate units.
+            float: Box width in layout coordinate units.
         """
-        visual_label = label.replace("$", "")
-        visual_label = re.sub(r"\\[a-zA-Z]+", "X", visual_label)
-        text_width = len(visual_label) * self.style.char_width_gate
+        regular_width = measure_text_width(
+            label,
+            font_size=self.style.font_size,
+            fallback_char_width=self.style.char_width_gate,
+        )
+        header_width = measure_text_width(
+            label,
+            font_size=self.style.subfont_size,
+            font_weight="bold",
+            fallback_char_width=self.style.char_width_bold,
+        )
+        text_width = max(regular_width, header_width)
         return max(text_width + 2 * self.style.text_padding, self.style.gate_width)
 
     def _estimate_block_label_box_width(self, label: str) -> float:
-        """Estimate box width for a CallBlock label.
+        """Measure a box width for a CallBlock label.
 
         Uses ``char_width_block`` (wider than ``char_width_gate``) because
         block labels often contain longer text with parenthesized parameters
         (e.g., ``mixer(omegas[0])``).
 
         Args:
-            label: Text label to estimate width for.
+            label (str): CallBlock label rendered at the regular gate size.
 
         Returns:
-            Estimated box width in data coordinate units.
+            float: Box width in layout coordinate units.
         """
-        visual_label = label.replace("$", "")
-        visual_label = re.sub(r"\\[a-zA-Z]+", "X", visual_label)
-        text_width = len(visual_label) * self.style.char_width_block
+        text_width = measure_text_width(
+            label,
+            font_size=self.style.font_size,
+            fallback_char_width=self.style.char_width_block,
+        )
         return max(text_width + 2 * self.style.text_padding, self.style.gate_width)
 
     @staticmethod

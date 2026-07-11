@@ -125,11 +125,13 @@ def test_controlled_box_label_uses_tex_name_for_builtin_gate() -> None:
 
 
 def test_controlled_box_power_lives_on_vgate_not_label() -> None:
-    """``power=k`` rides on ``VGate.power``; the label stays clean.
+    """``power=k`` keeps label, inner width, and outer width separate.
 
     Verifies the split between in-label text (just the wrapped
     callable + classical kwargs) and the ``power`` field that the
-    renderer turns into an outer ``pow=N`` wrapper box.
+    renderer turns into an outer ``pow=N`` wrapper box. The layout-facing
+    ``estimated_width`` includes both wrapper margins, while ``box_width``
+    remains the width of the inner target box consumed by the renderer.
     """
 
     @qmc.qkernel
@@ -144,10 +146,17 @@ def test_controlled_box_power_lives_on_vgate_not_label() -> None:
     box = _controlled_u_box(kernel)
     assert box.label == "$R_x$(angle=0.79)", box.label
     assert box.power == 3, box.power
+    assert box.box_width is not None
+    assert math.isclose(
+        box.estimated_width,
+        box.box_width + 2 * DEFAULT_STYLE.power_wrapper_margin,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )
 
 
 def test_controlled_box_power_defaults_to_one() -> None:
-    """When ``power`` is omitted, ``VGate.power == 1``."""
+    """An unpowered box uses the same width for layout and rendering."""
 
     @qmc.qkernel
     def kernel() -> qmc.Bit:
@@ -160,6 +169,13 @@ def test_controlled_box_power_defaults_to_one() -> None:
 
     box = _controlled_u_box(kernel)
     assert box.power == 1, box.power
+    assert box.box_width is not None
+    assert math.isclose(
+        box.estimated_width,
+        box.box_width,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )
 
 
 def _controlled_u_box_with_bindings(kernel, **bindings) -> VGate:
