@@ -616,7 +616,7 @@ def test_matrix_store_rejected():
 def test_if_branch_store_rejected():
     """Stores inside a measurement-backed if/else branch are rejected.
 
-    Array values have no phi merge, so the store would apply regardless of
+    Array values have no merge, so the store would apply regardless of
     the branch taken.
     """
 

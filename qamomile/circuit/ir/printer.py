@@ -23,15 +23,17 @@ from typing import Any
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import (
     CastOperation,
-    CompositeGateOperation,
     ControlledUOperation,
     ForItemsOperation,
     GateOperation,
     InverseBlockOperation,
+    InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
+    ProjectOperation,
+    ResetOperation,
     ReturnOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -39,9 +41,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
-    PhiOp,
 )
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
@@ -69,11 +69,11 @@ def pretty_print_block(block: Block, *, depth: int = 0) -> str:
 
     Args:
         block: The ``Block`` to format.  Works on any ``BlockKind``.
-        depth: How many levels of ``CallBlockOperation`` to expand inline.
-            ``0`` (default) shows only the callee name and I/O.  Positive
-            values expand the called block's body recursively, decrementing
-            the allowance at each step.  Useful for seeing what ``inline``
-            will produce without actually running the pass.
+        depth: How many levels of callable bodies to expand inline.
+            ``0`` (default) shows only the callable name and I/O. Positive
+            values expand ``InvokeOperation`` bodies recursively, decrementing
+            the allowance at each step. Useful for seeing what ``inline`` will
+            produce without actually running the pass.
 
     Returns:
         A newline-separated string.  The format is for human debugging and
@@ -149,19 +149,41 @@ class _BlockPrinter:
             self._emit_if(op, indent=indent, pad=pad)
         elif isinstance(op, WhileOperation):
             self._emit_while(op, indent=indent, pad=pad)
-        elif isinstance(op, CallBlockOperation):
-            self._emit_call(op, indent=indent, pad=pad)
+        elif isinstance(op, InvokeOperation):
+            self._emit_invoke(op, indent=indent, pad=pad)
         else:
             self.lines.append(pad + _format_flat_op(op))
 
     # -- control flow ----------------------------------------------------
+
+    def _region_args_suffix(self, op) -> str:
+        """Format a loop's region arguments as a header suffix.
+
+        Args:
+            op: A loop operation (``ForOperation`` / ``ForItemsOperation``
+                / ``WhileOperation``) carrying ``region_args``.
+
+        Returns:
+            str: `` iter_args(name = %init -> %result, ...)`` when the
+                loop carries region arguments, or ``""`` otherwise.
+        """
+        if not getattr(op, "region_args", ()):
+            return ""
+        parts = [
+            f"{a.var_name or '_'} = {_format_value(a.init)} -> {_format_value(a.result)}"
+            for a in op.region_args
+        ]
+        return " iter_args(" + ", ".join(parts) + ")"
 
     def _emit_for(self, op: ForOperation, *, indent: int, pad: str) -> None:
         start = _format_value(op.operands[0]) if len(op.operands) > 0 else "?"
         stop = _format_value(op.operands[1]) if len(op.operands) > 1 else "?"
         step = _format_value(op.operands[2]) if len(op.operands) > 2 else "?"
         lv = op.loop_var or "_"
-        self.lines.append(f"{pad}for %{lv} in range({start}, {stop}, {step}) {{")
+        iter_args = self._region_args_suffix(op)
+        self.lines.append(
+            f"{pad}for %{lv} in range({start}, {stop}, {step}){iter_args} {{"
+        )
         self._emit_ops(op.operations, indent=indent + 1)
         self.lines.append(f"{pad}}}")
 
@@ -169,7 +191,8 @@ class _BlockPrinter:
         keys = ", ".join(f"%{k}" for k in op.key_vars) if op.key_vars else "%k"
         val = f"%{op.value_var}" if op.value_var else "%v"
         iterable = _format_value(op.operands[0]) if op.operands else "<iterable>"
-        header = f"{pad}for ({keys}), {val} in items({iterable}) {{"
+        iter_args = self._region_args_suffix(op)
+        header = f"{pad}for ({keys}), {val} in items({iterable}){iter_args} {{"
         self.lines.append(header)
         self._emit_ops(op.operations, indent=indent + 1)
         self.lines.append(f"{pad}}}")
@@ -193,28 +216,25 @@ class _BlockPrinter:
             if op.max_iterations is not None
             else ""
         )
-        self.lines.append(f"{pad}while {cond}{max_iter} {{")
+        iter_args = self._region_args_suffix(op)
+        self.lines.append(f"{pad}while {cond}{max_iter}{iter_args} {{")
         self._emit_ops(op.operations, indent=indent + 1)
         self.lines.append(f"{pad}}}")
 
-    # -- call block ------------------------------------------------------
-
-    def _emit_call(self, op: CallBlockOperation, *, indent: int, pad: str) -> None:
-        target = op.block
-        name = target.name if target is not None and target.name else "<unresolved>"
+    def _emit_invoke(self, op: InvokeOperation, *, indent: int, pad: str) -> None:
+        target = op.body
+        name = op.name
         args = ", ".join(_format_value(v) for v in op.operands)
         rets = ", ".join(_format_value(v) for v in op.results)
         arrow = f" -> ({rets})" if rets else ""
         if self.depth > 0 and target is not None:
-            self.lines.append(f"{pad}call {name}({args}){arrow} {{")
+            self.lines.append(f"{pad}invoke {name}({args}){arrow} {{")
             child = _BlockPrinter(depth=self.depth - 1)
-            # Render the target block body only (not its outer header — we
-            # already emitted the ``call`` line with signature info).
             child._emit_ops(target.operations, indent=indent + 1)
             self.lines.extend(child.lines)
             self.lines.append(f"{pad}}}")
         else:
-            self.lines.append(f"{pad}call {name}({args}){arrow}")
+            self.lines.append(f"{pad}invoke {name}({args}){arrow}")
 
 
 # ---------------------------------------------------------------------------
@@ -228,12 +248,16 @@ def _format_flat_op(op: Operation) -> str:
         return _format_gate(op)
     if isinstance(op, ControlledUOperation):
         return _format_controlled(op)
-    if isinstance(op, CompositeGateOperation):
-        return _format_composite(op)
+    if isinstance(op, InvokeOperation):
+        return _format_invoke(op)
     if isinstance(op, InverseBlockOperation):
         return _format_inverse_block(op)
     if isinstance(op, MeasureOperation):
         return _format_measure(op, "measure")
+    if isinstance(op, ProjectOperation):
+        return _format_measure(op, f"project_{op.axis}")
+    if isinstance(op, ResetOperation):
+        return _format_measure(op, "reset")
     if isinstance(op, MeasureVectorOperation):
         return _format_measure(op, "measure_vector")
     if isinstance(op, MeasureQFixedOperation):
@@ -246,8 +270,6 @@ def _format_flat_op(op: Operation) -> str:
         return _format_pauli_evolve(op)
     if isinstance(op, ExpvalOp):
         return _format_simple(op, "expval")
-    if isinstance(op, PhiOp):
-        return _format_phi(op)
     if isinstance(op, BinOp):
         return _format_binary(op, _BINOP_SYMBOLS)
     if isinstance(op, CompOp):
@@ -329,9 +351,9 @@ def _format_controlled(op: ControlledUOperation) -> str:
     return f"{_format_results(op.results)} = controlled {block_name}({args}{power_str})"
 
 
-def _format_composite(op: CompositeGateOperation) -> str:
+def _format_invoke(op: InvokeOperation) -> str:
     args = ", ".join(_format_value(v) for v in op.operands)
-    return f"{_format_results(op.results)} = composite {op.name}({args})"
+    return f"{_format_results(op.results)} = invoke {op.name}({args})"
 
 
 def _format_inverse_block(op: InverseBlockOperation) -> str:
@@ -355,15 +377,8 @@ def _format_pauli_evolve(op: PauliEvolveOp) -> str:
     return f"{_format_results(op.results)} = pauli_evolve({', '.join(parts)})"
 
 
-def _format_phi(op: PhiOp) -> str:
-    cond = _format_value(op.condition) if op.operands else "<cond>"
-    tv = _format_value(op.true_value) if len(op.operands) > 1 else "<tv>"
-    fv = _format_value(op.false_value) if len(op.operands) > 2 else "<fv>"
-    return f"{_format_results(op.results)} = phi({cond} ? {tv} : {fv})"
-
-
 def _format_merge(if_op: IfOperation, merge: IfMerge) -> str:
-    """Format one if branch-merge slot as a phi line.
+    """Format one if branch-merge slot as a merge line.
 
     Args:
         if_op (IfOperation): The if-else owning the merge (condition
@@ -371,12 +386,12 @@ def _format_merge(if_op: IfOperation, merge: IfMerge) -> str:
         merge (IfMerge): The merge slot to format.
 
     Returns:
-        str: One ``result = phi(cond ? true : false)`` line.
+        str: One ``result = merge(cond ? true : false)`` line.
     """
     cond = _format_value(if_op.condition) if if_op.operands else "<cond>"
     tv = _format_value(merge.true_value)
     fv = _format_value(merge.false_value)
-    return f"{_format_results([merge.result])} = phi({cond} ? {tv} : {fv})"
+    return f"{_format_results([merge.result])} = merge({cond} ? {tv} : {fv})"
 
 
 def _format_binary(op: Operation, table: dict[Any, str]) -> str:

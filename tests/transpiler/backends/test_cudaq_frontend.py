@@ -2605,12 +2605,12 @@ class TestControlledHelperCudaq:
 
 
 # ============================================================================
-# Compile-time constant if with array quantum phi output
+# Compile-time constant if with array quantum merge output
 # ============================================================================
 
 
-class TestCompileTimeIfArrayQuantumPhi:
-    """Compile-time constant if with array quantum phi must not raise EmitError."""
+class TestCompileTimeIfArrayQuantumMerge:
+    """Compile-time constant if with array quantum merge must not raise EmitError."""
 
     def test_dead_branch_different_array(self):
         """Dead branch rebinds qubit array to a different array."""
@@ -3424,7 +3424,7 @@ class TestAlgorithmQAOAModules:
         assert sum(count for _, count in result.results) == 200
 
 
-class TestCompileTimeIfPhiPropagation:
+class TestCompileTimeIfMergePropagation:
     """Compile-time if lowering should preserve selected classical values."""
 
     def test_direct_classical_if_after_qinit_flag_true(self):
@@ -3554,7 +3554,7 @@ class TestCompileTimeIfPhiPropagation:
         assert {value for value, _ in sample.results} == {1}
         assert statevectors_equal(sv, expected)
 
-    def test_bit_vector_phi_merge_flag_true(self):
+    def test_bit_vector_merge_flag_true(self):
         """Branch-local Vector[Bit] values merge correctly for the true branch."""
         flag = True
 
@@ -3582,7 +3582,7 @@ class TestCompileTimeIfPhiPropagation:
         result = exe.sample(transpiler.executor(), shots=32).result()
         assert {value for value, _ in result.results} == {(1, 0)}
 
-    def test_bit_vector_phi_merge_flag_false(self):
+    def test_bit_vector_merge_flag_false(self):
         """Branch-local Vector[Bit] values merge correctly for the false branch."""
         flag = False
 
@@ -3667,32 +3667,34 @@ class TestDirectCastMeasure:
 # ============================================================================
 
 
+@qmc.composite_gate(name="bell_pair")
+def _custom_bell_pair(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Prepare a Bell pair through the public composite API.
+
+    Args:
+        q0 (qmc.Qubit): Control qubit.
+        q1 (qmc.Qubit): Target qubit.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Updated Bell-pair qubits.
+    """
+    q0 = qmc.h(q0)
+    return qmc.cx(q0, q1)
+
+
 class TestCustomCompositeGate:
-    """Custom CompositeGate decomposition should work on CUDA-Q."""
+    """Custom composite decomposition should work on CUDA-Q."""
 
     def test_custom_composite_transpiles(self):
-        """A BellPair composite gate can be inlined into CUDA-Q source."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return q0, q1
-
-        bell = BellPair()
+        """A Bell composite can be lowered into CUDA-Q source."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
@@ -3703,28 +3705,12 @@ class TestCustomCompositeGate:
         )
 
     def test_composite_statevector(self):
-        """A BellPair composite gate prepares |Phi+>."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return q0, q1
-
-        bell = BellPair()
+        """A Bell composite prepares |Phi+>."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
@@ -4197,7 +4183,7 @@ class TestEntanglementAndParityPatterns:
         assert statevectors_equal(sv, all_zeros_state(3))
 
 
-class TestWhileIfSharedLocalPhi:
+class TestWhileIfSharedLocalMerge:
     """While-if shared locals should preserve dead/live distinction."""
 
     def test_while_loop_with_if_else_same_name_dead_local_transpile(self):

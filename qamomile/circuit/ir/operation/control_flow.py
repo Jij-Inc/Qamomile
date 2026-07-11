@@ -2,15 +2,11 @@ from __future__ import annotations
 
 import dataclasses
 import typing
-from typing import cast
 
 from qamomile.circuit.ir.types.primitives import BitType, BlockType, UIntType
 from qamomile.circuit.ir.value import Value, ValueBase
 
 from .operation import Operation, OperationKind, ParamHint, Signature
-
-if typing.TYPE_CHECKING:
-    from .arithmetic_operations import PhiOp
 
 
 class IfMerge(typing.NamedTuple):
@@ -19,8 +15,9 @@ class IfMerge(typing.NamedTuple):
     An ``IfOperation`` merges each variable touched by its branches back
     into a single SSA value. ``IfMerge`` is the read-side view of one such
     merge slot, decoupling every consumer from how the merge is stored in
-    the IR (today a ``PhiOp`` in ``IfOperation.phi_ops``; the storage may
-    change without touching consumers).
+    the IR (today the parallel ``IfOperation.true_yields`` /
+    ``false_yields`` lists; the storage may change without touching
+    consumers).
 
     Attributes:
         index (int): Position of this merge among the if's results.
@@ -88,6 +85,106 @@ class HasNestedOps:
 
 
 @dataclasses.dataclass(frozen=True)
+class RegionArg:
+    """Explicit loop-carried value on a loop operation (MLIR-style iter_arg).
+
+    A ``RegionArg`` makes a loop-carried dependency explicit in the IR,
+    the way MLIR's ``scf.for`` models ``iter_args`` / ``scf.yield``:
+
+    - On iteration 0 the body reads ``block_arg`` bound to ``init``.
+    - After each iteration, ``block_arg`` is rebound to that iteration's
+      ``yielded`` value.
+    - After the loop, ``result`` holds the final carried value (``init``
+      when the loop ran zero iterations).
+
+    The loop body's operations reference ``block_arg`` (the frontend
+    substitutes the traced pre-loop reads), and post-loop operations
+    reference ``result`` (the frontend rebinds the Python handle when it
+    closes the loop). ``result`` is also appended to the loop operation's
+    ``results`` list so dependency analysis sees the loop as its
+    producer.
+
+    This subsumes the trace-once staleness that ``LoopCarriedRebind``
+    records exist to reject: a rebind represented as a ``RegionArg`` is
+    a supported loop-carried value, not a miscompilation hazard.
+
+    Attributes:
+        var_name (str): Display name of the carried Python variable.
+            Used for printers and error messages only.
+        init (Value): The value entering iteration 0 (the pre-loop
+            value). A genuine input of the loop operation.
+        block_arg (Value): The region argument the body reads each
+            iteration. A definition owned by the loop operation (like
+            ``ForOperation.loop_var_value``), not an outer-scope read.
+        yielded (Value): The body-produced value carried into the next
+            iteration (produced by an operation inside ``operations``).
+        result (Value): The value visible after the loop. A definition
+            owned by the loop operation; also present in ``results``.
+    """
+
+    var_name: str
+    init: Value
+    block_arg: Value
+    yielded: Value
+    result: Value
+
+
+def _region_arg_values(
+    region_args: tuple[RegionArg, ...],
+) -> list[ValueBase]:
+    """Collect the Value fields of region-argument records.
+
+    Args:
+        region_args (tuple[RegionArg, ...]): Records attached to a loop
+            operation.
+
+    Returns:
+        list[ValueBase]: ``init``, ``block_arg``, ``yielded``, and
+            ``result`` of every record, in order.
+    """
+    values: list[ValueBase] = []
+    for arg in region_args:
+        values.extend((arg.init, arg.block_arg, arg.yielded, arg.result))
+    return values
+
+
+def _replace_region_arg_values(
+    region_args: tuple[RegionArg, ...],
+    mapping: dict[str, ValueBase],
+) -> tuple[RegionArg, ...] | None:
+    """Substitute region-argument values through a UUID mapping.
+
+    Args:
+        region_args (tuple[RegionArg, ...]): Records to rewrite.
+        mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+    Returns:
+        tuple[RegionArg, ...] | None: Rewritten records, or ``None``
+            when nothing changed.
+    """
+    new_args: list[RegionArg] = []
+    changed = False
+    for arg in region_args:
+        replacements: dict[str, Value] = {}
+        for field_name in ("init", "block_arg", "yielded", "result"):
+            current = getattr(arg, field_name)
+            mapped = mapping.get(current.uuid)
+            if isinstance(mapped, Value) and mapped is not current:
+                replacements[field_name] = mapped
+        if replacements:
+            arg = RegionArg(
+                var_name=arg.var_name,
+                init=replacements.get("init", arg.init),
+                block_arg=replacements.get("block_arg", arg.block_arg),
+                yielded=replacements.get("yielded", arg.yielded),
+                result=replacements.get("result", arg.result),
+            )
+            changed = True
+        new_args.append(arg)
+    return tuple(new_args) if changed else None
+
+
+@dataclasses.dataclass(frozen=True)
 class LoopCarriedRebind:
     """Trace-time record of a variable rebound inside a loop body.
 
@@ -97,9 +194,13 @@ class LoopCarriedRebind:
     - **Classical scalar** (``before`` classical): the frontend traces a
       loop body exactly once, so a Python-level reassignment like
       ``total = total + i`` produces IR whose right-hand side reads the
-      fixed pre-loop value instead of the previous iteration's value — a
-      loop-carried dependency the IR cannot represent. The transpiler's
-      classical loop-carried check rejects these with a targeted error
+      fixed pre-loop value instead of the previous iteration's value.
+      Most such carries are now represented as explicit ``RegionArg``s
+      (see above) and are fully supported; a classical record is only
+      created for the shapes region binding declines — ``while``-body
+      carries (a runtime while loop cannot be unrolled) and
+      measurement-backed ``Bit`` carries — and the transpiler's
+      classical loop-carried check rejects those with a targeted error
       instead of silently miscompiling.
     - **Quantum** (``before`` quantum): the loop body left the variable
       bound to a different quantum resource (``logical_id`` change — a
@@ -116,7 +217,7 @@ class LoopCarriedRebind:
             reads; for quantum records, the incoming state a rebinding
             iteration would discard).
         after (Value): The variable's IR value after the loop body ran
-            (typically a ``BinOp`` result, an ``IfOperation`` phi
+            (typically a ``BinOp`` result, an ``IfOperation`` merge
             output, or a fresh quantum allocation).
         before_synthesized (bool): True when the pre-loop value was a
             plain Python number with no IR identity (e.g. ``total = 0``),
@@ -183,6 +284,32 @@ def _replace_rebind_values(
     return tuple(new_rebinds) if changed else None
 
 
+def _replace_yield_values(
+    values: list[Value],
+    mapping: dict[str, ValueBase],
+) -> list[Value] | None:
+    """Substitute branch-yield values through a UUID mapping.
+
+    Args:
+        values (list[Value]): Yield values to rewrite.
+        mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+    Returns:
+        list[Value] | None: Rewritten list, or ``None`` when nothing
+            changed.
+    """
+    new_values: list[Value] = []
+    changed = False
+    for value in values:
+        mapped = mapping.get(value.uuid)
+        if isinstance(mapped, Value) and mapped is not value:
+            new_values.append(mapped)
+            changed = True
+        else:
+            new_values.append(value)
+    return new_values if changed else None
+
+
 @dataclasses.dataclass
 class WhileOperation(HasNestedOps, Operation):
     """Represents a while loop operation.
@@ -201,6 +328,8 @@ class WhileOperation(HasNestedOps, Operation):
 
     Attributes:
         operations: List of operations in the loop body.
+        region_args: Explicit loop-carried values (see ``RegionArg``).
+            Each entry's ``result`` also appears in ``results``.
         operands[0]: Initial condition (required). Must be a measurement
             result (``Bit`` from ``qmc.measure()``).
         operands[1]: Loop-carried condition (optional). When the loop body
@@ -216,6 +345,7 @@ class WhileOperation(HasNestedOps, Operation):
     operations: list[Operation] = dataclasses.field(default_factory=list)
     max_iterations: int | None = None
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
+    region_args: tuple[RegionArg, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -224,21 +354,24 @@ class WhileOperation(HasNestedOps, Operation):
         return dataclasses.replace(self, operations=new_lists[0])
 
     def all_input_values(self) -> list[ValueBase]:
-        """Include loop-carried rebind records for cloning/substitution.
+        """Include rebind records and region args for cloning/substitution.
 
         Same rationale as ``ForOperation.all_input_values``: rebind
-        records reference body/pre-loop values by identity, so inline
-        cloning must remap them in lockstep with body operands.
+        records and region arguments reference body/pre-loop values by
+        identity, so inline cloning must remap them in lockstep with
+        body operands.
 
         Returns:
-            list[ValueBase]: Base input values plus rebind-record values.
+            list[ValueBase]: Base input values plus rebind-record and
+                region-argument values.
         """
         values = super().all_input_values()
         values.extend(_rebind_input_values(self.loop_carried_rebinds))
+        values.extend(_region_arg_values(self.region_args))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
-        """Substitute operand and rebind-record values.
+        """Substitute operand, rebind-record, and region-arg values.
 
         Args:
             mapping (dict[str, ValueBase]): UUID-keyed substitution map.
@@ -251,16 +384,23 @@ class WhileOperation(HasNestedOps, Operation):
         new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
         if new_rebinds is not None:
             result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
+        new_region_args = _replace_region_arg_values(result.region_args, mapping)
+        if new_region_args is not None:
+            result = dataclasses.replace(result, region_args=new_region_args)
         return result
 
     @property
     def signature(self) -> Signature:
+        result_hints = [
+            ParamHint(name=f"result_{i}", type=r.type)
+            for i, r in enumerate(self.results)
+        ]
         return Signature(
             operands=[
                 ParamHint("condition", BlockType()),
                 ParamHint("loop_carried", BlockType()),
             ],
-            results=[],
+            results=result_hints,
         )
 
     @property
@@ -290,6 +430,8 @@ class ForOperation(HasNestedOps, Operation):
             constructed before the migration; new construction must
             always provide it.
         operations: List of operations in the loop body
+        region_args: Explicit loop-carried values (see ``RegionArg``).
+            Each entry's ``result`` also appears in ``results``.
         operands[0]: start (UInt type)
         operands[1]: stop (UInt type)
         operands[2]: step (UInt type)
@@ -299,6 +441,7 @@ class ForOperation(HasNestedOps, Operation):
     loop_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
+    region_args: tuple[RegionArg, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -313,12 +456,14 @@ class ForOperation(HasNestedOps, Operation):
         reference to the loop variable to a fresh UUID, but leave
         ``loop_var_value`` pointing at the un-cloned original — emit-time
         UUID-keyed lookups for the loop variable would then miss.
-        Loop-carried rebind records are included for the same reason.
+        Loop-carried rebind records and region arguments are included
+        for the same reason.
         """
         values = super().all_input_values()
         if self.loop_var_value is not None:
             values.append(self.loop_var_value)
         values.extend(_rebind_input_values(self.loop_carried_rebinds))
+        values.extend(_region_arg_values(self.region_args))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
@@ -331,17 +476,24 @@ class ForOperation(HasNestedOps, Operation):
         new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
         if new_rebinds is not None:
             result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
+        new_region_args = _replace_region_arg_values(result.region_args, mapping)
+        if new_region_args is not None:
+            result = dataclasses.replace(result, region_args=new_region_args)
         return result
 
     @property
     def signature(self) -> Signature:
+        result_hints = [
+            ParamHint(name=f"result_{i}", type=r.type)
+            for i, r in enumerate(self.results)
+        ]
         return Signature(
             operands=[
                 ParamHint("start", UIntType()),
                 ParamHint("stop", UIntType()),
                 ParamHint("step", UIntType()),
             ],
-            results=[],
+            results=result_hints,
         )
 
     @property
@@ -370,6 +522,8 @@ class ForItemsOperation(HasNestedOps, Operation):
         value_var_value: IR ``Value`` for the value variable. ``None``
             only for legacy IR.
         operations: List of operations in the loop body.
+        region_args: Explicit loop-carried values (see ``RegionArg``).
+            Each entry's ``result`` also appears in ``results``.
         operands[0]: The dict/iterable value (DictValue type).
 
     Note:
@@ -384,6 +538,7 @@ class ForItemsOperation(HasNestedOps, Operation):
     value_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
+    region_args: tuple[RegionArg, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -397,7 +552,7 @@ class ForItemsOperation(HasNestedOps, Operation):
         Same rationale as ``ForOperation.all_input_values``: keep the IR
         identity fields in lockstep with body references so UUID-keyed
         lookups stay valid after inline cloning. Loop-carried rebind
-        records are included for the same reason.
+        records and region arguments are included for the same reason.
         """
         values = super().all_input_values()
         if self.key_var_values is not None:
@@ -405,6 +560,7 @@ class ForItemsOperation(HasNestedOps, Operation):
         if self.value_var_value is not None:
             values.append(self.value_var_value)
         values.extend(_rebind_input_values(self.loop_carried_rebinds))
+        values.extend(_region_arg_values(self.region_args))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
@@ -435,14 +591,21 @@ class ForItemsOperation(HasNestedOps, Operation):
         new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
         if new_rebinds is not None:
             result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
+        new_region_args = _replace_region_arg_values(result.region_args, mapping)
+        if new_region_args is not None:
+            result = dataclasses.replace(result, region_args=new_region_args)
         return result
 
     @property
     def signature(self) -> Signature:
         # Signature is flexible - operand is the dict/iterable being iterated
+        result_hints = [
+            ParamHint(name=f"result_{i}", type=r.type)
+            for i, r in enumerate(self.results)
+        ]
         return Signature(
             operands=[ParamHint("iterable", BlockType())],  # BlockType as placeholder
-            results=[],
+            results=result_hints,
         )
 
     @property
@@ -455,7 +618,7 @@ class BranchRebind:
     """Trace-time record of a quantum variable rebound inside an if branch.
 
     The frontend's branch tracing merges only the *new* branch values
-    through phi operations; when both branches rebind a variable, the
+    through merge operations; when both branches rebind a variable, the
     value the variable held before the branch no longer appears anywhere
     in the ``IfOperation``. These records preserve that pre-branch
     binding so the transpiler's control-flow discard check
@@ -469,7 +632,7 @@ class BranchRebind:
             Used only for error messages.
         before (Value): The variable's IR value at branch entry (the
             state that is dropped on a rebinding path unless that branch
-            consumes it or merges it out through a phi).
+            consumes it or merges it out through a merge).
         rebound_in_true (bool): True when the true branch left the
             variable bound to a different IR value.
         rebound_in_false (bool): True when the false branch left the
@@ -538,52 +701,84 @@ class IfOperation(HasNestedOps, Operation):
     Attributes:
         true_operations: List of operations in the true branch
         false_operations: List of operations in the false branch (may be empty)
-        phi_ops: List of PhiOp instances merging values from both branches
+        true_yields: Values the true branch yields into the merges,
+            index-aligned with ``results`` (``true_yields[i]`` merges
+            into ``results[i]``)
+        false_yields: Values the false branch yields into the merges,
+            index-aligned with ``results``
         branch_rebinds: Trace-time records of quantum variables whose
             binding changed in a branch (see ``BranchRebind``); consumed
             by the transpiler's branch-discard check
         operands[0]: condition (Bit type from measurement or comparison)
-        results: Phi-merged output values from both branches
+        results: Merged output values, one per yield pair
+
+    Note:
+        Yields are deliberately NOT operands: the affine-type walk counts
+        quantum operands as consumes, and an identity merge legitimately
+        carries the same quantum Value on both sides, which would
+        double-count as a second consume. Generic passes reach the yields
+        through the ``all_input_values`` / ``replace_values`` overrides
+        instead.
     """
 
     true_operations: list[Operation] = dataclasses.field(default_factory=list)
     false_operations: list[Operation] = dataclasses.field(default_factory=list)
-    phi_ops: list[PhiOp] = dataclasses.field(default_factory=list)
+    true_yields: list[Value] = dataclasses.field(default_factory=list)
+    false_yields: list[Value] = dataclasses.field(default_factory=list)
     branch_rebinds: tuple[BranchRebind, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
-        return [
-            self.true_operations,
-            self.false_operations,
-            cast(list[Operation], self.phi_ops),
-        ]
+        """Return the two branch bodies (merge yields are not operations).
+
+        Returns:
+            list[list[Operation]]: ``[true_operations, false_operations]``.
+                The branch-merge yields are values, not operations, so
+                they are intentionally absent here.
+        """
+        return [self.true_operations, self.false_operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
+        """Return a copy with the true and false branch bodies replaced.
+
+        Args:
+            new_lists (list[list[Operation]]): The replacement branch
+                bodies in ``nested_op_lists`` order
+                (``[true_operations, false_operations]``).
+
+        Returns:
+            Operation: A copy of this if-else with the branch bodies
+                swapped and all other fields (yields, rebinds) preserved.
+        """
         return dataclasses.replace(
             self,
             true_operations=new_lists[0],
             false_operations=new_lists[1],
-            phi_ops=cast("list[PhiOp]", new_lists[2]),
         )
 
     def all_input_values(self) -> list[ValueBase]:
-        """Include branch rebind records for cloning/substitution.
+        """Include branch-yield values and rebind records for cloning/substitution.
 
-        Same rationale as the loop operations' rebind records: the
+        The yields are subclass-specific Value fields (not operands —
+        see the class docstring), so generic passes reach them through
+        this override, mirroring ``ForItemsOperation.key_var_values``.
+        Branch rebind records follow the loop operations' rationale: the
         recorded pre-branch values reference program values by identity,
         so inline cloning must remap them in lockstep with operands.
-        Read-based checks must not treat them as reads (see
+        Read-based checks must not treat the records as reads (see
         ``_op_read_uuids`` in the analyze pass module).
 
         Returns:
-            list[ValueBase]: Base input values plus rebind-record values.
+            list[ValueBase]: Base input values plus the true/false
+                yields and rebind-record values.
         """
         values = super().all_input_values()
+        values.extend(self.true_yields)
+        values.extend(self.false_yields)
         values.extend(_branch_rebind_input_values(self.branch_rebinds))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
-        """Substitute operand and rebind-record values.
+        """Substitute operand, result, branch-yield, and rebind-record values.
 
         Args:
             mapping (dict[str, ValueBase]): UUID-keyed substitution map.
@@ -593,6 +788,12 @@ class IfOperation(HasNestedOps, Operation):
         """
         result = super().replace_values(mapping)
         assert isinstance(result, IfOperation)
+        new_true = _replace_yield_values(result.true_yields, mapping)
+        if new_true is not None:
+            result = dataclasses.replace(result, true_yields=new_true)
+        new_false = _replace_yield_values(result.false_yields, mapping)
+        if new_false is not None:
+            result = dataclasses.replace(result, false_yields=new_false)
         new_rebinds = _replace_branch_rebind_values(result.branch_rebinds, mapping)
         if new_rebinds is not None:
             result = dataclasses.replace(result, branch_rebinds=new_rebinds)
@@ -605,88 +806,54 @@ class IfOperation(HasNestedOps, Operation):
     def iter_merges(self) -> typing.Iterator[IfMerge]:
         """Iterate the branch-merge slots of this if-else.
 
-        This is the single read API for phi semantics: passes must consume
-        merges through it (never through ``phi_ops`` internals) so the
-        underlying storage can change without touching consumers.
+        This is the single read API for merge semantics: passes must
+        consume merges through it (never through the yield lists
+        directly) so the underlying storage can change without touching
+        consumers.
 
         Yields:
             IfMerge: One entry per merged output, in result order.
 
         Raises:
             RuntimeError: If the stored merge data is internally
-                inconsistent (merge count differs from result count, a
-                stored merge is not a ``PhiOp``, a merge does not have
-                exactly condition/true/false operands and one result, a
-                merge result does not match the if-operation result at
-                the same position, or a merge's condition operand does
-                not match the if-operation's condition — including a
-                missing condition while merges are attached). Any of
-                these indicates IR corruption, not a user error.
+                inconsistent (the yield-list lengths differ from the
+                result count, or the condition operand is missing while
+                merges are attached). This indicates IR corruption, not
+                a user error. The per-merge corruption modes of the old
+                embedded-operation storage (a foreign entry, a malformed
+                or mismatched condition, a result copy diverging from
+                ``results[i]``) cannot be represented in the yield-list
+                storage and need no checks.
         """
-        # Runtime import mirrors the TYPE_CHECKING guard above: PhiOp lives
-        # in a sibling module that also imports from .operation.
-        from .arithmetic_operations import PhiOp
-
-        if len(self.phi_ops) != len(self.results):
+        if not (len(self.true_yields) == len(self.false_yields) == len(self.results)):
             raise RuntimeError(
                 "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
-                f"{len(self.phi_ops)} phi_ops for {len(self.results)} "
-                "results. Merges must be created through add_merge()."
+                f"{len(self.true_yields)} true_yields / "
+                f"{len(self.false_yields)} false_yields for "
+                f"{len(self.results)} results. Merges must be created "
+                "through add_merge()."
             )
-        if self.phi_ops and not self.operands:
+        if self.results and not self.operands:
             raise RuntimeError(
                 "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
                 "merges are attached but the condition operand is missing."
             )
-        condition = self.operands[0] if self.operands else None
-        for i, phi in enumerate(self.phi_ops):
-            if not isinstance(phi, PhiOp):
-                raise RuntimeError(
-                    "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
-                    f"phi_ops[{i}] is {type(phi).__name__}, expected PhiOp."
-                )
-            if len(phi.operands) != 3 or len(phi.results) != 1:
-                raise RuntimeError(
-                    "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
-                    f"phi_ops[{i}] has {len(phi.operands)} operands and "
-                    f"{len(phi.results)} results; expected "
-                    "[condition, true_value, false_value] -> [output]."
-                )
-            phi_condition = phi.operands[0]
-            if isinstance(phi_condition, ValueBase) and isinstance(
-                condition, ValueBase
-            ):
-                condition_matches = phi_condition.uuid == condition.uuid
-            else:
-                # Compile-time-constant conditions may be raw Python bools
-                # with no IR identity; identity comparison covers them.
-                condition_matches = phi_condition is condition
-            if not condition_matches:
-                raise RuntimeError(
-                    "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
-                    f"phi_ops[{i}] condition does not match the "
-                    "if-operation's condition operand."
-                )
-            if phi.results[0].uuid != self.results[i].uuid:
-                raise RuntimeError(
-                    "[FOR DEVELOPER] IfOperation merge data is inconsistent: "
-                    f"phi_ops[{i}] output '{phi.results[0].uuid}' does not "
-                    f"match results[{i}] '{self.results[i].uuid}'."
-                )
+        for i, (true_value, false_value, result) in enumerate(
+            zip(self.true_yields, self.false_yields, self.results, strict=True)
+        ):
             yield IfMerge(
                 index=i,
-                true_value=phi.operands[1],
-                false_value=phi.operands[2],
-                result=self.results[i],
+                true_value=true_value,
+                false_value=false_value,
+                result=result,
             )
 
     def add_merge(self, true_value: Value, false_value: Value, result: Value) -> None:
         """Append a branch-merge slot to this if-else.
 
         The only sanctioned construction path for merges: it keeps the
-        merge storage (currently a ``PhiOp`` plus the mirrored entry in
-        ``results``) consistent so ``iter_merges`` can rely on the
-        invariants it checks.
+        yield lists and ``results`` index-aligned so ``iter_merges`` can
+        rely on the invariants it checks.
 
         Args:
             true_value (Value): Value selected when the condition is true.
@@ -701,10 +868,6 @@ class IfOperation(HasNestedOps, Operation):
                 merges are added), or the branch / result types do not
                 match.
         """
-        # Runtime import mirrors the TYPE_CHECKING guard above: PhiOp lives
-        # in a sibling module that also imports from .operation.
-        from .arithmetic_operations import PhiOp
-
         if not self.operands:
             raise RuntimeError(
                 "[FOR DEVELOPER] IfOperation.add_merge requires the "
@@ -718,12 +881,8 @@ class IfOperation(HasNestedOps, Operation):
                 f"false={false_value.type.label()}, "
                 f"result={result.type.label()}."
             )
-        self.phi_ops.append(
-            PhiOp(
-                operands=[self.condition, true_value, false_value],
-                results=[result],
-            )
-        )
+        self.true_yields.append(true_value)
+        self.false_yields.append(false_value)
         self.results.append(result)
 
     @property
@@ -739,3 +898,49 @@ class IfOperation(HasNestedOps, Operation):
     @property
     def operation_kind(self) -> OperationKind:
         return OperationKind.CONTROL
+
+
+def genuine_input_values(op: Operation) -> list[ValueBase]:
+    """Return an operation's input values that count as genuine reads.
+
+    ``Operation.all_input_values`` also surfaces the bookkeeping values
+    that ride along only for cloning / substitution: the ``before`` /
+    ``after`` of a loop operation's ``loop_carried_rebinds`` and the
+    ``before`` of an ``IfOperation``'s ``branch_rebinds``. Those records
+    are NOT data reads, so read-based analyses (liveness / dead-op
+    elimination, measurement-taint tracing, loop-carried stale-read
+    checks) must exclude them.
+
+    The exclusion is by **last occurrence**, not by UUID set: a single
+    value can be BOTH a genuine input AND a rebind ``before``. The
+    canonical case is an else-less quantum discard (``if cond: q =
+    fresh``): the false side yields the pre-branch ``q``, so that value
+    is simultaneously a ``false_yields`` entry (a genuine read) and the
+    ``branch_rebinds`` ``before`` (a record). ``all_input_values``
+    appends the record values after the genuine ones, so dropping the
+    last matching occurrence strips the record and leaves the read
+    intact — a plain UUID-set subtraction would wrongly drop the yield
+    read too.
+
+    Args:
+        op (Operation): Operation to inspect.
+
+    Returns:
+        list[ValueBase]: ``all_input_values`` with one occurrence per
+            rebind-record value removed.
+    """
+    values = list(op.all_input_values())
+    record_values: list[Value] = []
+    if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+        for loop_record in op.loop_carried_rebinds:
+            record_values.append(loop_record.before)
+            record_values.append(loop_record.after)
+    elif isinstance(op, IfOperation):
+        for branch_record in op.branch_rebinds:
+            record_values.append(branch_record.before)
+    for record_value in record_values:
+        for index in range(len(values) - 1, -1, -1):
+            if values[index].uuid == record_value.uuid:
+                del values[index]
+                break
+    return values

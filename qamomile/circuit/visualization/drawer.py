@@ -52,8 +52,8 @@ class MatplotlibDrawer:
 
     This drawer produces static matplotlib figures showing quantum circuits.
     It supports two modes:
-    - Block mode (inline=False): Shows CallBlockOperation as boxes
-    - Inline mode (inline=True): Expands CallBlockOperation contents
+    - Block mode (inline=False): Shows callable invocations as boxes
+    - Inline mode (inline=True): Expands inline callable contents
     """
 
     def __init__(self, graph: Block, style: CircuitStyle | None = None) -> None:
@@ -83,17 +83,17 @@ class MatplotlibDrawer:
         """Generate a matplotlib Figure of the circuit.
 
         Args:
-            inline (bool): If True, expand CallBlockOperation. If False, show
-                calls as boxes.
+            inline (bool): If True, expand inline callable contents. If False,
+                show calls as boxes.
             fold_loops (bool): If True (default), display ForOperation as
                 blocks instead of unrolling. If False, expand loops and show
                 all iterations. Does not affect WhileOperation (see
                 ``fold_whiles``).
-            expand_composite (bool): If True, expand CompositeGateOperation
-                nodes. If False (default), show them as boxes.
+            expand_composite (bool): If True, expand boxed InvokeOperation
+                bodies. If False (default), show them as boxes.
             inline_depth (int | None): Maximum nesting depth for inline
-                expansion. None means unlimited. Only affects CallBlock and
-                ControlledU nodes, not CompositeGate.
+                expansion. None means unlimited. Affects inline calls,
+                ControlledU, and boxed InvokeOperation nodes.
             fold_ifs (bool): If True, display IfOperation as folded summary
                 blocks. If False (default), show if/else branches side by side.
             fold_whiles (bool): If True, display WhileOperation as a folded
@@ -144,7 +144,7 @@ class MatplotlibDrawer:
 
         Args:
             kernel (Any): A QKernel instance to visualize.
-            inline (bool): If True, expand CallBlockOperation contents.
+            inline (bool): If True, expand inline callable contents.
             fold_loops (bool): If True (default), display ForOperation as
                 blocks.
             fold_ifs (bool): If True, display IfOperation as folded summary
@@ -152,7 +152,8 @@ class MatplotlibDrawer:
             fold_whiles (bool): If True, display WhileOperation as a folded
                 summary block. If False (default), show the loop body inside a
                 ``while <cond>:`` box, mirroring a single-branch if.
-            expand_composite (bool): If True, expand CompositeGateOperation.
+            expand_composite (bool): If True, expand boxed InvokeOperation
+                bodies.
             inline_depth (int | None): Maximum nesting depth for inline
                 expansion.
             style (CircuitStyle | None): Visual style configuration.

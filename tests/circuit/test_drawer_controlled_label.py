@@ -19,6 +19,7 @@ without touching matplotlib.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import qamomile.circuit as qmc
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
@@ -26,11 +27,11 @@ from qamomile.circuit.visualization.style import DEFAULT_STYLE
 from qamomile.circuit.visualization.visual_ir import VGate, VGateKind
 
 
-def _controlled_u_box(kernel) -> VGate:
+def _controlled_u_box(kernel: Any) -> VGate:
     """Return the single CONTROLLED_U_BOX ``VGate`` produced by *kernel*.
 
     Args:
-        kernel: A ``@qmc.qkernel`` whose top-level Block contains
+        kernel (Any): A ``@qmc.qkernel`` whose top-level Block contains
             exactly one ``ControlledUOperation``.
 
     Returns:
@@ -56,8 +57,15 @@ def _controlled_u_box(kernel) -> VGate:
     return boxes[0]
 
 
-def _controlled_u_label(kernel) -> str:
-    """Convenience wrapper returning just the controlled-U box label."""
+def _controlled_u_label(kernel: Any) -> str:
+    """Return only the controlled-U box label for a kernel.
+
+    Args:
+        kernel (Any): QKernel-like object containing one controlled call.
+
+    Returns:
+        str: Label resolved for the controlled-U box.
+    """
     return _controlled_u_box(kernel).label
 
 
@@ -178,13 +186,13 @@ def test_controlled_box_power_defaults_to_one() -> None:
     )
 
 
-def _controlled_u_box_with_bindings(kernel, **bindings) -> VGate:
+def _controlled_u_box_with_bindings(kernel: Any, **bindings: Any) -> VGate:
     """Same as ``_controlled_u_box`` but threads concrete bindings through.
 
     Args:
-        kernel: A ``@qmc.qkernel`` whose top-level Block contains
+        kernel (Any): A ``@qmc.qkernel`` whose top-level Block contains
             exactly one ``ControlledUOperation``.
-        **bindings: Concrete values for kernel parameters, used so
+        **bindings (Any): Concrete values for kernel parameters, used so
             symbolic ``UInt`` indices can be resolved.
 
     Returns:

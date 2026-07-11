@@ -1,7 +1,7 @@
 """Tests for the IfOperation branch-merge accessor API.
 
 ``IfOperation.add_merge`` / ``iter_merges`` / ``IfMerge`` are the single
-construction / read surface for phi semantics; these tests pin the
+construction / read surface for merge semantics; these tests pin the
 accessor contract (slot ordering, selection, identity detection) and the
 strict consistency checks that guard against hand-built or corrupted
 merge storage.
@@ -9,9 +9,14 @@ merge storage.
 
 import pytest
 
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
-from qamomile.circuit.ir.operation.control_flow import IfOperation
-from qamomile.circuit.ir.types.primitives import BitType, UIntType
+from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
+    IfOperation,
+    LoopCarriedRebind,
+    WhileOperation,
+    genuine_input_values,
+)
+from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.ir.value import Value
 
 
@@ -50,17 +55,19 @@ class TestAddMerge:
     """Construction contract of ``IfOperation.add_merge``."""
 
     @pytest.mark.parametrize("merge_count", [0, 1, 3])
-    def test_add_merge_keeps_phi_ops_and_results_in_lockstep(
+    def test_add_merge_keeps_yields_and_results_in_lockstep(
         self, merge_count: int
     ) -> None:
-        """add_merge mirrors every merge into phi_ops and results."""
+        """add_merge mirrors every merge into the yield lists and results."""
         if_op, triples = _if_with_merges(merge_count)
 
-        assert len(if_op.phi_ops) == merge_count
+        assert len(if_op.true_yields) == merge_count
+        assert len(if_op.false_yields) == merge_count
         assert len(if_op.results) == merge_count
-        for phi, (true_v, false_v, result) in zip(if_op.phi_ops, triples, strict=True):
-            assert phi.operands == [if_op.condition, true_v, false_v]
-            assert phi.results == [result]
+        for i, (true_v, false_v, result) in enumerate(triples):
+            assert if_op.true_yields[i] is true_v
+            assert if_op.false_yields[i] is false_v
+            assert if_op.results[i] is result
 
     def test_add_merge_without_condition_raises(self) -> None:
         """add_merge on a condition-less IfOperation is an internal error."""
@@ -130,90 +137,107 @@ class TestIterMerges:
 
         assert identity_flags == [True, False]
 
-    def test_iter_merges_count_mismatch_raises(self) -> None:
-        """A phi_ops/results length mismatch is reported as IR corruption."""
+    def test_iter_merges_result_count_mismatch_raises(self) -> None:
+        """A yields/results length mismatch is reported as IR corruption."""
         if_op, _ = _if_with_merges(1)
         if_op.results.append(_uint("extra"))
 
-        with pytest.raises(RuntimeError, match="1 phi_ops for 2 results"):
+        with pytest.raises(
+            RuntimeError, match="1 true_yields / 1 false_yields for 2 results"
+        ):
             list(if_op.iter_merges())
 
-    def test_iter_merges_malformed_phi_raises(self) -> None:
-        """A merge without condition/true/false operands is IR corruption."""
-        cond = Value(type=BitType(), name="cond")
-        result = _uint("r")
-        if_op = IfOperation(
-            operands=[cond],
-            results=[result],
-            phi_ops=[PhiOp(operands=[_uint("only")], results=[result])],
-        )
+    def test_iter_merges_yield_list_mismatch_raises(self) -> None:
+        """Yield lists that disagree with each other are IR corruption."""
+        if_op, _ = _if_with_merges(1)
+        if_op.true_yields.append(_uint("stray"))
 
-        with pytest.raises(RuntimeError, match="expected"):
-            list(if_op.iter_merges())
-
-    def test_iter_merges_result_mismatch_raises(self) -> None:
-        """A merge output that is not the positional if-result is corruption."""
-        cond = Value(type=BitType(), name="cond")
-        if_op = IfOperation(
-            operands=[cond],
-            results=[_uint("r_op")],
-            phi_ops=[
-                PhiOp(
-                    operands=[cond, _uint("t"), _uint("f")],
-                    results=[_uint("r_phi")],
-                )
-            ],
-        )
-
-        with pytest.raises(RuntimeError, match="does not"):
-            list(if_op.iter_merges())
-
-    def test_iter_merges_condition_mismatch_raises(self) -> None:
-        """A merge carrying a different condition than the if is corruption."""
-        cond = Value(type=BitType(), name="cond")
-        other_cond = Value(type=BitType(), name="other_cond")
-        result = _uint("r")
-        if_op = IfOperation(
-            operands=[cond],
-            results=[result],
-            phi_ops=[
-                PhiOp(
-                    operands=[other_cond, _uint("t"), _uint("f")],
-                    results=[result],
-                )
-            ],
-        )
-
-        with pytest.raises(RuntimeError, match="condition"):
-            list(if_op.iter_merges())
-
-    def test_iter_merges_non_phi_entry_raises(self) -> None:
-        """A non-PhiOp object stored among the merges is IR corruption."""
-        cond = Value(type=BitType(), name="cond")
-        result = _uint("r")
-        if_op = IfOperation(
-            operands=[cond],
-            results=[result],
-            phi_ops=[IfOperation(operands=[cond])],  # type: ignore[list-item]
-        )
-
-        with pytest.raises(RuntimeError, match="expected PhiOp"):
+        with pytest.raises(
+            RuntimeError, match="2 true_yields / 1 false_yields for 1 results"
+        ):
             list(if_op.iter_merges())
 
     def test_iter_merges_missing_condition_with_merges_raises(self) -> None:
-        """Merges attached to a condition-less if are IR corruption."""
-        cond = Value(type=BitType(), name="cond")
-        result = _uint("r")
-        if_op = IfOperation(
-            operands=[],
-            results=[result],
-            phi_ops=[
-                PhiOp(
-                    operands=[cond, _uint("t"), _uint("f")],
-                    results=[result],
-                )
-            ],
-        )
+        """Merges attached to a condition-less if are IR corruption.
+
+        The yield lists are attached directly (bypassing ``add_merge``,
+        which would already reject the missing condition) to simulate
+        hand-built corrupted storage. The old storage's other per-merge
+        corruption modes — a foreign entry among the merges or a merge
+        carrying a different condition — cannot be represented in the
+        yield-list storage and need no counterparts here.
+        """
+        if_op = IfOperation(operands=[])
+        if_op.true_yields.append(_uint("t"))
+        if_op.false_yields.append(_uint("f"))
+        if_op.results.append(_uint("r"))
 
         with pytest.raises(RuntimeError, match="condition operand is missing"):
             list(if_op.iter_merges())
+
+
+def _qubit(name: str) -> Value:
+    """Create a plain Qubit-typed Value.
+
+    Args:
+        name (str): Display name for the value.
+
+    Returns:
+        Value: Fresh Qubit-typed value.
+    """
+    return Value(type=QubitType(), name=name)
+
+
+class TestGenuineInputValues:
+    """Occurrence-based exclusion of rebind-record values from genuine reads."""
+
+    def test_loop_rebind_record_values_are_excluded(self) -> None:
+        """A loop rebind record's before/after are not genuine reads.
+
+        They ride along ``all_input_values`` only for cloning, so a value
+        referenced solely through the record must not count as read.
+        """
+        cond = Value(type=BitType(), name="cond")
+        before = _uint("before")
+        after = _uint("after")
+        while_op = WhileOperation(
+            operands=[cond],
+            operations=[],
+            loop_carried_rebinds=(
+                LoopCarriedRebind(var_name="acc", before=before, after=after),
+            ),
+        )
+
+        read_uuids = {v.uuid for v in genuine_input_values(while_op)}
+
+        assert cond.uuid in read_uuids, "the while condition is a genuine read"
+        assert before.uuid not in read_uuids, "rebind-record before is not a read"
+        assert after.uuid not in read_uuids, "rebind-record after is not a read"
+
+    def test_yield_shared_with_branch_rebind_is_kept(self) -> None:
+        """A value that is both a false yield and a branch-rebind before stays read.
+
+        This is the else-less quantum-discard shape: the false side yields
+        the pre-branch value, which is simultaneously the ``branch_rebinds``
+        before. A plain UUID-set subtraction would drop the yield read too;
+        the occurrence-based removal must keep it.
+        """
+        cond = Value(type=BitType(), name="cond")
+        q_pre = _qubit("q_pre")
+        fresh = _qubit("fresh")
+        merged = _qubit("merged")
+        if_op = IfOperation(operands=[cond], true_operations=[], false_operations=[])
+        if_op.add_merge(fresh, q_pre, merged)
+        if_op.branch_rebinds = (
+            BranchRebind(
+                var_name="q",
+                before=q_pre,
+                rebound_in_true=True,
+                rebound_in_false=False,
+            ),
+        )
+
+        read_uuids = {v.uuid for v in genuine_input_values(if_op)}
+
+        assert q_pre.uuid in read_uuids, "kept via the false yield despite the record"
+        assert fresh.uuid in read_uuids, "the true yield is a genuine read"

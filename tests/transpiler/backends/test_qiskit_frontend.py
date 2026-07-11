@@ -79,6 +79,9 @@ from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     x_mixer,
 )
 from qamomile.circuit.ir.block import BlockKind  # noqa: E402
+from qamomile.circuit.ir.operation.control_flow import IfOperation  # noqa: E402
+from qamomile.circuit.ir.operation.gate import MeasureOperation  # noqa: E402
+from qamomile.circuit.ir.value import Value  # noqa: E402
 from qamomile.circuit.transpiler.errors import (  # noqa: E402
     EmitError,
     QamomileCompileError,
@@ -2371,7 +2374,7 @@ class TestControlFlowIfElse:
           if m1: bell1 = X(bell1)
           if m0: bell1 = Z(bell1)
 
-        The second if's quantum operand (bell1_phi_0) is a phi-merged qubit
+        The second if's quantum operand (bell1_merge_0) is a merged qubit
         from the first if.  The analyze pass must allow this because the
         operand is quantum-typed, not a classical measurement result.
         """
@@ -2444,6 +2447,215 @@ class TestControlFlowIfElse:
             assert count > 0
 
 
+class TestLoopIndexedMeasuredBitMerge:
+    """Loop-indexed / measured Bit merges: representable ones run, the mux is rejected.
+
+    A runtime (measurement-conditioned) if-else that merges two DISTINCT
+    ``Vector[Bit]`` elements both measured BEFORE the branch
+    (``if sel[j]: r = a[j] else: r = b[j]``) is an at-runtime multiplexing
+    of two pre-existing clbits. The clbit-aliasing emit model cannot
+    represent it — it would bind the merged bit to the true-branch source
+    unconditionally and silently return the wrong value whenever the
+    condition selects the false branch — so emit rejects it with
+    ``EmitError`` (``map_merge_outputs(reject_runtime_bit_mux=True)`` from
+    ``register_merge_outputs``). Representable merges still work: a
+    compile-time-selected branch re-points its merged bit per unrolled
+    iteration (one reused merge-output UUID across iterations), and a merge
+    of branch-local fresh measurements aliases both onto one shared clbit.
+    """
+
+    def test_runtime_pre_measured_bit_mux_is_rejected(self):
+        """A runtime mux of two pre-measured elements raises EmitError.
+
+        ``a`` and ``b`` are measured before the loop; a runtime selector
+        ``sel[j]`` chooses between ``a[j]`` and ``b[j]``. Clbit aliasing
+        would silently bind the merged bit to ``a[j]`` regardless of
+        ``sel[j]`` (returning a wrong measurement), so emit must reject the
+        shape loudly. The always-true selector here would have masked the
+        bug by coincidence, which is exactly why a value-based test cannot
+        guard it — the rejection must be structural.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            a = qmc.qubit_array(2, "a")
+            a[1] = qmc.x(a[1])
+            abits = qmc.measure(a)  # (0, 1)
+            bb = qmc.qubit_array(2, "bb")
+            bbits = qmc.measure(bb)  # (0, 0)
+            sel = qmc.qubit_array(2, "sel")
+            sel[0] = qmc.x(sel[0])
+            sel[1] = qmc.x(sel[1])
+            selbits = qmc.measure(sel)  # (1, 1)
+            q = qmc.qubit_array(2, "q")
+            for j in qmc.range(2):
+                if selbits[j]:
+                    r = abits[j]
+                else:
+                    r = bbits[j]
+                if r:
+                    q[j] = qmc.x(q[j])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(EmitError, match="multiplex two already-measured"):
+            transpiler.transpile(circuit)
+
+    def test_branch_local_runtime_bit_merge_executes(self):
+        """A merge of branch-local fresh measurements still executes correctly.
+
+        When each branch freshly measures its own qubit into the merged
+        bit (``if sel: r = measure(t) else: r = measure(f)``), both
+        measurements are aliased onto one shared clbit, so the merge is
+        representable and the guard must not fire. ``sel == 1`` selects the
+        ``|1>`` qubit, so the result is deterministically ``(1,)``.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            sel_q = qmc.qubit("sel")
+            sel_q = qmc.x(sel_q)
+            sel = qmc.measure(sel_q)  # 1
+            t = qmc.qubit("t")
+            t = qmc.x(t)  # |1>
+            f = qmc.qubit("f")  # |0>
+            if sel:
+                r = qmc.measure(t)
+            else:
+                r = qmc.measure(f)
+            return r
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        result = exe.sample(transpiler.executor(), bindings={}, shots=100).result()
+
+        assert result.results, result.results
+        for value, count in result.results:
+            assert value == 1, result.results
+            assert count > 0
+        assert sum(count for _, count in result.results) == 100
+
+    def test_static_if_loop_indexed_merge_reregisters_per_iteration(self):
+        """A compile-time-if per unrolled iteration re-points its merged bit.
+
+        ``if j == 0`` resolves at compile time per unrolled iteration, so
+        the merge is handled by ``remap_static_merge_outputs``. Iteration 0
+        selects ``abits[0]`` and iteration 1 selects ``bbits[1]``; because
+        the unrolled body reuses one merge-output UUID, the static remapper
+        must overwrite the registration each iteration. If it kept
+        iteration 0's ``abits[0]`` clbit, ``q[1]`` would never flip and the
+        result would be ``(0, 0)`` instead of the correct ``(0, 1)``.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            a = qmc.qubit_array(2, "a")
+            abits = qmc.measure(a)  # (0, 0)
+            b = qmc.qubit_array(2, "b")
+            b[1] = qmc.x(b[1])
+            bbits = qmc.measure(b)  # (0, 1)
+            q = qmc.qubit_array(2, "q")
+            for j in qmc.range(2):
+                if j == 0:
+                    r = abits[j]
+                else:
+                    r = bbits[j]
+                if r:
+                    q[j] = qmc.x(q[j])
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(circuit)
+        result = exe.sample(transpiler.executor(), bindings={}, shots=100).result()
+
+        assert result.results, result.results
+        for value, count in result.results:
+            assert value == (0, 1), result.results
+            assert count > 0
+        assert sum(count for _, count in result.results) == 100
+
+
+class TestIdentityMergeBackstop:
+    """Emit must handle non-elided identity merges first-class.
+
+    The frontend elides merge slots it can PROVE are no-ops at trace
+    time (``_can_elide_scalar_merge`` / ``_can_elide_array_merge``), but
+    that is a belt-and-braces contract: elision is an optimization only,
+    and emit keeps handling identity merges (the same Value yielded by
+    both branches) that reach the IR. This test hand-builds exactly the
+    identity merge the frontend would have skipped and pins the full
+    transpile + execute path on it, so a future emit-side change that
+    starts *relying* on frontend elision fails loudly here — with wrong
+    measurement values, not just a structural diff.
+    """
+
+    def test_hand_built_identity_merge_transpiles_and_executes(self):
+        """A hand-built identity qubit merge runs on Qiskit with correct values."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            trigger = qmc.qubit("trigger")
+            trigger = qmc.x(trigger)
+            bit = qmc.measure(trigger)  # always 1
+            target = qmc.qubit("target")
+            target = qmc.x(target)  # |1>, measured through the merge below
+            spectator = qmc.qubit("spectator")
+            if bit:
+                spectator = qmc.h(spectator)
+            return qmc.measure(target)
+
+        # build() traces a fresh Block, so the surgery below cannot leak
+        # into the kernel's cached block.
+        block = circuit.build()
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        if_op = if_ops[0]
+        merge_count_before = len(list(if_op.iter_merges()))
+
+        measure_ops = [
+            (i, op)
+            for i, op in enumerate(block.operations)
+            if isinstance(op, MeasureOperation)
+        ]
+        final_index, final_measure = measure_ops[-1]
+        target_value = final_measure.operands[0]
+        assert block.operations.index(if_op) < final_index
+
+        # Hand-build the identity merge the frontend elided: the SAME
+        # Value object is yielded by both branches, and the final
+        # measurement is rerouted through the merged output so the
+        # executed result depends on emit resolving the merge.
+        merged = Value(type=target_value.type, name="target_identity_merge")
+        if_op.add_merge(target_value, target_value, merged)
+        [merge] = list(if_op.iter_merges())[merge_count_before:]
+        assert merge.is_identity
+        block.operations[final_index] = final_measure.replace_values(
+            {target_value.uuid: merged}
+        )
+
+        transpiler = QiskitTranspiler()
+        affine = transpiler.inline(block)
+        validated = transpiler.affine_validate(affine)
+        partially_evaluated = transpiler.partial_eval(validated)
+        partially_evaluated = transpiler.slice_borrow_check(partially_evaluated)
+        partially_evaluated = transpiler.strip_slice_ops(partially_evaluated)
+        analyzed = transpiler.analyze(partially_evaluated)
+        analyzed = transpiler.classical_lowering(analyzed)
+        analyzed = transpiler.validate_symbolic_shapes(analyzed)
+        exe = transpiler.emit(transpiler.plan(analyzed))
+
+        executor = transpiler.executor()
+        result = exe.sample(executor, bindings={}, shots=100).result()
+        assert result is not None
+        assert len(result.results) > 0
+        # target sits in |1> and the identity merge must resolve to its
+        # physical qubit, so every shot reads 1.
+        for value, count in result.results:
+            assert value == 1, result.results
+            assert count > 0
+        assert sum(count for _, count in result.results) == 100
+
+
 class TestControlFlowWhileStructure:
     """Structural tests for while-loop transpilation.
 
@@ -2488,7 +2700,7 @@ class TestControlFlowWhileStructure:
         assert isinstance(qc.data[2].operation, WhileLoopOp)
 
     def test_while_loop_structure(self):
-        """While loop body sub-circuit: H(q0) → Measure(q0→c)."""
+        """While loop body sub-circuit: reset → H(q0) → Measure(q0→c)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2508,17 +2720,22 @@ class TestControlFlowWhileStructure:
         assert isinstance(while_inst.operation, WhileLoopOp)
         body = while_inst.operation.params[0]
 
-        # Body has exactly 2 instructions
-        assert len(body.data) == 2
+        # Body has exactly 3 instructions. The leading reset prepares a
+        # nested fresh allocation as |0> on every runtime iteration.
+        assert len(body.data) == 3
         assert body.num_qubits == 1
 
-        # Body[0]: H on body-qubit 0
-        assert isinstance(body.data[0].operation, HGate)
+        # Body[0]: reset on body-qubit 0
+        assert body.data[0].operation.name == "reset"
         assert [body.find_bit(q).index for q in body.data[0].qubits] == [0]
 
-        # Body[1]: Measure on body-qubit 0
-        assert isinstance(body.data[1].operation, Measure)
+        # Body[1]: H on body-qubit 0
+        assert isinstance(body.data[1].operation, HGate)
         assert [body.find_bit(q).index for q in body.data[1].qubits] == [0]
+
+        # Body[2]: Measure on body-qubit 0
+        assert isinstance(body.data[2].operation, Measure)
+        assert [body.find_bit(q).index for q in body.data[2].qubits] == [0]
 
     def test_while_loop_circuit_structure(self):
         """Top-level resource counts for a while-loop circuit."""
@@ -2577,7 +2794,7 @@ class TestControlFlowWhileStructure:
         assert isinstance(qc.data[2].operation, WhileLoopOp)
 
     def test_while_loop_body_gate_verification(self):
-        """Body sub-circuit has H then Measure, both targeting body-qubit 0."""
+        """Body sub-circuit resets, gates, and measures body-qubit 0."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2596,21 +2813,26 @@ class TestControlFlowWhileStructure:
         assert isinstance(qc.data[2].operation, WhileLoopOp)
         body = qc.data[2].operation.params[0]
 
-        # Body has exactly 2 instructions
-        assert len(body.data) == 2
+        # Body has exactly 3 instructions
+        assert len(body.data) == 3
 
-        # Body[0]: H on body-qubit 0
-        assert isinstance(body.data[0].operation, HGate)
+        # Body[0]: reset on body-qubit 0
+        assert body.data[0].operation.name == "reset"
         assert [body.find_bit(q).index for q in body.data[0].qubits] == [0]
 
-        # Body[1]: Measure on body-qubit 0
-        assert isinstance(body.data[1].operation, Measure)
+        # Body[1]: H on body-qubit 0
+        assert isinstance(body.data[1].operation, HGate)
         assert [body.find_bit(q).index for q in body.data[1].qubits] == [0]
 
-        # H and Measure target the same qubit
-        h_target = [body.find_bit(q).index for q in body.data[0].qubits]
-        m_target = [body.find_bit(q).index for q in body.data[1].qubits]
-        assert h_target == m_target
+        # Body[2]: Measure on body-qubit 0
+        assert isinstance(body.data[2].operation, Measure)
+        assert [body.find_bit(q).index for q in body.data[2].qubits] == [0]
+
+        # Reset, H and Measure target the same qubit
+        reset_target = [body.find_bit(q).index for q in body.data[0].qubits]
+        h_target = [body.find_bit(q).index for q in body.data[1].qubits]
+        m_target = [body.find_bit(q).index for q in body.data[2].qubits]
+        assert reset_target == h_target == m_target
 
     # -- clbit aliasing (the root cause of the infinite-loop bug) ----------
     # NOTE: clbit aliasing and single-clbit tests are in the X-body section
@@ -2619,7 +2841,7 @@ class TestControlFlowWhileStructure:
     # -- body gate ordering -----------------------------------------------
 
     def test_while_loop_body_gate_order(self):
-        """Body gates must appear in source order: H → measure."""
+        """Body gates must appear in emitted order: reset → H → measure."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2635,9 +2857,10 @@ class TestControlFlowWhileStructure:
         _, qc = _transpile_and_get_circuit(circuit)
         assert isinstance(qc.data[2].operation, WhileLoopOp)
         body = qc.data[2].operation.params[0]
-        assert len(body.data) == 2
-        assert isinstance(body.data[0].operation, HGate)
-        assert isinstance(body.data[1].operation, Measure)
+        assert len(body.data) == 3
+        assert body.data[0].operation.name == "reset"
+        assert isinstance(body.data[1].operation, HGate)
+        assert isinstance(body.data[2].operation, Measure)
 
     # -- outer circuit gate ordering --------------------------------------
 
@@ -2694,7 +2917,7 @@ class TestControlFlowWhileStructure:
     # -- X-body structure: initial X, body has H + measure ----------------
 
     def test_while_loop_x_init_body_contains_expected_gates(self):
-        """X-initialized while loop body must contain H and measure."""
+        """X-initialized while loop body must contain reset, H and measure."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2710,9 +2933,10 @@ class TestControlFlowWhileStructure:
         _, qc = _transpile_and_get_circuit(circuit)
         assert isinstance(qc.data[2].operation, WhileLoopOp)
         body = qc.data[2].operation.params[0]
-        assert len(body.data) == 2
-        assert isinstance(body.data[0].operation, HGate)
-        assert isinstance(body.data[1].operation, Measure)
+        assert len(body.data) == 3
+        assert body.data[0].operation.name == "reset"
+        assert isinstance(body.data[1].operation, HGate)
+        assert isinstance(body.data[2].operation, Measure)
 
     def test_while_loop_body_measure_same_clbit(self):
         """Body measurement must write to the same clbit as the condition.
@@ -3013,7 +3237,7 @@ class TestControlFlowWhileStructure:
             )
 
     def test_while_loop_with_nested_if_else(self):
-        """While + nested if-else: recursive phi tracing must work.
+        """While + nested if-else: recursive merge tracing must work.
 
         sel1=1, sel2=1, so the innermost if-branch is taken.
         q3 is |0⟩ → bit=0, loop exits.  Tests that
@@ -3066,8 +3290,8 @@ class TestControlFlowWhileStructure:
     def test_while_loop_with_if_only_no_else(self):
         """While loop with if-only (no else): clbit count must not leak.
 
-        When the while body contains an if without else, the PhiOp's
-        false_val is the pre-if while-condition value.  map_phi_outputs
+        When the while body contains an if without else, the merge slot's
+        false_value is the pre-if while-condition value.  map_merge_outputs
         redirects this UUID, which used to corrupt the while-condition's
         canonical clbit and cause an extra orphaned clbit to appear.
 
@@ -3115,8 +3339,9 @@ class TestControlFlowWhileStructure:
         assert isinstance(while_body.data[0].operation, IfElseOp)
         if_inst = while_body.data[0]
         if_body = if_inst.operation.blocks[0]
-        assert len(if_body.data) == 1  # measure
-        assert isinstance(if_body.data[0].operation, Measure)
+        assert len(if_body.data) == 2  # reset + measure
+        assert if_body.data[0].operation.name == "reset"
+        assert isinstance(if_body.data[1].operation, Measure)
 
         # Test if the initial measurement writes to the clbit used by the while condition.
         while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
@@ -3131,7 +3356,7 @@ class TestControlFlowWhileStructure:
         assert if_cond_clbit_idx == second_measure_clbit_idx
 
         # Test if the third measurement (in the if body) writes to the same clbit as the while condition.
-        if_body_measure = if_body.data[0]
+        if_body_measure = if_body.data[1]
         if_body_measure_clbit_idx = qc.clbits.index(if_body_measure.clbits[0])
         assert if_body_measure_clbit_idx == while_cond_clbit_idx
 
@@ -3206,8 +3431,9 @@ class TestControlFlowWhileStructure:
         inner_if_body = inner_if_inst.operation.blocks[0]
         inner_else_body = inner_if_inst.operation.blocks[1]
         assert len(inner_else_body.data) == 0  # no else
-        assert len(inner_if_body.data) == 1  # measure
-        assert isinstance(inner_if_body.data[0].operation, Measure)
+        assert len(inner_if_body.data) == 2  # reset + measure
+        assert inner_if_body.data[0].operation.name == "reset"
+        assert isinstance(inner_if_body.data[1].operation, Measure)
 
         # Clbit mapping checks
         while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
@@ -3225,7 +3451,7 @@ class TestControlFlowWhileStructure:
         third_measure_clbit_idx = qc.clbits.index(third_measure.clbits[0])
         assert inner_if_cond_clbit_idx == third_measure_clbit_idx
 
-        inner_if_body_measure = inner_if_body.data[0]
+        inner_if_body_measure = inner_if_body.data[1]
         inner_if_body_measure_clbit_idx = qc.clbits.index(
             inner_if_body_measure.clbits[0]
         )
@@ -3734,7 +3960,7 @@ class TestTranspilerPassesPipeline:
         assert len(block.operations) > 0
 
     def test_inline(self, transpiler):
-        """inline() flattens CallBlockOperations from sub-kernel calls."""
+        """inline() flattens inline invocations from sub-kernel calls."""
 
         @qmc.qkernel
         def sub_kernel(q: qmc.Qubit) -> qmc.Qubit:
@@ -3800,15 +4026,15 @@ class TestTranspilerPassesPipeline:
         analyzed = transpiler.analyze(folded)
         assert analyzed.kind == BlockKind.ANALYZED
 
-    def test_analyze_allows_quantum_phi_operand_after_measurement_condition(
+    def test_analyze_allows_quantum_merge_operand_after_measurement_condition(
         self, transpiler
     ):
-        """analyze() must NOT reject quantum phi operands from if-else merges.
+        """analyze() must NOT reject quantum merge operands from if-else merges.
 
         When a qubit passes through an if-else block conditioned on a
-        measurement, the phi-merged output (e.g. ``q1_phi_0``) is
+        measurement, the merged output (e.g. ``q1_merge_0``) is
         quantum-typed.  A subsequent quantum gate using that qubit must
-        be allowed even though the phi value transitively depends on a
+        be allowed even though the merge value transitively depends on a
         measurement via the dependency graph.
         """
 
@@ -3822,10 +4048,10 @@ class TestTranspilerPassesPipeline:
             if m0:
                 q1 = qmc.x(q1)
 
-            # q1 is now a phi-merged qubit — quantum-typed
+            # q1 is now a merged qubit — quantum-typed
             m1 = qmc.measure(q2)
             if m1:
-                # Using phi-merged q1 as quantum operand must be allowed
+                # Using merged q1 as quantum operand must be allowed
                 q1 = qmc.z(q1)
 
             return qmc.measure(q1)
@@ -3923,7 +4149,7 @@ class TestTranspilerConfigAndSubstitution:
         assert transpiler.config is config
 
     def test_substitute_pass_sets_strategy(self):
-        """substitute() pass sets strategy_name on CompositeGateOperation."""
+        """substitute() pass sets strategy_name on InvokeOperation."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4129,19 +4355,6 @@ class TestTranspilerConfigAndSubstitution:
         )
         assert cp_approx == 7  # truncated to k=2 neighbors
         assert cp_approx < cp_std
-
-    def test_qft_strategy_resources(self):
-        """QFT strategy resource metadata is consistent."""
-        from qamomile.circuit.stdlib.qft import QFT
-
-        qft_gate = QFT(5)
-        standard_resources = qft_gate.get_resources_for_strategy("standard")
-        approx_resources = qft_gate.get_resources_for_strategy("approximate_k2")
-
-        assert standard_resources.custom_metadata["num_cp_gates"] == 10
-        assert approx_resources.custom_metadata["num_cp_gates"] < 10
-        assert standard_resources.custom_metadata["num_h_gates"] == 5
-        assert approx_resources.custom_metadata["num_h_gates"] == 5
 
     def test_substitute_no_rules_is_noop(self):
         """substitute() with no config rules returns block unchanged."""
@@ -4641,41 +4854,39 @@ class TestControlledGate:
         assert qc.num_qubits == 2
 
 
+@qmc.composite_gate(name="bell_pair")
+def _custom_bell_pair(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Prepare a Bell pair through the public composite API.
+
+    Args:
+        q0 (qmc.Qubit): Control qubit.
+        q1 (qmc.Qubit): Target qubit.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Updated Bell-pair qubits.
+    """
+    q0 = qmc.h(q0)
+    return qmc.cx(q0, q1)
+
+
 class TestCustomCompositeGate:
-    """Test custom CompositeGate through the full pipeline."""
+    """Test a custom composite qkernel through the full pipeline."""
 
     def test_custom_gate_transpiles(self):
-        """Custom CompositeGate decomposes and transpiles."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return (q0, q1)
-
-        bell = BellPair()
+        """A custom composite is boxed, decomposable, and executable."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
-        # CompositeGate may allocate extra qubits internally
+        sv = _run_statevector(qc, decompose=True)
         num_q = qc.num_qubits
-        # This test assumes the Bell pair occupies the only two qubits.
-        # If CompositeGate ever allocates ancillas, update the expected-state
-        # construction instead of relaxing this assertion.
         assert num_q == 2
         expected = np.zeros(2**num_q, dtype=complex)
         expected[0] = 1.0 / np.sqrt(2)  # |00>
@@ -7737,7 +7948,7 @@ class TestLoopBackedgeIfLivenessTranspilation:
             transpiler.transpile(circuit, bindings={})
 
 
-class TestDeadPhiTranspilation:
+class TestDeadMergeTranspilation:
     """Dead quantum variables in if branches must not cause EmitError."""
 
     def test_if_only_dead_reassigned_existing_transpile_ok(self):
@@ -7911,15 +8122,15 @@ class TestBoundConstantIfCondition:
 
 
 # ============================================================================
-# Compile-time constant if with array quantum phi output
+# Compile-time constant if with array quantum merge output
 # ============================================================================
 
 
-class TestCompileTimeIfArrayQuantumPhi:
-    """Compile-time constant if with array quantum phi must not raise EmitError.
+class TestCompileTimeIfArrayQuantumMerge:
+    """Compile-time constant if with array quantum merge must not raise EmitError.
 
     When a compile-time constant ``if`` has a dead branch that rebinds a
-    qubit array to a different array, the emit-time phi registration must
+    qubit array to a different array, the emit-time merge registration must
     use selected-branch-only remap (not the runtime two-branch validator).
     """
 
@@ -7984,16 +8195,16 @@ class TestCompileTimeIfArrayQuantumPhi:
 
 
 # ============================================================================
-# Compile-time if phi propagation (Issue: compile_time_constant_if_phi_propagation)
+# Compile-time if merge propagation (Issue: compile_time_constant_if_merge_propagation)
 # ============================================================================
 
 
-class TestCompileTimeIfPhiPropagation:
+class TestCompileTimeIfMergePropagation:
     """Compile-time IfOperation lowering before SegmentationPass.
 
     Tests that compile-time resolvable IfOperations (including expression-
     derived conditions like ``if flag > 0:``) are lowered before separation,
-    preventing MultipleQuantumSegmentsError and ensuring phi outputs are
+    preventing MultipleQuantumSegmentsError and ensuring merge outputs are
     correctly propagated.
     """
 
@@ -8099,8 +8310,8 @@ class TestCompileTimeIfPhiPropagation:
         else:
             pytest.fail("No RX gate found in circuit")
 
-    def test_bit_vector_phi_merge_flag_true(self):
-        """Branch-local measurement Vector[Bit] phi merge with flag=True."""
+    def test_bit_vector_merge_flag_true(self):
+        """Branch-local measurement Vector[Bit] merge with flag=True."""
         flag = True
 
         @qmc.qkernel
@@ -8124,8 +8335,8 @@ class TestCompileTimeIfPhiPropagation:
         for val, count in results:
             assert val is not None, "Bit vector result should not be None"
 
-    def test_bit_vector_phi_merge_flag_false(self):
-        """Branch-local measurement Vector[Bit] phi merge with flag=False."""
+    def test_bit_vector_merge_flag_false(self):
+        """Branch-local measurement Vector[Bit] merge with flag=False."""
         flag = False
 
         @qmc.qkernel
@@ -8149,8 +8360,8 @@ class TestCompileTimeIfPhiPropagation:
         for val, count in results:
             assert val is not None, "Bit vector result should not be None"
 
-    def test_array_quantum_phi_happy_path_regression(self):
-        """Existing array-quantum phi happy path must not regress."""
+    def test_array_quantum_merge_happy_path_regression(self):
+        """Existing array-quantum merge happy path must not regress."""
         flag = True
 
         @qmc.qkernel
@@ -8305,10 +8516,10 @@ class TestDirectCastMeasure:
         )
         assert measured_qubits == expected_qubits
 
-    def test_inlined_runtime_if_phi_cast_measures_all_qubits(self):
-        """Phi-merged QFixed carriers survive inlining of runtime-if bodies.
+    def test_inlined_runtime_if_merge_cast_measures_all_qubits(self):
+        """Merged QFixed carriers survive inlining of runtime-if bodies.
 
-        The phi output of a measurement-backed ``if`` carries QFixed carrier
+        The merge output of a measurement-backed ``if`` carries QFixed carrier
         metadata referencing the array cast inside the branches; cloning
         during inline must remap those references so the final measurement
         is not silently dropped (1 ancilla measure + 2 carrier measures).
@@ -8419,7 +8630,7 @@ class TestUnresolvedStructuralSize:
         assert "'n'" in str(exc_info.value)
 
 
-class TestWhileIfSharedLocalPhi:
+class TestWhileIfSharedLocalMerge:
     """While-if with quantum shared new locals: dead must transpile, live must error."""
 
     def test_while_loop_with_if_else_same_name_dead_local_transpile(self):
@@ -8445,7 +8656,7 @@ class TestWhileIfSharedLocalPhi:
                     bit = qmc.measure(q2)
             return bit
 
-        # Previously raised EmitError due to dead q2 generating quantum PhiOp
+        # Previously raised EmitError due to dead q2 generating a quantum merge slot
         _, qc = _transpile_and_get_circuit(circuit)
         assert qc.num_clbits >= 1
 

@@ -1,7 +1,7 @@
 """Compile-time IfOperation lowering pass.
 
 Lowers compile-time resolvable ``IfOperation``s before the segmentation pass,
-replacing them with selected-branch operations and substituting phi outputs
+replacing them with selected-branch operations and substituting merge outputs
 with selected-branch values throughout the block.
 
 This prevents ``SegmentationPass`` from seeing classical-only compile-time
@@ -20,9 +20,12 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
-    PhiOp,
 )
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    HasNestedOps,
+    IfOperation,
+    genuine_input_values,
+)
 from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
@@ -55,7 +58,7 @@ def resolve_compile_time_condition(
     classification, so they share this function.
 
     Tries ``resolve_if_condition`` first (plain Python values, constant
-    Values, direct UUID / name bindings), then falls back to the
+    Values, direct UUID / parameter-provenance bindings), then falls back to the
     accumulated ``concrete_values`` map for expression-derived
     conditions (``CompOp`` / ``CondOp`` / ``NotOp`` / ``BinOp`` chains
     evaluated by :func:`evaluate_classical_op_concrete`).
@@ -136,7 +139,7 @@ def _array_carrier_keys(
     stay consistent with every other carrier-key producer and resolver.
 
     Args:
-        source (ValueBase): Selected source value after phi substitution.
+        source (ValueBase): Selected source value after merge substitution.
             Array sources may be plain arrays or strided views.
         num_bits (int): Number of QFixed carrier bits to build.
 
@@ -173,7 +176,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     1. Evaluates conditions including expression-derived ones
        (``CompOp``, ``CondOp``, ``NotOp`` chains).
     2. Replaces resolved ``IfOperation``s with selected-branch operations.
-    3. Substitutes phi output UUIDs with selected-branch values in all
+    3. Substitutes merge output UUIDs with selected-branch values in all
        subsequent operations and block outputs.
     """
 
@@ -193,11 +196,12 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 can resolve bound/constant ``if`` conditions on a freshly
                 traced block before the transpiler pipeline runs; ``HIERARCHICAL``
                 is accepted during the self-recursion unroll loop. Surviving
-                ``CallBlockOperation``s are passed through untouched in both cases.
+                inline callable invocations are passed through untouched in both
+                cases.
 
         Returns:
             Block: New block with compile-time ``if``s replaced by their
-                selected-branch operations and phi outputs substituted. The
+                selected-branch operations and merge outputs substituted. The
                 input's ``BlockKind`` is preserved.
 
         Raises:
@@ -220,7 +224,11 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # Maps UUID → concrete Python value (int, float, bool).
         concrete_values: dict[str, Any] = {}
 
-        # Seed concrete_values from bindings (by UUID and by name).
+        # Seed concrete_values from UUID-keyed bindings entries. Name-keyed
+        # user bindings also land here but are dead entries: lookups against
+        # ``concrete_values`` are UUID-keyed, and a display name never
+        # collides with a UUID string. Name-based resolution happens only via
+        # parameter provenance in ``_try_seed_value`` below.
         for key, val in self._bindings.items():
             concrete_values[key] = val
 
@@ -229,12 +237,12 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             self._try_seed_value(iv, concrete_values)
 
         # Process operations, lowering compile-time ifs.
-        new_ops, phi_subst, dead_uuids = self._lower_operations(
+        new_ops, merge_subst, dead_uuids = self._lower_operations(
             input.operations, concrete_values
         )
 
-        # Apply phi substitution to block output_values.
-        new_outputs = self._substitute_output_values(input.output_values, phi_subst)
+        # Apply merge substitution to block output_values.
+        new_outputs = self._substitute_output_values(input.output_values, merge_subst)
 
         # Remove dead operations whose results are only used by lowered ifs.
         if dead_uuids:
@@ -307,16 +315,16 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         """Process operations, lowering compile-time IfOperations.
 
         Returns:
-            Tuple of (new operations list, phi substitution map,
+            Tuple of (new operations list, merge substitution map,
             dead UUIDs from lowered condition values).
         """
         new_ops: list[Operation] = []
-        phi_subst: dict[str, ValueBase] = {}
+        merge_subst: dict[str, ValueBase] = {}
         dead_uuids: set[str] = set()
 
         for op in operations:
-            # First apply any accumulated phi substitutions to this op.
-            op = self._apply_substitution(op, phi_subst)
+            # First apply any accumulated merge substitutions to this op.
+            op = self._apply_substitution(op, merge_subst)
 
             # Track classical op results for expression-aware evaluation.
             self._try_evaluate_classical_op(op, concrete_values)
@@ -329,9 +337,9 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     if hasattr(op.condition, "uuid"):
                         dead_uuids.add(op.condition.uuid)
 
-                    # Build phi substitution map.
+                    # Build merge substitution map.
                     for merge in op.iter_merges():
-                        phi_subst[merge.result.uuid] = merge.select(resolved)
+                        merge_subst[merge.result.uuid] = merge.select(resolved)
 
                     # Inline selected branch operations.
                     selected_ops = (
@@ -342,7 +350,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     lowered, nested_subst, nested_dead = self._lower_operations(
                         selected_ops, concrete_values
                     )
-                    phi_subst.update(nested_subst)
+                    merge_subst.update(nested_subst)
                     dead_uuids.update(nested_dead)
                     new_ops.extend(lowered)
                     continue
@@ -355,17 +363,30 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 lowered_false, subst_false, dead_false = self._lower_operations(
                     op.false_operations, dict(concrete_values)
                 )
-                # Apply nested substitutions to phi_ops.
+                # Apply nested substitutions to the branch-merge yields:
+                # a yield may reference the merged output of a
+                # compile-time if that was just lowered inside a branch.
                 nested_subst_if = {**subst_true, **subst_false}
-                new_phi_ops = cast(
-                    list[PhiOp],
-                    [self._apply_substitution(p, nested_subst_if) for p in op.phi_ops],
-                )
+                new_true_yields = op.true_yields
+                new_false_yields = op.false_yields
+                if nested_subst_if:
+                    nested_substitutor = ValueSubstitutor(
+                        nested_subst_if, transitive=True
+                    )
+                    new_true_yields = [
+                        cast(Value, nested_substitutor.substitute_value(v))
+                        for v in op.true_yields
+                    ]
+                    new_false_yields = [
+                        cast(Value, nested_substitutor.substitute_value(v))
+                        for v in op.false_yields
+                    ]
                 op = dataclasses.replace(
                     op,
                     true_operations=lowered_true,
                     false_operations=lowered_false,
-                    phi_ops=new_phi_ops,
+                    true_yields=new_true_yields,
+                    false_yields=new_false_yields,
                 )
                 dead_uuids.update(dead_true)
                 dead_uuids.update(dead_false)
@@ -378,18 +399,18 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                         body, dict(concrete_values)
                     )
                     new_lists.append(lowered_body)
-                    phi_subst.update(nested_subst)
+                    merge_subst.update(nested_subst)
                     dead_uuids.update(nested_dead)
                 op = op.rebuild_nested(new_lists)
                 # The substitution applied at the top of the loop predates
-                # the nested lowering, so phi outputs erased INSIDE this
+                # the nested lowering, so merge outputs erased INSIDE this
                 # op's body are still referenced by its rebind records
                 # (and possibly operands). Re-apply with the updated map.
-                op = self._apply_substitution(op, phi_subst)
+                op = self._apply_substitution(op, merge_subst)
 
             new_ops.append(op)
 
-        return new_ops, phi_subst, dead_uuids
+        return new_ops, merge_subst, dead_uuids
 
     # ------------------------------------------------------------------
     # Substitution
@@ -402,7 +423,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     ) -> tuple[Any, ...]:
         """Rewrite branch rebind record values through the substitutor.
 
-        Keeps ``IfOperation.branch_rebinds`` coherent when phi outputs
+        Keeps ``IfOperation.branch_rebinds`` coherent when merge outputs
         referenced by a record are lowered away, so the control-flow
         discard check's ``AnalyzePass`` safety-net run sees live values.
 
@@ -434,7 +455,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         """Rewrite loop rebind record values through the substitutor.
 
         Keeps ``loop_carried_rebinds`` coherent when a record's ``after``
-        (or ``before``) was a nested compile-time if's phi output that
+        (or ``before``) was a nested compile-time if's merge output that
         the lowering erased — without this, the control-flow discard
         check's ``AnalyzePass`` safety-net run would see a dangling UUID
         and lose the record's carried-forward lineage.
@@ -465,16 +486,54 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             new_records.append(record)
         return tuple(new_records) if changed else rebinds
 
+    @staticmethod
+    def _substitute_region_args(
+        region_args: tuple[Any, ...],
+        substitutor: "ValueSubstitutor",
+    ) -> tuple[Any, ...]:
+        """Rewrite loop region-argument values through the substitutor.
+
+        Keeps ``region_args`` coherent when a region argument's
+        ``yielded`` (or ``init``) was a nested compile-time if's phi
+        output that the lowering erased — without this, the executor and
+        emit-time threading would chase a dangling phi UUID (``Value
+        _phi_N not found``).
+
+        Args:
+            region_args (tuple[Any, ...]): ``RegionArg`` records.
+            substitutor (ValueSubstitutor): The active substitution.
+
+        Returns:
+            tuple[Any, ...]: Rewritten records; ``region_args`` itself
+                when nothing changed.
+        """
+        if not region_args:
+            return region_args
+        new_records = []
+        changed = False
+        for record in region_args:
+            replacements: dict[str, Any] = {}
+            for field_name in ("init", "block_arg", "yielded", "result"):
+                current = getattr(record, field_name)
+                substituted = substitutor.substitute_value(current)
+                if isinstance(substituted, Value) and substituted is not current:
+                    replacements[field_name] = substituted
+            if replacements:
+                record = dataclasses.replace(record, **replacements)
+                changed = True
+            new_records.append(record)
+        return tuple(new_records) if changed else region_args
+
     def _apply_substitution(
         self,
         op: Operation,
         subst: dict[str, ValueBase],
     ) -> Operation:
-        """Apply phi substitution map to an operation's operands and results.
+        """Apply merge substitution map to an operation's operands and results.
 
         Args:
             op (Operation): Operation to rewrite through ``subst``.
-            subst (dict[str, ValueBase]): Accumulated phi substitution map.
+            subst (dict[str, ValueBase]): Accumulated merge substitution map.
                 Mutated in place when a CastOperation result is rebuilt with
                 re-synced carrier metadata, so later operations holding the
                 same SSA value pick up the rebuilt metadata.
@@ -496,10 +555,10 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             ],
         )
 
-        # Phi substitution must reach into ``SliceArrayOperation`` result
+        # Merge substitution must reach into ``SliceArrayOperation`` result
         # metadata too.  The result is a sliced ``ArrayValue`` whose
         # ``slice_start`` / ``slice_step`` / ``slice_of`` Values may be
-        # phi-output references when the slice bounds come from an
+        # merge-output references when the slice bounds come from an
         # ``if`` branch.  Without substituting the result fields, the
         # post-fold ``SliceBorrowCheckPass`` sees a still-symbolic
         # ``slice_start`` and silently skips coverage registration,
@@ -532,17 +591,23 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             new_false = [
                 self._apply_substitution(o, subst) for o in op.false_operations
             ]
-            new_phi = cast(
-                list[PhiOp],
-                [self._apply_substitution(p, subst) for p in op.phi_ops],
-            )
+            # Branch-merge yields may reference outputs of previously
+            # lowered ifs; rewrite them through the same substitutor as
+            # the operands.
+            new_true_yields = [
+                cast(Value, substitutor.substitute_value(v)) for v in op.true_yields
+            ]
+            new_false_yields = [
+                cast(Value, substitutor.substitute_value(v)) for v in op.false_yields
+            ]
             return dataclasses.replace(
                 op,
                 operands=new_operands,
                 results=new_results,
                 true_operations=new_true,
                 false_operations=new_false,
-                phi_ops=new_phi,
+                true_yields=new_true_yields,
+                false_yields=new_false_yields,
                 branch_rebinds=self._substitute_branch_rebinds(
                     op.branch_rebinds, substitutor
                 ),
@@ -570,6 +635,12 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             if new_rebinds is not rebinds:
                 rebuilt = dataclasses.replace(
                     cast(Any, rebuilt), loop_carried_rebinds=new_rebinds
+                )
+            region_args = getattr(rebuilt, "region_args", ())
+            new_region_args = self._substitute_region_args(region_args, substitutor)
+            if new_region_args is not region_args:
+                rebuilt = dataclasses.replace(
+                    cast(Any, rebuilt), region_args=new_region_args
                 )
             return rebuilt
 
@@ -717,7 +788,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         output_values: list[Value],
         subst: dict[str, ValueBase],
     ) -> list[Value]:
-        """Apply phi substitution to block output values."""
+        """Apply merge substitution to block output values."""
         if not subst:
             return output_values
 
@@ -782,33 +853,25 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
     @staticmethod
     def _collect_used_uuids(op: Operation, used: set[str]) -> None:
-        """Collect all UUIDs used as operands in an operation (recursive)."""
-        for operand in op.operands:
-            if hasattr(operand, "uuid"):
-                used.add(operand.uuid)
+        """Collect all UUIDs an operation genuinely reads (recursive).
+
+        Reads are taken from :func:`genuine_input_values` so
+        subclass-specific reads (composite-gate power, symbolic control
+        counts, ``IfOperation`` branch-merge yields) count as uses while
+        rebind-record values — exposed only for cloning — do not.
+
+        Args:
+            op (Operation): Operation to inspect.
+            used (set[str]): Mutable set of used UUIDs, updated in place.
+        """
+        for operand in genuine_input_values(op):
+            used.add(operand.uuid)
             # Also collect element_indices and parent_array references.
             if isinstance(operand, Value):
                 if operand.parent_array is not None:
                     used.add(operand.parent_array.uuid)
                 for idx in operand.element_indices:
                     used.add(idx.uuid)
-
-        # theta is now part of operands — its UUID is collected above.
-
-        # ControlledUOperation non-operand fields (per subclass).
-        from qamomile.circuit.ir.operation.gate import (
-            ControlledUOperation,
-            SymbolicControlledU,
-        )
-
-        if isinstance(op, ControlledUOperation):
-            if isinstance(op.power, Value):
-                used.add(op.power.uuid)
-            if isinstance(op, SymbolicControlledU):
-                used.add(op.num_controls.uuid)
-                if op.control_indices is not None:
-                    for v in op.control_indices:
-                        used.add(v.uuid)
 
         # Recurse into control flow (For/ForItems/While/If).
         if isinstance(op, HasNestedOps):
@@ -827,12 +890,14 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             if const is not None:
                 concrete_values[value.uuid] = const
 
+        # Seed against ``bindings`` only via the sanctioned parameter-name
+        # provenance — never the display ``Value.name``. A bare-name seed would
+        # bind an inlined callee-local value that happened to share a name with
+        # a caller binding key, letting the pass fold an ``if`` on it and delete
+        # a live branch (a silent miscompilation).
         if hasattr(value, "is_parameter") and value.is_parameter():
             param_name = (
                 value.parameter_name() if hasattr(value, "parameter_name") else None
             )
             if param_name and param_name in self._bindings:
                 concrete_values[value.uuid] = self._bindings[param_name]
-
-        if hasattr(value, "name") and value.name and value.name in self._bindings:
-            concrete_values[value.uuid] = self._bindings[value.name]

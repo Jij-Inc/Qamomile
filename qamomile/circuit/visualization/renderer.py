@@ -95,6 +95,17 @@ class MatplotlibRenderer:
         self._add_jupyter_display_support(fig)
         return fig
 
+    def _visible_qubits(self, qubits: list[int]) -> list[int]:
+        """Return qubit indices that exist in the current rendered view.
+
+        Args:
+            qubits (list[int]): Qubit indices carried by the visual node.
+
+        Returns:
+            list[int]: Indices that can safely index ``self.qubit_y``.
+        """
+        return [q for q in qubits if 0 <= q < len(self.qubit_y)]
+
     def _draw_operations(self, fig: Figure, vc: VisualCircuit) -> None:
         """Draw all operations from Visual IR nodes.
 
@@ -104,9 +115,6 @@ class MatplotlibRenderer:
         Args:
             fig (Figure): Target matplotlib figure.
             vc (VisualCircuit): Visual circuit containing pre-resolved nodes.
-
-        Returns:
-            None
 
         Raises:
             ValueError: If any non-empty visual node lacks layout-owned
@@ -128,9 +136,6 @@ class MatplotlibRenderer:
             node (VInlineBlock): Visual block carrying label and style metadata.
             placement (InlineBlockLayout): Final block geometry produced by the
                 layout engine.
-
-        Returns:
-            None
         """
         inner = placement.inner_rect
         outer = placement.outer_rect
@@ -176,12 +181,12 @@ class MatplotlibRenderer:
         ax.add_patch(inner_patch)
 
         if is_controlled:
+            visible_affected = self._visible_qubits(node.affected_qubits)
+            visible_controls = set(self._visible_qubits(node.control_qubit_indices))
             target_qubits = [
-                qubit
-                for qubit in node.affected_qubits
-                if qubit not in node.control_qubit_indices
+                qubit for qubit in visible_affected if qubit not in visible_controls
             ]
-            for qubit in target_qubits or node.affected_qubits:
+            for qubit in target_qubits or visible_affected:
                 wire_y = self.qubit_y[qubit]
                 ax.add_line(
                     mlines.Line2D(
@@ -216,7 +221,7 @@ class MatplotlibRenderer:
 
         if node.control_qubit_indices:
             control_x = (outer.left + outer.right) / 2
-            for qubit in node.control_qubit_indices:
+            for qubit in self._visible_qubits(node.control_qubit_indices):
                 self._draw_control_dot(ax, control_x, self.qubit_y[qubit])
 
     def _draw_visual_nodes(
@@ -229,9 +234,6 @@ class MatplotlibRenderer:
         Args:
             fig (Figure): Target matplotlib figure.
             nodes (list[VisualNode]): Visual nodes to draw in traversal order.
-
-        Returns:
-            None
 
         Raises:
             ValueError: If a non-empty visual node lacks required layout-owned
@@ -301,9 +303,6 @@ class MatplotlibRenderer:
             ax (Axes): Axes to draw on.
             node (VUnfoldedSequence): Conditional node carrying its visual kind.
             placement (ControlFlowLayout): Final branch and connector geometry.
-
-        Returns:
-            None
         """
         edge_color, text_color, linestyle = self._control_flow_box_style(node.kind)
         if placement.connector_segments:
@@ -367,9 +366,6 @@ class MatplotlibRenderer:
             color (str): Matplotlib line color.
             linewidth (float): Line width in points.
             zorder (float): Matplotlib drawing order.
-
-        Returns:
-            None
         """
         ax.add_line(
             mlines.Line2D(
@@ -437,9 +433,6 @@ class MatplotlibRenderer:
             edge_color (str): Branch border color.
             text_color (str): Header text color.
             linestyle (str): Matplotlib border style.
-
-        Returns:
-            None
         """
         patch = mpatches.FancyBboxPatch(
             (rect.left, rect.bottom),
@@ -514,15 +507,12 @@ class MatplotlibRenderer:
             powered_layout (PoweredGateLayout | None): Target and wrapper
                 rectangles for a powered controlled gate. Defaults to None.
 
-        Returns:
-            None
-
         Raises:
             ValueError: If layout omitted geometry required by the gate's
                 rendering strategy.
         """
         ax = fig._qm_ax  # type: ignore[attr-defined]
-        qubit_indices = node.qubit_indices
+        qubit_indices = self._visible_qubits(node.qubit_indices)
 
         if not qubit_indices:
             return
@@ -763,7 +753,7 @@ class MatplotlibRenderer:
         Raises:
             ValueError: If layout omitted the required block-box rectangle.
         """
-        qubit_indices = node.qubit_indices
+        qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
@@ -830,20 +820,17 @@ class MatplotlibRenderer:
             powered_layout (PoweredGateLayout | None): Layout-owned target and
                 wrapper rectangles, or None for an unpowered gate.
 
-        Returns:
-            None
-
         Raises:
             ValueError: If layout omitted required generic or powered gate
                 geometry.
         """
-        qubit_indices = node.qubit_indices
+        qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
         # Split control and target indices
-        control_indices = qubit_indices[: node.control_count]
-        target_indices = qubit_indices[node.control_count :]
+        control_indices = self._visible_qubits(node.qubit_indices[: node.control_count])
+        target_indices = self._visible_qubits(node.qubit_indices[node.control_count :])
 
         control_y = [self.qubit_y[q] for q in control_indices]
         target_y = [self.qubit_y[q] for q in target_indices]
@@ -1034,7 +1021,7 @@ class MatplotlibRenderer:
             ValueError: If layout omitted the required expectation-box
                 rectangle.
         """
-        qubit_indices = node.qubit_indices
+        qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
@@ -1082,11 +1069,8 @@ class MatplotlibRenderer:
             fig (Figure): Target matplotlib figure carrying ``_qm_ax``.
             node (VFoldedBlock): Folded block node to render.
             placement (FoldedBlockLayout): Final box and connector geometry.
-
-        Returns:
-            None
         """
-        affected_qubits = node.affected_qubits
+        affected_qubits = self._visible_qubits(node.affected_qubits)
         if not affected_qubits:
             return
 
@@ -1235,9 +1219,6 @@ class MatplotlibRenderer:
 
         Args:
             fig (Figure): Matplotlib figure to enhance.
-
-        Returns:
-            None
         """
 
         def _repr_png_() -> bytes:
@@ -1317,9 +1298,6 @@ class MatplotlibRenderer:
         Args:
             fig (Figure): Target matplotlib figure.
             num_qubits (int): Number of qubit wires.
-
-        Returns:
-            None
         """
         ax = fig._qm_ax  # type: ignore[attr-defined]
         assert self.layout is not None

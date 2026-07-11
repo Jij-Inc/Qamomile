@@ -22,10 +22,9 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     RuntimeClassicalExpr,
 )
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
+    InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -70,6 +69,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
     _quantum_input_operands,
+)
+from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
+    reject_duplicate_physical_indices,
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
@@ -680,7 +682,7 @@ def _subtree_drops_constant_phase(
 
     Walks the same nested-block channels the controlled-helper validator
     descends -- ``HasNestedOps.nested_op_lists()`` (``for`` / ``if`` / item
-    loops), a ``CompositeGateOperation``'s implementation block, an
+    loops), an ``InvokeOperation``'s body, an
     ``InverseBlockOperation``'s source / implementation blocks, and a
     ``ControlledUOperation``'s controlled block -- and reports whether any
     reachable ``PauliEvolveOp`` carries a constant phase that the
@@ -708,8 +710,8 @@ def _subtree_drops_constant_phase(
             ):
                 return True
             continue
-        if isinstance(op, CompositeGateOperation):
-            block = op.implementation_block
+        if isinstance(op, InvokeOperation):
+            block = op.effective_body()
             if block is not None and _subtree_drops_constant_phase(
                 resolver, block.operations, bindings
             ):
@@ -822,6 +824,10 @@ def _validate_controlled_helper_unitary_ops(
             continue
         if isinstance(op, ControlledUOperation) and op.block is not None:
             _validate_controlled_helper_unitary_ops(op.block.operations, bindings)
+        if isinstance(op, InvokeOperation):
+            body = op.effective_body()
+            if body is not None:
+                _validate_controlled_helper_unitary_ops(body.operations, bindings)
         if isinstance(op, HasNestedOps):
             for nested in op.nested_op_lists():
                 _validate_controlled_helper_unitary_ops(nested, bindings)
@@ -846,13 +852,6 @@ def _validate_adjoint_helper_ops(
     """
     _validate_controlled_helper_unitary_ops(operations, bindings)
     for op in operations:
-        if isinstance(op, CallBlockOperation):
-            raise EmitError(
-                "CUDA-Q cudaq.adjoint helper kernels cannot contain residual "
-                "nested qkernel calls; falling back to Qamomile inverse "
-                "decomposition.",
-                operation="InverseBlockOperation",
-            )
         if isinstance(op, ControlledUOperation):
             raise EmitError(
                 "CUDA-Q cudaq.adjoint helper kernels cannot contain nested "
@@ -867,11 +866,10 @@ def _validate_adjoint_helper_ops(
                 "to Qamomile inverse decomposition.",
                 operation="InverseBlockOperation",
             )
-        if (
-            isinstance(op, CompositeGateOperation)
-            and op.implementation_block is not None
-        ):
-            _validate_adjoint_helper_ops(op.implementation_block.operations, bindings)
+        if isinstance(op, InvokeOperation):
+            body = op.effective_body()
+            if body is not None:
+                _validate_adjoint_helper_ops(body.operations, bindings)
             continue
         if isinstance(op, IfOperation):
             resolved_condition = resolve_if_condition(op.condition, bindings)
@@ -1060,7 +1058,13 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         parametric = bool(parameters)
         emitter = CudaqKernelEmitter(parametric=parametric)
         composite_emitters: list[Any] = []
-        super().__init__(emitter, bindings, parameters, composite_emitters)
+        super().__init__(
+            emitter,
+            bindings,
+            parameters,
+            composite_emitters,
+            backend_name="cudaq",
+        )
 
     def _emit_quantum_segment(
         self,
@@ -1382,6 +1386,16 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 target_index_groups = []
                 target_indices = []
             if len(target_indices) == op.num_target_qubits:
+                # CUDA-Q's adjoint fast path builds a helper kernel and never
+                # routes through the base ``emit_inverse_block_at_indices``
+                # entry check, so run the shared aliasing check here. This path
+                # is uncontrolled (num_control_qubits == 0), so the combined set
+                # is exactly ``target_indices``: an inverse block applied to
+                # aliased targets (``inverse(u)(qs[i], qs[j])`` on the diagonal)
+                # would otherwise compile silently and crash the simulator.
+                reject_duplicate_physical_indices(
+                    "inverse block (CUDA-Q adjoint)", target_indices
+                )
                 try:
                     self._emit_adjoint_helper(
                         circuit,
@@ -1443,7 +1457,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         )
         quantum_operands = _quantum_input_operands(block_value, input_operands)
         _bind_quantum_input_shapes(
-            self,
+            self._resolver,
             block_value,
             quantum_operands,
             bindings,
@@ -1528,6 +1542,15 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 "CUDA-Q cudaq.control requires at least one control qubit.",
                 operation="ControlledUOperation",
             )
+
+        # CUDA-Q's fallback builds a helper kernel via
+        # ``emit_controlled_kernel_call`` and never routes through
+        # ``append_gate``, so the shared aliasing check must run here. A
+        # control coinciding with a target (or a duplicated target) would make
+        # ``cudaq.control`` act twice on one qubit and crash the simulator.
+        reject_duplicate_physical_indices(
+            "controlled gate (CUDA-Q fallback)", control_indices + target_indices
+        )
 
         _validate_controlled_helper_unitary_ops(block_value.operations, bindings)
 
@@ -1861,7 +1884,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 )
                 self._propagate_cudaq_gate_results(op, qubit_map)
                 continue
-            if isinstance(op, CompositeGateOperation):
+            if isinstance(op, InvokeOperation):
                 self._emit_cudaq_controlled_composite(
                     circuit,
                     op,
@@ -2214,7 +2237,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
     def _emit_cudaq_controlled_composite(
         self,
         circuit: CudaqKernelArtifact,
-        op: CompositeGateOperation,
+        op: InvokeOperation,
         num_controls: int,
         control_indices: list[int],
         target_indices: list[int],
@@ -2223,12 +2246,12 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         emitter: CudaqKernelEmitter,
         bindings: dict[str, Any],
     ) -> None:
-        """Emit a CompositeGateOperation under outer controls.
+        """Emit an InvokeOperation under outer controls.
 
         Args:
             circuit (CudaqKernelArtifact): Artifact being built.
-            op (CompositeGateOperation): Composite op inside the controlled
-                block.
+            op (InvokeOperation): Composite or oracle invocation inside the
+                controlled block.
             num_controls (int): Number of outer controls.
             control_indices (list[int]): Physical outer controls.
             target_indices (list[int]): Fallback target slots from the
@@ -2249,31 +2272,24 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             qubit_map,
             self,
             bindings,
-            operation=f"CompositeGateOperation[{op.gate_type.name}]",
+            operation=f"InvokeOperation[{op.gate_type.name}]",
         )
-        if op.gate_type == CompositeGateType.QFT:
-            self._emit_cudaq_controlled_qft(
-                circuit, emitter, control_indices, qubit_indices
-            )
-        elif op.gate_type == CompositeGateType.IQFT:
-            self._emit_cudaq_controlled_iqft(
-                circuit, emitter, control_indices, qubit_indices
-            )
-        elif op.gate_type == CompositeGateType.CUSTOM and op.implementation is not None:
+        body = op.effective_body()
+        if body is not None:
             local_bindings = self._resolver.bind_block_params(
-                op.implementation,
+                body,
                 op.parameters,
                 bindings,
             )
             local_qubit_map, local_vector_slots = _build_block_qubit_map(
-                op.implementation,
+                body,
                 qubit_indices,
                 self,
                 local_bindings,
             )
             self._emit_cudaq_controlled_ops(
                 circuit,
-                op.implementation.operations,
+                body.operations,
                 len(control_indices),
                 control_indices,
                 qubit_indices,
@@ -2281,6 +2297,14 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 local_vector_slots,
                 emitter,
                 local_bindings,
+            )
+        elif op.gate_type == CompositeGateType.QFT:
+            self._emit_cudaq_controlled_qft(
+                circuit, emitter, control_indices, qubit_indices
+            )
+        elif op.gate_type == CompositeGateType.IQFT:
+            self._emit_cudaq_controlled_iqft(
+                circuit, emitter, control_indices, qubit_indices
             )
         else:
             raise EmitError(
@@ -2387,7 +2411,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             bindings,
         )
         _bind_quantum_input_shapes(
-            self,
+            self._resolver,
             impl,
             op.target_qubits,
             bindings,

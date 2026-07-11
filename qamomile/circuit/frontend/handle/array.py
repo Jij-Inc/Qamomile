@@ -25,7 +25,12 @@ from qamomile.circuit.transpiler.errors import (
     UnreturnedBorrowError,
 )
 
-from .handle import Handle, _emit_binop
+from .handle import (
+    Handle,
+    _describe_consume_sites,
+    _emit_binop,
+    _user_code_frame_ref,
+)
 from .primitives import Bit, Float, Qubit, UInt
 
 T = TypeVar("T", bound=Handle)
@@ -292,8 +297,8 @@ class ArrayBase(Handle, Generic[T]):
             instance.element_type = type_map[value.type]  # type: ignore[assignment]
         return instance
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "ArrayBase[T]":
-        """Wrap a phi-merged array value in this handle's array type.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "ArrayBase[T]":
+        """Wrap a merged array value in this handle's array type.
 
         Args:
             value (Value): Fresh ``ArrayValue`` produced for the merge
@@ -589,12 +594,15 @@ class ArrayBase(Handle, Generic[T]):
         # Check if the array itself has been consumed (e.g., by cast or measure)
         if self._consumed and self.value.type.is_quantum():
             display_name = self.value.name or "array"
+            first_use, reuse, consumed_at = _describe_consume_sites(
+                self, "array element access"
+            )
             raise QubitConsumedError(
                 f"Array '{display_name}' was already consumed by "
-                f"'{self._consumed_by}' and cannot be accessed.",
+                f"{first_use} and cannot be accessed in {reuse}.",
                 handle_name=display_name,
                 operation_name="array element access",
-                first_use_location=self._consumed_by,
+                first_use_location=consumed_at or self._consumed_by,
             )
 
         # Check if already borrowed — same dict covers direct element
@@ -760,12 +768,15 @@ class ArrayBase(Handle, Generic[T]):
         # Check if the array itself has been consumed (e.g., by cast or measure)
         if self._consumed and self.value.type.is_quantum():
             display_name = self.value.name or "array"
+            first_use, reuse, consumed_at = _describe_consume_sites(
+                self, "array element return"
+            )
             raise QubitConsumedError(
                 f"Array '{display_name}' was already consumed by "
-                f"'{self._consumed_by}' and cannot be accessed.",
+                f"{first_use} and cannot be accessed in {reuse}.",
                 handle_name=display_name,
                 operation_name="array element return",
-                first_use_location=self._consumed_by,
+                first_use_location=consumed_at or self._consumed_by,
             )
 
         # Determine the borrow key to release.
@@ -1312,13 +1323,16 @@ class Vector(ArrayBase[T]):
         self_root = self._slice_parent if isinstance(self, VectorView) else self  # type: ignore[attr-defined,unreachable]
         if self_root._consumed and self_root.value.type.is_quantum():
             display_name = self_root.value.name or "array"
+            first_use, reuse, consumed_at = _describe_consume_sites(
+                self_root, "slice assignment"
+            )
             raise QubitConsumedError(
                 f"Slice assignment target '{display_name}' was already "
-                f"consumed by '{self_root._consumed_by}' and cannot be "
-                f"used as the LHS of a slice assignment.",
+                f"consumed by {first_use} and cannot be used as the LHS "
+                f"of a slice assignment in {reuse}.",
                 handle_name=display_name,
                 operation_name="slice assignment",
-                first_use_location=self_root._consumed_by,
+                first_use_location=consumed_at or self_root._consumed_by,
             )
         if (
             isinstance(self, VectorView)  # type: ignore[unreachable]
@@ -1326,12 +1340,16 @@ class Vector(ArrayBase[T]):
             and self.value.type.is_quantum()
         ):
             display_name = self.value.name or "view"  # type: ignore[unreachable]
+            first_use, reuse, consumed_at = _describe_consume_sites(
+                self, "slice assignment"
+            )
             raise QubitConsumedError(
                 f"Slice assignment LHS view '{display_name}' was "
-                f"already consumed by '{self._consumed_by}'.",
+                f"already consumed by {first_use} and cannot be reused "
+                f"in {reuse}.",
                 handle_name=display_name,
                 operation_name="slice assignment",
-                first_use_location=self._consumed_by,
+                first_use_location=consumed_at or self._consumed_by,
             )
 
         # (4) Compute the would-be LHS coverage side-effect-free.  If
@@ -1373,9 +1391,10 @@ class Vector(ArrayBase[T]):
         #       fully replaced the outer.  In that case root assignment
         #       can release the inner directly, and we retire the
         #       skipped outer below so it cannot be reused afterward.
-        if value._slice_outer_view is not None:
-            if value._slice_outer_view is not self:
-                outer_view = value._slice_outer_view
+        value_outer_view = getattr(value, "_slice_outer_view", None)
+        if value_outer_view is not None:
+            if value_outer_view is not self:
+                outer_view = value_outer_view
                 outer_chain: list[VectorView[T]] = []
                 chain_matches_full_coverage = True
                 while outer_view is not None:
@@ -2142,9 +2161,9 @@ class VectorView(Vector[T]):
     index.  No affine translation happens in the view itself.
 
     Because the sliced ``ArrayValue`` is a first-class IR ``Value``,
-    the view can be passed as an operand of ``CallBlockOperation`` to
-    another ``@qkernel`` without the inline-trace special-case path
-    that earlier iterations required.  Passing views through
+    the view can be passed as an operand of an inline callable invocation
+    to another qkernel without the inline-trace special-case path that
+    earlier iterations required.  Passing views through
     ``expval`` / ``measure`` likewise operates on the sliced qubit
     subset, not the root parent as a whole.
 
@@ -2375,8 +2394,8 @@ class VectorView(Vector[T]):
         instance._slice_divergent_merge = False
         return instance
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "VectorView[T]":
-        """Wrap a phi-merged slice value as a view with this view's lineage.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "VectorView[T]":
+        """Wrap a merged slice value as a view with this view's lineage.
 
         Args:
             value (Value): Fresh sliced ``ArrayValue`` produced for the
@@ -2389,7 +2408,7 @@ class VectorView(Vector[T]):
             VectorView[T]: An unregistered view over the same parent and
                 affine map, inheriting this view's coverage and nesting
                 fields; borrow ownership is arranged separately by the
-                caller (``_refresh_slice_phi_owner``).
+                caller (``_refresh_slice_merge_owner``).
         """
         assert isinstance(value, ArrayValue)
         view = VectorView._wrap_unregistered(
@@ -2776,6 +2795,12 @@ class VectorView(Vector[T]):
                 )
         self._consumed = True
         self._consumed_by = operation_name
+        # Mirror ``Handle.consume``: record the user-code location of the
+        # transferring call so a later reuse of this view reports a real
+        # ``file:line`` first-use site. Views are always quantum, so no
+        # linearity guard is needed; line resolution stays deferred to the
+        # error path (see ``_FrameRef`` in ``handle.py``).
+        self._consumed_at = _user_code_frame_ref()
         if self._slice_covered_indices is not None:
             for idx in self._slice_covered_indices:
                 key = (f"const:{idx}",)

@@ -1,67 +1,44 @@
-"""Standard library of quantum algorithms.
+"""Expose standard-library quantum callables.
 
-Available:
-    Classes:
-        - QFT: Quantum Fourier Transform (CompositeGate class)
-        - IQFT: Inverse Quantum Fourier Transform (CompositeGate class)
+The reader-facing API is function-oriented: use :func:`qft`, :func:`iqft`,
+and :func:`qpe` inside qkernels. Internally these functions emit named
+callables with Qamomile bodies and optional backend-native implementations.
 
-    Strategies:
-        - StandardQFTStrategy: Full precision QFT
-        - ApproximateQFTStrategy: Truncated rotations QFT
-        - StandardIQFTStrategy: Full precision IQFT
-        - ApproximateIQFTStrategy: Truncated rotations IQFT
-
-    Functions:
-        - qft: Apply QFT to a vector of qubits
-        - iqft: Apply IQFT to a vector of qubits
-        - qpe: Quantum Phase Estimation
+QFT and IQFT use the same ``composite_gate`` mechanism as user callables; there
+is no separate class-based gate hierarchy.
 
 Example:
-    # Using class-based API (recommended for custom gates)
-    from qamomile.circuit.stdlib import QFT, IQFT
-
-    class MyCustomGate(CompositeGate):
-        def _decompose(self, qubits):
-            # Use QFT as building block
-            ...
-
-    # Using function-based API (recommended for kernels)
-    from qamomile.circuit.stdlib import qft, iqft
+    ```python
+    import qamomile.circuit as qmc
 
     @qmc.qkernel
-    def my_algorithm(qubits: Vector[Qubit]) -> Vector[Qubit]:
-        qubits = qft(qubits)
-        return qubits
-
-    # Using strategies
-    qft_gate = QFT(5)
-    result = qft_gate(q0, q1, q2, q3, q4, strategy="approximate")
+    def my_algorithm(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        qubits = qmc.qft(qubits)
+        return qmc.iqft(qubits)
+    ```
 """
 
-# Class-based API (new)
-# Function-based API (kept for compatibility, using new class-based impl)
-from .qft import IQFT, QFT, iqft, qft
-
-# Strategies
-from .qft_strategies import (
-    ApproximateIQFTStrategy,
-    ApproximateQFTStrategy,
-    StandardIQFTStrategy,
-    StandardQFTStrategy,
+from .arithmetic import (
+    controlled_modular_add,
+    modmul_const,
+    modular_add,
+    ripple_carry_add,
 )
+from .grover import grover_iteration_count, grover_search
+from .qft import iqft, qft
 from .qpe import qpe
+from .shor import shor_order_finding
 
 __all__ = [
-    # Classes
-    "QFT",
-    "IQFT",
-    # Strategies
-    "StandardQFTStrategy",
-    "ApproximateQFTStrategy",
-    "StandardIQFTStrategy",
-    "ApproximateIQFTStrategy",
-    # Functions
     "qft",
     "iqft",
     "qpe",
+    # Arithmetic and algorithms
+    "ripple_carry_add",
+    "modular_add",
+    "controlled_modular_add",
+    "modmul_const",
+    "shor_order_finding",
+    "grover_search",
+    "grover_iteration_count",
 ]

@@ -49,9 +49,11 @@ Block dict
 
 Only ``BlockKind.AFFINE`` and ``BlockKind.ANALYZED`` are accepted.
 ``HIERARCHICAL`` and ``TRACED`` raise on encode because they may
-embed ``CallBlockOperation`` references to sibling Blocks by Python
-identity; cross-process module references will be addressed
-separately.
+embed inline-policy ``InvokeOperation`` references to nested Blocks before
+inlining; cross-process module references will be addressed separately.
+Box-preserved ``InvokeOperation`` definitions may embed a concrete
+``body`` Block or an optional ``body_ref`` for deferred stdlib bodies
+whose width is resolved later.
 
 Type tags
 ---------
@@ -114,10 +116,11 @@ encoded with the tagged-dict wrapper defined in
 ``{"$complex": True, "real": <float>, "imag": <float>}``. Term order
 follows the Hamiltonian's own term-dict iteration order and the
 float-vs-complex distinction is preserved, so the reconstructed
-object is ``repr``-identical to the original; both properties feed
-``content_hash``, which stringifies opaque payloads via ``repr``.
-The wrapper contains no raw bytes, so both wire formats carry it
-unchanged.
+object is ``repr``-identical to the original. (``content_hash`` hashes
+Hamiltonian payloads structurally and order-independently via this
+same wrapper — see ``canonical._hamiltonian_token`` — so wire fidelity
+and hash identity are decoupled.) The wrapper contains no raw bytes,
+so both wire formats carry it unchanged.
 
 Forward compatibility
 ---------------------
@@ -161,5 +164,16 @@ from __future__ import annotations
 # ``loop_carried_rebinds`` records on loop operations follow the same
 # additive encoding (safety caveat: a reader that predates them drops
 # the records and with them the loop-carried rebind rejection — accepted
-# under the same-revision policy above).
+# under the same-revision policy above).  The ``region_args`` records on
+# loop operations (explicit loop-carried values: ``var_name`` plus
+# ``init_ref`` / ``block_arg_ref`` / ``yielded_ref`` / ``result_ref``)
+# are additive in the same way; a reader that predates them would drop
+# the loop-carried threading entirely, which is accepted only under the
+# same-revision policy above.  ``IfOperation`` branch merges
+# moved from embedded ``phi_ops`` operation dicts to
+# ``true_yield_refs`` / ``false_yield_refs`` UUID lists parallel to
+# ``result_refs`` — the first genuinely breaking reshape under the
+# same-revision policy: pre-change payloads fail loudly (unknown
+# ``PhiOp`` tag or merge-inconsistency ``ValueError``) instead of being
+# migrated.
 SCHEMA_VERSION: int = 1

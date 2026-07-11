@@ -15,6 +15,8 @@ from qamomile.circuit.frontend.operation.control_flow import (
     for_items,
     for_loop,
     loop_rebind_snapshot,
+    loop_region_enter,
+    loop_region_result,
     record_loop_rebinds,
     should_trace_for_loop,
     should_trace_items_loop,
@@ -231,11 +233,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
             # Function-wide lexical accumulation for rebind-record
             # candidates: unlike ``_outer_defined_vars`` (deliberately
             # narrowed to each branch's inputs so dead old values never
-            # force phi inputs), Python variables have function scope, so
+            # force merge inputs), Python variables have function scope, so
             # a branch assignment to a name defined anywhere earlier in
             # the function rebinds THAT variable. This set is consulted
             # only by the rebind-record candidate computation and never
-            # feeds the input/output/phi machinery.
+            # feeds the input/output/merge machinery.
             self._lexical_defined_vars |= defined_so_far
 
             # Visit the statement (may call visit_If, visit_For, etc.)
@@ -695,6 +697,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         candidates: list[str],
         classical_candidates: list[str],
         lineno: int,
+        region_bind: bool = False,
     ) -> list[ast.stmt]:
         """Wrap a transformed loop body with rebind snapshot/record probes.
 
@@ -709,6 +712,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         live inside the loop's ``with`` body, so the zero-trip trace
         guard skips them together with the body.
 
+        When ``region_bind`` is true (``for`` / ``for-items`` loops), a
+        ``name = loop_region_enter(_qm_rebind_snap_N, "name")``
+        assignment is additionally injected after the snapshot for each
+        read-before-write classical candidate, so the body's carried
+        reads go through an explicit region argument (see
+        ``loop_region_enter``). ``while`` loops keep ``region_bind``
+        false — a runtime while loop cannot be unrolled, so its
+        non-condition classical carries keep the record-based rejection.
+
         Args:
             flattened_body (list[ast.stmt]): The already-transformed loop
                 body statements.
@@ -718,6 +730,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 of ``candidates`` eligible for classical rebind records.
             lineno (int): Source line of the loop statement, used for the
                 generated nodes.
+            region_bind (bool): Inject region-argument entry assignments
+                for the classical candidates. Defaults to False.
 
         Returns:
             list[ast.stmt]: The wrapped body; ``flattened_body`` itself
@@ -774,7 +788,24 @@ class ControlFlowTransformer(ast.NodeTransformer):
             ),
             lineno=lineno,
         )
-        return [snap_stmt, *flattened_body, record_stmt]
+        entry_stmts: list[ast.stmt] = []
+        if region_bind:
+            entry_stmts = [
+                ast.Assign(
+                    targets=[ast.Name(id=name, ctx=ast.Store())],
+                    value=ast.Call(
+                        func=ast.Name(id="loop_region_enter", ctx=ast.Load()),
+                        args=[
+                            ast.Name(id=snap_name, ctx=ast.Load()),
+                            ast.Constant(value=name),
+                        ],
+                        keywords=[],
+                    ),
+                    lineno=lineno,
+                )
+                for name in classical_candidates
+            ]
+        return [snap_stmt, *entry_stmts, *flattened_body, record_stmt]
 
     def visit_While(self, node: ast.While) -> Any:
         if node.orelse:
@@ -1108,16 +1139,24 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_load_vars = saved_after_load
 
         flattened_body = self._wrap_body_with_rebind_probes(
-            flattened_body, rebind_candidates, classical_rebind_candidates, node.lineno
+            flattened_body,
+            rebind_candidates,
+            classical_rebind_candidates,
+            node.lineno,
+            region_bind=True,
         )
 
         # Dispatch to the appropriate transform.
         # Sequence iteration is already rejected by _validate_for_loop.
         if self._is_items_call(node.iter):
-            return self._transform_for_items(node, flattened_body)
+            return self._transform_for_items(
+                node, flattened_body, classical_rebind_candidates
+            )
 
         if self._is_range_call(node.iter):
-            return self._transform_for_range(node, flattened_body)
+            return self._transform_for_range(
+                node, flattened_body, classical_rebind_candidates
+            )
 
         # [FOR DEVELOPER]
         # Since _validate_for_loop should have rejected any non-items, non-range loops,
@@ -1129,8 +1168,47 @@ class ControlFlowTransformer(ast.NodeTransformer):
             f"iter={ast.dump(node.iter)}"
         )
 
+    def _region_result_stmts(
+        self, classical_candidates: list[str], lineno: int
+    ) -> list[ast.stmt]:
+        """Build post-loop ``loop_region_result`` rebinding assignments.
+
+        One ``name = loop_region_result("name", name)`` statement per
+        read-before-write classical candidate, to run immediately after
+        the loop's ``with`` block (inside the zero-trip guard) so
+        post-loop reads reference the loop operation's region-argument
+        result value instead of the body's final yielded value.
+
+        Args:
+            classical_candidates (list[str]): The read-before-write
+                classical candidate names of the loop.
+            lineno (int): Source line of the loop statement.
+
+        Returns:
+            list[ast.stmt]: The rebinding assignments (empty when there
+                are no candidates).
+        """
+        return [
+            ast.Assign(
+                targets=[ast.Name(id=name, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name(id="loop_region_result", ctx=ast.Load()),
+                    args=[
+                        ast.Constant(value=name),
+                        ast.Name(id=name, ctx=ast.Load()),
+                    ],
+                    keywords=[],
+                ),
+                lineno=lineno,
+            )
+            for name in classical_candidates
+        ]
+
     def _transform_for_range(
-        self, node: ast.For, flattened_body: list[ast.stmt]
+        self,
+        node: ast.For,
+        flattened_body: list[ast.stmt],
+        classical_candidates: list[str],
     ) -> ast.stmt:
         """Transform 'for i in range(...)' to 'with for_loop(...)'.
 
@@ -1192,14 +1270,20 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 ],
                 keywords=[],
             ),
-            body=[with_stmt],
+            body=[
+                with_stmt,
+                *self._region_result_stmts(classical_candidates, node.lineno),
+            ],
             orelse=[],
             lineno=node.lineno,
             col_offset=node.col_offset,
         )
 
     def _transform_for_items(
-        self, node: ast.For, flattened_body: list[ast.stmt]
+        self,
+        node: ast.For,
+        flattened_body: list[ast.stmt],
+        classical_candidates: list[str],
     ) -> ast.stmt:
         """Transform 'for (k, v) in items(d)' or 'for (k, v) in d.items()' to 'with for_items(d, [...], "v")'.
 
@@ -1269,7 +1353,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 args=[copy.deepcopy(dict_arg)],
                 keywords=[],
             ),
-            body=[with_stmt],
+            body=[
+                with_stmt,
+                *self._region_result_stmts(classical_candidates, node.lineno),
+            ],
             orelse=[],
             lineno=node.lineno,
             col_offset=node.col_offset,
@@ -1302,7 +1389,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         outer_defined = set(self._outer_defined_vars)
         has_else = bool(node.orelse)
 
-        # Existing vars re-assigned in any branch may need phi outputs even
+        # Existing vars re-assigned in any branch may need merge outputs even
         # when the old value is dead and therefore should not be passed in.
         reassigned_existing = (body_assigned | orelse_assigned) & outer_defined
 
@@ -1331,10 +1418,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
         # Filter dead-and-modified variables from output.  A variable that is
         # stored (modified) in a branch but never loaded after the if would
-        # generate an unnecessary PhiOp whose physical resources may differ
-        # across branches, causing EmitError at emit time.
+        # generate an unnecessary merge slot whose physical resources may
+        # differ across branches, causing EmitError at emit time.
         # Variables that are dead but NOT stored in any branch pass through
-        # unchanged (their phi has identical resources) and are harmless.
+        # unchanged (their merge has identical resources) and are harmless.
         stored_in_branches = collector_body.store_vars | collector_orelse.store_vars
         dead_modified = (stored_in_branches & input_vars_set) - after_loads
         live_shared = shared_new_locals & after_loads
@@ -1387,7 +1474,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         orelse_has_return = self._has_top_level_return(orelse_body)
 
         # One-sided return is not supported: when only one branch returns,
-        # the phi merge cannot pair the return value with a corresponding
+        # the merge cannot pair the return value with a corresponding
         # value from the other branch, causing TypeError or silent bugs.
         if body_has_return != orelse_has_return:
             returning_branch = "if" if body_has_return else "else"
@@ -1429,7 +1516,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Dead-rebind probes: a pre-existing variable reassigned in a
         # branch but never read after the if is dead-store-eliminated
         # from ``output_vars`` (and, when its old value is unread, from
-        # ``input_vars`` too), so no phi ever sees it — yet the rebind
+        # ``input_vars`` too), so no merge ever sees it — yet the rebind
         # still drops the pre-branch quantum state on the rebinding
         # path, exactly like the top-level rebind the decoration-time
         # analyzer rejects. Each branch body therefore returns, after
@@ -1508,7 +1595,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Rebind-record probe arguments: pre-branch bindings of every
         # pre-existing variable reassigned in a branch. A reassigned
         # variable whose old value is dead is deliberately NOT in
-        # ``input_vars`` (its old value must not force a phi input), so
+        # ``input_vars`` (its old value must not force a merge input), so
         # ``emit_if`` cannot see its pre-branch binding through
         # ``var_list``; ``branch_rebind_pre_bindings(locals(), ...)``
         # captures it at the call site instead. The candidate analysis
@@ -1615,6 +1702,19 @@ def transform_control_flow(func: Callable):
         ) from e
     src = textwrap.dedent(src)
     tree = ast.parse(src)
+    # Re-anchor the tree to the original source file before any transform
+    # runs, so that (a) transform-time diagnostics report absolute line
+    # numbers and (b) frames executing the traced kernel body carry the
+    # user's real ``file:line``. ``getsource`` yields line numbers relative
+    # to the decorator line, so shifting by ``co_firstlineno - 1`` restores
+    # absolute positions (``dedent`` only changes columns, never lines).
+    # Nodes synthesized by the transformer inherit these absolute positions
+    # via ``fix_missing_locations`` below. This gives readable tracebacks
+    # for any error raised while tracing — and lets trace-time diagnostics
+    # such as ``Handle.consume`` report the offending source line — instead
+    # of pointing into an opaque ``<qamomile-dsl>`` buffer.
+    ast.increment_lineno(tree, func.__code__.co_firstlineno - 1)
+    source_filename = inspect.getsourcefile(func) or "<qamomile-dsl>"
 
     # Collect global names (modules, builtins, etc.)
     global_names = set(func.__globals__.keys())
@@ -1666,6 +1766,8 @@ def transform_control_flow(func: Callable):
             "branch_rebind_pre_bindings": branch_rebind_pre_bindings,
             "dead_rebind_binding": dead_rebind_binding,
             "loop_rebind_snapshot": loop_rebind_snapshot,
+            "loop_region_enter": loop_region_enter,
+            "loop_region_result": loop_region_result,
             "record_loop_rebinds": record_loop_rebinds,
             "Any": Any,  # For type annotations in generated code
         }
@@ -1686,7 +1788,7 @@ def transform_control_flow(func: Callable):
                     f"This typically happens with forward references in nested functions."
                 ) from None
 
-    code_obj = compile(tree, filename="<qamomile-dsl>", mode="exec")
+    code_obj = compile(tree, filename=source_filename, mode="exec")
     exec(code_obj, name_space)
 
     return name_space[func.__name__]

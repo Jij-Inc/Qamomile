@@ -41,8 +41,8 @@ class Observable(Handle):
         ```
     """
 
-    def _wrap_phi_result(self, value: Value, counterpart: Value) -> "Observable":
-        """Wrap a phi-merged value in a fresh ``Observable`` handle.
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Observable":
+        """Wrap a merged value in a fresh ``Observable`` handle.
 
         Args:
             value (Value): Fresh IR value produced for the merge output.

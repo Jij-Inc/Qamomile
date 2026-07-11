@@ -330,6 +330,18 @@ class GateEmitter(Protocol[T]):
         """Emit measurement operation."""
         ...
 
+    def emit_reset(self, circuit: T, qubit: int) -> None:
+        """Emit a reset-to-zero operation.
+
+        Args:
+            circuit: Backend circuit to emit into.
+            qubit: Physical qubit index to reset.
+
+        Raises:
+            NotImplementedError: If the backend cannot represent reset.
+        """
+        raise NotImplementedError("This backend does not support reset emission.")
+
     # Barrier (optional, for visual separation)
     @abstractmethod
     def emit_barrier(self, circuit: T, qubits: list[int]) -> None:

@@ -2,29 +2,44 @@
 
 from __future__ import annotations
 
-import copy
 import dataclasses
 import inspect
 from collections.abc import Callable, Sequence
+from functools import partial
 from numbers import Real
 from typing import TYPE_CHECKING, Any, cast
 
-from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.array import ArrayBase, VectorView
-from qamomile.circuit.frontend.operation.control import _qkernel_for_callable
-from qamomile.circuit.frontend.param_validation import _validate_bound_handles
-from qamomile.circuit.frontend.qkernel import (
-    QKernel,
-    _promote_literal_to_handle,
+from qamomile.circuit.frontend.operation.control import (
+    _control_callable_metadata,
+    _qkernel_for_callable,
 )
+from qamomile.circuit.frontend.param_validation import _validate_bound_handles
+from qamomile.circuit.frontend.qkernel import QKernel
+from qamomile.circuit.frontend.qkernel_callable import (
+    qkernel_callable_attrs,
+    qkernel_callable_ref,
+    qkernel_invoke_block,
+)
+from qamomile.circuit.frontend.qkernel_invocation import invoke_qkernel_with_operation
+from qamomile.circuit.frontend.qkernel_like import QKernelLike
+from qamomile.circuit.frontend.qkernel_specialization import (
+    select_specialized_block,
+)
+from qamomile.circuit.frontend.qkernel_utils import promote_literal_to_handle
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallPolicy,
+    CallTransform,
     CompositeGateType,
-    ResourceMetadata,
+    InvokeOperation,
+    signature_from_block,
+    signature_from_values,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -230,6 +245,28 @@ def _static_quantum_width(value: ValueBase) -> int | None:
     return 1
 
 
+def _inverse_invoke_target_width(
+    op: InvokeOperation,
+    current_qubits: Sequence[ValueBase],
+) -> int:
+    """Return the scalar target width for an inverse invocation.
+
+    Args:
+        op (InvokeOperation): Invocation being inverted.
+        current_qubits (Sequence[ValueBase]): Current result-side quantum
+            values at the inverse call site.
+
+    Returns:
+        int: Static scalar target width when all target values have known
+            width, otherwise the invocation's recorded target width.
+    """
+    target_values = list(current_qubits[len(op.control_qubits) :])
+    widths = [_static_quantum_width(value) for value in target_values]
+    if widths and all(width is not None for width in widths):
+        return sum(cast(int, width) for width in widths)
+    return op.num_target_qubits
+
+
 def _fresh_result_value(
     value: ValueBase,
     value_map: dict[str, ValueBase],
@@ -304,29 +341,8 @@ def _validate_input_shape(
         )
 
 
-def _copy_resource_metadata(
-    resource_metadata: ResourceMetadata | None,
-) -> ResourceMetadata | None:
-    """Copy resource metadata for an inverse opaque composite.
-
-    Args:
-        resource_metadata (ResourceMetadata | None): Metadata attached to
-            the original composite operation.
-
-    Returns:
-        ResourceMetadata | None: Independent metadata object with the same
-            resource values, or None when the original had no metadata.
-    """
-    if resource_metadata is None:
-        return None
-    return dataclasses.replace(
-        resource_metadata,
-        custom_metadata=copy.deepcopy(resource_metadata.custom_metadata),
-    )
-
-
-def _inverse_stub_name(name: str) -> str:
-    """Return an opaque inverse-stub name.
+def _inverse_opaque_name(name: str) -> str:
+    """Return an opaque inverse-callable name.
 
     Args:
         name (str): Original custom composite name.
@@ -462,8 +478,6 @@ class _BlockInverter:
                 )
             if isinstance(op, ForOperation):
                 self._reject_unsupported_control_flow(op.operations)
-            if isinstance(op, CallBlockOperation) and op.block is not None:
-                self._reject_unsupported_control_flow(op.block.operations)
 
     def _seed_output_values(
         self,
@@ -625,14 +639,12 @@ class _BlockInverter:
             return self._invert_gate(op, value_map)
         if isinstance(op, InverseBlockOperation):
             return self._invert_inverse_block(op, value_map)
-        if isinstance(op, CompositeGateOperation):
-            return self._invert_composite_gate(op, value_map)
+        if isinstance(op, InvokeOperation):
+            return self._invert_invoke(op, value_map)
         if isinstance(op, PauliEvolveOp):
             return self._invert_pauli_evolve(op, value_map)
         if isinstance(op, ControlledUOperation):
             return self._invert_controlled_u(op, value_map)
-        if isinstance(op, CallBlockOperation):
-            return self._invert_call_block(op, value_map)
         if isinstance(op, ForOperation):
             return self._invert_for(op, value_map)
         if isinstance(op, (IfOperation, WhileOperation, ForItemsOperation)):
@@ -758,112 +770,138 @@ class _BlockInverter:
             value_map[operand.uuid] = result
         return [*extra_ops, inverse_op]
 
-    def _invert_composite_gate(
+    def _invert_invoke(
         self,
-        op: CompositeGateOperation,
+        op: InvokeOperation,
         value_map: dict[str, ValueBase],
     ) -> list[Operation]:
-        """Invert a composite gate operation.
+        """Invert a callable invocation.
 
         Args:
-            op (CompositeGateOperation): Composite gate operation to invert.
+            op (InvokeOperation): Invocation to invert.
             value_map (dict[str, ValueBase]): UUID-keyed current-value map.
 
         Returns:
-            list[Operation]: The inverse composite operation.
+            list[Operation]: Inlined inverse operations or a boxed inverse
+            invocation.
 
         Raises:
-            NotImplementedError: If the composite gate has no known inverse
-                and no implementation block.
+            NotImplementedError: If the invocation has no body and no known
+                inverse form.
         """
         current_qubits = [
-            _as_value(_substitute_value(result, value_map), "composite result")
+            _as_value(_substitute_value(result, value_map), "invoke result")
             for result in op.results
         ]
         new_results = [qubit.next_version() for qubit in current_qubits]
         mapped_params = [
-            _as_value(_substitute_value(param, value_map), "composite parameter")
+            _as_value(_substitute_value(param, value_map), "invoke parameter")
             for param in op.parameters
         ]
 
-        gate_type = op.gate_type
-        custom_name = op.custom_name
-        implementation_block = op.implementation_block
-        has_implementation = op.has_implementation
-        resource_metadata = _copy_resource_metadata(op.resource_metadata)
-        strategy_name = op.strategy_name
+        attrs = dict(op.attrs)
+        target = op.target
+        body = op.body
+        opaque_cost = op.definition.opaque_cost if op.definition is not None else None
+        transform = (
+            CallTransform.DIRECT
+            if op.transform is CallTransform.INVERSE
+            else CallTransform.INVERSE
+        )
+
+        gate_type_name = str(attrs.get("gate_type", "CUSTOM"))
         source_block = None
 
-        if op.gate_type is CompositeGateType.QFT:
-            from qamomile.circuit.stdlib.qft import IQFT
+        if gate_type_name == CompositeGateType.QFT.name:
+            from qamomile.circuit.stdlib.qft import iqft
 
-            gate_type = CompositeGateType.IQFT
-            custom_name = "iqft"
-            implementation_block = None
-            has_implementation = False
-            if strategy_name is not None and IQFT.get_strategy(strategy_name) is None:
-                raise NotImplementedError(
-                    "inverse() cannot invert QFT with strategy "
-                    f"{strategy_name!r} because IQFT does not define the "
-                    "same strategy."
-                )
-        elif op.gate_type is CompositeGateType.IQFT:
-            from qamomile.circuit.stdlib.qft import QFT
+            attrs["gate_type"] = CompositeGateType.IQFT.name
+            attrs["custom_name"] = "iqft"
+            target = CallableRef(
+                namespace=op.target.namespace,
+                name="iqft",
+                version=op.target.version,
+            )
+            body = iqft.block
+            transform = CallTransform.DIRECT
+        elif gate_type_name == CompositeGateType.IQFT.name:
+            from qamomile.circuit.stdlib.qft import qft
 
-            gate_type = CompositeGateType.QFT
-            custom_name = "qft"
-            implementation_block = None
-            has_implementation = False
-            if strategy_name is not None and QFT.get_strategy(strategy_name) is None:
+            attrs["gate_type"] = CompositeGateType.QFT.name
+            attrs["custom_name"] = "qft"
+            target = CallableRef(
+                namespace=op.target.namespace,
+                name="qft",
+                version=op.target.version,
+            )
+            body = qft.block
+            transform = CallTransform.DIRECT
+        elif op.body is not None:
+            source_block = op.body
+            body = self.invert_block(op.body)
+            opaque_cost = None
+            attrs["gate_type"] = CompositeGateType.CUSTOM.name
+            attrs["custom_name"] = f"{op.name}_inverse"
+        elif attrs.get("kind") in {"composite", "oracle"}:
+            if attrs.get("kind") == "composite" and gate_type_name not in {
+                CompositeGateType.CUSTOM.name,
+                "",
+            }:
                 raise NotImplementedError(
-                    "inverse() cannot invert IQFT with strategy "
-                    f"{strategy_name!r} because QFT does not define the "
-                    "same strategy."
+                    "inverse() cannot invert an opaque native InvokeOperation "
+                    f"{gate_type_name!r}. Use an explicit inverse operation "
+                    "or provide an implementation body."
                 )
-        elif op.implementation is not None:
-            gate_type = CompositeGateType.CUSTOM
-            source_block = op.implementation
-            implementation_block = self.invert_block(op.implementation)
-            has_implementation = True
-            resource_metadata = None
-            custom_name = f"{op.name}_inverse"
-        elif op.gate_type is not CompositeGateType.CUSTOM:
-            raise NotImplementedError(
-                "inverse() cannot invert native CompositeGateOperation "
-                f"{op.gate_type.value!r}. Use an explicit inverse operation "
-                "or provide an implementation block."
+            inverse_name = _inverse_opaque_name(op.name)
+            attrs["gate_type"] = CompositeGateType.CUSTOM.name
+            attrs["custom_name"] = inverse_name
+            target = CallableRef(
+                namespace=op.target.namespace,
+                name=inverse_name,
+                version=op.target.version,
             )
         else:
-            gate_type = CompositeGateType.CUSTOM
-            source_block = None
-            implementation_block = None
-            has_implementation = False
-            custom_name = _inverse_stub_name(op.name)
+            raise NotImplementedError(
+                "inverse() cannot invert an opaque InvokeOperation without "
+                "an implementation body."
+            )
 
-        if source_block is not None and implementation_block is not None:
+        if source_block is not None and body is not None:
             inverse_op: Operation = InverseBlockOperation(
                 operands=[*current_qubits, *mapped_params],
                 results=new_results,
                 num_control_qubits=op.num_control_qubits,
-                num_target_qubits=op.num_target_qubits,
-                custom_name=custom_name,
+                num_target_qubits=_inverse_invoke_target_width(op, current_qubits),
+                custom_name=str(attrs.get("custom_name", op.name)),
                 source_block=source_block,
-                implementation_block=implementation_block,
+                implementation_block=body,
             )
         else:
-            inverse_op = CompositeGateOperation(
+            policy = op.default_policy if body is not None else CallPolicy.PRESERVE_BOX
+            attrs["default_policy"] = policy.name
+            inverse_op = InvokeOperation(
                 operands=[*current_qubits, *mapped_params],
                 results=new_results,
-                gate_type=gate_type,
-                num_control_qubits=op.num_control_qubits,
-                num_target_qubits=op.num_target_qubits,
-                custom_name=custom_name,
-                resource_metadata=resource_metadata,
-                has_implementation=has_implementation,
-                implementation_block=implementation_block,
-                composite_gate_instance=None,
-                strategy_name=strategy_name,
+                target=target,
+                transform=transform,
+                attrs=attrs,
+                definition=CallableDef(
+                    ref=target,
+                    signature=(
+                        signature_from_block(body)
+                        if body is not None
+                        else signature_from_values(
+                            [*current_qubits, *mapped_params],
+                            new_results,
+                        )
+                    ),
+                    body=body,
+                    opaque_cost=opaque_cost,
+                    default_policy=policy,
+                    attrs=attrs,
+                ),
             )
+
         for operand, result in zip(op.control_qubits + op.target_qubits, new_results):
             value_map[operand.uuid] = result
         return [inverse_op]
@@ -990,6 +1028,8 @@ class _BlockInverter:
             results=cast(list[Value], [*new_controls, *new_targets]),
             num_controls=op.num_control_qubits,
             block=op.source_block,
+            callable_ref=op.callable_ref,
+            callable_attrs=dict(op.callable_attrs),
         )
 
         self._update_quantum_value_map(value_map, op.control_qubits, new_controls)
@@ -1248,44 +1288,6 @@ class _BlockInverter:
         )
         return [inverse_op]
 
-    def _invert_call_block(
-        self,
-        op: CallBlockOperation,
-        value_map: dict[str, ValueBase],
-    ) -> list[Operation]:
-        """Inline the inverse of a nested QKernel call.
-
-        Args:
-            op (CallBlockOperation): Call operation to invert.
-            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
-
-        Returns:
-            list[Operation]: Inlined inverse operations.
-
-        Raises:
-            NotImplementedError: If the call has no block target.
-        """
-        if op.block is None:
-            raise NotImplementedError(
-                "inverse() cannot invert unresolved qkernel calls."
-            )
-        local_map = dict(value_map)
-        for block_input, call_operand in zip(op.block.input_values, op.operands):
-            resolved = _substitute_value(call_operand, value_map)
-            local_map[block_input.uuid] = resolved
-            if isinstance(block_input, ArrayValue) and isinstance(resolved, ArrayValue):
-                for block_dim, arg_dim in zip(block_input.shape, resolved.shape):
-                    local_map[block_dim.uuid] = _substitute_value(arg_dim, value_map)
-        for block_output, call_result in zip(op.block.output_values, op.results):
-            local_map[block_output.uuid] = _substitute_value(call_result, value_map)
-
-        self._reject_unsupported_control_flow(op.block.operations)
-        operations = self._invert_block_operations(op.block, local_map)
-        for block_input, call_operand in zip(op.block.input_values, op.operands):
-            if block_input.type.is_quantum():
-                value_map[call_operand.uuid] = local_map[block_input.uuid]
-        return operations
-
     def _invert_for(
         self,
         op: ForOperation,
@@ -1426,13 +1428,47 @@ class InverseGate:
         qkernel (QKernel): Kernel whose inverse should be emitted.
     """
 
-    def __init__(self, qkernel: QKernel) -> None:
+    def __init__(
+        self,
+        qkernel: QKernel,
+        *,
+        callable_ref: CallableRef | None = None,
+        callable_attrs: dict[str, Any] | None = None,
+    ) -> None:
         """Initialize the inverse wrapper.
 
         Args:
             qkernel (QKernel): Kernel whose inverse should be emitted.
+            callable_ref (CallableRef | None): Optional stable identity of the
+                source callable being inverted. Defaults to the qkernel ref.
+            callable_attrs (dict[str, Any] | None): Optional attrs copied from
+                the source callable. Defaults to qkernel attrs.
         """
         self._qkernel = qkernel
+        self._target_callable_ref = callable_ref
+        self._target_callable_attrs = (
+            dict(callable_attrs) if callable_attrs is not None else None
+        )
+
+    def _callable_ref(self) -> CallableRef:
+        """Return the source callable identity.
+
+        Returns:
+            CallableRef: Identity of the callable being inverted.
+        """
+        if self._target_callable_ref is not None:
+            return self._target_callable_ref
+        return qkernel_callable_ref(self._qkernel)
+
+    def _callable_attrs(self) -> dict[str, Any]:
+        """Return attrs copied from the source callable.
+
+        Returns:
+            dict[str, Any]: Serializer-friendly callable attrs.
+        """
+        if self._target_callable_attrs is not None:
+            return dict(self._target_callable_attrs)
+        return qkernel_callable_attrs(self._qkernel)
 
     def _bind_arguments(self, *args: Any, **kwargs: Any) -> "BoundArguments":
         """Bind and literal-promote call arguments.
@@ -1457,7 +1493,7 @@ class InverseGate:
         for name, value in list(bound_args.arguments.items()):
             expected_type = self._qkernel.input_types.get(name)
             if expected_type is not None:
-                bound_args.arguments[name] = _promote_literal_to_handle(
+                bound_args.arguments[name] = promote_literal_to_handle(
                     value,
                     expected_type,
                 )
@@ -1488,23 +1524,7 @@ class InverseGate:
         Returns:
             Block: Block whose operations should be inverted.
         """
-        block_ir = None
-        if not self._qkernel._specializing:
-            spec = self._qkernel._extract_calltime_specialization(arguments)
-            if spec is not None:
-                sub_parameters, sub_bindings, sub_qubit_sizes = spec
-                self._qkernel._specializing = True
-                try:
-                    block_ir = self._qkernel._build_specialized(
-                        parameters=sub_parameters,
-                        bindings=sub_bindings,
-                        qubit_sizes=sub_qubit_sizes,
-                    )
-                finally:
-                    self._qkernel._specializing = False
-        if block_ir is None:
-            block_ir = self._qkernel.block
-        return block_ir
+        return select_specialized_block(self._qkernel, arguments)
 
     def _prepare_inputs(
         self,
@@ -1698,6 +1718,8 @@ class InverseGate:
             custom_name=f"{block.name}_inverse",
             source_block=block,
             implementation_block=inverse_block,
+            callable_ref=self._callable_ref(),
+            callable_attrs=self._callable_attrs(),
         )
         get_current_tracer().add_operation(op)
 
@@ -1718,7 +1740,7 @@ class InverseGate:
 
         Returns:
             Any: Quantum output handle, or a tuple of handles when the
-                wrapped kernel has multiple quantum inputs.
+            wrapped kernel has multiple quantum inputs.
         """
         bound_args = self._bind_arguments(*args, **kwargs)
         block = self._select_block(bound_args.arguments)
@@ -1741,6 +1763,68 @@ class InverseGate:
         if len(outputs) == 1:
             return outputs[0]
         return tuple(outputs)
+
+
+def _inverse_composite_operation(
+    kernel: QKernel,
+    block: Block,
+    inputs: dict[str, Value],
+) -> InvokeOperation:
+    """Build one inverse invocation for a composite qkernel.
+
+    Args:
+        kernel (QKernel): Composite qkernel being inverted.
+        block (Block): Call-site-specialized direct implementation body.
+        inputs (dict[str, Value]): Actual call operands keyed by parameter name.
+
+    Returns:
+        InvokeOperation: Inverse callable invocation retaining the composite's
+        definition, models, and implementation identity.
+    """
+    operation = qkernel_invoke_block(kernel, block, inputs)
+    operation.transform = CallTransform.INVERSE
+    definition = operation.definition
+    assert definition is not None
+    if definition.implementation_for(transform=CallTransform.INVERSE) is None:
+        try:
+            inverse_body = _BlockInverter().invert_block(block)
+        except NotImplementedError:
+            # Keep the semantic inverse call available to analysis. A later
+            # compile with concrete structural bindings may materialize the
+            # inverse body; emit rejects it clearly if it remains unresolved.
+            inverse_body = None
+        if inverse_body is not None:
+            definition.implementations.append(
+                CallableImplementation(
+                    transform=CallTransform.INVERSE,
+                    body=inverse_body,
+                )
+            )
+    return operation
+
+
+@dataclasses.dataclass(frozen=True)
+class _InverseComposite:
+    """Expose inverse composite calls through the normal qkernel call protocol.
+
+    Args:
+        kernel (QKernel): Composite qkernel to invert.
+    """
+
+    kernel: QKernel
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Invoke the inverse composite at the current trace site.
+
+        Args:
+            *args (Any): Positional arguments accepted by the composite.
+            **kwargs (Any): Keyword arguments accepted by the composite.
+
+        Returns:
+            Any: Frontend handle or tuple matching the composite signature.
+        """
+        factory = partial(_inverse_composite_operation, self.kernel)
+        return invoke_qkernel_with_operation(self.kernel, factory, *args, **kwargs)
 
 
 def _inverse_known_qft_target(target: Any) -> Any | None:
@@ -1809,24 +1893,27 @@ def _inverse_native_gate_target(target: Any) -> Any | None:
     return None
 
 
-def inverse(target: QKernel | Callable[..., Any]) -> Any:
+def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
     """Create an inverse operation wrapper.
 
     Native Qamomile gate functions are first synthesized into tiny
     `QKernel` objects, then inverted with the same block walker used for
-    user-defined kernels. Known QFT/IQFT functions map directly to their
-    counterpart so backend-native composite emission remains available.
+    user-defined kernels. Qkernel-like composite gate callables created by
+    ``qmc.composite_gate`` reuse their wrapped qkernel body. Known QFT/IQFT
+    functions map directly to their counterpart so backend-native composite
+    emission remains available.
 
     Args:
-        target (QKernel | Callable[..., Any]): Native gate function,
-            `QKernel`, or supported stdlib function to invert.
+        target (QKernelLike | Callable[..., Any]): Native gate function,
+            qkernel-like object, or supported stdlib function to invert.
 
     Returns:
         Any: A callable inverse wrapper, or the opposite QFT/IQFT function.
 
     Raises:
-        TypeError: If `target` cannot be interpreted as a gate-like
-            callable, or if a `CompositeGate` instance is passed directly.
+        TypeError: If `target` cannot be interpreted as a gate-like callable,
+            or if a body-free class-based composite instance is passed
+            directly.
         NotImplementedError: If an inverted kernel uses unsupported
             operations such as `if`/`while`/`for items` control flow,
             `QInit`, or a `ForOperation` whose bounds are not compile-time
@@ -1852,11 +1939,12 @@ def inverse(target: QKernel | Callable[..., Any]) -> Any:
     native_inverse = _inverse_native_gate_target(target)
     if native_inverse is not None:
         return native_inverse
-    if isinstance(target, CompositeGate):
-        raise TypeError(
-            "inverse() does not support direct CompositeGate instances. "
-            "Use qmc.inverse(qmc.qft) or qmc.inverse(qmc.iqft) for QFT/IQFT, "
-            "or invert a QKernel that contains the composite gate."
-        )
     qkernel = _qkernel_for_callable(target, caller="inverse")
-    return InverseGate(qkernel)
+    if getattr(qkernel, "_callable_kind", None) == "composite":
+        return _InverseComposite(qkernel)
+    callable_ref, callable_attrs = _control_callable_metadata(target, qkernel)
+    return InverseGate(
+        qkernel,
+        callable_ref=callable_ref,
+        callable_attrs=callable_attrs,
+    )

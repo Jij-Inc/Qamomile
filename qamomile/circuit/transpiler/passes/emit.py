@@ -7,9 +7,9 @@ from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
+    InvokeOperation,
 )
 from qamomile.circuit.ir.value import Value, resolve_root_qubit_address
 from qamomile.circuit.transpiler.executable import (
@@ -44,9 +44,9 @@ C = TypeVar("C", contravariant=True)  # Circuit type for emitter
 
 @runtime_checkable
 class CompositeGateEmitter(Protocol[C]):
-    """Protocol for backend-specific CompositeGate emitters.
+    """Protocol for backend-specific boxed-call emitters.
 
-    Each backend can implement emitters for specific composite gate types
+    Each backend can implement emitters for specific boxed callable types
     (QPE, QFT, IQFT, etc.) using native backend libraries.
 
     The emitter pattern allows:
@@ -80,15 +80,15 @@ class CompositeGateEmitter(Protocol[C]):
     def emit(
         self,
         circuit: C,
-        op: CompositeGateOperation,
+        op: InvokeOperation,
         qubit_indices: list[int],
         bindings: dict[str, Any],
     ) -> bool:
-        """Emit the composite gate to the circuit.
+        """Emit the boxed callable to the circuit.
 
         Args:
             circuit: The backend-specific circuit to emit to
-            op: The CompositeGateOperation to emit
+            op: The invocation to emit
             qubit_indices: Physical qubit indices for the operation
             bindings: Parameter bindings for the operation
 
@@ -123,7 +123,25 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             bindings: Values to bind parameters to. If not provided,
                      parameters must be bound at execution time.
             parameters: List of parameter names to preserve as backend parameters.
+
+        Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters``. This is the innermost emit-side choke point:
+                it catches the overlap even when an ``EmitPass`` is constructed
+                directly (e.g. via ``Transpiler._create_emit_pass``), bypassing
+                the ``transpile`` / ``emit`` wrappers. A name in both is
+                ambiguous and would otherwise silently bake the binding while
+                dropping the runtime parameter (see #354).
         """
+        from qamomile.circuit.frontend.param_validation import (
+            validate_bindings_parameters_disjoint,
+        )
+
+        # Validate before wrapping ``bindings`` into an ``EmitContext``: on a
+        # re-entrant call ``bindings`` may already be an ``EmitContext`` (a dict
+        # subclass), but ``.keys()`` still exposes the raw names for the check.
+        validate_bindings_parameters_disjoint(bindings, parameters)
+
         # Wrap user bindings in an ``EmitContext`` so emit-time writers can
         # progressively migrate to typed methods (``set_value``, ``set_runtime_expr``,
         # ``push_loop_var``) while existing dict-style writes continue to

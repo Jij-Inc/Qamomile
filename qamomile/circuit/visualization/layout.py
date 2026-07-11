@@ -100,6 +100,19 @@ class CircuitLayoutEngine:
         return list(range(min(qubits), max(qubits) + 1))
 
     @staticmethod
+    def _visible_qubits(qubits: list[int], num_qubits: int) -> list[int]:
+        """Return unique qubit indices present in the displayed circuit.
+
+        Args:
+            qubits (list[int]): Candidate indices carried by Visual IR.
+            num_qubits (int): Number of wires in the displayed circuit.
+
+        Returns:
+            list[int]: Sorted indices safe for layout state and wire arrays.
+        """
+        return sorted({q for q in qubits if 0 <= q < num_qubits})
+
+    @staticmethod
     def _union_spans(spans: list[HorizontalSpan]) -> HorizontalSpan | None:
         """Return the union of a possibly empty span list.
 
@@ -286,7 +299,11 @@ class CircuitLayoutEngine:
             node (VGate): Gate, measurement, block box, or expectation node.
             state (LayoutState): Current placement state.
         """
-        wires = self._wire_range(node.qubit_indices)
+        visible_qubits = self._visible_qubits(
+            node.qubit_indices,
+            len(state.qubit_right_edges),
+        )
+        wires = self._wire_range(visible_qubits)
         full_width = max(0.0, node.estimated_width)
         center = self._next_center(state, wires, full_width)
         span = HorizontalSpan(center - full_width / 2, center + full_width / 2)
@@ -301,7 +318,7 @@ class CircuitLayoutEngine:
             node.kind in (VGateKind.MEASURE, VGateKind.MEASURE_VECTOR)
             and node.terminates_wire
         ) or node.kind == VGateKind.EXPVAL:
-            for qubit in node.qubit_indices:
+            for qubit in visible_qubits:
                 state.qubit_end_positions[qubit] = span.right
 
     def _place_vinline_block(
@@ -318,9 +335,11 @@ class CircuitLayoutEngine:
             node,
             len(state.qubit_right_edges),
         )
-        placement_qubits = sorted(
-            set(semantic_qubits) | set(node.control_qubit_indices)
+        visible_controls = self._visible_qubits(
+            node.control_qubit_indices,
+            len(state.qubit_right_edges),
         )
+        placement_qubits = sorted(set(semantic_qubits) | set(visible_controls))
         wires = self._wire_range(placement_qubits)
         minimum_outer_width = max(node.final_width, self.style.gate_width)
         provisional_center = self._next_center(state, wires, minimum_outer_width)
@@ -394,8 +413,9 @@ class CircuitLayoutEngine:
             node (VFoldedBlock): Folded summary node to position.
             state (LayoutState): Current placement state.
         """
-        placement_qubits = sorted(
-            set(node.affected_qubits) | set(node.condition_measure_qubit_indices)
+        placement_qubits = self._visible_qubits(
+            node.affected_qubits + node.condition_measure_qubit_indices,
+            len(state.qubit_right_edges),
         )
         wires = self._wire_range(placement_qubits)
         box_width = max(node.folded_width, self.style.gate_width)
@@ -446,15 +466,23 @@ class CircuitLayoutEngine:
             state (LayoutState): Current placement state.
             depth (int): Current visual nesting depth.
         """
-        affected = list(node.affected_qubits)
+        num_qubits = len(state.qubit_right_edges)
+        affected = self._visible_qubits(node.affected_qubits, num_qubits)
         if not affected:
-            affected = list(node.condition_measure_qubit_indices)
+            affected = self._visible_qubits(
+                node.condition_measure_qubit_indices,
+                num_qubits,
+            )
         semantic_qubits = self._semantic_qubits(
             node,
-            len(state.qubit_right_edges),
+            num_qubits,
+        )
+        condition_qubits = self._visible_qubits(
+            node.condition_measure_qubit_indices,
+            num_qubits,
         )
         placement_qubits = sorted(
-            set(semantic_qubits or affected) | set(node.condition_measure_qubit_indices)
+            set(semantic_qubits or affected) | set(condition_qubits)
         )
         wires = self._wire_range(placement_qubits)
         padding = max(
@@ -538,7 +566,11 @@ class CircuitLayoutEngine:
                 iteration_spans.append(child_span)
         span = self._union_spans(iteration_spans)
         if span is None:
-            wires = self._wire_range(node.affected_qubits)
+            visible_qubits = self._visible_qubits(
+                node.affected_qubits,
+                len(state.qubit_right_edges),
+            )
+            wires = self._wire_range(visible_qubits)
             anchor = self._frontier(state, wires)
             span = HorizontalSpan(anchor, anchor)
         self._record_span(node.node_key, span, state)

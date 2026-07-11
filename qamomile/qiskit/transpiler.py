@@ -70,7 +70,13 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         """
         emitter = QiskitGateEmitter()
         composite_emitters = self._init_emitters() if use_native_composite else []
-        super().__init__(emitter, bindings, parameters, composite_emitters)
+        super().__init__(
+            emitter,
+            bindings,
+            parameters,
+            composite_emitters,
+            backend_name="qiskit",
+        )
         self._use_native_composite = use_native_composite
 
     def _init_emitters(self) -> list:
@@ -119,8 +125,19 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             )
 
             _bind_loop_var(loop_bindings, op, loop_param)
+            # ``emit_qinit_reset=True`` mirrors the base ``emit_for`` native
+            # branch (control_flow_emission.py) and the if/else branches
+            # below: a fresh ``qmc.qubit(...)`` allocated inside the loop body
+            # must be reset to |0> at the start of every iteration. Without it
+            # the second and later iterations silently reuse the ancilla in its
+            # post-measurement state, computing a wrong quantum state.
             self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, loop_bindings
+                circuit,
+                op.operations,
+                qubit_map,
+                clbit_map,
+                loop_bindings,
+                emit_qinit_reset=True,
             )
 
     def _emit_if(
@@ -145,25 +162,35 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         with circuit.if_test(if_test_condition) as else_:
             self._emit_operations(
-                circuit, op.true_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.true_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         with else_:
             self._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.false_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
 
         # Register merge outputs after emitting both branches, matching the
         # base-class runtime contract. ResourceAllocator pre-registers the
         # qubit / clbit merges on this backend (so the physical mapping is
         # mostly a no-op here), but classical identity merges bind into
-        # ``bindings`` only through register_classical_phi_aliases.
+        # ``bindings`` only through register_classical_merge_aliases.
         from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (  # noqa: E501
-            register_classical_phi_aliases,
-            register_phi_outputs,
+            register_classical_merge_aliases,
+            register_merge_outputs,
         )
 
-        register_phi_outputs(self, op, qubit_map, clbit_map, bindings)
-        register_classical_phi_aliases(self, op, bindings, None)
+        register_merge_outputs(self, op, qubit_map, clbit_map, bindings)
+        register_classical_merge_aliases(self, op, bindings, None)
 
     def _emit_while(
         self,
@@ -188,7 +215,12 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         with circuit.while_loop(while_condition):  # type: ignore[call-overload]
             self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
 
     def _resolve_runtime_condition(

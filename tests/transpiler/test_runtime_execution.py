@@ -7,7 +7,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
     NotOp,
-    PhiOp,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -26,6 +25,7 @@ from qamomile.circuit.transpiler.compiled_segments import (
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
+from qamomile.circuit.transpiler.job import SampleJob
 from qamomile.circuit.transpiler.parameter_binding import (
     ParameterInfo,
     ParameterMetadata,
@@ -84,7 +84,7 @@ class _FakeExecutor(QuantumExecutor[str]):
 
 
 class TestClassicalExecutorControlFlow:
-    def test_executes_if_with_phi_merge(self) -> None:
+    def test_executes_if_with_merge(self) -> None:
         cond = Value(type=BitType(), name="cond")
         true_result = Value(type=UIntType(), name="true_result")
         false_result = Value(type=UIntType(), name="false_result")
@@ -92,7 +92,6 @@ class TestClassicalExecutorControlFlow:
 
         if_op = IfOperation(
             operands=[cond],
-            results=[merged],
             true_operations=[
                 BinOp(
                     kind=BinOpKind.ADD,
@@ -107,13 +106,8 @@ class TestClassicalExecutorControlFlow:
                     results=[false_result],
                 )
             ],
-            phi_ops=[
-                PhiOp(
-                    operands=[cond, true_result, false_result],
-                    results=[merged],
-                )
-            ],
         )
+        if_op.add_merge(true_result, false_result, merged)
 
         context = ExecutionContext({cond.uuid: True})
         results = ClassicalExecutor().execute(
@@ -206,7 +200,6 @@ class TestClassicalExecutorControlFlow:
                 )
             ],
             false_operations=[],
-            phi_ops=[],
         )
 
         results = ClassicalExecutor().execute(
@@ -218,6 +211,16 @@ class TestClassicalExecutorControlFlow:
 
 
 class TestExecutableProgramRuntime:
+    def test_sample_job_aggregates_duplicate_projected_outputs(self) -> None:
+        """Raw states collapsing to one public value have their counts summed."""
+        job = SampleJob(
+            {"000": 2, "100": 3},
+            lambda counts: [((0,), count) for count in counts.values()],
+            shots=5,
+        )
+
+        assert job.result().results == [((0,), 5)]
+
     def test_run_executes_expval_before_classical_post(self) -> None:
         exp_result = Value(type=FloatType(), name="exp_result")
         output = Value(type=FloatType(), name="output")

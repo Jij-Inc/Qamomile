@@ -30,8 +30,8 @@ from qamomile.circuit.transpiler.param_keys import dict_param_key
 
 from .cast_binop_emission import _set_emit_value
 from .condition_resolution import (
-    map_phi_outputs,
-    remap_static_phi_outputs,
+    map_merge_outputs,
+    remap_static_merge_outputs,
     resolve_condition_address_detailed,
     resolve_if_condition,
 )
@@ -125,6 +125,110 @@ def resolve_loop_bounds(
 # ---------------------------------------------------------------------------
 
 
+def _seed_region_args(
+    emit_pass: "StandardEmitPass",
+    op: ForOperation | ForItemsOperation,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve each region argument's init value into a carried-value map.
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        op (ForOperation | ForItemsOperation): The loop carrying
+            ``region_args``.
+        bindings (dict[str, Any]): Current emit-time bindings.
+
+    Returns:
+        dict[str, Any]: ``block_arg.uuid`` → concrete (or backend
+            symbolic ``Parameter``) init value for every region argument.
+
+    Raises:
+        EmitError: If an init value can be neither resolved concretely
+            nor represented as a backend runtime parameter.
+    """
+    carried: dict[str, Any] = {}
+    for arg in op.region_args:
+        init = emit_pass._resolver.resolve_classical_value(arg.init, bindings)
+        if init is None:
+            param_key = emit_pass._resolver.get_parameter_key(arg.init, bindings)
+            if param_key:
+                init = emit_pass._get_or_create_parameter(param_key, arg.init.uuid)
+        if init is None:
+            raise EmitError(
+                f"Loop-carried value '{arg.var_name}' has an initial value "
+                f"that cannot be resolved at emit time. Loop-carried "
+                f"classical scalars must start from a compile-time-"
+                f"resolvable value or a declared runtime parameter.",
+                operation=type(op).__name__,
+            )
+        carried[arg.block_arg.uuid] = init
+    return carried
+
+
+def _advance_region_args(
+    emit_pass: "StandardEmitPass",
+    op: ForOperation | ForItemsOperation,
+    carried: dict[str, Any],
+    loop_bindings: dict[str, Any],
+) -> None:
+    """Carry each region argument's yielded value into the next iteration.
+
+    The body emission has already evaluated classical ops into
+    ``loop_bindings`` (``evaluate_binop`` writes results by UUID), so the
+    yielded value is read from there first and only falls back to the
+    resolver for pass-through shapes (identity carries, constants).
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        op (ForOperation | ForItemsOperation): The loop carrying
+            ``region_args``.
+        carried (dict[str, Any]): The carried-value map from
+            ``_seed_region_args``; updated in place.
+        loop_bindings (dict[str, Any]): The just-emitted iteration's
+            bindings.
+
+    Raises:
+        EmitError: If a yielded value cannot be resolved — e.g. it
+            depends on a mid-circuit measurement outcome, which has no
+            emit-time value.
+    """
+    for arg in op.region_args:
+        nxt = loop_bindings.get(arg.yielded.uuid)
+        if nxt is None:
+            nxt = emit_pass._resolver.resolve_classical_value(
+                arg.yielded, loop_bindings
+            )
+        if nxt is None:
+            raise EmitError(
+                f"Loop-carried value '{arg.var_name}' could not be computed "
+                f"for the next iteration at emit time. Carried classical "
+                f"scalars inside a quantum loop must be computable from "
+                f"compile-time values, runtime parameters, and the loop "
+                f"variable; values derived from measurement results cannot "
+                f"be carried across unrolled iterations.",
+                operation=type(op).__name__,
+            )
+        carried[arg.block_arg.uuid] = nxt
+
+
+def _publish_region_results(
+    op: ForOperation | ForItemsOperation,
+    carried: dict[str, Any],
+    bindings: dict[str, Any],
+) -> None:
+    """Expose each region argument's final carried value as the loop result.
+
+    Args:
+        op (ForOperation | ForItemsOperation): The emitted loop.
+        carried (dict[str, Any]): The final carried-value map (init
+            values for a zero-trip loop).
+        bindings (dict[str, Any]): The enclosing emit bindings; mutated
+            so post-loop operations resolve the loop results.
+    """
+    for arg in op.region_args:
+        _set_emit_value(bindings, arg.result.uuid, carried[arg.block_arg.uuid])
+
+
 def emit_for(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -143,9 +247,18 @@ def emit_for(
 
     indexset = range(start, stop, step)
     if len(indexset) == 0:
+        # Zero-trip loop: region results still need publishing (they
+        # pass the init values through).
+        if op.region_args:
+            carried = _seed_region_args(emit_pass, op, bindings)
+            _publish_region_results(op, carried, bindings)
         return
 
-    if force_unroll:
+    if force_unroll or op.region_args:
+        # Region-carried values must be threaded iteration by iteration,
+        # which only the unrolled path can do — a native backend loop
+        # re-executes one body and cannot rebind a per-iteration
+        # classical carried value.
         emit_for_unrolled(emit_pass, circuit, op, qubit_map, clbit_map, bindings)
         return
 
@@ -159,7 +272,12 @@ def emit_for(
         loop_bindings = bindings.copy()
         _bind_loop_var(loop_bindings, op, loop_context)
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            loop_bindings,
+            emit_qinit_reset=True,
         )
         emit_pass._emitter.emit_for_loop_end(circuit, loop_context)
     else:
@@ -245,12 +363,22 @@ def emit_for_unrolled(
             "through the pipeline (report this as a compiler bug)."
         )
 
+    carried = _seed_region_args(emit_pass, op, bindings)
     for i in range(start, stop, step):
         loop_bindings = bindings.copy()
+        for uuid, value in carried.items():
+            _set_emit_value(loop_bindings, uuid, value)
         _bind_loop_var(loop_bindings, op, i)
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            loop_bindings,
+            emit_qinit_reset=True,
         )
+        _advance_region_args(emit_pass, op, carried, loop_bindings)
+    _publish_region_results(op, carried, bindings)
 
 
 # ---------------------------------------------------------------------------
@@ -311,8 +439,11 @@ def emit_for_items(
     key_var_values = op.key_var_values
     value_var_value = op.value_var_value
 
+    carried = _seed_region_args(emit_pass, op, bindings)
     for key, value in entries:
         loop_bindings = bindings.copy()
+        for carried_uuid, carried_value in carried.items():
+            _set_emit_value(loop_bindings, carried_uuid, carried_value)
         push = getattr(loop_bindings, "push_loop_var", None)
 
         def _bind(
@@ -368,9 +499,24 @@ def emit_for_items(
         value_uuid = value_var_value.uuid if value_var_value is not None else None
         _bind(value_uuid, op.value_var, value)
 
+        # ``emit_qinit_reset=True`` mirrors ``emit_for_unrolled`` and the
+        # native ``for`` / ``if`` / ``while`` branches. Like those paths,
+        # for-items re-emits the *same* ``op.operations`` once per dict entry
+        # without UUID remapping — the ``ResourceAllocator`` registers each
+        # body ``QInitOperation`` exactly once — so a fresh ``qmc.qubit(...)``
+        # allocated in the body maps to one shared physical qubit reused
+        # across entries. Without an explicit reset the second and later
+        # entries would silently reuse it in its post-measurement state.
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            loop_bindings,
+            emit_qinit_reset=True,
         )
+        _advance_region_args(emit_pass, op, carried, loop_bindings)
+    _publish_region_results(op, carried, bindings)
 
 
 # ---------------------------------------------------------------------------
@@ -549,20 +695,37 @@ def emit_if(
     resolved = resolve_if_condition(condition, bindings)
 
     # Compile-time constant condition: emit only the selected branch.
-    # Use remap_static_phi_outputs (not the runtime map_phi_outputs
-    # validator) so that dead-branch array quantum phi outputs are
+    # Use remap_static_merge_outputs (not the runtime map_merge_outputs
+    # validator) so that dead-branch array quantum merge outputs are
     # aliased from the selected branch only.
     if resolved is not None:
         if resolved:
             emit_pass._emit_operations(
-                circuit, op.true_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.true_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         else:
             emit_pass._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.false_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
-        remap_static_phi_outputs(op, resolved, qubit_map, clbit_map)
-        register_classical_phi_aliases(emit_pass, op, bindings, resolved)
+        remap_static_merge_outputs(
+            op,
+            resolved,
+            qubit_map,
+            clbit_map,
+            bindings=bindings,
+            resolver=emit_pass._resolver,
+        )
+        register_classical_merge_aliases(emit_pass, op, bindings, resolved)
         return
 
     condition_addr = resolve_condition_address(condition, bindings, emit_pass._resolver)
@@ -580,19 +743,29 @@ def emit_if(
     if emit_pass._emitter.supports_if_else():
         context = emit_pass._emitter.emit_if_start(circuit, clbit_idx, 1)
         emit_pass._emit_operations(
-            circuit, op.true_operations, qubit_map, clbit_map, bindings
+            circuit,
+            op.true_operations,
+            qubit_map,
+            clbit_map,
+            bindings,
+            emit_qinit_reset=True,
         )
         if op.false_operations:
             emit_pass._emitter.emit_else_start(circuit, context)
             emit_pass._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.false_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         emit_pass._emitter.emit_if_end(circuit, context)
 
-        # Register phi output UUIDs so subsequent operations
+        # Register merge output UUIDs so subsequent operations
         # (e.g., measure) can resolve the merged values.
-        register_phi_outputs(emit_pass, op, qubit_map, clbit_map, bindings)
-        register_classical_phi_aliases(emit_pass, op, bindings, None)
+        register_merge_outputs(emit_pass, op, qubit_map, clbit_map, bindings)
+        register_classical_merge_aliases(emit_pass, op, bindings, None)
     else:
         raise EmitError(
             "Backend does not support native if/else control flow. "
@@ -601,21 +774,43 @@ def emit_if(
 
 
 # ---------------------------------------------------------------------------
-# Phi output registration (helper for emit_if)
+# Merge output registration (helper for emit_if)
 # ---------------------------------------------------------------------------
 
 
-def register_phi_outputs(
+def register_merge_outputs(
     emit_pass: "StandardEmitPass",
     op: IfOperation,
     qubit_map: QubitMap,
     clbit_map: ClbitMap,
     bindings: dict[str, Any] | None = None,
 ) -> None:
-    """Register phi output UUIDs via the shared ``map_phi_outputs`` utility.
+    """Register merge output UUIDs via the shared ``map_merge_outputs`` utility.
 
     Uses the full ``ValueResolver.resolve_qubit_index_detailed`` for
-    scalar qubit resolution (handles array element operands).
+    scalar qubit resolution (handles array element operands). Runs at emit
+    time with ``reject_runtime_bit_mux=True`` so an unrepresentable runtime
+    multiplexing of two pre-existing measured bits fails loudly rather than
+    silently binding the merge to the true branch.
+
+    Args:
+        emit_pass (StandardEmitPass): The active emit pass, providing the
+            ``ValueResolver`` used for scalar / array-element resolution.
+        op (IfOperation): The runtime if-else whose merged outputs are
+            registered onto their physical clbits / qubits.
+        qubit_map (QubitMap): Address-to-physical-qubit map, mutated in
+            place.
+        clbit_map (ClbitMap): Address-to-physical-clbit map, mutated in
+            place.
+        bindings (dict[str, Any] | None): Active emit-time bindings used to
+            fold a merge source's symbolic ``Vector[Bit]`` element index
+            (e.g. an unrolled loop variable). Defaults to None (empty).
+
+    Raises:
+        EmitError: If a quantum merge's branches resolve to different
+            physical resources, or a runtime scalar ``Bit`` merge
+            multiplexes two distinct pre-existing measured clbits (see
+            ``map_merge_outputs``).
     """
     resolver_bindings = bindings or {}
 
@@ -625,27 +820,41 @@ def register_phi_outputs(
         )
         return result.index if result.success else None
 
-    map_phi_outputs(op, qubit_map, clbit_map, _resolve_scalar)
+    map_merge_outputs(
+        op,
+        qubit_map,
+        clbit_map,
+        _resolve_scalar,
+        bindings=resolver_bindings,
+        resolver=emit_pass._resolver,
+        # Emit-time only: by now representable Bit merges (branch-local
+        # fresh measurements, while-loop-carried conditions) have been
+        # aliased onto a single shared clbit, so a still-distinct pair of
+        # source clbits marks the unrepresentable runtime pre-measured
+        # multiplexing shape and must fail loudly instead of silently
+        # binding the merge to the true branch.
+        reject_runtime_bit_mux=True,
+    )
 
 
-def register_classical_phi_aliases(
+def register_classical_merge_aliases(
     emit_pass: "StandardEmitPass",
     op: IfOperation,
     bindings: dict[str, Any],
     resolved: bool | None,
 ) -> None:
-    """Bind classical phi outputs to a concrete value when resolvable.
+    """Bind classical merge outputs to a concrete value when resolvable.
 
-    The frontend creates a phi for *every* variable referenced in an
+    The frontend creates a merge for *every* variable referenced in an
     if-branch, including read-only ones (e.g. a for-loop index ``j`` that
-    is read but not assigned in the branch). These read-only phis are
+    is read but not assigned in the branch). These read-only merges are
     identity merges — both inputs reference the same IR Value — so the
-    phi output is deterministically equal to that input.
+    merge output is deterministically equal to that input.
 
-    For classical types (UInt / Float / Bit) the phi outputs are not
-    captured by ``map_phi_outputs`` / ``remap_static_phi_outputs`` (which
+    For classical types (UInt / Float / Bit) the merge outputs are not
+    captured by ``map_merge_outputs`` / ``remap_static_merge_outputs`` (which
     only handle qubit / clbit phys-resource mapping). Without this
-    binding, downstream uses like ``data[j_phi_4]`` cannot resolve the
+    binding, downstream uses like ``data[j_merge_4]`` cannot resolve the
     index and emit fails with ``symbolic_index_not_bound``.
 
     The alias is written to ``bindings`` by both UUID and (when present)
@@ -658,7 +867,7 @@ def register_classical_phi_aliases(
         op (IfOperation): The if-else whose merged classical outputs
             should be bound; merges are read through ``iter_merges``.
         bindings (dict[str, Any]): Current bindings; mutated in place to
-            bind phi outputs.
+            bind merge outputs.
         resolved (bool | None): ``True`` / ``False`` if the if was
             compile-time resolved (use the selected branch's input);
             ``None`` if it was a runtime if (only bind identity merges).
@@ -668,8 +877,8 @@ def register_classical_phi_aliases(
     """
     for merge in op.iter_merges():
         output = merge.result
-        # Only handle classical types; quantum/bit phi physical mapping
-        # is the responsibility of map_phi_outputs / remap_static_phi_outputs.
+        # Only handle classical types; quantum/bit merge physical mapping
+        # is the responsibility of map_merge_outputs / remap_static_merge_outputs.
         if output.type.is_quantum() or hasattr(output.type, "_is_bit_marker"):
             continue
 
@@ -680,7 +889,7 @@ def register_classical_phi_aliases(
             )
         else:
             # Runtime path: only bind identity merges (read-only variable)
-            # — otherwise the phi output truly depends on the runtime
+            # — otherwise the merge output truly depends on the runtime
             # branch and we can't pre-bind.
             if not merge.is_identity:
                 continue
@@ -690,7 +899,7 @@ def register_classical_phi_aliases(
 
         if value is None:
             continue
-        # Phi output is a UUID-identified intermediate; route through the
+        # Merge output is a UUID-identified intermediate; route through the
         # typed slot when the bindings is an EmitContext.
         set_value = getattr(bindings, "set_value", None)
         if callable(set_value):
@@ -698,7 +907,7 @@ def register_classical_phi_aliases(
         else:
             bindings[output.uuid] = value
         if output.name:
-            # Phi output names are like ``"j_phi_4"`` — unique per phi op
+            # Merge output names are like ``"j_merge_4"`` — unique per merge op
             # within an if, so name-keyed writes don't collide the way
             # generic ``"uint_tmp"`` tmp names do. Stored under the flat
             # dict for legacy lookups; not a separate semantic slot.
@@ -748,7 +957,12 @@ def emit_while(
     if emit_pass._emitter.supports_while_loop():
         context = emit_pass._emitter.emit_while_start(circuit, clbit_idx, 1)
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            bindings,
+            emit_qinit_reset=True,
         )
         emit_pass._emitter.emit_while_end(circuit, context)
     else:
