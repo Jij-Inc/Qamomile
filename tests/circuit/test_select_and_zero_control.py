@@ -9,10 +9,12 @@ rotation angles, and index basis states, and every supported index /
 target handle pattern (scalar ``Qubit``, ``Vector[Qubit]``,
 ``VectorView[Qubit]``) is exercised.
 
-QURI Parts only ships single-control plus the ``C^nX`` family in its
-controlled fallback, so the universally-portable legs here keep their
-inner controlled-U to single-control or ``X``-cases; deeper general
-multi-control coverage runs Qiskit-only with exact-statevector checks.
+QURI Parts lowers deep multi-controls through the shared clean-ancilla
+Toffoli cascade (it has no reusable-gate path), so its legs depend on the
+segment reserving an ancilla pool; the universally-portable legs here keep
+their inner controlled-U to shapes every backend lowers without extra
+assumptions, and deeper general multi-control coverage runs Qiskit-only
+with exact-statevector checks.
 """
 
 from __future__ import annotations
