@@ -18,7 +18,12 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     SymbolicControlledU,
 )
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    ValueBase,
+    collect_value_like_uuids,
+)
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.value_resolver import (
     ValueResolver as UnifiedValueResolver,
@@ -86,7 +91,9 @@ class ConstantFoldingPass(Pass[Block, Block]):
         # Block-output UUIDs: a folded store whose result is returned must
         # stay in the IR so the classical executor materializes the value
         # at runtime (folding records compile-time metadata only).
-        output_uuids = {v.uuid for v in input.output_values if isinstance(v, ValueBase)}
+        output_uuids: set[str] = set()
+        for value in input.output_values:
+            output_uuids.update(collect_value_like_uuids(value))
 
         # Process operations
         new_ops = self._fold_operations(input.operations, folded_values, output_uuids)

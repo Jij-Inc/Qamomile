@@ -7,7 +7,6 @@ from typing import Any, Mapping, cast
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
@@ -17,6 +16,7 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
     resolve_root_array_index,
     resolve_root_qubit_address,
@@ -70,15 +70,6 @@ class ValueSubstitutor:
                     sub_map[value.uuid] = substituted
 
         result = op.replace_values(sub_map) if sub_map else op
-
-        if isinstance(result, IfOperation):
-            from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
-
-            new_phi_ops = cast(
-                list[PhiOp],
-                [self.substitute_operation(phi_op) for phi_op in result.phi_ops],
-            )
-            result = dataclasses.replace(result, phi_ops=new_phi_ops)
 
         # ``CastOperation.qubit_mapping`` holds carrier keys as a bare
         # operation field, so ``replace_values`` does not reach it; substitute
@@ -632,16 +623,13 @@ class ValueSubstitutor:
             ValueBase: Rebuilt tuple when any element changes; otherwise
             the original tuple value.
         """
-        new_elements = []
+        new_elements: list[ValueLike] = []
         changed = False
         for elem in value.elements:
             substituted = self.substitute_value(elem)
-            if isinstance(substituted, Value):
-                new_elements.append(substituted)
-                if substituted is not elem:
-                    changed = True
-            else:
-                new_elements.append(elem)
+            new_elements.append(cast(ValueLike, substituted))
+            if substituted is not elem:
+                changed = True
         if changed:
             return dataclasses.replace(value, elements=tuple(new_elements))
         return value

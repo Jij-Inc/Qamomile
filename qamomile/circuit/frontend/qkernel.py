@@ -171,7 +171,12 @@ def _wrap_call_dict_value(
         )
         for key, entry_value in value.entries
     ]
-    return Dict(value=value, _entries=entries, _key_type=key_type)
+    return Dict(
+        value=value,
+        _entries=entries,
+        _key_type=key_type,
+        _value_type=value_type,
+    )
 
 
 def _wrap_call_array_value(value: ValueLike, handle_type: Any) -> ArrayBase[Any]:
@@ -836,7 +841,7 @@ class QKernel(Generic[P, R]):
         which preserves ``logical_id`` continuity through the chain of
         sequential self-calls.  Replacing them with values from
         ``self._block.call`` would collapse both calls' results onto the
-        block's ``phi_output`` (which has a fresh ``logical_id``), breaking
+        block's ``merge_output`` (which has a fresh ``logical_id``), breaking
         the qubit-map lookup during backend emit.
         """
         if not self._pending_self_calls:

@@ -28,6 +28,7 @@ Tests cover four layers:
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
@@ -45,7 +46,11 @@ from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.value import TupleValue, Value
-from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.errors import (
+    ExecutionError,
+    SeparationError,
+    ValidationError,
+)
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 from qamomile.circuit.transpiler.passes.inline import InlinePass
 from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
@@ -1174,7 +1179,45 @@ class TestMeasurementDerivedOutput:
             )
             .result()
         )
-        assert result.results == [(0.0, 2), (0.25, 3), (0.5, 5), (0.75, 7)]
+        values, counts = zip(*result.results)
+        np.testing.assert_allclose(
+            values,
+            (0.0, 0.25, 0.5, 0.75),
+            rtol=0.0,
+            atol=1e-12,
+        )
+        assert counts == (2, 3, 5, 7)
+
+    def test_qfixed_measurement_inside_loop_is_rejected(self, transpiler):
+        """A nested QFixed decode fails before raw carrier bits can escape."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Float:
+            qs = qmc.qubit_array(2, name="qs")
+            out = qmc.float_(0.0)
+            for _ in qmc.range(1):
+                out = qmc.measure(qmc.cast(qs, qmc.QFixed, int_bits=0))
+            return out
+
+        with pytest.raises(SeparationError, match="QFixed measurement inside"):
+            transpiler.transpile(kernel)
+
+    def test_qfixed_measurement_inside_dynamic_if_is_rejected(self, transpiler):
+        """A branch-local QFixed value cannot become an unresolved SELECT."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Float:
+            qs = qmc.qubit_array(2, name="qs")
+            selector = qmc.measure(qmc.qubit("selector"))
+            out = qmc.float_(0.0)
+            if selector:
+                out = qmc.measure(qmc.cast(qs, qmc.QFixed, int_bits=0))
+            else:
+                out = qmc.measure(qmc.cast(qs, qmc.QFixed, int_bits=0))
+            return out
+
+        with pytest.raises(SeparationError, match="QFixed measurement inside"):
+            transpiler.transpile(kernel)
 
     def test_slice_output_resolves_measured_vector_view(self, transpiler):
         """A whole sliced ``Vector[Bit]`` output reconstructs from the root
@@ -1305,6 +1348,12 @@ class TestMeasurementDerivedOutput:
             2,
             3,
         )
+        assert exe.run(transpiler.executor(), bindings={"pair": [2, 3]}).result() == (
+            2,
+            3,
+        )
+        with pytest.raises(ExecutionError, match="Typed output"):
+            exe.sample(transpiler.executor(), shots=1, bindings={"pair": (2,)}).result()
 
     def test_tuple_input_element_output_resolves_runtime_binding(self, transpiler):
         """A scalar element of a tuple-typed input resolves from runtime
@@ -1339,6 +1388,24 @@ class TestMeasurementDerivedOutput:
             transpiler.executor(), shots=5, bindings={"pair": (2, 3)}
         ).result().results == [(5, 5)]
         assert exe.run(transpiler.executor(), bindings={"pair": (2, 3)}).result() == 5
+
+    def test_nested_tuple_input_element_resolves_runtime_binding(self, transpiler):
+        """Runtime alias seeding descends through nested tuple elements."""
+
+        @qmc.qkernel
+        def kernel(
+            pair: qmc.Tuple[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.UInt],
+        ) -> qmc.UInt:
+            q = qmc.qubit("q")
+            _ = qmc.measure(q)
+            return pair[0][1]
+
+        exe = transpiler.transpile(kernel)
+        bindings = {"pair": ((2, 3), 4)}
+        assert exe.sample(
+            transpiler.executor(), shots=5, bindings=bindings
+        ).result().results == [(3, 5)]
+        assert exe.run(transpiler.executor(), bindings=bindings).result() == 3
 
     def test_subqkernel_tuple_output_can_be_indexed_by_caller(self, transpiler):
         """A tuple returned by a sub-qkernel keeps its element handles."""
@@ -1478,9 +1545,8 @@ class TestMeasurementDerivedOutput:
         assert exe.sample(transpiler.executor(), shots=3).result().results == [(5, 3)]
         assert exe.run(transpiler.executor()).result() == 5
 
-    def test_dynamic_if_phi_expr_branch_output_uses_post_value(self, transpiler):
-        """A quantum-effective if returning a Phi with an expression branch
-        uses the host-computed Phi result, not a one-sided clbit alias."""
+    def test_dynamic_if_select_expr_branch_output_uses_post_value(self, transpiler):
+        """A dynamic merge with an expression branch uses its host SELECT."""
 
         @qmc.qkernel
         def kernel() -> qmc.Bit:
@@ -1499,9 +1565,8 @@ class TestMeasurementDerivedOutput:
         result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
         assert result.result().results == [(0, 20)]
 
-    def test_dynamic_if_phi_shadow_computes_runtime_condition(self, transpiler):
-        """A post-classical shadow if also computes a runtime expression used
-        as the branch condition."""
+    def test_dynamic_if_select_computes_runtime_condition(self, transpiler):
+        """A host SELECT computes a runtime expression used as its condition."""
 
         @qmc.qkernel
         def kernel() -> qmc.Bit:
@@ -1523,11 +1588,10 @@ class TestMeasurementDerivedOutput:
         result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
         assert result.result().results == [(0, 20)]
 
-    def test_dynamic_if_phi_different_direct_clbits_use_selected_branch(
+    def test_dynamic_if_select_different_direct_clbits_uses_selected_branch(
         self, transpiler
     ):
-        """Different direct clbit Phi sources are selected host-side instead
-        of being collapsed into a single alias."""
+        """A host SELECT preserves different direct clbit branch sources."""
 
         @qmc.qkernel
         def kernel() -> qmc.Bit:
@@ -1550,8 +1614,8 @@ class TestMeasurementDerivedOutput:
         result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
         assert result.result().results == [(1, 20)]
 
-    def test_dynamic_if_phi_same_direct_clbit_still_resolves(self, transpiler):
-        """The safe same-clbit Phi case remains supported."""
+    def test_dynamic_if_merge_same_direct_clbit_still_resolves(self, transpiler):
+        """An identity merge over one clbit still resolves correctly."""
 
         @qmc.qkernel
         def kernel() -> qmc.Bit:
@@ -1570,9 +1634,8 @@ class TestMeasurementDerivedOutput:
         result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
         assert result.result().results == [(1, 20)]
 
-    def test_dynamic_if_phi_nested_under_for_uses_post_value(self, transpiler):
-        """A host-needed Bit Phi inside a qmc.range loop is shadowed
-        host-side instead of resolving to ``None``."""
+    def test_dynamic_if_select_nested_under_for_uses_post_value(self, transpiler):
+        """A loop-invariant host SELECT under qmc.range resolves its value."""
 
         @qmc.qkernel
         def kernel() -> qmc.Bit:
@@ -1599,8 +1662,8 @@ class TestMeasurementDerivedOutput:
         result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
         assert result.result().results == [(1, 20)]
 
-    def test_nested_shadow_if_uses_outer_runtime_condition_expr(self, transpiler):
-        """A loop-nested shadow if recomputes an outer runtime condition."""
+    def test_nested_select_uses_outer_runtime_condition_expr(self, transpiler):
+        """A loop-nested SELECT recomputes an outer runtime condition."""
 
         @qmc.qkernel
         def kernel() -> qmc.Bit:
@@ -1628,8 +1691,8 @@ class TestMeasurementDerivedOutput:
         result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
         assert result.result().results == [(1, 20)]
 
-    def test_dynamic_if_phi_nested_under_for_items_uses_post_value(self, transpiler):
-        """A host-needed Bit Phi inside qmc.items is shadowed host-side."""
+    def test_dynamic_if_select_nested_under_for_items_uses_post_value(self, transpiler):
+        """A loop-invariant host SELECT under qmc.items resolves its value."""
 
         @qmc.qkernel
         def kernel(spec: qmc.Dict[qmc.UInt, qmc.UInt]) -> qmc.Bit:
@@ -1677,7 +1740,7 @@ class TestMeasurementDerivedOutput:
                     bit = a
             return qmc.measure(q[4])
 
-        with pytest.raises(EmitError, match="updated by measurements produced"):
+        with pytest.raises(ValidationError, match="updated by measurements produced"):
             transpiler.transpile(kernel)
 
     def test_condop_or_output_sample(self, transpiler):
@@ -1979,8 +2042,7 @@ class TestMeasurementDerivedOutputSegmentation:
         selects = [
             op
             for op in classical_ops
-            if isinstance(op, RuntimeClassicalExpr)
-            and op.kind is RuntimeOpKind.SELECT
+            if isinstance(op, RuntimeClassicalExpr) and op.kind is RuntimeOpKind.SELECT
         ]
         assert selects, "the merge must surface as a SELECT expression"
         assert len(selects[0].operands) == 3
@@ -2012,6 +2074,24 @@ class TestMeasurementDerivedOutputSegmentation:
 
         with pytest.raises(SeparationError, match="varies across iterations"):
             transpiler.transpile(kernel)
+
+    def test_partial_branch_producer_is_not_hoisted(self, transpiler):
+        """A branch-local division stays lazy and is rejected as unsupported."""
+        from qamomile.circuit.transpiler.errors import SeparationError
+
+        @qmc.qkernel
+        def kernel(divisor: qmc.UInt) -> qmc.UInt:
+            selector_q = qmc.qubit("selector")
+            target = qmc.qubit("target")
+            selector = qmc.measure(selector_q)
+            out = divisor
+            if selector:
+                target = qmc.x(target)
+                out = 1 // divisor
+            return out
+
+        with pytest.raises(SeparationError, match="cannot be lowered safely"):
+            transpiler.transpile(kernel, parameters=["divisor"])
 
 
 class TestRuntimeExprHostDispatch:
@@ -2080,6 +2160,42 @@ class TestRuntimeExprHostDispatch:
     def test_not_kind_evaluates(self, operand, expected):
         """The unary NOT kind negates its single operand."""
         assert self._execute_single(RuntimeOpKind.NOT, [operand]) == expected
+
+    @pytest.mark.parametrize(
+        "condition, selected_index, expected",
+        [
+            pytest.param(1, 1, 7, id="true"),
+            pytest.param(0, 2, 9, id="false"),
+        ],
+    )
+    def test_select_resolves_only_selected_operand(
+        self, condition, selected_index, expected
+    ):
+        """SELECT does not resolve an unavailable operand from the other branch."""
+        from qamomile.circuit.ir.types.primitives import FloatType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.classical_executor import ClassicalExecutor
+        from qamomile.circuit.transpiler.execution_context import ExecutionContext
+        from qamomile.circuit.transpiler.segments import ClassicalSegment
+
+        operands = [
+            Value(type=FloatType(), name="condition").with_const(condition),
+            Value(type=FloatType(), name="true_value"),
+            Value(type=FloatType(), name="false_value"),
+        ]
+        operands[selected_index] = operands[selected_index].with_const(expected)
+        output = Value(type=FloatType(), name="output")
+        operation = RuntimeClassicalExpr(
+            operands=operands,
+            results=[output],
+            kind=RuntimeOpKind.SELECT,
+        )
+
+        results = ClassicalExecutor().execute(
+            ClassicalSegment(operations=[operation]), ExecutionContext()
+        )
+
+        assert results[output.uuid] == expected
 
     def test_division_by_zero_raises_execution_error(self):
         """A failing evaluation (division by zero) raises ExecutionError

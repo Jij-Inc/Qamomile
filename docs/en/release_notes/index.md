@@ -4,6 +4,7 @@ slug: release-notes
 
 # Release Notes
 
+- [v0.12.7](v0_12_7) — `Dict[K, Float]` coefficients as runtime parameters with `d[key]` subscript, `%` operator on `UInt`, and a batch of new compile-time errors (`QubitRebindError`, `QubitConsumedError`, `TypeError` on `bool` / mismatched args) that reject previously silent miscompiles
 - [v0.12.6](v0_12_6) — circuit inversion with `qmc.inverse` (built-in gates, `@qkernel`s, QFT/IQFT), `qmc.modular_increment` / `qmc.modular_decrement` basis-state arithmetic, job/result types importable from `qamomile.circuit`
 - [v0.12.5](v0_12_5) — `PCEConverter` / `PCEEncoder` for Pauli Correlation Encoding, seeded QURI Parts sampling, measured `Vector[Bit]` condition fixes, and `qmc.expval` fixes for `Vector` elements
 - [v0.12.4](v0_12_4) — `qmc.controlled` renamed to `qmc.control` with a more expressive symbolic mode, higher-order Ising model construction via `BinaryModel.from_higher_ising`, unary `-` on `Float` handles

@@ -6,14 +6,11 @@ import numbers
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
-    ForItemsOperation,
-    ForOperation,
     HasNestedOps,
     IfOperation,
     WhileOperation,
@@ -30,12 +27,11 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
-    map_phi_outputs,
-    remap_static_phi_outputs,
+    map_merge_outputs,
+    remap_static_merge_outputs,
     resolve_condition_address_detailed,
     resolve_if_condition,
 )
@@ -155,7 +151,6 @@ class ResourceAllocator:
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
-        alias_branch_local_bit_phis: bool = False,
     ) -> None:
         """Recursively allocate resources from operations.
 
@@ -164,16 +159,8 @@ class ResourceAllocator:
                 nested control-flow bodies.
             qubit_map (QubitMap): Qubit address mapping mutated in place.
             clbit_map (ClbitMap): Clbit address mapping mutated in place.
-            bindings (dict[str, Any]): Compile-time bindings available for
-                structural size and condition resolution.
-            alias_branch_local_bit_phis (bool): When ``True``, scalar Bit
-                Phi outputs whose true/false sources are both measurements
-                produced inside their respective branches are consolidated
-                onto one clbit. This is only enabled inside loop bodies, where
-                the backend needs a stable clbit across iterations.
-
-        Returns:
-            None: Mutates ``qubit_map`` and ``clbit_map`` in place.
+            bindings (dict[str, Any]): Parameter bindings used to resolve
+                symbolic array sizes.
 
         Raises:
             EmitError: If a quantum array's size cannot be resolved from
@@ -265,36 +252,20 @@ class ResourceAllocator:
                 resolved = resolve_if_condition(op.condition, bindings)
                 if resolved is not None:
                     # Compile-time constant: only allocate the selected
-                    # branch and remap phi outputs directly.
+                    # branch and remap merge outputs directly.
                     selected = op.true_operations if resolved else op.false_operations
-                    self._allocate_recursive(
-                        selected,
-                        qubit_map,
-                        clbit_map,
-                        bindings,
-                        alias_branch_local_bit_phis,
-                    )
-                    self._remap_static_phi_outputs(
-                        op.phi_ops, resolved, qubit_map, clbit_map
+                    self._allocate_recursive(selected, qubit_map, clbit_map, bindings)
+                    self._remap_static_merge_outputs(
+                        op, resolved, qubit_map, clbit_map, bindings
                     )
                 else:
                     self._allocate_recursive(
-                        op.true_operations,
-                        qubit_map,
-                        clbit_map,
-                        bindings,
-                        alias_branch_local_bit_phis,
+                        op.true_operations, qubit_map, clbit_map, bindings
                     )
                     self._allocate_recursive(
-                        op.false_operations,
-                        qubit_map,
-                        clbit_map,
-                        bindings,
-                        alias_branch_local_bit_phis,
+                        op.false_operations, qubit_map, clbit_map, bindings
                     )
-                    self._allocate_phi_ops(op.phi_ops, qubit_map, clbit_map)
-                    if alias_branch_local_bit_phis:
-                        self._alias_branch_local_bit_phis(op, clbit_map)
+                    self._allocate_if_merges(op, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, WhileOperation):
                 # WhileOperation operands:
@@ -304,16 +275,10 @@ class ResourceAllocator:
                 # No other operand count is valid.
                 if len(op.operands) == 1:
                     # Invariant condition: the condition variable is not
-                    # reassigned inside the loop body.  No while-condition
-                    # backedge aliasing is needed, but branch-local scalar
-                    # Bit Phi outputs inside the loop still need loop-local
-                    # clbit consolidation.
+                    # reassigned inside the loop body.  No loop-carried
+                    # clbit aliasing is needed; just allocate the body.
                     self._allocate_recursive(
-                        op.operations,
-                        qubit_map,
-                        clbit_map,
-                        bindings,
-                        True,
+                        op.operations, qubit_map, clbit_map, bindings
                     )
                 elif len(op.operands) == 2:
                     initial_cond = op.operands[0]
@@ -327,21 +292,18 @@ class ResourceAllocator:
 
                     # Save the canonical clbit for the initial condition
                     # BEFORE body allocation.  An if-only (no else) inside
-                    # the loop body produces a PhiOp whose false_val is the
-                    # pre-if while-condition value.  map_phi_outputs will
-                    # redirect that false_val UUID to the true-branch clbit,
+                    # the loop body produces a merge whose false_value is
+                    # the pre-if while-condition value.  map_merge_outputs
+                    # will redirect that false-source UUID to the
+                    # true-branch clbit,
                     # overwriting clbit_map[init_addr] and making the
                     # post-body mismatch detection ineffective.
                     saved_init_clbit = clbit_map.get(init_addr)
 
-                    # Allocate the loop body so that IfOperation phi
+                    # Allocate the loop body so that IfOperation merge
                     # mappings inside the body are fully resolved.
                     self._allocate_recursive(
-                        op.operations,
-                        qubit_map,
-                        clbit_map,
-                        bindings,
-                        True,
+                        op.operations, qubit_map, clbit_map, bindings
                     )
 
                     # Restore the canonical clbit for init_addr if it was
@@ -356,35 +318,17 @@ class ResourceAllocator:
                     )
                     carried_addr = self._condition_source_address(carried_val, bindings)
                     carried_clbit = clbit_map.get(carried_addr)
-                    condition_already_stable = (
-                        saved_init_clbit is not None
-                        and carried_clbit is not None
-                        and saved_init_clbit == carried_clbit
-                    )
-                    condition_update_is_safe = False
-                    body_updates_condition = False
-                    if saved_init_clbit is not None and isinstance(carried_val, Value):
-                        (
-                            condition_update_is_safe,
-                            body_updates_condition,
-                        ) = self._loop_body_condition_update_status(
-                            op.operations,
-                            carried_val,
-                            clbit_map,
-                            saved_init_clbit,
-                        )
 
                     # Alias the loop-carried condition to the initial
                     # while-condition clbit.  After body allocation the
                     # loop-carried UUID may point to a different clbit
-                    # (e.g. a phi-merged measurement from an if-else).
-                    # We recursively trace IfOperation phi_ops and map all
+                    # (e.g. a merged measurement from an if-else).
+                    # We recursively trace IfOperation merges and map all
                     # upstream branch-measurement UUIDs to the canonical clbit.
                     if (
                         saved_init_clbit is not None
-                        and condition_update_is_safe
-                        and body_updates_condition
-                        and not condition_already_stable
+                        and carried_clbit is not None
+                        and saved_init_clbit != carried_clbit
                     ):
                         clbit_map[carried_addr] = saved_init_clbit
                         self._alias_loop_carried_clbits(
@@ -393,19 +337,8 @@ class ResourceAllocator:
                             saved_init_clbit,
                             clbit_map,
                         )
-                    elif (
-                        saved_init_clbit is not None
-                        and not condition_update_is_safe
-                        and not condition_already_stable
-                    ):
-                        raise EmitError(
-                            "WhileOperation loop-carried Bit conditions must be "
-                            "updated by measurements produced inside the loop "
-                            "body. Reusing a measurement taken before the loop "
-                            "cannot safely update the backend while-condition "
-                            "clbit.",
-                            operation="WhileOperation",
-                        )
+                    elif saved_init_clbit is not None and carried_addr not in clbit_map:
+                        clbit_map[carried_addr] = saved_init_clbit
                 else:
                     assert False, (
                         "[FOR DEVELOPER] WhileOperation must have exactly 2 "
@@ -416,17 +349,8 @@ class ResourceAllocator:
 
             elif isinstance(op, HasNestedOps):
                 # Generic recursion for For/ForItems: recurse into all nested bodies.
-                nested_alias = alias_branch_local_bit_phis or isinstance(
-                    op, (ForOperation, ForItemsOperation)
-                )
                 for body in op.nested_op_lists():
-                    self._allocate_recursive(
-                        body,
-                        qubit_map,
-                        clbit_map,
-                        bindings,
-                        nested_alias,
-                    )
+                    self._allocate_recursive(body, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, PauliEvolveOp):
                 self._allocate_pauli_evolve(op, qubit_map)
@@ -440,35 +364,40 @@ class ResourceAllocator:
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
 
-    @staticmethod
     def _condition_source_address(
+        self,
         value: Any,
         bindings: dict[str, Any],
     ) -> QubitAddress:
-        """Resolve a while / phi condition source to its ``clbit_map`` key.
+        """Resolve a while / merge condition source to its ``clbit_map`` key.
 
         A measured ``Vector[Bit]`` element (``s[i]`` from
         ``s = qmc.measure(register)``) registers its clbit under
         ``QubitAddress(root_array.uuid, index)``, not the element's own
         UUID. Resolving the source the same way the emit-time condition
-        lookup does keeps the loop-carried / phi clbit alias consistent
-        with where the clbit was actually allocated. The allocator has no
-        ``ValueResolver``, so only constant indices / slice bounds resolve;
-        an unresolved element falls back to its scalar UUID (which is not
+        lookup does keeps the loop-carried / merge clbit alias consistent
+        with where the clbit was actually allocated. The allocator's
+        ``ValueResolver`` folds symbolic indices / slice bounds through
+        ``bindings`` (e.g. an unrolled loop variable), so a loop-indexed
+        element resolves to its root clbit; a genuinely unresolvable
+        element still falls back to its scalar UUID (which is not
         registered, so the caller's ``clbit_map`` lookup misses and the
-        aliasing is correctly skipped rather than pointed at a wrong slot).
+        aliasing is skipped rather than pointed at a wrong slot).
 
         Args:
-            value (Any): The condition / phi source — an IR ``Value`` or, in
+            value (Any): The condition / merge source — an IR ``Value`` or, in
                 degenerate cases, a non-Value (handled via ``str``).
-            bindings (dict[str, Any]): Active bindings for constant folding.
+            bindings (dict[str, Any]): Active bindings for folding symbolic
+                element indices / slice bounds via the resolver.
 
         Returns:
             QubitAddress: The address the source's classical bit is
                 registered under.
         """
         if isinstance(value, Value):
-            address, _ = resolve_condition_address_detailed(value, bindings, None)
+            address, _ = resolve_condition_address_detailed(
+                value, bindings, self._resolver
+            )
             return address
         return QubitAddress(str(value))
 
@@ -479,10 +408,10 @@ class ResourceAllocator:
         canonical_clbit: int,
         clbit_map: ClbitMap,
     ) -> None:
-        """Recursively trace PhiOp sources and alias them to *canonical_clbit*.
+        """Recursively trace if-merge sources and alias them to *canonical_clbit*.
 
         When a while loop body contains an if-else with measurements in
-        both branches, the phi-merged result (the loop-carried condition)
+        both branches, the merged result (the loop-carried condition)
         and all its upstream branch-measurement UUIDs must write to the
         same classical bit as the initial while condition.
         """
@@ -495,34 +424,15 @@ class ResourceAllocator:
                 continue
             if not isinstance(op, IfOperation):
                 continue
-            for phi in op.phi_ops:
-                if not isinstance(phi, PhiOp):
+            for merge in op.iter_merges():
+                if merge.result.uuid != target_addr.uuid:
                     continue
-                output = phi.results[0]
-                if output.uuid != target_addr.uuid:
-                    continue
-                true_val = phi.operands[1]
-                false_val = phi.operands[2]
-                true_addr = self._condition_source_address(true_val, {})
-                false_addr = self._condition_source_address(false_val, {})
+                true_addr = self._condition_source_address(merge.true_value, {})
+                false_addr = self._condition_source_address(merge.false_value, {})
                 if true_addr in clbit_map:
-                    true_safe, true_updates = self._condition_source_update_status(
-                        op.true_operations,
-                        true_val,
-                        clbit_map,
-                        canonical_clbit,
-                    )
-                    if true_safe and true_updates:
-                        clbit_map[true_addr] = canonical_clbit
+                    clbit_map[true_addr] = canonical_clbit
                 if false_addr in clbit_map:
-                    false_safe, false_updates = self._condition_source_update_status(
-                        op.false_operations,
-                        false_val,
-                        clbit_map,
-                        canonical_clbit,
-                    )
-                    if false_safe and false_updates:
-                        clbit_map[false_addr] = canonical_clbit
+                    clbit_map[false_addr] = canonical_clbit
                 # Recurse into branches for nested if-else
                 self._alias_loop_carried_clbits(
                     op.true_operations, true_addr, canonical_clbit, clbit_map
@@ -531,200 +441,67 @@ class ResourceAllocator:
                     op.false_operations, false_addr, canonical_clbit, clbit_map
                 )
 
-    def _loop_body_condition_update_status(
-        self,
-        operations: list[Operation],
-        value: Value,
-        clbit_map: ClbitMap,
-        canonical_clbit: int,
-    ) -> tuple[bool, bool]:
-        """Classify whether a loop-carried condition update is safe.
-
-        Args:
-            operations (list[Operation]): Loop body operations to inspect.
-            value (Value): Loop-carried condition value.
-            clbit_map (ClbitMap): Current classical bit allocation map.
-            canonical_clbit (int): Clbit backing the initial while condition.
-
-        Returns:
-            tuple[bool, bool]: ``(is_safe, updates_condition)``. ``is_safe`` is
-                true when every branch source is either measured in the loop
-                body or already backed by ``canonical_clbit``. The second flag
-                is true when at least one branch actually measures a fresh
-                value in the loop body.
-        """
-        return self._condition_source_update_status(
-            operations,
-            value,
-            clbit_map,
-            canonical_clbit,
-        )
-
-    def _condition_source_update_status(
-        self,
-        operations: list[Operation],
-        value: Value,
-        clbit_map: ClbitMap,
-        canonical_clbit: int,
-    ) -> tuple[bool, bool]:
-        """Classify one source of a loop-carried condition Phi.
-
-        Args:
-            operations (list[Operation]): Operations in the source's lexical
-                branch.
-            value (Value): Candidate source value.
-            clbit_map (ClbitMap): Current classical bit allocation map.
-            canonical_clbit (int): Clbit backing the initial while condition.
-
-        Returns:
-            tuple[bool, bool]: ``(is_safe, updates_condition)`` for this source.
-        """
-        source_addr = self._condition_source_address(value, {})
-        if clbit_map.get(source_addr) == canonical_clbit:
-            return True, False
-        if self._branch_produces_measurement_value(operations, value):
-            return True, True
-        for body_op in operations:
-            if isinstance(body_op, IfOperation):
-                for phi in body_op.phi_ops:
-                    if not isinstance(phi, PhiOp) or phi.output.uuid != value.uuid:
-                        continue
-                    true_val = phi.true_value
-                    false_val = phi.false_value
-                    if not isinstance(true_val, Value) or not isinstance(
-                        false_val, Value
-                    ):
-                        return False, False
-                    true_safe, true_updates = self._condition_source_update_status(
-                        body_op.true_operations,
-                        true_val,
-                        clbit_map,
-                        canonical_clbit,
-                    )
-                    false_safe, false_updates = self._condition_source_update_status(
-                        body_op.false_operations,
-                        false_val,
-                        clbit_map,
-                        canonical_clbit,
-                    )
-                    return true_safe and false_safe, true_updates or false_updates
-            if isinstance(body_op, HasNestedOps):
-                for body in body_op.nested_op_lists():
-                    safe, updates = self._condition_source_update_status(
-                        body,
-                        value,
-                        clbit_map,
-                        canonical_clbit,
-                    )
-                    if safe:
-                        return safe, updates
-        return False, False
-
-    def _alias_branch_local_bit_phis(
+    def _allocate_if_merges(
         self,
         op: IfOperation,
-        clbit_map: ClbitMap,
-    ) -> None:
-        """Alias loop-local scalar Bit Phi branch measurements.
-
-        Qiskit loop bodies need a loop-carried Bit value to be backed by one
-        clbit across iterations.  This helper keeps that consolidation narrow:
-        it only aliases Phi inputs that are produced by measurements inside
-        the corresponding branch, so pre-existing source bits outside the if
-        keep their own clbit mappings.
-
-        Args:
-            op (IfOperation): Runtime if operation inside a loop body.
-            clbit_map (ClbitMap): Mutable clbit map to update.
-
-        Returns:
-            None: Mutates ``clbit_map`` in place when a branch-local scalar
-                Bit Phi can be safely consolidated.
-        """
-        for phi in op.phi_ops:
-            if not isinstance(phi, PhiOp):
-                continue
-            output = phi.output
-            if isinstance(output, ArrayValue) or not isinstance(output.type, BitType):
-                continue
-            true_val = phi.true_value
-            false_val = phi.false_value
-            if not (
-                isinstance(true_val, Value)
-                and isinstance(false_val, Value)
-                and self._branch_produces_measurement_value(
-                    op.true_operations, true_val
-                )
-                and self._branch_produces_measurement_value(
-                    op.false_operations, false_val
-                )
-            ):
-                continue
-
-            true_addr = self._condition_source_address(true_val, {})
-            false_addr = self._condition_source_address(false_val, {})
-            true_clbit = clbit_map.get(true_addr)
-            false_clbit = clbit_map.get(false_addr)
-            if true_clbit is None or false_clbit is None:
-                continue
-            clbit_map[false_addr] = true_clbit
-            clbit_map[QubitAddress(output.uuid)] = true_clbit
-
-    def _branch_produces_measurement_value(
-        self,
-        operations: list[Operation],
-        value: Value,
-    ) -> bool:
-        """Return whether ``value`` is measured inside ``operations``.
-
-        Args:
-            operations (list[Operation]): Branch operations to inspect.
-            value (Value): Scalar Bit value whose producer is being checked.
-
-        Returns:
-            bool: ``True`` when the branch contains a ``MeasureOperation``
-                producing ``value`` directly.
-        """
-        for branch_op in operations:
-            if isinstance(branch_op, MeasureOperation) and branch_op.results:
-                if branch_op.results[0].uuid == value.uuid:
-                    return True
-            if isinstance(branch_op, HasNestedOps):
-                for body in branch_op.nested_op_lists():
-                    if self._branch_produces_measurement_value(body, value):
-                        return True
-        return False
-
-    def _allocate_phi_ops(
-        self,
-        phi_ops: list,
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
+        bindings: dict[str, Any],
     ) -> None:
-        """Register phi output UUIDs via the shared ``map_phi_outputs`` utility."""
-        map_phi_outputs(phi_ops, qubit_map, clbit_map)
+        """Register merge output UUIDs via the shared ``map_merge_outputs`` utility.
 
-    def _remap_static_phi_outputs(
+        Args:
+            op (IfOperation): The runtime if-else whose merged outputs need
+                physical-resource registration.
+            qubit_map (QubitMap): QubitAddress-to-physical-qubit mapping
+                (mutated in place).
+            clbit_map (ClbitMap): QubitAddress-to-physical-clbit mapping
+                (mutated in place).
+            bindings (dict[str, Any]): Active bindings passed with the
+                allocator's ``ValueResolver`` so a merge source that is a
+                loop-indexed measured ``Vector[Bit]`` element resolves to
+                its root clbit.
+        """
+        map_merge_outputs(
+            op, qubit_map, clbit_map, bindings=bindings, resolver=self._resolver
+        )
+
+    def _remap_static_merge_outputs(
         self,
-        phi_ops: list,
+        op: IfOperation,
         condition_value: bool,
         qubit_map: QubitMap,
         clbit_map: ClbitMap,
+        bindings: dict[str, Any],
     ) -> None:
-        """Remap phi outputs for a compile-time constant ``IfOperation``.
+        """Remap merge outputs for a compile-time constant ``IfOperation``.
 
-        Delegates to the module-level ``remap_static_phi_outputs`` helper,
+        Delegates to the module-level ``remap_static_merge_outputs`` helper,
         which is shared with the emit pass to ensure scalar and array
-        quantum phi outputs are handled identically at both allocation
+        quantum merge outputs are handled identically at both allocation
         and emission time.
 
         Args:
-            phi_ops: Phi operations from the ``IfOperation``.
-            condition_value: The resolved boolean condition.
-            qubit_map: QubitAddress-to-physical-qubit mapping (mutated in place).
-            clbit_map: QubitAddress-to-physical-clbit mapping (mutated in place).
+            op (IfOperation): The if-else whose condition resolved at
+                compile time.
+            condition_value (bool): The resolved boolean condition.
+            qubit_map (QubitMap): QubitAddress-to-physical-qubit mapping
+                (mutated in place).
+            clbit_map (ClbitMap): QubitAddress-to-physical-clbit mapping
+                (mutated in place).
+            bindings (dict[str, Any]): Active bindings passed with the
+                allocator's ``ValueResolver`` so a merge source that is a
+                loop-indexed measured ``Vector[Bit]`` element resolves to
+                its root clbit.
         """
-        remap_static_phi_outputs(phi_ops, condition_value, qubit_map, clbit_map)
+        remap_static_merge_outputs(
+            op,
+            condition_value,
+            qubit_map,
+            clbit_map,
+            bindings=bindings,
+            resolver=self._resolver,
+        )
 
     def _resolve_size(
         self,

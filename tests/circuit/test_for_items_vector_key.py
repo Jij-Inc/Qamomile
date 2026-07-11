@@ -4,6 +4,7 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.control_flow import ForItemsOperation
+from qamomile.circuit.ir.types.primitives import UIntType
 
 
 class TestForItemsVectorKeyIR:
@@ -144,6 +145,24 @@ class TestForItemsVectorKeyTranspile:
         circuit = executor.compiled_quantum[0].circuit
         rzz_count = sum(1 for inst in circuit.data if inst.operation.name == "rzz")
         assert rzz_count == 3
+
+    def test_subqkernel_dict_output_keeps_value_type(self):
+        """A returned Dict preserves its declared scalar value type."""
+
+        @qmc.qkernel
+        def identity(
+            values: qmc.Dict[qmc.UInt, qmc.UInt],
+        ) -> qmc.Dict[qmc.UInt, qmc.UInt]:
+            return values
+
+        @qmc.qkernel
+        def caller(values: qmc.Dict[qmc.UInt, qmc.UInt]) -> qmc.UInt:
+            returned = identity(values)
+            return returned[0]
+
+        block = caller.build(values={0: 7})
+
+        assert isinstance(block.output_values[0].type, UIntType)
 
     def test_vector_key_single_element(self):
         """Test Dict[Vector[UInt], Float] with single-element keys."""

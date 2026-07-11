@@ -316,7 +316,7 @@ class ProgramOrchestrator(Generic[T]):
         tuple_value: TupleValue,
         top_level_names: set[str],
     ) -> None:
-        """Seed aliases for one tuple input's direct elements.
+        """Seed aliases recursively for one tuple input's elements.
 
         Args:
             context (ExecutionContext): Execution context seeded with user
@@ -343,6 +343,13 @@ class ProgramOrchestrator(Generic[T]):
             self._set_context_if_absent(context, element.uuid, element_data)
             for alias in self._tuple_element_aliases(element, top_level_names):
                 self._set_context_if_absent(context, alias, element_data)
+            if isinstance(element, TupleValue):
+                self._seed_tuple_elements(
+                    context=context,
+                    tuple_name=f"{tuple_name}[{index}]",
+                    tuple_value=element,
+                    top_level_names=top_level_names,
+                )
 
     def _resolve_tuple_input_data(
         self,
@@ -402,13 +409,13 @@ class ProgramOrchestrator(Generic[T]):
 
     def _tuple_element_aliases(
         self,
-        element: Value,
+        element: ValueLike,
         top_level_names: set[str],
     ) -> tuple[str, ...]:
         """Return non-conflicting context aliases for a tuple element.
 
         Args:
-            element (Value): Tuple element IR value.
+            element (ValueLike): Tuple element IR value.
             top_level_names (set[str]): Names of all public inputs.
 
         Returns:
@@ -693,13 +700,13 @@ class ProgramOrchestrator(Generic[T]):
                 measurement loading and post-quantum classical execution.
 
         Returns:
-            Any: Concrete Python value, or ``None`` when the output cannot be
-                found.
+            Any: Concrete Python value represented by ``value``.
+
+        Raises:
+            ExecutionError: If typed output metadata cannot be resolved from
+                execution state, bindings, or static metadata.
         """
         if isinstance(value, TupleValue):
-            resolved = self._resolve_direct_output_value(value, context)
-            if resolved is not None:
-                return resolved
             return tuple(
                 self._resolve_output_value_like(element, context)
                 for element in value.elements
@@ -730,7 +737,12 @@ class ProgramOrchestrator(Generic[T]):
         resolved = self._resolve_direct_output_value(value, context)
         if resolved is not None:
             return resolved
-        return None
+        raise ExecutionError(
+            f"Typed output '{value.name or value.uuid}' "
+            f"({value.type.label()}) could not be resolved from execution "
+            f"state. This indicates missing output provenance or an "
+            f"unsupported control-flow value."
+        )
 
     def _resolve_direct_output_value(
         self,

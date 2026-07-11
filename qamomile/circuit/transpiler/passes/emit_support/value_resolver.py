@@ -383,7 +383,7 @@ class ValueResolver:
            ``bindings`` — return that.
         4. ``value.uuid`` is in ``bindings`` — return that. This is where
            emit-time-computed intermediates (``evaluate_binop`` /
-           ``evaluate_classical_predicate`` results) and phi aliases live.
+           ``evaluate_classical_predicate`` results) and merge aliases live.
         5. ``value.name`` is in ``bindings`` — return that. This is where
            kernel parameters and loop iteration variables live. NOT a
            reliable channel for auto-generated tmp names like
@@ -416,7 +416,7 @@ class ValueResolver:
             if param_name and param_name in bindings:
                 return bindings[param_name]
         # 4. UUID-keyed entries (intermediates, loop variables, runtime
-        #    exprs, phi aliases — every internally-created binding keys
+        #    exprs, merge aliases — every internally-created binding keys
         #    on Value UUID).
         if value.uuid in bindings:
             return bindings[value.uuid]

@@ -8,7 +8,6 @@ from abc import ABC, abstractmethod
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
-    PhiOp,
     RuntimeClassicalExpr,
 )
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
@@ -31,6 +30,7 @@ from qamomile.circuit.ir.value import (
     ValueLike,
     collect_value_like_uuids,
 )
+from qamomile.circuit.transpiler.errors import SeparationError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
@@ -128,13 +128,59 @@ def lower_measure_qfixed(op: MeasureQFixedOperation) -> list[Operation]:
     return [measure_vec_op, decode_op]
 
 
+def _reject_nested_measure_qfixed(
+    operations: list[Operation], *, nested: bool = False
+) -> None:
+    """Reject QFixed measurements inside runtime control flow.
+
+    Pre-segmentation QFixed lowering splits one hybrid operation into a
+    quantum vector measurement and a host-side decode. A nested control-flow
+    body cannot carry that decoded value across the quantum/host boundary
+    with today's segmented control-flow representation, so leaving the
+    operation nested would expose raw carrier bits as a Float output.
+
+    Args:
+        operations (list[Operation]): Operations in the current lexical body.
+        nested (bool): Whether the body is inside a control-flow operation.
+            Defaults to False.
+
+    Raises:
+        SeparationError: If a nested ``MeasureQFixedOperation`` is found.
+    """
+    for op in operations:
+        if nested and isinstance(op, MeasureQFixedOperation):
+            raise SeparationError(
+                "QFixed measurement inside control flow cannot be split into "
+                "quantum measurement and host-side decode until branch and "
+                "loop values can cross the quantum/host segment boundary. "
+                "Move the QFixed measurement outside the if/loop, or return "
+                "raw measured bits and decode them outside the kernel."
+            )
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                _reject_nested_measure_qfixed(body, nested=True)
+
+
 def lower_operations(block: Block) -> Block:
     """Lower high-level operations like MeasureQFixedOperation.
 
     MeasureQFixedOperation is lowered to:
-    1. MeasureVectorOperation for each qubit (HYBRID -> QUANTUM segment)
+    1. MeasureVectorOperation for the QFixed carrier (HYBRID -> QUANTUM segment)
     2. DecodeQFixedOperation to convert bits to float (CLASSICAL segment)
+
+    Args:
+        block (Block): Block whose top-level high-level operations should be
+            lowered.
+
+    Returns:
+        Block: Block with top-level QFixed measurements split into quantum
+            measurement and classical decode operations.
+
+    Raises:
+        SeparationError: If a QFixed measurement occurs inside control flow,
+            where the decode result cannot cross the segment boundary.
     """
+    _reject_nested_measure_qfixed(block.operations)
     lowered_ops: list[Operation] = []
     for op in block.operations:
         if isinstance(op, MeasureQFixedOperation):
@@ -317,8 +363,8 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             self._block_output_uuids.update(collect_value_like_uuids(value))
 
         # While-condition chain UUIDs: merges carrying a while condition
-        # keep their phi (the clbit-aliasing machinery owns them), so the
-        # host-needed rejection below must exempt them.
+        # stay on their IfOperation (the clbit-aliasing machinery owns them), so the
+        # unsupported-merge rejection below must exempt them.
         self._while_condition_uuids = _collect_while_operand_uuids(block.operations)
 
         # Absorbable set: classical ops (top-level or nested) whose results are
@@ -547,7 +593,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 pending_post = []
 
             if op_kind == OperationKind.QUANTUM:
-                self._reject_host_needed_phi_outputs(op)
+                self._reject_unrepresentable_runtime_values(op)
 
             current_ops.append(op)
 
@@ -821,36 +867,10 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         collector.visit_operations(operations)
         return collector.consumers
 
-    def _phi_needs_host_value(self, phi: PhiOp) -> bool:
-        """Return whether a Phi output must be available host-side.
-
-        Args:
-            phi (PhiOp): Phi operation to inspect.
-
-        Returns:
-            bool: ``True`` when the Phi output is a block output or feeds a
-                host-side classical consumer.
-        """
-        output = phi.output
-        if isinstance(output, ArrayValue):
-            return False
-        if isinstance(output.type, QubitType):
-            return False
-        if output.uuid in self._block_output_uuids:
-            return True
-        for consumer in self._consumers.get(output.uuid, ()):
-            if isinstance(consumer, RuntimeClassicalExpr):
-                if id(consumer) in self._host_evaluated_expr_ids:
-                    return True
-                continue
-            if self._effective_kind(consumer) == OperationKind.CLASSICAL:
-                return True
-        return False
-
-    def _reject_host_needed_phi_outputs(
+    def _reject_unrepresentable_runtime_values(
         self, op: Operation, nested: bool = False
     ) -> None:
-        """Reject host-needed values stranded inside quantum control flow.
+        """Reject runtime values that cannot be represented safely.
 
         ``ClassicalLoweringPass`` lowers every representable scalar
         classical merge of a runtime ``IfOperation`` to a ``SELECT``
@@ -859,17 +879,17 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         Two shapes remain unrepresentable and would otherwise silently
         resolve to ``None``:
 
-        - a merge that still carries its phi (a branch value produced by
-          nested control flow), and
+        - a scalar classical merge that remains on the if because a branch
+          producer cannot be moved safely outside the branch, and
         - a host-needed runtime expression stranded inside a
           quantum-effective loop body (a loop-varying value — e.g. a
           ``SELECT`` whose sources are measured per iteration), which no
           classical segment will ever execute.
 
-        Fail loudly for both. While-condition merges are exempt: the while
-        clbit-aliasing machinery owns them and the orchestrator reads them
-        through the aliased clbit. Identity merges are exempt too — they
-        resolve through their common source.
+        Fail loudly for both, regardless of whether the value feeds the host
+        or another in-circuit consumer. While-condition merges are exempt:
+        the while clbit-aliasing machinery owns them. Identity merges are
+        exempt too because they resolve through their common source.
 
         Args:
             op (Operation): Quantum-segment operation to scan. The
@@ -880,11 +900,9 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 places top-level ones). Defaults to False.
 
         Raises:
-            SeparationError: If a host-needed merge or nested runtime
-                expression cannot be surfaced host-side.
+            SeparationError: If a scalar classical merge or nested runtime
+                expression cannot be represented safely.
         """
-        from qamomile.circuit.transpiler.errors import SeparationError
-
         if (
             nested
             and isinstance(op, RuntimeClassicalExpr)
@@ -901,31 +919,32 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 f"loop, or return the underlying measurements and "
                 f"post-process outside the kernel."
             )
-        if isinstance(op, IfOperation):
-            for phi in op.phi_ops:
-                output = phi.output
+        if (
+            isinstance(op, IfOperation)
+            and op.condition.uuid in self._measurement_tainted
+        ):
+            for merge in op.iter_merges():
+                output = merge.result
                 if isinstance(output, ArrayValue) or output.type.is_quantum():
                     continue
-                if phi.true_value.uuid == phi.false_value.uuid:
+                if merge.is_identity:
                     continue
                 if output.uuid in self._while_condition_uuids:
                     continue
-                if self._phi_needs_host_value(phi):
-                    raise SeparationError(
-                        f"The measurement-dependent branch merge producing "
-                        f"'{output.name}' is returned or used by host-side "
-                        f"classical work, but its value cannot be recomputed "
-                        f"host-side: a branch value is produced by nested "
-                        f"control flow, or the merge varies across loop "
-                        f"iterations (not representable until loop-carried "
-                        f"values are formalized). Compute the branch values "
-                        f"before the branch, or return the underlying "
-                        f"measurements and post-process outside the kernel."
-                    )
+                raise SeparationError(
+                    f"The measurement-dependent branch merge producing "
+                    f"'{output.name}' cannot be lowered safely: a branch "
+                    f"value is produced by nested control flow, depends on "
+                    f"branch-local quantum work, uses an operation that may "
+                    f"fail when evaluated eagerly, or varies across loop "
+                    f"iterations. Compute total branch values from inputs "
+                    f"available before the branch, or return the underlying "
+                    f"measurements and post-process outside the kernel."
+                )
         if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 for nested_op in body:
-                    self._reject_host_needed_phi_outputs(nested_op, nested=True)
+                    self._reject_unrepresentable_runtime_values(nested_op, nested=True)
 
     def _classify_runtime_exprs(
         self,
@@ -980,7 +999,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # Ops that execute host-side when reached: every top-level op whose
         # effective kind is CLASSICAL, plus everything nested inside one.
         # Consumers nested inside a QUANTUM-effective control op (e.g. the
-        # phi merges of a runtime if) execute in-circuit, not host-side,
+        # merge yields of a runtime if) execute in-circuit, not host-side,
         # and must not drag their operand expressions into a classical
         # segment.
         top_level_ids = {id(op) for op in operations}
@@ -1256,19 +1275,66 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         class SegmentIOCollector(ControlFlowVisitor):
             def visit_operation(self, op: Operation) -> None:
+                """Record one operation's reads and definitions.
+
+                Args:
+                    op (Operation): The visited operation.
+                """
                 # Operands not defined in this segment are inputs
                 for operand in op.operands:
-                    if isinstance(operand, ValueBase):
-                        if (
-                            operand.uuid not in value_definitions
-                            or value_definitions[operand.uuid] != segment_index
-                        ):
-                            segment_inputs.add(operand.uuid)
+                    self._record_read(operand)
 
                 # Results are defined by this segment
                 for result in op.results:
-                    value_definitions[result.uuid] = segment_index
-                    segment_outputs.add(result.uuid)
+                    self._record_definition(result)
+
+            def _visit_control_flow(self, op: Operation) -> None:
+                """Recurse into control flow, handling if-merges explicitly.
+
+                Args:
+                    op (Operation): The operation whose nested bodies are
+                        visited.
+                """
+                if isinstance(op, IfOperation):
+                    # Explicit merge handling via iter_merges — the
+                    # collector must not rely on merge storage being
+                    # reachable through the generic nested-list walk.
+                    # Branch bodies are visited first so branch-defined
+                    # merge sources register as in-segment definitions
+                    # before the merges read them.
+                    self.visit_operations(op.true_operations)
+                    self.visit_operations(op.false_operations)
+                    for merge in op.iter_merges():
+                        self._record_read(merge.true_value)
+                        self._record_read(merge.false_value)
+                        self._record_definition(merge.result)
+                    return
+                super()._visit_control_flow(op)
+
+            @staticmethod
+            def _record_read(operand: object) -> None:
+                """Mark a value read as a segment input unless locally defined.
+
+                Args:
+                    operand (object): Candidate operand; ignored unless it
+                        is a ``ValueBase``.
+                """
+                if isinstance(operand, ValueBase):
+                    if (
+                        operand.uuid not in value_definitions
+                        or value_definitions[operand.uuid] != segment_index
+                    ):
+                        segment_inputs.add(operand.uuid)
+
+            @staticmethod
+            def _record_definition(result: Value) -> None:
+                """Mark a value as defined by (and output of) this segment.
+
+                Args:
+                    result (Value): The defined result value.
+                """
+                value_definitions[result.uuid] = segment_index
+                segment_outputs.add(result.uuid)
 
         collector = SegmentIOCollector()
         collector.visit_operations(operations)

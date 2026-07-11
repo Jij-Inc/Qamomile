@@ -42,10 +42,10 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
+    BinOpKind,
     CompOp,
     CondOp,
     NotOp,
-    PhiOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
     runtime_kind_from_binop,
@@ -56,10 +56,13 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     HasNestedOps,
+    IfMerge,
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.gate import MeasureOperation
 from qamomile.circuit.ir.operation.operation import OperationKind
+from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
@@ -188,7 +191,7 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         )
 
     # ------------------------------------------------------------------
-    # Runtime-if merge lowering (phi → SELECT)
+    # Runtime-if merge lowering (merge → SELECT)
     # ------------------------------------------------------------------
 
     def _lower_if_merges(
@@ -212,7 +215,7 @@ class ClassicalLoweringPass(Pass[Block, Block]):
 
         Bodies are lowered bottom-up so an outer merge whose branch value is
         an inner merge sees the inner ``SELECT`` (an ordinary pure classical
-        producer) instead of a ``PhiOp``. Merges recorded inside ``For`` /
+        producer) instead of an ``IfOperation`` merge. Merges recorded inside ``For`` /
         ``ForItems`` bodies float past the loop when loop-invariant (see
         :meth:`_float_loop_invariant_exprs`); zero-trip semantics make
         ``While`` bodies ineligible for floating.
@@ -221,7 +224,7 @@ class ClassicalLoweringPass(Pass[Block, Block]):
             operations (list[Operation]): Operations of one lexical body.
             tainted (set[str]): Measurement-derived value UUIDs.
             while_protected (set[str]): UUIDs consumed as ``WhileOperation``
-                condition operands; merges producing them keep their phi so
+                condition operands; merges producing them stay on the if so
                 the while-condition clbit machinery stays in charge.
 
         Returns:
@@ -278,17 +281,17 @@ class ClassicalLoweringPass(Pass[Block, Block]):
 
         condition = op.operands[0] if op.operands else None
         appended: list[Operation] = []
-        lowered_uuids: set[str] = set()
+        lowered_indices: set[int] = set()
         if (
             isinstance(condition, ValueBase)
             and not isinstance(condition, ArrayValue)
             and condition.uuid in tainted
         ):
-            for phi in op.phi_ops:
-                if not self._is_lowerable_merge(phi, while_protected):
+            for merge in op.iter_merges():
+                if not self._is_lowerable_merge(merge, while_protected):
                     continue
-                true_group = self._copy_pure_closure([phi.true_value], true_ops)
-                false_group = self._copy_pure_closure([phi.false_value], false_ops)
+                true_group = self._copy_pure_closure([merge.true_value], true_ops)
+                false_group = self._copy_pure_closure([merge.false_value], false_ops)
                 if true_group is None or false_group is None:
                     continue
                 true_copies, true_map = true_group
@@ -301,48 +304,59 @@ class ClassicalLoweringPass(Pass[Block, Block]):
                             "list[Value]",
                             [
                                 condition,
-                                true_map.get(phi.true_value.uuid, phi.true_value),
-                                false_map.get(phi.false_value.uuid, phi.false_value),
+                                true_map.get(merge.true_value.uuid, merge.true_value),
+                                false_map.get(
+                                    merge.false_value.uuid, merge.false_value
+                                ),
                             ],
                         ),
-                        results=[phi.output],
+                        results=[merge.result],
                         kind=RuntimeOpKind.SELECT,
                     )
                 )
-                lowered_uuids.add(phi.output.uuid)
+                lowered_indices.add(merge.index)
 
         rewritten = dataclasses.replace(
             op,
             true_operations=true_ops,
             false_operations=false_ops,
-            phi_ops=[phi for phi in op.phi_ops if phi.output.uuid not in lowered_uuids],
+            true_yields=[
+                value
+                for index, value in enumerate(op.true_yields)
+                if index not in lowered_indices
+            ],
+            false_yields=[
+                value
+                for index, value in enumerate(op.false_yields)
+                if index not in lowered_indices
+            ],
             results=[
-                result
-                for result in op.results
-                if not (isinstance(result, ValueBase) and result.uuid in lowered_uuids)
+                value
+                for index, value in enumerate(op.results)
+                if index not in lowered_indices
             ],
         )
         return rewritten, appended
 
-    def _is_lowerable_merge(self, phi: PhiOp, while_protected: set[str]) -> bool:
+    def _is_lowerable_merge(self, merge: IfMerge, while_protected: set[str]) -> bool:
         """Return whether a merge slot can lower to a ``SELECT`` expression.
 
         Args:
-            phi (PhiOp): The merge to classify.
+            merge (IfMerge): The merge to classify.
             while_protected (set[str]): While-condition operand UUIDs.
 
         Returns:
             bool: ``True`` for a non-identity scalar classical merge that
                 does not carry a while condition. Quantum and array merges
-                keep their phi (emit-side physical-resource checks own
+                stay on the if (emit-side physical-resource checks own
                 them), identity merges resolve through their common source,
                 and while-condition merges stay on the clbit-aliasing path.
         """
-        output = phi.output
+        output = merge.result
         if isinstance(output, ArrayValue) or output.type.is_quantum():
             return False
-        true_value = phi.true_value
-        false_value = phi.false_value
+        true_value = merge.true_value
+        false_value = merge.false_value
         if isinstance(true_value, ArrayValue) or isinstance(false_value, ArrayValue):
             return False
         if true_value.uuid == false_value.uuid:
@@ -364,9 +378,11 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         are visible outside the branch. The originals stay in the branch
         for any in-branch consumers; SSA holds because the copies produce
         new UUIDs. Values without a producer in the body (pre-branch
-        values) and non-classical producers (branch-local measurements)
-        are left as leaf references — the per-shot execution context
-        resolves them.
+        values) and direct scalar Bit measurements are left as leaf
+        references — the per-shot execution context resolves them. Other
+        non-classical producers, such as QFixed measurements and expectation
+        values, have no directly resolvable host carrier and make the merge
+        ineligible.
 
         Args:
             seeds (list[ValueBase]): Values the ``SELECT`` needs.
@@ -376,7 +392,7 @@ class ClassicalLoweringPass(Pass[Block, Block]):
             tuple[list[Operation], dict[str, ValueBase]] | None: Ordered
                 fresh copies and the old-to-fresh value mapping, or ``None``
                 when a needed producer is a nested control-flow op that
-                cannot be copied (the merge then keeps its phi and
+                cannot be copied (the merge then stays on the if and
                 segmentation reports it if a host consumer needs it).
         """
         producers: dict[str, Operation] = {}
@@ -388,11 +404,15 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         needed_ids: set[int] = set()
         visited: set[str] = set()
 
-        def require(value: ValueBase) -> bool:
+        def require(value: ValueBase, *, direct_seed: bool) -> bool:
             """Mark ``value``'s in-body pure producer chain as needed.
 
             Args:
                 value (ValueBase): Value the closure must resolve.
+                direct_seed (bool): Whether ``value`` is selected directly by
+                    the merge. A direct branch-local measurement can remain a
+                    lazy SELECT operand; a copied producer may not depend on
+                    branch-local quantum work.
 
             Returns:
                 bool: ``False`` when the chain hits an uncopyable producer.
@@ -404,33 +424,39 @@ class ClassicalLoweringPass(Pass[Block, Block]):
             if producer is None:
                 return True
             if isinstance(producer, IfOperation):
-                for nested_phi in producer.phi_ops:
-                    if (
-                        isinstance(nested_phi, PhiOp)
-                        and nested_phi.output.uuid == value.uuid
-                    ):
-                        nested_true = nested_phi.true_value
-                        nested_false = nested_phi.false_value
+                for nested_merge in producer.iter_merges():
+                    if nested_merge.result.uuid == value.uuid:
+                        nested_true = nested_merge.true_value
+                        nested_false = nested_merge.false_value
                         if (
                             isinstance(nested_true, ValueBase)
                             and isinstance(nested_false, ValueBase)
                             and nested_true.uuid == nested_false.uuid
                         ):
-                            return require(nested_true)
+                            return require(nested_true, direct_seed=direct_seed)
                         return False
                 return False
             if isinstance(producer, HasNestedOps):
                 return False
             if producer.operation_kind != OperationKind.CLASSICAL:
-                return True
+                return (
+                    direct_seed
+                    and isinstance(producer, MeasureOperation)
+                    and isinstance(value, Value)
+                    and isinstance(value.type, BitType)
+                )
+            if not self._is_total_hoist_candidate(producer):
+                return False
             needed_ids.add(id(producer))
             for operand in producer.all_input_values():
-                if isinstance(operand, ValueBase) and not require(operand):
+                if isinstance(operand, ValueBase) and not require(
+                    operand, direct_seed=False
+                ):
                     return False
             return True
 
         for seed in seeds:
-            if not require(seed):
+            if not require(seed, direct_seed=True):
                 return None
 
         mapping: dict[str, ValueBase] = {}
@@ -443,6 +469,47 @@ class ClassicalLoweringPass(Pass[Block, Block]):
                     mapping[result.uuid] = result.next_version()
             copies.append(body_op.replace_values(mapping))
         return copies, mapping
+
+    @staticmethod
+    def _is_total_hoist_candidate(operation: Operation) -> bool:
+        """Check whether a branch-local operation is safe to run eagerly.
+
+        Hoisted operations execute before the SELECT chooses a branch, so
+        they must be pure and total. Arithmetic that can fail for valid
+        runtime inputs (division, modulo, exponentiation) and other
+        classical operations with lookup or mutation semantics remain in
+        the branch and cause a loud unsupported-merge diagnostic.
+
+        Args:
+            operation (Operation): Branch-local classical producer.
+
+        Returns:
+            bool: True when eager host-side evaluation preserves semantics.
+        """
+        if isinstance(operation, (CompOp, CondOp, NotOp)):
+            return True
+        if isinstance(operation, BinOp):
+            return operation.kind in {
+                BinOpKind.ADD,
+                BinOpKind.SUB,
+                BinOpKind.MUL,
+            }
+        if isinstance(operation, RuntimeClassicalExpr):
+            return operation.kind in {
+                RuntimeOpKind.EQ,
+                RuntimeOpKind.NEQ,
+                RuntimeOpKind.LT,
+                RuntimeOpKind.LE,
+                RuntimeOpKind.GT,
+                RuntimeOpKind.GE,
+                RuntimeOpKind.AND,
+                RuntimeOpKind.OR,
+                RuntimeOpKind.NOT,
+                RuntimeOpKind.ADD,
+                RuntimeOpKind.SUB,
+                RuntimeOpKind.MUL,
+            }
+        return False
 
     def _float_loop_invariant_exprs(
         self,
@@ -583,14 +650,14 @@ def _collect_while_operand_uuids(operations: list[Operation]) -> set[str]:
     """Collect UUIDs carrying a ``WhileOperation`` loop-carried condition.
 
     The loop-carried condition update (``operands[1]``) is resolved by the
-    emit-time clbit-aliasing machinery, which follows phi chains down to
+    emit-time clbit-aliasing machinery, which follows merge chains down to
     the underlying measurements (``validate_while`` /
     ``ResourceAllocator``). Every merge on such a chain must therefore
-    keep its phi instead of lowering to a ``SELECT`` expression: the set
+    stay on its ``IfOperation`` instead of lowering to a ``SELECT`` expression: the set
     contains the carried operands plus, transitively, the branch sources
-    of every phi whose output is already protected. The *initial*
+    of every merge whose output is already protected. The *initial*
     condition (``operands[0]``) is deliberately not protected — a
-    phi-merged initial condition lowers to a ``SELECT`` and reaches the
+    merged initial condition lowers to a ``SELECT`` and reaches the
     backend as an ordinary runtime expression, exactly like an ``if``
     condition.
 
@@ -601,10 +668,10 @@ def _collect_while_operand_uuids(operations: list[Operation]) -> set[str]:
         set[str]: UUIDs of every value on a carried while-condition chain.
     """
     uuids: set[str] = set()
-    phi_sources: dict[str, tuple[str, str]] = {}
+    merge_sources: dict[str, tuple[str, str]] = {}
 
     def scan(operations: list[Operation]) -> None:
-        """Collect carried while operands and phi source pairs in one walk.
+        """Collect carried while operands and merge source pairs in one walk.
 
         Args:
             operations (list[Operation]): Operations to scan.
@@ -615,10 +682,10 @@ def _collect_while_operand_uuids(operations: list[Operation]) -> set[str]:
                     if isinstance(operand, ValueBase):
                         uuids.add(operand.uuid)
             if isinstance(op, IfOperation):
-                for phi in op.phi_ops:
-                    phi_sources[phi.output.uuid] = (
-                        phi.true_value.uuid,
-                        phi.false_value.uuid,
+                for merge in op.iter_merges():
+                    merge_sources[merge.result.uuid] = (
+                        merge.true_value.uuid,
+                        merge.false_value.uuid,
                     )
             if isinstance(op, HasNestedOps):
                 for body in op.nested_op_lists():
@@ -626,10 +693,10 @@ def _collect_while_operand_uuids(operations: list[Operation]) -> set[str]:
 
     scan(operations)
 
-    worklist = [uuid for uuid in uuids if uuid in phi_sources]
+    worklist = [uuid for uuid in uuids if uuid in merge_sources]
     while worklist:
         current = worklist.pop()
-        for source_uuid in phi_sources.get(current, ()):
+        for source_uuid in merge_sources.get(current, ()):
             if source_uuid not in uuids:
                 uuids.add(source_uuid)
                 worklist.append(source_uuid)

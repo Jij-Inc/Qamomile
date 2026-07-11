@@ -35,6 +35,7 @@ from qamomile.circuit.ir.operation import (
 )
 from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import (
     SCHEMA_VERSION,
@@ -122,6 +123,20 @@ def _measure_kernel(q: qmc.Qubit) -> qmc.Bit:
     """Kernel that exercises a measurement-derived classical bit."""
     q = qmc.h(q)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _if_merge_kernel() -> qmc.Bit:
+    """Measurement-conditioned if-else whose branches rebind a qubit."""
+    q = qmc.qubit(name="q")
+    q = qmc.h(q)
+    bit = qmc.measure(q)
+    r = qmc.qubit(name="r")
+    if bit:
+        r = qmc.x(r)
+    else:
+        r = qmc.h(r)
+    return qmc.measure(r)
 
 
 @qmc.qkernel
@@ -690,6 +705,91 @@ class TestRoundTripIRFeatures:
         assert to_dict(load_json(dump_json(block))) == original
         assert to_dict(load_msgpack(dump_msgpack(block))) == original
         assert content_hash(load_json(dump_json(block))) == content_hash(block)
+
+    def test_if_operation_merge_round_trip(self):
+        """IfOperation branch merges survive both wire formats as yield refs.
+
+        The wire form encodes merges as ``true_yield_refs`` /
+        ``false_yield_refs`` UUID lists parallel to ``result_refs`` (no
+        embedded phi operation dicts); the decoded op must reproduce the
+        original ``iter_merges`` view exactly.
+        """
+        block = _to_affine(_if_merge_kernel)
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert if_ops, [type(op).__name__ for op in block.operations]
+        original_merges = [
+            [
+                (m.true_value.uuid, m.false_value.uuid, m.result.uuid)
+                for m in op.iter_merges()
+            ]
+            for op in if_ops
+        ]
+        assert all(original_merges), original_merges
+
+        payload = to_dict(block)
+        if_dicts = [
+            d for d in payload["block"]["operations"] if d.get("$type") == "IfOperation"
+        ]
+        assert if_dicts
+        for d in if_dicts:
+            assert "phi_ops" not in d
+            assert (
+                len(d["true_yield_refs"])
+                == len(d["false_yield_refs"])
+                == len(d["result_refs"])
+            )
+
+        original = to_dict(block)
+        assert to_dict(load_json(dump_json(block))) == original
+        assert to_dict(load_msgpack(dump_msgpack(block))) == original
+
+        restored = load_json(dump_json(block))
+        restored_merges = [
+            [
+                (m.true_value.uuid, m.false_value.uuid, m.result.uuid)
+                for m in op.iter_merges()
+            ]
+            for op in restored.operations
+            if isinstance(op, IfOperation)
+        ]
+        assert restored_merges == original_merges
+        assert content_hash(restored) == content_hash(block)
+
+    def test_if_operation_mismatched_yield_refs_rejected(self):
+        """Corrupted yield-ref lists are rejected loudly at decode time."""
+        block = _to_affine(_if_merge_kernel)
+        payload = to_dict(block)
+        corrupted = False
+        for op_dict in payload["block"]["operations"]:
+            if op_dict.get("$type") == "IfOperation":
+                op_dict["true_yield_refs"] = op_dict["true_yield_refs"][:-1]
+                corrupted = True
+        assert corrupted
+        with pytest.raises(ValueError, match="merge data is inconsistent"):
+            from_dict(payload)
+
+    def test_if_operation_legacy_phi_ops_payload_rejected(self):
+        """A pre-yields payload carrying the removed 'phi_ops' field fails loud.
+
+        The length check only catches a legacy op that also kept its merge
+        outputs in ``results``; an explicit ``phi_ops`` guard is what keeps
+        the "old payloads are rejected, never silently down-decoded"
+        contract true for a ``phi_ops``-only shape.
+        """
+        block = _to_affine(_if_merge_kernel)
+        payload = to_dict(block)
+        injected = False
+        for op_dict in payload["block"]["operations"]:
+            if op_dict.get("$type") == "IfOperation":
+                # Simulate an old-revision IfOperation: the merges lived
+                # under the removed ``phi_ops`` field, not the yield refs.
+                op_dict.pop("true_yield_refs", None)
+                op_dict.pop("false_yield_refs", None)
+                op_dict["phi_ops"] = []
+                injected = True
+        assert injected
+        with pytest.raises(ValueError, match="phi_ops"):
+            from_dict(payload)
 
     def test_if_branch_rebinds_round_trip(self):
         """IfOperation branch-rebind records survive both wire formats."""
@@ -1532,6 +1632,36 @@ class TestManualConstruction:
         restored = load(dump(block))
         assert to_dict(restored) == to_dict(block)
         assert isinstance(restored.output_values[0], TupleValue)
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_nested_tuple_return_round_trip(self, dump, load):
+        """Nested tuple outputs and Return operands survive serialization."""
+        a = Value(type=UIntType(), name="a")
+        b = Value(type=UIntType(), name="b")
+        inner = TupleValue(name="inner", elements=(a, b))
+        outer = TupleValue(name="outer", elements=(inner, a))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[outer],
+            output_values=[outer],
+            label_args=["outer"],
+            output_names=["outer"],
+            operations=[ReturnOperation(operands=cast(list[Value], [outer]))],
+        )
+
+        restored = load(dump(block))
+
+        assert to_dict(restored) == to_dict(block)
+        restored_outer = restored.output_values[0]
+        assert isinstance(restored_outer, TupleValue)
+        assert isinstance(restored_outer.elements[0], TupleValue)
+        restored_return = restored.operations[0]
+        assert isinstance(restored_return, ReturnOperation)
+        assert isinstance(restored_return.operands[0], TupleValue)
 
     @pytest.mark.parametrize(
         "dump,load",

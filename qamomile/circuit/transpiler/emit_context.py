@@ -12,8 +12,8 @@ seven distinct semantic purposes simultaneously:
 3. Emit-time-computed intermediates — ``BinOp`` / ``CompOp`` /
    ``CondOp`` / ``NotOp`` results (keyed by Value UUID after Fix B;
    originally also keyed by Value name, which collided across tmps).
-4. Phi-output aliases (keyed by phi-output UUID; written by
-   ``register_classical_phi_aliases``).
+4. Merge-output aliases (keyed by merge-output UUID; written by
+   ``register_classical_merge_aliases``).
 5. Backend runtime expressions (e.g. ``qiskit.circuit.classical.expr.Expr``
    for compound runtime if-conditions).
 6. Array data (keyed by array name; bound iterables passed by user).
@@ -22,7 +22,7 @@ seven distinct semantic purposes simultaneously:
 
 This overloading was the structural cause of every name-collision bug
 class seen in this codebase: ``"bit_tmp"`` chained predicates,
-``j_phi_4`` phi aliases, the inline-pass ``DictValue`` drop, and the
+``j_merge_4`` merge aliases, the inline-pass ``DictValue`` drop, and the
 type-blind ``bool(...)`` coercion in ``resolve_operand``. Each was
 patched locally; the structural overloading remained.
 
@@ -85,7 +85,7 @@ class EmitContext(dict):
             user-chosen variable names in nested or sibling loops never
             collide.
         _values: Emit-time-computed intermediate values (``BinOp``
-            results, ``CompOp``/``CondOp``/``NotOp`` results, phi
+            results, ``CompOp``/``CondOp``/``NotOp`` results, merge
             aliases), keyed by Value UUID.
         _runtime_exprs: Backend runtime-expression objects (e.g. Qiskit
             ``expr.Expr`` for compound classical conditions), keyed by
@@ -194,7 +194,7 @@ class EmitContext(dict):
         """Bind an emit-time-computed intermediate by Value UUID.
 
         Use for ``BinOp`` / ``CompOp`` / ``CondOp`` / ``NotOp`` results,
-        phi aliases, and other UUID-identified intermediates.
+        merge aliases, and other UUID-identified intermediates.
         """
         self._values[uuid] = value
         self[uuid] = value
@@ -340,3 +340,50 @@ class EmitContext(dict):
         new._dict_data = self._dict_data.copy()
         new._observables = self._observables.copy()
         return new
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """Capture the dict body and every semantic slot for later restore.
+
+        Used to run a throwaway dry-run emission (ancilla demand counting)
+        against the same context object and then roll it back, so the count
+        run's intermediate fold results and parameters do not leak into the
+        real emission. Unlike ``copy`` this records enough to restore *this*
+        object in place, preserving its identity for callers that hold a
+        reference to it.
+
+        Returns:
+            dict[str, Any]: A snapshot passable to ``restore_state``.
+        """
+        return {
+            "body": dict(self),
+            "_params": self._params.copy(),
+            "_loop_vars": self._loop_vars.copy(),
+            "_values": self._values.copy(),
+            "_runtime_exprs": self._runtime_exprs.copy(),
+            "_array_data": self._array_data.copy(),
+            "_dict_data": self._dict_data.copy(),
+            "_observables": self._observables.copy(),
+        }
+
+    def restore_state(self, snapshot: dict[str, Any]) -> None:
+        """Restore the dict body and slots from ``snapshot`` in place.
+
+        The object's identity is preserved (the dict body is cleared and
+        repopulated rather than replaced), so references held elsewhere stay
+        valid.
+
+        Args:
+            snapshot (dict[str, Any]): A snapshot from ``snapshot_state``.
+
+        Returns:
+            None.
+        """
+        dict.clear(self)
+        dict.update(self, snapshot["body"])
+        self._params = snapshot["_params"]
+        self._loop_vars = snapshot["_loop_vars"]
+        self._values = snapshot["_values"]
+        self._runtime_exprs = snapshot["_runtime_exprs"]
+        self._array_data = snapshot["_array_data"]
+        self._dict_data = snapshot["_dict_data"]
+        self._observables = snapshot["_observables"]

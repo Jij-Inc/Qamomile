@@ -237,17 +237,17 @@ The concrete-index cases (`q[1]`, `q[1::2]`, or a slice bound that has already b
 
 **Future fix**: carry a symbolic affine root expression for carrier keys — the same direction proposed for the tuple-form expval metadata limitation, e.g. `(root_uuid, offset_value, stride_value, local_index_value)` — and resolve it at emit with the same binding resolver used for runtime slice chains, or fold the view bounds from `bindings` before carrier substitution runs. Either lets a binding-resolvable view drive the cast instead of being rejected.
 
-## Structural Tuple/Dict values still have secondary-path gaps
+## Structural Tuple/Dict branch merges remain unsupported
 
-The runtime output, ordinary qkernel-call paths, IR serialization, inline lowering, and compile-time-if output rewriting now preserve `TupleValue` / `DictValue` metadata closely enough for direct tuple outputs, tuple element outputs, post-classical tuple element expressions, structural input/output serialization, caller-side indexing / `qmc.items()` on a sub-qkernel's returned tuple or dict, structural block outputs rewritten by `InlinePass`, and structural block outputs rewritten by `CompileTimeIfLoweringPass`. Some less-common compiler paths still assume branch merges or runtime binding aliases are direct scalar elements, so nested structural values can keep stale element references or fail before lowering.
+The runtime output, ordinary qkernel-call paths, IR serialization, inline lowering, compile-time-if output rewriting, and nested tuple runtime binding now preserve `TupleValue` / `DictValue` metadata closely enough for direct tuple outputs, tuple element outputs, post-classical tuple element expressions, structural input/output serialization, caller-side indexing / `qmc.items()` on a sub-qkernel's returned tuple or dict, nested input access such as `pair[0][1]`, structural block outputs rewritten by `InlinePass`, and structural block outputs rewritten by `CompileTimeIfLoweringPass`. Structural values returned directly from dynamic branch helpers still fail before lowering because branch merging remains scalar-oriented.
 
-**When it bites**: the most likely remaining shapes are (1) `qmc.if_else(...)` branches that return `qmc.Tuple[...]` or `qmc.Dict[...]` handles, because the frontend Phi merge is still scalar-`Value` oriented; and (2) nested tuple runtime bindings such as `pair: qmc.Tuple[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.UInt]` followed by `return pair[0][1]`, because execution-context alias seeding currently descends only to direct tuple elements.
+**When it bites**: `qmc.if_else(...)` branches that return `qmc.Tuple[...]` or `qmc.Dict[...]` handles, because the frontend merge is still scalar-`Value` oriented.
 
-**Why this trade-off was chosen**: the current fix focused on the user-visible paths that were already reproducible in normal transpilation and execution, plus the structural-output substitution gaps that could be fixed by reusing the recursive `ValueSubstitutor`: post-process sample aggregation, scalar/tuple measured outputs, direct tuple element runtime bindings, structural input/output serialization, top-level sub-qkernel structural return wrapping, `InlinePass` output rewriting, and `CompileTimeIfLoweringPass` output rewriting. The remaining cases are broader pipeline contracts: structural branch merging in the frontend and recursive runtime binding alias generation. Each needs more than substituting an existing `ValueLike`; it must define how to construct or merge new structural values across control-flow boundaries and runtime binding aliases.
+**Why this trade-off was chosen**: the current fix focused on the user-visible paths that were already reproducible in normal transpilation and execution, plus the structural-output substitution gaps that could be fixed by reusing recursive `ValueLike` traversal: post-process sample aggregation, scalar/tuple measured outputs, nested tuple element runtime bindings, structural input/output serialization, top-level sub-qkernel structural return wrapping, `InlinePass` output rewriting, and `CompileTimeIfLoweringPass` output rewriting. Structural branch merging is a broader frontend control-flow contract: it must define how to construct and merge new structural values across branch boundaries rather than merely substitute existing references.
 
-**Workaround**: avoid returning structural `Tuple` / `Dict` values directly from `qmc.if_else` branches, avoid relying on nested tuple runtime bindings as public inputs, and flatten nested tuple inputs into separate scalar or direct tuple arguments when the elements must be used in post-classical expressions.
+**Workaround**: avoid returning structural `Tuple` / `Dict` values directly from `qmc.if_else` branches. Merge or return their scalar elements separately instead.
 
-**Future fix**: teach the frontend Phi merge to rebuild structural handles from merged structural `ValueLike` results. Runtime binding alias seeding should recurse through nested `TupleValue` elements while preserving the current top-level-name collision protections.
+**Future fix**: teach the frontend merge to rebuild structural handles from merged structural `ValueLike` results.
 
 ## Loop-varying branch merges cannot surface as host-side values
 
@@ -260,3 +260,15 @@ A measurement-dependent branch merge (`if bit: out = x else: out = y`) whose res
 **Workaround**: measure into distinct qubits/bits outside the loop and select over those, or return the underlying measurement results and compute the reduction in ordinary Python outside the kernel.
 
 **Future fix**: when loops gain `iter_args` / `body_yields`, promote the loop-varying merge into a loop yield and lower the yield to the same `SELECT` / runtime-expression machinery.
+
+## QFixed measurements cannot be decoded inside runtime control flow
+
+`MeasureQFixedOperation` is split before segmentation into one abstract vector measurement in the quantum segment and one `DecodeQFixedOperation` in the host-side classical segment. That split is well-defined at block scope, but a measurement nested inside `if`, `for`, `qmc.items`, or `while` has no explicit branch/loop yield that can carry the selected or last-iteration decoded Float to the host. Segmentation therefore raises `SeparationError` instead of exposing the raw carrier-bit tuple as if it were the declared Float output.
+
+**When it bites**: measuring a `QFixed` value inside runtime control flow, whether the result is returned directly or merged into a value used after the construct.
+
+**Why this trade-off was chosen**: recursively replacing the nested operation with a vector measurement plus an in-body decode would leave a host-only decode inside the quantum segment. Moving only the decode outside would lose branch selection, zero-trip behavior, and last-iteration semantics. A loud plan-time rejection preserves the typed-output contract until control-flow yields can express those semantics.
+
+**Workaround**: move the QFixed measurement outside control flow, or return raw measured bits and decode them in ordinary Python outside the kernel.
+
+**Future fix**: once segmented control flow can carry yielded values across the quantum/host boundary, lower the nested carrier measurement in place and route its selected or loop-carried decode through the post-quantum classical segment.

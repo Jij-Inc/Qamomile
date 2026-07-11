@@ -12,10 +12,7 @@ from qamomile.circuit.ir.operation.composite_gate import (
     CompositeGateOperation,
     CompositeGateType,
 )
-from qamomile.circuit.ir.operation.control_flow import (
-    HasNestedOps,
-    IfOperation,
-)
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
@@ -47,7 +44,7 @@ def _has_any_call_block(operations: list[Operation]) -> bool:
     """Return whether any operation (or nested operation) is a call.
 
     Recurses into the nested blocks of ``InverseBlockOperation`` and
-    ``ControlledUOperation`` and into ``IfOperation`` / ``HasNestedOps``
+    ``ControlledUOperation`` and into ``HasNestedOps``
     bodies, so a call hidden inside a control-flow body or an
     operation-owned block is still detected. ``InlinePass`` uses this to
     decide whether its output block is ``AFFINE`` (no calls remain) or
@@ -70,12 +67,7 @@ def _has_any_call_block(operations: list[Operation]) -> bool:
         if isinstance(op, ControlledUOperation):
             if op.block is not None and _has_any_call_block(op.block.operations):
                 return True
-        if isinstance(op, IfOperation):
-            if _has_any_call_block(op.true_operations) or _has_any_call_block(
-                op.false_operations
-            ):
-                return True
-        elif isinstance(op, HasNestedOps):
+        if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 if _has_any_call_block(body):
                     return True
@@ -86,7 +78,7 @@ def count_call_blocks(operations: list[Operation]) -> int:
     """Count all CallBlockOperations reachable from an operation list.
 
     Recurses into ``InverseBlockOperation`` / ``ControlledUOperation``
-    nested blocks and into ``IfOperation`` / ``HasNestedOps`` bodies, so
+    nested blocks and into ``HasNestedOps`` bodies, so
     calls hidden inside control flow or operation-owned blocks are
     counted. ``unroll_recursion`` uses this as the primary termination
     signal (``count == 0`` means the block is fully inlined).
@@ -109,10 +101,7 @@ def count_call_blocks(operations: list[Operation]) -> int:
         if isinstance(op, ControlledUOperation):
             if op.block is not None:
                 count += count_call_blocks(op.block.operations)
-        if isinstance(op, IfOperation):
-            count += count_call_blocks(op.true_operations)
-            count += count_call_blocks(op.false_operations)
-        elif isinstance(op, HasNestedOps):
+        if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 count += count_call_blocks(body)
     return count
@@ -151,10 +140,7 @@ def count_unrollable_call_blocks(operations: list[Operation]) -> int:
     for op in operations:
         if isinstance(op, CallBlockOperation) and op.block is not None:
             count += 1
-        if isinstance(op, IfOperation):
-            count += count_unrollable_call_blocks(op.true_operations)
-            count += count_unrollable_call_blocks(op.false_operations)
-        elif isinstance(op, HasNestedOps):
+        if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 count += count_unrollable_call_blocks(body)
     return count
@@ -243,23 +229,6 @@ class InlinePass(Pass[Block, Block]):
                 else:
                     inlined = self._inline_call(op, value_map, visiting_blocks)
                     result.extend(inlined)
-
-            elif isinstance(op, IfOperation):
-                # Recurse into both branches, preserve the If structure
-                serialized_true = self._serialize_operations(
-                    op.true_operations, value_map, visiting_blocks
-                )
-                serialized_false = self._serialize_operations(
-                    op.false_operations, value_map, visiting_blocks
-                )
-                new_op = dataclasses.replace(
-                    op,
-                    true_operations=serialized_true,
-                    false_operations=serialized_false,
-                )
-                # Apply value substitutions to operands and results
-                new_op = self._substitute_values(new_op, value_map)
-                result.append(new_op)
 
             elif isinstance(op, HasNestedOps):
                 # Generic recursion for For/ForItems/While: recurse into
@@ -397,7 +366,7 @@ class InlinePass(Pass[Block, Block]):
         # the frontend.
         seen_quantum_args: dict[str, str] = {}
         for arg_index, (block_input, call_arg) in enumerate(
-            zip(block.input_values, call_args)
+            zip(block.input_values, call_args, strict=True)
         ):
             substituted_arg = arg_substitutor.substitute_value(call_arg)
             resolved_arg = substituted_arg
@@ -548,6 +517,7 @@ class InlinePass(Pass[Block, Block]):
             for source_element, resolved_element in zip(
                 source.elements,
                 resolved.elements,
+                strict=True,
             ):
                 self._map_value_structure(source_element, resolved_element, value_map)
             return

@@ -480,7 +480,7 @@ class _Canonicalizer:
         cloned: ValueBase
         if isinstance(value, TupleValue):
             new_elements = tuple(
-                cast(Value, self.canonical_value(e)) for e in value.elements
+                cast(ValueLike, self.canonical_value(e)) for e in value.elements
             )
             cloned = dataclasses.replace(
                 value,

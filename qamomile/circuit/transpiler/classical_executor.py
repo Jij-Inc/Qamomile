@@ -14,7 +14,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     CondOpKind,
     NotOp,
-    PhiOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
 )
@@ -35,6 +34,7 @@ from qamomile.circuit.ir.value import (
     DictValue,
     TupleValue,
     Value,
+    ValueLike,
     resolve_root_array_index,
 )
 from qamomile.circuit.transpiler.errors import ExecutionError
@@ -155,8 +155,6 @@ class ClassicalExecutor:
             self._execute_condop(op, context, results, scoped_locals)
         elif isinstance(op, RuntimeClassicalExpr):
             self._execute_runtime_expr(op, context, results, scoped_locals)
-        elif isinstance(op, PhiOp):
-            self._execute_phi(op, context, results, scoped_locals)
         elif isinstance(op, DecodeQFixedOperation):
             self._execute_decode_qfixed(op, context, results, scoped_locals)
         elif isinstance(op, DictGetItemOperation):
@@ -313,13 +311,8 @@ class ClassicalExecutor:
             result_value = evaluate_notop_value(operand)
         elif kind is RuntimeOpKind.SELECT:
             condition = self._get_value(op.operands[0], context, results, scoped_locals)
-            true_value = self._get_value(
-                op.operands[1], context, results, scoped_locals
-            )
-            false_value = self._get_value(
-                op.operands[2], context, results, scoped_locals
-            )
-            result_value = true_value if bool(condition) else false_value
+            selected = op.operands[1] if bool(condition) else op.operands[2]
+            result_value = self._get_value(selected, context, results, scoped_locals)
         else:
             lhs = self._get_value(op.operands[0], context, results, scoped_locals)
             rhs = self._get_value(op.operands[1], context, results, scoped_locals)
@@ -348,19 +341,6 @@ class ClassicalExecutor:
             result_value = int(result_value)
         if op.results:
             results[op.results[0].uuid] = result_value
-
-    def _execute_phi(
-        self,
-        op: PhiOp,
-        context: ExecutionContext,
-        results: dict[str, Any],
-        scoped_locals: dict[str, Any],
-    ) -> None:
-        """Execute SSA phi merge after a conditional branch."""
-        condition = bool(self._get_value(op.condition, context, results, scoped_locals))
-        selected = op.true_value if condition else op.false_value
-        merged = self._get_value(selected, context, results, scoped_locals)
-        results[op.output.uuid] = merged
 
     def _execute_decode_qfixed(
         self,
@@ -499,7 +479,7 @@ class ClassicalExecutor:
         updated = tuple(elements)
         # The shared key chains subsequent stores to the same logical array;
         # the per-version uuid entry keeps downstream reads of this SSA
-        # version and block-output resolution via output_refs working.
+        # version and typed block-output resolution working.
         results[state_key] = updated
         results[result_value.uuid] = updated
 
@@ -680,14 +660,29 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> None:
-        """Execute a classical if/else."""
+        """Execute a classical if/else.
+
+        Runs the taken branch's operations, then resolves every merged
+        output to its selected branch source.
+
+        Args:
+            op (IfOperation): The if-else to execute.
+            context (ExecutionContext): Execution context holding
+                measurements and bindings.
+            results (dict[str, Any]): Mutable results map; merged outputs
+                are recorded under their result UUIDs.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+        """
         condition = bool(self._get_value(op.condition, context, results, scoped_locals))
         branch_scope = scoped_locals.copy()
         branch_ops = op.true_operations if condition else op.false_operations
         self._execute_operations(branch_ops, context, results, branch_scope)
 
-        for phi_op in op.phi_ops:
-            self._execute_phi(phi_op, context, results, branch_scope)
+        for merge in op.iter_merges():
+            selected = merge.select(condition)
+            results[merge.result.uuid] = self._get_value(
+                selected, context, results, branch_scope
+            )
 
     def _execute_while(
         self,
@@ -754,7 +749,16 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> Any:
-        """Get the concrete value from context or results."""
+        """Get the concrete value from context or results.
+
+        Raises:
+            ExecutionError: If the value cannot be resolved from the
+                execution state — with a slice-view-specific diagnostic
+                when the unresolved value is a sliced ``ArrayValue``
+                (most commonly a view merged from different slices
+                across if/else branches, which has no materialized
+                contents).
+        """
         if value.uuid in results:
             return results[value.uuid]
         if context.has(value.uuid):
@@ -772,6 +776,14 @@ class ClassicalExecutor:
             param_name = value.parameter_name()
             if param_name and context.has(param_name):
                 return context.get(param_name)
+        if isinstance(value, ArrayValue) and value.slice_of is not None:
+            raise ExecutionError(
+                f"Array view '{value.name}' could not be resolved in the "
+                f"classical segment. A common cause is merging different "
+                f"slices across if/else branches — such a merged view has "
+                f"no materialized contents. Slice identically in both "
+                f"branches or read the root array instead."
+            )
         raise ExecutionError(f"Value {value.name} not found in context or results")
 
     def _get_array_element_value(
@@ -956,17 +968,36 @@ class ClassicalExecutor:
 
     def _resolve_structured_value(
         self,
-        value: TupleValue | Value,
+        value: ValueLike,
         context: ExecutionContext,
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> Any:
-        """Resolve a tuple or scalar value to a Python object."""
+        """Resolve a structural or scalar IR value to a Python object.
+
+        Args:
+            value (ValueLike): Scalar or nested structural value to resolve.
+            context (ExecutionContext): Runtime bindings and measured values.
+            results (dict[str, Any]): Results produced by classical execution.
+            scoped_locals (dict[str, Any]): Active control-flow local values.
+
+        Returns:
+            Any: Resolved scalar, tuple, or dictionary value.
+        """
         if isinstance(value, TupleValue):
             return tuple(
-                self._get_value(elem, context, results, scoped_locals)
+                self._resolve_structured_value(elem, context, results, scoped_locals)
                 for elem in value.elements
             )
+        if isinstance(value, DictValue):
+            return {
+                self._resolve_structured_value(
+                    key, context, results, scoped_locals
+                ): self._resolve_structured_value(
+                    entry_value, context, results, scoped_locals
+                )
+                for key, entry_value in value.entries
+            }
         return self._get_value(value, context, results, scoped_locals)
 
     def _bind_for_items_key(

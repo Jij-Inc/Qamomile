@@ -153,6 +153,19 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 circuit, op.false_operations, qubit_map, clbit_map, bindings
             )
 
+        # Register merge outputs after emitting both branches, matching the
+        # base-class runtime contract. ResourceAllocator pre-registers the
+        # qubit / clbit merges on this backend (so the physical mapping is
+        # mostly a no-op here), but classical identity merges bind into
+        # ``bindings`` only through register_classical_merge_aliases.
+        from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (  # noqa: E501
+            register_classical_merge_aliases,
+            register_merge_outputs,
+        )
+
+        register_merge_outputs(self, op, qubit_map, clbit_map, bindings)
+        register_classical_merge_aliases(self, op, bindings, None)
+
     def _emit_while(
         self,
         circuit: "QuantumCircuit",
@@ -403,12 +416,23 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
     def _build_qiskit_binary_expr(kind: RuntimeOpKind, lhs: Any, rhs: Any) -> Any:
         """Map a binary ``RuntimeOpKind`` to its Qiskit ``expr`` constructor.
 
-        Every arm of ``RuntimeOpKind`` (except ``NOT``, which is handled
-        upstream) is dispatched here. Kinds without a Qiskit ``expr``
-        equivalent — currently ``FLOORDIV``, ``MOD`` and ``POW`` — raise
-        ``NotImplementedError`` rather than silently returning ``None``,
-        so the contract gap is loud at emit time instead of producing a
-        misleading "Unsupported kind" error.
+        Binary arms of ``RuntimeOpKind`` are dispatched here. ``NOT`` and
+        ``SELECT`` are handled upstream because they are unary and ternary,
+        respectively. Kinds without a Qiskit ``expr`` equivalent — currently
+        ``FLOORDIV``, ``MOD`` and ``POW`` — fail loudly at emit time.
+
+        Args:
+            kind (RuntimeOpKind): Binary runtime operation to translate.
+            lhs (Any): Resolved left operand.
+            rhs (Any): Resolved right operand.
+
+        Returns:
+            Any: Qiskit classical expression for the binary operation.
+
+        Raises:
+            NotImplementedError: If Qiskit has no equivalent expression for
+                ``kind``.
+            ValueError: If ``kind`` is not a binary runtime operation.
         """
         from qiskit.circuit.classical import expr
 

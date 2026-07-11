@@ -80,7 +80,7 @@ class _CallOutputFreshener:
 
         if isinstance(value, TupleValue):
             new_elements = tuple(
-                cast(Value, self.freshen(element)) for element in value.elements
+                cast(ValueLike, self.freshen(element)) for element in value.elements
             )
             new_metadata = self._remap_metadata(value)
             cloned = dataclasses.replace(
@@ -179,7 +179,9 @@ class _CallOutputFreshener:
         self._input_by_logical_id[formal.logical_id] = actual
 
         if isinstance(formal, TupleValue) and isinstance(actual, TupleValue):
-            for formal_element, actual_element in zip(formal.elements, actual.elements):
+            for formal_element, actual_element in zip(
+                formal.elements, actual.elements, strict=True
+            ):
                 self._register_input_binding(formal_element, actual_element, seen)
             return
 
@@ -239,8 +241,10 @@ class _CallOutputFreshener:
 
         if isinstance(source, TupleValue) and isinstance(actual, TupleValue):
             elements = tuple(
-                cast(Value, self._next_pass_through(source_elem, actual_elem))
-                for source_elem, actual_elem in zip(source.elements, actual.elements)
+                cast(ValueLike, self._next_pass_through(source_elem, actual_elem))
+                for source_elem, actual_elem in zip(
+                    source.elements, actual.elements, strict=True
+                )
             )
             result = dataclasses.replace(
                 actual,

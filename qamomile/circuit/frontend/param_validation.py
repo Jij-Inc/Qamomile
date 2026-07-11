@@ -16,7 +16,12 @@ from __future__ import annotations
 import types as _types
 from typing import Any, Union, get_args, get_origin
 
-from qamomile.circuit.frontend.func_to_block import is_array_type
+from qamomile.circuit.frontend.func_to_block import (
+    handle_type_map,
+    is_array_type,
+    is_dict_type,
+    is_tuple_type,
+)
 from qamomile.circuit.frontend.handle import Handle, Observable
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Qubit, UInt
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
@@ -356,6 +361,92 @@ def _validate_quantum_param_handle(
         )
 
 
+def _annotations_match(expected: Any, actual: Any) -> bool:
+    """Return whether two frontend annotations carry the same IR type.
+
+    Args:
+        expected (Any): Annotation declared by the callee.
+        actual (Any): Annotation recorded on the caller's structural handle.
+
+    Returns:
+        bool: ``True`` when both annotations map to the same IR value type.
+    """
+    try:
+        return handle_type_map(expected) == handle_type_map(actual)
+    except (NotImplementedError, TypeError):
+        return expected == actual
+
+
+def _validate_structural_param_handle(
+    param_name: str,
+    declared: Any,
+    param_value: Handle,
+    context: str,
+) -> None:
+    """Validate Tuple and Dict handles recursively at a qkernel call site.
+
+    Args:
+        param_name (str): Kernel parameter name, including any nested index.
+        declared (Any): Resolved Tuple or Dict annotation from the callee.
+        param_value (Handle): Caller-supplied structural handle.
+        context (str): Call-site label used to prefix diagnostics.
+
+    Raises:
+        TypeError: If the container kind, tuple arity, or nested element/key/
+            value type does not match the declaration.
+    """
+    from qamomile.circuit.frontend.handle.containers import Dict, Tuple
+
+    if is_tuple_type(declared):
+        if not isinstance(param_value, Tuple):
+            raise TypeError(
+                f"{context}: parameter {param_name!r} is declared as Tuple "
+                f"but received {type(param_value).__name__}."
+            )
+        declared_elements = get_args(declared)
+        if len(declared_elements) != len(param_value._elements):
+            raise TypeError(
+                f"{context}: tuple parameter {param_name!r} expects "
+                f"{len(declared_elements)} elements but received "
+                f"{len(param_value._elements)}."
+            )
+        for index, (element_type, element) in enumerate(
+            zip(declared_elements, param_value._elements, strict=True)
+        ):
+            _validate_param_handle(
+                f"{param_name}[{index}]", element_type, element, context
+            )
+        return
+
+    if not isinstance(param_value, Dict):
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as Dict but "
+            f"received {type(param_value).__name__}."
+        )
+    declared_args = get_args(declared)
+    if len(declared_args) != 2:
+        raise TypeError(
+            f"{context}: dict parameter {param_name!r} must declare key and "
+            f"value types."
+        )
+    key_type, value_type = declared_args
+    if param_value._key_type is not None and not _annotations_match(
+        key_type, param_value._key_type
+    ):
+        raise TypeError(
+            f"{context}: dict parameter {param_name!r} has an incompatible key type."
+        )
+    if param_value._value_type is not None and not _annotations_match(
+        value_type, param_value._value_type
+    ):
+        raise TypeError(
+            f"{context}: dict parameter {param_name!r} has an incompatible value type."
+        )
+    for key, value in param_value._entries:
+        _validate_param_handle(f"{param_name}.key", key_type, key, context)
+        _validate_param_handle(f"{param_name}.value", value_type, value, context)
+
+
 def _validate_param_handle(
     param_name: str,
     declared: Any,
@@ -365,10 +456,8 @@ def _validate_param_handle(
 ) -> None:
     """Validate a bound handle against its qkernel parameter declaration.
 
-    Routes to the quantum or classical validator based on the declared
-    parameter kind. Structural-container declarations (``Tuple`` /
-    ``Dict``) and unannotated parameters are passed through unchecked --
-    their shape is enforced by the inline / segmentation passes instead.
+    Routes to the structural, quantum, or classical validator based on the
+    declared parameter kind. Unannotated parameters pass through unchanged.
 
     Args:
         param_name (str): Kernel parameter name, used in error messages.
@@ -388,15 +477,15 @@ def _validate_param_handle(
         TypeError: If *param_value* does not match the quantum or
             classical declaration of *param_name*.
     """
-    if _is_quantum_param_decl(declared):
+    if is_tuple_type(declared) or is_dict_type(declared):
+        _validate_structural_param_handle(param_name, declared, param_value, context)
+    elif _is_quantum_param_decl(declared):
         _validate_quantum_param_handle(
             param_name, declared, param_value, context, allow_broadcast=allow_broadcast
         )
     elif _is_classical_param_decl(declared):
         _validate_classical_param_handle(param_name, declared, param_value, context)
-    # else: a structural container (``Tuple`` / ``Dict``) or an
-    # unannotated parameter -- there is no scalar/array arity contract to
-    # enforce here, so the handle passes through unchecked.
+    # else: an unannotated or unsupported parameter declaration.
 
 
 def _validate_bound_handles(
