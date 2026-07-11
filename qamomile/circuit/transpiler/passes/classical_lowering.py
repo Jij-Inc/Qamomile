@@ -523,7 +523,8 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         is equivalent to the traced last-iteration value — and makes the
         expression visible to top-level segment routing. An expression
         stays in the body when any transitive operand is produced inside
-        the loop subtree or its result is consumed inside it. ``While``
+        the loop subtree, its result is consumed inside it, or its result is
+        the yielded value of a ``RegionArg``. ``While``
         loops are never floated: a zero-trip while must leave the pre-loop
         value observable, which an unconditionally evaluated ``SELECT``
         would overwrite.
@@ -565,6 +566,16 @@ class ClassicalLoweringPass(Pass[Block, Block]):
             if isinstance(body_op, RuntimeClassicalExpr)
         ]
         floating = {id(body_op) for body_op in candidates}
+        region_yielded_uuids = {
+            region_arg.yielded.uuid
+            for region_arg in getattr(loop_op, "region_args", ())
+        }
+        for body_op in candidates:
+            if any(
+                isinstance(result, ValueBase) and result.uuid in region_yielded_uuids
+                for result in body_op.results
+            ):
+                floating.discard(id(body_op))
 
         def reads(operations: list[Operation], uuids: set[str]) -> bool:
             """Return whether any non-floating subtree op reads ``uuids``.

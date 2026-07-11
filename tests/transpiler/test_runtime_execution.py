@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 import qamomile.observable as qm_o
@@ -242,6 +243,56 @@ class TestExecutableProgramRuntime:
         )
 
         assert job.result().results == [((0,), 5)]
+
+    def test_sample_job_keeps_bool_and_int_outputs_distinct(self) -> None:
+        """Aggregation preserves scalar type instead of using Python equality."""
+        job = SampleJob(
+            {"0": 2, "1": 3},
+            lambda counts: [(True, counts["0"]), (1, counts["1"])],
+            shots=5,
+        )
+
+        assert job.result().results == [(True, 2), (1, 3)]
+
+    def test_sample_job_aggregates_equal_numpy_outputs(self) -> None:
+        """Independent arrays with equal dtype, shape, and values aggregate."""
+        first = np.array([1, 2], dtype=np.int32)
+        second = np.array([1, 2], dtype=np.int32)
+        job = SampleJob(
+            {"0": 2, "1": 3},
+            lambda counts: [(first, counts["0"]), (second, counts["1"])],
+            shots=5,
+        )
+
+        results = job.result().results
+        assert len(results) == 1
+        assert results[0][0] is first
+        assert results[0][1] == 5
+
+    def test_sample_job_preserves_numpy_dtype_and_shape(self) -> None:
+        """Aggregation does not collapse arrays with different public types."""
+        values = (
+            np.array([1, 2], dtype=np.int32),
+            np.array([1, 2], dtype=np.int64),
+            np.array([[1, 2]], dtype=np.int32),
+        )
+        job = SampleJob(
+            {"00": 1, "01": 1, "10": 1},
+            lambda counts: [
+                (value, count)
+                for value, count in zip(values, counts.values(), strict=True)
+            ],
+            shots=3,
+        )
+
+        results = job.result().results
+        assert [count for _, count in results] == [1, 1, 1]
+        assert [value.dtype for value, _ in results] == [
+            np.dtype(np.int32),
+            np.dtype(np.int64),
+            np.dtype(np.int32),
+        ]
+        assert [value.shape for value, _ in results] == [(2,), (2,), (1, 2)]
 
     def test_run_executes_expval_before_classical_post(self) -> None:
         exp_result = Value(type=FloatType(), name="exp_result")

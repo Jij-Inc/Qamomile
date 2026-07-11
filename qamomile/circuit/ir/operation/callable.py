@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+import uuid as uuid_module
+from collections.abc import Mapping, Sequence
+from typing import Any, cast
 
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    ValueLike,
+    remap_value_metadata_references,
+)
 
 from .operation import Operation, OperationKind, ParamHint, Signature
-
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.value import Value
 
 
 class CallTransform(enum.Enum):
@@ -200,8 +207,8 @@ class CallableDef:
 
 
 def signature_from_values(
-    operands: Sequence["Value"],
-    results: Sequence["Value"],
+    operands: Sequence[ValueLike],
+    results: Sequence[ValueLike],
     *,
     operand_names: Sequence[str] | None = None,
     result_names: Sequence[str] | None = None,
@@ -209,8 +216,8 @@ def signature_from_values(
     """Build a callable signature from concrete operand and result values.
 
     Args:
-        operands (Sequence[Value]): Values consumed by the callable.
-        results (Sequence[Value]): Values produced by the callable.
+        operands (Sequence[ValueLike]): Values consumed by the callable.
+        results (Sequence[ValueLike]): Values produced by the callable.
         operand_names (Sequence[str] | None): Optional names for operands.
             Missing entries fall back to ``arg_<index>``. Defaults to ``None``.
         result_names (Sequence[str] | None): Optional names for results.
@@ -267,13 +274,398 @@ def signature_from_block(block: Block) -> Signature:
     )
 
 
+class _CallResultMaterializer:
+    """Create caller-local values for a block invocation's results.
+
+    The materializer first reserves UUID and logical-ID mappings for the
+    complete callee value graph, then rebuilds output values. Reserving first
+    lets metadata on one output safely reference values owned by another
+    output or by an operation visited later in the block.
+
+    Args:
+        block (Block): Callee block whose outputs are being materialized.
+        actuals (list[ValueLike]): Caller-side arguments in formal-input order.
+    """
+
+    def __init__(self, block: Block, actuals: list[ValueLike]) -> None:
+        """Initialize formal bindings and reserve the callee value graph.
+
+        Args:
+            block (Block): Callee block whose values define the source graph.
+            actuals (list[ValueLike]): Caller-side arguments aligned with
+                ``block.input_values``.
+
+        Raises:
+            ValueError: If the formal and actual argument counts differ.
+        """
+        if len(block.input_values) != len(actuals):
+            raise ValueError(
+                f"Block '{block.name}' expects {len(block.input_values)} "
+                f"arguments, got {len(actuals)}"
+            )
+
+        self._input_by_uuid: dict[str, ValueLike] = {}
+        self._input_by_logical_id: dict[str, ValueLike] = {}
+        self._uuid_remap: dict[str, str] = {}
+        self._logical_id_remap: dict[str, str] = {}
+        self._reserved_uuids: set[str] = set()
+        self._materialized: dict[str, ValueLike] = {}
+        self._pass_through: dict[str, ValueLike] = {}
+
+        for formal, actual in zip(block.input_values, actuals, strict=True):
+            self._bind_input(formal, actual)
+
+        self._reserve_block(block)
+        for output in block.output_values:
+            self._reserve_output_pass_throughs(output)
+
+    def materialize(self, value: ValueLike) -> ValueLike:
+        """Return a caller-local materialization of one callee output value.
+
+        Args:
+            value (ValueLike): Callee-side output value.
+
+        Returns:
+            ValueLike: Caller-local value whose graph and metadata contain no
+                callee-local UUIDs when those UUIDs belong to the block.
+        """
+        if value.uuid in self._pass_through:
+            return self._pass_through[value.uuid]
+        if value.uuid in self._materialized:
+            return self._materialized[value.uuid]
+
+        actual = self._bound_actual(value)
+        if actual is not None:
+            result = cast(ValueLike, actual.next_version())
+            self._pass_through[value.uuid] = result
+            self._uuid_remap[value.uuid] = result.uuid
+            self._logical_id_remap[value.logical_id] = result.logical_id
+            return result
+
+        self._reserve_value(value)
+        new_uuid = self._uuid_remap[value.uuid]
+        new_logical_id = self._logical_id_remap[value.logical_id]
+        metadata = remap_value_metadata_references(
+            value.metadata,
+            self._remap_uuid,
+            self._remap_logical_id,
+        )
+
+        if isinstance(value, TupleValue):
+            result = dataclasses.replace(
+                value,
+                elements=tuple(self.materialize(element) for element in value.elements),
+                metadata=metadata,
+                uuid=new_uuid,
+                logical_id=new_logical_id,
+            )
+        elif isinstance(value, DictValue):
+            entries: list[tuple[TupleValue | Value, Value]] = []
+            for key, entry_value in value.entries:
+                entries.append(
+                    (
+                        cast(TupleValue | Value, self.materialize(key)),
+                        cast(Value, self.materialize(entry_value)),
+                    )
+                )
+            result = dataclasses.replace(
+                value,
+                entries=tuple(entries),
+                metadata=metadata,
+                uuid=new_uuid,
+                logical_id=new_logical_id,
+            )
+        elif isinstance(value, ArrayValue):
+            result = dataclasses.replace(
+                value,
+                parent_array=(
+                    cast(ArrayValue, self.materialize(value.parent_array))
+                    if value.parent_array is not None
+                    else None
+                ),
+                element_indices=tuple(
+                    cast(Value, self.materialize(index))
+                    for index in value.element_indices
+                ),
+                shape=tuple(
+                    cast(Value, self.materialize(dimension))
+                    for dimension in value.shape
+                ),
+                slice_of=(
+                    cast(ArrayValue, self.materialize(value.slice_of))
+                    if value.slice_of is not None
+                    else None
+                ),
+                slice_start=(
+                    cast(Value, self.materialize(value.slice_start))
+                    if value.slice_start is not None
+                    else None
+                ),
+                slice_step=(
+                    cast(Value, self.materialize(value.slice_step))
+                    if value.slice_step is not None
+                    else None
+                ),
+                metadata=metadata,
+                uuid=new_uuid,
+                logical_id=new_logical_id,
+            )
+        else:
+            result = dataclasses.replace(
+                value,
+                parent_array=(
+                    cast(ArrayValue, self.materialize(value.parent_array))
+                    if value.parent_array is not None
+                    else None
+                ),
+                element_indices=tuple(
+                    cast(Value, self.materialize(index))
+                    for index in value.element_indices
+                ),
+                metadata=metadata,
+                uuid=new_uuid,
+                logical_id=new_logical_id,
+            )
+
+        self._materialized[value.uuid] = result
+        return result
+
+    def _bind_input(
+        self,
+        formal: ValueLike,
+        actual: ValueLike,
+        seen: set[str] | None = None,
+    ) -> None:
+        """Bind one formal value graph to its caller-side value graph.
+
+        Dict containers are intentionally bound at the root only. A symbolic
+        formal dict may have no entries while its bound caller value does, so
+        positional entry zipping would invent an invalid correspondence.
+
+        Args:
+            formal (ValueLike): Callee-side formal value.
+            actual (ValueLike): Caller-side actual value.
+            seen (set[str] | None): Formal UUIDs already visited. Defaults to
+                ``None``.
+        """
+        if seen is None:
+            seen = set()
+        if formal.uuid in seen:
+            return
+        seen.add(formal.uuid)
+
+        self._input_by_uuid[formal.uuid] = actual
+        self._input_by_logical_id[formal.logical_id] = actual
+        self._uuid_remap[formal.uuid] = actual.uuid
+        self._logical_id_remap[formal.logical_id] = actual.logical_id
+
+        if isinstance(formal, TupleValue) and isinstance(actual, TupleValue):
+            if len(formal.elements) == len(actual.elements):
+                for formal_element, actual_element in zip(
+                    formal.elements,
+                    actual.elements,
+                    strict=True,
+                ):
+                    self._bind_input(formal_element, actual_element, seen)
+            return
+        if isinstance(formal, DictValue):
+            return
+        if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
+            for formal_dimension, actual_dimension in zip(
+                formal.shape,
+                actual.shape,
+            ):
+                self._bind_input(formal_dimension, actual_dimension, seen)
+            if formal.slice_of is not None and actual.slice_of is not None:
+                self._bind_input(formal.slice_of, actual.slice_of, seen)
+            if formal.slice_start is not None and actual.slice_start is not None:
+                self._bind_input(formal.slice_start, actual.slice_start, seen)
+            if formal.slice_step is not None and actual.slice_step is not None:
+                self._bind_input(formal.slice_step, actual.slice_step, seen)
+        if isinstance(formal, Value) and isinstance(actual, Value):
+            if formal.parent_array is not None and actual.parent_array is not None:
+                self._bind_input(formal.parent_array, actual.parent_array, seen)
+            for formal_index, actual_index in zip(
+                formal.element_indices,
+                actual.element_indices,
+            ):
+                self._bind_input(formal_index, actual_index, seen)
+
+    def _reserve_block(self, block: Block) -> None:
+        """Reserve identifiers for every concrete value owned by a block.
+
+        Args:
+            block (Block): Callee block to scan recursively.
+        """
+        for value in block.input_values:
+            self._reserve_value(value)
+        for value in block.output_values:
+            self._reserve_value(value)
+        for value in block.parameters.values():
+            if isinstance(value, ValueBase):
+                self._reserve_value(cast(ValueLike, value))
+        self._reserve_operations(block.operations)
+
+    def _reserve_operations(self, operations: list[Operation]) -> None:
+        """Reserve values owned or referenced by an operation tree.
+
+        Args:
+            operations (list[Operation]): Operations to scan recursively.
+        """
+        for operation in operations:
+            for value in operation.all_input_values():
+                if isinstance(value, ValueBase):
+                    self._reserve_value(cast(ValueLike, value))
+            for value in operation.results:
+                if isinstance(value, ValueBase):
+                    self._reserve_value(cast(ValueLike, value))
+            nested_op_lists = getattr(operation, "nested_op_lists", None)
+            if callable(nested_op_lists):
+                for nested in nested_op_lists():
+                    self._reserve_operations(nested)
+
+    def _reserve_value(self, value: ValueLike) -> None:
+        """Reserve identifiers for one value and its object references.
+
+        Args:
+            value (ValueLike): Value graph node to reserve.
+        """
+        if value.uuid in self._reserved_uuids:
+            return
+        self._reserved_uuids.add(value.uuid)
+
+        actual = self._bound_actual(value)
+        if actual is not None:
+            self._uuid_remap[value.uuid] = actual.uuid
+            self._logical_id_remap[value.logical_id] = actual.logical_id
+            return
+
+        self._uuid_remap.setdefault(value.uuid, str(uuid_module.uuid4()))
+        self._logical_id_remap.setdefault(
+            value.logical_id,
+            str(uuid_module.uuid4()),
+        )
+        for child in self._value_children(value):
+            self._reserve_value(child)
+
+    def _reserve_output_pass_throughs(self, value: ValueLike) -> None:
+        """Reserve next-version placeholders for input-derived output nodes.
+
+        Args:
+            value (ValueLike): Output graph node to inspect.
+        """
+        actual = self._bound_actual(value)
+        if actual is not None:
+            result = cast(ValueLike, actual.next_version())
+            self._pass_through[value.uuid] = result
+            self._uuid_remap[value.uuid] = result.uuid
+            self._logical_id_remap[value.logical_id] = result.logical_id
+            return
+        for child in self._value_children(value):
+            self._reserve_output_pass_throughs(child)
+
+    @staticmethod
+    def _value_children(value: ValueLike) -> tuple[ValueLike, ...]:
+        """Return object-linked child values for one graph node.
+
+        Args:
+            value (ValueLike): Value graph node.
+
+        Returns:
+            tuple[ValueLike, ...]: Child values referenced by dataclass fields.
+        """
+        if isinstance(value, TupleValue):
+            return value.elements
+        if isinstance(value, DictValue):
+            return tuple(
+                child
+                for key, entry_value in value.entries
+                for child in (key, entry_value)
+            )
+
+        children: list[ValueLike] = []
+        if value.parent_array is not None:
+            children.append(value.parent_array)
+        children.extend(value.element_indices)
+        if isinstance(value, ArrayValue):
+            children.extend(value.shape)
+            if value.slice_of is not None:
+                children.append(value.slice_of)
+            if value.slice_start is not None:
+                children.append(value.slice_start)
+            if value.slice_step is not None:
+                children.append(value.slice_step)
+        return tuple(children)
+
+    def _bound_actual(self, value: ValueLike) -> ValueLike | None:
+        """Return the caller value corresponding to an input-derived value.
+
+        Args:
+            value (ValueLike): Callee-side value.
+
+        Returns:
+            ValueLike | None: Bound caller value, or ``None``.
+        """
+        return self._input_by_uuid.get(
+            value.uuid,
+            self._input_by_logical_id.get(value.logical_id),
+        )
+
+    def _remap_uuid(self, uuid: str) -> str:
+        """Return the caller-local UUID for a callee UUID reference.
+
+        Args:
+            uuid (str): Callee UUID.
+
+        Returns:
+            str: Caller-local UUID when reserved, otherwise ``uuid``.
+        """
+        return self._uuid_remap.get(uuid, uuid)
+
+    def _remap_logical_id(self, logical_id: str) -> str:
+        """Return the caller-local logical ID for a callee reference.
+
+        Args:
+            logical_id (str): Callee logical ID.
+
+        Returns:
+            str: Caller-local logical ID when reserved, otherwise
+                ``logical_id``.
+        """
+        return self._logical_id_remap.get(logical_id, logical_id)
+
+
+def block_call_operands_and_results(
+    block: Block,
+    inputs_map: Mapping[str, ValueLike],
+) -> tuple[list[ValueLike], list[ValueLike]]:
+    """Materialize one block invocation's operands and results.
+
+    Args:
+        block (Block): Callee block.
+        inputs_map (Mapping[str, ValueLike]): Caller values keyed by formal
+            label.
+
+    Returns:
+        tuple[list[ValueLike], list[ValueLike]]: Ordered caller operands and
+        caller-local result values.
+
+    Raises:
+        KeyError: If a formal label is missing from ``inputs_map``.
+        ValueError: If the resulting argument count does not match the block.
+    """
+    inputs = [inputs_map[label] for label in block.label_args]
+    materializer = _CallResultMaterializer(block, inputs)
+    return inputs, [materializer.materialize(output) for output in block.output_values]
+
+
 @dataclasses.dataclass(init=False)
 class InvokeOperation(Operation):
     """Represent a composite, stdlib, or oracle call.
 
     Args:
-        operands (list[Value]): Input values consumed by the call.
-        results (list[Value]): Output values produced by the call.
+        operands (list[ValueLike]): Input values consumed by the call.
+        results (list[ValueLike]): Output values produced by the call.
         target (CallableRef): Callable identity.
         transform (CallTransform): Direct, inverse, or controlled invocation.
         attrs (dict[str, Any]): Compile-time attributes for strategy, arity,
@@ -290,8 +682,8 @@ class InvokeOperation(Operation):
 
     def __init__(
         self,
-        operands: list["Value"] | None = None,
-        results: list["Value"] | None = None,
+        operands: Sequence[ValueLike] | None = None,
+        results: Sequence[ValueLike] | None = None,
         *,
         target: CallableRef | None = None,
         transform: CallTransform = CallTransform.DIRECT,
@@ -301,9 +693,9 @@ class InvokeOperation(Operation):
         """Initialize an invocation operation.
 
         Args:
-            operands (list[Value] | None): Input values consumed by the call.
+            operands (Sequence[ValueLike] | None): Input values consumed by the call.
                 Defaults to ``None``, meaning no operands.
-            results (list[Value] | None): Output values produced by the call.
+            results (Sequence[ValueLike] | None): Output values produced by the call.
                 Defaults to ``None``, meaning no results.
             target (CallableRef | None): Callable identity. Defaults to an
                 anonymous user callable when omitted.
@@ -314,8 +706,14 @@ class InvokeOperation(Operation):
             definition (CallableDef | None): Callable definition. Defaults to
                 ``None``, in which case one is created from ``target``.
         """
-        self.operands = list(operands) if operands is not None else []
-        self.results = list(results) if results is not None else []
+        self.operands = cast(
+            list[Value],
+            list(operands) if operands is not None else [],
+        )
+        self.results = cast(
+            list[Value],
+            list(results) if results is not None else [],
+        )
         self.target = (
             target
             if target is not None

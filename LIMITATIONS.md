@@ -232,17 +232,17 @@ The runtime output, ordinary qkernel-call paths, IR serialization, inline loweri
 
 **Future fix**: teach the frontend merge to rebuild structural handles from merged structural `ValueLike` results.
 
-## Loop-varying branch merges cannot surface as host-side values
+## Measurement-derived RegionArg carries cannot stay inside quantum loops
 
-A measurement-dependent branch merge (`if bit: out = x else: out = y`) whose result is returned or post-processed host-side is lowered to a `SELECT` runtime expression and recomputed per shot from the measurement record. When the merge sits inside a loop body and its condition or branch values are measured *inside* that loop, the value differs per iteration, and the trace-once IR has no loop-carried representation for "the value from the last executed iteration". Rather than silently resolving the output to `None` (or a stale iteration's value), segmentation raises `SeparationError` ("varies across iterations").
+A measurement-dependent branch merge (`if bit: out = x else: out = y`) whose result is returned or post-processed host-side is lowered to a `SELECT` runtime expression. `qmc.range` and `qmc.items` now represent a rebound scalar explicitly as `RegionArg(init, block_arg, yielded, result)`. When the loop is purely classical, the complete loop can run in the post-quantum classical segment and the carried value is recomputed correctly for each raw measurement row. When the same loop also contains quantum work, however, segmentation cannot move the loop to the host or split one loop body across quantum and host segments. Rather than silently resolving the carried output to `None` or a stale iteration, segmentation raises `SeparationError` for the measurement-derived carry.
 
-**When it bites**: returning (or classically post-processing) a variable rebound in a branch inside `qmc.range` / `qmc.items` / `while` when the branch condition or branch values come from measurements taken inside the loop body. Merges over values measured *before* the loop are unaffected — they are loop-invariant, float past the loop, and evaluate correctly.
+**When it bites**: returning or classically post-processing a `UInt` / `Float` rebound inside a `qmc.range` or `qmc.items` loop when its update depends on a measurement and that loop also contains gates or other quantum-effective operations. Purely classical RegionArg loops after a measurement are supported. Measurement-backed `Bit` carries and general `while` carries remain covered by the earlier loop-carried-value limitations.
 
-**Why this trade-off was chosen**: representing the escape value of a loop-varying merge requires loop-carried yields (the `iter_args` / `body_yields` extension planned for the loop-carried-values work). Until loops can yield per-iteration results, any host-side recomputation would have to guess which iteration's measurements to read; failing loudly is the only honest behavior.
+**Why this trade-off was chosen**: RegionArg now captures the iteration semantics in the IR and both the classical executor and ordinary emit-time unrolling can thread values they own. The remaining gap is the segmented execution boundary: a backend runtime classical expression derived from an in-circuit measurement is not surfaced as a host value after each quantum-loop iteration, so the host cannot advance the RegionArg without guessing or replaying backend state.
 
-**Workaround**: measure into distinct qubits/bits outside the loop and select over those, or return the underlying measurement results and compute the reduction in ordinary Python outside the kernel.
+**Workaround**: keep the measurement-derived reduction in a purely classical loop, move quantum work outside that loop, or return the underlying measurements and compute the reduction in ordinary Python outside the kernel.
 
-**Future fix**: when loops gain `iter_args` / `body_yields`, promote the loop-varying merge into a loop yield and lower the yield to the same `SELECT` / runtime-expression machinery.
+**Future fix**: add a segmented control-flow protocol that can expose backend classical-expression results at each loop iteration and feed the updated RegionArg into the next iteration, or let capable backends return the final carried runtime value directly.
 
 ## QFixed measurements cannot be decoded inside runtime control flow
 

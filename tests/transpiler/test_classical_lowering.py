@@ -41,7 +41,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeClassicalExpr,
     RuntimeOpKind,
 )
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import UIntType
@@ -1491,7 +1491,7 @@ class TestMeasurementDerivedOutput:
         )
 
         inlined = InlinePass().run(caller)
-        assert not any(isinstance(op, CallBlockOperation) for op in inlined.operations)
+        assert not any(isinstance(op, InvokeOperation) for op in inlined.operations)
         outer_ops = [
             op
             for op in inlined.operations
@@ -1718,6 +1718,52 @@ class TestMeasurementDerivedOutput:
 
         exe = transpiler.transpile(kernel, bindings={"spec": {0: 1}})
         assert exe.sample(transpiler.executor(), shots=20).result().results == [(1, 20)]
+
+    def test_measurement_derived_uint_region_arg_runs_post_classically(
+        self, transpiler
+    ):
+        """A purely classical RegionArg loop runs after the measurement."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.UInt:
+            q = qmc.qubit("q")
+            condition = qmc.measure(q)
+            total = qmc.uint(0)
+            for _ in qmc.range(2):
+                if condition:
+                    total = total + 1
+                else:
+                    total = total + 2
+            return total
+
+        executable = transpiler.transpile(kernel)
+
+        assert executable.sample(transpiler.executor(), shots=5).result().results == [
+            (4, 5)
+        ]
+
+    def test_measurement_derived_uint_region_arg_in_quantum_loop_is_rejected(
+        self, transpiler
+    ):
+        """A quantum loop cannot carry a host-side measurement-derived UInt."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.UInt:
+            q = qmc.qubit("q")
+            target = qmc.qubit("target")
+            condition = qmc.measure(q)
+            total = qmc.uint(0)
+            for _ in qmc.range(2):
+                target = qmc.h(target)
+                target = qmc.h(target)
+                if condition:
+                    total = total + 1
+                else:
+                    total = total + 2
+            return total
+
+        with pytest.raises(SeparationError, match="loop-carried value 'total'"):
+            transpiler.transpile(kernel)
 
     def test_while_loop_carried_external_measurement_is_rejected(self, transpiler):
         """A while condition cannot be updated from measurements taken before

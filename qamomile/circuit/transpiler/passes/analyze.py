@@ -63,7 +63,9 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
     ``IfOperation`` merge outputs get explicit edges to the condition and
     both branch sources via ``iter_merges`` — the builder does not rely
     on merge storage being reachable through the generic nested-list
-    walk. Also seeds an edge from each ``ArrayValue`` element (``Value``
+    walk. Loop ``RegionArg`` block arguments and results depend on both
+    their initial and yielded values, so taint can cross the loop boundary
+    in either direction. Also seeds an edge from each ``ArrayValue`` element (``Value``
     carrying ``parent_array``) to its parent array UUID, and walks the
     parent's ``slice_of`` chain so that a sliced view (e.g. ``s[0:4:2][i]``
     for ``s = qmc.measure(register)``) inherits taint from the root
@@ -115,6 +117,19 @@ def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
                     deps.add(merge.false_value.uuid)
                     self._seed_structural_edges(merge.true_value)
                     self._seed_structural_edges(merge.false_value)
+            for region_arg in getattr(op, "region_args", ()):
+                carried_dependencies = {
+                    region_arg.init.uuid,
+                    region_arg.yielded.uuid,
+                }
+                self.graph.setdefault(region_arg.block_arg.uuid, set()).update(
+                    carried_dependencies
+                )
+                self.graph.setdefault(region_arg.result.uuid, set()).update(
+                    carried_dependencies
+                )
+                self._seed_structural_edges(region_arg.init)
+                self._seed_structural_edges(region_arg.yielded)
 
         def _seed_structural_edges(self, value: object) -> None:
             """Seed element-to-parent and slice-chain edges for one value.

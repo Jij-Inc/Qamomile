@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, cast
 
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.func_to_block import (
@@ -28,7 +28,7 @@ from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
 from qamomile.circuit.frontend.tracer import Tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueLike
 
 
 def build_specialized_block(
@@ -143,9 +143,16 @@ def create_traced_block(
         result = kernel.func(**dummy_inputs)
         output_values = _extract_output_values(result)
         if emit_return_op:
-            tracer.add_operation(ReturnOperation(operands=output_values, results=[]))
+            tracer.add_operation(
+                ReturnOperation(
+                    operands=cast(list[Value], output_values),
+                    results=[],
+                )
+            )
 
-    input_values = [handle.value for handle in dummy_inputs.values()]
+    input_values: list[ValueLike] = [
+        cast(ValueLike, handle.value) for handle in dummy_inputs.values()
+    ]
     param_slots = build_param_slots(
         signature=kernel.signature,
         input_types=kernel.input_types,
@@ -210,23 +217,23 @@ def build_qkernel(
     return block
 
 
-def _extract_output_values(result: Any) -> list[Value]:
+def _extract_output_values(result: Any) -> list[ValueLike]:
     """Extract IR output values from a qkernel return object.
 
     Args:
         result (Any): Return value from the traced qkernel body.
 
     Returns:
-        list[Value]: Values carried by handle-like return objects.
+        list[ValueLike]: Values carried by handle-like return objects.
     """
-    output_values: list[Value] = []
+    output_values: list[ValueLike] = []
     if result is None:
         return output_values
     if isinstance(result, tuple):
         for item in result:
             if hasattr(item, "value"):
-                output_values.append(item.value)
+                output_values.append(cast(ValueLike, item.value))
         return output_values
     if hasattr(result, "value"):
-        output_values.append(result.value)
+        output_values.append(cast(ValueLike, result.value))
     return output_values

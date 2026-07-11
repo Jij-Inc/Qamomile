@@ -1105,7 +1105,7 @@ class ResourceInterpreter:
             input_allocations = {
                 value.logical_id: _qubit_value_size(value, resolver)
                 for value in block_or_ops.input_values
-                if value.type.is_quantum()
+                if isinstance(value, Value) and value.type.is_quantum()
             }
             body = self.eval_operations(
                 block_or_ops.operations,

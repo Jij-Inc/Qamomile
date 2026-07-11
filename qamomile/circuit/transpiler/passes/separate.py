@@ -11,6 +11,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassical
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
     HasNestedOps,
     IfOperation,
 )
@@ -756,21 +758,24 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Return whether ``op``'s result is needed by a quantum operation.
 
         Checks the quantum-needed set computed in
-        :meth:`_build_segments_list`. Only classical ops that feed a quantum
-        gate (directly or through a chain of other classical expressions) may
-        be absorbed into a quantum segment; ops whose results are block
-        outputs or feed only classical post-processing must stay classical.
+        :meth:`_build_segments_list`. Constant results are excluded because
+        quantum emission resolves their metadata directly and does not need
+        the producing operation in its segment. Only classical ops that feed
+        a non-constant quantum input (directly or through a chain of other
+        classical expressions) may be absorbed into a quantum segment; ops
+        whose results are block outputs or feed only classical
+        post-processing must stay classical.
 
         Args:
             op (Operation): The operation to classify.
 
         Returns:
-            bool: ``True`` if any result UUID is in the quantum-needed set,
-                ``False`` otherwise.
+            bool: ``True`` if any non-constant result UUID is in the
+                quantum-needed set, ``False`` otherwise.
         """
         needed = self._quantum_needed
         for v in op.results:
-            if isinstance(v, ValueBase) and v.uuid in needed:
+            if isinstance(v, ValueBase) and v.uuid in needed and not v.is_constant():
                 return True
         return False
 
@@ -865,8 +870,10 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         Walks the full operation tree (recursing through control-flow
         bodies) and records every operation as a consumer of each of its
-        input values, including extra value fields exposed via
-        ``all_input_values`` (e.g. an ``IfOperation``'s condition).
+        semantic input values, including extra value fields exposed via
+        ``all_input_values`` (e.g. an ``IfOperation``'s condition). For a
+        loop ``RegionArg``, ``init`` and ``yielded`` are reads while
+        ``block_arg`` and ``result`` are definitions and are excluded.
 
         Args:
             operations (list[Operation]): Top-level operations of the block.
@@ -892,8 +899,28 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 Returns:
                     None: Mutates ``self.consumers`` in place.
                 """
-                for v in op.all_input_values():
+                region_args = getattr(op, "region_args", ())
+                region_definition_uuids = {
+                    value.uuid
+                    for region_arg in region_args
+                    for value in (region_arg.block_arg, region_arg.result)
+                }
+                semantic_inputs = [
+                    value
+                    for value in op.all_input_values()
+                    if value.uuid not in region_definition_uuids
+                ]
+                semantic_inputs.extend(
+                    value
+                    for region_arg in region_args
+                    for value in (region_arg.init, region_arg.yielded)
+                )
+                seen: set[str] = set()
+                for v in semantic_inputs:
                     if isinstance(v, ValueBase):
+                        if v.uuid in seen:
+                            continue
+                        seen.add(v.uuid)
                         self.consumers.setdefault(v.uuid, []).append(op)
 
         collector = ConsumerCollector()
@@ -909,7 +936,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         classical merge of a runtime ``IfOperation`` to a ``SELECT``
         expression, and loop-invariant expressions float past their loop,
         so the normal runtime-expression routing surfaces them host-side.
-        Two shapes remain unrepresentable and would otherwise silently
+        Three shapes remain unrepresentable and would otherwise silently
         resolve to ``None``:
 
         - a scalar classical merge that remains on the if because a branch
@@ -917,7 +944,9 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         - a host-needed runtime expression stranded inside a
           quantum-effective loop body (a loop-varying value — e.g. a
           ``SELECT`` whose sources are measured per iteration), which no
-          classical segment will ever execute.
+          classical segment will ever execute, and
+        - a measurement-derived ``RegionArg`` carry, which the current
+          emit-time loop lowering cannot feed from one iteration to the next.
 
         Fail loudly for both, regardless of whether the value feeds the host
         or another in-circuit consumer. While-condition merges are exempt:
@@ -936,6 +965,21 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             SeparationError: If a scalar classical merge or nested runtime
                 expression cannot be represented safely.
         """
+        if isinstance(op, (ForOperation, ForItemsOperation)):
+            for region_arg in op.region_args:
+                if {
+                    region_arg.yielded.uuid,
+                    region_arg.result.uuid,
+                } & self._measurement_tainted:
+                    raise SeparationError(
+                        f"The loop-carried value '{region_arg.var_name}' is "
+                        "derived from a measurement, but the current backend "
+                        "loop emission cannot carry runtime classical values "
+                        "between iterations. Return the underlying "
+                        "measurements and post-process outside the kernel, or "
+                        "move the measurement-dependent computation outside "
+                        "the loop."
+                    )
         if (
             nested
             and isinstance(op, RuntimeClassicalExpr)
@@ -947,8 +991,8 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 f"returned or used by host-side classical work, but it is "
                 f"computed inside a quantum loop body and varies across "
                 f"iterations, so no classical segment can recompute it "
-                f"(not representable until loop-carried values are "
-                f"formalized). Compute it from values measured outside the "
+                f"with the current execution model. Compute it from values "
+                f"measured outside the "
                 f"loop, or return the underlying measurements and "
                 f"post-process outside the kernel."
             )

@@ -5,7 +5,6 @@ This module is internal. Users interact with ExecutableProgram.sample()/run().
 
 from __future__ import annotations
 
-from collections.abc import Hashable
 from typing import Any, Generic, TypeVar
 
 from qamomile.circuit.ir.value import (
@@ -49,28 +48,6 @@ if __builtins__:  # always True; avoids circular import at module level
 
 T = TypeVar("T")  # Backend circuit type
 _MISSING = object()
-_NUMPY_MODULE: Any | None = None
-_NUMPY_IMPORT_ATTEMPTED = False
-
-
-def _get_numpy_module() -> Any | None:
-    """Return the cached NumPy module when it is available.
-
-    Returns:
-        Any | None: Imported NumPy module, or ``None`` when NumPy is not
-            installed.
-    """
-    global _NUMPY_IMPORT_ATTEMPTED, _NUMPY_MODULE
-
-    if not _NUMPY_IMPORT_ATTEMPTED:
-        np_module: Any | None
-        try:
-            import numpy as np_module
-        except ImportError:
-            np_module = None
-        _NUMPY_MODULE = np_module
-        _NUMPY_IMPORT_ATTEMPTED = True
-    return _NUMPY_MODULE
 
 
 class ProgramOrchestrator(Generic[T]):
@@ -112,7 +89,7 @@ class ProgramOrchestrator(Generic[T]):
         raw_counts = executor.execute(circuit, shots)
 
         def convert_counts(raw_counts: dict[str, int]) -> list[tuple[Any, int]]:
-            aggregated: dict[Hashable, tuple[Any, int]] = {}
+            results: list[tuple[Any, int]] = []
             for bitstring, count in raw_counts.items():
                 shot_context = context.copy()
                 bits = self._bitstring_to_tuple(bitstring)
@@ -123,13 +100,8 @@ class ProgramOrchestrator(Generic[T]):
                     value = self._resolve_outputs(shot_context)
                 else:
                     value = bits
-                key = self._sample_result_key(value)
-                if key in aggregated:
-                    original_value, existing_count = aggregated[key]
-                    aggregated[key] = (original_value, existing_count + count)
-                else:
-                    aggregated[key] = (value, count)
-            return list(aggregated.values())
+                results.append((value, count))
+            return results
 
         return SampleJob(raw_counts, convert_counts, shots)
 
@@ -1013,52 +985,3 @@ class ProgramOrchestrator(Generic[T]):
         if param_name and context.has(param_name):
             return int(context.get(param_name))
         return None
-
-    @classmethod
-    def _sample_result_key(cls, value: Any) -> Hashable:
-        """Build an exact, hashable aggregation key for a sample result.
-
-        Args:
-            value (Any): Typed sample result value.
-
-        Returns:
-            Hashable: Key that preserves container structure. Floating-point
-                values are not rounded; NaN values are not intentionally
-                coalesced because normal exact equality does not make two NaNs
-                equal.
-        """
-        if isinstance(value, tuple):
-            return ("tuple", tuple(cls._sample_result_key(v) for v in value))
-        if isinstance(value, list):
-            return ("list", tuple(cls._sample_result_key(v) for v in value))
-        if isinstance(value, dict):
-            return (
-                "dict",
-                frozenset(
-                    (cls._sample_result_key(k), cls._sample_result_key(v))
-                    for k, v in value.items()
-                ),
-            )
-
-        np_module = _get_numpy_module()
-
-        if np_module is not None:
-            if isinstance(value, np_module.ndarray):
-                return (
-                    "ndarray",
-                    value.dtype.str,
-                    tuple(value.shape),
-                    tuple(
-                        cls._sample_result_key(v) for v in value.reshape(-1).tolist()
-                    ),
-                )
-            if isinstance(value, np_module.generic):
-                return (
-                    "np_scalar",
-                    value.dtype.str,
-                    cls._sample_result_key(value.item()),
-                )
-
-        if isinstance(value, Hashable):
-            return ("scalar", type(value), value)
-        return ("identity", id(value))
