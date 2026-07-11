@@ -8,8 +8,6 @@ from typing import cast
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle import Qubit, UInt, Vector
 
-_MODMUL_NAME = "modmul_const"
-
 
 @qmc.qkernel
 def _majority(
@@ -415,7 +413,7 @@ def _xor_constant(register: Vector[Qubit], value: UInt) -> Vector[Qubit]:
     return register
 
 
-@qmc.composite_gate(name=_MODMUL_NAME)
+@qmc.composite_gate(name="modmul_const")
 def _modmul_const_body(
     control: Qubit,
     register: Vector[Qubit],
