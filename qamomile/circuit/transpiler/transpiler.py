@@ -289,7 +289,7 @@ class Transpiler(ABC, Generic[T]):
         """
         return ParameterShapeResolutionPass(bindings).run(block)
 
-    # Upper bound on unroll iterations for self-recursive @qkernels.
+    # Upper bound on unroll iterations for self-recursive qkernels.
     # 64 covers Suzuki–Trotter up to order 130 (64 levels at 2-per-level).
     MAX_UNROLL_DEPTH: int = 64
 
@@ -358,13 +358,13 @@ class Transpiler(ABC, Generic[T]):
             # (``CompileTimeIfLoweringPass`` does fold compile-time ``if``s
             # inside a ControlledUOperation.block, but that never removes the
             # trapped call itself.) This is the signature of a self-recursive
-            # @qkernel passed to ``qmc.control`` / ``qmc.inverse``; fail fast
+            # qkernel passed to ``qmc.control`` / ``qmc.inverse``; fail fast
             # with a targeted message instead of spinning to
             # ``MAX_UNROLL_DEPTH`` and blaming the bindings.
             if count_unrollable_inline_invokes(block.operations) == 0:
                 raise FrontendTransformError(
                     "qmc.control / qmc.inverse was given a recursive "
-                    "@qkernel: after inlining, an inline callable invocation "
+                    "qkernel: after inlining, an inline callable invocation "
                     "still remains inside the controlled / inverted block, where "
                     "the unroll loop cannot resolve it — inline's cycle "
                     "guard stops after one layer and does not re-enter an "
@@ -376,7 +376,7 @@ class Transpiler(ABC, Generic[T]):
                 )
 
         raise FrontendTransformError(
-            f"Recursive @qkernel did not terminate after "
+            f"Recursive qkernel did not terminate after "
             f"{self.MAX_UNROLL_DEPTH} unroll iterations.  Either the "
             f"recursion does not terminate under the provided bindings, "
             f"or the parameter driving the base-case condition was not "
@@ -631,7 +631,7 @@ class Transpiler(ABC, Generic[T]):
         substituted = self.substitute(block)
         shape_resolved = self.resolve_parameter_shapes(substituted, bindings)
         affine = self.inline(shape_resolved)
-        # Self-recursive @qkernels need iterated inline ↔ partial_eval so
+        # Self-recursive qkernels need iterated inline ↔ partial_eval so
         # each unroll step can have its base-case `if` folded before the
         # next unroll.  No-op when the block is already affine.
         affine = self.unroll_recursion(affine, bindings)

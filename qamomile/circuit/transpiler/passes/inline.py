@@ -137,7 +137,7 @@ def count_unrollable_inline_invokes(operations: list[Operation]) -> int:
     The unroll loop uses this to tell two failure modes apart: a non-zero
     :func:`count_inline_invokes` with a zero ``count_unrollable_inline_invokes``
     means every residual call is trapped inside a controlled / inverted
-    block (i.e. a recursive ``@qkernel`` was passed to ``qmc.control`` /
+    block (i.e. a recursive qkernel was passed to ``qmc.control`` /
     ``qmc.inverse``), as opposed to a genuinely non-terminating top-level
     recursion.
 
