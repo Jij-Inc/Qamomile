@@ -695,6 +695,68 @@ case_controlled_qft_over_uint_slice()
 
 # %% [markdown]
 # (cg-7)=
-# ## 7. まとめ
+# ## 7. 0制御と`qmc.select`
 #
-# `qmc.control(fn, num_controls=...)`を使うことでQamomileのビルトインゲートやユーザ定義の量子カーネルを制御化することができます。`qmc.control`には二つのモードがあり、そのモードは`num_controls`の型で決まります。Pythonの`int`であれば*concrete mode*、`qmc.UInt`(または`n - 1`のような`UInt`式)なら*symbolic mode*です。
+# concrete制御は通常`|1>`で発火します。`control_values=`を渡すと各制御の発火条件を選べます。`0`は0制御(anti-control)、`1`は通常の制御です。sequenceの並びは制御operandの順序に対応します。整数maskはQiskitの`ctrl_state`と同じ規則で、bit `j`が制御operand `j`を表します。幅が固定されるため、このoptionにはconcreteな`num_controls`が必要です。bodyを持たないopaque oracleでは、すべて1のpatternだけを利用できます。
+
+
+# %%
+@qmc.qkernel
+def zero_control_demo() -> qmc.Bit:
+    c = qmc.qubit(name="c")
+    t = qmc.qubit(name="t")
+    # cが|0>の間にXを発火させます。
+    c, t = qmc.control(qmc.x, control_values=(0,))(c, t)
+    return qmc.measure(t)
+
+
+zero_control_counts = dict(
+    transpiler.transpile(zero_control_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+assert zero_control_counts == {1: 256}
+
+# %% [markdown]
+# `qmc.select([U_0, U_1, ...])`を使うと、この考え方を量子multiplexerへ拡張できます。先頭の引数がindex registerで、その後ろに各caseで共有するtarget引数を並べます。indexが`i`を表すとき、case `U_i`が適用されます。indexはbig-endianで、先頭のindex量子ビットが最上位bitです。registerには`ceil(log2(len(cases)))`個の量子ビットが必要です。case数は2のべき乗でなくてもよく、割り当てられていないindex値ではidentityとして動作します。
+#
+# すべてのcaseは引数signatureが同じで、受け取った量子target wireを過不足なく返す必要があります。caseはunitaryであり、測定、射影、reset、内部ancillaの割り当て、追加の古典出力は利用できません。共有する古典parameterはkeywordで渡せます。case内のbound/default分岐はトランスパイル時に解決されます。
+
+
+# %%
+@qmc.qkernel
+def keep_target(q: qmc.Qubit) -> qmc.Qubit:
+    return q
+
+
+@qmc.qkernel
+def flip_target(q: qmc.Qubit) -> qmc.Qubit:
+    return qmc.x(q)
+
+
+@qmc.qkernel
+def select_demo() -> qmc.Bit:
+    index = qmc.qubit_array(1, name="index")
+    index[0] = qmc.x(index[0])  # case 1を選択します。
+    target = qmc.qubit(name="target")
+    index, target = qmc.select([keep_target, flip_target])(index, target)
+    return qmc.measure(target)
+
+
+select_counts = dict(
+    transpiler.transpile(select_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+assert select_counts == {1: 256}
+
+# %% [markdown]
+# SELECTはemitまで単一の高レベルIR operationとして保たれ、emit時にbackendの制御ゲート機構へloweringされます。`qmc.range`内にネストできるほか、選択したbackendがruntime制御フローをサポートする場合は、測定結果を使う`if` / `while`内でも利用できます。`qmc.control`や`qmc.inverse`の内側にも配置できます。
+
+# %% [markdown]
+# (cg-8)=
+# ## 8. まとめ
+#
+# `qmc.control(fn, num_controls=...)`を使うことでQamomileのビルトインゲートやユーザ定義の量子カーネルを制御化することができます。`qmc.control`には二つのモードがあり、そのモードは`num_controls`の型で決まります。Pythonの`int`であれば*concrete mode*、`qmc.UInt`(または`n - 1`のような`UInt`式)なら*symbolic mode*です。concrete modeでは`control_values`による複数の発火patternも利用できます。indexでunitary case群を選択する場合は、`qmc.select`を使うとbig-endian index semanticsと未割り当てbasis stateでのidentity動作を持つ単一の量子multiplexer operationとして表現できます。

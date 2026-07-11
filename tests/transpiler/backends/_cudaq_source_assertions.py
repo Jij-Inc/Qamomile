@@ -233,6 +233,9 @@ class _ExpectedCudaqSourceBuilder:
             if self._mode == ExecutionMode.RUNNABLE:
                 self._emit(self._clbit_store(clbit, f"mz(q[{qubit}])"))
             return
+        if kind == "reset":
+            self._emit(f"reset(q[{args[0]}])")
+            return
         if kind == "barrier":
             return
         if kind == "if_start":
@@ -332,6 +335,10 @@ class TracingCudaqKernelEmitter(CudaqKernelEmitter):
     def emit_h(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         self._record(circuit, "h", qubit)
         super().emit_h(circuit, qubit)
+
+    def emit_reset(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        self._record(circuit, "reset", qubit)
+        super().emit_reset(circuit, qubit)
 
     def emit_x(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
         self._record(circuit, "x", qubit)

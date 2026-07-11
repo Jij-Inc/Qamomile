@@ -1506,11 +1506,10 @@ class TestIfElseDeadMergeFiltering:
         @qkernel
         def circuit(q0: Qubit, q_t: Qubit) -> qm.Bit:
             cond = qm.measure(q0)
-            b = qm.measure(q_t)
             if cond:
                 q_t = qm.x(q_t)
-            # q_t is dead; only b is returned
-            return b
+            # q_t is dead; only cond is returned
+            return cond
 
         graph = circuit.build()
         if_ops = [op for op in graph.operations if isinstance(op, IfOperation)]
@@ -1523,15 +1522,22 @@ class TestIfElseDeadMergeFiltering:
         assert len(qubit_merges) == 0
 
     def test_if_one_sided_new_local_followed_by_store_only_is_allowed(self):
-        """One-sided new local, only stored (not loaded) after -> allowed."""
+        """One-sided new local, only stored (not loaded) after -> allowed.
+
+        ``q1`` is consumed inside the branch and ``q2`` (a distinct qubit) is
+        consumed afterward: reusing ``q1`` after the branch would violate the
+        conditional-move rule (a value consumed on one branch is consumed
+        after the if), so this test deliberately measures a different qubit
+        to isolate the ``b_new`` dead-phi behaviour it is checking.
+        """
 
         @qkernel
-        def circuit(q0: Qubit, q1: Qubit) -> qm.Bit:
+        def circuit(q0: Qubit, q1: Qubit, q2: Qubit) -> qm.Bit:
             cond = qm.measure(q0)
             if cond:
                 b_new = qm.measure(q1)  # noqa: F841
             # b_new is only overwritten, never read
-            b_new = qm.measure(q1)  # noqa: F841
+            b_new = qm.measure(q2)  # noqa: F841
             return cond
 
         graph = circuit.build()

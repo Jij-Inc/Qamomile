@@ -15,19 +15,32 @@ case unitary, exactly like the target / parameter arguments of
 the most-significant bit.
 
 The frontend reuses ``qmc.control``'s operand / result machinery (so every
-control-prefix and target handle pattern is supported identically) but
-emits a single :class:`SelectOperation`, leaving the native-vs-decomposed
-choice to the backend emit pass.
+control-prefix and target handle pattern is supported identically) but emits a
+single :class:`SelectOperation`. The standard emit path lowers that abstract op
+late into per-case controlled unitaries.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
+import numpy as np
+
+from qamomile.circuit.frontend.qkernel_specialization import select_specialized_block
 from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.gate import ControlledUOperation, ResetOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.operation import (
+    Operation,
+    OperationKind,
+    QInitOperation,
+)
 from qamomile.circuit.ir.operation.select import SelectOperation
 
-from .control import ControlledGate, _qkernel_for_callable, _specialized_block_for_call
+from .control import ControlledGate, _qkernel_for_callable
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
@@ -84,6 +97,78 @@ def _signature_key(qkernel: "Any") -> tuple[tuple[str, Any, Any], ...]:
     )
 
 
+def _default_values_equal(left: Any, right: Any) -> bool:
+    """Compare Python parameter defaults without ambiguous array truth values.
+
+    Args:
+        left (Any): Default value from the reference case.
+        right (Any): Default value from another case.
+
+    Returns:
+        bool: Whether the defaults are structurally equal.
+    """
+    if left is right:
+        return True
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        if not isinstance(left, np.ndarray) or not isinstance(right, np.ndarray):
+            return False
+        try:
+            return bool(np.array_equal(left, right, equal_nan=True))
+        except TypeError:
+            return bool(np.array_equal(left, right))
+    if isinstance(left, (list, tuple)) or isinstance(right, (list, tuple)):
+        return (
+            type(left) is type(right)
+            and len(left) == len(right)
+            and all(
+                _default_values_equal(left_item, right_item)
+                for left_item, right_item in zip(left, right, strict=True)
+            )
+        )
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (
+            isinstance(left, dict)
+            and isinstance(right, dict)
+            and left.keys() == right.keys()
+            and all(_default_values_equal(left[key], right[key]) for key in left)
+        )
+    try:
+        return bool(left == right)
+    except (TypeError, ValueError):
+        return False
+
+
+def _signature_keys_equal(
+    left: tuple[tuple[str, Any, Any], ...],
+    right: tuple[tuple[str, Any, Any], ...],
+) -> bool:
+    """Compare case signature keys with structural default-value equality.
+
+    Args:
+        left (tuple[tuple[str, Any, Any], ...]): Reference signature key.
+        right (tuple[tuple[str, Any, Any], ...]): Candidate signature key.
+
+    Returns:
+        bool: Whether names, annotations, order, and defaults all match.
+    """
+    if len(left) != len(right):
+        return False
+    return all(
+        left_name == right_name
+        and left_annotation == right_annotation
+        and _default_values_equal(left_default, right_default)
+        for (
+            left_name,
+            left_annotation,
+            left_default,
+        ), (
+            right_name,
+            right_annotation,
+            right_default,
+        ) in zip(left, right, strict=True)
+    )
+
+
 def _quantum_logical_ids(values: Sequence[Any]) -> tuple[Any, ...]:
     """Return the ordered logical IDs of quantum values in a sequence.
 
@@ -120,7 +205,8 @@ def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
     handle relabel for an ordinary qkernel call but cannot be made conditional
     on a quantum SELECT index; callers must express it as an explicit SWAP
     gate instead. Internal ancillas that are allocated and uncomputed (not
-    returned) are fine — they never appear in ``output_values``.
+    returned) are rejected today because the controlled fallback has no
+    operation-owned ancilla contract.
 
     Args:
         case_blocks (Sequence[Any]): The specialized case blocks, in index
@@ -131,9 +217,22 @@ def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
 
     Raises:
         ValueError: If any case block's quantum output wires are not exactly
-            the quantum input wires it received.
+            the quantum input wires it received, or if its reachable body
+            contains non-unitary behavior or internal ancilla allocation.
     """
     for position, block in enumerate(case_blocks):
+        quantum_inputs = [
+            value for value in block.input_values if value.type.is_quantum()
+        ]
+        if len(block.output_values) != len(quantum_inputs) or any(
+            not value.type.is_quantum() for value in block.output_values
+        ):
+            raise ValueError(
+                f"qmc.select case {position} is not a unitary on the target "
+                f"register: it must return exactly its {len(quantum_inputs)} "
+                f"quantum input wire(s) and no classical outputs, but returns "
+                f"{len(block.output_values)} value(s)."
+            )
         input_ids = _quantum_logical_ids(block.input_values)
         output_ids = _quantum_logical_ids(block.output_values)
         if input_ids != output_ids:
@@ -147,6 +246,104 @@ def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
                 f"not valid selectable unitaries; use explicit gates such "
                 f"as qmc.swap for physical permutations."
             )
+        _validate_case_operations_are_unitary(block, position)
+
+
+def _validate_case_operations_are_unitary(block: Block, position: int) -> None:
+    """Reject non-unitary behavior and internal ancillas in a SELECT case.
+
+    Classical arithmetic and control-flow nodes are allowed because a
+    compile-time-resolvable branch may parameterize an otherwise unitary case;
+    the normal partial-evaluation pipeline lowers it before emission. Hybrid
+    operations and reset are intrinsically non-unitary and cannot appear in a
+    quantum multiplexer case. Internal allocation is also rejected because a
+    SELECT case has no operation-owned ancilla ABI. Operation-owned
+    callable/control/inverse/select bodies are checked recursively so boxing
+    cannot hide a violation.
+
+    Args:
+        block (Block): Case block to inspect recursively.
+        position (int): Case index used in diagnostics.
+
+    Returns:
+        None: The function returns nothing when the case is unitary.
+
+    Raises:
+        ValueError: If a reachable operation is hybrid, resets a qubit, or
+            allocates an internal ancilla.
+    """
+    seen_blocks: set[int] = set()
+
+    def visit_block(candidate: Block) -> None:
+        """Inspect one block once and recurse through owned bodies.
+
+        Args:
+            candidate (Block): Block to inspect.
+
+        Returns:
+            None: The function updates ``seen_blocks`` and raises on failure.
+
+        Raises:
+            ValueError: If a non-unitary or unsupported operation is found.
+        """
+        block_id = id(candidate)
+        if block_id in seen_blocks:
+            return
+        seen_blocks.add(block_id)
+        visit_operations(candidate.operations)
+
+    def visit_operations(operations: Sequence[Operation]) -> None:
+        """Inspect an operation list and every nested operation/body.
+
+        Args:
+            operations (Sequence[Operation]): Operations to inspect.
+
+        Returns:
+            None: The function raises on the first non-unitary operation.
+
+        Raises:
+            ValueError: If a non-unitary or unsupported operation is found.
+        """
+        for operation in operations:
+            if isinstance(operation, QInitOperation):
+                raise ValueError(
+                    f"qmc.select case {position} contains internal "
+                    f"QInitOperation; SELECT cases cannot allocate ancillas."
+                )
+            if operation.operation_kind is OperationKind.HYBRID or isinstance(
+                operation, ResetOperation
+            ):
+                raise ValueError(
+                    f"qmc.select case {position} contains non-unitary "
+                    f"{type(operation).__name__}; SELECT cases may contain "
+                    f"only unitary quantum behavior."
+                )
+            if isinstance(operation, HasNestedOps):
+                for nested in operation.nested_op_lists():
+                    visit_operations(nested)
+            if isinstance(operation, InvokeOperation):
+                definition = operation.definition
+                if definition is not None:
+                    if definition.body is not None:
+                        visit_block(definition.body)
+                    for implementation in definition.implementations:
+                        if implementation.body is not None:
+                            visit_block(implementation.body)
+            if (
+                isinstance(operation, ControlledUOperation)
+                and operation.block is not None
+            ):
+                visit_block(operation.block)
+            if isinstance(operation, InverseBlockOperation):
+                if operation.source_block is not None:
+                    visit_block(operation.source_block)
+                if operation.implementation_block is not None:
+                    visit_block(operation.implementation_block)
+            if isinstance(operation, SelectOperation):
+                for case_block in operation.case_blocks:
+                    visit_block(case_block)
+
+    visit_block(block)
 
 
 class SelectGate:
@@ -178,7 +375,8 @@ class SelectGate:
 
         Raises:
             ValueError: If fewer than two cases are supplied, or the cases
-                do not all share an identical parameter signature.
+                do not all share an identical parameter signature. Case-body
+                footprint and unitarity are validated when the gate is called.
             TypeError: If a case cannot be wrapped into a kernel (missing
                 annotations, unsupported types, or no qubit parameter).
         """
@@ -188,11 +386,12 @@ class SelectGate:
         wrapped = [_qkernel_for_callable(c, caller="select") for c in case_list]
         reference_key = _signature_key(wrapped[0])
         for position, kernel in enumerate(wrapped[1:], start=1):
-            if _signature_key(kernel) != reference_key:
+            candidate_key = _signature_key(kernel)
+            if not _signature_keys_equal(candidate_key, reference_key):
                 raise ValueError(
                     f"qmc.select requires every case to share the same "
                     f"parameter signature; case {position} has signature "
-                    f"{_signature_key(kernel)!r} which differs from case 0's "
+                    f"{candidate_key!r} which differs from case 0's "
                     f"{reference_key!r}. Selected unitaries act on the same "
                     f"target register and receive the same forwarded "
                     f"arguments, so their signatures must match."
@@ -240,7 +439,8 @@ class SelectGate:
         Raises:
             ValueError: If the leading qubits cannot supply exactly
                 ``num_index_qubits`` index qubits on an argument boundary,
-                or no target argument is given.
+                no target argument is given, or a specialized case is not a
+                supported unitary on exactly the shared target register.
             TypeError: On unknown / mistyped forwarded parameters.
             QubitConsumedError: If an index or target qubit was already
                 consumed by an earlier operation.
@@ -257,7 +457,7 @@ class SelectGate:
         # shape-dependent stdlib unitary used as a case does not no-op on
         # its cached symbolic block).
         case_blocks = [
-            _specialized_block_for_call(case, prep.sub_args_resolved)
+            select_specialized_block(case, prep.sub_args_resolved)
             for case in self._cases
         ]
 
@@ -295,10 +495,9 @@ def select(cases: Sequence["QKernel | Callable[..., Any]"]) -> SelectGate:
     index qubit most-significant). ``len(cases)`` need not be a power of
     two; index values ``>= len(cases)`` apply no operation.
 
-    At emit time a backend with a native multiplexer primitive can emit a
-    single instruction; otherwise the op is decomposed into one
-    controlled-U per case, each controlled on the index register with a
-    mixed ``0``/``1`` (anti-/normal) control pattern.
+    The standard emit path decomposes the abstract op into one controlled-U
+    per case, each controlled on the index register with a mixed ``0``/``1``
+    (anti-/normal) activation pattern.
 
     Args:
         cases (Sequence[QKernel | Callable[..., Any]]): The case unitaries
@@ -312,7 +511,8 @@ def select(cases: Sequence["QKernel | Callable[..., Any]"]) -> SelectGate:
 
     Raises:
         ValueError: If fewer than two cases are supplied or the cases do
-            not share an identical parameter signature.
+            not share an identical parameter signature. Case-body footprint
+            and unitarity are validated when the returned gate is called.
         TypeError: If a case cannot be wrapped into a kernel.
 
     Example:

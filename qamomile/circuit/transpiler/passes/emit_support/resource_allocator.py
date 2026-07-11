@@ -6,10 +6,8 @@ import numbers
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-)
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -22,6 +20,8 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
@@ -224,6 +224,19 @@ class ResourceAllocator:
                     clbit_map[clbit_addr] = self._next_clbit_index
                     self._next_clbit_index += 1
 
+            elif isinstance(op, ProjectOperation):
+                qubit_in = op.operands[0]
+                qubit_out = op.results[0]
+                bit_out = op.results[1]
+                self._allocate_qubit_list([qubit_in], [qubit_out], qubit_map)
+                clbit_addr = QubitAddress(bit_out.uuid)
+                if clbit_addr not in clbit_map:
+                    clbit_map[clbit_addr] = self._next_clbit_index
+                    self._next_clbit_index += 1
+
+            elif isinstance(op, ResetOperation):
+                self._allocate_qubit_list(op.operands, op.results, qubit_map)
+
             elif isinstance(op, MeasureVectorOperation):
                 result = op.results[0]
                 if isinstance(result, ArrayValue) and result.shape:
@@ -356,7 +369,7 @@ class ResourceAllocator:
             elif isinstance(op, PauliEvolveOp):
                 self._allocate_pauli_evolve(op, qubit_map)
 
-            elif isinstance(op, (CompositeGateOperation, InverseBlockOperation)):
+            elif isinstance(op, (InverseBlockOperation, InvokeOperation)):
                 self._allocate_composite(op, qubit_map)
 
             elif isinstance(op, ControlledUOperation):
@@ -782,7 +795,7 @@ class ResourceAllocator:
 
     def _allocate_composite(
         self,
-        op: CompositeGateOperation | InverseBlockOperation,
+        op: InverseBlockOperation | InvokeOperation,
         qubit_map: QubitMap,
     ) -> None:
         """Allocate resources for a composite-like quantum operation."""

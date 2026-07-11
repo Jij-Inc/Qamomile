@@ -26,7 +26,14 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit import qkernel
-from qamomile.circuit.frontend.handle import Bit, Float, Observable, Qubit, Vector
+from qamomile.circuit.frontend.handle import (
+    Bit,
+    Float,
+    Observable,
+    Qubit,
+    UInt,
+    Vector,
+)
 
 # ---------------------------------------------------------------------------
 # Module-scope case kernels (qkernel needs file-backed source).
@@ -59,6 +66,19 @@ def _x_gate(q: Qubit) -> Qubit:
     return qmc.x(q)
 
 
+@qmc.composite_gate(name="select_test_x")
+def _composite_x_gate(q: Qubit) -> Qubit:
+    """Apply Pauli-X through a boxed composite callable.
+
+    Args:
+        q (Qubit): Target qubit.
+
+    Returns:
+        Qubit: The target after Pauli-X.
+    """
+    return qmc.x(q)
+
+
 @qkernel
 def _delegating_x_gate(q: Qubit) -> Qubit:
     """Delegate to another qkernel so the case initially contains a call op.
@@ -70,6 +90,19 @@ def _delegating_x_gate(q: Qubit) -> Qubit:
         Qubit: The target after the delegated Pauli-X.
     """
     return _x_gate(q)
+
+
+@qkernel
+def _delegating_composite_x_gate(q: Qubit) -> Qubit:
+    """Call a boxed composite from inside a SELECT case block.
+
+    Args:
+        q (Qubit): Target qubit.
+
+    Returns:
+        Qubit: The target after the boxed Pauli-X.
+    """
+    return _composite_x_gate(q)
 
 
 @qkernel
@@ -98,6 +131,38 @@ def _rz_case(q: Qubit, theta: Float) -> Qubit:
         Qubit: The rotated target qubit.
     """
     return qmc.rz(q, theta)
+
+
+@qkernel
+def _conditional_x_case(q: Qubit, flag: UInt) -> Qubit:
+    """Apply X when a compile-time SELECT case flag is true.
+
+    Args:
+        q (Qubit): Target qubit.
+        flag (UInt): Compile-time branch flag.
+
+    Returns:
+        Qubit: Conditionally flipped target.
+    """
+    if flag:
+        q = qmc.x(q)
+    return q
+
+
+@qkernel
+def _conditional_z_case(q: Qubit, flag: UInt) -> Qubit:
+    """Apply Z when a compile-time SELECT case flag is true.
+
+    Args:
+        q (Qubit): Target qubit.
+        flag (UInt): Compile-time branch flag.
+
+    Returns:
+        Qubit: Conditionally phase-flipped target.
+    """
+    if flag:
+        q = qmc.z(q)
+    return q
 
 
 @qkernel
@@ -188,6 +253,25 @@ def _apply_anti_cx(c: Qubit, t: Qubit) -> tuple[Qubit, Qubit]:
 
 
 @qkernel
+def _apply_anti_composite_x(c: Qubit, t: Qubit) -> tuple[Qubit, Qubit]:
+    """Apply an anti-controlled boxed composite X.
+
+    Args:
+        c (Qubit): Anti-control qubit.
+        t (Qubit): Target qubit.
+
+    Returns:
+        tuple[Qubit, Qubit]: Updated control and target qubits.
+    """
+    c, t = qmc.control(
+        _composite_x_gate,
+        num_controls=1,
+        control_values=(0,),
+    )(c, t)
+    return c, t
+
+
+@qkernel
 def _select_x_body(idx: Qubit, t: Qubit) -> tuple[Qubit, Qubit]:
     """Apply X only for index ``|1>`` under an enclosing control.
 
@@ -214,6 +298,25 @@ def _select_zero_x_body(idx: Qubit, t: Qubit) -> tuple[Qubit, Qubit]:
         tuple[Qubit, Qubit]: Updated index and target qubits.
     """
     idx, t = qmc.select([_x_gate, _id_gate])(idx, t)
+    return idx, t
+
+
+@qkernel
+def _select_then_touch_vector_index(
+    idx: Vector[Qubit],
+    t: Qubit,
+) -> tuple[Vector[Qubit], Qubit]:
+    """Use a vector index element after SELECT inside an outer control.
+
+    Args:
+        idx (Vector[Qubit]): One-qubit SELECT index register.
+        t (Qubit): Identity-case target qubit.
+
+    Returns:
+        tuple[Vector[Qubit], Qubit]: Updated index register and target.
+    """
+    idx, t = qmc.select([_id_gate, _id_gate])(idx, t)
+    idx[0] = qmc.x(idx[0])
     return idx, t
 
 
@@ -402,6 +505,33 @@ class TestZeroControlCrossBackend:
         counts = {bits: cnt for bits, cnt in job.result().results}
         assert set(counts) == {0}, f"{sdk_transpiler.backend_name}: got {counts}"
 
+    def test_composite_anti_control_and_inverse_are_identity(self, sdk_transpiler):
+        """A boxed composite keeps its anti-control through inversion.
+
+        Mixed control values deliberately use structural controlled-U lowering
+        even for boxed composites. This checks that the boxed invocation inside
+        that structural body is emitted correctly and that inverse preserves
+        the anti-control activation pattern.
+        """
+
+        @qkernel
+        def circ() -> Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            c, t = _apply_anti_composite_x(c, t)
+            c, t = qmc.inverse(_apply_anti_composite_x)(c, t)
+            return qmc.measure(t)
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(circ)
+        counts = {
+            bits: cnt
+            for bits, cnt in exe.sample(_executor(sdk_transpiler, 0), shots=256)
+            .result()
+            .results
+        }
+        assert set(counts) == {0}, f"{sdk_transpiler.backend_name}: got {counts}"
+
     def test_anti_control_vector_handle(self, sdk_transpiler):
         """Anti-control accepts a whole ``Vector[Qubit]`` control register.
 
@@ -568,6 +698,33 @@ class TestSelectCrossBackend:
             f"{sdk_transpiler.backend_name}: index_one={index_one} got {counts}"
         )
 
+    @pytest.mark.parametrize("flag", [0, 1])
+    def test_case_compile_time_if_is_lowered(self, sdk_transpiler, flag):
+        """A bound ``if`` inside each case is lowered before controlled emit."""
+
+        @qkernel
+        def circ() -> Bit:
+            idx = qmc.qubit(name="idx")
+            t = qmc.qubit(name="t")
+            idx, t = qmc.select([_conditional_x_case, _conditional_z_case])(
+                idx,
+                t,
+                flag=flag,
+            )
+            return qmc.measure(t)
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(circ)
+        counts = {
+            bits: cnt
+            for bits, cnt in exe.sample(_executor(sdk_transpiler, 0), shots=256)
+            .result()
+            .results
+        }
+        assert set(counts) == {flag}, (
+            f"{sdk_transpiler.backend_name}: flag={flag} got {counts}"
+        )
+
     def test_case_qkernel_calls_are_inlined(self, sdk_transpiler):
         """A case composed from another qkernel executes instead of disappearing.
 
@@ -594,6 +751,53 @@ class TestSelectCrossBackend:
             .results
         }
         assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: got {counts}"
+
+    def test_case_preserves_boxed_composite_under_index_control(self, sdk_transpiler):
+        """An index control still controls a boxed composite inside a case.
+
+        PR #571 keeps composite calls as ``InvokeOperation`` boxes during
+        inlining. SELECT's late decomposition must add its index control to the
+        selected implementation body rather than emitting that body
+        unconditionally.
+        """
+
+        @qkernel
+        def circ() -> Bit:
+            idx = qmc.qubit(name="idx")
+            t = qmc.qubit(name="t")
+            idx, t = qmc.select([_id_gate, _delegating_composite_x_gate])(idx, t)
+            return qmc.measure(t)
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(circ)
+        counts = {
+            bits: cnt
+            for bits, cnt in exe.sample(_executor(sdk_transpiler, 0), shots=256)
+            .result()
+            .results
+        }
+        assert set(counts) == {0}, f"{sdk_transpiler.backend_name}: got {counts}"
+
+        @qkernel
+        def selected_circ() -> Bit:
+            idx = qmc.qubit(name="idx")
+            idx = qmc.x(idx)
+            t = qmc.qubit(name="t")
+            idx, t = qmc.select([_id_gate, _delegating_composite_x_gate])(idx, t)
+            return qmc.measure(t)
+
+        selected_exe = transpiler.transpile(selected_circ)
+        selected_counts = {
+            bits: cnt
+            for bits, cnt in selected_exe.sample(
+                _executor(sdk_transpiler, 1), shots=256
+            )
+            .result()
+            .results
+        }
+        assert set(selected_counts) == {1}, (
+            f"{sdk_transpiler.backend_name}: got {selected_counts}"
+        )
 
     def test_select_nested_under_control(self, sdk_transpiler):
         """An outer controlled-U composes its control with SELECT's index.
@@ -654,6 +858,37 @@ class TestSelectCrossBackend:
         assert set(counts) == {expected}, (
             f"{sdk_transpiler.backend_name}: outer={outer_one} "
             f"index={index_one} got {counts}"
+        )
+
+    @pytest.mark.parametrize("outer_one", [False, True])
+    def test_nested_control_maps_vector_index_result(self, sdk_transpiler, outer_one):
+        """A vector index remains addressable after nested controlled SELECT."""
+
+        @qkernel
+        def circ() -> Bit:
+            outer = qmc.qubit(name="outer")
+            if outer_one:
+                outer = qmc.x(outer)
+            idx = qmc.qubit_array(1, name="idx")
+            t = qmc.qubit(name="t")
+            outer, idx, t = qmc.control(_select_then_touch_vector_index)(
+                outer,
+                idx,
+                t,
+            )
+            return qmc.measure(idx[0])
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(circ)
+        counts = {
+            bits: cnt
+            for bits, cnt in exe.sample(_executor(sdk_transpiler, 0), shots=256)
+            .result()
+            .results
+        }
+        expected = 1 if outer_one else 0
+        assert set(counts) == {expected}, (
+            f"{sdk_transpiler.backend_name}: outer={outer_one} got {counts}"
         )
 
     def test_returned_index_vector_element_remains_mapped(self, sdk_transpiler):
@@ -1141,6 +1376,12 @@ class TestSelectValidation:
         with pytest.raises(ValueError, match="concrete int num_controls"):
             qmc.control(qmc.x, num_controls=n, control_values=(0,))
 
+    def test_opaque_oracle_rejects_zero_control_pattern(self):
+        """A bodyless oracle rejects anti-control without backend semantics."""
+        oracle = qmc.opaque("select_test_oracle", num_qubits=1)
+        with pytest.raises(NotImplementedError, match="body-backed qkernel"):
+            qmc.control(oracle, control_values=(0,))
+
     def test_mismatched_case_defaults_rejected(self):
         """Cases with the same signature but different defaults are rejected.
 
@@ -1156,6 +1397,47 @@ class TestSelectValidation:
         @qkernel
         def case_b(q: Qubit, theta: Float = 0.9) -> Qubit:
             return qmc.rx(q, theta)
+
+        with pytest.raises(ValueError, match="same parameter signature"):
+            qmc.select([case_a, case_b])
+
+    def test_array_case_defaults_compare_structurally(self):
+        """Equal ndarray defaults match without ambiguous truth-value errors."""
+
+        @qkernel
+        def case_a(
+            q: Qubit,
+            angles: Vector[Float] = np.array([0.1, 0.2]),
+        ) -> Qubit:
+            return qmc.rx(q, angles[0])
+
+        @qkernel
+        def case_b(
+            q: Qubit,
+            angles: Vector[Float] = np.array([0.1, 0.2]),
+        ) -> Qubit:
+            return qmc.ry(q, angles[0])
+
+        gate = qmc.select([case_a, case_b])
+
+        assert gate.num_cases == 2
+
+    def test_different_array_case_defaults_are_rejected(self):
+        """Different ndarray defaults remain incompatible case signatures."""
+
+        @qkernel
+        def case_a(
+            q: Qubit,
+            angles: Vector[Float] = np.array([0.1, 0.2]),
+        ) -> Qubit:
+            return qmc.rx(q, angles[0])
+
+        @qkernel
+        def case_b(
+            q: Qubit,
+            angles: Vector[Float] = np.array([0.1, 0.9]),
+        ) -> Qubit:
+            return qmc.ry(q, angles[0])
 
         with pytest.raises(ValueError, match="same parameter signature"):
             qmc.select([case_a, case_b])
@@ -1255,6 +1537,58 @@ class TestSelectValidation:
         with pytest.raises(ValueError, match="not a unitary on the target"):
             _ = circ.block
 
+    def test_case_with_extra_classical_output_rejected(self):
+        """A case cannot silently discard an additional classical result."""
+
+        @qkernel
+        def _returns_flag(q: Qubit) -> tuple[Qubit, UInt]:
+            return q, qmc.uint(1)
+
+        @qkernel
+        def circ() -> Bit:
+            idx = qmc.qubit(name="idx")
+            t = qmc.qubit(name="t")
+            idx, t = qmc.select([_x_gate, _returns_flag])(idx, t)
+            return qmc.measure(t)
+
+        with pytest.raises(ValueError, match="no classical outputs"):
+            _ = circ.block
+
+    def test_reset_case_rejected_as_non_unitary(self):
+        """A reset cannot be hidden inside a unitary SELECT case."""
+
+        @qkernel
+        def _reset_case(q: Qubit) -> Qubit:
+            return qmc.reset(q)
+
+        @qkernel
+        def circ() -> Bit:
+            idx = qmc.qubit(name="idx")
+            t = qmc.qubit(name="t")
+            idx, t = qmc.select([_x_gate, _reset_case])(idx, t)
+            return qmc.measure(t)
+
+        with pytest.raises(ValueError, match="non-unitary ResetOperation"):
+            _ = circ.block
+
+    def test_internal_ancilla_case_rejected(self):
+        """A case cannot allocate an ancilla the controlled ABI cannot map."""
+
+        @qkernel
+        def _ancilla_case(q: Qubit) -> Qubit:
+            _ = qmc.qubit(name="ancilla")
+            return q
+
+        @qkernel
+        def circ() -> Bit:
+            idx = qmc.qubit(name="idx")
+            t = qmc.qubit(name="t")
+            idx, t = qmc.select([_x_gate, _ancilla_case])(idx, t)
+            return qmc.measure(t)
+
+        with pytest.raises(ValueError, match="internal QInitOperation"):
+            _ = circ.block
+
 
 class TestSelectAndControlIrValidation:
     """IR-boundary validation for hand-built / decoded select and control_values."""
@@ -1317,8 +1651,33 @@ class TestSelectAndControlIrValidation:
         """A ``SelectOperation`` with no case blocks raises ``ValueError``."""
         from qamomile.circuit.ir.operation.select import SelectOperation
 
-        with pytest.raises(ValueError, match="at least one case block"):
+        with pytest.raises(ValueError, match="at least two case blocks"):
             SelectOperation(operands=[], results=[], num_index_qubits=1, case_blocks=[])
+
+    def test_select_rejects_zero_index_width(self):
+        """IR SELECT requires a positive index width and multiple cases."""
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.select import SelectOperation
+
+        with pytest.raises(ValueError, match="must be positive"):
+            SelectOperation(
+                operands=[],
+                results=[],
+                num_index_qubits=0,
+                case_blocks=[Block()],
+            )
+
+    @pytest.mark.parametrize("num_controls", [True, 1.0, 0, -1])
+    def test_concrete_controlled_rejects_invalid_control_count(self, num_controls):
+        """IR controlled-U requires a positive plain-integer control count."""
+        from qamomile.circuit.ir.operation.gate import ConcreteControlledU
+
+        with pytest.raises(ValueError, match="positive Python int"):
+            ConcreteControlledU(
+                operands=[],
+                results=[],
+                num_controls=num_controls,
+            )
 
     @pytest.mark.parametrize("num_index_qubits", [True, 1.0])
     def test_select_rejects_non_int_index_width(self, num_index_qubits):
@@ -1457,8 +1816,7 @@ class TestSelectPipelineIntegration:
         assert set(counts) == {(1, 1, 1)}, f"got {counts}"
 
     def test_estimator_counts_select(self):
-        """Resource estimation counts a select (does not silently skip it)."""
-        from qamomile.circuit.estimator import count_gates, qubits_counter
+        """Body-derived estimation counts every controlled SELECT case."""
 
         @qkernel
         def circ() -> Bit:
@@ -1467,11 +1825,14 @@ class TestSelectPipelineIntegration:
             idx, t = qmc.select([_id_gate, _x_gate, _id_gate, _x_gate])(idx, t)
             return qmc.measure(t)
 
-        gate_count = count_gates(circ.block)
-        # 4 cases -> 4 opaque controlled gates.
-        assert int(gate_count.total) == 4, f"got {gate_count.total}"
-        # idx (2) + target (1); ancilla-free cases add nothing.
-        assert int(qubits_counter(circ.block)) == 3
+        estimate = circ.estimate_resources()
+        # Only the two X case bodies contain gates; each is controlled by the
+        # two-qubit index register. Identity cases contribute no logical gate.
+        assert int(estimate.gates.total) == 2
+        assert int(estimate.gates.multi_qubit) == 2
+        # idx (2) + target (1); the cases allocate no ancillas.
+        assert int(estimate.width.allocated_qubits) == 3
+        assert int(estimate.width.peak_qubits) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1556,6 +1917,39 @@ class TestSelectSerializationAndHash:
         assert restored.num_index_qubits == original.num_index_qubits == 2
         assert len(restored.case_blocks) == len(original.case_blocks) == 3
 
+    def test_select_cases_use_block_local_value_tables(self):
+        """Each serialized SELECT case carries only its own Value scope.
+
+        Reusing the top-level encode context for every nested case copied the
+        complete global table into each case, making an N-case SELECT grow
+        quadratically. The decoder already treats every Block as an
+        independent scope, so the encoded tables should be pairwise disjoint
+        for independently traced cases.
+        """
+        from qamomile.circuit.ir.serialize import to_dict
+
+        @qkernel
+        def circ() -> Bit:
+            idx = qmc.qubit(name="idx")
+            t = qmc.qubit(name="t")
+            idx, t = qmc.select([_id_gate, _x_gate])(idx, t)
+            return qmc.measure(t)
+
+        payload = to_dict(_affine(circ))["block"]
+        select_payload = next(
+            operation
+            for operation in payload["operations"]
+            if operation["$type"] == "SelectOperation"
+        )
+        tables = [payload["value_table"]] + [
+            case["value_table"] for case in select_payload["case_blocks"]
+        ]
+        uuid_sets = [{entry["uuid"] for entry in table} for table in tables]
+
+        for left_index, left in enumerate(uuid_sets):
+            for right in uuid_sets[left_index + 1 :]:
+                assert left.isdisjoint(right)
+
     @pytest.mark.parametrize("encode_decode", ["json", "msgpack"])
     def test_control_values_roundtrips(self, encode_decode):
         """An anti-control's ``control_values`` survives serialization."""
@@ -1603,6 +1997,29 @@ class TestSelectSerializationAndHash:
         )
         controlled["control_values"] = [False]
         with pytest.raises(ValueError, match="list of Python int"):
+            from_dict(payload)
+
+    @pytest.mark.parametrize("num_controls", [True, 1.0, "1", 0, -1])
+    def test_decoder_rejects_invalid_control_count(self, num_controls):
+        """Wire decoding rejects coercible and non-positive control counts."""
+        from qamomile.circuit.ir.serialize import from_dict, to_dict
+
+        @qkernel
+        def circ() -> Bit:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            c, t = qmc.control(qmc.x)(c, t)
+            return qmc.measure(t)
+
+        payload = to_dict(_affine(circ))
+        controlled = next(
+            op
+            for op in payload["block"]["operations"]
+            if op["$type"] == "ConcreteControlledU"
+        )
+        controlled["num_controls"] = num_controls
+
+        with pytest.raises(ValueError, match="positive Python int"):
             from_dict(payload)
 
     def test_decoder_rejects_non_int_select_width(self):

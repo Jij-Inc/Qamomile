@@ -25,6 +25,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     _gate_matches_qubit_count,
     _prepare_nested_block_for_emit,
 )
+from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
+    reject_duplicate_physical_indices,
+)
 from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
     map_array_result_group,
 )
@@ -185,6 +188,15 @@ def emit_inverse_block_at_indices(
             f"expected {op.num_target_qubits}, got {len(target_indices)}.",
             operation="InverseBlockOperation",
         )
+
+    # All four downstream paths (native ``gate_inverse`` append, reusable
+    # fallback-gate append, controlled fallback, and the inline expansion) act
+    # on the same combined ``control_indices + target_indices`` set. A single
+    # check here covers them all: an inverse block whose controls/targets alias
+    # at runtime (``inverse(u)(qs[i], qs[j])`` on the diagonal) is physically
+    # ill-defined and would otherwise leak a raw backend error (Qiskit) or
+    # compile silently and crash the simulator (CUDA-Q).
+    reject_duplicate_physical_indices("inverse block", control_indices + target_indices)
 
     input_operands = [*op.target_qubits, *op.parameters]
     can_build_reusable_gate = _emitter_supports_reusable_gates(emit_pass._emitter)

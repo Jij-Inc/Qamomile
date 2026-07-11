@@ -3,8 +3,8 @@
 These tests pin the controlled-fallback lowering of ``exp(-i * gamma * H)``
 wrapped by ``qmc.control``: the shared walker emits the basis change and CX
 ladder uncontrolled and routes only the central ``RZ`` through the
-multi-control machinery (``emit_crz`` for one control, the backend's dense
-``UnitaryMatrix`` hook for two or more).
+multi-control machinery (``emit_crz`` for one control, the shared
+Toffoli-cascade lowering on clean ancillas for two or more).
 
 QURI Parts is the backend that exercises the shared
 ``emit_controlled_pauli_evolve`` helper through its recursive fallback
@@ -38,6 +38,9 @@ import qamomile.circuit as qmc  # noqa: E402
 import qamomile.observable as qm_o  # noqa: E402
 from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 from qamomile.qiskit import QiskitTranspiler  # noqa: E402
+from tests.transpiler._ancilla_assertions import (  # noqa: E402
+    assert_ancillas_uncomputed,
+)
 
 pytestmark = pytest.mark.quri_parts
 
@@ -104,6 +107,29 @@ def _quri_statevector(qp_circuit: Any) -> np.ndarray:
         bound = qp_circuit
     state = GeneralCircuitQuantumState(bound.qubit_count, bound)
     return np.array(evaluate_state_to_vector(state).vector)
+
+
+def _strip_zero_ancillas(statevector: np.ndarray, dim: int) -> np.ndarray:
+    """Project a statevector onto its leading ``dim`` amplitudes.
+
+    The QURI Parts lowering of multi-controlled gates appends clean
+    ancilla qubits after the data qubits and uncomputes them before the
+    circuit ends, so every amplitude beyond the data-qubit dimension
+    must be zero. Qiskit's native controlled gates use no ancillas, so
+    trimming to the Qiskit statevector's size aligns the two for
+    fidelity comparison. Thin wrapper over
+    :func:`assert_ancillas_uncomputed` expressing this module's natural
+    unit (the Qiskit statevector size); that helper holds the shared
+    ancilla-uncomputation assertion.
+
+    Args:
+        statevector (np.ndarray): Full statevector including ancillas.
+        dim (int): Data-qubit dimension to keep (the Qiskit size).
+
+    Returns:
+        np.ndarray: Statevector restricted to the data qubits.
+    """
+    return assert_ancillas_uncomputed(statevector, dim)
 
 
 def _fidelity_err(sv_a: np.ndarray, sv_b: np.ndarray) -> float:
@@ -519,7 +545,9 @@ def test_controlled_pauli_evolve_statevector_matches_qiskit(
     qp_exe = _quri_parts_transpiler().transpile(sample_kernel, bindings=bindings)
 
     sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
-    sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
+    sv_qp = _strip_zero_ancillas(
+        _quri_statevector(qp_exe.compiled_quantum[0].circuit), sv_qk.size
+    )
 
     assert _fidelity_err(sv_qk, sv_qp) < 1e-9
 
@@ -538,7 +566,9 @@ def test_controlled_pauli_evolve_boundary_gamma_matches_qiskit(
     qp_exe = _quri_parts_transpiler().transpile(sample_kernel, bindings=bindings)
 
     sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
-    sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
+    sv_qp = _strip_zero_ancillas(
+        _quri_statevector(qp_exe.compiled_quantum[0].circuit), sv_qk.size
+    )
 
     assert _fidelity_err(sv_qk, sv_qp) < 1e-9
 
@@ -646,11 +676,10 @@ def test_controlled_pauli_evolve_parametric_gamma_raises_on_quri_parts(
 
     The central RZ angle is ``2 * coeff * gamma`` and the constant-term phase
     is ``-gamma * constant``; QURI Parts' Rust-backed runtime ``Parameter``
-    exposes no Python arithmetic, so neither scaling can be expressed (the
-    same pre-existing limitation as uncontrolled ``pauli_evolve``). For two or
-    more controls the dense ``UnitaryMatrix`` path independently requires a
-    compile-time-numeric angle. Either way the controlled lowering surfaces a
-    clear ``EmitError`` at transpile time rather than a raw ``TypeError``.
+    exposes no Python arithmetic, so neither scaling can be expressed
+    regardless of the control count (the same pre-existing limitation as
+    uncontrolled ``pauli_evolve``). The controlled lowering surfaces a clear
+    ``EmitError`` at transpile time rather than a raw ``TypeError``.
     """
     qp_tr = _quri_parts_transpiler()
     with pytest.raises(EmitError):
@@ -679,7 +708,9 @@ def test_controlled_pauli_evolve_distinct_hamiltonians_resolve_independently(
         _cpe_two_hamiltonians, bindings=bindings
     )
     sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
-    sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
+    sv_qp = _strip_zero_ancillas(
+        _quri_statevector(qp_exe.compiled_quantum[0].circuit), sv_qk.size
+    )
 
     assert _fidelity_err(sv_qk, sv_qp) < 1e-9
 
@@ -706,6 +737,8 @@ def test_controlled_pauli_evolve_vector_observable_element(seed: int) -> None:
         _cpe_vector_hamiltonian, bindings=bindings
     )
     sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
-    sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
+    sv_qp = _strip_zero_ancillas(
+        _quri_statevector(qp_exe.compiled_quantum[0].circuit), sv_qk.size
+    )
 
     assert _fidelity_err(sv_qk, sv_qp) < 1e-9

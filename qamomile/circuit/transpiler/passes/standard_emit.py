@@ -11,8 +11,13 @@ subclass override points (used by QiskitEmitPass, CudaqEmitPass).
 
 from __future__ import annotations
 
+import contextlib
 import re
-from typing import Any, Generic, TypeVar
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.value import Value
 
 from qamomile.circuit.ir.operation import (
     Operation,
@@ -26,13 +31,11 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
 )
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DictGetItemOperation,
     StoreArrayElementOperation,
-)
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -48,11 +51,14 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.transpiler.emit_context import EmitContext
 from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
 from qamomile.circuit.transpiler.passes.emit import CompositeGateEmitter, EmitPass
@@ -60,6 +66,8 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     ClbitMap,
     CompositeDecomposer,
     LoopAnalyzer,
+    MultiControlAncillaPool,
+    QubitAddress,
     QubitMap,
     ResourceAllocator,
 )
@@ -69,7 +77,7 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
     handle_cast,
 )
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
-    emit_composite_gate,
+    emit_invoke_operation,
 )
 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
     emit_for,
@@ -83,6 +91,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     emit_controlled_fallback,
     emit_controlled_u,
 )
+from qamomile.circuit.transpiler.passes.emit_support.counting_emitter import (
+    CountingEmitter,
+)
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import emit_gate
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     emit_inverse_block,
@@ -95,12 +106,49 @@ from qamomile.circuit.transpiler.passes.emit_support.measurement_emission import
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     emit_pauli_evolve,
 )
-from qamomile.circuit.transpiler.passes.emit_support.select_emission import (
-    SelectGateEmitter,
-    emit_select,
-)
+from qamomile.circuit.transpiler.passes.emit_support.select_emission import emit_select
 
 T = TypeVar("T")  # Backend circuit type
+
+
+def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
+    """Return True if the segment could reach the multi-control cascade.
+
+    The counting dry-run that sizes the ancilla pool roughly doubles a
+    segment's emission work, so it is only worth running when the segment
+    can actually consume the pool. Only a ``ControlledUOperation`` (a
+    ``qmc.control(...)`` call), an ``InverseBlockOperation`` (whose block
+    may hold controlled gates), or an ``InvokeOperation`` (whose selected
+    callable body may be controlled) reaches the irreducible
+    multi-controlled hook, directly or after control composition. A segment
+    of plain gates, measurements, and classical ops — the common case —
+    never does, so the dry run is skipped. This is only a presence check,
+    not a demand computation: when it says "maybe", the real count still
+    comes from the dry run, so it cannot drift from the emitter.
+
+    Args:
+        operations (list[Operation]): The quantum segment's operations.
+
+    Returns:
+        bool: True if any operation, recursively through control-flow
+            bodies, is a controlled-U, inverse block, or callable invocation.
+    """
+    for op in operations:
+        if isinstance(
+            op,
+            (
+                ControlledUOperation,
+                InverseBlockOperation,
+                InvokeOperation,
+                SelectOperation,
+            ),
+        ):
+            return True
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                if _segment_may_reserve_ancillas(body):
+                    return True
+    return False
 
 
 class StandardEmitPass(EmitPass[T], Generic[T]):
@@ -114,14 +162,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     module functions in ``emit_support/`` by default.
 
     Args:
-        gate_emitter (GateEmitter[T]): Backend-specific gate emitter.
-        bindings (dict[str, Any] | None): Parameter bindings for the circuit.
-        parameters (list[str] | None): Parameter names to preserve as backend
-            parameters.
-        composite_emitters (list[CompositeGateEmitter[T]] | None): Native
-            composite-gate emitters tried in order.
-        select_emitters (list[SelectGateEmitter] | None): Native SELECT
-            emitters tried in order.
+        gate_emitter: Backend-specific gate emitter
+        bindings: Parameter bindings for the circuit
+        parameters: List of parameter names to preserve as backend parameters
+        composite_emitters: Optional list of CompositeGateEmitter for native implementations
     """
 
     def __init__(
@@ -130,28 +174,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
         composite_emitters: list[CompositeGateEmitter[T]] | None = None,
-        select_emitters: list[SelectGateEmitter] | None = None,
+        backend_name: str | None = None,
     ):
-        """Initialize the standard backend-independent emit orchestration.
-
-        Args:
-            gate_emitter (GateEmitter[T]): Backend-specific primitive gate
-                emitter.
-            bindings (dict[str, Any] | None): Compile-time parameter bindings.
-                Defaults to None.
-            parameters (list[str] | None): Parameters preserved for backend
-                runtime binding. Defaults to None.
-            composite_emitters (list[CompositeGateEmitter[T]] | None): Native
-                composite-gate emitters tried before decomposition. Defaults
-                to None.
-            select_emitters (list[SelectGateEmitter] | None): Native SELECT
-                emitters tried before controlled-case decomposition. Defaults
-                to None.
-        """
         super().__init__(bindings, parameters)
         self._emitter = gate_emitter
         self._composite_emitters = composite_emitters or []
-        self._select_emitters = select_emitters or []
+        self.backend_name = backend_name
 
         # Helper classes (``_resolver`` is built by ``EmitPass.__init__``).
         self._allocator = ResourceAllocator(self._resolver)
@@ -166,6 +194,18 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # Populated during measurement emission to support backends
         # where emit_measure is a no-op (e.g., QURI Parts).
         self._measurement_qubit_map: dict[int, int] = {}
+
+        # Clean ancilla qubits reserved for the shared Toffoli-cascade
+        # lowering of irreducible multi-controlled gates. Populated per
+        # quantum segment when ``_reserves_multi_control_ancillas()``
+        # is True; None on backends with native multi-control support.
+        self._mc_ancilla_pool: MultiControlAncillaPool | None = None
+
+        # True only during the count-only dry-run walk in
+        # ``_count_multi_control_ancilla_demand``. Backend paths that build
+        # or manipulate real circuit objects (e.g. QURI Parts' native
+        # inverse) consult this to stay on a counting-safe route.
+        self._counting_emission = False
 
     # ------------------------------------------------------------------
     # Core orchestration (stays on this class)
@@ -218,12 +258,101 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
         clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
 
+        self._mc_ancilla_pool = None
+        if self._reserves_multi_control_ancillas() and _segment_may_reserve_ancillas(
+            operations
+        ):
+            ancilla_demand = self._count_multi_control_ancilla_demand(
+                operations, qubit_count, qubit_map, clbit_map, bindings
+            )
+            if ancilla_demand > 0:
+                self._mc_ancilla_pool = MultiControlAncillaPool(
+                    qubit_count, ancilla_demand
+                )
+                qubit_count += ancilla_demand
+
         circuit = self._emitter.create_circuit(qubit_count, clbit_count)
         self._measurement_qubit_map.clear()
 
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
 
         return circuit, qubit_map, clbit_map
+
+    def _count_multi_control_ancilla_demand(
+        self,
+        operations: list[Operation],
+        data_qubit_count: int,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> int:
+        """Measure the clean-ancilla demand by a count-only dry-run emission.
+
+        Runs the real ``_emit_operations`` walk once against a
+        :class:`CountingEmitter` (every gate a no-op, every reusable-gate /
+        native path declined) and a counting :class:`MultiControlAncillaPool`
+        that records peak concurrent usage instead of a real circuit. Because
+        the walk is the same code the real emission runs, the count cannot
+        drift from the emitter the way a separate mirror estimate could; the
+        capability answers are biased toward the cascade path so the peak is
+        an upper bound. All pass and context state the walk mutates is
+        snapshotted and restored so the throwaway run leaves no trace.
+
+        Args:
+            operations (list[Operation]): The quantum segment's operations.
+            data_qubit_count (int): Number of data qubits already allocated;
+                the counting pool's indices start here (their exact values
+                are irrelevant, only the peak count matters).
+            qubit_map (QubitMap): Data-qubit map; copied for the dry run.
+            clbit_map (ClbitMap): Classical-bit map; copied for the dry run.
+            bindings (dict[str, Any]): Emit bindings; mutations are rolled
+                back after counting.
+
+        Returns:
+            int: The peak number of clean ancilla qubits a real emission of
+                ``operations`` would hold at once.
+        """
+        saved_emitter = self._emitter
+        saved_pool = self._mc_ancilla_pool
+        saved_composites = self._composite_emitters
+        saved_params = dict(self._parameter_map)
+        saved_sources = dict(self._parameter_sources)
+        saved_measure = dict(self._measurement_qubit_map)
+        saved_context = (
+            bindings.snapshot_state()
+            if isinstance(bindings, EmitContext)
+            else dict(bindings)
+        )
+        counting_pool = MultiControlAncillaPool(data_qubit_count, 0, counting=True)
+        self._emitter = cast(GateEmitter[T], CountingEmitter(saved_emitter))
+        self._mc_ancilla_pool = counting_pool
+        self._counting_emission = True
+        # Native composite emitters would construct real circuit objects on
+        # the dummy circuit; disable them so counting stays on the library
+        # decomposition path (which reserves the same or more ancillas).
+        self._composite_emitters = []
+        try:
+            dummy = self._emitter.create_circuit(0, 0)
+            self._emit_operations(
+                dummy, operations, dict(qubit_map), dict(clbit_map), bindings
+            )
+        finally:
+            self._emitter = saved_emitter
+            self._mc_ancilla_pool = saved_pool
+            self._composite_emitters = saved_composites
+            self._counting_emission = False
+            self._parameter_map.clear()
+            self._parameter_map.update(saved_params)
+            self._parameter_sources.clear()
+            self._parameter_sources.update(saved_sources)
+            self._measurement_qubit_map.clear()
+            self._measurement_qubit_map.update(saved_measure)
+            if isinstance(bindings, EmitContext):
+                bindings.restore_state(saved_context)
+            else:
+                bindings.clear()
+                bindings.update(saved_context)
+        return counting_pool.peak
 
     def _emit_operations(
         self,
@@ -233,10 +362,13 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
         force_unroll: bool = False,
+        emit_qinit_reset: bool = False,
     ) -> None:
         """Emit operations to the circuit (dispatcher)."""
         for op in operations:
             if isinstance(op, QInitOperation):
+                if emit_qinit_reset:
+                    self._emit_qinit_reset(circuit, op, qubit_map, bindings)
                 continue
             elif isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
                 # SliceArrayOperation / ReleaseSliceViewOperation are
@@ -259,6 +391,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 emit_gate(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, MeasureOperation):
                 emit_measure(self, circuit, op, qubit_map, clbit_map, bindings)
+            elif isinstance(op, ProjectOperation):
+                self._emit_project(circuit, op, qubit_map, clbit_map, bindings)
+            elif isinstance(op, ResetOperation):
+                self._emit_reset(circuit, op, qubit_map, bindings)
             elif isinstance(op, MeasureVectorOperation):
                 emit_measure_vector(self, circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, MeasureQFixedOperation):
@@ -273,8 +409,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, WhileOperation):
                 self._emit_while(circuit, op, qubit_map, clbit_map, bindings)
-            elif isinstance(op, CompositeGateOperation):
-                emit_composite_gate(self, circuit, op, qubit_map, bindings)
+            elif isinstance(op, InvokeOperation):
+                emit_invoke_operation(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, InverseBlockOperation):
                 self._emit_inverse_block(circuit, op, qubit_map, bindings)
             elif isinstance(op, ControlledUOperation):
@@ -337,6 +473,220 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 raise NotImplementedError(
                     f"Unhandled control flow: {type(op).__name__}"
                 )
+
+    def _emit_qinit_reset(
+        self,
+        circuit: T,
+        op: QInitOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit prepare-zero operations for nested fresh allocations.
+
+        Args:
+            circuit (T): Backend circuit currently being emitted.
+            op (QInitOperation): Fresh logical allocation to prepare.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            bindings (dict[str, Any]): Emit-time bindings for array sizes.
+
+        Raises:
+            EmitError: If a symbolic array allocation size cannot be
+                resolved during emit.
+        """
+        from qamomile.circuit.ir.value import ArrayValue
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        result = op.results[0]
+        if isinstance(result, ArrayValue):
+            if not result.shape:
+                return
+            size = self._resolver.resolve_int_value(result.shape[0], bindings)
+            if size is None:
+                raise EmitError(
+                    "Cannot emit nested fresh allocation for a symbolic-size "
+                    "qubit array. Bind the array size before transpilation.",
+                    operation="QInitOperation",
+                )
+            for index in range(size):
+                qubit = qubit_map[QubitAddress(result.uuid, index)]
+                self._checked_emit_reset(circuit, qubit, "QInitOperation")
+            return
+        qubit = qubit_map[QubitAddress(result.uuid)]
+        self._checked_emit_reset(circuit, qubit, "QInitOperation")
+
+    def _resolve_qubit_operand(
+        self,
+        qubit_val: Value,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+        operation: str,
+    ) -> int:
+        """Resolve a single qubit operand to its physical qubit index.
+
+        Uses the full resolver (which handles array-element qubits with
+        composite keys, e.g. ``q[i]`` after loop unrolling) with a fallback
+        to a direct scalar-UUID lookup. This is the shared resolution path
+        for reset / projection so they behave identically to
+        ``emit_measure`` — a plain ``qubit_map[QubitAddress(uuid)]`` misses
+        array elements, whose addresses are composite ``(root_uuid, index)``
+        keys rather than the element's own UUID.
+
+        Args:
+            qubit_val (Value): The qubit operand to resolve.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            bindings (dict[str, Any]): Emit-time bindings for index/size
+                resolution.
+            operation (str): Operation name for the error message.
+
+        Returns:
+            int: The physical qubit index.
+
+        Raises:
+            EmitError: If the operand cannot be resolved to a physical
+                qubit index (e.g. an unresolved native-loop index that
+                should have forced unrolling, or a missing allocation).
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        index = self._resolver.resolve_qubit_index(qubit_val, qubit_map, bindings)
+        if index is None:
+            scalar_addr = QubitAddress(qubit_val.uuid)
+            if scalar_addr in qubit_map:
+                index = qubit_map[scalar_addr]
+        if index is None:
+            raise EmitError(
+                f"{operation} could not resolve qubit "
+                f"'{qubit_val.name}' (uuid: {qubit_val.uuid[:8]}...) to a "
+                f"physical qubit index. A qubit indexed by a native-loop "
+                f"variable (e.g. `q[i]`) must be unrolled before emit; if you "
+                f"reached this error the loop was not unrolled or the qubit "
+                f"was never allocated.",
+                operation=operation,
+            )
+        return index
+
+    def _emit_project(
+        self,
+        circuit: T,
+        op: ProjectOperation,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a projective measurement that keeps the projected qubit.
+
+        A ``project_z`` is emitted as a measurement whose qubit survives (the
+        handle is rebound to the projected state). The qubit operand is
+        resolved through ``_resolve_qubit_operand`` so array-element qubits
+        (``project_z(q[i])`` after loop unrolling) resolve correctly, matching
+        ``emit_measure``.
+
+        Args:
+            circuit (T): Backend circuit currently being emitted.
+            op (ProjectOperation): The projection operation to emit. Must have
+                already lowered ``project_x`` / ``project_y`` to ``project_z``
+                plus basis-change gates.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            clbit_map (ClbitMap): Current classical-bit address map.
+            bindings (dict[str, Any]): Emit-time bindings for index/size
+                resolution.
+
+        Raises:
+            EmitError: If ``op.axis`` is not ``"z"`` (an unlowered
+                ``project_x`` / ``project_y`` reached emit), if the qubit
+                operand cannot be resolved to a physical index, or if the
+                result classical bit was never allocated.
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
+
+        if op.axis != "z":
+            raise EmitError(
+                f"ProjectOperation axis {op.axis!r} reached emit; only "
+                "project_z should appear because project_x/project_y lower "
+                "through basis-change gates.",
+                operation="ProjectOperation",
+            )
+        qubit = self._resolve_qubit_operand(
+            op.operands[0], qubit_map, bindings, "ProjectOperation"
+        )
+        clbit_addr = QubitAddress(op.results[1].uuid)
+        if clbit_addr not in clbit_map:
+            raise EmitError(
+                f"ProjectOperation could not resolve its result classical bit "
+                f"(uuid: {op.results[1].uuid[:8]}...): it was never allocated "
+                f"in the clbit map.",
+                operation="ProjectOperation",
+            )
+        bit = clbit_map[clbit_addr]
+        self._emitter.emit_measure(circuit, qubit, bit)
+        if self._emitter.measurement_mode == MeasurementMode.STATIC:
+            self._measurement_qubit_map[bit] = qubit
+
+    def _emit_reset(
+        self,
+        circuit: T,
+        op: ResetOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a reset of a qubit to the |0> state.
+
+        The qubit operand is resolved through ``_resolve_qubit_operand`` so
+        array-element qubits (``reset(q[i])`` after loop unrolling) resolve
+        correctly.
+
+        Args:
+            circuit (T): Backend circuit currently being emitted.
+            op (ResetOperation): The reset operation to emit.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            bindings (dict[str, Any]): Emit-time bindings for index/size
+                resolution.
+
+        Raises:
+            EmitError: If the qubit operand cannot be resolved to a physical
+                qubit index (e.g. an unresolved native-loop index that should
+                have forced unrolling, or a missing allocation).
+        """
+        qubit = self._resolve_qubit_operand(
+            op.operands[0], qubit_map, bindings, "ResetOperation"
+        )
+        self._checked_emit_reset(circuit, qubit, "ResetOperation")
+
+    def _checked_emit_reset(self, circuit: T, qubit: int, operation: str) -> None:
+        """Emit a reset, converting backend refusal into an ``EmitError``.
+
+        ``GateEmitter.emit_reset`` raises ``NotImplementedError`` on backends
+        with no reset primitive (e.g. QURI Parts). Letting that raw Python
+        exception escape a normal qkernel compile is a UX bug, so every reset
+        emission funnels through here and surfaces an actionable compile
+        error instead.
+
+        Args:
+            circuit (T): Backend circuit currently being emitted.
+            qubit (int): Physical qubit index to reset.
+            operation (str): Operation label for the error message
+                (``"ResetOperation"`` or ``"QInitOperation"``).
+
+        Raises:
+            EmitError: If the backend emitter does not support reset. The
+                message tells the user to use a reset-capable backend or
+                avoid ``qmc.reset`` / fresh in-loop allocation on this one.
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        try:
+            self._emitter.emit_reset(circuit, qubit)
+        except NotImplementedError as e:
+            raise EmitError(
+                "This backend cannot emit a qubit reset. "
+                "`qmc.reset(...)` and fresh qubit allocation inside a "
+                "runtime loop (which requires a per-iteration reset) need a "
+                "backend with a native reset primitive, e.g. Qiskit or "
+                "CUDA-Q. Either switch backend or restructure the kernel to "
+                "avoid reset on this one.",
+                operation=operation,
+            ) from e
 
     # ------------------------------------------------------------------
     # Methods overridden by backend subclasses (QiskitEmitPass, CudaqEmitPass).
@@ -510,6 +860,62 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             bindings,
         )
 
+    def _reserves_multi_control_ancillas(self) -> bool:
+        """Backend hook: opt in to the shared multi-controlled lowering.
+
+        When True, ``_emit_quantum_segment`` statically estimates the
+        clean-ancilla demand of the segment's multi-controlled gates,
+        appends that many extra qubits to the circuit, and the base
+        ``_emit_irreducible_multi_controlled_gate`` lowers irreducible
+        multi-controlled gates through the shared Toffoli-cascade
+        decomposition (arXiv:2307.07478, Appendix A.3) on those
+        ancillas.
+
+        Backends with a native multi-controlled primitive (e.g. Qiskit's
+        ``gate.control(k)``, CUDA-Q's ``ctrl`` variants) keep the
+        default False so their circuits carry no unused ancilla qubits.
+        A new backend without native multi-control support should
+        override this to return True instead of implementing its own
+        ``_emit_irreducible_multi_controlled_gate``.
+
+        Returns:
+            bool: False in the base implementation.
+        """
+        return False
+
+    @contextlib.contextmanager
+    def _suspended_mc_ancilla_pool(self) -> Iterator[None]:
+        """Suspend the segment's multi-control ancilla pool during nested emission.
+
+        The reserved pool's indices are physical addresses in the *parent*
+        segment's circuit (they sit past that circuit's data qubits). Any
+        helper that emits a block into an independent sub-circuit — the
+        reusable-gate probe (``blockvalue_to_gate``) or a backend-native
+        inverse (``_try_emit_backend_inverse``) — MUST run its sub-circuit
+        emission inside this context so that an irreducible
+        multi-controlled gate in the block does not index the parent pool.
+        Reusing a parent index in the narrower sub-circuit would either
+        exceed its width or silently alias one of its data qubits.
+
+        With the pool suspended the base
+        ``_emit_irreducible_multi_controlled_gate`` finds no pool and
+        raises ``EmitError``; the sub-circuit helpers catch it and fall
+        back to gate-by-gate emission on the parent circuit, where the
+        pool and the composed control set are both valid. Backends that do
+        not reserve a pool (native multi-control) already hold ``None``,
+        so the suspension is a no-op for them.
+
+        Yields:
+            None: Runs the ``with`` body with ``_mc_ancilla_pool`` cleared;
+                the previous pool is restored on exit, including on error.
+        """
+        saved = self._mc_ancilla_pool
+        self._mc_ancilla_pool = None
+        try:
+            yield
+        finally:
+            self._mc_ancilla_pool = saved
+
     def _emit_irreducible_multi_controlled_gate(
         self,
         circuit: T,
@@ -518,14 +924,18 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         target_idx: int,
         angle: Any,
     ) -> None:
-        """Backend hook: emit one irreducible multi-controlled gate.
+        """Emit one irreducible multi-controlled gate.
 
         The shared controlled fallback reduces multi-qubit gate types
         structurally and covers up to two controls on X / Z via
         Toffoli. Single-qubit gates that still carry two or more
-        controls after those reductions land here. Backends that can
-        realize an arbitrary multi-controlled single-qubit gate (e.g.
-        QURI Parts via a dense local unitary) override this method.
+        controls after those reductions land here.
+
+        When the backend reserved a clean-ancilla pool (see
+        ``_reserves_multi_control_ancillas``), the gate is lowered
+        through the shared Toffoli-cascade decomposition. Otherwise the
+        backend is expected to have native multi-control support and
+        never reach this hook; reaching it raises a descriptive error.
 
         Args:
             circuit (T): Backend circuit being built.
@@ -537,18 +947,44 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 gates, or ``None`` for fixed gates.
 
         Raises:
-            EmitError: Always, in the base implementation.
+            EmitError: If no ancilla pool was reserved for this segment,
+                or the pool is smaller than ``len(control_indices) - 1``
+                (a bug in ``_count_multi_control_ancilla_demand``).
         """
         from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            emit_multi_controlled_on_clean_ancillas,
+        )
 
-        raise EmitError(
-            f"Cannot emit {len(control_indices)}-controlled {gate_type.name}: "
-            f"the shared fallback reduces to Toffoli for up to two "
-            f"controls only, and backend {type(self).__name__!r} does "
-            f"not override ``_emit_irreducible_multi_controlled_gate``. "
-            f"Run this kernel on a backend with native multi-control "
-            f"support, or add the hook to the backend's emit pass.",
-            operation="ControlledGate",
+        if self._mc_ancilla_pool is None:
+            raise EmitError(
+                f"Cannot emit {len(control_indices)}-controlled "
+                f"{gate_type.name}: the shared fallback reduces to Toffoli "
+                f"for up to two controls only, and backend "
+                f"{type(self).__name__!r} neither reserves ancillas for the "
+                f"shared Toffoli-cascade decomposition "
+                f"(``_reserves_multi_control_ancillas``) nor overrides "
+                f"``_emit_irreducible_multi_controlled_gate``. Run this "
+                f"kernel on a backend with native multi-control support, or "
+                f"enable the shared decomposition in the backend's emit "
+                f"pass.",
+                operation="ControlledGate",
+            )
+
+        ancillas = self._mc_ancilla_pool.take(len(control_indices) - 1)
+        if ancillas is None:
+            raise EmitError(
+                f"Multi-controlled {gate_type.name} over "
+                f"{len(control_indices)} controls needs "
+                f"{len(control_indices) - 1} clean ancilla qubit(s), but "
+                f"only {self._mc_ancilla_pool.count} were reserved for this "
+                f"segment. This means the count-only demand walk "
+                f"(``_count_multi_control_ancilla_demand``) under-measured "
+                f"the segment's demand — a compiler bug; please report it.",
+                operation="ControlledGate",
+            )
+        emit_multi_controlled_on_clean_ancillas(
+            self, circuit, gate_type, control_indices, target_idx, angle, ancillas
         )
 
     def _blockvalue_to_gate(

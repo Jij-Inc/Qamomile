@@ -854,10 +854,99 @@ case_controlled_qft_over_uint_slice()
 
 # %% [markdown]
 # (cg-7)=
-# ## 7. Summary
+# ## 7. Zero-valued controls and `qmc.select`
+#
+# Concrete controls normally fire on `|1>`. Pass `control_values=` to
+# choose the activation state of each control: `0` creates a
+# zero-control (anti-control), while `1` keeps the normal behavior. A
+# sequence follows control-operand order. An integer mask follows the
+# same convention as Qiskit's `ctrl_state`: bit `j` describes control
+# operand `j`. The width is fixed, so this option requires a concrete
+# `num_controls`; bodyless opaque oracles accept only the all-one
+# pattern.
+
+
+# %%
+@qmc.qkernel
+def zero_control_demo() -> qmc.Bit:
+    c = qmc.qubit(name="c")
+    t = qmc.qubit(name="t")
+    # Fire X while c is |0>.
+    c, t = qmc.control(qmc.x, control_values=(0,))(c, t)
+    return qmc.measure(t)
+
+
+zero_control_counts = dict(
+    transpiler.transpile(zero_control_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+assert zero_control_counts == {1: 256}
+
+# %% [markdown]
+# `qmc.select([U_0, U_1, ...])` generalizes this idea into a quantum
+# multiplexer. Its leading argument is an index register, followed by
+# the shared target arguments. If the index reads `i`, case `U_i` is
+# applied. Index order is big-endian (the first index qubit is the most
+# significant bit), and the register needs
+# `ceil(log2(len(cases)))` qubits. The case count need not be a power of
+# two; unassigned index values act as identity.
+#
+# Every case must have the same argument signature and must return
+# exactly the quantum target wires it receives. Cases are unitary:
+# measurement, projection, reset, internal ancilla allocation, and extra
+# classical outputs are not accepted. Shared classical parameters may be
+# forwarded by keyword; bound/default branches inside a case are resolved at
+# transpile time.
+
+
+# %%
+@qmc.qkernel
+def keep_target(q: qmc.Qubit) -> qmc.Qubit:
+    return q
+
+
+@qmc.qkernel
+def flip_target(q: qmc.Qubit) -> qmc.Qubit:
+    return qmc.x(q)
+
+
+@qmc.qkernel
+def select_demo() -> qmc.Bit:
+    index = qmc.qubit_array(1, name="index")
+    index[0] = qmc.x(index[0])  # Select case 1.
+    target = qmc.qubit(name="target")
+    index, target = qmc.select([keep_target, flip_target])(index, target)
+    return qmc.measure(target)
+
+
+select_counts = dict(
+    transpiler.transpile(select_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+assert select_counts == {1: 256}
+
+# %% [markdown]
+# SELECT remains one high-level IR operation until emission, where it
+# is lowered to the backend's controlled-gate machinery. It can be
+# nested in `qmc.range`, and in measurement-backed `if` / `while`
+# control flow when the selected backend supports that runtime control
+# flow. It can also appear under `qmc.control` or `qmc.inverse`.
+
+# %% [markdown]
+# (cg-8)=
+# ## 8. Summary
 #
 # `qmc.control(fn, num_controls=...)` makes a controlled version
 # of any Qamomile built-in gate or user-defined kernel. It has two
 # modes, decided by the type of `num_controls`: a Python `int`
 # gives *concrete* mode, and a `qmc.UInt` (or a `UInt` expression
 # like `n - 1`) gives *symbolic* mode.
+# Concrete mode also supports mixed activation patterns through
+# `control_values`. For indexed families of unitary cases,
+# `qmc.select` provides a single quantum-multiplexer operation with
+# big-endian index semantics and identity behavior for unassigned
+# basis states.

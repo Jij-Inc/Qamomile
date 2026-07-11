@@ -1,9 +1,66 @@
+"""Compiler core of Qamomile and its public user-facing API surface.
+
+Design center
+-------------
+
+The central abstraction is the ``qkernel`` decorator (``frontend/``):
+users write quantum programs as plain Python functions, the frontend
+traces them into an IR ``Block`` (``ir/``), the transpiler pipeline
+(``transpiler/``) rewrites the IR through staged, ``BlockKind``-gated
+passes, and a backend package emits an executable program. This module
+re-exports everything a user program needs to be written: the decorator,
+the handle types (``Qubit``, ``Vector``, ``Float``, ...), gate /
+measurement / control-flow builders, meta-operations (``control`` /
+``inverse``), the stdlib and algorithm kernels (QFT, QPE, Grover, Shor,
+modular arithmetic), symbolic resource estimation (``estimator/``), and
+the job / result types returned by ``ExecutableProgram.sample`` / ``run``.
+
+Dependency direction (hard constraint)
+--------------------------------------
+
+``qamomile.circuit`` is the design center of the whole project: every
+other qamomile module depends on it, never the reverse —
+``optimization → circuit ← backends`` (qiskit / quri_parts / cudaq /
+...). Nothing under this package may import a backend package or SDK.
+Backend-specific concretization (native gate sets, per-qubit instruction
+encoding, runtime control-flow lowering) belongs in each backend's emit
+pass / ``GateEmitter``; this package owns only the abstract IR, the
+backend-agnostic pass pipeline, and the shared decomposition recipes
+that backends may fall back on.
+
+Module-local constraints
+------------------------
+
+- stdlib / algorithm kernels are imported *after* the frontend symbols
+  because their implementation modules do
+  ``import qamomile.circuit as qmc`` — keep new kernel imports at the
+  bottom of this file.
+- Visualization (``MatplotlibDrawer`` etc.) is lazy-loaded via module
+  ``__getattr__`` so that importing ``qamomile.circuit`` does not pull
+  in matplotlib.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .estimator import (
+    CallResources,
+    DepthResources,
+    EstimateQuality,
+    GateBasis,
+    GateResources,
+    OpaqueCallContext,
+    ResourceEstimate,
+    ResourceEstimator,
+    UnknownResourcePolicy,
+    WidthResources,
+    estimate_resources,
+)
+
 # Frontend API
-from .frontend.composite_gate import CompositeGate, composite_gate
+from .frontend.callable_signature import CallableSignature
+from .frontend.composite_gate import composite_gate as composite_gate
 from .frontend.constructors import bit, float_, qubit, qubit_array, uint
 from .frontend.handle import (
     Bit,
@@ -25,7 +82,14 @@ from .frontend.operation.control import control
 from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.expval import expval
 from .frontend.operation.inverse import inverse
-from .frontend.operation.measurement import measure
+from .frontend.operation.measurement import (
+    measure,
+    measure_reset,
+    project_x,
+    project_y,
+    project_z,
+    reset,
+)
 from .frontend.operation.pauli_evolve import pauli_evolve
 from .frontend.operation.qubit_gates import (
     ccx,
@@ -48,10 +112,22 @@ from .frontend.operation.qubit_gates import (
     z,
 )
 from .frontend.operation.select import select
+from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
-from .stdlib import iqft, qft, qpe
+from .stdlib import (
+    controlled_modular_add,
+    grover_iteration_count,
+    grover_search,
+    iqft,
+    modmul_const,
+    modular_add,
+    qft,
+    qpe,
+    ripple_carry_add,
+    shor_order_finding,
+)
 
 # Execution result / job types (return values of ExecutableProgram.sample / run)
 from .transpiler.job import (
@@ -95,7 +171,20 @@ from .algorithm.arithmetic.modular_incdec import (  # noqa: E402, I001
 __all__ = [
     "qkernel",
     "composite_gate",
-    "CompositeGate",
+    "Oracle",
+    "opaque",
+    "CallableSignature",
+    "CallResources",
+    "DepthResources",
+    "EstimateQuality",
+    "GateBasis",
+    "GateResources",
+    "OpaqueCallContext",
+    "ResourceEstimate",
+    "ResourceEstimator",
+    "UnknownResourcePolicy",
+    "WidthResources",
+    "estimate_resources",
     "control",
     "select",
     "inverse",
@@ -124,6 +213,11 @@ __all__ = [
     "cp",
     "swap",
     "measure",
+    "measure_reset",
+    "project_x",
+    "project_y",
+    "project_z",
+    "reset",
     "expval",
     "pauli_evolve",
     "for_items",
@@ -146,8 +240,15 @@ __all__ = [
     "modular_decrement",
     "modular_increment",
     "qpe",
+    "ripple_carry_add",
+    "modular_add",
+    "controlled_modular_add",
     "iqft",
     "qft",
+    "modmul_const",
+    "shor_order_finding",
+    "grover_search",
+    "grover_iteration_count",
     "QKernel",
     # Job / result types
     "Job",

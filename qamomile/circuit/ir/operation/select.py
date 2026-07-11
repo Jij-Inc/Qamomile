@@ -8,11 +8,10 @@ index (control) register::
     SELECT = sum_i |i><i| (x) U_i
 
 Following the project's IR-abstraction principle, the op stays as a single
-high-level box. Whether a backend realises it with a native multiplexer
-primitive or by gate-by-gate decomposition into per-case controlled-U
-operations (each with a mixed ``0``/``1`` control pattern equal to the
-binary expansion of ``i``) is decided entirely at emit time — the IR does
-not commit to either.
+high-level box. The standard emit path lowers it gate-by-gate into per-case
+controlled-U operations (each with a mixed ``0``/``1`` control pattern equal
+to the binary expansion of ``i``). A backend-specific implementation can
+replace that late lowering without changing the frontend or IR shape.
 """
 
 from __future__ import annotations
@@ -62,8 +61,8 @@ class SelectOperation(Operation):
 
         Guards against malformed externally-decoded or hand-built IR:
 
-        * there must be at least one case block (an empty SELECT is a
-          silent no-op that only maps its results — never valid IR);
+        * there must be at least two case blocks (a zero- or one-case SELECT
+          is not a multiplexer and must be represented directly);
         * the index register must have enough qubits to address every
           case (``2 ** num_index_qubits >= len(case_blocks)``).
 
@@ -72,24 +71,25 @@ class SelectOperation(Operation):
         so this only fires on hand-built or corrupt IR.
 
         Raises:
-            ValueError: If ``case_blocks`` is empty, ``num_index_qubits``
-                is not a Python int or is negative, or there are more case blocks than
-                ``2 ** num_index_qubits`` index values can address.
+            ValueError: If fewer than two case blocks are present,
+                ``num_index_qubits`` is not a positive Python int, or there
+                are more case blocks than ``2 ** num_index_qubits`` index
+                values can address.
         """
         if not is_plain_int(self.num_index_qubits):
             raise ValueError(
                 "SelectOperation.num_index_qubits must be a Python int, "
                 f"got {self.num_index_qubits!r}."
             )
-        if self.num_index_qubits < 0:
+        if self.num_index_qubits < 1:
             raise ValueError(
-                f"SelectOperation.num_index_qubits must be non-negative, "
+                f"SelectOperation.num_index_qubits must be positive, "
                 f"got {self.num_index_qubits}."
             )
-        if not self.case_blocks:
+        if len(self.case_blocks) < 2:
             raise ValueError(
-                "SelectOperation requires at least one case block; an empty "
-                "case list is not a valid multiplexer."
+                "SelectOperation requires at least two case blocks; a zero- "
+                "or one-case operation is not a multiplexer."
             )
         if len(self.case_blocks) > (1 << self.num_index_qubits):
             raise ValueError(

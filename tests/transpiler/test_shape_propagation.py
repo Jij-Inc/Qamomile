@@ -48,6 +48,38 @@ class TestXMixerShapePropagation:
         assert isinstance(result_val, ArrayValue)
         assert len(result_val.shape) == 1
 
+    def test_block_call_inlines_as_invoke_operation(self):
+        """Block.call should produce an inline InvokeOperation."""
+        from qamomile.circuit.ir.block import Block, BlockKind
+        from qamomile.circuit.ir.operation import GateOperation, InvokeOperation
+        from qamomile.circuit.ir.types.primitives import QubitType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.passes.inline import InlinePass
+
+        @qmc.qkernel
+        def helper(q: qmc.Qubit) -> qmc.Qubit:
+            q = qmc.h(q)
+            return q
+
+        q = Value(type=QubitType(), name="q")
+        call_op = helper.block.call(q=q)
+
+        assert isinstance(call_op, InvokeOperation)
+
+        outer = Block(
+            name="outer",
+            label_args=["q"],
+            input_values=[q],
+            output_values=list(call_op.results),
+            operations=[call_op],
+            kind=BlockKind.HIERARCHICAL,
+        )
+        inlined = InlinePass().run(outer)
+
+        assert inlined.kind is BlockKind.AFFINE
+        assert not any(isinstance(op, InvokeOperation) for op in inlined.operations)
+        assert any(isinstance(op, GateOperation) for op in inlined.operations)
+
 
 class TestQAOAPatternShapePropagation:
     """Test QAOA-like patterns that chain ising_cost and x_mixer."""
