@@ -166,37 +166,39 @@ ghz_with_composite.draw(n=4, fold_loops=False)
 # %% [markdown]
 # ## Pattern 3: Opaque Oracle for Top-Down Design
 #
-# Sometimes you want to design an algorithm's structure before implementing every sub-component. An **opaque oracle** has no implementation body — just a name, qubit count, and optional explicit cost.
+# Sometimes you want to design an algorithm's structure before implementing every sub-component. An **opaque oracle** has no implementation body — just a name, qubit count, and optional resource model.
 #
 # This lets you estimate the cost of the overall algorithm while the oracle or sub-routine is still under development.
 #
-# Pass a `ResourceEstimate` through `cost=` when you know the oracle's cost but do not want to implement its body yet.
+# Use `qmc.opaque(...)` with `FixedResourceModel` when you know the oracle's cost but do not want to implement its body yet.
 
 
 # %%
-def fixed_oracle_cost(
+def fixed_oracle_model(
     name: str,
     *,
     query_complexity: int = 1,
     t_gates: int = 0,
-) -> qmc.ResourceEstimate:
-    return qmc.ResourceEstimate(
-        gates=qmc.GateResources(
-            total=t_gates,
-            t=t_gates,
-            non_clifford=t_gates,
-        ),
-        calls=qmc.CallResources(
-            calls_by_name={name: 1},
-            queries_by_name={name: query_complexity},
-        ),
+) -> qmc.FixedResourceModel:
+    return qmc.FixedResourceModel(
+        qmc.ResourceEstimate(
+            gates=qmc.GateResources(
+                total=t_gates,
+                t=t_gates,
+                non_clifford=t_gates,
+            ),
+            calls=qmc.CallResources(
+                calls_by_name={name: 1},
+                queries_by_name={name: query_complexity},
+            ),
+        )
     )
 
 
 oracle_box = qmc.opaque(
     "oracle",
     num_qubits=3,
-    cost=fixed_oracle_cost(
+    resource_model=fixed_oracle_model(
         "oracle",
         query_complexity=1,
         t_gates=40,
@@ -226,7 +228,7 @@ est = algorithm_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
 assert est.qubits == 3
 print("total gates:", est.gates.total)
-# 3 H gates (broadcast over qubit_array(3)) plus the explicit oracle cost.
+# 3 H gates (broadcast over qubit_array(3)) plus the fixed oracle model.
 assert est.gates.total == 43
 
 # %% [markdown]
@@ -237,7 +239,7 @@ assert est.gates.total == 43
 phase_oracle = qmc.opaque(
     "phase_oracle",
     num_qubits=3,
-    cost=fixed_oracle_cost(
+    resource_model=fixed_oracle_model(
         "phase_oracle",
         query_complexity=2,
     ),
@@ -247,7 +249,7 @@ phase_oracle = qmc.opaque(
 mixing_oracle = qmc.opaque(
     "mixing_oracle",
     num_qubits=3,
-    cost=fixed_oracle_cost(
+    resource_model=fixed_oracle_model(
         "mixing_oracle",
         query_complexity=1,
     ),
@@ -297,12 +299,10 @@ assert {k: str(v) for k, v in oracle_est.calls.queries_by_name.items()} == {
 }
 
 # %% [markdown]
-# Pass a concrete value for `rounds` to get numeric counts directly:
+# Substitute a concrete value for `rounds` to get numeric counts:
 
 # %%
-oracle_est_4 = iterative_oracle_skeleton.estimate_resources(
-    inputs={"rounds": 4}
-).simplify()
+oracle_est_4 = oracle_est.substitute(rounds=4)
 print("oracle_calls (rounds=4):", oracle_est_4.calls.calls_by_name)
 assert oracle_est_4.calls.calls_by_name == {"phase_oracle": 5, "mixing_oracle": 4}
 print("oracle_queries (rounds=4):", oracle_est_4.calls.queries_by_name)
@@ -321,7 +321,7 @@ assert oracle_est_4.calls.queries_by_name == {"phase_oracle": 10, "mixing_oracle
 #   The transpiler inlines the call into a flat circuit.
 # - **`@composite_gate`**: gives a qkernel a named identity visible in
 #   diagrams. Stack `@composite_gate` on top of `@qkernel`.
-# - **Opaque oracle**: `qmc.opaque(..., cost=...)` for top-down
+# - **Opaque oracle**: `qmc.opaque(..., resource_model=...)` for top-down
 #   design and resource estimation without a full implementation.
 # - **`est.calls.calls_by_name`**: even when oracle internals are unknown, this reports per-oracle call counts as a dict (including symbolic call counts).
 #
