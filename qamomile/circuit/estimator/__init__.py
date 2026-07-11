@@ -22,16 +22,12 @@ Usage:
         >>> print(estimate.qubits)  # e.g., "n + 3"
         >>> print(estimate.gates.total)  # e.g., "2*n"
 
-    Algorithmic estimates:
-        >>> from qamomile.circuit.estimator.algorithmic import estimate_qaoa
+    Formula-based algorithm estimates live in ``qamomile.resource_estimation``:
+        >>> from qamomile.resource_estimation import estimate_qaoa
         >>> import sympy as sp
         >>> n, p = sp.symbols('n p', positive=True, integer=True)
         >>> est = estimate_qaoa(n, p, num_edges=n*(n-1)/2)
         >>> print(est.gates.total)
-
-References:
-    Based on "Quantum algorithms: A survey of applications and
-    end-to-end complexities" (arXiv:2310.03011v2)
 """
 
 # Core estimators
@@ -41,9 +37,6 @@ from qamomile.circuit.estimator.resource_estimator import (
     ResourceEstimate,
     estimate_resources,
 )
-
-# Algorithmic estimators are in submodule
-# from qamomile.circuit.estimator.algorithmic import ...
 
 __all__ = [
     # Core types

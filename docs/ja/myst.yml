@@ -92,6 +92,17 @@ project:
             - file: api/quri_parts/exceptions
             - file: api/quri_parts/observable
             - file: api/quri_parts/transpiler
+        - file: api/resource_estimation/index
+          children:
+            - file: api/resource_estimation/block_encoding
+            - file: api/resource_estimation/ftqc
+            - file: api/resource_estimation/hamiltonian
+            - file: api/resource_estimation/hamiltonian_algorithms
+            - file: api/resource_estimation/hamiltonian_simulation
+            - file: api/resource_estimation/qaoa
+            - file: api/resource_estimation/qpe
+            - file: api/resource_estimation/quantities
+            - file: api/resource_estimation/workload
 # --- End API Reference ---
 
 site:

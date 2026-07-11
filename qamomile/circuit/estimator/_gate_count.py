@@ -172,6 +172,31 @@ class GateCount:
             },
         )
 
+    def expressions(self) -> tuple[sp.Expr, ...]:
+        """Return every expression carried by the gate-count breakdown.
+
+        This is the canonical enumeration of ``GateCount`` fields. Parameter
+        collection in ``resource_estimator`` and downstream consumers (such as
+        ``qamomile.resource_estimation``) iterate this tuple instead of
+        re-listing the fields, so adding a field here keeps all consumers in
+        sync.
+
+        Returns:
+            tuple[sp.Expr, ...]: Scalar gate-count fields followed by
+                oracle-call and oracle-query expressions.
+        """
+        return (
+            self.total,
+            self.single_qubit,
+            self.two_qubit,
+            self.multi_qubit,
+            self.t_gates,
+            self.clifford_gates,
+            self.rotation_gates,
+            *self.oracle_calls.values(),
+            *self.oracle_queries.values(),
+        )
+
     @staticmethod
     def zero() -> GateCount:
         """Return a zero gate count.
