@@ -20,6 +20,9 @@ from typing import TYPE_CHECKING, Any, Sequence
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
     RuntimeClassicalExpr,
 )
 from qamomile.circuit.ir.operation.callable import (
@@ -63,6 +66,11 @@ from qamomile.circuit.transpiler.passes.emit_support import (
 )
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
+    evaluate_classical_predicate,
+)
+from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+    _bind_loop_var,
+    resolve_loop_bounds,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _bind_block_inputs,
@@ -774,6 +782,7 @@ def _resolve_real_constant(hamiltonian: Any) -> float:
 def _validate_controlled_helper_unitary_ops(
     operations: Sequence[Operation],
     bindings: dict[str, Any],
+    emit_pass: Any | None = None,
 ) -> None:
     """Validate that a CUDA-Q controlled helper is unitary-only.
 
@@ -782,6 +791,9 @@ def _validate_controlled_helper_unitary_ops(
             or in a nested control-flow body.
         bindings (dict[str, Any]): Emit-time bindings used to decide
             whether ``if`` conditions are compile-time constants.
+        emit_pass (Any | None): Active CUDA-Q emit pass used to evaluate
+            predicate operations and loop bounds that become concrete only at
+            emit time. Defaults to ``None`` for structural-only validation.
 
     Raises:
         EmitError: If the controlled target contains measurement,
@@ -796,6 +808,12 @@ def _validate_controlled_helper_unitary_ops(
         RuntimeClassicalExpr,
     )
     for op in operations:
+        if isinstance(op, BinOp) and emit_pass is not None:
+            evaluate_binop(emit_pass, op, bindings)
+            continue
+        if isinstance(op, (CompOp, CondOp, NotOp)) and emit_pass is not None:
+            evaluate_classical_predicate(emit_pass, op, bindings)
+            continue
         if isinstance(op, non_unitary_ops):
             raise EmitError(
                 f"CUDA-Q cudaq.control helper kernels must be unitary-only; "
@@ -808,6 +826,22 @@ def _validate_controlled_helper_unitary_ops(
                 "runtime while-loops are not supported inside a controlled target.",
                 operation="ControlledUOperation",
             )
+        if isinstance(op, ForOperation) and emit_pass is not None:
+            start, stop, step = resolve_loop_bounds(
+                emit_pass._resolver,
+                op,
+                bindings,
+            )
+            if start is not None and stop is not None and step is not None:
+                for index in range(start, stop, step):
+                    loop_bindings = bindings.copy()
+                    _bind_loop_var(loop_bindings, op, index)
+                    _validate_controlled_helper_unitary_ops(
+                        op.operations,
+                        loop_bindings,
+                        emit_pass,
+                    )
+                continue
         if isinstance(op, IfOperation):
             resolved_condition = resolve_if_condition(op.condition, bindings)
             if resolved_condition is None:
@@ -820,17 +854,51 @@ def _validate_controlled_helper_unitary_ops(
             selected_ops = (
                 op.true_operations if resolved_condition else op.false_operations
             )
-            _validate_controlled_helper_unitary_ops(selected_ops, bindings)
+            _validate_controlled_helper_unitary_ops(
+                selected_ops,
+                bindings,
+                emit_pass,
+            )
             continue
         if isinstance(op, ControlledUOperation) and op.block is not None:
-            _validate_controlled_helper_unitary_ops(op.block.operations, bindings)
+            local_bindings = bindings
+            if emit_pass is not None:
+                local_bindings = emit_pass._resolver.bind_block_params(
+                    op.block,
+                    op.param_operands,
+                    bindings,
+                )
+            _validate_controlled_helper_unitary_ops(
+                op.block.operations,
+                local_bindings,
+                emit_pass,
+            )
         if isinstance(op, InvokeOperation):
-            body = op.effective_body()
+            body = op.effective_body(
+                backend=getattr(emit_pass, "backend_name", None)
+                if emit_pass is not None
+                else None
+            )
             if body is not None:
-                _validate_controlled_helper_unitary_ops(body.operations, bindings)
+                local_bindings = bindings
+                if emit_pass is not None:
+                    local_bindings = emit_pass._resolver.bind_block_params(
+                        body,
+                        op.parameters,
+                        bindings,
+                    )
+                _validate_controlled_helper_unitary_ops(
+                    body.operations,
+                    local_bindings,
+                    emit_pass,
+                )
         if isinstance(op, HasNestedOps):
             for nested in op.nested_op_lists():
-                _validate_controlled_helper_unitary_ops(nested, bindings)
+                _validate_controlled_helper_unitary_ops(
+                    nested,
+                    bindings,
+                    emit_pass,
+                )
 
 
 def _validate_adjoint_helper_ops(
@@ -1552,7 +1620,11 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             "controlled gate (CUDA-Q fallback)", control_indices + target_indices
         )
 
-        _validate_controlled_helper_unitary_ops(block_value.operations, bindings)
+        _validate_controlled_helper_unitary_ops(
+            block_value.operations,
+            bindings,
+            self,
+        )
 
         helper_targets = list(range(len(target_indices)))
         helper_qubit_map = _build_helper_qubit_map(

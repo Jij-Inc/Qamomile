@@ -355,6 +355,20 @@ def _x_if_sel_zero(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
     return q
 
 
+@qmc.composite_gate(name="boxed_x_if_sel_zero")
+def _boxed_x_if_sel_zero(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
+    """Flip ``q`` in a boxed callable when compile-time ``sel`` is zero."""
+    if sel == 0:
+        q = qmc.x(q)
+    return q
+
+
+@qmc.qkernel
+def _boxed_if_wrapper(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
+    """Forward through a direct boxed callable inside another qkernel."""
+    return _boxed_x_if_sel_zero(q, sel)
+
+
 @qmc.qkernel
 def _x_in_for_if_sel_zero(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
     """Flip ``q`` in a one-iteration loop when ``sel`` equals zero."""
@@ -385,6 +399,105 @@ def controlled_if_comparison_run(sel: qmc.UInt, obs: qmc.Observable) -> qmc.Floa
     q = qmc.qubit_array(2, "q")
     q[0] = qmc.x(q[0])
     q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_composite_if_sample(sel: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled boxed body with a compile-time branch."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_boxed_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_composite_if_run(
+    sel: qmc.UInt,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval for a controlled boxed body with a compile-time branch."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_boxed_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_nested_composite_if_sample(
+    sel: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Sample control over a qkernel that directly invokes a boxed body."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_boxed_if_wrapper)(q[0], q[1], sel)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_nested_composite_if_run(
+    sel: qmc.UInt,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval for control over a direct boxed invocation."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_boxed_if_wrapper)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_loop_selector_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled branch selected by the current loop iteration."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    for i in qmc.range(2):
+        q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], i)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_loop_selector_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a loop-iteration-selected controlled branch."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    for i in qmc.range(2):
+        q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], i)
+    return qmc.expval(q, obs)
+
+
+@qmc.composite_gate(name="interleaved_loop_if")
+def _interleaved_loop_if(
+    first: qmc.Qubit,
+    selector: qmc.UInt,
+    second: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Apply gates through an interleaved signature and arithmetic branch."""
+    first = qmc.x(first)
+    if selector + 1 == 1:
+        second = qmc.x(second)
+    return first, second
+
+
+@qmc.qkernel
+def controlled_interleaved_loop_if_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled boxed branch selected by a loop iteration."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled = qmc.control(_interleaved_loop_if)
+    for selector in qmc.range(2):
+        q[0], q[1], q[2] = controlled(q[0], q[1], selector, q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_interleaved_loop_if_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval for an interleaved boxed loop-selected branch."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled = qmc.control(_interleaved_loop_if)
+    for selector in qmc.range(2):
+        q[0], q[1], q[2] = controlled(q[0], q[1], selector, q[2])
     return qmc.expval(q, obs)
 
 
@@ -1285,6 +1398,70 @@ FRONTEND_EXECUTION_CASES = [
         expected_expval=0.0,
         sample_bindings={"sel": 1},
         run_bindings={"sel": 1, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-composite-if-true",
+        sample_kernel=controlled_composite_if_sample,
+        run_kernel=controlled_composite_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"sel": 0},
+        run_bindings={"sel": 0, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-composite-if-false",
+        sample_kernel=controlled_composite_if_sample,
+        run_kernel=controlled_composite_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=0.0,
+        sample_bindings={"sel": 1},
+        run_bindings={"sel": 1, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-nested-composite-if-true",
+        sample_kernel=controlled_nested_composite_if_sample,
+        run_kernel=controlled_nested_composite_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"sel": 0},
+        run_bindings={"sel": 0, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-nested-composite-if-false",
+        sample_kernel=controlled_nested_composite_if_sample,
+        run_kernel=controlled_nested_composite_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=0.0,
+        sample_bindings={"sel": 1},
+        run_bindings={"sel": 1, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-loop-selector",
+        sample_kernel=controlled_loop_selector_sample,
+        run_kernel=controlled_loop_selector_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-interleaved-loop-if",
+        sample_kernel=controlled_interleaved_loop_if_sample,
+        run_kernel=controlled_interleaved_loop_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1),
+        expected_support={(1, 0, 1)},
+        expected_expval=-1.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2)},
     ),
     FrontendExecutionCase(
         name="controlled-if-in-for",

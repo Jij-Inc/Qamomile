@@ -11,6 +11,7 @@ This prevents ``SegmentationPass`` from seeing classical-only compile-time
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from typing import Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -21,6 +22,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
 )
+from qamomile.circuit.ir.operation.callable import (
+    CallTransform,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -30,6 +35,7 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
@@ -187,8 +193,28 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
        subsequent operations and block outputs.
     """
 
-    def __init__(self, bindings: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        bindings: dict[str, Any] | None = None,
+        *,
+        _under_controlled_unitary: bool = False,
+        _active_block_ids: frozenset[int] | None = None,
+    ):
+        """Initialize compile-time if lowering state.
+
+        Args:
+            bindings (dict[str, Any] | None): Compile-time bindings visible in
+                the current block. Defaults to no bindings.
+            _under_controlled_unitary (bool): Internal context flag indicating
+                that boxed callables encountered here will be decomposed by the
+                controlled emission walker and therefore need their owned
+                bodies lowered too. Defaults to ``False``.
+            _active_block_ids (frozenset[int] | None): Internal recursion-path
+                guard for operation-owned blocks. Defaults to an empty set.
+        """
         self._bindings = bindings or {}
+        self._under_controlled_unitary = _under_controlled_unitary
+        self._active_block_ids = _active_block_ids or frozenset()
 
     @property
     def name(self) -> str:
@@ -428,6 +454,20 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 # target, which QURI Parts / CUDA-Q reject at emit.
                 op = self._lower_controlled_block(op, concrete_values)
 
+            elif isinstance(op, InvokeOperation) and (
+                op.transform is CallTransform.CONTROLLED
+                or self._under_controlled_unitary
+            ):
+                # A boxed callable reached under structural control also owns
+                # fresh-namespace bodies. Lower every body that controlled
+                # emission may select for this invocation's transform.
+                op = self._lower_invoke_bodies(op, concrete_values)
+
+            elif (
+                isinstance(op, InverseBlockOperation) and self._under_controlled_unitary
+            ):
+                op = self._lower_inverse_block(op, concrete_values)
+
             new_ops.append(op)
 
         return new_ops, merge_subst, dead_uuids
@@ -469,26 +509,140 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         """
         block = op.block
         assert block is not None
-        inner_bindings = self._controlled_block_bindings(block, op, concrete_values)
-        new_block = CompileTimeIfLoweringPass(inner_bindings).run(block)
+        new_block = self._lower_operation_owned_block(
+            block,
+            op.param_operands,
+            concrete_values,
+        )
         return dataclasses.replace(op, block=new_block)
 
-    def _controlled_block_bindings(
+    def _lower_invoke_bodies(
+        self,
+        op: InvokeOperation,
+        concrete_values: dict[str, Any],
+    ) -> InvokeOperation:
+        """Lower compile-time ifs in bodies selected for an invocation.
+
+        A callable definition can provide a default body plus backend- or
+        strategy-specific implementations. Emission first looks for a body
+        whose transform matches the invocation and otherwise falls back to the
+        default body, so both sets must be lowered before backend selection.
+        The definition and implementations are copied per call site to avoid
+        mutating a shared callable body when the same callable is invoked with
+        different compile-time arguments.
+
+        Args:
+            op (InvokeOperation): Boxed invocation reached under structural
+                control, or a controlled invocation at the outer level.
+            concrete_values (dict[str, Any]): Outer-namespace concrete values
+                used to resolve the invocation's parameter operands.
+
+        Returns:
+            InvokeOperation: Invocation with every selectable IR body replaced
+            by an independently lowered copy. Bodyless opaque invocations are
+            returned unchanged.
+
+        Raises:
+            ValidationError: If a selected nested body has an unsupported
+                block kind or contains a symbolic-bound slice-view cast source
+                selected by compile-time lowering.
+        """
+        definition = op.definition
+        if definition is None:
+            return op
+
+        changed = False
+        new_body = definition.body
+        if new_body is not None:
+            new_body = self._lower_operation_owned_block(
+                new_body,
+                op.parameters,
+                concrete_values,
+            )
+            changed = True
+
+        new_implementations = []
+        for implementation in definition.implementations:
+            new_implementation = implementation
+            if (
+                implementation.transform is op.transform
+                and implementation.body is not None
+            ):
+                new_implementation = dataclasses.replace(
+                    implementation,
+                    body=self._lower_operation_owned_block(
+                        implementation.body,
+                        op.parameters,
+                        concrete_values,
+                    ),
+                )
+                changed = True
+            new_implementations.append(new_implementation)
+
+        if not changed:
+            return op
+        new_definition = dataclasses.replace(
+            definition,
+            body=new_body,
+            implementations=new_implementations,
+        )
+        return dataclasses.replace(op, definition=new_definition)
+
+    def _lower_inverse_block(
+        self,
+        op: InverseBlockOperation,
+        concrete_values: dict[str, Any],
+    ) -> InverseBlockOperation:
+        """Lower owned inverse blocks reached by controlled decomposition.
+
+        Args:
+            op (InverseBlockOperation): Inverse operation whose forward and
+                fallback bodies may be selected during controlled emission.
+            concrete_values (dict[str, Any]): Outer-namespace concrete values
+                used to resolve the inverse parameter operands.
+
+        Returns:
+            InverseBlockOperation: Copy with each available body independently
+            lowered in its own namespace.
+
+        Raises:
+            ValidationError: If a nested block has an unsupported kind or
+                lowering selects a symbolic-bound slice-view cast source.
+        """
+        source_block = op.source_block
+        if source_block is not None:
+            source_block = self._lower_operation_owned_block(
+                source_block,
+                op.parameters,
+                concrete_values,
+            )
+        implementation_block = op.implementation_block
+        if implementation_block is not None:
+            implementation_block = self._lower_operation_owned_block(
+                implementation_block,
+                op.parameters,
+                concrete_values,
+            )
+        return dataclasses.replace(
+            op,
+            source_block=source_block,
+            implementation_block=implementation_block,
+        )
+
+    def _lower_operation_owned_block(
         self,
         block: Block,
-        op: ControlledUOperation,
+        param_operands: Sequence[ValueBase],
         concrete_values: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Seed inner-block bindings from a controlled-U's classical operands.
+    ) -> Block:
+        """Lower a fresh-namespace block using its call-site parameters.
 
-        Pairs the wrapped block's classical / object input values with the
-        operation's classical / object target operands (both in signature
-        order) and resolves each operand to a compile-time constant via the
-        outer concrete-value map. Resolved entries are keyed by the inner
-        input UUID only. The firewall against outer-namespace name collisions
-        is that this map is a fresh dict seeded exclusively from THIS call's
-        operands — never from the outer bindings — so an outer parameter that
-        happens to share an inner parameter's name cannot mis-seed it.
+        Pairs the block's classical/object inputs with the operation's
+        parameter operands in signature order and resolves each operand via
+        the outer concrete-value map. Resolved values are keyed by inner input
+        UUID only. The fresh map is seeded exclusively from this call's
+        operands, so an outer parameter with the same display name cannot
+        mis-seed the inner parameter.
 
         The inner UUID key is what carries the value into the fresh inner
         pass: :meth:`run` copies it into that pass's
@@ -501,29 +655,38 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         miscompile.
 
         Args:
-            block (Block): The controlled-U's nested unitary block.
-            op (ControlledUOperation): The controlled-U operation whose
-                parameter operands follow the wrapped block's signature.
+            block (Block): Operation-owned block with a fresh value namespace.
+            param_operands (Sequence[ValueBase]): Classical/object call-site
+                operands in the wrapped block's signature order.
             concrete_values (dict[str, Any]): Outer-namespace concrete values
                 used to resolve the operands to compile-time constants.
 
         Returns:
-            dict[str, Any]: Inner-namespace bindings keyed by inner input
-                UUID. Empty when the block has no resolvable classical
-                parameters.
+            Block: Independently lowered block whose value namespace remains
+            local to the operation that owns it.
+
+        Raises:
+            ValidationError: If the nested block has an unsupported kind or
+                lowering selects a symbolic-bound slice-view cast source.
         """
+        block_id = id(block)
+        if block_id in self._active_block_ids:
+            return block
+
         inner_bindings: dict[str, Any] = {}
         resolver = UnifiedValueResolver(
             context=concrete_values, bindings=self._bindings
         )
-        for inner_iv, operand in pair_block_parameter_operands(
-            block, op.param_operands
-        ):
+        for inner_iv, operand in pair_block_parameter_operands(block, param_operands):
             resolved = resolver.resolve(operand)
             if resolved is None:
                 continue
             inner_bindings[inner_iv.uuid] = resolved
-        return inner_bindings
+        return CompileTimeIfLoweringPass(
+            inner_bindings,
+            _under_controlled_unitary=True,
+            _active_block_ids=self._active_block_ids | {block_id},
+        ).run(block)
 
     # ------------------------------------------------------------------
     # Substitution

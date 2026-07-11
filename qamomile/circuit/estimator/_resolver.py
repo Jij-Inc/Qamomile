@@ -23,6 +23,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.callable import CallTransform
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
 from ._utils import BINOP_TO_SYMPY
 
@@ -209,10 +210,7 @@ class ExprResolver:
             actual_operands = actual_operands[call_op.num_control_qubits :]
 
         extra: dict[str, sp.Expr] = {}
-        for i, formal in enumerate(called_block.input_values):
-            if i >= len(actual_operands):
-                break
-            actual = actual_operands[i]
+        for formal, actual in pair_block_operands(called_block, actual_operands):
             extra[formal.uuid] = self.resolve(actual)
             # Map array shape dimension UUIDs
             if isinstance(actual, ArrayValue) and isinstance(formal, ArrayValue):

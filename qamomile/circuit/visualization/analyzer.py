@@ -44,6 +44,9 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    align_formal_operands,
+)
 
 from .geometry import compute_border_padding
 from .style import CircuitStyle
@@ -3869,21 +3872,11 @@ class CircuitAnalyzer:
                 behaviour for an unaligned actual list that was
                 already too short.
         """
-        q_iter = iter(quantum_actuals)
-        c_iter = iter(classical_actuals)
-        aligned: list[ValueBase] = []
-        for formal in formals:
-            pool = q_iter if isinstance(formal.type, QubitType) else c_iter  # type: ignore[attr-defined]
-            try:
-                aligned.append(next(pool))
-            except StopIteration:
-                # Out of actuals for this kind -- stop early so the
-                # downstream ``zip`` sees a truncated list.  Surplus
-                # entries in the other pool are intentionally
-                # dropped: appending them would silently mis-pair
-                # them with later formals.
-                return aligned
-        return aligned
+        return align_formal_operands(
+            formals,
+            quantum_actuals,
+            classical_actuals,
+        )
 
     def _build_block_value_mappings(
         self,

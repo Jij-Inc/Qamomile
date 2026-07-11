@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.value import resolve_root_qubit_address
 from qamomile.circuit.transpiler.block_parameter_binding import (
+    block_parameter_binding_keys,
     pair_block_parameter_operands,
 )
 from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
@@ -363,7 +364,7 @@ class ValueResolver:
 
     def lookup_in_bindings(
         self,
-        value: "Value",
+        value: Any,
         bindings: dict[str, Any],
         *,
         index_array: bool = False,
@@ -395,15 +396,15 @@ class ValueResolver:
            a resolvable parent in ``bindings`` — index into it.
 
         Args:
-            value: The IR Value (or already-concrete Python scalar) to
+            value (Any): The IR value (or already-concrete Python scalar) to
                 resolve.
-            bindings: The active bindings dict.
-            index_array: When True, also resolve array-element accesses
+            bindings (dict[str, Any]): The active bindings dictionary.
+            index_array (bool): When True, also resolve array-element accesses
                 via ``parent_array`` indexing. Off by default because not
                 all callers want to index into bound containers.
 
         Returns:
-            The resolved Python value, or ``None`` if no step matched.
+            Any: The resolved Python value, or ``None`` if no step matched.
         """
         # 1. Already concrete (Python scalar that was passed through).
         if not hasattr(value, "uuid"):
@@ -449,7 +450,7 @@ class ValueResolver:
 
     def resolve_operand_for_binding(
         self,
-        operand: "Value",
+        operand: Any,
         bindings: dict[str, Any],
     ) -> Any:
         """Resolve an operand to a concrete value for block parameter binding.
@@ -457,6 +458,13 @@ class ValueResolver:
         Used when calling a sub-block (e.g. a controlled-U body): each
         param operand at the call site must resolve to a value to seed the
         callee's parameter bindings.
+
+        Args:
+            operand (Any): Call-site value or already-concrete operand.
+            bindings (dict[str, Any]): Parent emit-time bindings.
+
+        Returns:
+            Any: Resolved value, or ``None`` when the operand is symbolic.
         """
         return self.lookup_in_bindings(operand, bindings, index_array=True)
 
@@ -478,18 +486,25 @@ class ValueResolver:
                 resolve the call-site operands.
 
         Returns:
-            dict[str, Any]: Parent bindings extended with resolved local
-            bindings under the nested block's formal parameter names.
+            dict[str, Any]: Parent bindings with each inner formal rebound under
+            both its UUID and sanctioned parameter-name key.
         """
         local_bindings = bindings.copy()
         if not hasattr(block_value, "input_values"):
             return local_bindings
+        for param_input in block_value.input_values:
+            if not (param_input.type.is_classical() or param_input.type.is_object()):
+                continue
+            for key in block_parameter_binding_keys(param_input):
+                local_bindings.pop(key, None)
         for param_input, operand in pair_block_parameter_operands(
             block_value, param_operands
         ):
+            inner_keys = block_parameter_binding_keys(param_input)
             resolved = self.resolve_operand_for_binding(operand, bindings)
             if resolved is not None:
-                local_bindings[param_input.name] = resolved
+                for key in inner_keys:
+                    local_bindings[key] = resolved
         return local_bindings
 
     def resolve_bound_value(

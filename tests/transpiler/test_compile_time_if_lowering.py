@@ -19,6 +19,13 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOpKind,
     NotOp,
 )
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallTransform,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     BranchRebind,
     ForOperation,
@@ -32,6 +39,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     GateOperationType,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
@@ -306,6 +314,22 @@ def _first_controlled_block_ops(block: Block) -> list[Operation]:
             assert op.block is not None
             return op.block.operations
     raise AssertionError("no ControlledUOperation found in block")
+
+
+def _controlled_invoke_ops(block: Block) -> list[InvokeOperation]:
+    """Return the top-level controlled invocation operations in a block.
+
+    Args:
+        block (Block): Lowered block to inspect.
+
+    Returns:
+        list[InvokeOperation]: Controlled boxed invocations in program order.
+    """
+    return [
+        op
+        for op in block.operations
+        if isinstance(op, InvokeOperation) and op.transform is CallTransform.CONTROLLED
+    ]
 
 
 class TestControlledBlockIfLowering:
@@ -662,6 +686,334 @@ class TestControlledBlockIfLowering:
         assert not _find_ops(lowered_loop.operations, IfOperation)
         assert not _find_ops(lowered_loop.operations, CompOp)
         assert len(_find_gates(lowered_loop.operations, GateOperationType.X)) == 1
+
+    def test_if_inside_controlled_while_body_is_lowered_in_fresh_scope(self):
+        """A controlled-owned While body receives isolated compile-time values."""
+        inner_q = _qubit_val("inner_q")
+        inner_sel = _uint_val("inner_sel")
+        comparison, if_op = _make_comparison_if_with_x_gate(inner_sel, inner_q)
+        while_op = WhileOperation(
+            operands=[_bit_val("runtime_condition")],
+            operations=[comparison, if_op],
+        )
+        unitary = Block(
+            name="unitary",
+            input_values=[inner_q, inner_sel],
+            operations=[while_op],
+            kind=BlockKind.AFFINE,
+        )
+        control = _qubit_val("control")
+        target = _qubit_val("target")
+        controlled = ConcreteControlledU(
+            operands=[control, target, _uint_val("actual_sel", const=0)],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=unitary,
+        )
+        outer = Block(
+            name="outer",
+            operations=[controlled],
+            kind=BlockKind.AFFINE,
+        )
+
+        nested_ops = _first_controlled_block_ops(_run_pass(outer))
+
+        [lowered_while] = _find_ops(nested_ops, WhileOperation)
+        assert not _find_ops(lowered_while.operations, IfOperation)
+        assert not _find_ops(lowered_while.operations, CompOp)
+        assert len(_find_gates(lowered_while.operations, GateOperationType.X)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: compile-time ifs inside controlled boxed invocation bodies
+# ---------------------------------------------------------------------------
+
+
+class TestControlledInvokeIfLowering:
+    """Controlled InvokeOperation bodies use the same isolated lowering."""
+
+    @staticmethod
+    def _boxed_comp_if_body() -> qm.QKernel:
+        """Build a boxed one-qubit callable conditioned on ``sel == 0``.
+
+        Returns:
+            QKernel: Composite callable with a compile-time conditional X gate.
+        """
+
+        @qm.composite_gate(name="boxed_x_if_zero")
+        def boxed_x_if_zero(q: qm.Qubit, sel: qm.UInt) -> qm.Qubit:
+            """Apply X when the compile-time selector equals zero."""
+            if sel == 0:
+                q = qm.x(q)
+            return q
+
+        return boxed_x_if_zero
+
+    def test_shared_definition_is_lowered_independently_per_call(self):
+        """Two controlled calls clone and fold one shared composite body."""
+        boxed_x_if_zero = self._boxed_comp_if_body()
+
+        @qm.qkernel
+        def circ() -> qm.Vector[qm.Bit]:
+            qs = qm.qubit_array(3, "qs")
+            qs[0] = qm.x(qs[0])
+            qs[0], qs[1] = qm.control(boxed_x_if_zero)(qs[0], qs[1], 0)
+            qs[0], qs[2] = qm.control(boxed_x_if_zero)(qs[0], qs[2], 1)
+            return qm.measure(qs)
+
+        [true_call, false_call] = _controlled_invoke_ops(_lower(circ))
+        assert true_call.definition is not None
+        assert false_call.definition is not None
+        true_body = true_call.definition.body
+        false_body = false_call.definition.body
+        assert true_body is not None
+        assert false_body is not None
+        assert true_body is not false_body
+        assert not _find_ops(true_body.operations, IfOperation)
+        assert not _find_ops(true_body.operations, CompOp)
+        assert len(_find_gates(true_body.operations, GateOperationType.X)) == 1
+        assert not _find_ops(false_body.operations, IfOperation)
+        assert not _find_ops(false_body.operations, CompOp)
+        assert not _find_gates(false_body.operations, GateOperationType.X)
+
+        source_ops = boxed_x_if_zero.block.operations
+        assert _find_ops(source_ops, IfOperation), (
+            "per-call lowering must not mutate the shared source definition"
+        )
+        assert _find_ops(source_ops, CompOp)
+
+    def test_multiple_parameters_keep_declaration_order(self):
+        """A controlled boxed body pairs its second parameter correctly."""
+
+        @qm.composite_gate(name="boxed_x_if_b_zero")
+        def boxed_x_if_b_zero(
+            q: qm.Qubit,
+            a: qm.UInt,
+            b: qm.UInt,
+        ) -> qm.Qubit:
+            """Apply X when the second compile-time parameter is zero."""
+            if b == 0:
+                q = qm.x(q)
+            return q
+
+        @qm.qkernel
+        def circ() -> qm.Vector[qm.Bit]:
+            qs = qm.qubit_array(2, "qs")
+            qs[0] = qm.x(qs[0])
+            qs[0], qs[1] = qm.control(boxed_x_if_b_zero)(
+                qs[0],
+                qs[1],
+                1,
+                0,
+            )
+            return qm.measure(qs)
+
+        [invoke] = _controlled_invoke_ops(_lower(circ))
+        assert invoke.body is not None
+        assert not _find_ops(invoke.body.operations, IfOperation)
+        assert not _find_ops(invoke.body.operations, CompOp)
+        assert len(_find_gates(invoke.body.operations, GateOperationType.X)) == 1
+
+    def test_direct_boxed_helper_inside_controlled_body_is_lowered(self):
+        """Controlled decomposition descends through a direct boxed helper."""
+        boxed_x_if_zero = self._boxed_comp_if_body()
+
+        @qm.qkernel
+        def wrapper(q: qm.Qubit, sel: qm.UInt) -> qm.Qubit:
+            return boxed_x_if_zero(q, sel)
+
+        @qm.qkernel
+        def circ() -> qm.Vector[qm.Bit]:
+            qs = qm.qubit_array(2, "qs")
+            qs[0] = qm.x(qs[0])
+            qs[0], qs[1] = qm.control(wrapper)(qs[0], qs[1], 0)
+            return qm.measure(qs)
+
+        outer_ops = _first_controlled_block_ops(_lower(circ))
+        [invoke] = _find_ops(outer_ops, InvokeOperation)
+        assert invoke.transform is CallTransform.DIRECT
+        assert invoke.body is not None
+        assert not _find_ops(invoke.body.operations, IfOperation)
+        assert not _find_ops(invoke.body.operations, CompOp)
+        assert len(_find_gates(invoke.body.operations, GateOperationType.X)) == 1
+
+    def test_controlled_implementation_body_is_lowered(self):
+        """A transform-specific controlled body is folded before selection."""
+
+        def conditional_body(name: str, include_control: bool) -> Block:
+            """Build a fresh-namespace conditional implementation block.
+
+            Args:
+                name (str): Block name used for diagnostics.
+                include_control (bool): Whether to include a control-qubit
+                    formal before the target formal.
+
+            Returns:
+                Block: Affine block containing ``if sel == 0: X(target)``.
+            """
+            target = _qubit_val(f"{name}_target")
+            selector = _uint_val(f"{name}_selector")
+            comparison, if_op = _make_comparison_if_with_x_gate(selector, target)
+            inputs = [target, selector]
+            if include_control:
+                inputs.insert(0, _qubit_val(f"{name}_control"))
+            return Block(
+                name=name,
+                input_values=inputs,
+                operations=[comparison, if_op],
+                kind=BlockKind.AFFINE,
+            )
+
+        default_body = conditional_body("default", include_control=False)
+        controlled_body = conditional_body("controlled", include_control=True)
+        definition = CallableDef(
+            ref=CallableRef(namespace="test", name="conditional_box"),
+            body=default_body,
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.CONTROLLED,
+                    backend="test-backend",
+                    body=controlled_body,
+                )
+            ],
+        )
+        control = _qubit_val("actual_control")
+        target = _qubit_val("actual_target")
+        selector = _uint_val("actual_selector", const=0)
+        invoke = InvokeOperation(
+            operands=[control, target, selector],
+            results=[control.next_version(), target.next_version()],
+            transform=CallTransform.CONTROLLED,
+            attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+            definition=definition,
+        )
+        outer = Block(
+            name="outer",
+            operations=[invoke],
+            kind=BlockKind.AFFINE,
+        )
+
+        [lowered] = _controlled_invoke_ops(_run_pass(outer))
+        assert lowered.definition is not None
+        lowered_default = lowered.definition.body
+        assert lowered_default is not None
+        [lowered_impl] = lowered.definition.implementations
+        assert lowered_impl.body is not None
+        for body in (lowered_default, lowered_impl.body):
+            assert not _find_ops(body.operations, IfOperation)
+            assert not _find_ops(body.operations, CompOp)
+            assert len(_find_gates(body.operations, GateOperationType.X)) == 1
+
+    def test_recursive_callable_body_stops_at_active_boundary(self):
+        """A self-referential boxed definition does not recurse forever."""
+        inner_target = _qubit_val("inner_target")
+        inner_selector = _uint_val("inner_selector")
+        comparison, if_op = _make_comparison_if_with_x_gate(
+            inner_selector,
+            inner_target,
+        )
+        body = Block(
+            name="recursive_body",
+            input_values=[inner_target, inner_selector],
+            operations=[comparison, if_op],
+            kind=BlockKind.AFFINE,
+        )
+        ref = CallableRef(namespace="test", name="recursive_box")
+        definition = CallableDef(ref=ref, body=body)
+        recursive_call = InvokeOperation(
+            operands=[inner_target, inner_selector],
+            results=[inner_target.next_version()],
+            definition=definition,
+        )
+        body.operations.append(recursive_call)
+
+        control = _qubit_val("control")
+        target = _qubit_val("target")
+        selector = _uint_val("selector", const=0)
+        controlled_call = InvokeOperation(
+            operands=[control, target, selector],
+            results=[control.next_version(), target.next_version()],
+            transform=CallTransform.CONTROLLED,
+            attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+            definition=definition,
+        )
+        outer = Block(
+            name="outer",
+            operations=[controlled_call],
+            kind=BlockKind.AFFINE,
+        )
+
+        [lowered] = _controlled_invoke_ops(_run_pass(outer))
+
+        assert lowered.body is not None
+        assert not _find_ops(lowered.body.operations, IfOperation)
+        assert len(_find_ops(lowered.body.operations, InvokeOperation)) == 1
+
+    def test_inverse_block_inside_controlled_body_is_lowered(self):
+        """Controlled decomposition lowers an inverse operation's owned bodies."""
+
+        def inverse_body(name: str) -> Block:
+            """Build a conditional inverse recipe block.
+
+            Args:
+                name (str): Diagnostic block name.
+
+            Returns:
+                Block: Fresh affine body with ``if selector == 0: X``.
+            """
+            target = _qubit_val(f"{name}_target")
+            selector = _uint_val(f"{name}_selector")
+            comparison, if_op = _make_comparison_if_with_x_gate(selector, target)
+            return Block(
+                name=name,
+                input_values=[target, selector],
+                operations=[comparison, if_op],
+                kind=BlockKind.AFFINE,
+            )
+
+        unitary_target = _qubit_val("unitary_target")
+        selector = _uint_val("actual_selector", const=0)
+        inverse = InverseBlockOperation(
+            operands=[unitary_target, selector],
+            results=[unitary_target.next_version()],
+            num_target_qubits=1,
+            source_block=inverse_body("source"),
+            implementation_block=inverse_body("implementation"),
+        )
+        unitary = Block(
+            name="unitary",
+            input_values=[unitary_target],
+            operations=[inverse],
+            kind=BlockKind.AFFINE,
+        )
+        control = _qubit_val("control")
+        target = _qubit_val("target")
+        controlled = ConcreteControlledU(
+            operands=[control, target],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=unitary,
+        )
+        outer = Block(
+            name="outer",
+            operations=[controlled],
+            kind=BlockKind.AFFINE,
+        )
+
+        [lowered_inverse] = _find_ops(
+            _first_controlled_block_ops(_run_pass(outer)),
+            InverseBlockOperation,
+        )
+
+        assert lowered_inverse.source_block is not None
+        assert lowered_inverse.implementation_block is not None
+        for body in (
+            lowered_inverse.source_block,
+            lowered_inverse.implementation_block,
+        ):
+            assert not _find_ops(body.operations, IfOperation)
+            assert not _find_ops(body.operations, CompOp)
+            assert len(_find_gates(body.operations, GateOperationType.X)) == 1
 
 
 # ---------------------------------------------------------------------------
