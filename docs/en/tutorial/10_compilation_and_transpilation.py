@@ -53,7 +53,7 @@
 # Block [HIERARCHICAL]
 #    │  substitute                  (optional rule-based replacement)
 #    │  resolve_parameter_shapes    (concretise Vector shape dims)
-#    │  inline                      (remove CallBlockOperations)
+#    │  inline                      (remove inline InvokeOperations)
 #    ▼
 # Block [AFFINE]
 #    │  unroll_recursion            (iterated inline ↔ partial_eval)
@@ -148,7 +148,7 @@
 # | `GateOperation` | `H`, `RX`, `CX`, … | `ir/operation/gate.py` |
 # | `MeasureOperation` | Measurement | `ir/operation/measurement.py` |
 # | `ForOperation`, `IfOperation`, `WhileOperation` | Control flow | `ir/operation/control_flow.py` |
-# | `CallBlockOperation` | Call to another `Block` (removed by `inline`) | `ir/operation/call_block_ops.py` |
+# | `InvokeOperation` | Call to another qkernel/composite/oracle | `ir/operation/callable.py` |
 #
 # All control-flow ops implement the `HasNestedOps` protocol
 # (`nested_op_lists()` / `rebuild_nested()`) so passes can walk into loop and
@@ -161,7 +161,7 @@
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir import pretty_print_block
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.qiskit import QiskitTranspiler
 
@@ -223,7 +223,7 @@ def summarise(block):
 # `qamomile.circuit.ir.pretty_print_block` returns an MLIR-style textual
 # dump of the block — the fastest way to see *what changed* between two
 # passes. The `depth` argument controls how many layers of
-# `CallBlockOperation` to expand inline, so e.g. `depth=1` previews what
+# `InvokeOperation` to expand inline, so e.g. `depth=1` previews what
 # `inline` will produce without running it.
 
 # %% [markdown]
@@ -238,7 +238,7 @@ def summarise(block):
 # `to_block` executes the decorated function under a tracer context. Every
 # `qmc.h(...)`, `qmc.range(...)`, and `entangle_pair(...)` call records an
 # `Operation` into the Block. Calls to other `@qkernel`s become
-# `CallBlockOperation`s — the body is **not** inlined yet.
+# `InvokeOperation`s — the body is **not** inlined yet.
 
 # %%
 bindings = {"n": 3}
@@ -250,10 +250,10 @@ assert block.kind.name == "HIERARCHICAL"
 print("parameters:       ", list(block.parameters))
 assert list(block.parameters) == ["theta"]
 print(
-    "CallBlockOps:     ",
-    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
+    "InvokeOps:        ",
+    sum(1 for op in block.operations if isinstance(op, InvokeOperation)),
 )
-# Note: `CallBlockOperation`s may live inside a `ForOperation` body too —
+# Note: `InvokeOperation`s may live inside a `ForOperation` body too —
 # they are not necessarily in the top-level list.
 
 # %% [markdown]
@@ -265,7 +265,7 @@ print(
 print(pretty_print_block(block))
 
 # %% [markdown]
-# With `depth=1`, the `CallBlockOperation` is expanded inside its call line
+# With `depth=1`, the `InvokeOperation` is expanded inside its call line
 # — the same shape `inline` will produce in the next stage, so you can
 # preview it without actually running the pass.
 
@@ -280,16 +280,16 @@ print(pretty_print_block(block, depth=1))
 #
 # ### 4.2 `inline` — flattening nested block calls
 #
-# `inline` replaces every `CallBlockOperation` with the operations of the
+# `inline` replaces every inline-policy `InvokeOperation` with the operations of the
 # target block, substituting SSA values so the result stays well-formed. Once
-# no `CallBlockOperation` remains, the block transitions to `AFFINE`.
+# no inline qkernel invocation remains, the block transitions to `AFFINE`.
 
 
 # %%
 def count_calls(ops):
     total = 0
     for op in ops:
-        if isinstance(op, CallBlockOperation):
+        if isinstance(op, InvokeOperation):
             total += 1
         # Walk nested control-flow bodies so we count calls inside loops.
         for child in getattr(op, "nested_op_lists", lambda: [])():
@@ -300,7 +300,7 @@ def count_calls(ops):
 block = transpiler.inline(block)
 print("after inline:     ", summarise(block))
 assert block.kind.name == "AFFINE"
-print("CallBlockOps (deep):", count_calls(block.operations))
+print("InvokeOps (deep):", count_calls(block.operations))
 assert count_calls(block.operations) == 0
 print("is_affine:        ", block.is_affine())
 assert block.is_affine()
@@ -682,7 +682,7 @@ print(pretty_print_block(qfixed_block))
 # directly on the analyzed block.
 
 # %%
-from qamomile.circuit.transpiler.passes.separate import lower_operations
+from qamomile.circuit.transpiler.passes.separate import lower_operations  # noqa: E402
 
 lowered = lower_operations(qfixed_block)
 print(pretty_print_block(lowered))
@@ -769,7 +769,10 @@ try:
     )
 
     print("backend circuit type: ", type(quri_exe.quantum_circuit).__name__)
-    assert type(quri_exe.quantum_circuit).__name__ == "LinearMappedParametricQuantumCircuit"
+    assert (
+        type(quri_exe.quantum_circuit).__name__
+        == "LinearMappedParametricQuantumCircuit"
+    )
     print("parameter_names:      ", quri_exe.parameter_names)
     assert list(quri_exe.parameter_names) == ["theta"]
     print()

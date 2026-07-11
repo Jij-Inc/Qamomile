@@ -249,13 +249,10 @@ def repeat_until_zero() -> qmc.Bit:
     bit = qmc.measure(q)
 
     while bit:
-        # Re-prepare and re-measure until we get 0. The register is a
-        # body-local name: rebinding the outer `q` to a register
-        # allocated in the body is rejected, because the runtime loop
-        # re-executes its body on one persistent register without reset.
-        q2 = qmc.qubit("q2")
-        q2 = qmc.h(q2)
-        bit = qmc.measure(q2)
+        # Re-prepare and re-measure until we get 0
+        q = qmc.qubit("q2")
+        q = qmc.h(q)
+        bit = qmc.measure(q)
 
     return bit
 
@@ -292,10 +289,10 @@ def measure_and_correct() -> qmc.Bit:
             q1 = qmc.x(q1)
         else:
             q1 = q1
-        # Re-prepare and re-measure (body-local register name, as above)
-        q0_retry = qmc.qubit("q0_retry")
-        q0_retry = qmc.h(q0_retry)
-        bit = qmc.measure(q0_retry)
+        # Re-prepare and re-measure
+        q0 = qmc.qubit("q0_retry")
+        q0 = qmc.h(q0)
+        bit = qmc.measure(q0)
 
     return qmc.measure(q1)
 
