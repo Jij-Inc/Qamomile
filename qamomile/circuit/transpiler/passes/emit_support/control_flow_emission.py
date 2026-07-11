@@ -24,6 +24,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.param_keys import dict_param_key
@@ -883,7 +884,7 @@ def register_classical_merge_aliases(
         # be bound here so it can drive a subsequent compile-time branch.
         if output.type.is_quantum():
             continue
-        is_bit = hasattr(output.type, "_is_bit_marker")
+        is_bit = isinstance(output.type, BitType)
         if is_bit and resolved is None:
             continue
 
