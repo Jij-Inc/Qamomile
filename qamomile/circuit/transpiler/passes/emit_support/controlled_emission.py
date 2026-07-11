@@ -25,9 +25,7 @@ from qamomile.circuit.ir.operation import (
     SliceArrayOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-)
+from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -45,6 +43,9 @@ from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
 )
+from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
+    reject_duplicate_physical_indices,
+)
 from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
     map_array_result_group,
 )
@@ -59,6 +60,45 @@ if TYPE_CHECKING:
         ValueResolver,
     )
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+
+
+def _checked_append_gate(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    gate: Any,
+    qubit_indices: list[int],
+    gate_label: str,
+) -> None:
+    """Append a controlled / composite gate after rejecting qubit aliasing.
+
+    Every controlled or composite block reaches the backend through
+    ``append_gate`` with a combined physical-index list (``control_phys +
+    target_indices``). A controlled block is defined only on distinct qubits;
+    when a symbolic control and target index coincide at runtime (e.g.
+    ``qmc.control(x)(qs[i], qs[j])`` on the diagonal) the duplicate is visible
+    only here at emit time. This wrapper runs the shared aliasing check before
+    delegating to the backend, so the controlled path gets the same Qamomile
+    ``QubitAliasError`` the native ``emit_gate`` path already raises, on every
+    backend, instead of a raw ``CircuitError`` (Qiskit) or a silent
+    compile-then-crash (CUDA-Q).
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass (for its emitter).
+        circuit (Any): Backend circuit being emitted into.
+        gate (Any): The already-controlled/powered backend gate to append.
+        qubit_indices (list[int]): Combined physical qubit indices the gate
+            acts on (controls followed by targets).
+        gate_label (str): Human-readable label for the aliasing diagnostic.
+
+    Returns:
+        None
+
+    Raises:
+        QubitAliasError: If two of ``qubit_indices`` are the same physical
+            qubit.
+    """
+    reject_duplicate_physical_indices(gate_label, qubit_indices)
+    emit_pass._emitter.append_gate(circuit, gate, qubit_indices)
 
 
 def emit_controlled_powers(
@@ -81,8 +121,12 @@ def emit_controlled_powers(
             controlled_powered_gate = emit_pass._emitter.gate_controlled(
                 powered_gate, 1
             )
-            emit_pass._emitter.append_gate(
-                circuit, controlled_powered_gate, [ctrl_idx] + target_indices
+            _checked_append_gate(
+                emit_pass,
+                circuit,
+                controlled_powered_gate,
+                [ctrl_idx] + target_indices,
+                "controlled power",
             )
     else:
         for k, ctrl_idx in enumerate(counting_indices):
@@ -241,8 +285,8 @@ def _batch_op_weight(
         return 2
     if isinstance(op, ForOperation):
         return _for_batch_weight(emit_pass, op, bindings)
-    if isinstance(op, CompositeGateOperation):
-        block = op.implementation_block
+    if isinstance(op, InvokeOperation):
+        block = op.effective_body(backend=getattr(emit_pass, "backend_name", None))
         if block is None:
             return 0
         return _controlled_body_batch_weight(emit_pass, block.operations, bindings)
@@ -349,7 +393,7 @@ def _body_has_rotation_like_leaf(operations: list[Operation]) -> bool:
             (
                 ControlledUOperation,
                 ForOperation,
-                CompositeGateOperation,
+                InvokeOperation,
                 InverseBlockOperation,
                 PauliEvolveOp,
             ),
@@ -490,14 +534,14 @@ def emit_controlled_operations(
             _emit_nested_controlled_u(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
-        elif isinstance(op, CompositeGateOperation):
+        elif isinstance(op, InvokeOperation):
             composite_control_groups = [
                 _expand_quantum_operands_to_phys(
                     emit_pass,
                     operand,
                     qubit_map,
                     bindings,
-                    operation="CompositeGateOperation",
+                    operation="InvokeOperation",
                 )
                 for operand in op.control_qubits
             ]
@@ -507,7 +551,7 @@ def emit_controlled_operations(
                     operand,
                     qubit_map,
                     bindings,
-                    operation="CompositeGateOperation",
+                    operation="InvokeOperation",
                 )
                 for operand in op.target_qubits
             ]
@@ -1030,8 +1074,12 @@ def _emit_nested_controlled_u(
         controlled_gate = emit_pass._emitter.gate_controlled(
             unitary_gate, len(composed_controls)
         )
-        emit_pass._emitter.append_gate(
-            circuit, controlled_gate, composed_controls + resolved.target_phys
+        _checked_append_gate(
+            emit_pass,
+            circuit,
+            controlled_gate,
+            composed_controls + resolved.target_phys,
+            "controlled gate",
         )
     else:
         inner_map = build_controlled_block_qubit_map(
@@ -1347,6 +1395,17 @@ def emit_multi_controlled_gate(
             "emit_multi_controlled_gate requires at least one control.",
             operation="ControlledGate",
         )
+
+    # Inner gates reached through the fallback (block-decomposition) walker
+    # emit directly via ``emit_toffoli`` / ``emit_cx`` etc. and never pass
+    # through ``emit_gate``'s aliasing check. This is the single choke point
+    # for every controlled inner gate, so re-run the shared check on the
+    # combined control + target set: a body ``cx(qs[i], qs[j])`` with i == j at
+    # runtime, or an inner control that coincides with a target, is caught here.
+    reject_duplicate_physical_indices(
+        f"controlled {gate_type.name if gate_type else 'gate'}",
+        control_indices + target_indices,
+    )
 
     def _require_targets(count: int) -> None:
         """Validate that the gate received enough resolved targets.
@@ -2119,8 +2178,12 @@ def emit_controlled_u_with_symbolic_indices(
         if power_value > 1:
             unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power_value)
         controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
-        emit_pass._emitter.append_gate(
-            circuit, controlled_gate, control_phys + target_indices
+        _checked_append_gate(
+            emit_pass,
+            circuit,
+            controlled_gate,
+            control_phys + target_indices,
+            "controlled gate",
         )
     else:
         emit_pass._emit_controlled_fallback(
@@ -2277,8 +2340,12 @@ def emit_controlled_u_multi_arg(
         if power_value > 1:
             unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power_value)
         controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
-        emit_pass._emitter.append_gate(
-            circuit, controlled_gate, control_phys + target_indices
+        _checked_append_gate(
+            emit_pass,
+            circuit,
+            controlled_gate,
+            control_phys + target_indices,
+            "controlled gate",
         )
     else:
         emit_pass._emit_controlled_fallback(
@@ -2453,8 +2520,12 @@ def emit_controlled_u(
         if power_value > 1:
             unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power_value)
         controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
-        emit_pass._emitter.append_gate(
-            circuit, controlled_gate, control_indices + target_indices
+        _checked_append_gate(
+            emit_pass,
+            circuit,
+            controlled_gate,
+            control_indices + target_indices,
+            "controlled gate",
         )
     else:
         emit_pass._emit_controlled_fallback(
@@ -2545,8 +2616,12 @@ def _emit_single_target_block_per_vector_element(
             unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power)
         controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, num_controls)
         for target_idx in target_indices:
-            emit_pass._emitter.append_gate(
-                circuit, controlled_gate, control_indices + [target_idx]
+            _checked_append_gate(
+                emit_pass,
+                circuit,
+                controlled_gate,
+                control_indices + [target_idx],
+                "controlled gate",
             )
         return
 
@@ -2618,6 +2693,15 @@ def emit_controlled_fallback(
             operation="ControlledUOperation",
         )
 
+    # The fallback (block decomposition) path does not go through
+    # ``_checked_append_gate``, so re-run the shared aliasing check on the
+    # combined control + target set here. A control that coincides with a
+    # target (or a duplicated target) at runtime is physically ill-defined and
+    # would otherwise decompose into gates acting twice on one qubit.
+    reject_duplicate_physical_indices(
+        "controlled gate (fallback)", control_indices + target_indices
+    )
+
     block_value = _prepare_nested_block_for_emit(block_value, bindings)
     qubit_map = build_controlled_block_qubit_map(
         emit_pass, block_value, target_indices, bindings
@@ -2658,11 +2742,13 @@ def emit_custom_composite(
         num_qubits,
         bindings,
         input_operands=op.operands,
-        operation_name="CompositeGateOperation",
+        operation_name="InvokeOperation",
     )
 
     if custom_gate is not None and _gate_matches_qubit_count(custom_gate, num_qubits):
-        emit_pass._emitter.append_gate(circuit, custom_gate, qubit_indices)
+        _checked_append_gate(
+            emit_pass, circuit, custom_gate, qubit_indices, "composite gate"
+        )
     else:
         local_qubit_map: QubitMap = {}
         local_clbit_map: ClbitMap = {}
@@ -2674,7 +2760,7 @@ def emit_custom_composite(
             bindings,
             local_qubit_map,
             parent_qubits=qubit_indices,
-            operation_name="CompositeGateOperation",
+            operation_name="InvokeOperation",
         )
 
         if hasattr(impl, "operations"):
@@ -2691,7 +2777,7 @@ def emit_custom_composite(
 def emit_controlled_composite_at_indices(
     emit_pass: "StandardEmitPass",
     circuit: Any,
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     control_indices: list[int],
     qubit_indices: list[int],
     bindings: dict[str, Any],
@@ -2701,7 +2787,7 @@ def emit_controlled_composite_at_indices(
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
         circuit (Any): Backend circuit being emitted into.
-        op (CompositeGateOperation): Composite operation to emit.
+        op (InvokeOperation): Composite or oracle invocation to emit.
         control_indices (list[int]): Physical outer control qubits.
         qubit_indices (list[int]): Physical qubits occupied by ``op``'s
             own control and target operands.
@@ -2714,36 +2800,60 @@ def emit_controlled_composite_at_indices(
         EmitError: If the composite has no implementation block or the
             fallback cannot represent the controlled composite.
     """
-    impl = op.implementation
+    selected_impl = op.implementation_for(
+        backend=getattr(emit_pass, "backend_name", None)
+    )
+    if selected_impl is not None and selected_impl.body is not None:
+        emit_custom_composite(
+            emit_pass,
+            circuit,
+            op,
+            selected_impl.body,
+            qubit_indices,
+            bindings,
+        )
+        return
+
+    own_control_count = (
+        op.num_control_qubits if op.transform is CallTransform.CONTROLLED else 0
+    )
+    own_controls = qubit_indices[:own_control_count]
+    body_qubits = qubit_indices[own_control_count:]
+    body_operands = op.operands[own_control_count:]
+    all_controls = [*control_indices, *own_controls]
+
+    impl = op.body
     if impl is None:
         raise EmitError(
-            "Cannot emit controlled composite without an implementation block.",
-            operation="CompositeGateOperation",
+            "Cannot emit controlled invocation without an implementation block.",
+            operation="InvokeOperation",
         )
 
-    num_qubits = len(qubit_indices)
+    num_qubits = len(body_qubits)
     custom_gate = emit_pass._blockvalue_to_gate(
         impl,
         num_qubits,
         bindings,
-        input_operands=op.operands,
-        operation_name="CompositeGateOperation",
+        input_operands=body_operands,
+        operation_name="InvokeOperation",
     )
     if custom_gate is not None:
         controlled_gate = custom_gate
-        if control_indices:
+        if all_controls:
             controlled_gate = emit_pass._emitter.gate_controlled(
                 custom_gate,
-                len(control_indices),
+                len(all_controls),
             )
         if controlled_gate is not None and _gate_matches_qubit_count(
             controlled_gate,
-            len(control_indices) + num_qubits,
+            len(all_controls) + num_qubits,
         ):
-            emit_pass._emitter.append_gate(
+            _checked_append_gate(
+                emit_pass,
                 circuit,
                 controlled_gate,
-                [*control_indices, *qubit_indices],
+                [*all_controls, *body_qubits],
+                "composite gate",
             )
             return
 
@@ -2751,18 +2861,18 @@ def emit_controlled_composite_at_indices(
     local_bindings = _bind_and_populate_block_inputs(
         emit_pass,
         impl,
-        op.operands,
+        body_operands,
         num_qubits,
         bindings,
         local_qubit_map,
-        operation_name="CompositeGateOperation",
+        operation_name="InvokeOperation",
     )
     emit_pass._emit_controlled_fallback(
         circuit,
         impl,
-        len(control_indices),
-        control_indices,
-        qubit_indices,
+        len(all_controls),
+        all_controls,
+        body_qubits,
         1,
         local_bindings,
     )

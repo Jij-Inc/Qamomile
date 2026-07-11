@@ -17,10 +17,23 @@ class Tracer:
             scalar rebinds recorded by ``record_loop_rebinds`` while this
             tracer captured a loop body. The loop builder copies them onto
             the loop operation after the body trace completes.
+        region_entries (dict[str, typing.Any]): Pending loop region
+            arguments created by ``loop_region_enter`` while this tracer
+            captured a loop body, keyed by variable name (values are
+            ``_PendingRegionArg`` instances from the frontend
+            control-flow module). The loop builder converts them into
+            ``RegionArg`` records on the loop operation.
+        loop_region_results (dict[str, typing.Any]): Post-loop result
+            handles published by the most recently closed loop traced
+            under this tracer, keyed by variable name. Consumed (popped)
+            by the AST-injected ``loop_region_result`` assignments that
+            run immediately after the loop's ``with`` block exits.
     """
 
     _operations: list[Operation] = dataclasses.field(default_factory=list)
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
+    region_entries: dict[str, typing.Any] = dataclasses.field(default_factory=dict)
+    loop_region_results: dict[str, typing.Any] = dataclasses.field(default_factory=dict)
 
     @property
     def operations(self) -> list[Operation]:

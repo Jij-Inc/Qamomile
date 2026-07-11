@@ -21,6 +21,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CompOpKind,
 )
+from qamomile.circuit.ir.operation.callable import CallTransform
 from qamomile.circuit.ir.value import ArrayValue, Value
 
 from ._utils import BINOP_TO_SYMPY
@@ -55,7 +56,7 @@ class ExprResolver:
         self,
         block: Any = None,
         context: dict[str, sp.Expr] | None = None,
-        loop_var_names: dict[str, sp.Symbol] | None = None,
+        loop_var_names: dict[str, sp.Expr] | None = None,
         parent_blocks: list[Any] | None = None,
     ):
         """Initialise an ExprResolver.
@@ -66,14 +67,14 @@ class ExprResolver:
             context (dict[str, sp.Expr] | None): UUID → resolved expression
                 mapping for values passed across scope boundaries (e.g.
                 call arguments, composite-gate operands).
-            loop_var_names (dict[str, sp.Symbol] | None): Value name →
-                SymPy symbol mapping for loop variables in scope.
+            loop_var_names (dict[str, sp.Expr] | None): Value name → SymPy
+                expression mapping for loop variables in scope.
             parent_blocks (list[Any] | None): Ancestor blocks to search
                 when tracing fails in the current block.
         """
         self._block = block
         self._context: dict[str, sp.Expr] = dict(context or {})
-        self._loop_var_names: dict[str, sp.Symbol] = dict(loop_var_names or {})
+        self._loop_var_names: dict[str, sp.Expr] = dict(loop_var_names or {})
         self._parent_blocks: list[Any] = list(parent_blocks or [])
 
     # ------------------------------------------------------------------ #
@@ -119,20 +120,20 @@ class ExprResolver:
         self,
         inner_block: Any,
         extra_context: dict[str, sp.Expr] | None = None,
-        extra_loop_vars: dict[str, sp.Symbol] | None = None,
+        extra_loop_vars: dict[str, sp.Expr] | None = None,
     ) -> ExprResolver:
         """Create a child resolver for an inner scope (loop body, branch).
 
         Propagates parent_blocks so values from outer scopes remain
-        traceable.  For *callee* scopes (CallBlockOperation), use
+        traceable.  For callee invocation scopes, use
         :meth:`call_child_scope` instead — callees get a fresh scope.
 
         Args:
             inner_block (Any): The block for the child scope.
             extra_context (dict[str, sp.Expr] | None): Additional UUID →
                 expression mappings to merge into the child context.
-            extra_loop_vars (dict[str, sp.Symbol] | None): Additional
-                loop variable name → symbol mappings.
+            extra_loop_vars (dict[str, sp.Expr] | None): Additional loop
+                variable name → expression mappings.
 
         Returns:
             ExprResolver: A new resolver scoped to *inner_block* with
@@ -155,8 +156,14 @@ class ExprResolver:
             parent_blocks=new_parents,
         )
 
-    def call_child_scope(self, call_op: Any) -> ExprResolver:
-        """Create a child resolver for a ``CallBlockOperation``.
+    def call_child_scope(
+        self,
+        call_op: Any,
+        *,
+        called_block: Block | None = None,
+        body_implements_transform: bool = False,
+    ) -> ExprResolver:
+        """Create a child resolver for an inline callable invocation.
 
         Maps formal parameter UUIDs → resolved actual arguments,
         **including array shape dimension UUIDs** (critical for
@@ -166,23 +173,46 @@ class ExprResolver:
         its own scope plus values propagated through ``call_context``.
 
         Args:
-            call_op (Any): A CallBlockOperation whose ``block`` field
-                is the called Block and ``operands`` are actuals.
+            call_op (Any): An invocation carrying either a legacy
+                ``block`` field, an ``InvokeOperation.effective_body()``
+                method, or an ``InvokeOperation.body`` field, plus
+                ``operands`` containing actual arguments.
+            called_block (Block | None): Already-selected callable body.
+                Pass this when another resolver has selected a backend- or
+                strategy-specific implementation. Defaults to ``None``.
+            body_implements_transform (bool): Whether ``called_block`` is a
+                transform-specific implementation whose formal inputs include
+                control operands. Defaults to ``False`` for a direct body that
+                the compiler transforms structurally.
 
         Returns:
             ExprResolver: A new resolver scoped to the callee block with
                 formal→actual bindings in context and empty parent blocks.
         """
-        called_block = call_op.block
+        if called_block is None:
+            called_block = getattr(call_op, "block", None)
+        if not isinstance(called_block, Block):
+            effective_body = getattr(call_op, "effective_body", None)
+            if callable(effective_body):
+                called_block = effective_body()
+        if not isinstance(called_block, Block):
+            called_block = getattr(call_op, "body", None)
         if not isinstance(called_block, Block):
             # Not a nested Block input — use child_scope as fallback
             return self.child_scope(called_block)
 
+        actual_operands = call_op.operands
+        if (
+            getattr(call_op, "transform", None) is CallTransform.CONTROLLED
+            and not body_implements_transform
+        ):
+            actual_operands = actual_operands[call_op.num_control_qubits :]
+
         extra: dict[str, sp.Expr] = {}
         for i, formal in enumerate(called_block.input_values):
-            if i >= len(call_op.operands):
+            if i >= len(actual_operands):
                 break
-            actual = call_op.operands[i]
+            actual = actual_operands[i]
             extra[formal.uuid] = self.resolve(actual)
             # Map array shape dimension UUIDs
             if isinstance(actual, ArrayValue) and isinstance(formal, ArrayValue):
@@ -199,6 +229,21 @@ class ExprResolver:
             parent_blocks=[],
         )
 
+    def bind(self, value: Value, expression: sp.Expr) -> None:
+        """Bind an IR value to an expression in this resolver scope.
+
+        This is used for SSA results whose value is established while walking
+        operations in program order, notably the final results of loop region
+        arguments. Child scopes still receive a copy, so a binding cannot leak
+        backwards into an already-created sibling scope.
+
+        Args:
+            value (Value): IR value whose UUID identifies the binding.
+            expression (sp.Expr): Symbolic or concrete expression represented by
+                the value.
+        """
+        self._context[value.uuid] = expression
+
     # Read-only accessors for engine / accumulator use
 
     @property
@@ -207,8 +252,8 @@ class ExprResolver:
         return self._context.copy()
 
     @property
-    def loop_var_names(self) -> dict[str, sp.Symbol]:
-        """Copy of the loop variable name → symbol mapping."""
+    def loop_var_names(self) -> dict[str, sp.Expr]:
+        """Copy of the loop variable name → expression mapping."""
         return self._loop_var_names.copy()
 
     @property

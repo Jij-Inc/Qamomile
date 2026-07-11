@@ -10,9 +10,7 @@ from numbers import Real
 from typing import TYPE_CHECKING, Any, Sequence, cast
 
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
-)
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
@@ -51,11 +49,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     try_emit_batched_controlled_operations,
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
-    resolve_angle_value,
-)
-from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
-    _map_global_phase_results,
-    emit_controlled_global_phase,
+    reject_duplicate_physical_indices,
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
@@ -215,6 +209,15 @@ def _emit_quri_controlled_gate(
             operation="ControlledUOperation",
         )
 
+    # QURI Parts always walks controlled-U bodies gate-by-gate here rather than
+    # through ``append_gate``, so this is the choke point for inner-gate
+    # aliasing. A body ``cx(qs[i], qs[j])`` with i == j at runtime, or an inner
+    # control that coincides with a target, is caught here.
+    reject_duplicate_physical_indices(
+        f"controlled {op.gate_type.name if op.gate_type else 'gate'} (QURI Parts)",
+        control_indices + target_indices,
+    )
+
     if len(control_indices) == 1:
         if op.gate_type == GateOperationType.CX:
             if len(target_indices) < 2:
@@ -337,7 +340,7 @@ def _emit_quri_controlled_gate(
 
 
 def _map_quri_composite_results(
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     control_indices: list[int],
     target_index_groups: list[list[int]],
     qubit_map: QubitMap,
@@ -345,7 +348,7 @@ def _map_quri_composite_results(
     """Map composite result values back to their physical qubits.
 
     Args:
-        op (CompositeGateOperation): Composite operation that was emitted.
+        op (InvokeOperation): Invocation that was emitted.
         control_indices (list[int]): Physical qubits for the composite's
             own control operands.
         target_index_groups (list[list[int]]): Physical qubits for each
@@ -410,6 +413,13 @@ def _emit_quri_inverse_operation(
     input_operands = [*op.target_qubits, *op.parameters]
     effective_controls = outer_control_indices + local_controls
 
+    # An inverse block whose controls/targets alias at runtime is physically
+    # ill-defined; all three sub-paths below (backend inverse, controlled walk,
+    # inline) act on this combined set, so one check covers them.
+    reject_duplicate_physical_indices(
+        "inverse block (QURI Parts)", effective_controls + target_indices
+    )
+
     if not effective_controls and emit_pass._try_emit_backend_inverse(
         circuit,
         op.source_block,
@@ -455,17 +465,17 @@ def _emit_quri_inverse_operation(
 def _emit_quri_composite_operation(
     emit_pass: StandardEmitPass[Any],
     circuit: Any,
-    op: CompositeGateOperation,
+    op: InvokeOperation,
     outer_control_indices: list[int],
     qubit_map: QubitMap,
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a composite operation under accumulated controls.
+    """Emit a boxed invocation under accumulated controls.
 
     Args:
         emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
         circuit (Any): QURI Parts circuit being built.
-        op (CompositeGateOperation): Composite operation from the block
+        op (InvokeOperation): Composite or oracle invocation from the block
             currently being walked.
         outer_control_indices (list[int]): Controls accumulated from
             enclosing controlled-U operations.
@@ -474,13 +484,13 @@ def _emit_quri_composite_operation(
             block.
 
     Raises:
-        EmitError: If the composite has no implementation block or cannot
+        EmitError: If the invocation has no implementation block or cannot
             be routed through the guarded recursive fallback.
     """
-    impl = op.implementation
+    impl = op.effective_body()
     if impl is None:
         raise EmitError(
-            "QURI Parts controlled fallback cannot emit a composite gate "
+            "QURI Parts controlled fallback cannot emit an invocation "
             "without an implementation block.",
             operation="ControlledUOperation",
         )
@@ -687,9 +697,14 @@ def _emit_quri_controlled_operations(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
             continue
-        if isinstance(op, CompositeGateOperation):
+        if isinstance(op, InvokeOperation):
             _emit_quri_composite_operation(
-                emit_pass, circuit, op, control_indices, qubit_map, bindings
+                emit_pass,
+                circuit,
+                op,
+                control_indices,
+                qubit_map,
+                bindings,
             )
             continue
         if isinstance(op, InverseBlockOperation):
@@ -740,8 +755,9 @@ def _emit_quri_controlled_operations(
         raise EmitError(
             "QURI Parts recursive controlled fallback only supports "
             "primitive gates, nested ControlledUOperation values, "
-            "CompositeGateOperation values, InverseBlockOperation values, "
-            "GlobalPhaseBlockOperation values, PauliEvolveOp values, "
+            "InvokeOperation values, "
+            "InverseBlockOperation values, "
+            "PauliEvolveOp values, "
             "ReturnOperation, and statically resolved ForOperation bodies. "
             f"Unsupported operation: {type(op).__name__}.",
             operation="ControlledUOperation",
@@ -827,7 +843,13 @@ class QuriPartsEmitPass(
         emitter = QuriPartsGateEmitter()
         # QURI Parts has no native composite gate emitters
         composite_emitters: list[Any] = []
-        super().__init__(emitter, bindings, parameters, composite_emitters)  # type: ignore[arg-type]
+        super().__init__(
+            cast(Any, emitter),
+            bindings,
+            parameters,
+            composite_emitters,
+            backend_name="quri_parts",
+        )
 
     def _blockvalue_to_gate(
         self,
@@ -910,6 +932,13 @@ class QuriPartsEmitPass(
                 f"control_indices={control_indices!r}.",
                 operation="ControlledUOperation",
             )
+        # QURI Parts walks the block gate-by-gate rather than routing through
+        # ``append_gate``, so run the shared aliasing check here. A control that
+        # coincides with a target at runtime is physically ill-defined.
+        reject_duplicate_physical_indices(
+            "controlled gate (QURI Parts fallback)",
+            control_indices + target_indices,
+        )
         qubit_map = _build_quri_controlled_qubit_map(
             self, block_value, target_indices, bindings
         )
@@ -963,6 +992,7 @@ class QuriPartsEmitPass(
             bindings (dict[str, Any]): Active compile-time and runtime
                 parameter bindings.
         """
+        impl = _prepare_nested_block_for_emit(impl, bindings)
         self._emit_block_inline(
             circuit,
             impl,

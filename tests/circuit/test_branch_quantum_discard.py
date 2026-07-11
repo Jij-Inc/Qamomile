@@ -1223,16 +1223,13 @@ class TestRejectedLoopDiscards:
         with pytest.raises(QubitRebindError, match="read after the loop"):
             _transpile(kernel, bindings={"dummy": 0})
 
-    def test_while_rebind_repeat_until_success_rejected(self):
-        """Rebinding a pre-existing register to a body-produced one in a
-        while body is rejected even when only the condition escapes: the
-        runtime loop re-executes the body on one persistent register
-        without reset, so "fresh per iteration" is not expressible —
-        review measured an rx-gated variant sampling the wire-reuse
-        distribution (P(1)=0.219 toward 0.2) instead of the
-        fresh-register one (2/7). Spell the register as a body-local
-        name instead; the emitted circuit is identical and nothing
-        pre-existing is discarded."""
+    def test_while_rebind_repeat_until_success_allowed(self):
+        """A measured-and-released name may be rebound to loop-local fresh state.
+
+        Nested QInit emission now prepares the persistent backend wire at
+        each runtime iteration, so this repeat-until-success shape has
+        fresh logical |0> semantics instead of stale wire reuse.
+        """
 
         @qmc.qkernel
         def kernel(dummy: qmc.UInt) -> qmc.Bit:
@@ -1245,8 +1242,8 @@ class TestRejectedLoopDiscards:
                 bit = qmc.measure(q)
             return bit
 
-        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
-            _transpile(kernel, bindings={"dummy": 0})
+        result = _transpile(kernel, bindings={"dummy": 0})
+        assert result is not None
 
     def test_while_carried_slice_switch_read_after_loop_rejected(self):
         """A carried-but-not-identical while rebind read after the loop is
@@ -1486,11 +1483,13 @@ class TestRejectedLoopDiscards:
         with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
             _transpile(kernel, bindings={"n": 2})
 
-    def test_alias_owned_reset_for_loop_rejected(self):
-        """An outside alias plus in-body consumption of the fresh register
-        does not save an unrolled loop: the body's ops are re-instantiated
-        on the traced registers, so per-iteration re-allocation is not
-        expressible regardless of what the body consumes."""
+    def test_alias_owned_reset_for_loop_allowed(self):
+        """Outside ownership plus terminal fresh consumption is allowed.
+
+        The saved alias owns the pre-loop state, and nested QInit reset
+        emission gives the body allocation fresh logical |0> semantics
+        on each unrolled iteration.
+        """
 
         @qmc.qkernel
         def kernel(n: qmc.UInt) -> qmc.Bit:
@@ -1502,8 +1501,8 @@ class TestRejectedLoopDiscards:
                 b = qmc.measure(q)  # noqa: F841 — in-body consumption
             return qmc.measure(saved)
 
-        with pytest.raises(QubitRebindError, match=LOOP_DISCARD):
-            _transpile(kernel, bindings={"n": 2})
+        result = _transpile(kernel, bindings={"n": 2})
+        assert result is not None
 
     def test_module_level_check_rejects_consumed_loop_rebind(self):
         """The module-level helper rejects the consume-then-reallocate

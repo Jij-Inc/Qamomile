@@ -14,8 +14,10 @@ deterministic resolution order:
 3. **Compile-time array element** — ``arr[i]`` or ``arr[a:b][i]``
    resolves from the root array's ``const_array`` metadata or binding.
 4. **Bindings by parameter name** — ``value.is_parameter() → bindings[param_name]``.
-5. **Bindings by value name** — ``value.name → bindings[name]``.
-6. Returns ``None`` if none of the above match.
+   This is the only name-keyed rule: resolution never falls back to the
+   display ``Value.name``, which is excluded from canonical hashing and
+   carries no binding provenance.
+5. Returns ``None`` if none of the above match.
 """
 
 from __future__ import annotations
@@ -94,15 +96,23 @@ class ValueResolver:
         if array_element is not None:
             return array_element
 
-        # 4. Bindings by parameter name
+        # 4. Bindings by parameter name.
+        #
+        # Resolution against ``bindings`` is keyed *only* on the sanctioned
+        # ``ScalarMetadata.parameter_name`` provenance channel — never on the
+        # display ``Value.name``. A bare-name fallback (``value.name in
+        # bindings``) silently mis-resolved any non-parameter value that
+        # happened to share a name with a binding key — e.g. an inlined
+        # callee-local variable named like a caller binding — which
+        # ``CompileTimeIfLoweringPass`` could then fold into deleting a live
+        # branch. Display names are also excluded from canonical hashing, so a
+        # name-keyed resolution made two structurally identical blocks compile
+        # differently under the same bindings. Parameter provenance is the
+        # single source of truth.
         if hasattr(value, "is_parameter") and value.is_parameter():
             param_name = value.parameter_name()
             if param_name and param_name in self._bindings:
                 return self._bindings[param_name]
-
-        # 5. Bindings by value name
-        if hasattr(value, "name") and value.name and value.name in self._bindings:
-            return self._bindings[value.name]
 
         return None
 

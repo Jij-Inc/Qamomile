@@ -90,6 +90,17 @@ class MatplotlibRenderer:
         self._add_jupyter_display_support(fig)
         return fig
 
+    def _visible_qubits(self, qubits: list[int]) -> list[int]:
+        """Return qubit indices that exist in the current rendered view.
+
+        Args:
+            qubits (list[int]): Qubit indices carried by the visual node.
+
+        Returns:
+            list[int]: Indices that can safely index ``self.qubit_y``.
+        """
+        return [q for q in qubits if 0 <= q < len(self.qubit_y)]
+
     def _draw_operations(self, fig: Figure, vc: VisualCircuit) -> None:
         """Draw all operations from Visual IR nodes.
 
@@ -169,8 +180,16 @@ class MatplotlibRenderer:
         # Group blocks by topmost qubit for overlap calculation
         qubit_blocks: dict[int, list[dict]] = defaultdict(list)
         for block_info in block_ranges:
-            top_qubit = min(block_info["qubit_indices"])
-            qubit_blocks[top_qubit].append(block_info)
+            visible_qubits = self._visible_qubits(block_info["qubit_indices"])
+            if not visible_qubits:
+                continue
+            visible_block_info = dict(block_info)
+            visible_block_info["qubit_indices"] = visible_qubits
+            visible_block_info["control_qubit_indices"] = self._visible_qubits(
+                block_info.get("control_qubit_indices", [])
+            )
+            top_qubit = min(visible_qubits)
+            qubit_blocks[top_qubit].append(visible_block_info)
 
         for qubit, blocks in qubit_blocks.items():
             blocks.sort(key=lambda b: b["start_x"])
@@ -299,6 +318,10 @@ class MatplotlibRenderer:
         """
         if max_gate_width is None:
             max_gate_width = self.style.gate_width
+
+        qubit_indices = self._visible_qubits(qubit_indices)
+        if not qubit_indices:
+            return 0.0, 0.0
 
         y_coords = [self.qubit_y[q] for q in qubit_indices]
         min_y = min(y_coords)
@@ -507,7 +530,7 @@ class MatplotlibRenderer:
         Returns:
             None
         """
-        affected_qubits = node.affected_qubits
+        affected_qubits = self._visible_qubits(node.affected_qubits)
         if not affected_qubits:
             return
 
@@ -888,7 +911,7 @@ class MatplotlibRenderer:
     ) -> None:
         """Draw a VGate node using pre-resolved fields."""
         ax = fig._qm_ax  # type: ignore[attr-defined]
-        qubit_indices = node.qubit_indices
+        qubit_indices = self._visible_qubits(node.qubit_indices)
 
         if not qubit_indices:
             return
@@ -1050,8 +1073,8 @@ class MatplotlibRenderer:
         block_width: float | None,
         is_call_block: bool,
     ) -> None:
-        """Draw a block-box (CallBlock or CompositeGate) from VGate."""
-        qubit_indices = node.qubit_indices
+        """Draw a callable/control block box from VGate."""
+        qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
@@ -1108,13 +1131,13 @@ class MatplotlibRenderer:
         block_width: float | None,
     ) -> None:
         """Draw a ControlledU box from VGate with control dots."""
-        qubit_indices = node.qubit_indices
+        qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
         # Split control and target indices
-        control_indices = qubit_indices[: node.control_count]
-        target_indices = qubit_indices[node.control_count :]
+        control_indices = self._visible_qubits(node.qubit_indices[: node.control_count])
+        target_indices = self._visible_qubits(node.qubit_indices[node.control_count :])
 
         control_y = [self.qubit_y[q] for q in control_indices]
         target_y = [self.qubit_y[q] for q in target_indices]
@@ -1296,7 +1319,7 @@ class MatplotlibRenderer:
         block_width: float | None,
     ) -> None:
         """Draw an expectation value operation from VGate."""
-        qubit_indices = node.qubit_indices
+        qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
@@ -1358,7 +1381,7 @@ class MatplotlibRenderer:
         Returns:
             None
         """
-        affected_qubits = node.affected_qubits
+        affected_qubits = self._visible_qubits(node.affected_qubits)
         if not affected_qubits:
             return
 
@@ -1693,7 +1716,7 @@ class MatplotlibRenderer:
         for key, info in self.layout.folded_block_extents.items():
             if key not in positions:
                 continue
-            qubits = info["affected_qubits"]
+            qubits = self._visible_qubits(info["affected_qubits"])
             if not qubits:
                 continue
             y_coords = [self.qubit_y[q] for q in qubits]
