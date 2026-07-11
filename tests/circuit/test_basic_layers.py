@@ -11,17 +11,17 @@ from qamomile.circuit.algorithm.basic import (
     ry_layer,
     rz_layer,
 )
-from qamomile.circuit.estimator import count_gates
+from qamomile.circuit.estimator import estimate_resources
 
 # ---------------------------------------------------------------------------
-# Symbolic gate count tests (count_gates on IR)
+# Symbolic resource tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("num_qubits", [1, 3, 5])
 def test_rx_layer_gate_count(num_qubits):
     """Test that rx_layer produces n RX gates."""
-    counts = count_gates(rx_layer.block)
+    counts = estimate_resources(rx_layer.block).gates
     q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == num_qubits
     assert counts.two_qubit.subs(q_dim0, num_qubits) == 0
@@ -30,7 +30,7 @@ def test_rx_layer_gate_count(num_qubits):
 @pytest.mark.parametrize("num_qubits", [1, 3, 5])
 def test_ry_layer_gate_count(num_qubits):
     """Test that ry_layer produces n RY gates."""
-    counts = count_gates(ry_layer.block)
+    counts = estimate_resources(ry_layer.block).gates
     q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == num_qubits
     assert counts.two_qubit.subs(q_dim0, num_qubits) == 0
@@ -39,7 +39,7 @@ def test_ry_layer_gate_count(num_qubits):
 @pytest.mark.parametrize("num_qubits", [1, 3, 5])
 def test_rz_layer_gate_count(num_qubits):
     """Test that rz_layer produces n RZ gates."""
-    counts = count_gates(rz_layer.block)
+    counts = estimate_resources(rz_layer.block).gates
     q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == num_qubits
     assert counts.two_qubit.subs(q_dim0, num_qubits) == 0
@@ -48,7 +48,7 @@ def test_rz_layer_gate_count(num_qubits):
 @pytest.mark.parametrize("num_qubits", [2, 4, 6])
 def test_cz_entangling_layer_gate_count(num_qubits):
     """Test that cz_entangling_layer produces n-1 CZ gates."""
-    counts = count_gates(cz_entangling_layer.block)
+    counts = estimate_resources(cz_entangling_layer.block).gates
     q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == 0
     assert counts.two_qubit.subs(q_dim0, num_qubits) == num_qubits - 1
@@ -57,7 +57,7 @@ def test_cz_entangling_layer_gate_count(num_qubits):
 @pytest.mark.parametrize("num_qubits", [2, 4, 6])
 def test_cx_entangling_layer_gate_count(num_qubits):
     """Test that cx_entangling_layer produces n-1 CX gates."""
-    counts = count_gates(cx_entangling_layer.block)
+    counts = estimate_resources(cx_entangling_layer.block).gates
     q_dim0 = sp.Symbol("q_dim0", integer=True, positive=True)
     assert counts.single_qubit.subs(q_dim0, num_qubits) == 0
     assert counts.two_qubit.subs(q_dim0, num_qubits) == num_qubits - 1

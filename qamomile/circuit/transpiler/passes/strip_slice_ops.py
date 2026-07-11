@@ -78,9 +78,17 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
                     if transformed is None:
                         continue
                     transformed = self._transform_control_flow(transformed)
-                    if isinstance(transformed, (ForOperation, ForItemsOperation)) and (
-                        not transformed.operations
+                    if (
+                        isinstance(transformed, (ForOperation, ForItemsOperation))
+                        and not transformed.operations
+                        and not transformed.region_args
                     ):
+                        # A loop shell left empty by marker stripping is
+                        # dead — unless it carries region args (explicit
+                        # loop-carried values, e.g. a pure handle swap
+                        # ``a, b = b, a`` whose body emits no IR ops but
+                        # whose per-iteration carry is the loop's entire
+                        # effect).
                         continue
                     result.append(transformed)
                 return result

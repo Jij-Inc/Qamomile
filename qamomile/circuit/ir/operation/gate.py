@@ -5,6 +5,7 @@ import enum
 import typing
 
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.callable import CallableRef
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -148,6 +149,47 @@ class MeasureOperation(Operation):
 
 
 @dataclasses.dataclass
+class ProjectOperation(Operation):
+    """Project a qubit in one Pauli basis and keep the projected state."""
+
+    axis: str = "z"
+
+    def __post_init__(self):
+        if self.axis not in {"x", "y", "z"}:
+            raise ValueError("axis must be one of 'x', 'y', or 'z'.")
+
+    @property
+    def signature(self) -> Signature:
+        return Signature(
+            operands=[ParamHint(name="qubit", type=QubitType())],
+            results=[
+                ParamHint(name="qubit", type=QubitType()),
+                ParamHint(name="bit", type=BitType()),
+            ],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        return OperationKind.HYBRID
+
+
+@dataclasses.dataclass
+class ResetOperation(Operation):
+    """Reset a qubit to the |0> state and return the fresh handle."""
+
+    @property
+    def signature(self) -> Signature:
+        return Signature(
+            operands=[ParamHint(name="qubit", type=QubitType())],
+            results=[ParamHint(name="qubit", type=QubitType())],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        return OperationKind.QUANTUM
+
+
+@dataclasses.dataclass
 class ControlledUOperation(Operation):
     """Base class for controlled-U operations.
 
@@ -171,19 +213,22 @@ class ControlledUOperation(Operation):
             (``int | Value``). The default ``1`` is a dataclass slot
             reservation — ``ControlledUOperation`` is never instantiated
             directly (concrete subclasses are the only producers; see the
-            pattern-match dispatch in
-            ``qamomile/circuit/estimator/qubits_counter.py:262,393`` and
-            ``qamomile/circuit/estimator/gate_counter.py:161``). Every
-            concrete subclass redeclares ``num_controls`` with the correct
-            narrow type and the default it actually wants
+            pattern-match dispatch in the symbolic ``ResourceEstimator``).
+            Every concrete subclass redeclares ``num_controls`` with the
+            correct narrow type and the default it actually wants
             (``ConcreteControlledU``: ``int = 1`` matches the single-control
             shape; ``SymbolicControlledU``: a ``UIntType`` ``Value`` placeholder
             via ``default_factory``).
+        callable_ref: Stable identity of the controlled callable.
+        callable_attrs: Serializer-friendly attrs copied from the controlled
+            callable definition.
     """
 
     power: int | Value = 1
     block: Block | None = None
     num_controls: int | Value = 1
+    callable_ref: CallableRef | None = None
+    callable_attrs: dict[str, typing.Any] = dataclasses.field(default_factory=dict)
 
     @property
     def is_symbolic_num_controls(self) -> bool:

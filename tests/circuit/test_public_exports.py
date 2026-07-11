@@ -15,6 +15,21 @@ re-imported here, so the test also documents the back-compat contract.
 from __future__ import annotations
 
 import qamomile.circuit as qmc
+from qamomile.circuit.estimator.resource_estimator import (
+    OpaqueCallContext,
+    ResourceEstimator,
+    UnknownResourcePolicy,
+)
+from qamomile.circuit.frontend.callable_signature import CallableSignature
+from qamomile.circuit.frontend.composite_gate import composite_gate
+from qamomile.circuit.frontend.operation.measurement import (
+    measure_reset,
+    project_x,
+    project_y,
+    project_z,
+    reset,
+)
+from qamomile.circuit.frontend.oracle import Oracle, opaque
 from qamomile.circuit.transpiler import job as _job_module
 
 
@@ -58,6 +73,75 @@ def test_job_types_listed_in_all():
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"
         )
+
+
+def test_callable_helpers_are_publicly_reexported():
+    """Primary callable helper API is reachable from ``qamomile.circuit``."""
+    assert qmc.composite_gate is composite_gate
+    assert qmc.opaque is opaque
+    assert qmc.Oracle is Oracle
+    assert qmc.CallableSignature is CallableSignature
+    assert qmc.ResourceEstimator is ResourceEstimator
+    assert qmc.UnknownResourcePolicy is UnknownResourcePolicy
+    assert qmc.OpaqueCallContext is OpaqueCallContext
+
+    for name in (
+        "composite_gate",
+        "opaque",
+        "Oracle",
+        "CallableSignature",
+        "ResourceEstimator",
+        "UnknownResourcePolicy",
+        "OpaqueCallContext",
+    ):
+        assert name in qmc.__all__, (
+            f"{name!r} should be listed in qamomile.circuit.__all__"
+        )
+
+
+def test_measurement_helpers_are_publicly_reexported():
+    """Measurement/projection helper API is reachable from ``qamomile.circuit``."""
+    assert qmc.project_z is project_z
+    assert qmc.project_x is project_x
+    assert qmc.project_y is project_y
+    assert qmc.reset is reset
+    assert qmc.measure_reset is measure_reset
+
+    for name in (
+        "project_z",
+        "project_x",
+        "project_y",
+        "reset",
+        "measure_reset",
+    ):
+        assert name in qmc.__all__, (
+            f"{name!r} should be listed in qamomile.circuit.__all__"
+        )
+
+
+def test_removed_parallel_composite_api_is_not_exposed() -> None:
+    """Only the QKernel-returning composite_gate decorator is public."""
+    assert not hasattr(qmc, "composite")
+    assert not hasattr(qmc, "CompositeGate")
+
+
+def test_compiler_callable_descriptors_are_not_top_level_api():
+    """Compiler-facing callable descriptors stay out of ``qamomile.circuit``.
+
+    The intended frontend surface is expressed through qkernel,
+    composite_gate, and opaque helpers. ``CallableDef`` and related IR
+    descriptors are available from deep compiler paths only.
+    """
+    for name in (
+        "CallableDef",
+        "CallableRef",
+        "CallableImplementation",
+        "InvokeOperation",
+        "CallPolicy",
+        "CallTransform",
+    ):
+        assert name not in qmc.__all__
+        assert not hasattr(qmc, name)
 
 
 def test_deep_path_still_importable():

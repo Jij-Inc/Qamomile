@@ -602,6 +602,14 @@ class QuriPartsGateEmitter:
         """
         pass
 
+    def emit_reset(
+        self,
+        circuit: "LinearMappedUnboundParametricQuantumCircuit",
+        qubit: int,
+    ) -> None:
+        """Raise because QURI Parts circuits do not support reset."""
+        raise NotImplementedError("QURI Parts does not support reset operations.")
+
     # Barrier - QURI Parts doesn't support barriers
     def emit_barrier(
         self,

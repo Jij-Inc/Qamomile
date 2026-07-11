@@ -2,7 +2,7 @@
 
 The recursion is resolved by the transpiler's inline ↔ partial_eval
 fixed-point loop: each iteration unrolls one layer of self-referential
-``CallBlockOperation`` and then folds the base-case ``if`` under the
+``InvokeOperation`` and then folds the base-case ``if`` under the
 provided bindings.  When the recursion driver is not concretized by the
 bindings the self-call is left in the IR; when it is concrete but the
 recursion does not terminate the loop raises ``FrontendTransformError``.
@@ -11,7 +11,7 @@ recursion does not terminate the loop raises ``FrontendTransformError``.
 import pytest
 
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.transpiler.errors import FrontendTransformError
 from qamomile.qiskit import QiskitTranspiler
 
@@ -34,6 +34,13 @@ def _rec(k: qmc.UInt, q: qmc.Qubit) -> qmc.Qubit:
 def _outer_of_rec(k: qmc.UInt) -> qmc.Bit:
     q = qmc.qubit(name="q")
     q = _rec(k, q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _outer_of_leaf() -> qmc.Bit:
+    q = qmc.qubit(name="q")
+    q = _leaf(q)
     return qmc.measure(q)
 
 
@@ -64,16 +71,29 @@ def _rec_tuple_without_matching_input(
     return result
 
 
+def test_helper_qkernel_call_is_inline_policy_invoke():
+    """A helper qkernel call is represented as an inline InvokeOperation."""
+    block = _outer_of_leaf.block
+    invokes = [op for op in block.operations if isinstance(op, InvokeOperation)]
+
+    assert len(invokes) == 1
+    assert invokes[0].attrs["kind"] == "qkernel"
+    assert invokes[0].target.namespace == "user.qkernel"
+
+    inlined = QiskitTranspiler().inline(block)
+    assert not any(isinstance(op, InvokeOperation) for op in inlined.operations)
+
+
 def test_build_of_self_recursive_kernel_succeeds():
     """A self-recursive kernel builds into a hierarchical block with a
-    self-referential CallBlockOperation inside its body."""
+    self-referential InvokeOperation inside its body."""
     block = _rec.block
     self_refs = 0
     pending = [block.operations]
     while pending:
         ops = pending.pop()
         for op in ops:
-            if isinstance(op, CallBlockOperation) and op.block is block:
+            if isinstance(op, InvokeOperation) and op.body is block:
                 self_refs += 1
             if hasattr(op, "nested_op_lists"):
                 for body in op.nested_op_lists():

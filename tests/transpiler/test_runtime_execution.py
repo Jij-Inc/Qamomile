@@ -25,6 +25,7 @@ from qamomile.circuit.transpiler.compiled_segments import (
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
+from qamomile.circuit.transpiler.job import SampleJob
 from qamomile.circuit.transpiler.parameter_binding import (
     ParameterInfo,
     ParameterMetadata,
@@ -231,6 +232,16 @@ class TestExecutableProgramRuntime:
 
         with pytest.raises(ExecutionError, match="Typed output 'missing_output'"):
             executable.sample(_FakeExecutor(counts={"": 2}), shots=2).result()
+
+    def test_sample_job_aggregates_duplicate_projected_outputs(self) -> None:
+        """Raw states collapsing to one public value have their counts summed."""
+        job = SampleJob(
+            {"000": 2, "100": 3},
+            lambda counts: [((0,), count) for count in counts.values()],
+            shots=5,
+        )
+
+        assert job.result().results == [((0,), 5)]
 
     def test_run_executes_expval_before_classical_post(self) -> None:
         exp_result = Value(type=FloatType(), name="exp_result")

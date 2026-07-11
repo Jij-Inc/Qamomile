@@ -14,10 +14,12 @@ bytes), so both wire formats carry it unchanged.
 Two fidelity properties are load-bearing:
 
 - **Term order is preserved.** ``Hamiltonian``'s term dict iteration
-  order is observable through ``repr`` and therefore feeds
-  ``content_hash`` (canonical bytes stringify opaque payloads via
-  ``repr``). The encoder emits terms in iteration order and the
-  decoder re-adds them in wire order.
+  order is observable through ``repr`` and ``__iter__``, so a faithful
+  round-trip must not reorder terms. The encoder emits terms in
+  iteration order and the decoder re-adds them in wire order.
+  (``content_hash`` is deliberately order-*independent*: canonical
+  bytes sort the term tokens, matching ``Hamiltonian.__eq__``'s
+  dict-based term comparison — see ``canonical._hamiltonian_token``.)
 - **Coefficient types are preserved.** ``repr(1.2)`` differs from
   ``repr((1.2+0j))``, so int / float coefficients are written as plain
   numbers while complex ones get an explicit ``$complex`` sub-wrapper.

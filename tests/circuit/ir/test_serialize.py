@@ -32,8 +32,9 @@ from qamomile.circuit.ir.operation import (
     GateOperation,
     GateOperationType,
     InverseBlockOperation,
+    InvokeOperation,
 )
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import CallTransform, CompositeGateType
 from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
@@ -155,7 +156,7 @@ def _nested_inverse_inner(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
 
 @qmc.qkernel
 def _nested_inverse_outer(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
-    """Outer helper that leaves a CallBlockOperation before inline."""
+    """Outer helper that leaves an inline InvokeOperation before inline."""
     q = qmc.h(q)
     q = _nested_inverse_inner(q, theta)
     return q
@@ -201,6 +202,12 @@ def _phase(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
     return qmc.p(q, theta)
 
 
+@qmc.composite_gate(name="boxed_phase")
+def _boxed_phase(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Single-qubit phase rotation exposed as a composite callable."""
+    return qmc.p(q, theta)
+
+
 @qmc.qkernel
 def _controlled_phase(
     ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
@@ -209,6 +216,24 @@ def _controlled_phase(
     op = qmc.control(_phase)
     ctrl, target = op(ctrl, target, theta=theta)
     return ctrl, target
+
+
+@qmc.qkernel
+def _controlled_boxed_phase(
+    ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Top-level kernel that controls a composite callable."""
+    op = qmc.control(_boxed_phase)
+    ctrl, target = op(ctrl, target, theta=theta)
+    return ctrl, target
+
+
+@qmc.qkernel
+def _inverse_boxed_phase(target: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Top-level kernel that inverts a composite callable."""
+    inverse_phase = qmc.inverse(_boxed_phase)
+    target = inverse_phase(target, theta=theta)
+    return target
 
 
 @qmc.qkernel
@@ -415,7 +440,7 @@ def _controlled_nonleaf_inner(q: qmc.Qubit) -> qmc.Qubit:
 
 @qmc.qkernel
 def _controlled_nonleaf_unitary(q: qmc.Qubit) -> qmc.Qubit:
-    """Non-leaf unitary: its cached block contains a CallBlockOperation."""
+    """Non-leaf unitary: its cached block contains an inline InvokeOperation."""
     q = _controlled_nonleaf_inner(q)
     q = qmc.x(q)
     return q
@@ -429,7 +454,7 @@ def _controlled_nonleaf_kernel(
 
     Before InlinePass descended into ``ControlledUOperation.block``,
     the nested call survived inlining, the block was still reported as
-    AFFINE, and serialization died on the residual CallBlockOperation.
+    AFFINE, and serialization died on the residual inline InvokeOperation.
     """
     op = qmc.control(_controlled_nonleaf_unitary)
     ctrl, target = op(ctrl, target)
@@ -520,11 +545,11 @@ class TestRoundTripStructure:
         assert inverse_op.source_block.kind is BlockKind.AFFINE
         assert inverse_op.implementation_block.kind is BlockKind.AFFINE
         assert not any(
-            isinstance(op, CallBlockOperation)
+            isinstance(op, InvokeOperation) and op.attrs.get("kind") == "qkernel"
             for op in inverse_op.source_block.operations
         )
         assert not any(
-            isinstance(op, CallBlockOperation)
+            isinstance(op, InvokeOperation) and op.attrs.get("kind") == "qkernel"
             for op in inverse_op.implementation_block.operations
         )
 
@@ -597,6 +622,93 @@ class TestRoundTripIRFeatures:
         restored = load_json(dump_json(block))
         op_names = [type(op).__name__ for op in restored.operations]
         assert any(name.endswith("ControlledU") for name in op_names), op_names
+
+    def test_controlled_u_callable_ref_and_attrs_round_trip(self):
+        """Controlled-U keeps the wrapped qkernel callable identity and attrs."""
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+
+        block = _to_affine(_controlled_phase)
+        controlled_ops = [
+            op for op in block.operations if isinstance(op, ControlledUOperation)
+        ]
+        assert controlled_ops
+        assert {op.callable_ref.name for op in controlled_ops if op.callable_ref} == {
+            "_phase"
+        }
+        assert {op.callable_attrs["kind"] for op in controlled_ops} == {"qkernel"}
+        assert {op.callable_attrs["default_policy"] for op in controlled_ops} == {
+            "INLINE"
+        }
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            restored_ops = [
+                op for op in restored.operations if isinstance(op, ControlledUOperation)
+            ]
+            assert [op.callable_ref.name for op in restored_ops if op.callable_ref] == [
+                "_phase"
+            ]
+            assert [op.callable_attrs["kind"] for op in restored_ops] == ["qkernel"]
+            assert [op.callable_attrs["default_policy"] for op in restored_ops] == [
+                "INLINE"
+            ]
+
+    def test_controlled_composite_callable_ref_and_attrs_round_trip(self):
+        """Controlled composite Invoke keeps one callable definition."""
+
+        block = _to_affine(_controlled_boxed_phase)
+        controlled_ops = [
+            op for op in block.operations if isinstance(op, InvokeOperation)
+        ]
+        assert controlled_ops
+        assert {op.target.namespace for op in controlled_ops} == {"user.composite"}
+        assert {op.target.name for op in controlled_ops} == {"boxed_phase"}
+        assert {op.transform for op in controlled_ops} == {CallTransform.CONTROLLED}
+        assert {op.attrs["kind"] for op in controlled_ops} == {"composite"}
+        assert {op.attrs["default_policy"] for op in controlled_ops} == {"PRESERVE_BOX"}
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            restored_ops = [
+                op for op in restored.operations if isinstance(op, InvokeOperation)
+            ]
+            assert [op.target.namespace for op in restored_ops] == ["user.composite"]
+            assert [op.target.name for op in restored_ops] == ["boxed_phase"]
+            assert [op.transform for op in restored_ops] == [CallTransform.CONTROLLED]
+            assert [op.attrs["kind"] for op in restored_ops] == ["composite"]
+            assert [op.attrs["default_policy"] for op in restored_ops] == [
+                "PRESERVE_BOX"
+            ]
+
+    def test_inverse_composite_callable_ref_and_attrs_round_trip(self):
+        """Inverse composite Invoke keeps one callable definition."""
+        block = _to_affine(_inverse_boxed_phase)
+        inverse_ops = [op for op in block.operations if isinstance(op, InvokeOperation)]
+        assert inverse_ops
+        assert {op.target.namespace for op in inverse_ops} == {"user.composite"}
+        assert {op.target.name for op in inverse_ops} == {"boxed_phase"}
+        assert {op.transform for op in inverse_ops} == {CallTransform.INVERSE}
+        assert {op.attrs["kind"] for op in inverse_ops} == {"composite"}
+        assert {op.attrs["default_policy"] for op in inverse_ops} == {"PRESERVE_BOX"}
+
+        for restored in (
+            load_json(dump_json(block)),
+            load_msgpack(dump_msgpack(block)),
+        ):
+            restored_ops = [
+                op for op in restored.operations if isinstance(op, InvokeOperation)
+            ]
+            assert [op.target.namespace for op in restored_ops] == ["user.composite"]
+            assert [op.target.name for op in restored_ops] == ["boxed_phase"]
+            assert [op.transform for op in restored_ops] == [CallTransform.INVERSE]
+            assert [op.attrs["kind"] for op in restored_ops] == ["composite"]
+            assert [op.attrs["default_policy"] for op in restored_ops] == [
+                "PRESERVE_BOX"
+            ]
 
     def test_controlled_u_symbolic_power_round_trip(self):
         """Controlled-U symbolic ``power`` survives both wire formats."""
@@ -950,7 +1062,7 @@ class TestRoundTripIRFeatures:
         """A controlled non-leaf kernel inlines fully and round-trips.
 
         InlinePass must descend into ``ControlledUOperation.block`` so
-        AFFINE keeps meaning "no residual CallBlockOperation anywhere
+        AFFINE keeps meaning "no residual inline InvokeOperation anywhere
         reachable"; the serializer rejects residual calls.
         """
         from qamomile.circuit.ir.operation.gate import ControlledUOperation
@@ -963,7 +1075,10 @@ class TestRoundTripIRFeatures:
         assert controlled_ops
         nested = controlled_ops[0].block
         assert nested is not None
-        assert not any(isinstance(op, CallBlockOperation) for op in nested.operations)
+        assert not any(
+            isinstance(op, InvokeOperation) and op.attrs.get("kind") == "qkernel"
+            for op in nested.operations
+        )
 
         original = to_dict(block)
         assert to_dict(load_json(dump_json(block))) == original
@@ -1501,12 +1616,12 @@ class TestRejectBoolInIntFields:
 
 
 # ---------------------------------------------------------------------------
-# Unsupported scope: HIERARCHICAL / CallBlockOperation
+# Unsupported scope: HIERARCHICAL
 # ---------------------------------------------------------------------------
 
 
 class TestUnsupportedKind:
-    """``to_dict`` rejects unsupported block kinds and CallBlockOperation."""
+    """``to_dict`` rejects unsupported block kinds."""
 
     def test_rejects_hierarchical(self):
         """HIERARCHICAL blocks must be inlined first."""
@@ -1515,16 +1630,6 @@ class TestUnsupportedKind:
         )
         with pytest.raises(ValueError, match="AFFINE"):
             to_dict(hierarchical)
-
-    def test_rejects_call_block_operation(self):
-        """A residual ``CallBlockOperation`` raises ``NotImplementedError``."""
-        block = _to_affine(_scalar_gate)
-        bad = dataclasses.replace(
-            block,
-            operations=[*block.operations, CallBlockOperation(block=block)],
-        )
-        with pytest.raises(NotImplementedError, match="CallBlockOperation"):
-            to_dict(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -1793,7 +1898,7 @@ def _algo_rx_then_cz(
 ) -> qmc.Vector[qmc.Qubit]:
     """Compose two ``qamomile.circuit.algorithm.basic`` kernels.
 
-    Forces ``InlinePass`` to flatten two distinct ``CallBlockOperation``s
+    Forces ``InlinePass`` to flatten two distinct inline InvokeOperations
     and confirms the serialized form still survives.
     """
     n = thetas.shape[0]
@@ -1818,7 +1923,7 @@ def _algo_phase_gadget(
 
 @qmc.qkernel
 def _qft_3() -> qmc.Vector[qmc.Qubit]:
-    """QFT on 3 qubits — exercises ``CompositeGateOperation`` + nested block."""
+    """QFT on 3 qubits — exercises ``InvokeOperation`` + nested body."""
     qs = qmc.qubit_array(3, "qs")
     return qft(qs)
 
@@ -1830,6 +1935,14 @@ def _qft_then_iqft_4() -> qmc.Vector[qmc.Qubit]:
     qs = qft(qs)
     qs = iqft(qs)
     return qs
+
+
+@qmc.qkernel
+def _symbolic_qft(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Symbolic-width QFT — exercises deferred stdlib body references."""
+    qs = qmc.qubit_array(n, "qs")
+    qs = qft(qs)
+    return qmc.measure(qs)
 
 
 _REAL_KERNELS = [
@@ -1925,8 +2038,8 @@ class TestRealAlgorithmRoundTrip:
         }
         assert restored_uuids == original_uuids
 
-    def test_qft_round_trip_preserves_nested_block(self):
-        """QFT's nested ``implementation_block`` survives byte-for-byte.
+    def test_qft_round_trip_preserves_invoke_body(self):
+        """QFT's nested invoke body survives byte-for-byte.
 
         This is a focused regression test: the encoder must emit the
         nested unitary block separately rather than via ``repr`` (the
@@ -1937,18 +2050,42 @@ class TestRealAlgorithmRoundTrip:
         restored = load_msgpack(dump_msgpack(block))
         original_d = to_dict(block)
         restored_d = to_dict(restored)
-        # Find the CompositeGateOperation in operations
-        composite = next(
+        # Find the QFT InvokeOperation in operations.
+        invoke = next(
             op
             for op in original_d["block"]["operations"]
-            if op["$type"] == "CompositeGateOperation"
+            if op["$type"] == "InvokeOperation"
+            and op["attrs"]["gate_type"] == CompositeGateType.QFT.name
         )
-        composite_r = next(
+        invoke_r = next(
             op
             for op in restored_d["block"]["operations"]
-            if op["$type"] == "CompositeGateOperation"
+            if op["$type"] == "InvokeOperation"
+            and op["attrs"]["gate_type"] == CompositeGateType.QFT.name
         )
-        assert composite["implementation_block"] == composite_r["implementation_block"]
+        assert invoke["definition"]["body"] == invoke_r["definition"]["body"]
+
+    def test_symbolic_qft_round_trip_preserves_body(self):
+        """Symbolic-width QFT serializes its ordinary qkernel body."""
+        block = _build_real(_symbolic_qft, {})
+        original_d = to_dict(block)
+        restored_d = to_dict(load_msgpack(dump_msgpack(block)))
+        invoke = next(
+            op
+            for op in original_d["block"]["operations"]
+            if op["$type"] == "InvokeOperation"
+            and op["attrs"]["gate_type"] == CompositeGateType.QFT.name
+        )
+        invoke_r = next(
+            op
+            for op in restored_d["block"]["operations"]
+            if op["$type"] == "InvokeOperation"
+            and op["attrs"]["gate_type"] == CompositeGateType.QFT.name
+        )
+
+        assert invoke["definition"]["body"] is not None
+        assert invoke["definition"]["body_ref"] is None
+        assert invoke_r["definition"]["body"] == invoke["definition"]["body"]
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureVectorOperation,
+    ProjectOperation,
 )
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import Value, resolve_root_array_index
@@ -102,6 +103,12 @@ def is_measurement_backed(
     producer = producer_map.get(value.uuid)
 
     if isinstance(producer, (MeasureOperation, MeasureVectorOperation)):
+        visiting.discard(value.uuid)
+        return True
+    if (
+        isinstance(producer, ProjectOperation)
+        and producer.results[1].uuid == value.uuid
+    ):
         visiting.discard(value.uuid)
         return True
 
