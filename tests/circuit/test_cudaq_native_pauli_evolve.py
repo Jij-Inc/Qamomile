@@ -177,8 +177,8 @@ def test_controlled_helper_pads_narrow_hamiltonian(
     )
     source = exe.compiled_quantum[0].circuit.source
 
-    assert 'exp_pauli(-0.5, [t0], "Z")' in source
-    assert "x(t1)" in source
+    assert "rz.ctrl(1.0, q[0], q[1])" in source
+    assert "x.ctrl(q[0], q[2])" in source
 
 
 _X, _Y, _Z = qm_o.X, qm_o.Y, qm_o.Z

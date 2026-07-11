@@ -2292,10 +2292,10 @@ class TestLogicalClbitReturnContract:
         assert "return [__b" in circuit.source
 
     def test_runnable_source_initializes_clbits(self) -> None:
-        """RUNNABLE source must initialize __b{i} = False for all clbits."""
+        """RUNNABLE source must initialize mutable clbit cells."""
         _, circuit = _transpile_and_get_circuit(_c_if_basic)
         for i in range(circuit.num_clbits):
-            assert f"__b{i} = False" in circuit.source
+            assert f"__b{i} = [False]" in circuit.source
 
     def test_runnable_measurement_qubit_map_empty(self) -> None:
         """RUNNABLE segments must not populate measurement_qubit_map."""
@@ -2726,10 +2726,8 @@ class TestCudaqHelperKernelSemanticsContract:
         assert statevectors_equal(sv, expected)
         _assert_source_contains(
             qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit, t1: cudaq.qubit):",
-            "x(t0)",
-            "x(t1)",
-            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2], q[3])",
+            "x.ctrl(q[0], q[1], q[2])",
+            "x.ctrl(q[0], q[1], q[3])",
         )
 
     def test_existing_ccx_happy_path_regression(self):
@@ -3913,12 +3911,10 @@ class TestControlledSubRoutines:
         assert qc.execution_mode == ExecutionMode.STATIC
         _assert_source_contains(
             qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit):",
-            "h(t0)",
-            "x(t0)",
             "def _qamomile_kernel():",
             "q = cudaq.qvector(2)",
-            "cudaq.control(_qamomile_controlled_0, q[0], q[1])",
+            "h.ctrl(q[0], q[1])",
+            "x.ctrl(q[0], q[1])",
         )
 
     def test_controlled_parametric_kernel_uses_cudaq_control(self):
@@ -3940,10 +3936,8 @@ class TestControlledSubRoutines:
         _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
         _assert_source_contains(
             qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
-            "ry(thetas[0], t0)",
             "def _qamomile_kernel(thetas: list[float]):",
-            "cudaq.control(_qamomile_controlled_0, q[0], q[1], thetas)",
+            "ry.ctrl(thetas[0], q[0], q[1])",
         )
 
     def test_nested_controlled_parametric_helper_forwards_thetas(self):
@@ -3974,11 +3968,8 @@ class TestControlledSubRoutines:
         _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
         _assert_source_contains(
             qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
-            "ry(thetas[0], t0)",
-            "def _qamomile_controlled_1(t0: cudaq.qubit, t1: cudaq.qubit, thetas: list[float]):",
-            "cudaq.control(_qamomile_controlled_0, t0, t1, thetas)",
-            "cudaq.control(_qamomile_controlled_1, q[0], q[1], q[2], thetas)",
+            "def _qamomile_kernel(thetas: list[float]):",
+            "ry.ctrl(thetas[0], q[0], q[1], q[2])",
         )
 
     def test_controlled_multi_control_helper_uses_cudaq_control(self):
@@ -4003,10 +3994,8 @@ class TestControlledSubRoutines:
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
         _assert_source_contains(
             qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit):",
-            "h(t0)",
-            "x(t0)",
-            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2])",
+            "h.ctrl(q[0], q[1], q[2])",
+            "x.ctrl(q[0], q[1], q[2])",
         )
 
     def test_identical_controlled_helpers_are_reused(self):
@@ -4029,8 +4018,8 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
-        assert qc.source.count("def _qamomile_controlled_") == 1
-        assert qc.source.count("cudaq.control(_qamomile_controlled_0") == 2
+        assert qc.source.count("h.ctrl(q[0]") == 2
+        assert qc.source.count("x.ctrl(q[0]") == 2
 
     def test_controlled_power_2(self):
         """A powered controlled phase helper transpiles."""

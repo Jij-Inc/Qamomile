@@ -112,8 +112,8 @@ class TestFrontendReachableKinds:
 
 
 class TestSyntheticBinaryExprDispatch:
-    """Direct unit tests on ``_build_qiskit_binary_expr`` covering every
-    binary ``RuntimeOpKind``. Numeric operands are passed as Python ints
+    """Direct unit tests on the Qiskit scalar materializer. Numeric operands
+    are passed as Qiskit expressions
     to assert that the dispatch preserves them (no ``bool(...)`` coercion)
     and routes through the right Qiskit ``expr`` builder.
     """
@@ -145,7 +145,8 @@ class TestSyntheticBinaryExprDispatch:
         self, kind, expected_op_name, expr_module
     ):
         """Each binary RuntimeOpKind dispatches to the matching qiskit.expr op."""
-        from qamomile.qiskit.transpiler import QiskitEmitPass
+        from qamomile.circuit.transpiler.circuit_ir import BinaryOperator
+        from qamomile.qiskit.materializer import _materialize_binary
 
         expr, types = expr_module
         # Use lift on plain ints — they get qiskit Uint(8) typing but
@@ -158,7 +159,7 @@ class TestSyntheticBinaryExprDispatch:
             lhs = expr.lift(True)
             rhs = expr.lift(False)
 
-        result = QiskitEmitPass._build_qiskit_binary_expr(kind, lhs, rhs)
+        result = _materialize_binary(BinaryOperator[kind.name], lhs, rhs)
         assert hasattr(result, "op"), f"Expected expr.Binary, got {type(result)}"
         assert result.op.name == expected_op_name
 
@@ -167,13 +168,16 @@ class TestSyntheticBinaryExprDispatch:
     )
     def test_unsupported_kinds_raise_not_implemented(self, kind, expr_module):
         """FLOORDIV, MOD and POW have no qiskit.expr equivalent — raise loudly."""
-        from qamomile.qiskit.transpiler import QiskitEmitPass
+        from qamomile.circuit.transpiler.circuit_ir import BinaryOperator
+        from qamomile.qiskit.materializer import _materialize_binary
 
         expr, types = expr_module
         lhs = expr.lift(3, types.Uint(8))
         rhs = expr.lift(2, types.Uint(8))
-        with pytest.raises(NotImplementedError, match=kind.name):
-            QiskitEmitPass._build_qiskit_binary_expr(kind, lhs, rhs)
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        with pytest.raises(EmitError, match=kind.name.lower()):
+            _materialize_binary(BinaryOperator[kind.name], lhs, rhs)
 
     def test_numeric_constants_preserve_their_type(self, expr_module):
         """Regression for the Copilot-flagged ``bool(...)`` coercion bug.
@@ -182,13 +186,14 @@ class TestSyntheticBinaryExprDispatch:
         anything coerced operands to ``bool`` it would become ``True`` and
         compare against the register as 1, silently changing semantics.
         """
-        from qamomile.qiskit.transpiler import QiskitEmitPass
+        from qamomile.circuit.transpiler.circuit_ir import BinaryOperator
+        from qamomile.qiskit.materializer import _materialize_binary
 
         expr, types = expr_module
         lhs = expr.lift(7, types.Uint(8))
         # 5 is a Python int; lifted into a Uint(8) constant by qiskit.
         rhs = expr.lift(5, types.Uint(8))
-        result = QiskitEmitPass._build_qiskit_binary_expr(RuntimeOpKind.EQ, lhs, rhs)
+        result = _materialize_binary(BinaryOperator.EQ, lhs, rhs)
         assert result.op.name == "EQUAL"
         # Right operand should still represent 5, not True.
         assert getattr(result.right, "value", None) == 5

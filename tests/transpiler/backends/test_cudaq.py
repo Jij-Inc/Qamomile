@@ -11,7 +11,6 @@ from typing import Any
 import numpy as np
 import pytest
 
-from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -258,84 +257,6 @@ class TestCudaqRuntimeControlFlow:
         exe = transpiler.transpile(circuit_with_while)
         circuit = exe.compiled_quantum[0].circuit
         assert circuit.execution_mode == ExecutionMode.RUNNABLE
-
-
-class TestCudaqControlledSliceElementFallback:
-    """Regression tests for CUDA-Q controlled fallback element resolution."""
-
-    def test_controlled_fallback_resolves_fixed_slice_element(self) -> None:
-        """Controlled fallback should resolve scalar elements of slice views."""
-        root = _qubit_array("q", 4)
-        view = ArrayValue(
-            type=QubitType(),
-            name="q_view",
-            shape=(_uint("q_view_dim0", 2),),
-            slice_of=root,
-            slice_start=_uint("slice_start", 1),
-            slice_step=_uint("slice_step", 2),
-        )
-        element = _qubit_element(view, 1, "q_view[1]")
-        transpiler = CudaqTranspiler()
-
-        calls = _emit_controlled_ops_and_record_targets(
-            transpiler,
-            [_x_gate_on(element)],
-            {root.uuid: [10, 11, 12, 13]},
-        )
-
-        assert calls == [[13]]
-
-    def test_controlled_fallback_recomputes_loop_dependent_slice_slots(
-        self,
-    ) -> None:
-        """Loop-dependent slice bounds should not reuse stale slice slots."""
-        root = _qubit_array("q", 4)
-        loop_var = _uint("i")
-        view = ArrayValue(
-            type=QubitType(),
-            name="q_view",
-            shape=(_uint("q_view_dim0", 2),),
-            slice_of=root,
-            slice_start=loop_var,
-            slice_step=_uint("slice_step", 2),
-        )
-        element = _qubit_element(view, 0, "q_view[0]")
-        loop = ForOperation(
-            operands=[_uint("start", 0), _uint("stop", 2), _uint("step", 1)],
-            loop_var="i",
-            loop_var_value=loop_var,
-            operations=[_x_gate_on(element)],
-        )
-        transpiler = CudaqTranspiler()
-
-        calls = _emit_controlled_ops_and_record_targets(
-            transpiler,
-            [loop],
-            {root.uuid: [10, 11, 12, 13]},
-        )
-
-        assert calls == [[10], [11]]
-
-    def test_controlled_fallback_reseeds_symbolic_vector_element(self) -> None:
-        """Loop-indexed root-vector elements should reseed on each iteration."""
-        root = _qubit_array("q", 4)
-        loop_var = _uint("i")
-        element = _qubit_element(root, loop_var, "q[i]")
-        loop = ForOperation(
-            operands=[_uint("start", 0), _uint("stop", 2), _uint("step", 1)],
-            loop_var="i",
-            loop_var_value=loop_var,
-            operations=[_x_gate_on(element)],
-        )
-        transpiler = CudaqTranspiler()
-
-        calls = _emit_controlled_ops_and_record_targets(
-            transpiler,
-            [loop],
-            {root.uuid: [10, 11, 12, 13]},
-        )
-
-        assert calls == [[10], [11]]
 
 
 class TestCudaqSourceInspectRegression:

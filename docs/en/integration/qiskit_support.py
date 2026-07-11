@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -458,7 +459,7 @@ print("if_else condition:", if_op.condition)
 # ### Native `PauliEvolutionGate`
 #
 # `qmc.pauli_evolve(q, H, gamma)` represents the time evolution $e^{-i\gamma H}$.
-# The Qiskit integration writes that operation as a `PauliEvolutionGate` when `use_native_composite=True` (the default).
+# The Qiskit integration writes that operation as a `PauliEvolutionGate` when `use_native_pauli_evolution=True` (the default).
 # An unbound `gamma` becomes a Qiskit `Parameter`, so the same circuit can be reused while trying different variational parameters.
 
 # %%
@@ -492,7 +493,7 @@ assert "PauliEvolution" in evolution_ops
 assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 
 # %% [markdown]
-# Pass `QiskitTranspiler(use_native_composite=False)` when you want a gate-by-gate decomposition instead.
+# Pass `QiskitTranspiler(use_native_pauli_evolution=False)` when you want a gate-by-gate decomposition instead.
 # The same flag also disables native QFT/IQFT output, which is useful for debugging or for comparing gate counts across quantum SDKs.
 
 # %% [markdown]

@@ -368,12 +368,12 @@ def _backend_statevector(sdk_transpiler: Any, circuit: Any) -> np.ndarray:
 
 
 def _rz_count_qiskit(qc) -> int:
-    """Count RZ gates inside Qiskit ``for_loop`` bodies (plus top-level)."""
+    """Count native Pauli rotations inside loops and at top level."""
     count = 0
     for inst in qc.data:
         if inst.operation.name == "for_loop":
             count += _rz_count_qiskit(inst.operation.blocks[0])
-        elif inst.operation.name == "rz":
+        elif inst.operation.name in {"rz", "PauliEvolution"}:
             count += 1
     return count
 

@@ -1,12 +1,13 @@
-"""Standard emit pass using GateEmitter protocol.
+"""Shared semantic-to-circuit lowering engine.
 
-This module provides StandardEmitPass, a reusable emit pass implementation
-that uses the GateEmitter protocol for backend-specific gate emission.
+This module provides the legacy-named ``StandardEmitPass`` used internally
+by ``CircuitLoweringPass`` to walk Qamomile semantic IR and construct the
+backend-neutral circuit-family IR.
 
 The actual emission logic is decomposed into focused modules under
 ``emit_support/``. This class serves as the orchestrator with thin
-wrappers that delegate to those module functions while preserving
-subclass override points (used by QiskitEmitPass, CudaqEmitPass).
+wrappers that delegate to those module functions. SDK backends do not
+subclass this engine; they consume the resulting immutable circuit program.
 """
 
 from __future__ import annotations
@@ -147,12 +148,10 @@ def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
 class StandardEmitPass(EmitPass[T], Generic[T]):
     """Standard emit pass implementation using GateEmitter protocol.
 
-    This class provides the orchestration logic for circuit emission
-    while delegating backend-specific operations to a GateEmitter.
-
-    Subclasses (QiskitEmitPass, CudaqEmitPass) override specific methods
-    to provide native backend support. The thin wrappers here delegate to
-    module functions in ``emit_support/`` by default.
+    This class provides orchestration for semantic IR traversal while
+    delegating circuit instruction construction to a GateEmitter. The
+    concrete compiler use is ``CircuitLoweringPass``; SDK targets materialize
+    its immutable result instead of subclassing this class.
 
     Args:
         gate_emitter: Backend-specific gate emitter
@@ -680,8 +679,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             ) from e
 
     # ------------------------------------------------------------------
-    # Methods overridden by backend subclasses (QiskitEmitPass, CudaqEmitPass).
-    # Only methods with actual overrides are kept as instance methods.
+    # Structured lowering extension points used by CircuitLoweringPass.
     # ------------------------------------------------------------------
 
     def _emit_for(

@@ -68,6 +68,55 @@ class EmitError(QamomileCompileError):
         super().__init__(message)
 
 
+@dataclass(eq=False, init=False)
+class TargetCapabilityError(EmitError):
+    """A program requires a capability the selected target does not declare.
+
+    Raised by circuit-IR target-legality verification before any backend
+    materialization starts. The message always names the target and the
+    missing capability axis, so the failure reads as a target restriction
+    rather than a Qamomile language error.
+
+    Args:
+        message (str): Human-readable diagnosis naming the target and the
+            missing capability.
+        target (str | None): Declared target name. Defaults to ``None``.
+        operation (str | None): Instruction description that triggered the
+            failure. Defaults to ``None``.
+
+    Example:
+        Correct — bind the runtime parameter before selecting a
+        concrete-angle-only target::
+
+            transpiler.transpile(kernel, bindings={"theta": 0.5})
+
+        Incorrect — keeping ``theta`` symbolic on such a target raises this
+        error::
+
+            transpiler.transpile(kernel, parameters=["theta"])
+    """
+
+    target: str | None
+
+    def __init__(
+        self,
+        message: str,
+        target: str | None = None,
+        operation: str | None = None,
+    ):
+        """Initialize a target-capability diagnosis.
+
+        Args:
+            message (str): Human-readable diagnosis naming the target and the
+                missing capability.
+            target (str | None): Declared target name. Defaults to ``None``.
+            operation (str | None): Instruction description that triggered
+                the failure. Defaults to ``None``.
+        """
+        self.target = target
+        super().__init__(message, operation=operation)
+
+
 class ResolutionFailureReason(Enum):
     """Categorizes why qubit index resolution failed."""
 

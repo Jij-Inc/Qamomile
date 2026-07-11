@@ -1,0 +1,111 @@
+"""Tests for program-level semantic preparation before target lowering."""
+
+from __future__ import annotations
+
+import pytest
+
+import qamomile.circuit as qmc
+from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableRef,
+    InvokeOperation,
+)
+from qamomile.circuit.transpiler.prepared import prepare_module
+from qamomile.qiskit import QiskitTranspiler
+
+
+@qmc.composite_gate(name="prepared_bell")
+def _prepared_bell(
+    left: qmc.Qubit,
+    right: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Build a reusable Bell-state operation."""
+    left = qmc.h(left)
+    return qmc.cx(left, right)
+
+
+@qmc.qkernel
+def _prepared_entrypoint() -> tuple[qmc.Bit, qmc.Bit]:
+    """Invoke a boxed callable from the preparation test entrypoint."""
+    left = qmc.qubit("left")
+    right = qmc.qubit("right")
+    left, right = _prepared_bell(left, right)
+    return qmc.measure(left), qmc.measure(right)
+
+
+def test_prepare_preserves_hierarchy_and_collects_call_graph() -> None:
+    """Preparation retains calls while collecting their definitions."""
+    prepared = QiskitTranspiler().prepare(_prepared_entrypoint)
+
+    assert prepared.entrypoint.kind is BlockKind.HIERARCHICAL
+    invokes = [
+        operation
+        for operation in prepared.entrypoint.operations
+        if isinstance(operation, InvokeOperation)
+    ]
+    assert len(invokes) == 1
+    call = invokes[0]
+    assert call.target in prepared.definitions
+    assert call.target in prepared.call_graph[prepared.entrypoint_ref]
+    assert prepared.body(call.target) is _prepared_bell.block
+
+
+def test_prepare_exposes_program_abi_before_segmentation() -> None:
+    """Preparation records public outputs without creating a ProgramPlan."""
+    prepared = QiskitTranspiler().prepare(_prepared_entrypoint)
+
+    assert prepared.abi.public_inputs == {}
+    assert prepared.abi.output_refs == [
+        value.uuid for value in prepared.entrypoint.output_values
+    ]
+
+
+def test_prepare_definition_mapping_is_read_only() -> None:
+    """Target lowering cannot mutate the prepared definition registry."""
+    prepared = QiskitTranspiler().prepare(_prepared_entrypoint)
+
+    with pytest.raises(TypeError):
+        prepared.definitions[prepared.entrypoint_ref] = next(  # type: ignore[index]
+            iter(prepared.definitions.values())
+        )
+
+
+def test_prepare_collects_edges_for_shared_body_under_each_owner() -> None:
+    """Call-graph collection keys body visits by symbol as well as identity."""
+    leaf_ref = CallableRef("test", "leaf")
+    leaf_definition = CallableDef(ref=leaf_ref, body=Block(name="leaf"))
+    shared_body = Block(
+        name="shared",
+        operations=[InvokeOperation(definition=leaf_definition)],
+    )
+    left_definition = CallableDef(
+        ref=CallableRef("test", "left"),
+        body=shared_body,
+    )
+    right_definition = CallableDef(
+        ref=CallableRef("test", "right"),
+        body=shared_body,
+    )
+    entrypoint = Block(
+        name="entrypoint",
+        operations=[
+            InvokeOperation(definition=left_definition),
+            InvokeOperation(definition=right_definition),
+        ],
+    )
+
+    prepared = prepare_module(entrypoint)
+
+    assert prepared.call_graph[left_definition.ref] == frozenset({leaf_ref})
+    assert prepared.call_graph[right_definition.ref] == frozenset({leaf_ref})
+
+
+def test_existing_transpile_pipeline_uses_prepared_entrypoint() -> None:
+    """The circuit pipeline still executes after preparation extraction."""
+    transpiler = QiskitTranspiler()
+    executable = transpiler.transpile(_prepared_entrypoint)
+    result = executable.sample(transpiler.executor(), shots=16).result()
+
+    assert sum(count for _, count in result.results) == 16
+    assert {bits for bits, _ in result.results} <= {(0, 0), (1, 1)}

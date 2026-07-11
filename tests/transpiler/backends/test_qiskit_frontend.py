@@ -4324,6 +4324,25 @@ class TestTranspilerConfigAndSubstitution:
         # Approximate has strictly fewer total gates
         assert len(qc_approx.data) < len(qc_std.data)
 
+    def test_approximate_qft_overrides_native_preference(self):
+        """An approximate strategy is never relabeled as exact native QFT."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q = qmc.qft(q)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler(use_native_composite=True)
+        transpiler.set_config(
+            TranspilerConfig.with_strategies({"qft": "approximate_k1"})
+        )
+        circuit_artifact = transpiler.transpile(circuit).quantum_circuit
+        names = [instruction.operation.name for instruction in circuit_artifact.data]
+
+        assert "qft" not in names
+        assert names.count("cp") == 3
+
     def test_approximate_qft_cp_count(self):
         """Approximate QFT (k=2) on 5 qubits has fewer CP gates than standard."""
 
@@ -4712,7 +4731,13 @@ class TestStdlibQFT:
         assert np.allclose(sv, expected, atol=1e-10)
 
     def test_qft_native_emission(self):
-        """Native QFT emitter uses Qiskit's QFT library gate."""
+        """Native emission preserves QFT identity as Qiskit's QFTGate.
+
+        The intrinsic identity must survive lowering and legalization so the
+        materializer can emit the single native library gate, and the native
+        realization must be unitarily equivalent to the decomposed fallback.
+        """
+        from qiskit.quantum_info import Operator
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4723,7 +4748,45 @@ class TestStdlibQFT:
         transpiler = QiskitTranspiler(use_native_composite=True)
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
-        assert len(qc.data) > 0
+        names = [instruction.operation.name for instruction in qc.data]
+        assert names.count("qft") == 1
+        assert names.count("measure") == 3
+
+        decomposed_exe = QiskitTranspiler(use_native_composite=False).transpile(circuit)
+        decomposed = decomposed_exe.compiled_quantum[0].circuit
+        native_unitary = qc.copy()
+        native_unitary.remove_final_measurements()
+        decomposed_unitary = decomposed.copy()
+        decomposed_unitary.remove_final_measurements()
+        assert Operator(native_unitary).equiv(Operator(decomposed_unitary))
+
+    def test_iqft_native_emission_matches_decomposed(self):
+        """Native IQFT emission is unitarily equivalent to the fallback."""
+        from qiskit.quantum_info import Operator
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q = qmc.iqft(q)
+            return qmc.measure(q)
+
+        native = (
+            QiskitTranspiler(use_native_composite=True)
+            .transpile(circuit)
+            .compiled_quantum[0]
+            .circuit
+        )
+        decomposed = (
+            QiskitTranspiler(use_native_composite=False)
+            .transpile(circuit)
+            .compiled_quantum[0]
+            .circuit
+        )
+        native_unitary = native.copy()
+        native_unitary.remove_final_measurements()
+        decomposed_unitary = decomposed.copy()
+        decomposed_unitary.remove_final_measurements()
+        assert Operator(native_unitary).equiv(Operator(decomposed_unitary))
 
     def test_qft_decomposed_emission(self):
         """Decomposed QFT uses primitive gates (H, CP) in stdlib high-to-low order."""
@@ -8716,92 +8779,3 @@ class TestWhileIfSharedLocalMerge:
 
         with pytest.raises((DependencyError, EmitError)):
             _transpile_and_get_circuit(circuit)
-
-
-class TestCommonFallbackMappedWalker:
-    """Exercise the shared controlled fallback via a gateless Qiskit pass.
-
-    Monkeypatching ``QiskitEmitPass._blockvalue_to_gate`` to return None
-    forces the shared mapped walker (the path QURI Parts-like backends
-    take), so its output can be statevector-compared against Qiskit's
-    native custom-controlled-gate emission of the same kernel.
-    """
-
-    @staticmethod
-    def _force_fallback(monkeypatch) -> None:
-        """Disable block-to-gate conversion on the Qiskit emit pass."""
-        from qamomile.qiskit.transpiler import QiskitEmitPass
-
-        monkeypatch.setattr(
-            QiskitEmitPass,
-            "_blockvalue_to_gate",
-            lambda self, *args, **kwargs: None,
-        )
-
-    def test_multi_target_inner_block_matches_native_gate_path(
-        self, monkeypatch
-    ) -> None:
-        """Multi-target controlled sub-kernel: fallback equals native path."""
-
-        @qmc.qkernel
-        def multi_target(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-            qs[0] = qmc.h(qs[0])
-            qs[1] = qmc.x(qs[1])
-            qs[0], qs[2] = qmc.cx(qs[0], qs[2])
-            qs[1] = qmc.rz(qs[1], 0.375)
-            return qs
-
-        controlled = qmc.control(multi_target)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            c = qmc.qubit("c")
-            qs = qmc.qubit_array(3, "qs")
-            c = qmc.h(c)
-            qs[1] = qmc.x(qs[1])
-            c, qs = controlled(c, qs)
-            bits = qmc.measure(qs)
-            return bits
-
-        _, native_circuit = _transpile_and_get_circuit(circuit)
-        native_sv = _run_statevector(native_circuit, decompose=True)
-
-        self._force_fallback(monkeypatch)
-        _, fallback_circuit = _transpile_and_get_circuit(circuit)
-        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
-
-        assert statevectors_equal(fallback_sv, native_sv)
-
-    def test_controlled_modular_increment_matches_native_gate_path(
-        self, monkeypatch
-    ) -> None:
-        """Nested symbolic MCX composition: fallback equals native path.
-
-        ``modular_increment`` wraps ``qmc.control(qmc.x,
-        num_controls=k)`` inside a ``qmc.range`` loop, so the shared
-        walker must unroll the loop, resolve the loop-dependent nested
-        ``SymbolicControlledU``, and compose its controls with the
-        outer one (the 1D periodic Poisson shift shape).
-        """
-        from qamomile.circuit import modular_increment
-
-        controlled_shift = qmc.control(modular_increment)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            c = qmc.qubit("c")
-            qs = qmc.qubit_array(2, "qs")
-            c = qmc.h(c)
-            qs[0] = qmc.x(qs[0])
-            c, qs = controlled_shift(c, qs)
-            bits = qmc.measure(qs)
-            return bits
-
-        _, native_circuit = _transpile_and_get_circuit(circuit)
-        native_sv = _run_statevector(native_circuit, decompose=True)
-
-        self._force_fallback(monkeypatch)
-        _, fallback_circuit = _transpile_and_get_circuit(circuit)
-        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
-
-        assert statevectors_equal(fallback_sv, native_sv)

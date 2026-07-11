@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -449,7 +450,7 @@ print("if_else condition:", if_op.condition)
 # ### ネイティブ`PauliEvolutionGate`
 #
 # `qmc.pauli_evolve(q, H, gamma)`は、Qamomileの中間表現では$e^{-i\gamma H}$を表します。
-# Qiskit連携は、`use_native_composite=True`(デフォルト)の場合、この操作を`PauliEvolutionGate`として出力します。
+# Qiskit連携は、`use_native_pauli_evolution=True`(デフォルト)の場合、この操作を`PauliEvolutionGate`として出力します。
 # 未バインドの`gamma`はQiskitの`Parameter`になるため、同じ回路を変分パラメータを変えながら評価する用途に再利用できます。
 
 # %%
@@ -482,7 +483,7 @@ assert "PauliEvolution" in evolution_ops
 assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 
 # %% [markdown]
-# 量子SDKに依存しないゲート分解を確認したい場合は、`QiskitTranspiler(use_native_composite=False)`を渡します。
+# 量子SDKに依存しないゲート分解を確認したい場合は、`QiskitTranspiler(use_native_pauli_evolution=False)`を渡します。
 # 同じフラグでネイティブQFT/IQFT出力も無効化できるため、デバッグや量子SDK非依存のゲート数比較に便利です。
 
 # %% [markdown]
