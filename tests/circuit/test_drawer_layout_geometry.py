@@ -1262,3 +1262,84 @@ class TestGeometryPrimitiveValidation:
             measure_text("label", font_size=0)
         with pytest.raises(ValueError, match="Fallback"):
             measure_text("label", font_size=13, fallback_char_width=-0.1)
+
+
+class TestOutOfRangeIndexGeometry:
+    """Layout and renderer agree on visibility-filtered gate classification.
+
+    The analyzer has historically emitted phantom wire indices outside the
+    displayed range (see ``TestSliceSubKernelArgumentDraw`` in
+    ``test_drawer_slice.py``), which is why the renderer filters indices
+    through ``_visible_qubits`` before dispatching. Layout must classify and
+    split gates on the same filtered basis: classifying on the unfiltered
+    indices skips the box rect the renderer then demands via
+    ``_require_box_rect``, turning a degraded drawing into a crash.
+    """
+
+    def _render(self, gate: VGate, num_qubits: int) -> Figure:
+        """Lay out and render a single-gate circuit.
+
+        Args:
+            gate (VGate): Gate node under test.
+            num_qubits (int): Number of displayed wires.
+
+        Returns:
+            Figure: Rendered matplotlib figure.
+        """
+        vc = VisualCircuit(
+            children=[gate],
+            qubit_map={f"q{i}": i for i in range(num_qubits)},
+            qubit_names={i: f"q{i}" for i in range(num_qubits)},
+            num_qubits=num_qubits,
+        )
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(vc)
+        return MatplotlibRenderer(DEFAULT_STYLE).render(vc, layout)
+
+    def test_native_multi_gate_with_out_of_range_index_renders(self):
+        """A CX whose second index is out of range degrades to a box."""
+        gate = VGate(
+            node_key=("g1",),
+            label="$X$",
+            qubit_indices=[0, 5],
+            estimated_width=DEFAULT_STYLE.gate_width,
+            kind=VGateKind.GATE,
+            gate_type=GateOperationType.CX,
+        )
+        fig = self._render(gate, num_qubits=2)
+        assert isinstance(fig, Figure)
+
+    def test_controlled_u_with_out_of_range_control_renders(self):
+        """A controlled-U whose control index is out of range keeps its target box."""
+        gate = VGate(
+            node_key=("g2",),
+            label="$U$",
+            qubit_indices=[5, 0],
+            control_count=1,
+            estimated_width=DEFAULT_STYLE.gate_width,
+            kind=VGateKind.CONTROLLED_U_BOX,
+        )
+        fig = self._render(gate, num_qubits=1)
+        assert isinstance(fig, Figure)
+
+    def test_out_of_range_control_keeps_target_box_on_target_wire(self):
+        """The stored target box anchors to the real target wire, not a control."""
+        gate = VGate(
+            node_key=("g3",),
+            label="$U$",
+            qubit_indices=[5, 0],
+            control_count=1,
+            estimated_width=DEFAULT_STYLE.gate_width,
+            kind=VGateKind.CONTROLLED_U_BOX,
+        )
+        vc = VisualCircuit(
+            children=[gate],
+            qubit_map={"q0": 0},
+            qubit_names={0: "q0"},
+            num_qubits=1,
+        )
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(vc)
+        # The split must happen on the unfiltered indices (controls first),
+        # so the surviving target wire 0 still owns a box rect.
+        assert ("g3",) in layout.gate_box_rects
+        box = layout.gate_box_rects[("g3",)]
+        assert box.bottom <= layout.qubit_y[0] <= box.top

@@ -64,13 +64,16 @@ from .visual_ir import (
 _INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_tmp"})
 
 
-# String markers appended to a node's scope path for the true / false branch of
-# an ``IfOperation`` (see ``_build_vif`` and the layout engine's unfolded-if
-# placement). They are the only non-integer scope-path elements any node key
-# carries, so their presence uniquely identifies a node nested inside an
-# if/else branch — used to keep mid-circuit measurements from terminating a
-# wire that the other branch never measured.
-_IF_BRANCH_SCOPE_KEYS: frozenset[str] = frozenset({"true", "false"})
+# String markers appended to a node's scope path for the true / false branch
+# of an ``IfOperation`` (see ``_build_vif``) and for the body of a
+# ``WhileOperation`` (see ``_build_vwhile``). They are the only non-integer
+# scope-path elements any node key carries, so their presence uniquely
+# identifies a node nested inside a conditional scope — used to keep
+# mid-circuit measurements from terminating a wire: an if branch's
+# measurement may not run (the other branch never measured), and a while
+# body's measurement re-runs every iteration, so in both cases the wire must
+# continue past the box.
+_CONDITIONAL_SCOPE_KEYS: frozenset[str] = frozenset({"true", "false", "body"})
 
 
 # Single source of truth for the TeX rendering of every built-in
@@ -1117,24 +1120,26 @@ class CircuitAnalyzer:
         return result
 
     @staticmethod
-    def _node_key_in_if_branch(node_key: tuple) -> bool:
-        """Whether a node sits inside an if/else branch scope.
+    def _node_key_in_conditional_scope(node_key: tuple) -> bool:
+        """Whether a node sits inside an if/else branch or while-body scope.
 
-        If-branch scopes are tagged with the ``"true"`` / ``"false"`` string
-        markers in the node key (see ``_build_vif`` and the layout engine's
-        unfolded-if placement). No other scope kind uses string markers, so
-        their presence uniquely identifies an if-branch nesting.
+        Conditional scopes are tagged with the ``"true"`` / ``"false"``
+        string markers (``_build_vif``) or the ``"body"`` marker
+        (``_build_vwhile``) in the node key. No other scope kind uses string
+        markers, so their presence uniquely identifies a conditional nesting.
 
         Args:
             node_key (tuple): The node's scope key, of the form
                 ``(*scope_path, id(op))``.
 
         Returns:
-            bool: True if any element of ``node_key`` is an if-branch marker,
-                meaning the node is nested inside a true/false branch.
+            bool: True if any element of ``node_key`` is a conditional-scope
+                marker, meaning the node is nested inside an if branch or a
+                while body.
         """
         return any(
-            isinstance(part, str) and part in _IF_BRANCH_SCOPE_KEYS for part in node_key
+            isinstance(part, str) and part in _CONDITIONAL_SCOPE_KEYS
+            for part in node_key
         )
 
     def _build_vgate(
@@ -1200,7 +1205,7 @@ class CircuitAnalyzer:
                 qubit_indices=qubit_indices,
                 estimated_width=gate_width,
                 kind=VGateKind.MEASURE,
-                terminates_wire=not self._node_key_in_if_branch(node_key),
+                terminates_wire=not self._node_key_in_conditional_scope(node_key),
             )
 
         if isinstance(op, MeasureVectorOperation):
@@ -1218,7 +1223,7 @@ class CircuitAnalyzer:
                 qubit_indices=qubit_indices,
                 estimated_width=gate_width,
                 kind=VGateKind.MEASURE_VECTOR,
-                terminates_wire=not self._node_key_in_if_branch(node_key),
+                terminates_wire=not self._node_key_in_conditional_scope(node_key),
             )
 
         if isinstance(op, MeasureQFixedOperation):
@@ -1249,7 +1254,7 @@ class CircuitAnalyzer:
                 qubit_indices=qubit_indices,
                 estimated_width=self.style.gate_width,
                 kind=VGateKind.MEASURE_VECTOR,
-                terminates_wire=not self._node_key_in_if_branch(node_key),
+                terminates_wire=not self._node_key_in_conditional_scope(node_key),
             )
 
         if isinstance(op, InvokeOperation):

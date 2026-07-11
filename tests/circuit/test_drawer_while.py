@@ -259,6 +259,34 @@ class TestUnfoldedWhile:
         assert seq.condition_measure_node_key is not None
         assert seq.condition_measure_qubit_indices == [0]
 
+    def test_body_measurement_keeps_wire_running(self):
+        """A measurement inside the while body must not terminate its wire.
+
+        The loop body re-executes every iteration, so its measurement is
+        mid-circuit — the wire has to continue under the rest of the while
+        box, exactly like a measurement inside an if branch. Regression: the
+        conditional-scope check only recognized the if markers, so the body
+        measure carried ``terminates_wire=True`` and the wire was cut inside
+        the box.
+        """
+        vc = _visual_circuit(measurement_while)
+        seq = _unfolded_whiles(vc)[0]
+        body_measures = [
+            n
+            for n in _walk(seq.iterations[0])
+            if isinstance(n, VGate)
+            and n.kind in (VGateKind.MEASURE, VGateKind.MEASURE_VECTOR)
+        ]
+        assert body_measures
+        assert all(not m.terminates_wire for m in body_measures)
+        # The top-level condition measurement still terminates normally.
+        top_measures = [
+            n
+            for n in vc.children
+            if isinstance(n, VGate) and n.kind == VGateKind.MEASURE
+        ]
+        assert all(m.terminates_wire for m in top_measures)
+
 
 class TestFoldedWhile:
     """``fold_whiles=True`` collapses a while into a compact summary box."""

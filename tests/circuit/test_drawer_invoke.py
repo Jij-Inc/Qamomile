@@ -180,10 +180,10 @@ def _carried_rotation() -> qmc.Qubit:
         qmc.Qubit: Qubit after three parameterized rotations.
     """
     q = qmc.qubit("q")
-    theta = qmc.float_(0.0)
+    rx_angle = qmc.float_(0.0)
     for _iteration in qmc.range(3):
-        theta = theta + 0.25
-        q = qmc.rx(q, theta)
+        rx_angle = rx_angle + 0.25
+        q = qmc.rx(q, rx_angle)
     return q
 
 

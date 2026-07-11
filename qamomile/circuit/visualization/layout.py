@@ -665,11 +665,20 @@ class CircuitLayoutEngine:
         """
         return self._label_height(f"pow={power}")
 
-    def _gate_draws_text_box(self, node: VGate) -> bool:
+    def _gate_draws_text_box(self, node: VGate, num_qubits: int) -> bool:
         """Return whether a gate node renders one text-bearing rectangle.
+
+        Classification counts only wire indices inside ``[0, num_qubits)``
+        because the renderer dispatches on the same visibility-filtered
+        indices (``MatplotlibRenderer._visible_qubits``). Counting unfiltered
+        indices here would disagree with the renderer for nodes carrying an
+        out-of-range index — layout would skip the box rect the renderer
+        then demands via ``_require_box_rect``, crashing ``draw()``.
 
         Args:
             node (VGate): Gate-like visual node.
+            num_qubits (int): Number of displayed wires; indices outside
+                ``[0, num_qubits)`` are ignored.
 
         Returns:
             bool: True for generic gate, block, controlled-unitary, and
@@ -682,11 +691,20 @@ class CircuitLayoutEngine:
                 GateOperationType.TOFFOLI,
                 GateOperationType.SWAP,
             }
-            return len(node.qubit_indices) == 1 or node.gate_type not in native_multi
+            visible = [q for q in node.qubit_indices if 0 <= q < num_qubits]
+            return len(visible) == 1 or node.gate_type not in native_multi
         if node.kind == VGateKind.CONTROLLED_U_BOX:
-            target_count = len(node.qubit_indices) - node.control_count
+            # Split the unfiltered indices by control_count first, then
+            # filter — the renderer splits the same way, so filtering
+            # before splitting would shift real targets into the control
+            # slice whenever a control index is out of range.
+            visible_targets = [
+                q
+                for q in node.qubit_indices[node.control_count :]
+                if 0 <= q < num_qubits
+            ]
             if node.gate_type == GateOperationType.SWAP:
-                return target_count != 2
+                return len(visible_targets) != 2
             native_controlled = {
                 GateOperationType.X,
                 GateOperationType.CX,
@@ -694,24 +712,26 @@ class CircuitLayoutEngine:
                 GateOperationType.Z,
                 GateOperationType.CZ,
             }
-            return target_count == 0 or node.gate_type not in native_controlled
+            return not visible_targets or node.gate_type not in native_controlled
         return node.kind in {
             VGateKind.BLOCK_BOX,
             VGateKind.COMPOSITE_BOX,
             VGateKind.EXPVAL,
         }
 
-    def _gate_box_height(self, node: VGate) -> float:
+    def _gate_box_height(self, node: VGate, num_qubits: int) -> float:
         """Return a text-bearing gate box height.
 
         Args:
             node (VGate): Gate-like visual node.
+            num_qubits (int): Number of displayed wires, forwarded to the
+                text-box classification.
 
         Returns:
             float: At least ``style.gate_height``, enlarged for the configured
                 font when this node draws text.
         """
-        if not self._gate_draws_text_box(node):
+        if not self._gate_draws_text_box(node, num_qubits):
             return self.style.gate_height
         text_height = measure_text(
             node.label,
@@ -1058,16 +1078,24 @@ class CircuitLayoutEngine:
             )
             return
 
-        half_height = self._gate_box_height(node) / 2
+        half_height = self._gate_box_height(node, len(qubit_y)) / 2
         y_values = [qubit_y[q] for q in valid_qubits]
         bottom = min(y_values) - half_height
         top = max(y_values) + half_height
 
         box_rect: Rect | None = None
-        if self._gate_draws_text_box(node):
+        if self._gate_draws_text_box(node, len(qubit_y)):
             box_qubits = valid_qubits
             if node.kind == VGateKind.CONTROLLED_U_BOX:
-                box_qubits = valid_qubits[node.control_count :]
+                # Split the unfiltered indices by control_count, then filter,
+                # matching the renderer's control/target split — slicing the
+                # filtered list would drop real targets whenever a control
+                # index is out of range.
+                box_qubits = [
+                    q
+                    for q in node.qubit_indices[node.control_count :]
+                    if 0 <= q < len(qubit_y)
+                ]
             if box_qubits:
                 box_y = [qubit_y[q] for q in box_qubits]
                 box_width = node.box_width or span.width
@@ -1080,7 +1108,11 @@ class CircuitLayoutEngine:
                 finalization.gate_box_rects[node.node_key] = box_rect
 
         if node.kind == VGateKind.CONTROLLED_U_BOX and node.power > 1:
-            target_qubits = valid_qubits[node.control_count :]
+            target_qubits = [
+                q
+                for q in node.qubit_indices[node.control_count :]
+                if 0 <= q < len(qubit_y)
+            ]
             if target_qubits and box_rect is not None:
                 target_rect = box_rect
                 wrapper_rect = Rect(
