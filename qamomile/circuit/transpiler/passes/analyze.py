@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     MeasureOperation,
     MeasureVectorOperation,
+    ProjectOperation,
 )
 from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
@@ -157,6 +158,8 @@ def find_measurement_results(operations: list[Operation]) -> set[str]:
             if isinstance(op, (MeasureOperation, MeasureVectorOperation)):
                 for result in op.results:
                     self.result_uuids.add(result.uuid)
+            elif isinstance(op, ProjectOperation):
+                self.result_uuids.add(op.results[1].uuid)
 
     collector = MeasurementResultCollector()
     collector.visit_operations(operations)
@@ -2000,20 +2003,17 @@ def _check_loop_quantum_discards(
       Python semantics already double-consume the pre-loop value, so no
       well-formed program is miscompiled by this arm.
 
-    Everything else is rejected. In particular, a BODY-PRODUCED rebound
-    register is never exempt — not even when the body terminally
-    consumes it (the former repeat-until-success exemption): a runtime
-    while re-executes its body on one persistent register without
-    reset, so "fresh per iteration" is not expressible, and review
-    measured an rx-gated repeat-until-success body sampling the
-    wire-reuse distribution instead of the fresh-register one. Spell
-    such bodies with a body-local register name instead (no
-    pre-existing variable rebound, so nothing is discarded and the
-    identical circuit stays out of this check's jurisdiction). In-body
-    consumption of the incoming value is likewise NOT an exemption: the
-    read re-executes against the traced register every iteration, which
-    matches Python semantics only for the first one (review-measured
-    divergence, see above).
+    Everything else is rejected. A BODY-PRODUCED rebound register is
+    exempt only for the terminal fresh-allocation shape: the pre-loop
+    state is already owned outside the loop, the body never reads that
+    pre-loop value, the rebound quantum value is terminally consumed in
+    the body, and it is not read after the loop. That is exactly the
+    repeat-until-success pattern where ``qmc.qubit()`` denotes a fresh
+    logical ``|0>`` per iteration; nested ``QInitOperation`` emission is
+    responsible for preparing/resetting the persistent backend wire.
+    In-body consumption of the incoming value itself remains NOT an
+    exemption: the read re-executes against the traced register every
+    iteration and matches Python semantics only for the first one.
 
     ``while`` loops report a dedicated error for any non-identical
     rebound value read after the loop — checked BEFORE the carried
@@ -2072,10 +2072,12 @@ def _check_loop_quantum_discards(
     # rejected. Without pruning here, the two are indistinguishable at
     # the pre-fold hook.
     body_producers: dict[str, Operation] = {}
+    pruned_bodies: list[Operation] = []
     body_merge_aliases: dict[str, Value] = {}
     value_table: dict[str, ValueBase] = {}
     for body in loop_op.nested_op_lists():
         pruned_body = prune_compile_time_ifs(body, dict(concrete_values), bindings)
+        pruned_bodies.extend(pruned_body.operations)
         for alias_result, alias_source in pruned_body.merge_aliases:
             body_merge_aliases[alias_result.uuid] = alias_source
             value_table.setdefault(alias_result.uuid, alias_result)
@@ -2085,6 +2087,10 @@ def _check_loop_quantum_discards(
                 body_producers[result.uuid] = body_op
             for value in (*body_op.all_input_values(), *body_op.results):
                 value_table.setdefault(value.uuid, value)
+    body_readers = _wire_reader_map(pruned_bodies)
+    body_alias_reads: set[str] = set()
+    for alias_source in body_merge_aliases.values():
+        _add_uuid_with_ancestry(alias_source, body_alias_reads)
 
     def body_reads(uuid: str) -> bool:
         """Whether any pruned body op reads the value (ancestry included).
@@ -2171,6 +2177,19 @@ def _check_loop_quantum_discards(
             # owner covers the first. Also keeps the AnalyzePass safety
             # net exact for records whose after was a compile-time merge
             # that if-lowering erased and substituted away.
+            continue
+        if (
+            record.after.type.is_quantum()
+            and owned
+            and not before_read
+            and record.after.uuid not in reads_outside
+            and _wire_terminally_consumed(record.after, body_readers, body_alias_reads)
+        ):
+            # Fresh/rebound loop-local state that is terminally consumed
+            # inside the body is safe once QInit has explicit nested
+            # prepare-zero semantics: the pre-loop state is already
+            # owned outside the loop, the body never rereads it, and the
+            # rebound state cannot escape the zero-trip while path.
             continue
         # Body-produced rebinds are rejected for BOTH loop kinds:
         # unrolled loops re-instantiate the body without carrying the
@@ -2362,22 +2381,19 @@ def reject_control_flow_quantum_discard(
     Scalar ``Qubit`` and whole-register ``Vector[Qubit]`` rebinds are
     covered alike.
 
-    Loop bodies are covered more strictly, because neither loop kind can
-    express a per-iteration quantum rebind today (see
+    Loop bodies are covered more strictly than branches (see
     :func:`_check_loop_quantum_discards`): the frontend records quantum
     rebinds on ``ForOperation`` / ``ForItemsOperation`` /
     ``WhileOperation`` (``LoopCarriedRebind`` entries whose ``before`` is
     quantum), and each record is rejected unless it carries the incoming
-    value forward on the same wires, or is a covered loop-invariant
-    rebind (post-body value not produced in the body, body never reads
-    the pre-loop value, pre-loop value owned outside). Body-produced
-    rebinds are never exempt — an unrolled loop does not carry the
-    rebound register between iterations and a runtime while re-executes
-    its body on one persistent register without reset — and in-body
-    consumption of the incoming value is not an exemption either: the
-    read re-executes against the traced register every iteration and
-    matches Python semantics only for the first one. A loop-body rebind
-    needs no runtime/compile-time classification, so loops are checked
+    value forward on the same wires, is a covered loop-invariant rebind,
+    or is the terminal fresh-allocation pattern where nested
+    ``QInitOperation`` reset/prepare-zero emission gives
+    ``qmc.qubit()`` fresh-per-iteration semantics. In-body consumption
+    of the incoming value itself is not an exemption: the read
+    re-executes against the traced register every iteration and matches
+    Python semantics only for the first one. A loop-body rebind needs no
+    runtime/compile-time classification, so loops are checked
     wherever they appear on a live (non-pruned) path,
     trip-count-agnostically, exactly like the classical loop-carried
     check.
@@ -2435,7 +2451,7 @@ def reject_control_flow_quantum_discard(
 
     Scope contract: the scan recurses through control-flow nesting only
     (``IfOperation`` branches and ``HasNestedOps`` bodies). Boxed
-    implementation blocks — ``CompositeGateOperation.implementation_block``,
+    implementation blocks — ``InvokeOperation`` bodies and implementations,
     ``InverseBlockOperation.implementation_block``,
     ``ControlledUOperation.block`` — are NOT descended into: they stay
     HIERARCHICAL recipe blocks outside the entrypoint pipeline, exactly

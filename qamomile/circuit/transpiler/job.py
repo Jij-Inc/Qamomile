@@ -10,6 +10,50 @@ from typing import Callable, Generic, TypeVar
 T = TypeVar("T")
 
 
+def _aggregate_typed_results(
+    results: list[tuple[T, int]],
+) -> list[tuple[T, int]]:
+    """Combine counts whose converted public result values are equal.
+
+    Backend raw bitstrings can differ only on qubits that are not part of the
+    program output. After result conversion those rows represent the same
+    public value and must appear as one ``SampleResult`` entry.
+
+    Args:
+        results (list[tuple[T, int]]): Converted result values and counts.
+
+    Returns:
+        list[tuple[T, int]]: Stable first-seen values with duplicate counts
+            summed.
+    """
+    aggregated: list[tuple[T, int]] = []
+    hashable_positions: dict[T, int] = {}
+    for value, count in results:
+        try:
+            position = hashable_positions.get(value)
+        except TypeError:
+            position = None
+            for index, (existing, _) in enumerate(aggregated):
+                try:
+                    equal = bool(existing == value)
+                except (TypeError, ValueError):
+                    equal = False
+                if equal:
+                    position = index
+                    break
+        if position is None:
+            position = len(aggregated)
+            aggregated.append((value, count))
+            try:
+                hashable_positions[value] = position
+            except TypeError:
+                pass
+            continue
+        existing, existing_count = aggregated[position]
+        aggregated[position] = (existing, existing_count + count)
+    return aggregated
+
+
 class JobStatus(Enum):
     """Status of a quantum job."""
 
@@ -113,7 +157,9 @@ class SampleJob(Job[SampleResult[T]], Generic[T]):
             return self._result
 
         # Convert to typed results (returns list[tuple[T, int]])
-        typed_results = self._result_converter(self._raw_counts)
+        typed_results = _aggregate_typed_results(
+            self._result_converter(self._raw_counts)
+        )
 
         self._result = SampleResult(results=typed_results, shots=self._shots)
         return self._result

@@ -20,17 +20,24 @@ from typing import Any, Callable, cast
 from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
-    CompositeGateOperation,
-    CompositeGateType,
+    CallableBodyRef,
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallPolicy,
+    CallTransform,
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
     GateOperationType,
     InverseBlockOperation,
+    InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
+    ProjectOperation,
+    ResetOperation,
     ReturnOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -44,25 +51,31 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeClassicalExpr,
     RuntimeOpKind,
 )
+from qamomile.circuit.ir.operation.callable import signature_from_values
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
     StoreArrayElementOperation,
 )
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.circuit.ir.operation.control_flow import (
     BranchRebind,
     ForOperation,
     IfOperation,
     LoopCarriedRebind,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     SymbolicControlledU,
 )
-from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
+from qamomile.circuit.ir.operation.operation import (
+    CInitOperation,
+    ParamHint,
+    QInitOperation,
+    Signature,
+)
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
@@ -218,7 +231,7 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
             ``from_dict`` entry), reject any kind other than
             ``AFFINE`` / ``ANALYZED``. Nested blocks (those embedded in
             ``ControlledUOperation.block`` or
-            ``CompositeGateOperation.implementation_block``) may
+            ``InvokeOperation.body``) may
             legitimately be ``HIERARCHICAL`` — e.g., the cached
             ``kernel.block`` form of a leaf kernel passed to
             ``qmc.control``. Skip the kind check there.
@@ -904,6 +917,38 @@ def _decode_measure(d: dict[str, Any], ctx: _DecodeContext) -> MeasureOperation:
     return MeasureOperation(operands=operands, results=results)
 
 
+def _decode_project(d: dict[str, Any], ctx: _DecodeContext) -> ProjectOperation:
+    """Decode :class:`ProjectOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        ProjectOperation: The reconstructed op.
+    """
+    operands, results = _operands_results(d, ctx)
+    return ProjectOperation(
+        operands=operands,
+        results=results,
+        axis=str(d.get("axis", "z")),
+    )
+
+
+def _decode_reset(d: dict[str, Any], ctx: _DecodeContext) -> ResetOperation:
+    """Decode :class:`ResetOperation`.
+
+    Args:
+        d (dict[str, Any]): The op dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        ResetOperation: The reconstructed op.
+    """
+    operands, results = _operands_results(d, ctx)
+    return ResetOperation(operands=operands, results=results)
+
+
 def _decode_measure_vector(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> MeasureVectorOperation:
@@ -1244,6 +1289,33 @@ def _decode_loop_carried_rebinds(
     )
 
 
+def _decode_region_args(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+) -> tuple[RegionArg, ...]:
+    """Decode loop region-argument records from a loop op dict.
+
+    Args:
+        d (dict[str, Any]): The loop op dict, possibly carrying a
+            ``region_args`` list.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[RegionArg, ...]: The reconstructed records; empty when
+            the key is absent.
+    """
+    return tuple(
+        RegionArg(
+            var_name=str(r.get("var_name", "")),
+            init=_materialize_as_value(ctx, r["init_ref"]),
+            block_arg=_materialize_as_value(ctx, r["block_arg_ref"]),
+            yielded=_materialize_as_value(ctx, r["yielded_ref"]),
+            result=_materialize_as_value(ctx, r["result_ref"]),
+        )
+        for r in d.get("region_args", ())
+    )
+
+
 def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
     """Decode :class:`ForOperation`.
 
@@ -1267,6 +1339,7 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         loop_var_value=loop_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+        region_args=_decode_region_args(d, ctx),
     )
 
 
@@ -1301,6 +1374,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         value_var_value=value_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+        region_args=_decode_region_args(d, ctx),
     )
 
 
@@ -1323,6 +1397,7 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
         operations=body,
         max_iterations=d.get("max_iterations"),
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
+        region_args=_decode_region_args(d, ctx),
     )
 
 
@@ -1433,12 +1508,19 @@ def _decode_concrete_controlled(
         if d.get("unitary_block") is not None
         else None
     )
+    callable_attrs = _decode_callable_attrs(d.get("callable_attrs"))
     return ConcreteControlledU(
         operands=operands,
         results=results,
         num_controls=int(d.get("num_controls", 1)),
         power=_decode_power(d.get("power", 1), ctx),
         block=block,
+        callable_ref=(
+            _decode_callable_ref(d.get("callable_ref"))
+            if d.get("callable_ref") is not None
+            else None
+        ),
+        callable_attrs=callable_attrs,
     )
 
 
@@ -1468,6 +1550,7 @@ def _decode_symbolic_controlled(
         if d.get("unitary_block") is not None
         else None
     )
+    callable_attrs = _decode_callable_attrs(d.get("callable_attrs"))
     controlled_refs = d.get("control_index_refs")
     control_indices: tuple[Value, ...] | None
     if controlled_refs is None:
@@ -1484,6 +1567,12 @@ def _decode_symbolic_controlled(
         power=_decode_power(d.get("power", 1), ctx),
         block=block,
         num_control_args=int(d.get("num_control_args", 1)),
+        callable_ref=(
+            _decode_callable_ref(d.get("callable_ref"))
+            if d.get("callable_ref") is not None
+            else None
+        ),
+        callable_attrs=callable_attrs,
     )
 
 
@@ -1508,44 +1597,233 @@ def _decode_power(value: Any, ctx: _DecodeContext) -> Any:
     raise ValueError(f"unrecognized power payload: {value!r}")
 
 
-def _decode_composite_gate(
-    d: dict[str, Any], ctx: _DecodeContext
-) -> CompositeGateOperation:
-    """Decode :class:`CompositeGateOperation`.
+def _decode_callable_ref(d: Any) -> CallableRef:
+    """Decode a callable reference.
+
+    Args:
+        d (Any): Serialized callable reference payload.
+
+    Returns:
+        CallableRef: Reconstructed callable reference.
+
+    Raises:
+        ValueError: If the payload is not a dict with namespace and name.
+    """
+    if not isinstance(d, dict):
+        raise ValueError("CallableRef payload must be a dict")
+    namespace = d.get("namespace")
+    name = d.get("name")
+    version = d.get("version", "1")
+    if not isinstance(namespace, str) or not isinstance(name, str):
+        raise ValueError("CallableRef payload requires string namespace and name")
+    if not isinstance(version, str):
+        raise ValueError("CallableRef payload requires string version")
+    return CallableRef(namespace=namespace, name=name, version=version)
+
+
+def _decode_callable_attrs(d: Any) -> dict[str, Any]:
+    """Decode optional serializer-friendly callable attrs.
+
+    Args:
+        d (Any): Encoded payload or ``None``.
+
+    Returns:
+        dict[str, Any]: Decoded attrs. Missing attrs decode to an empty dict.
+
+    Raises:
+        ValueError: If the payload does not decode to a dict.
+    """
+    attrs = _decode_payload(d)
+    if attrs is None:
+        return {}
+    if not isinstance(attrs, dict):
+        raise ValueError("ControlledU callable_attrs must decode to a dict")
+    return attrs
+
+
+def _decode_callable_body_ref(d: Any) -> CallableBodyRef | None:
+    """Decode a deferred callable body reference.
+
+    Args:
+        d (Any): Serialized body-reference payload.
+
+    Returns:
+        CallableBodyRef | None: Reconstructed body reference, or ``None`` when
+        absent.
+
+    Raises:
+        ValueError: If the payload is malformed.
+    """
+    if d is None:
+        return None
+    if not isinstance(d, dict):
+        raise ValueError("CallableBodyRef payload must be a dict")
+    kind = d.get("kind", "standard")
+    if not isinstance(kind, str):
+        raise ValueError("CallableBodyRef kind must be a string")
+    attrs = _decode_payload(d.get("attrs"))
+    if attrs is None:
+        attrs = {}
+    if not isinstance(attrs, dict):
+        raise ValueError("CallableBodyRef attrs must decode to a dict")
+    return CallableBodyRef(
+        ref=_decode_callable_ref(d.get("ref")),
+        kind=kind,
+        attrs=attrs,
+    )
+
+
+def _decode_callable_implementation(d: Any) -> CallableImplementation:
+    """Decode a callable implementation candidate.
+
+    Args:
+        d (Any): Serialized implementation payload.
+
+    Returns:
+        CallableImplementation: Reconstructed implementation.
+
+    Raises:
+        ValueError: If the payload is not a dict.
+    """
+    if not isinstance(d, dict):
+        raise ValueError("CallableImplementation payload must be a dict")
+    attrs = _decode_payload(d.get("attrs"))
+    if attrs is None:
+        attrs = {}
+    if not isinstance(attrs, dict):
+        raise ValueError("CallableImplementation attrs must decode to a dict")
+    return CallableImplementation(
+        transform=_enum_by_name(CallTransform, d.get("transform"), "CallTransform"),
+        backend=d.get("backend"),
+        strategy=d.get("strategy"),
+        body=_decode_block(d["body"]) if d.get("body") is not None else None,
+        body_ref=_decode_callable_body_ref(d.get("body_ref")),
+        attrs=attrs,
+    )
+
+
+def _decode_signature(d: Any, ctx: _DecodeContext) -> Signature | None:
+    """Decode a callable definition signature.
+
+    Args:
+        d (Any): Serialized signature payload.
+        ctx (_DecodeContext): Active decode context used for value-type
+            decoding.
+
+    Returns:
+        Signature | None: Decoded signature, or ``None`` when absent.
+
+    Raises:
+        ValueError: If the signature payload is malformed.
+    """
+    if d is None:
+        return None
+    if not isinstance(d, dict):
+        raise ValueError("Signature payload must be a dict")
+
+    operands: list[ParamHint | None] = []
+    for hint in d.get("operands", []):
+        if hint is None:
+            operands.append(None)
+            continue
+        if not isinstance(hint, dict):
+            raise ValueError("Signature operand hint must be a dict or None")
+        name = hint.get("name")
+        if not isinstance(name, str):
+            raise ValueError("Signature operand hint requires a string name")
+        operands.append(
+            ParamHint(name=name, type=_decode_value_type(hint["type"], ctx))
+        )
+
+    results: list[ParamHint] = []
+    for hint in d.get("results", []):
+        if not isinstance(hint, dict):
+            raise ValueError("Signature result hint must be a dict")
+        name = hint.get("name")
+        if not isinstance(name, str):
+            raise ValueError("Signature result hint requires a string name")
+        results.append(ParamHint(name=name, type=_decode_value_type(hint["type"], ctx)))
+
+    return Signature(operands=operands, results=results)
+
+
+def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef | None:
+    """Decode a callable definition.
+
+    Args:
+        d (Any): Serialized definition payload.
+        ctx (_DecodeContext): Active decode context.
+
+    Returns:
+        CallableDef | None: Reconstructed definition, or ``None``.
+
+    Raises:
+        ValueError: If the payload is malformed.
+    """
+    if d is None:
+        return None
+    if not isinstance(d, dict):
+        raise ValueError("CallableDef payload must be a dict")
+    attrs = _decode_payload(d.get("attrs"))
+    if attrs is None:
+        attrs = {}
+    if not isinstance(attrs, dict):
+        raise ValueError("CallableDef attrs must decode to a dict")
+    raw_policy = d.get("default_policy", CallPolicy.INLINE.name)
+    return CallableDef(
+        ref=_decode_callable_ref(d.get("ref")),
+        signature=_decode_signature(d.get("signature"), ctx),
+        body=_decode_block(d["body"]) if d.get("body") is not None else None,
+        body_ref=_decode_callable_body_ref(d.get("body_ref")),
+        implementations=[
+            _decode_callable_implementation(impl)
+            for impl in d.get("implementations", [])
+        ],
+        default_policy=_enum_by_name(CallPolicy, raw_policy, "CallPolicy"),
+        attrs=attrs,
+    )
+
+
+def _decode_invoke_operation(d: dict[str, Any], ctx: _DecodeContext) -> InvokeOperation:
+    """Decode :class:`InvokeOperation`.
 
     Args:
         d (dict[str, Any]): The op dict.
         ctx (_DecodeContext): The active decode context.
 
     Returns:
-        CompositeGateOperation: The reconstructed op with its nested
-            implementation block.
+        InvokeOperation: The reconstructed invocation operation.
 
     Raises:
-        ValueError: If ``gate_type`` is not a known
-            :class:`CompositeGateType` name.
+        ValueError: If transform names are unknown.
     """
     operands, results = _operands_results(d, ctx)
-    gate_type = _enum_by_name(
-        CompositeGateType, d.get("gate_type"), "CompositeGateType"
-    )
-    implementation = (
-        _decode_block(d["implementation_block"])
-        if d.get("implementation_block") is not None
-        else None
-    )
-    return CompositeGateOperation(
+    transform = _enum_by_name(CallTransform, d.get("transform"), "CallTransform")
+    attrs = _decode_payload(d.get("attrs"))
+    if attrs is None:
+        attrs = {}
+    if not isinstance(attrs, dict):
+        raise ValueError("InvokeOperation attrs must decode to a dict")
+    definition = _decode_callable_def(d.get("definition"), ctx)
+    if definition is None:
+        body = _decode_block(d["body"]) if d.get("body") is not None else None
+        definition = CallableDef(
+            ref=_decode_callable_ref(d.get("target")),
+            signature=(
+                signature_from_values(operands, results)
+                if operands or results
+                else None
+            ),
+            body=body,
+            attrs=attrs,
+        )
+    return InvokeOperation(
         operands=operands,
         results=results,
-        gate_type=gate_type,
-        num_control_qubits=int(d.get("num_control_qubits", 0)),
-        num_target_qubits=int(d.get("num_target_qubits", 0)),
-        custom_name=d.get("custom_name", ""),
-        resource_metadata=_decode_resource_metadata(d.get("resource_metadata")),
-        has_implementation=bool(d.get("has_implementation", True)),
-        implementation_block=implementation,
-        composite_gate_instance=None,
-        strategy_name=d.get("strategy_name"),
+        target=_decode_callable_ref(d.get("target")),
+        transform=transform,
+        attrs=attrs,
+        definition=definition,
     )
 
 
@@ -1579,41 +1857,20 @@ def _decode_inverse_block(
         custom_name=d.get("custom_name", ""),
         source_block=source_block,
         implementation_block=implementation_block,
-    )
-
-
-def _decode_resource_metadata(d: Any) -> ResourceMetadata | None:
-    """Decode :class:`ResourceMetadata` (or ``None``).
-
-    Args:
-        d (Any): The serialized form.
-
-    Returns:
-        ResourceMetadata | None: ``None`` when absent; else the
-            reconstructed metadata.
-    """
-    if d is None:
-        return None
-    custom = _decode_payload(d.get("custom_metadata"))
-    if custom is None:
-        custom = {}
-    return ResourceMetadata(
-        query_complexity=d.get("query_complexity"),
-        t_gates=d.get("t_gates"),
-        ancilla_qubits=int(d.get("ancilla_qubits", 0)),
-        total_gates=d.get("total_gates"),
-        single_qubit_gates=d.get("single_qubit_gates"),
-        two_qubit_gates=d.get("two_qubit_gates"),
-        multi_qubit_gates=d.get("multi_qubit_gates"),
-        clifford_gates=d.get("clifford_gates"),
-        rotation_gates=d.get("rotation_gates"),
-        custom_metadata=custom,
+        callable_ref=(
+            _decode_callable_ref(d.get("callable_ref"))
+            if d.get("callable_ref") is not None
+            else None
+        ),
+        callable_attrs=_decode_callable_attrs(d.get("callable_attrs")),
     )
 
 
 _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] = {
     "GateOperation": _decode_gate_operation,
     "MeasureOperation": _decode_measure,
+    "ProjectOperation": _decode_project,
+    "ResetOperation": _decode_reset,
     "MeasureVectorOperation": _decode_measure_vector,
     "MeasureQFixedOperation": _decode_measure_qfixed,
     "DecodeQFixedOperation": _decode_decode_qfixed,
@@ -1638,6 +1895,6 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "IfOperation": _decode_if,
     "ConcreteControlledU": _decode_concrete_controlled,
     "SymbolicControlledU": _decode_symbolic_controlled,
-    "CompositeGateOperation": _decode_composite_gate,
+    "InvokeOperation": _decode_invoke_operation,
     "InverseBlockOperation": _decode_inverse_block,
 }

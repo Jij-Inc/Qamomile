@@ -2,6 +2,7 @@ import builtins
 import contextlib
 import contextvars
 import copy
+import dataclasses
 import typing
 
 from qamomile.circuit.frontend.func_to_block import is_array_type
@@ -19,6 +20,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
     LoopCarriedRebind,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
@@ -159,6 +161,11 @@ def for_loop(
     with trace(body_tracer):
         yield loop_var
 
+    # Convert pending region entries (loop-carried classical scalars)
+    # into explicit RegionArg records and publish post-loop result
+    # handles for the AST-injected loop_region_result assignments.
+    region_args, region_results = _close_region_entries(body_tracer, parent_tracer)
+
     # Create ForOperation
     # operands: [start, stop, step]
     for_op = ForOperation(
@@ -166,7 +173,9 @@ def for_loop(
         loop_var_value=loop_var_value,
         operations=body_tracer.operations,
         loop_carried_rebinds=body_tracer.loop_carried_rebinds,
+        region_args=region_args,
     )
+    for_op.results.extend(region_results)
     for_op.operands.append(_value_to_ir_value(start, "start"))
     for_op.operands.append(_value_to_ir_value(stop, "stop"))
     for_op.operands.append(_value_to_ir_value(step, "step"))
@@ -175,21 +184,55 @@ def for_loop(
 
 
 def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
-    """Create a Handle copy with consumed state reset for branch tracing.
+    """Create a branch-independent Handle copy for if-else branch tracing.
 
-    This function intentionally accesses Handle's private ``_consumed`` and
-    ``_consumed_by`` attributes.  This is the **only** place where such access
-    is acceptable: if-else branches are mutually exclusive, so both must be
-    traceable independently.  Exposing a general-purpose copy method on Handle
-    would undermine the affine-type enforcement that prevents qubit reuse bugs.
+    This function intentionally accesses Handle's private ``_consumed`` /
+    ``_consumed_by`` / ``_consumed_at`` / ``_consumed_pre_branch`` attributes.
+    Direct consumed-state manipulation is confined to the phi-merge machinery
+    in this module: here (giving each branch its own consumption state so
+    mutually-exclusive branches trace independently) and in
+    ``_mark_conditionally_consumed`` (re-marking the merged handle when a
+    branch consumed the value — the conditional-move rule).  Keeping this off
+    the public Handle surface preserves the affine-type enforcement that
+    prevents qubit reuse bugs.
+
+    Branch independence means each branch gets its own consumption state so
+    that consuming a handle inside one branch does not poison tracing of the
+    mutually-exclusive branch.  It does NOT mean resurrection: a handle that
+    was already consumed BEFORE the branch stays consumed in both copies, so
+    using it inside a branch raises ``QubitConsumedError`` at trace time with
+    the original consumer's location.  Such copies are marked with
+    ``_consumed_pre_branch`` so the phi-merge machinery can still recognize
+    the slot as untouched by the branch (elision stays valid and the
+    conditional-move rule does not misfire — see ``_consumed_in_branch``).
+
+    Scope note: this preserves *scalar* pre-branch consumption. The array
+    element borrow table is still reset to empty per branch, because the
+    phi-merge element-borrow union (``_merge_branch_element_borrows``)
+    assumes each branch's leftover borrows are in-branch only; seeding it
+    with pre-branch borrows would double-count them onto the merged handle.
 
     Non-Handle values (int, float, etc.) are returned unchanged.
+
+    Args:
+        h (typing.Any): Variable captured for the branch bodies — a Handle
+            or a plain Python value.
+
+    Returns:
+        typing.Any: A branch-local shallow copy for Handles, or ``h``
+            unchanged for non-Handles.
     """
     if not isinstance(h, Handle):
         return h
     c = copy.copy(h)
-    c._consumed = False
-    c._consumed_by = None
+    if c._consumed:
+        # Consumed before the branch: keep the consumed state (no
+        # resurrection) but mark it so the merge machinery can tell it
+        # apart from in-branch consumption.
+        c._consumed_pre_branch = True
+    else:
+        c._consumed_by = None
+        c._consumed_at = None
     # Reset borrowed-element tracking for ArrayBase instances so that
     # each branch starts with an empty borrow set.  Without this,
     # shallow copy shares the same _borrowed_indices dict and borrowing
@@ -197,6 +240,164 @@ def _fresh_handle_copy_for_tracing(h: typing.Any) -> typing.Any:
     if isinstance(c, ArrayBase):
         c._borrowed_indices = {}
     return c
+
+
+# Marker phrase embedded in the ``_consumed_by`` message a conditional
+# consumption produces. Used to detect a nested-if phrase and avoid
+# re-wrapping it (which would duplicate the suffix).
+_COND_CONSUME_MARKER = "of the preceding if/else"
+
+
+def _consumed_in_branch(val: typing.Any) -> bool:
+    """Check whether a branch-returned value was consumed INSIDE the branch.
+
+    Branch-tracing copies of handles that were already consumed before the
+    if-else carry ``_consumed_pre_branch`` (see
+    ``_fresh_handle_copy_for_tracing``). Their ``_consumed`` flag is True, but
+    the branch itself provably did not touch them, so they must not block
+    merge elision nor trigger the conditional-move rule
+    (``_mark_conditionally_consumed``) — only values consumed by an operation
+    *inside* the branch should. This helper is the single source of truth for
+    "the branch consumed this value".
+
+    Args:
+        val (typing.Any): Value a branch returned for a variable slot
+            (Handle, Value, or primitive).
+
+    Returns:
+        bool: ``True`` when the value was consumed by an operation inside the
+            branch body (as opposed to before the if-else).
+    """
+    return getattr(val, "_consumed", False) and not getattr(
+        val, "_consumed_pre_branch", False
+    )
+
+
+def _merge_branch_element_borrows(
+    merged_handle: typing.Any,
+    true_val: typing.Any,
+    false_val: typing.Any,
+) -> None:
+    """Carry unreturned branch element borrows onto the phi-merged array.
+
+    Each branch traces against a fresh handle copy whose ``_borrowed_indices``
+    starts empty (so mutually-exclusive branches don't conflict). Any entry
+    still outstanding at the end of a branch is an element that was borrowed
+    and never returned on that path — most importantly an element
+    destructively consumed inside the branch (``if sel: _ = measure(qs[0])``).
+    Before this merge, that per-element state was silently dropped: a post-if
+    ``qs[0] = h(qs[0])`` compiled even though on the taken path it acts on a
+    measured wire — the exact program that raises when written without the
+    enclosing ``if``. Union-merging both branches' leftover borrow entries
+    onto the merged handle routes the post-if element access into the
+    existing borrow / destroyed-slot enforcement in
+    ``ArrayBase.__getitem__``, which raises at trace time.
+
+    A borrow that IS returned inside its branch (``if sel: qs[0] =
+    h(qs[0])``) releases its entry before the branch ends and is unaffected.
+    Dropping the array (no post-if element access) also stays legal — the
+    entries only bite on reuse.
+
+    Args:
+        merged_handle (typing.Any): The phi-result handle for this variable.
+        true_val (typing.Any): The true-branch handle/value (its leftover
+            ``_borrowed_indices`` are merged when it is an ``ArrayBase``).
+        false_val (typing.Any): The false-branch handle/value.
+
+    Returns:
+        None
+    """
+    if not isinstance(merged_handle, ArrayBase):
+        return
+    value = getattr(merged_handle, "value", None)
+    if value is None or not value.type.is_quantum():
+        return
+    for branch_val in (true_val, false_val):
+        if isinstance(branch_val, ArrayBase):
+            merged_handle._borrowed_indices.update(branch_val._borrowed_indices)
+
+
+def _mark_conditionally_consumed(
+    merged_handle: typing.Any,
+    true_val: typing.Any,
+    false_val: typing.Any,
+    true_consumed: bool,
+    false_consumed: bool,
+) -> None:
+    """Mark a phi-merged quantum handle consumed if a branch consumed it.
+
+    Implements the conditional-move rule (as in Rust's borrow checker /
+    ``maybe-init`` dataflow): a quantum value consumed on *any* branch of an
+    if/else is treated as consumed after the merge. Without this, a variable
+    consumed on one path (e.g. ``if c: _ = qmc.measure(q)``) but not rebound
+    would still surface after the if as a live handle wrapping the phi result,
+    so a later ``q = qmc.h(q)`` compiled silently — the exact program that
+    raises ``QubitConsumedError`` when written without the enclosing ``if``.
+    Marking the merged handle consumed makes the reuse raise at trace time
+    with an actionable message, restoring affine soundness.
+
+    This intentionally accesses the Handle's private ``_consumed`` /
+    ``_consumed_by`` fields, mirroring ``_fresh_handle_copy_for_tracing``:
+    phi-merge is the one place that must adjust consumed state directly. Only
+    quantum handles are marked (classical values are non-affine and may be
+    reused freely). Dropping the value (never using it after the if) stays
+    legal — affinity permits drop; only *reuse* now raises.
+
+    Args:
+        merged_handle (typing.Any): The phi-result handle returned to the
+            traced Python code for this variable.
+        true_val (typing.Any): The true-branch handle/value for this variable
+            (carries ``_consumed_by`` when it was consumed).
+        false_val (typing.Any): The false-branch handle/value for this
+            variable.
+        true_consumed (bool): Whether the true branch consumed this variable.
+        false_consumed (bool): Whether the false branch consumed this
+            variable.
+
+    Returns:
+        None
+    """
+    _merge_branch_element_borrows(merged_handle, true_val, false_val)
+    if not (true_consumed or false_consumed):
+        return
+    value = getattr(merged_handle, "value", None)
+    if value is None or not value.type.is_quantum():
+        return
+    consuming_op = getattr(true_val, "_consumed_by", None) if true_consumed else None
+    if consuming_op is None:
+        consuming_op = getattr(false_val, "_consumed_by", None)
+    # Carry the consuming branch's source location through the merge so a
+    # later reuse reports where inside the branch the value was consumed.
+    # Each fallback is guarded by that branch's consumed flag so a
+    # non-consuming branch's handle can never contribute a stale location.
+    consumed_at = getattr(true_val, "_consumed_at", None) if true_consumed else None
+    if consumed_at is None and false_consumed:
+        consumed_at = getattr(false_val, "_consumed_at", None)
+    merged_handle._consumed_at = consumed_at
+    # Nested-if case: the branch value was consumed by a deeper merge that
+    # already produced a full conditional-consumption phrase (it contains the
+    # marker below). Re-wrapping it would duplicate the suffix
+    # ("...of the preceding if/else ... of the preceding if/else ..."), so the
+    # inner phrase — which already conveys that the value was conditionally
+    # consumed — is kept verbatim.
+    if consuming_op and _COND_CONSUME_MARKER in consuming_op:
+        merged_handle._consumed = True
+        merged_handle._consumed_by = consuming_op
+        return
+    if true_consumed and false_consumed:
+        which = "both branches"
+    elif true_consumed:
+        which = "the true branch"
+    else:
+        which = "the false branch"
+    op_desc = consuming_op if consuming_op else "a measurement/gate"
+    # ``_consumed_by`` is rendered inside single quotes by the
+    # ``QubitConsumedError`` template, so the phrase is not self-quoted here.
+    merged_handle._consumed = True
+    merged_handle._consumed_by = (
+        f"{op_desc} in {which} {_COND_CONSUME_MARKER} "
+        f"(a quantum value consumed on one branch cannot be used after the if)"
+    )
 
 
 def _value_to_ir_value(val: typing.Any, name_prefix: str = "const") -> Value:
@@ -325,6 +526,207 @@ def should_trace_items_loop(mapping: typing.Any) -> bool:
     return len(dict_runtime.bound_data) > 0
 
 
+@dataclasses.dataclass
+class _PendingRegionArg:
+    """Working record for a loop region argument during body tracing.
+
+    Created by :func:`loop_region_enter` when the loop body's
+    read-before-write classical scalar candidates are rebound to fresh
+    region-argument handles at body entry, completed by
+    :func:`record_loop_rebinds` (which fills ``yielded``), and consumed
+    by the loop builders, which convert it into an IR ``RegionArg`` and
+    publish the post-loop result handle.
+
+    Attributes:
+        var_name (str): The carried Python variable name.
+        init (Value): The pre-loop IR value entering iteration 0
+            (synthesized as a constant for plain Python numbers).
+        block_arg (Value): The region-argument value the body reads.
+        entry_handle (Handle): The frontend handle wrapping
+            ``block_arg`` that the AST-injected entry assignment bound
+            into the loop body's frame.
+        yielded (Value | None): The body's final IR value for the
+            variable, set by ``record_loop_rebinds``. ``None`` means the
+            body produced no representable update (identity carry).
+        publish_result (bool): Whether the loop builder should publish
+            the post-loop result handle for this variable. ``False``
+            when the body's final Python value is not representable in
+            IR (an opaque object), in which case the Python binding must
+            keep the opaque value.
+    """
+
+    var_name: str
+    init: Value
+    block_arg: Value
+    entry_handle: Handle
+    yielded: Value | None = None
+    publish_result: bool = True
+
+
+def _region_scalar_handle(value: Value, template: Handle | None) -> Handle:
+    """Wrap an IR scalar value in the matching frontend handle.
+
+    Args:
+        value (Value): The IR value to wrap (``UIntType`` or
+            ``FloatType``).
+        template (Handle | None): The handle whose family should be
+            preserved, or ``None`` to dispatch on ``value.type``.
+
+    Returns:
+        Handle: A ``UInt`` or ``Float`` handle wrapping ``value``.
+
+    Raises:
+        TypeError: If ``value`` is neither UInt- nor Float-typed.
+    """
+    if isinstance(template, UInt) or (
+        template is None and isinstance(value.type, UIntType)
+    ):
+        return UInt(value=value, init_value=0)
+    if isinstance(template, Float) or (
+        template is None and isinstance(value.type, FloatType)
+    ):
+        return Float(value=value, init_value=0.0)
+    raise TypeError(
+        f"Loop region arguments support UInt / Float scalars; got value type "
+        f"{value.type!r}"
+    )
+
+
+def loop_region_enter(
+    snapshot: dict[str, typing.Any],
+    name: str,
+) -> typing.Any:
+    """Bind a loop-carried classical scalar to a fresh region argument.
+
+    Called from AST-injected code at the top of a ``for`` /
+    ``for-items`` loop body (immediately after ``loop_rebind_snapshot``)
+    for each read-before-write classical candidate: ``total =
+    loop_region_enter(_qm_rebind_snap_N, "total")``. When the pre-loop
+    binding is a classical ``UInt`` / ``Float`` scalar (or a plain
+    Python ``int`` / ``float``), the body is given a fresh
+    region-argument handle so its reads become explicit loop-carried
+    reads instead of stale pre-loop reads — the MLIR ``iter_args``
+    model. The loop builder later converts the pending entry into a
+    ``RegionArg`` on the loop operation.
+
+    Non-scalar and quantum bindings (arrays, dicts, ``Qubit``, ``Bit``,
+    opaque Python objects, ``bool``) are returned unchanged, so those
+    shapes keep their existing tracing behavior — quantum rebinds keep
+    feeding the discard check, and measurement-backed ``Bit`` carries
+    keep their targeted rejection.
+
+    Args:
+        snapshot (dict[str, typing.Any]): Pre-loop-body bindings from
+            ``loop_rebind_snapshot``.
+        name (str): The candidate variable name.
+
+    Returns:
+        typing.Any: A fresh region-argument handle for supported scalar
+            bindings, or the original binding unchanged.
+
+    Raises:
+        NameError: If ``name`` resolves nowhere — mirroring the
+            ``NameError`` the body's first read would have raised.
+    """
+    if name not in snapshot:
+        raise NameError(f"name '{name}' is not defined")
+    resolved = snapshot[name]
+    tracer = get_current_tracer()
+
+    init_value: Value | None = None
+    template: Handle | None = None
+    if isinstance(resolved, (UInt, Float)):
+        candidate = resolved.value
+        if isinstance(candidate, Value) and not candidate.type.is_quantum():
+            init_value = candidate
+            template = resolved
+    elif not isinstance(resolved, bool) and isinstance(resolved, (int, float)):
+        init_value = _value_to_ir_value(resolved, name)
+    if init_value is None:
+        return resolved
+
+    block_arg = Value(type=init_value.type, name=name)
+    entry_handle = _region_scalar_handle(block_arg, template)
+    tracer.region_entries[name] = _PendingRegionArg(
+        var_name=name,
+        init=init_value,
+        block_arg=block_arg,
+        entry_handle=entry_handle,
+    )
+    return entry_handle
+
+
+def loop_region_result(name: str, current: typing.Any) -> typing.Any:
+    """Rebind a loop-carried variable to its post-loop result handle.
+
+    Called from AST-injected code immediately after a ``for`` /
+    ``for-items`` loop's ``with`` block: ``total =
+    loop_region_result("total", total)``. Consumes the result handle
+    the loop builder published for ``name`` (if any) so post-loop reads
+    reference the loop operation's result value instead of the body's
+    final yielded value.
+
+    Args:
+        name (str): The carried variable name.
+        current (typing.Any): The variable's current binding (the body's
+            final handle), returned unchanged when the closed loop
+            published no result for ``name``.
+
+    Returns:
+        typing.Any: The published result handle, or ``current``.
+    """
+    tracer = get_current_tracer()
+    return tracer.loop_region_results.pop(name, current)
+
+
+def _close_region_entries(
+    body_tracer: Tracer,
+    parent_tracer: Tracer,
+) -> tuple[tuple[RegionArg, ...], list[Value]]:
+    """Convert pending region entries into IR ``RegionArg`` records.
+
+    Called by the ``for`` / ``for-items`` loop builders after the body
+    trace completes. For each pending entry, synthesizes the loop-result
+    ``Value``, builds the ``RegionArg``, and publishes the post-loop
+    result handle on ``parent_tracer.loop_region_results`` (replacing
+    any leftovers from a previously closed loop) for the AST-injected
+    ``loop_region_result`` assignments to consume.
+
+    Args:
+        body_tracer (Tracer): The tracer that captured the loop body
+            (carries ``region_entries``).
+        parent_tracer (Tracer): The tracer the loop operation is being
+            appended to (receives ``loop_region_results``).
+
+    Returns:
+        tuple[tuple[RegionArg, ...], list[Value]]: The region-argument
+            records for the loop operation and the result values to
+            append to its ``results`` list, in entry order.
+    """
+    region_args: list[RegionArg] = []
+    results: list[Value] = []
+    result_handles: dict[str, typing.Any] = {}
+    for entry in body_tracer.region_entries.values():
+        yielded = entry.yielded if entry.yielded is not None else entry.block_arg
+        result = Value(type=entry.block_arg.type, name=entry.var_name)
+        region_args.append(
+            RegionArg(
+                var_name=entry.var_name,
+                init=entry.init,
+                block_arg=entry.block_arg,
+                yielded=yielded,
+                result=result,
+            )
+        )
+        results.append(result)
+        if entry.publish_result:
+            result_handles[entry.var_name] = _region_scalar_handle(
+                result, entry.entry_handle
+            )
+    parent_tracer.loop_region_results = result_handles
+    return tuple(region_args), results
+
+
 def loop_rebind_snapshot(
     frame_locals: dict[str, typing.Any],
     names: tuple[str, ...],
@@ -379,10 +781,14 @@ def record_loop_rebinds(
     - **Classical scalar** (only names in ``classical_names``, the
       read-before-write candidates): the post-body value is a classical
       scalar with a different IR identity — the ``total = total + i``
-      shape whose traced-once IR silently diverges from Python
-      semantics. Store-only classical reassignments (a value recomputed
-      from scratch each iteration) are deliberately not recorded; they
-      trace correctly.
+      shape. Candidates that were region-bound at body entry
+      (``loop_region_enter``) complete their pending ``RegionArg``
+      instead of producing a record — the carry is then explicit and
+      supported. A record is created only for the shapes region binding
+      declined (``while`` bodies, measurement-backed ``Bit`` carries),
+      which the transpiler still rejects. Store-only classical
+      reassignments (a value recomputed from scratch each iteration)
+      are deliberately not recorded; they trace correctly.
 
     No IR operations are emitted; this only annotates the tracer.
 
@@ -398,8 +804,38 @@ def record_loop_rebinds(
     """
     post_bindings = branch_rebind_pre_bindings(frame_locals, names)
     classical_candidates = set(classical_names)
+    tracer = get_current_tracer()
     records: list[LoopCarriedRebind] = []
     for name in names:
+        entry = tracer.region_entries.get(name)
+        if entry is not None:
+            # Region-bound classical scalar: fill in the yielded value
+            # instead of recording a rebind — the carried update is now
+            # an explicit, supported RegionArg, not a staleness hazard.
+            if name not in post_bindings:
+                continue
+            after = post_bindings[name]
+            if after is entry.entry_handle:
+                # Never actually stored on the traced path: identity
+                # carry (yielded defaults to the block argument).
+                continue
+            after_value = _ir_value_from_handle_like(after)
+            if after_value is None and isinstance(after, (bool, int, float)):
+                after_value = _value_to_ir_value(after, name)
+            if (
+                after_value is None
+                or isinstance(after_value, ArrayValue)
+                or after_value.type.is_quantum()
+            ):
+                # The body's final Python value is not representable as
+                # a carried classical scalar (opaque object / array /
+                # quantum). Keep the identity carry for the body's
+                # block-argument reads, but let the Python binding keep
+                # the body's final value after the loop.
+                entry.publish_result = False
+                continue
+            entry.yielded = after_value
+            continue
         if name not in snapshot or name not in post_bindings:
             continue
         before = snapshot[name]
@@ -466,7 +902,6 @@ def record_loop_rebinds(
             )
         )
     if records:
-        tracer = get_current_tracer()
         tracer.loop_carried_rebinds = tracer.loop_carried_rebinds + tuple(records)
 
 
@@ -1196,6 +1631,12 @@ def emit_if(
                     f"but false branch returned {type(false_val).__name__}. "
                     f"Both branches of an if-else must return the same variables."
                 )
+            # Only in-branch consumption counts: a handle consumed BEFORE the
+            # if (``_consumed_pre_branch``) must not block elision or trigger
+            # the conditional-move rule — its reuse inside a branch already
+            # raised at trace time (see ``_fresh_handle_copy_for_tracing``).
+            true_consumed = _consumed_in_branch(true_val)
+            false_consumed = _consumed_in_branch(false_val)
             # Merge minimization: skip slots the trace proves are no-ops
             # (see the elision predicates for the exact conditions and
             # the belt-and-braces invariant they share with emit).
@@ -1209,6 +1650,13 @@ def emit_if(
                 )
                 continue
             merged_handle = _create_merge_for_values(true_val, false_val, if_op)
+            # Conditional-move rule: if the value was consumed on either
+            # branch, the merged handle is consumed after the if. Reusing it
+            # then raises at trace time instead of carrying a consumed value
+            # forward through the branch merge.
+            _mark_conditionally_consumed(
+                merged_handle, true_val, false_val, true_consumed, false_consumed
+            )
             merged_results.append(merged_handle)
         elif isinstance(false_val, (Handle, Value)):
             raise TypeError(
@@ -1400,6 +1848,11 @@ def for_items(
     with trace(body_tracer):
         yield (key_result, value_handle)
 
+    # Convert pending region entries (loop-carried classical scalars)
+    # into explicit RegionArg records and publish post-loop result
+    # handles for the AST-injected loop_region_result assignments.
+    region_args, region_results = _close_region_entries(body_tracer, parent_tracer)
+
     # Create ForItemsOperation with captured body operations
     for_items_op = ForItemsOperation(
         key_vars=key_var_names,
@@ -1409,7 +1862,9 @@ def for_items(
         value_var_value=value_var_value,
         operations=body_tracer.operations,
         loop_carried_rebinds=body_tracer.loop_carried_rebinds,
+        region_args=region_args,
     )
+    for_items_op.results.extend(region_results)
     for_items_op.operands.append(d.value)  # type: ignore[arg-type]  # DictValue is not Value but stored as operand
 
     parent_tracer.add_operation(for_items_op)

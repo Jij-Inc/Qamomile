@@ -85,6 +85,106 @@ class HasNestedOps:
 
 
 @dataclasses.dataclass(frozen=True)
+class RegionArg:
+    """Explicit loop-carried value on a loop operation (MLIR-style iter_arg).
+
+    A ``RegionArg`` makes a loop-carried dependency explicit in the IR,
+    the way MLIR's ``scf.for`` models ``iter_args`` / ``scf.yield``:
+
+    - On iteration 0 the body reads ``block_arg`` bound to ``init``.
+    - After each iteration, ``block_arg`` is rebound to that iteration's
+      ``yielded`` value.
+    - After the loop, ``result`` holds the final carried value (``init``
+      when the loop ran zero iterations).
+
+    The loop body's operations reference ``block_arg`` (the frontend
+    substitutes the traced pre-loop reads), and post-loop operations
+    reference ``result`` (the frontend rebinds the Python handle when it
+    closes the loop). ``result`` is also appended to the loop operation's
+    ``results`` list so dependency analysis sees the loop as its
+    producer.
+
+    This subsumes the trace-once staleness that ``LoopCarriedRebind``
+    records exist to reject: a rebind represented as a ``RegionArg`` is
+    a supported loop-carried value, not a miscompilation hazard.
+
+    Attributes:
+        var_name (str): Display name of the carried Python variable.
+            Used for printers and error messages only.
+        init (Value): The value entering iteration 0 (the pre-loop
+            value). A genuine input of the loop operation.
+        block_arg (Value): The region argument the body reads each
+            iteration. A definition owned by the loop operation (like
+            ``ForOperation.loop_var_value``), not an outer-scope read.
+        yielded (Value): The body-produced value carried into the next
+            iteration (produced by an operation inside ``operations``).
+        result (Value): The value visible after the loop. A definition
+            owned by the loop operation; also present in ``results``.
+    """
+
+    var_name: str
+    init: Value
+    block_arg: Value
+    yielded: Value
+    result: Value
+
+
+def _region_arg_values(
+    region_args: tuple[RegionArg, ...],
+) -> list[ValueBase]:
+    """Collect the Value fields of region-argument records.
+
+    Args:
+        region_args (tuple[RegionArg, ...]): Records attached to a loop
+            operation.
+
+    Returns:
+        list[ValueBase]: ``init``, ``block_arg``, ``yielded``, and
+            ``result`` of every record, in order.
+    """
+    values: list[ValueBase] = []
+    for arg in region_args:
+        values.extend((arg.init, arg.block_arg, arg.yielded, arg.result))
+    return values
+
+
+def _replace_region_arg_values(
+    region_args: tuple[RegionArg, ...],
+    mapping: dict[str, ValueBase],
+) -> tuple[RegionArg, ...] | None:
+    """Substitute region-argument values through a UUID mapping.
+
+    Args:
+        region_args (tuple[RegionArg, ...]): Records to rewrite.
+        mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+    Returns:
+        tuple[RegionArg, ...] | None: Rewritten records, or ``None``
+            when nothing changed.
+    """
+    new_args: list[RegionArg] = []
+    changed = False
+    for arg in region_args:
+        replacements: dict[str, Value] = {}
+        for field_name in ("init", "block_arg", "yielded", "result"):
+            current = getattr(arg, field_name)
+            mapped = mapping.get(current.uuid)
+            if isinstance(mapped, Value) and mapped is not current:
+                replacements[field_name] = mapped
+        if replacements:
+            arg = RegionArg(
+                var_name=arg.var_name,
+                init=replacements.get("init", arg.init),
+                block_arg=replacements.get("block_arg", arg.block_arg),
+                yielded=replacements.get("yielded", arg.yielded),
+                result=replacements.get("result", arg.result),
+            )
+            changed = True
+        new_args.append(arg)
+    return tuple(new_args) if changed else None
+
+
+@dataclasses.dataclass(frozen=True)
 class LoopCarriedRebind:
     """Trace-time record of a variable rebound inside a loop body.
 
@@ -94,9 +194,13 @@ class LoopCarriedRebind:
     - **Classical scalar** (``before`` classical): the frontend traces a
       loop body exactly once, so a Python-level reassignment like
       ``total = total + i`` produces IR whose right-hand side reads the
-      fixed pre-loop value instead of the previous iteration's value — a
-      loop-carried dependency the IR cannot represent. The transpiler's
-      classical loop-carried check rejects these with a targeted error
+      fixed pre-loop value instead of the previous iteration's value.
+      Most such carries are now represented as explicit ``RegionArg``s
+      (see above) and are fully supported; a classical record is only
+      created for the shapes region binding declines — ``while``-body
+      carries (a runtime while loop cannot be unrolled) and
+      measurement-backed ``Bit`` carries — and the transpiler's
+      classical loop-carried check rejects those with a targeted error
       instead of silently miscompiling.
     - **Quantum** (``before`` quantum): the loop body left the variable
       bound to a different quantum resource (``logical_id`` change — a
@@ -224,6 +328,8 @@ class WhileOperation(HasNestedOps, Operation):
 
     Attributes:
         operations: List of operations in the loop body.
+        region_args: Explicit loop-carried values (see ``RegionArg``).
+            Each entry's ``result`` also appears in ``results``.
         operands[0]: Initial condition (required). Must be a measurement
             result (``Bit`` from ``qmc.measure()``).
         operands[1]: Loop-carried condition (optional). When the loop body
@@ -239,6 +345,7 @@ class WhileOperation(HasNestedOps, Operation):
     operations: list[Operation] = dataclasses.field(default_factory=list)
     max_iterations: int | None = None
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
+    region_args: tuple[RegionArg, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -247,21 +354,24 @@ class WhileOperation(HasNestedOps, Operation):
         return dataclasses.replace(self, operations=new_lists[0])
 
     def all_input_values(self) -> list[ValueBase]:
-        """Include loop-carried rebind records for cloning/substitution.
+        """Include rebind records and region args for cloning/substitution.
 
         Same rationale as ``ForOperation.all_input_values``: rebind
-        records reference body/pre-loop values by identity, so inline
-        cloning must remap them in lockstep with body operands.
+        records and region arguments reference body/pre-loop values by
+        identity, so inline cloning must remap them in lockstep with
+        body operands.
 
         Returns:
-            list[ValueBase]: Base input values plus rebind-record values.
+            list[ValueBase]: Base input values plus rebind-record and
+                region-argument values.
         """
         values = super().all_input_values()
         values.extend(_rebind_input_values(self.loop_carried_rebinds))
+        values.extend(_region_arg_values(self.region_args))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
-        """Substitute operand and rebind-record values.
+        """Substitute operand, rebind-record, and region-arg values.
 
         Args:
             mapping (dict[str, ValueBase]): UUID-keyed substitution map.
@@ -274,16 +384,23 @@ class WhileOperation(HasNestedOps, Operation):
         new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
         if new_rebinds is not None:
             result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
+        new_region_args = _replace_region_arg_values(result.region_args, mapping)
+        if new_region_args is not None:
+            result = dataclasses.replace(result, region_args=new_region_args)
         return result
 
     @property
     def signature(self) -> Signature:
+        result_hints = [
+            ParamHint(name=f"result_{i}", type=r.type)
+            for i, r in enumerate(self.results)
+        ]
         return Signature(
             operands=[
                 ParamHint("condition", BlockType()),
                 ParamHint("loop_carried", BlockType()),
             ],
-            results=[],
+            results=result_hints,
         )
 
     @property
@@ -313,6 +430,8 @@ class ForOperation(HasNestedOps, Operation):
             constructed before the migration; new construction must
             always provide it.
         operations: List of operations in the loop body
+        region_args: Explicit loop-carried values (see ``RegionArg``).
+            Each entry's ``result`` also appears in ``results``.
         operands[0]: start (UInt type)
         operands[1]: stop (UInt type)
         operands[2]: step (UInt type)
@@ -322,6 +441,7 @@ class ForOperation(HasNestedOps, Operation):
     loop_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
+    region_args: tuple[RegionArg, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -336,12 +456,14 @@ class ForOperation(HasNestedOps, Operation):
         reference to the loop variable to a fresh UUID, but leave
         ``loop_var_value`` pointing at the un-cloned original — emit-time
         UUID-keyed lookups for the loop variable would then miss.
-        Loop-carried rebind records are included for the same reason.
+        Loop-carried rebind records and region arguments are included
+        for the same reason.
         """
         values = super().all_input_values()
         if self.loop_var_value is not None:
             values.append(self.loop_var_value)
         values.extend(_rebind_input_values(self.loop_carried_rebinds))
+        values.extend(_region_arg_values(self.region_args))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
@@ -354,17 +476,24 @@ class ForOperation(HasNestedOps, Operation):
         new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
         if new_rebinds is not None:
             result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
+        new_region_args = _replace_region_arg_values(result.region_args, mapping)
+        if new_region_args is not None:
+            result = dataclasses.replace(result, region_args=new_region_args)
         return result
 
     @property
     def signature(self) -> Signature:
+        result_hints = [
+            ParamHint(name=f"result_{i}", type=r.type)
+            for i, r in enumerate(self.results)
+        ]
         return Signature(
             operands=[
                 ParamHint("start", UIntType()),
                 ParamHint("stop", UIntType()),
                 ParamHint("step", UIntType()),
             ],
-            results=[],
+            results=result_hints,
         )
 
     @property
@@ -393,6 +522,8 @@ class ForItemsOperation(HasNestedOps, Operation):
         value_var_value: IR ``Value`` for the value variable. ``None``
             only for legacy IR.
         operations: List of operations in the loop body.
+        region_args: Explicit loop-carried values (see ``RegionArg``).
+            Each entry's ``result`` also appears in ``results``.
         operands[0]: The dict/iterable value (DictValue type).
 
     Note:
@@ -407,6 +538,7 @@ class ForItemsOperation(HasNestedOps, Operation):
     value_var_value: Value | None = None
     operations: list[Operation] = dataclasses.field(default_factory=list)
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
+    region_args: tuple[RegionArg, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
@@ -420,7 +552,7 @@ class ForItemsOperation(HasNestedOps, Operation):
         Same rationale as ``ForOperation.all_input_values``: keep the IR
         identity fields in lockstep with body references so UUID-keyed
         lookups stay valid after inline cloning. Loop-carried rebind
-        records are included for the same reason.
+        records and region arguments are included for the same reason.
         """
         values = super().all_input_values()
         if self.key_var_values is not None:
@@ -428,6 +560,7 @@ class ForItemsOperation(HasNestedOps, Operation):
         if self.value_var_value is not None:
             values.append(self.value_var_value)
         values.extend(_rebind_input_values(self.loop_carried_rebinds))
+        values.extend(_region_arg_values(self.region_args))
         return values
 
     def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
@@ -458,14 +591,21 @@ class ForItemsOperation(HasNestedOps, Operation):
         new_rebinds = _replace_rebind_values(result.loop_carried_rebinds, mapping)
         if new_rebinds is not None:
             result = dataclasses.replace(result, loop_carried_rebinds=new_rebinds)
+        new_region_args = _replace_region_arg_values(result.region_args, mapping)
+        if new_region_args is not None:
+            result = dataclasses.replace(result, region_args=new_region_args)
         return result
 
     @property
     def signature(self) -> Signature:
         # Signature is flexible - operand is the dict/iterable being iterated
+        result_hints = [
+            ParamHint(name=f"result_{i}", type=r.type)
+            for i, r in enumerate(self.results)
+        ]
         return Signature(
             operands=[ParamHint("iterable", BlockType())],  # BlockType as placeholder
-            results=[],
+            results=result_hints,
         )
 
     @property

@@ -94,7 +94,7 @@ class VGate:
 
 @dataclass
 class VInlineBlock:
-    """Inlined CallBlock/ControlledU/CompositeGate with visible border.
+    """Inlined callable/control body with visible border.
 
     Carries pre-resolved children, affected qubits, and pre-computed widths
     so that Layout and Renderer need no Analyzer access.

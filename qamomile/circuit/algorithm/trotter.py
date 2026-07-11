@@ -142,7 +142,7 @@ def _resolve_hamiltonian_len(
 
     A bound ``Vector[qmc.Observable]`` (the qkernel-side handle for a
     vector of ``qamomile.observable.Hamiltonian`` objects) stores
-    ``_shape`` as an int tuple (see ``qkernel._create_bound_input``);
+    ``_shape`` as an int tuple (see ``qkernel_inputs.create_bound_input``);
     cache-trace Vectors carry a symbolic ``UInt`` in shape[0] and
     return ``None``.
     """

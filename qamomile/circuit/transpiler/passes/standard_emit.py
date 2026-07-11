@@ -14,7 +14,10 @@ from __future__ import annotations
 import contextlib
 import re
 from collections.abc import Iterator
-from typing import Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.value import Value
 
 from qamomile.circuit.ir.operation import (
     Operation,
@@ -28,13 +31,11 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
 )
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DictGetItemOperation,
     StoreArrayElementOperation,
-)
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -50,6 +51,8 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
@@ -63,6 +66,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     CompositeDecomposer,
     LoopAnalyzer,
     MultiControlAncillaPool,
+    QubitAddress,
     QubitMap,
     ResourceAllocator,
 )
@@ -72,7 +76,7 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
     handle_cast,
 )
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
-    emit_composite_gate,
+    emit_invoke_operation,
 )
 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
     emit_for,
@@ -112,8 +116,8 @@ def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
     segment's emission work, so it is only worth running when the segment
     can actually consume the pool. Only a ``ControlledUOperation`` (a
     ``qmc.control(...)`` call), an ``InverseBlockOperation`` (whose block
-    may hold controlled gates), or a ``CompositeGateOperation`` (whose
-    decomposition may be controlled) reaches the irreducible
+    may hold controlled gates), or an ``InvokeOperation`` (whose selected
+    callable body may be controlled) reaches the irreducible
     multi-controlled hook, directly or after control composition. A segment
     of plain gates, measurements, and classical ops — the common case —
     never does, so the dry run is skipped. This is only a presence check,
@@ -125,12 +129,12 @@ def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
 
     Returns:
         bool: True if any operation, recursively through control-flow
-            bodies, is a controlled-U, inverse block, or composite gate.
+            bodies, is a controlled-U, inverse block, or callable invocation.
     """
     for op in operations:
         if isinstance(
             op,
-            (ControlledUOperation, InverseBlockOperation, CompositeGateOperation),
+            (ControlledUOperation, InverseBlockOperation, InvokeOperation),
         ):
             return True
         if isinstance(op, HasNestedOps):
@@ -163,10 +167,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
         composite_emitters: list[CompositeGateEmitter[T]] | None = None,
+        backend_name: str | None = None,
     ):
         super().__init__(bindings, parameters)
         self._emitter = gate_emitter
         self._composite_emitters = composite_emitters or []
+        self.backend_name = backend_name
 
         # Helper classes (``_resolver`` is built by ``EmitPass.__init__``).
         self._allocator = ResourceAllocator(self._resolver)
@@ -349,10 +355,13 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
         force_unroll: bool = False,
+        emit_qinit_reset: bool = False,
     ) -> None:
         """Emit operations to the circuit (dispatcher)."""
         for op in operations:
             if isinstance(op, QInitOperation):
+                if emit_qinit_reset:
+                    self._emit_qinit_reset(circuit, op, qubit_map, bindings)
                 continue
             elif isinstance(op, (SliceArrayOperation, ReleaseSliceViewOperation)):
                 # SliceArrayOperation / ReleaseSliceViewOperation are
@@ -375,6 +384,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 emit_gate(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, MeasureOperation):
                 emit_measure(self, circuit, op, qubit_map, clbit_map, bindings)
+            elif isinstance(op, ProjectOperation):
+                self._emit_project(circuit, op, qubit_map, clbit_map, bindings)
+            elif isinstance(op, ResetOperation):
+                self._emit_reset(circuit, op, qubit_map, bindings)
             elif isinstance(op, MeasureVectorOperation):
                 emit_measure_vector(self, circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, MeasureQFixedOperation):
@@ -389,8 +402,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, WhileOperation):
                 self._emit_while(circuit, op, qubit_map, clbit_map, bindings)
-            elif isinstance(op, CompositeGateOperation):
-                emit_composite_gate(self, circuit, op, qubit_map, bindings)
+            elif isinstance(op, InvokeOperation):
+                emit_invoke_operation(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, InverseBlockOperation):
                 self._emit_inverse_block(circuit, op, qubit_map, bindings)
             elif isinstance(op, ControlledUOperation):
@@ -451,6 +464,220 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 raise NotImplementedError(
                     f"Unhandled control flow: {type(op).__name__}"
                 )
+
+    def _emit_qinit_reset(
+        self,
+        circuit: T,
+        op: QInitOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit prepare-zero operations for nested fresh allocations.
+
+        Args:
+            circuit (T): Backend circuit currently being emitted.
+            op (QInitOperation): Fresh logical allocation to prepare.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            bindings (dict[str, Any]): Emit-time bindings for array sizes.
+
+        Raises:
+            EmitError: If a symbolic array allocation size cannot be
+                resolved during emit.
+        """
+        from qamomile.circuit.ir.value import ArrayValue
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        result = op.results[0]
+        if isinstance(result, ArrayValue):
+            if not result.shape:
+                return
+            size = self._resolver.resolve_int_value(result.shape[0], bindings)
+            if size is None:
+                raise EmitError(
+                    "Cannot emit nested fresh allocation for a symbolic-size "
+                    "qubit array. Bind the array size before transpilation.",
+                    operation="QInitOperation",
+                )
+            for index in range(size):
+                qubit = qubit_map[QubitAddress(result.uuid, index)]
+                self._checked_emit_reset(circuit, qubit, "QInitOperation")
+            return
+        qubit = qubit_map[QubitAddress(result.uuid)]
+        self._checked_emit_reset(circuit, qubit, "QInitOperation")
+
+    def _resolve_qubit_operand(
+        self,
+        qubit_val: Value,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+        operation: str,
+    ) -> int:
+        """Resolve a single qubit operand to its physical qubit index.
+
+        Uses the full resolver (which handles array-element qubits with
+        composite keys, e.g. ``q[i]`` after loop unrolling) with a fallback
+        to a direct scalar-UUID lookup. This is the shared resolution path
+        for reset / projection so they behave identically to
+        ``emit_measure`` — a plain ``qubit_map[QubitAddress(uuid)]`` misses
+        array elements, whose addresses are composite ``(root_uuid, index)``
+        keys rather than the element's own UUID.
+
+        Args:
+            qubit_val (Value): The qubit operand to resolve.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            bindings (dict[str, Any]): Emit-time bindings for index/size
+                resolution.
+            operation (str): Operation name for the error message.
+
+        Returns:
+            int: The physical qubit index.
+
+        Raises:
+            EmitError: If the operand cannot be resolved to a physical
+                qubit index (e.g. an unresolved native-loop index that
+                should have forced unrolling, or a missing allocation).
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        index = self._resolver.resolve_qubit_index(qubit_val, qubit_map, bindings)
+        if index is None:
+            scalar_addr = QubitAddress(qubit_val.uuid)
+            if scalar_addr in qubit_map:
+                index = qubit_map[scalar_addr]
+        if index is None:
+            raise EmitError(
+                f"{operation} could not resolve qubit "
+                f"'{qubit_val.name}' (uuid: {qubit_val.uuid[:8]}...) to a "
+                f"physical qubit index. A qubit indexed by a native-loop "
+                f"variable (e.g. `q[i]`) must be unrolled before emit; if you "
+                f"reached this error the loop was not unrolled or the qubit "
+                f"was never allocated.",
+                operation=operation,
+            )
+        return index
+
+    def _emit_project(
+        self,
+        circuit: T,
+        op: ProjectOperation,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a projective measurement that keeps the projected qubit.
+
+        A ``project_z`` is emitted as a measurement whose qubit survives (the
+        handle is rebound to the projected state). The qubit operand is
+        resolved through ``_resolve_qubit_operand`` so array-element qubits
+        (``project_z(q[i])`` after loop unrolling) resolve correctly, matching
+        ``emit_measure``.
+
+        Args:
+            circuit (T): Backend circuit currently being emitted.
+            op (ProjectOperation): The projection operation to emit. Must have
+                already lowered ``project_x`` / ``project_y`` to ``project_z``
+                plus basis-change gates.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            clbit_map (ClbitMap): Current classical-bit address map.
+            bindings (dict[str, Any]): Emit-time bindings for index/size
+                resolution.
+
+        Raises:
+            EmitError: If ``op.axis`` is not ``"z"`` (an unlowered
+                ``project_x`` / ``project_y`` reached emit), if the qubit
+                operand cannot be resolved to a physical index, or if the
+                result classical bit was never allocated.
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
+
+        if op.axis != "z":
+            raise EmitError(
+                f"ProjectOperation axis {op.axis!r} reached emit; only "
+                "project_z should appear because project_x/project_y lower "
+                "through basis-change gates.",
+                operation="ProjectOperation",
+            )
+        qubit = self._resolve_qubit_operand(
+            op.operands[0], qubit_map, bindings, "ProjectOperation"
+        )
+        clbit_addr = QubitAddress(op.results[1].uuid)
+        if clbit_addr not in clbit_map:
+            raise EmitError(
+                f"ProjectOperation could not resolve its result classical bit "
+                f"(uuid: {op.results[1].uuid[:8]}...): it was never allocated "
+                f"in the clbit map.",
+                operation="ProjectOperation",
+            )
+        bit = clbit_map[clbit_addr]
+        self._emitter.emit_measure(circuit, qubit, bit)
+        if self._emitter.measurement_mode == MeasurementMode.STATIC:
+            self._measurement_qubit_map[bit] = qubit
+
+    def _emit_reset(
+        self,
+        circuit: T,
+        op: ResetOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a reset of a qubit to the |0> state.
+
+        The qubit operand is resolved through ``_resolve_qubit_operand`` so
+        array-element qubits (``reset(q[i])`` after loop unrolling) resolve
+        correctly.
+
+        Args:
+            circuit (T): Backend circuit currently being emitted.
+            op (ResetOperation): The reset operation to emit.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            bindings (dict[str, Any]): Emit-time bindings for index/size
+                resolution.
+
+        Raises:
+            EmitError: If the qubit operand cannot be resolved to a physical
+                qubit index (e.g. an unresolved native-loop index that should
+                have forced unrolling, or a missing allocation).
+        """
+        qubit = self._resolve_qubit_operand(
+            op.operands[0], qubit_map, bindings, "ResetOperation"
+        )
+        self._checked_emit_reset(circuit, qubit, "ResetOperation")
+
+    def _checked_emit_reset(self, circuit: T, qubit: int, operation: str) -> None:
+        """Emit a reset, converting backend refusal into an ``EmitError``.
+
+        ``GateEmitter.emit_reset`` raises ``NotImplementedError`` on backends
+        with no reset primitive (e.g. QURI Parts). Letting that raw Python
+        exception escape a normal qkernel compile is a UX bug, so every reset
+        emission funnels through here and surfaces an actionable compile
+        error instead.
+
+        Args:
+            circuit (T): Backend circuit currently being emitted.
+            qubit (int): Physical qubit index to reset.
+            operation (str): Operation label for the error message
+                (``"ResetOperation"`` or ``"QInitOperation"``).
+
+        Raises:
+            EmitError: If the backend emitter does not support reset. The
+                message tells the user to use a reset-capable backend or
+                avoid ``qmc.reset`` / fresh in-loop allocation on this one.
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        try:
+            self._emitter.emit_reset(circuit, qubit)
+        except NotImplementedError as e:
+            raise EmitError(
+                "This backend cannot emit a qubit reset. "
+                "`qmc.reset(...)` and fresh qubit allocation inside a "
+                "runtime loop (which requires a per-iteration reset) need a "
+                "backend with a native reset primitive, e.g. Qiskit or "
+                "CUDA-Q. Either switch backend or restructure the kernel to "
+                "avoid reset on this one.",
+                operation=operation,
+            ) from e
 
     # ------------------------------------------------------------------
     # Methods overridden by backend subclasses (QiskitEmitPass, CudaqEmitPass).

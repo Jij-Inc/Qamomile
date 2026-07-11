@@ -11,15 +11,15 @@ from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.operation import Operation
-    from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+    from qamomile.circuit.ir.operation.callable import InvokeOperation
 
 
 class BlockKind(Enum):
     """Classification of block structure for pipeline stages."""
 
     TRACED = auto()  # Direct output of frontend tracing / build()
-    HIERARCHICAL = auto()  # May contain CallBlockOperations
-    AFFINE = auto()  # No CallBlockOperations, For/If preserved
+    HIERARCHICAL = auto()  # May contain inline callable invocations
+    AFFINE = auto()  # No inline callable invocations, For/If preserved
     ANALYZED = auto()  # Validated and dependency-analyzed
 
 
@@ -81,12 +81,35 @@ class Block:
         return list(self.parameters.keys())
 
     def is_affine(self) -> bool:
-        """Check if block contains no CallBlockOperations."""
+        """Return whether this block has passed affine validation.
+
+        Returns:
+            bool: True for ``AFFINE`` and ``ANALYZED`` blocks.
+        """
         return self.kind in (BlockKind.AFFINE, BlockKind.ANALYZED)
 
-    def call(self, **kwargs: Value) -> "CallBlockOperation":
-        """Create a CallBlockOperation against this block."""
-        from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+    def call(self, **kwargs: Value) -> "InvokeOperation":
+        """Create an inline callable invocation against this block.
+
+        Args:
+            **kwargs (Value): Actual argument values keyed by
+                ``self.label_args``.
+
+        Returns:
+            InvokeOperation: Inline-policy invocation whose callable
+                definition points at this block.
+
+        Raises:
+            KeyError: If a required label in ``self.label_args`` is missing
+                from ``kwargs``.
+        """
+        from qamomile.circuit.ir.operation.callable import (
+            CallableDef,
+            CallableRef,
+            CallPolicy,
+            InvokeOperation,
+            signature_from_block,
+        )
 
         inputs = [kwargs[label] for label in self.label_args]
         dummy_inputs = {v.logical_id: idx for idx, v in enumerate(self.input_values)}
@@ -99,8 +122,19 @@ class Block:
             else:
                 results.append(dummy_return)
 
-        return CallBlockOperation(
-            block=self,
+        name = self.name or "anonymous"
+        attrs = {"kind": "block", "default_policy": CallPolicy.INLINE.name}
+        ref = CallableRef(namespace="user.block", name=name)
+        return InvokeOperation(
             operands=inputs,
             results=results,
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                signature=signature_from_block(self),
+                body=self,
+                default_policy=CallPolicy.INLINE,
+                attrs=attrs,
+            ),
         )
