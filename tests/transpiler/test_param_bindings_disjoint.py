@@ -110,6 +110,97 @@ class TestParamBindingsDisjoint:
         assert sum(count for _, count in result.results) == 4
 
 
+class TestStepByStepDisjointness:
+    """The disjointness rule is enforced on every entry point, not just transpile.
+
+    Before this fix the overlap check lived only inside ``transpile``. The
+    documented step-by-step API (``to_block`` → … → ``emit``) and the frontend
+    ``build`` bypassed it, so a name in both ``bindings`` and ``parameters``
+    was silently baked in (its runtime parameter dropped) — the exact #354
+    class the check exists to prevent. The check now runs in the shared helper
+    called from ``build`` / ``to_block`` / ``emit`` / ``transpile``.
+    """
+
+    def test_build_overlap_rejected(self) -> None:
+        """``QKernel.build`` rejects a name in both parameters and kwargs."""
+        with pytest.raises(ValueError, match=r"appear in both"):
+            _identity_kernel.build(parameters=["theta"], theta=0.5)
+
+    def test_to_block_overlap_rejected(self, qiskit_transpiler) -> None:
+        """``Transpiler.to_block`` rejects the overlap before tracing."""
+        with pytest.raises(ValueError, match=r"appear in both"):
+            qiskit_transpiler.to_block(
+                _identity_kernel,
+                bindings={"theta": 0.5},
+                parameters=["theta"],
+            )
+
+    def test_emit_overlap_rejected(self, qiskit_transpiler) -> None:
+        """``Transpiler.emit`` rejects the overlap on the step-by-step path.
+
+        This is the exact bypass the fix closes: a plan built without overlap,
+        then emitted with a name in both ``bindings`` and ``parameters``, used
+        to silently bake the binding and drop the runtime parameter.
+        """
+        block = qiskit_transpiler.to_block(_identity_kernel, parameters=["theta"])
+        block = qiskit_transpiler.resolve_parameter_shapes(
+            qiskit_transpiler.substitute(block), {}
+        )
+        block = qiskit_transpiler.inline(block)
+        block = qiskit_transpiler.affine_validate(block)
+        block = qiskit_transpiler.partial_eval(block, {})
+        block = qiskit_transpiler.analyze(block)
+        plan = qiskit_transpiler.plan(block)
+
+        with pytest.raises(ValueError, match=r"appear in both"):
+            qiskit_transpiler.emit(plan, bindings={"theta": 0.5}, parameters=["theta"])
+
+    def test_emit_disjoint_still_works(self, qiskit_transpiler) -> None:
+        """A disjoint step-by-step emit is unaffected (no false positive)."""
+        block = qiskit_transpiler.to_block(_identity_kernel, parameters=["theta"])
+        block = qiskit_transpiler.resolve_parameter_shapes(
+            qiskit_transpiler.substitute(block), {}
+        )
+        block = qiskit_transpiler.inline(block)
+        block = qiskit_transpiler.affine_validate(block)
+        block = qiskit_transpiler.partial_eval(block, {})
+        block = qiskit_transpiler.analyze(block)
+        plan = qiskit_transpiler.plan(block)
+
+        exe = qiskit_transpiler.emit(plan, parameters=["theta"])
+        assert exe.parameter_names == ["theta"]
+
+    def test_direct_emit_pass_construction_rejected(self, qiskit_transpiler) -> None:
+        """Constructing an emit pass directly with an overlap raises.
+
+        ``EmitPass.__init__`` is the innermost emit-side choke point: it guards
+        even the advanced path that builds a pass directly via
+        ``Transpiler._create_emit_pass``, skipping the ``transpile`` / ``emit``
+        wrappers. The concrete backend pass reaches the base ``__init__`` via
+        ``super().__init__``, so the check fires here too.
+        """
+        with pytest.raises(ValueError, match=r"appear in both"):
+            qiskit_transpiler._create_emit_pass(
+                bindings={"theta": 0.5}, parameters=["theta"]
+            )
+
+    def test_helper_unit(self) -> None:
+        """The shared helper raises exactly on overlap and is None-safe."""
+        from qamomile.circuit.frontend.param_validation import (
+            validate_bindings_parameters_disjoint,
+        )
+
+        # None / empty inputs never raise.
+        validate_bindings_parameters_disjoint(None, None)
+        validate_bindings_parameters_disjoint({"a": 1}, None)
+        validate_bindings_parameters_disjoint(None, ["a"])
+        validate_bindings_parameters_disjoint({"a": 1}, ["b"])
+
+        # Overlap raises with both names listed.
+        with pytest.raises(ValueError, match=r"appear in both"):
+            validate_bindings_parameters_disjoint({"a": 1, "b": 2}, ["a", "b"])
+
+
 class TestIssue354BSeriesRepro:
     """The exact repro from Issue #354 B-series no longer silently miscompiles.
 

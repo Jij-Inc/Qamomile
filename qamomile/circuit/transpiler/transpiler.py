@@ -7,7 +7,10 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from qamomile.circuit.frontend.decomposition import DecompositionConfig
-from qamomile.circuit.frontend.qkernel import QKernel
+from qamomile.circuit.frontend.param_validation import (
+    validate_bindings_parameters_disjoint,
+)
+from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.errors import (
     FrontendTransformError,
@@ -26,8 +29,8 @@ from qamomile.circuit.transpiler.passes.entrypoint_validation import (
 )
 from qamomile.circuit.transpiler.passes.inline import (
     InlinePass,
-    count_call_blocks,
-    count_unrollable_call_blocks,
+    count_inline_invokes,
+    count_unrollable_inline_invokes,
 )
 from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
     ParameterShapeResolutionPass,
@@ -123,8 +126,8 @@ class TranspilerConfig:
 class Transpiler(ABC, Generic[T]):
     """Base class for backend-specific transpilers.
 
-    Provides the full compilation pipeline from QKernel to
-    executable program.
+    Provides the full compilation pipeline from qkernel-like frontend objects
+    to executable programs.
 
     Usage:
         transpiler = QiskitTranspiler()
@@ -209,16 +212,27 @@ class Transpiler(ABC, Generic[T]):
 
     def to_block(
         self,
-        kernel: QKernel,
+        kernel: QKernelLike,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> Block:
-        """Convert a QKernel to a Block.
+        """Convert a qkernel-like frontend object to a Block.
 
         Args:
-            kernel: The QKernel to convert
-            bindings: Concrete values to bind at trace time (resolves array shapes)
-            parameters: Names to keep as unbound parameters
+            kernel (QKernelLike): QKernel or qkernel-like frontend object to
+                convert.
+            bindings (dict[str, Any] | None): Concrete values to bind at trace
+                time, including values used to resolve array shapes.
+            parameters (list[str] | None): Names to keep as unbound runtime
+                parameters.
+
+        Returns:
+            Block: Hierarchical block for the frontend object.
+
+        Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters`` (propagated from ``kernel.build``), violating
+                the bindings/parameters disjointness rule.
 
         When bindings or parameters are provided, uses kernel.build() to properly
         resolve array shapes from the bound data. Otherwise uses the cached
@@ -241,8 +255,8 @@ class Transpiler(ABC, Generic[T]):
     def substitute(self, block: Block) -> Block:
         """Pass 0.5: Apply substitutions (optional).
 
-        This pass replaces CallBlockOperation targets and sets
-        strategy names on CompositeGateOperations based on config.
+        This pass rewrites inline callable targets and sets strategy names on
+        boxed InvokeOperations based on config.
 
         Args:
             block: Block to transform
@@ -280,7 +294,7 @@ class Transpiler(ABC, Generic[T]):
     MAX_UNROLL_DEPTH: int = 64
 
     def inline(self, block: Block) -> Block:
-        """Pass 1: Inline all CallBlockOperations."""
+        """Pass 1: Inline all inline-policy callable invocations."""
         return self._inline_pass.run(block)
 
     def unroll_recursion(
@@ -290,10 +304,10 @@ class Transpiler(ABC, Generic[T]):
     ) -> Block:
         """Fixed-point loop of inline ↔ partial_eval for self-recursive kernels.
 
-        Each iteration unrolls one layer of self-referential
-        ``CallBlockOperation`` and then folds the base-case
+        Each iteration unrolls one layer of self-referential inline
+        callable invocation and then folds the base-case
         ``IfOperation`` via ``partial_eval``. Terminates when no
-        ``CallBlockOperation`` remains (success), when every residual call
+        inline callable invocation remains (success), when every residual call
         is trapped inside an operation-owned block where ``partial_eval``
         cannot fold it (control / inverse of a recursive kernel — raises a
         targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is reached
@@ -301,7 +315,7 @@ class Transpiler(ABC, Generic[T]):
 
         Args:
             block (Block): The block to unroll. May be ``HIERARCHICAL``
-                (still containing self-referential ``CallBlockOperation``s)
+                (still containing self-referential callable invocations)
                 or already ``AFFINE`` (returned unchanged).
             bindings (dict[str, Any] | None): Compile-time bindings used by
                 ``partial_eval`` to fold the base-case condition. Defaults
@@ -309,11 +323,11 @@ class Transpiler(ABC, Generic[T]):
 
         Returns:
             Block: The fully unrolled, ``AFFINE`` block once no
-                ``CallBlockOperation`` remains. Returned unchanged when the
+                inline callable invocation remains. Returned unchanged when the
                 input already has no calls.
 
         Raises:
-            FrontendTransformError: If every remaining ``CallBlockOperation``
+            FrontendTransformError: If every remaining inline callable invocation
                 is trapped inside a ``ControlledUOperation.block`` /
                 ``InverseBlockOperation`` block (a self-recursive kernel was
                 passed to ``qmc.control`` / ``qmc.inverse``), or if a
@@ -321,16 +335,16 @@ class Transpiler(ABC, Generic[T]):
                 converge within ``MAX_UNROLL_DEPTH`` iterations. The two
                 cases carry distinct, cause-specific messages.
         """
-        if count_call_blocks(block.operations) == 0:
+        if count_inline_invokes(block.operations) == 0:
             return block
 
         for _ in range(self.MAX_UNROLL_DEPTH):
             block = self.inline(block)
             block = self.partial_eval(block, bindings)
-            if count_call_blocks(block.operations) == 0:
+            if count_inline_invokes(block.operations) == 0:
                 # ``partial_eval`` keeps ``block.kind`` from the input,
                 # which stays HIERARCHICAL even after the last
-                # CallBlockOperation was folded away.  Re-run ``inline``
+                # inline callable invocation was folded away.  Re-run ``inline``
                 # to refresh the kind to AFFINE so downstream
                 # ``affine_validate`` is happy.
                 return self.inline(block)
@@ -344,10 +358,10 @@ class Transpiler(ABC, Generic[T]):
             # ``qmc.control`` / ``qmc.inverse``; fail fast with a targeted
             # message instead of spinning to ``MAX_UNROLL_DEPTH`` and
             # blaming the bindings.
-            if count_unrollable_call_blocks(block.operations) == 0:
+            if count_unrollable_inline_invokes(block.operations) == 0:
                 raise FrontendTransformError(
                     "qmc.control / qmc.inverse was given a recursive "
-                    "@qkernel: after inlining, a CallBlockOperation still "
+                    "@qkernel: after inlining, an inline callable invocation still "
                     "remains inside the controlled / inverted block, and "
                     "partial_eval cannot fold its base-case `if` there "
                     "(constant folding does not descend into a "
@@ -529,7 +543,16 @@ class Transpiler(ABC, Generic[T]):
             separated: The separated program to emit
             bindings: Parameter values to bind at compile time
             parameters: Parameter names to preserve as backend parameters
+
+        Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters``. This check also runs in ``transpile`` and
+                ``to_block``/``build``, but ``emit`` is a public step-by-step
+                entry point that bypasses those, so the guard is repeated here
+                to prevent a name from being silently baked in (its runtime
+                parameter dropped) when the step-by-step API is driven directly.
         """
+        validate_bindings_parameters_disjoint(bindings, parameters)
         emit_pass = self._create_emit_pass(bindings, parameters)
         return emit_pass.run(separated)
 
@@ -537,14 +560,15 @@ class Transpiler(ABC, Generic[T]):
 
     def transpile(
         self,
-        kernel: QKernel,
+        kernel: QKernelLike,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> ExecutableProgram[T]:
-        """Full compilation pipeline from QKernel to executable.
+        """Full compilation pipeline from a qkernel-like object to executable.
 
         Args:
-            kernel (QKernel): The QKernel to compile
+            kernel (QKernelLike): QKernel or qkernel-like frontend object to
+                compile.
             bindings (dict[str, Any] | None): Parameter values to bind
                 (also resolves array shapes). Names in ``bindings`` and
                 ``parameters`` must be disjoint — a name is either
@@ -582,10 +606,10 @@ class Transpiler(ABC, Generic[T]):
             QKernels remain valid as subroutines and for ``build()``.
 
         Pipeline:
-            1. to_block: Convert QKernel to Block
+            1. to_block: Convert a qkernel-like frontend object to Block
             2. substitute: Apply substitutions (if configured)
             3. resolve_parameter_shapes: Constant-fold symbolic Vector param dims
-            4. inline: Inline CallBlockOperations
+            4. inline: Inline inline-policy callable invocations
             5. affine_validate: Validate affine type semantics
             6. partial_eval: Fold constants and lower compile-time control flow
             7. analyze: Validate and analyze dependencies
@@ -593,18 +617,7 @@ class Transpiler(ABC, Generic[T]):
             9. plan: Build ProgramPlan (segment into C->Q->C steps)
             10. emit: Generate backend-specific code
         """
-        if bindings and parameters:
-            overlap = set(parameters) & set(bindings.keys())
-            if overlap:
-                raise ValueError(
-                    f"Parameter name(s) {sorted(overlap)} appear in both "
-                    f"`parameters` and `bindings`. A name must be either "
-                    f"compile-time bound (in `bindings`) or runtime symbolic "
-                    f"(in `parameters`), not both. "
-                    f"If you want this value baked into the circuit, remove "
-                    f"it from `parameters`. If you want it as a runtime "
-                    f"parameter, remove it from `bindings`."
-                )
+        validate_bindings_parameters_disjoint(bindings, parameters)
 
         entrypoint_validator = EntrypointValidationPass()
 
@@ -638,7 +651,7 @@ class Transpiler(ABC, Generic[T]):
 
     def to_circuit(
         self,
-        kernel: QKernel,
+        kernel: QKernelLike,
         bindings: dict[str, Any] | None = None,
     ) -> T:
         """Compile and extract just the quantum circuit.
@@ -647,11 +660,12 @@ class Transpiler(ABC, Generic[T]):
         backend circuit without the full executable.
 
         Args:
-            kernel: The QKernel to compile
-            bindings: Parameter values to bind
+            kernel (QKernelLike): QKernel or qkernel-like frontend object to
+                compile.
+            bindings (dict[str, Any] | None): Parameter values to bind.
 
         Returns:
-            Backend-specific quantum circuit
+            T: Backend-specific quantum circuit.
 
         Note:
             ``kernel`` is treated as a top-level executable entrypoint and

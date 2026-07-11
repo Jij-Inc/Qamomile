@@ -6,7 +6,6 @@ Provides ``emit_measure``, ``emit_measure_vector`` and
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -38,9 +37,15 @@ def emit_measure(
     scalar qubits and array element qubits with composite keys).
 
     Raises:
-        warnings.warn: If the qubit or clbit cannot be resolved, a
-            warning is emitted instead of silently dropping the
-            measurement.
+        EmitError: If the qubit or clbit cannot be resolved to a physical
+            address. A dropped measurement is never recoverable inside a
+            quantum segment — the emitted circuit would silently return
+            results with a measured bit missing — so this is a hard error
+            rather than a warning. The most common trigger is a
+            ``measure(q[i])`` whose index ``i`` is an unresolved native-loop
+            parameter; ``LoopAnalyzer.should_unroll`` is expected to have
+            forced such loops to unroll before emit, so reaching this path
+            indicates a real resolution failure.
     """
     qubit_val = op.operands[0]
     clbit_uuid = op.results[0].uuid
@@ -72,9 +77,13 @@ def emit_measure(
             )
         if clbit_addr not in clbit_map:
             details.append(f"clbit (uuid: {clbit_uuid[:8]}...) not found in clbit_map")
-        warnings.warn(
-            f"Measurement dropped: {'; '.join(details)}.",
-            stacklevel=2,
+        raise EmitError(
+            f"Measurement could not be emitted: {'; '.join(details)}. "
+            f"A measurement inside a native backend loop indexed by the loop "
+            f"variable (e.g. `measure(q[i])`) must be unrolled; if you reached "
+            f"this error the loop was not unrolled or the qubit was never "
+            f"allocated.",
+            operation="MeasureOperation",
         )
 
 

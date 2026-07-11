@@ -21,6 +21,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     HasNestedOps,
     IfOperation,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.value import (
@@ -438,71 +439,6 @@ class ClassicalExecutor:
             f"resolved for element store."
         )
 
-    def _seed_carry_args(
-        self,
-        op: ForOperation | ForItemsOperation | WhileOperation,
-        carried_values: list[Any],
-        results: dict[str, Any],
-    ) -> None:
-        """Bind the previous iteration's carried values to the body formals.
-
-        Args:
-            op (ForOperation | ForItemsOperation | WhileOperation): The
-                loop whose carry slots are seeded.
-            carried_values (list[Any]): Current carried values, one per
-                slot (the ``iter_arg`` values before the first
-                iteration, the previous iteration's yields afterwards).
-            results (dict[str, Any]): Mutable results map; each
-                ``body_arg`` UUID is (re)bound in place.
-        """
-        for carry, value in zip(op.iter_carries(), carried_values, strict=True):
-            results[carry.body_arg.uuid] = value
-
-    def _collect_carry_yields(
-        self,
-        op: ForOperation | ForItemsOperation | WhileOperation,
-        context: ExecutionContext,
-        results: dict[str, Any],
-        loop_scope: dict[str, Any],
-    ) -> list[Any]:
-        """Read the values the just-executed body yields for the next trip.
-
-        Args:
-            op (ForOperation | ForItemsOperation | WhileOperation): The
-                loop whose carry slots are read.
-            context (ExecutionContext): Execution context holding
-                measurements and bindings.
-            results (dict[str, Any]): Results map after the body ran.
-            loop_scope (dict[str, Any]): The finished iteration's scope.
-
-        Returns:
-            list[Any]: One yielded value per carry slot.
-        """
-        return [
-            self._get_value(carry.body_yield, context, results, loop_scope)
-            for carry in op.iter_carries()
-        ]
-
-    def _bind_carry_results(
-        self,
-        op: ForOperation | ForItemsOperation | WhileOperation,
-        carried_values: list[Any],
-        results: dict[str, Any],
-    ) -> None:
-        """Bind the final carried values to the loop's result values.
-
-        Args:
-            op (ForOperation | ForItemsOperation | WhileOperation): The
-                finished loop.
-            carried_values (list[Any]): Final carried values — the last
-                iteration's yields, or the ``iter_arg`` values when the
-                loop ran zero times.
-            results (dict[str, Any]): Mutable results map; each carry
-                ``result`` UUID is bound in place.
-        """
-        for carry, value in zip(op.iter_carries(), carried_values, strict=True):
-            results[carry.result.uuid] = value
-
     def _execute_for(
         self,
         op: ForOperation,
@@ -533,19 +469,148 @@ class ClassicalExecutor:
         self._materialize_loop_store_defaults(
             op.operations, context, results, scoped_locals
         )
-        carried_values = [
-            self._get_value(carry.iter_arg, context, results, scoped_locals)
-            for carry in op.iter_carries()
-        ]
+        self._validated_region_args(op)
+        if op.loop_var_value is None:
+            raise ExecutionError(
+                f"ForOperation '{op.loop_var or '<unnamed>'}' has no "
+                "loop_var_value; the IR must be rebuilt with the current "
+                "frontend."
+            )
+        self._seed_region_args(op, context, results, scoped_locals)
         for loop_value in range(start, stop, step):
             loop_scope = scoped_locals.copy()
-            loop_scope[op.loop_var] = loop_value
-            self._seed_carry_args(op, carried_values, results)
+            results[op.loop_var_value.uuid] = loop_value
             self._execute_operations(op.operations, context, results, loop_scope)
-            carried_values = self._collect_carry_yields(
-                op, context, results, loop_scope
+            self._advance_region_args(op, context, results, loop_scope)
+        self._publish_region_results(op, results)
+
+    def _validated_region_args(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+    ) -> tuple[RegionArg, ...]:
+        """Validate and return a loop operation's region arguments.
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): The
+                loop operation to validate.
+
+        Returns:
+            tuple[RegionArg, ...]: The validated region arguments.
+
+        Raises:
+            ExecutionError: If result counts or UUIDs do not align,
+                block/result UUIDs are duplicated, or one argument's
+                values have different types.
+        """
+        region_args = op.region_args
+        if len(region_args) != len(op.results):
+            raise ExecutionError(
+                "Loop RegionArg data is inconsistent: "
+                f"{len(region_args)} region args for {len(op.results)} results."
             )
-        self._bind_carry_results(op, carried_values, results)
+        block_arg_uuids: set[str] = set()
+        result_uuids: set[str] = set()
+        for index, (arg, result) in enumerate(
+            zip(region_args, op.results, strict=True)
+        ):
+            if arg.result.uuid != result.uuid:
+                raise ExecutionError(
+                    "Loop RegionArg data is inconsistent: "
+                    f"region_args[{index}].result does not match "
+                    f"results[{index}]."
+                )
+            if not (
+                arg.init.type
+                == arg.block_arg.type
+                == arg.yielded.type
+                == arg.result.type
+            ):
+                raise ExecutionError(
+                    f"Loop RegionArg '{arg.var_name}' has mismatched value types."
+                )
+            if arg.block_arg.uuid in block_arg_uuids or arg.result.uuid in result_uuids:
+                raise ExecutionError(
+                    "Loop RegionArg data contains duplicate block/result identities."
+                )
+            block_arg_uuids.add(arg.block_arg.uuid)
+            result_uuids.add(arg.result.uuid)
+        return region_args
+
+    def _seed_region_args(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Bind each region argument's block argument to its init value.
+
+        Runs once before iteration 0 so the body's loop-carried reads
+        (which reference ``block_arg``) observe the pre-loop value on
+        the first pass.
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): The
+                loop being executed.
+            context (ExecutionContext): Execution context.
+            results (dict[str, Any]): Intermediate results by UUID.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+        """
+        for arg in self._validated_region_args(op):
+            results[arg.block_arg.uuid] = self._get_value(
+                arg.init, context, results, scoped_locals
+            )
+
+    def _advance_region_args(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Carry each region argument's yielded value into the next iteration.
+
+        Runs after each body execution: the block argument is rebound to
+        the value the body just yielded, exactly the MLIR
+        ``iter_args`` / ``yield`` step.
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): The
+                loop being executed.
+            context (ExecutionContext): Execution context.
+            results (dict[str, Any]): Intermediate results by UUID.
+            scoped_locals (dict[str, Any]): Loop-scoped variables.
+        """
+        # Two-phase: resolve every yielded value against the CURRENT
+        # iteration's state before rebinding any block argument, so
+        # simultaneous carries (``a, b = b, a``) read the pre-advance
+        # values instead of a partially updated mix.
+        advanced = {
+            arg.block_arg.uuid: self._get_value(
+                arg.yielded, context, results, scoped_locals
+            )
+            for arg in self._validated_region_args(op)
+        }
+        results.update(advanced)
+
+    def _publish_region_results(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+        results: dict[str, Any],
+    ) -> None:
+        """Expose each region argument's final carried value as the loop result.
+
+        Runs once after the last iteration (or immediately for a
+        zero-trip loop, in which case the result is the init value the
+        seed step stored).
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): The
+                executed loop.
+            results (dict[str, Any]): Intermediate results by UUID.
+        """
+        for arg in self._validated_region_args(op):
+            results[arg.result.uuid] = results[arg.block_arg.uuid]
 
     def _execute_for_items(
         self,
@@ -557,26 +622,42 @@ class ClassicalExecutor:
         """Execute a classical dict iteration."""
         if not op.operands:
             raise ExecutionError("ForItemsOperation requires an iterable operand")
+        if op.key_var_values is None or len(op.key_var_values) != len(op.key_vars):
+            raise ExecutionError(
+                "ForItemsOperation key identities are missing or inconsistent; "
+                "the IR must be rebuilt with the current frontend."
+            )
+        if op.value_var_value is None:
+            raise ExecutionError(
+                "ForItemsOperation value identity is missing; the IR must be "
+                "rebuilt with the current frontend."
+            )
+        if op.key_is_vector:
+            if (
+                not op.key_var_values
+                or not isinstance(op.key_var_values[0], ArrayValue)
+                or not op.key_var_values[0].shape
+            ):
+                raise ExecutionError(
+                    "ForItemsOperation vector-key shape identity is missing; "
+                    "the IR must be rebuilt with the current frontend."
+                )
+        self._validated_region_args(op)
 
         iterable = self._get_iterable(op.operands[0], context, results, scoped_locals)
 
         self._materialize_loop_store_defaults(
             op.operations, context, results, scoped_locals
         )
-        carried_values = [
-            self._get_value(carry.iter_arg, context, results, scoped_locals)
-            for carry in op.iter_carries()
-        ]
+        self._seed_region_args(op, context, results, scoped_locals)
         for key, value in iterable:
             loop_scope = scoped_locals.copy()
-            self._bind_for_items_key(loop_scope, op, key)
+            self._bind_for_items_key(loop_scope, results, op, key)
             loop_scope[op.value_var] = value
-            self._seed_carry_args(op, carried_values, results)
+            results[op.value_var_value.uuid] = value
             self._execute_operations(op.operations, context, results, loop_scope)
-            carried_values = self._collect_carry_yields(
-                op, context, results, loop_scope
-            )
-        self._bind_carry_results(op, carried_values, results)
+            self._advance_region_args(op, context, results, loop_scope)
+        self._publish_region_results(op, results)
 
     def _execute_if(
         self,
@@ -623,19 +704,14 @@ class ClassicalExecutor:
         condition_value = op.operands[0]
         next_condition = op.operands[1] if len(op.operands) > 1 else condition_value
 
-        carried_values = [
-            self._get_value(carry.iter_arg, context, results, scoped_locals)
-            for carry in op.iter_carries()
-        ]
+        self._validated_region_args(op)
+        self._seed_region_args(op, context, results, scoped_locals)
         while bool(self._get_value(condition_value, context, results, scoped_locals)):
             loop_scope = scoped_locals.copy()
-            self._seed_carry_args(op, carried_values, results)
             self._execute_operations(op.operations, context, results, loop_scope)
-            carried_values = self._collect_carry_yields(
-                op, context, results, loop_scope
-            )
+            self._advance_region_args(op, context, results, loop_scope)
             condition_value = next_condition
-        self._bind_carry_results(op, carried_values, results)
+        self._publish_region_results(op, results)
 
     def _execute_dict_getitem(
         self,
@@ -836,12 +912,31 @@ class ClassicalExecutor:
     def _bind_for_items_key(
         self,
         loop_scope: dict[str, Any],
+        results: dict[str, Any],
         op: ForItemsOperation,
         key: Any,
     ) -> None:
-        """Bind for-items key variables into the loop scope."""
+        """Bind for-items key variables by stable UUID and display name.
+
+        Args:
+            loop_scope (dict[str, Any]): Per-iteration display-name scope.
+            results (dict[str, Any]): UUID-keyed execution results.
+            op (ForItemsOperation): The for-items operation whose key
+                identities were validated by :meth:`_execute_for_items`.
+            key (Any): The current concrete dict key.
+
+        Raises:
+            ExecutionError: If a destructured key is not a tuple/list or
+                has the wrong arity.
+        """
+        assert op.key_var_values is not None
         if len(op.key_vars) == 1:
             loop_scope[op.key_vars[0]] = key
+            results[op.key_var_values[0].uuid] = key
+            if op.key_is_vector:
+                key_value = op.key_var_values[0]
+                assert isinstance(key_value, ArrayValue) and key_value.shape
+                results[key_value.shape[0].uuid] = len(key)
             return
 
         if not isinstance(key, (tuple, list)):
@@ -854,5 +949,8 @@ class ClassicalExecutor:
                 f"got {len(key)}"
             )
 
-        for name, element in zip(op.key_vars, key, strict=True):
+        for name, identity, element in zip(
+            op.key_vars, op.key_var_values, key, strict=True
+        ):
             loop_scope[name] = element
+            results[identity.uuid] = element

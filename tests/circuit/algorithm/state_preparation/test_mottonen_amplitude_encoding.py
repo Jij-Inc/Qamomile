@@ -8,14 +8,18 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.state_preparation import (
-    MottonenAmplitudeEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
 )
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateType
+from qamomile.circuit.algorithm.state_preparation.mottonen_amplitude_encoding import (
+    _mottonen_composite,
+    _MottonenAngles as MottonenAmplitudeEncoding,
+)
+from qamomile.circuit.ir.operation import InvokeOperation
+from qamomile.circuit.ir.operation.callable import CompositeGateType
 from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.value import resolve_root_qubit_address
+from qamomile.circuit.ir.value import ArrayValue, resolve_root_qubit_address
 from qamomile.circuit.transpiler.passes.emit_support import ResourceAllocator
 from qamomile.circuit.transpiler.segments import QuantumStep
 from qamomile.linalg import (
@@ -223,46 +227,46 @@ class TestCompositeGateMetadata:
 
     def test_gate_identifiers(self) -> None:
         """``gate_type`` and ``custom_name`` match what the IR will tag."""
-        gate = MottonenAmplitudeEncoding([1.0, 0.0])
-        assert gate.gate_type == CompositeGateType.CUSTOM
-        assert gate.custom_name == "mottonen_amplitude_encoding"
+        gate, width = _mottonen_composite([1.0, 0.0])
+        assert width == 1
+        assert gate._callable_gate_type == CompositeGateType.CUSTOM
+        assert gate._callable_name == "mottonen_amplitude_encoding"
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources_real(self, n_qubits: int) -> None:
         """Real input: single-stage RY counts match the Gray-walk formulas."""
-        gate = MottonenAmplitudeEncoding(np.ones(2**n_qubits))
-        assert gate.num_target_qubits == n_qubits
-        r = gate._resources()
-        meta = r.custom_metadata
-        assert meta["num_ry_gates"] == 2**n_qubits - 1
-        assert meta["num_rz_gates"] == 0
-        assert meta["num_cnot_gates"] == 2**n_qubits - 2
-        assert meta["num_qubits"] == n_qubits
-        assert meta["complex_input"] is False
-        assert r.t_gates == 0
-        assert r.total_gates == (2**n_qubits - 1) + (2**n_qubits - 2)
-        assert r.single_qubit_gates == 2**n_qubits - 1
-        assert r.two_qubit_gates == 2**n_qubits - 2
+        amplitudes = np.ones(2**n_qubits)
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(n_qubits, "q")
+            q = amplitude_encoding(q, amplitudes)
+            return q
+
+        estimate = kernel.estimate_resources()
+        assert estimate.gates.t == 0
+        assert estimate.gates.total == (2**n_qubits - 1) + (2**n_qubits - 2)
+        assert estimate.gates.single_qubit == 2**n_qubits - 1
+        assert estimate.gates.two_qubit == 2**n_qubits - 2
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources_complex(self, n_qubits: int) -> None:
         """Complex input: two-stage RY + RZ counts double the gate budget."""
-        amps = np.ones(2**n_qubits, dtype=complex) + 1j * np.arange(2**n_qubits)
-        gate = MottonenAmplitudeEncoding(amps)
-        assert gate.num_target_qubits == n_qubits
-        r = gate._resources()
-        meta = r.custom_metadata
-        assert meta["num_ry_gates"] == 2**n_qubits - 1
-        assert meta["num_rz_gates"] == 2**n_qubits - 1
-        assert meta["num_cnot_gates"] == 2 * (2**n_qubits - 2)
-        assert meta["num_qubits"] == n_qubits
-        assert meta["complex_input"] is True
+        amplitudes = np.ones(2**n_qubits, dtype=complex) + 1j * np.arange(2**n_qubits)
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(n_qubits, "q")
+            q = amplitude_encoding(q, amplitudes)
+            return q
+
+        estimate = kernel.estimate_resources()
         rot = 2 * (2**n_qubits - 1)
         cnot = 2 * (2**n_qubits - 2)
-        assert r.t_gates == 0
-        assert r.total_gates == rot + cnot
-        assert r.single_qubit_gates == rot
-        assert r.two_qubit_gates == cnot
+        assert estimate.gates.t == 0
+        assert estimate.gates.total == rot + cnot
+        assert estimate.gates.single_qubit == rot
+        assert estimate.gates.two_qubit == cnot
 
 
 # ---------------------------------------------------------------------------
@@ -450,13 +454,6 @@ class TestLazyConstruction:
         assert gate._ry_angles_per_level_cache is None
         assert gate._rz_angles_per_level_cache is None
 
-    def test_resources_does_not_compute_angles(self) -> None:
-        """``_resources()`` reads ``_is_complex`` directly; no angle work."""
-        gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
-        _ = gate._resources()
-        assert gate._ry_angles_per_level_cache is None
-        assert gate._rz_angles_per_level_cache is None
-
     def test_decompose_triggers_angle_computation(self) -> None:
         """``_decompose()`` populates the angle caches."""
         gate = MottonenAmplitudeEncoding([1.0, 2.0, 3.0, 4.0])
@@ -465,7 +462,7 @@ class TestLazyConstruction:
         def kernel() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
             # invoking the gate inside a kernel call goes through _decompose
-            q[0], q[1] = gate(q[0], q[1])
+            gate._decompose(q)
             return qmc.measure(q)
 
         kernel.build()
@@ -480,9 +477,8 @@ class TestLazyConstruction:
 
         Documented limitation: ``CompositeGate.__call__`` eagerly runs
         ``_build_decomposition_block`` whenever the gate is invoked
-        inside a kernel body, in order to populate the
-        ``implementation_block`` field on the resulting
-        ``CompositeGateOperation``.  As a consequence, even though
+        inside a kernel body, in order to populate the ``body`` field on the
+        resulting ``InvokeOperation``.  As a consequence, even though
         ``MottonenAmplitudeEncoding._decompose()`` is lazy on the gate
         object itself, going through ``amplitude_encoding(q, amps)``
         inside a ``@qkernel`` will still compute the angles at
@@ -494,10 +490,6 @@ class TestLazyConstruction:
         ``_build_decomposition_block`` until emit time, this assertion
         fails loudly and the lazy contract can be tightened.
         """
-        from qamomile.circuit.ir.operation.composite_gate import (
-            CompositeGateOperation,
-        )
-
         amps = [float(i + 1) for i in range(2**4)]
 
         @qmc.qkernel
@@ -507,15 +499,17 @@ class TestLazyConstruction:
             return qmc.measure(q)
 
         block = kernel.build()
-        composite_ops = [
-            op for op in block.operations if isinstance(op, CompositeGateOperation)
+        invoke_ops = [
+            op
+            for op in block.operations
+            if isinstance(op, InvokeOperation)
+            and op.target.name == "mottonen_amplitude_encoding"
         ]
-        assert len(composite_ops) == 1
-        wrapped_gate = composite_ops[0].composite_gate_instance
-        assert isinstance(wrapped_gate, MottonenAmplitudeEncoding)
-        # Today: angles ARE populated by kernel.build() because
+        assert len(invoke_ops) == 1
+        # Today: the decomposition body IS populated by kernel.build() because
         # CompositeGate.__call__ eagerly builds the decomposition block.
-        assert wrapped_gate._ry_angles_per_level_cache is not None
+        assert invoke_ops[0].body is not None
+        assert invoke_ops[0].body.operations
 
 
 # ---------------------------------------------------------------------------
@@ -1031,11 +1025,11 @@ def _shot_noise_tolerance(p: float, shots: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Wrapper-kernel regressions for custom-composite inlining
+# Wrapper-kernel regressions for custom-composite boxing
 # ---------------------------------------------------------------------------
 
 
-class TestAmplitudeEncodingWrapperInlining:
+class TestAmplitudeEncodingWrapperBoxing:
     """Regression tests for amplitude_encoding inside qkernel wrappers."""
 
     @pytest.mark.parametrize(
@@ -1051,10 +1045,10 @@ class TestAmplitudeEncodingWrapperInlining:
             ),
         ],
     )
-    def test_inline_rewrites_composite_element_parents(
+    def test_invoke_operands_resolve_to_caller_array(
         self, amplitudes: list[float] | list[complex]
     ) -> None:
-        """Inlined Möttönen gate operands must resolve to the caller array."""
+        """Boxed Möttönen operands must resolve to the caller array."""
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
@@ -1070,20 +1064,27 @@ class TestAmplitudeEncodingWrapperInlining:
             op.results[0] for op in affine.operations if isinstance(op, QInitOperation)
         ]
         assert qinit_arrays
-        qinit_uuid = qinit_arrays[0].uuid
+        qinit_logical_id = qinit_arrays[0].logical_id
 
-        root_addresses: list[tuple[str, int]] = []
+        invoke_ops = [op for op in affine.operations if isinstance(op, InvokeOperation)]
+        assert invoke_ops
+
+        array_operands: list[ArrayValue] = []
         for op in affine.operations:
-            if isinstance(op, GateOperation):
-                for operand in op.qubit_operands:
-                    if operand.parent_array is None:
-                        continue
-                    root_addr = resolve_root_qubit_address(operand)
-                    assert root_addr is not None
-                    root_addresses.append(root_addr)
+            if not isinstance(op, InvokeOperation):
+                continue
+            for operand in op.target_qubits:
+                if isinstance(operand, ArrayValue):
+                    array_operands.append(operand)
+                    continue
+                if operand.parent_array is None:
+                    continue
+                root_addr = resolve_root_qubit_address(operand)
+                assert root_addr is not None
+                assert root_addr[0] == qinit_arrays[0].uuid
 
-        assert root_addresses
-        assert {root_uuid for root_uuid, _ in root_addresses} == {qinit_uuid}
+        assert array_operands
+        assert all(operand.logical_id == qinit_logical_id for operand in array_operands)
 
         affine = transpiler.unroll_recursion(affine, None)
         validated = transpiler.affine_validate(affine)
@@ -1507,7 +1508,7 @@ class TestAmplitudeEncodingBoundVector:
             qiskit_transpiler.transpile(kernel, parameters=["amps"])
 
     def test_bound_amplitudes_emits_composite_gate(self, qiskit_transpiler) -> None:
-        """Bound-Vector path keeps the high-level CompositeGate in the IR.
+        """Bound-Vector path keeps the high-level invoke in the IR.
 
         Distinguishes the bound path from
         ``amplitude_encoding_from_angles``, which emits flat RY/CNOT
@@ -1517,15 +1518,14 @@ class TestAmplitudeEncodingBoundVector:
         """
         kernel = _build_amplitude_encoding_bound_kernel(2)
         block = kernel.build(amps=[1.0, 2.0, 3.0, 4.0])
-        from qamomile.circuit.ir.operation.composite_gate import (
-            CompositeGateOperation,
-        )
-
-        composite_ops = [
-            op for op in block.operations if isinstance(op, CompositeGateOperation)
+        invoke_ops = [
+            op
+            for op in block.operations
+            if isinstance(op, InvokeOperation)
+            and op.target.name == "mottonen_amplitude_encoding"
         ]
-        assert len(composite_ops) == 1
-        assert composite_ops[0].custom_name == "mottonen_amplitude_encoding"
+        assert len(invoke_ops) == 1
+        assert invoke_ops[0].attrs["custom_name"] == "mottonen_amplitude_encoding"
 
 
 # ---------------------------------------------------------------------------
@@ -1663,7 +1663,6 @@ class TestParametricInputValidation:
         each per-element angle to ``float`` before handing it to the
         rotation gate.
         """
-        from qamomile.circuit.ir.operation.gate import GateOperation
 
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Bit]:

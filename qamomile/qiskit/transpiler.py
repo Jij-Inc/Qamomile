@@ -70,7 +70,13 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         """
         emitter = QiskitGateEmitter()
         composite_emitters = self._init_emitters() if use_native_composite else []
-        super().__init__(emitter, bindings, parameters, composite_emitters)
+        super().__init__(
+            emitter,
+            bindings,
+            parameters,
+            composite_emitters,
+            backend_name="qiskit",
+        )
         self._use_native_composite = use_native_composite
 
     def _init_emitters(self) -> list:
@@ -127,8 +133,19 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             )
 
             _bind_loop_var(loop_bindings, op, loop_param)
+            # ``emit_qinit_reset=True`` mirrors the base ``emit_for`` native
+            # branch (control_flow_emission.py) and the if/else branches
+            # below: a fresh ``qmc.qubit(...)`` allocated inside the loop body
+            # must be reset to |0> at the start of every iteration. Without it
+            # the second and later iterations silently reuse the ancilla in its
+            # post-measurement state, computing a wrong quantum state.
             self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, loop_bindings
+                circuit,
+                op.operations,
+                qubit_map,
+                clbit_map,
+                loop_bindings,
+                emit_qinit_reset=True,
             )
 
     def _emit_if(
@@ -153,11 +170,21 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         with circuit.if_test(if_test_condition) as else_:
             self._emit_operations(
-                circuit, op.true_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.true_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         with else_:
             self._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.false_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
 
         # Register merge outputs after emitting both branches, matching the
@@ -195,13 +222,14 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 loop can thread them between iterations) or has no
                 condition operand.
         """
-        if op.carried_names:
+        if op.region_args:
             # Mirror the base emit_while backstop: this override replaces
             # the base function entirely, and the transpile-time rejection
             # is the only earlier line of defense.
+            carried_names = ", ".join(arg.var_name for arg in op.region_args)
             raise EmitError(
                 "Loop-carried classical values in a while loop cannot be "
-                f"emitted ({', '.join(op.carried_names)}): a runtime loop "
+                f"emitted ({carried_names}): a runtime loop "
                 "re-executes one static body and cannot thread a classical "
                 "value between iterations.",
                 operation="WhileOperation",
@@ -220,7 +248,12 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
 
         with circuit.while_loop(while_condition):  # type: ignore[call-overload]
             self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
 
     def _resolve_runtime_condition(

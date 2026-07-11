@@ -22,11 +22,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
 )
 from qamomile.circuit.ir.operation.control_flow import (
-    ForItemsOperation,
-    ForOperation,
     HasNestedOps,
     IfOperation,
-    WhileOperation,
     genuine_input_values,
 )
 from qamomile.circuit.ir.value import (
@@ -61,7 +58,7 @@ def resolve_compile_time_condition(
     classification, so they share this function.
 
     Tries ``resolve_if_condition`` first (plain Python values, constant
-    Values, direct UUID / name bindings), then falls back to the
+    Values, direct UUID / parameter-provenance bindings), then falls back to the
     accumulated ``concrete_values`` map for expression-derived
     conditions (``CompOp`` / ``CondOp`` / ``NotOp`` / ``BinOp`` chains
     evaluated by :func:`evaluate_classical_op_concrete`).
@@ -199,7 +196,8 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 can resolve bound/constant ``if`` conditions on a freshly
                 traced block before the transpiler pipeline runs; ``HIERARCHICAL``
                 is accepted during the self-recursion unroll loop. Surviving
-                ``CallBlockOperation``s are passed through untouched in both cases.
+                inline callable invocations are passed through untouched in both
+                cases.
 
         Returns:
             Block: New block with compile-time ``if``s replaced by their
@@ -226,7 +224,11 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # Maps UUID → concrete Python value (int, float, bool).
         concrete_values: dict[str, Any] = {}
 
-        # Seed concrete_values from bindings (by UUID and by name).
+        # Seed concrete_values from UUID-keyed bindings entries. Name-keyed
+        # user bindings also land here but are dead entries: lookups against
+        # ``concrete_values`` are UUID-keyed, and a display name never
+        # collides with a UUID string. Name-based resolution happens only via
+        # parameter provenance in ``_try_seed_value`` below.
         for key, val in self._bindings.items():
             concrete_values[key] = val
 
@@ -446,48 +448,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         return tuple(new_records) if changed else rebinds
 
     @staticmethod
-    def _substitute_loop_carries(
-        op: Any,
-        substitutor: "ValueSubstitutor",
-    ) -> Any:
-        """Rewrite loop carry-slot values through the substitutor.
-
-        Keeps ``iter_args`` / ``body_args`` / ``body_yields`` coherent
-        when a slot references a merge output the lowering erased — an
-        ``iter_arg`` selected by a pre-loop compile-time if, or a
-        ``body_yield`` merged by an in-body one. The loop's ``results``
-        are loop-defined outputs, never merge outputs, so they need no
-        substitution here.
-
-        Args:
-            op (Any): The rebuilt loop operation
-                (``ForOperation`` / ``ForItemsOperation`` /
-                ``WhileOperation``).
-            substitutor (ValueSubstitutor): The active substitution.
-
-        Returns:
-            Any: ``op`` with substituted carry lists; ``op`` itself when
-                nothing changed.
-        """
-        replacements: dict[str, Any] = {}
-        for field_name in ("iter_args", "body_args", "body_yields"):
-            values = getattr(op, field_name)
-            new_values: list[Value] = []
-            changed = False
-            for value in values:
-                new_value = substitutor.substitute_value(value)
-                if isinstance(new_value, Value) and new_value is not value:
-                    new_values.append(new_value)
-                    changed = True
-                else:
-                    new_values.append(value)
-            if changed:
-                replacements[field_name] = new_values
-        if not replacements:
-            return op
-        return dataclasses.replace(op, **replacements)
-
-    @staticmethod
     def _substitute_loop_rebinds(
         rebinds: tuple[Any, ...],
         substitutor: "ValueSubstitutor",
@@ -525,6 +485,44 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 changed = True
             new_records.append(record)
         return tuple(new_records) if changed else rebinds
+
+    @staticmethod
+    def _substitute_region_args(
+        region_args: tuple[Any, ...],
+        substitutor: "ValueSubstitutor",
+    ) -> tuple[Any, ...]:
+        """Rewrite loop region-argument values through the substitutor.
+
+        Keeps ``region_args`` coherent when a region argument's
+        ``yielded`` (or ``init``) was a nested compile-time if's phi
+        output that the lowering erased — without this, the executor and
+        emit-time threading would chase a dangling phi UUID (``Value
+        _phi_N not found``).
+
+        Args:
+            region_args (tuple[Any, ...]): ``RegionArg`` records.
+            substitutor (ValueSubstitutor): The active substitution.
+
+        Returns:
+            tuple[Any, ...]: Rewritten records; ``region_args`` itself
+                when nothing changed.
+        """
+        if not region_args:
+            return region_args
+        new_records = []
+        changed = False
+        for record in region_args:
+            replacements: dict[str, Any] = {}
+            for field_name in ("init", "block_arg", "yielded", "result"):
+                current = getattr(record, field_name)
+                substituted = substitutor.substitute_value(current)
+                if isinstance(substituted, Value) and substituted is not current:
+                    replacements[field_name] = substituted
+            if replacements:
+                record = dataclasses.replace(record, **replacements)
+                changed = True
+            new_records.append(record)
+        return tuple(new_records) if changed else region_args
 
     def _apply_substitution(
         self,
@@ -638,8 +636,12 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 rebuilt = dataclasses.replace(
                     cast(Any, rebuilt), loop_carried_rebinds=new_rebinds
                 )
-            if isinstance(rebuilt, (ForOperation, ForItemsOperation, WhileOperation)):
-                rebuilt = self._substitute_loop_carries(rebuilt, substitutor)
+            region_args = getattr(rebuilt, "region_args", ())
+            new_region_args = self._substitute_region_args(region_args, substitutor)
+            if new_region_args is not region_args:
+                rebuilt = dataclasses.replace(
+                    cast(Any, rebuilt), region_args=new_region_args
+                )
             return rebuilt
 
         result_op = op
@@ -888,12 +890,14 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             if const is not None:
                 concrete_values[value.uuid] = const
 
+        # Seed against ``bindings`` only via the sanctioned parameter-name
+        # provenance — never the display ``Value.name``. A bare-name seed would
+        # bind an inlined callee-local value that happened to share a name with
+        # a caller binding key, letting the pass fold an ``if`` on it and delete
+        # a live branch (a silent miscompilation).
         if hasattr(value, "is_parameter") and value.is_parameter():
             param_name = (
                 value.parameter_name() if hasattr(value, "parameter_name") else None
             )
             if param_name and param_name in self._bindings:
                 concrete_values[value.uuid] = self._bindings[param_name]
-
-        if hasattr(value, "name") and value.name and value.name in self._bindings:
-            concrete_values[value.uuid] = self._bindings[value.name]

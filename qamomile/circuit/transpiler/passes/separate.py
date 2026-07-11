@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
+from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -64,11 +65,21 @@ def materialize_return(block: Block) -> Block:
     return block
 
 
-def lower_measure_qfixed(op: MeasureQFixedOperation) -> list[Operation]:
+def lower_measure_qfixed(
+    op: MeasureQFixedOperation,
+    cast_source: ArrayValue | None = None,
+) -> list[Operation]:
     """Lower MeasureQFixedOperation to MeasureVectorOperation + decode.
 
+    Args:
+        op (MeasureQFixedOperation): QFixed measurement to lower.
+        cast_source (ArrayValue | None): Source vector from the preceding
+            ``CastOperation`` when the QFixed carries a deferred, non-enumerated
+            vector alias. Defaults to ``None`` for concrete carrier lists.
+
     Returns:
-        List of operations: [MeasureVectorOperation, DecodeQFixedOperation]
+        list[Operation]: Operations ``[MeasureVectorOperation,
+        DecodeQFixedOperation]``.
     """
     qfixed = op.operands[0]
 
@@ -76,26 +87,44 @@ def lower_measure_qfixed(op: MeasureQFixedOperation) -> list[Operation]:
     num_bits = op.num_bits or len(qubit_uuids)
     int_bits = op.int_bits
 
-    size_value = Value(
-        type=UIntType(),
-        name="qfixed_size",
-    ).with_const(num_bits)
+    if qubit_uuids:
+        size_value = Value(
+            type=UIntType(),
+            name="qfixed_size",
+        ).with_const(num_bits)
 
-    qubits_array = ArrayValue(
-        type=QubitType(),
-        name="qfixed_qubits",
-        shape=(size_value,),
-    ).with_array_runtime_metadata(
-        element_uuids=qubit_uuids,
-        element_logical_ids=qfixed.get_cast_qubit_logical_ids() or (),
-    )
-    cast_source_uuid = qfixed.get_cast_source_uuid()
-    if cast_source_uuid:
-        qubits_array = qubits_array.with_cast_metadata(
-            source_uuid=cast_source_uuid,
-            source_logical_id=qfixed.get_cast_source_logical_id(),
-            qubit_uuids=qubit_uuids,
-            qubit_logical_ids=qfixed.get_cast_qubit_logical_ids() or (),
+        qubits_array = ArrayValue(
+            type=QubitType(),
+            name="qfixed_qubits",
+            shape=(size_value,),
+        ).with_array_runtime_metadata(
+            element_uuids=qubit_uuids,
+            element_logical_ids=qfixed.get_cast_qubit_logical_ids() or (),
+        )
+        cast_source_uuid = qfixed.get_cast_source_uuid()
+        if cast_source_uuid:
+            qubits_array = qubits_array.with_cast_metadata(
+                source_uuid=cast_source_uuid,
+                source_logical_id=qfixed.get_cast_source_logical_id(),
+                qubit_uuids=qubit_uuids,
+                qubit_logical_ids=qfixed.get_cast_qubit_logical_ids() or (),
+            )
+    elif cast_source is not None and cast_source.shape:
+        qubits_array = cast_source
+        size_value = cast_source.shape[0]
+        if num_bits == 0 and size_value.is_constant():
+            const_bits = size_value.get_const()
+            if const_bits is not None:
+                num_bits = int(const_bits)
+    else:
+        size_value = Value(
+            type=UIntType(),
+            name="qfixed_size",
+        ).with_const(num_bits)
+        qubits_array = ArrayValue(
+            type=QubitType(),
+            name="qfixed_qubits",
+            shape=(size_value,),
         )
 
     bits_array = ArrayValue(
@@ -127,9 +156,15 @@ def lower_operations(block: Block) -> Block:
     2. DecodeQFixedOperation to convert bits to float (CLASSICAL segment)
     """
     lowered_ops: list[Operation] = []
+    qfixed_cast_sources: dict[str, ArrayValue] = {}
     for op in block.operations:
-        if isinstance(op, MeasureQFixedOperation):
-            lowered_ops.extend(lower_measure_qfixed(op))
+        if isinstance(op, CastOperation):
+            if op.results and isinstance(op.operands[0], ArrayValue):
+                qfixed_cast_sources[op.results[0].uuid] = op.operands[0]
+            lowered_ops.append(op)
+        elif isinstance(op, MeasureQFixedOperation):
+            cast_source = qfixed_cast_sources.get(op.operands[0].uuid)
+            lowered_ops.extend(lower_measure_qfixed(op, cast_source))
         else:
             lowered_ops.append(op)
     return dataclasses.replace(block, operations=lowered_ops)
@@ -500,8 +535,8 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 place.
         """
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-            for carry in op.iter_carries():
-                collected[carry.result.uuid] = carry.var_name
+            for region_arg in op.region_args:
+                collected[region_arg.result.uuid] = region_arg.var_name
         if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 for nested in body:

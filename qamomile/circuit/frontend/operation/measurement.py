@@ -9,6 +9,8 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation as IRMeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
 )
 from qamomile.circuit.ir.types import BitType, FloatType
 from qamomile.circuit.ir.types.primitives import UIntType
@@ -92,6 +94,107 @@ def _measure_qubit(qubit: Qubit) -> Bit:
     tracer.add_operation(measure_op)
 
     return bit_out
+
+
+def project_z(qubit: Qubit) -> tuple[Qubit, Bit]:
+    """Project a qubit in the Z basis and keep the projected state.
+
+    Args:
+        qubit: The qubit to project. The input handle is consumed.
+
+    Returns:
+        A pair of the projected qubit handle and the measurement bit.
+    """
+    qubit = qubit.consume(operation_name="project_z")
+    qubit_out_value = qubit.value.next_version()
+    bit_out_value = Value(type=BitType(), name=f"{qubit.value.name}_projected")
+    qubit_out = Qubit(
+        value=qubit_out_value,
+        parent=qubit.parent,
+        indices=qubit.indices,
+    )
+    bit_out = Bit(value=bit_out_value)
+
+    project_op = ProjectOperation(
+        operands=[qubit.value],
+        results=[qubit_out_value, bit_out_value],
+        axis="z",
+    )
+    tracer = get_current_tracer()
+    tracer.add_operation(project_op)
+    return qubit_out, bit_out
+
+
+def project_x(qubit: Qubit) -> tuple[Qubit, Bit]:
+    """Project a qubit in the X basis and keep the projected state.
+
+    Args:
+        qubit: The qubit to project. The input handle is consumed.
+
+    Returns:
+        A pair of the projected qubit handle and the measurement bit.
+    """
+    from qamomile.circuit.frontend.operation.qubit_gates import h
+
+    qubit = h(qubit)
+    qubit, bit = project_z(qubit)
+    qubit = h(qubit)
+    return qubit, bit
+
+
+def project_y(qubit: Qubit) -> tuple[Qubit, Bit]:
+    """Project a qubit in the Y basis and keep the projected state.
+
+    Args:
+        qubit: The qubit to project. The input handle is consumed.
+
+    Returns:
+        A pair of the projected qubit handle and the measurement bit.
+    """
+    from qamomile.circuit.frontend.operation.qubit_gates import h, s, sdg
+
+    qubit = sdg(qubit)
+    qubit = h(qubit)
+    qubit, bit = project_z(qubit)
+    qubit = h(qubit)
+    qubit = s(qubit)
+    return qubit, bit
+
+
+def reset(qubit: Qubit) -> Qubit:
+    """Reset a qubit to the |0> state.
+
+    Args:
+        qubit: The qubit to reset. The input handle is consumed.
+
+    Returns:
+        A fresh handle for the reset qubit.
+    """
+    qubit = qubit.consume(operation_name="reset")
+    qubit_out_value = qubit.value.next_version()
+    qubit_out = Qubit(
+        value=qubit_out_value,
+        parent=qubit.parent,
+        indices=qubit.indices,
+    )
+    reset_op = ResetOperation(operands=[qubit.value], results=[qubit_out_value])
+    tracer = get_current_tracer()
+    tracer.add_operation(reset_op)
+    return qubit_out
+
+
+def measure_reset(qubit: Qubit) -> tuple[Qubit, Bit]:
+    """Measure a qubit in the Z basis and reset it to |0>.
+
+    Args:
+        qubit: The qubit to measure and reset. The input handle is consumed.
+
+    Returns:
+        A pair of the reset qubit handle and the measurement bit.
+    """
+    qubit, bit = project_z(qubit)
+    qubit = reset(qubit)
+    return qubit, bit
 
 
 def _measure_qfixed(qfixed: QFixed) -> Float:

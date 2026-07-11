@@ -22,9 +22,10 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
+    RegionArg,
     WhileOperation,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.param_keys import dict_param_key
 
@@ -125,104 +126,173 @@ def resolve_loop_bounds(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_carry_value(
-    emit_pass: "StandardEmitPass",
-    value: Value,
-    bindings: dict[str, Any],
-    var_name: str,
-    when: str,
-) -> Any:
-    """Resolve one carried classical value at emit time.
+def _validated_region_args(
+    op: ForOperation | ForItemsOperation | WhileOperation,
+) -> tuple[RegionArg, ...]:
+    """Validate and return a loop operation's region arguments.
+
+    Region-argument results are definitions owned by the loop.  Requiring
+    them to align with ``op.results`` prevents malformed or legacy IR from
+    silently publishing a carried value under the wrong SSA identity.
 
     Args:
-        emit_pass (StandardEmitPass): The emit pass (for resolver access).
-        value (Value): The carry slot value to resolve (an ``iter_arg``
-            before the first iteration, a ``body_yield`` afterwards).
-        bindings (dict[str, Any]): The bindings scope the value lives in
-            (the outer scope for ``iter_arg``, the just-emitted
-            iteration's scope for ``body_yield``).
-        var_name (str): Display name of the carried variable, for the
-            error message.
-        when (str): Human-readable resolution point ("entering the
-            loop" / "after an iteration"), for the error message.
+        op (ForOperation | ForItemsOperation | WhileOperation): The loop
+            operation to validate.
 
     Returns:
-        Any: The resolved value — a concrete Python number, or a
-            backend parameter expression when the carried arithmetic
-            involves runtime parameters.
+        tuple[RegionArg, ...]: The validated region arguments.
 
     Raises:
-        EmitError: If the value cannot be resolved — e.g. the carried
-            update depends on a measurement result, which has no
-            emit-time value.
+        EmitError: If result counts or UUIDs do not align, block/result
+            UUIDs are duplicated, or the four values of an argument have
+            different types.
     """
-    resolved = emit_pass._resolver.resolve_classical_value(value, bindings)
-    if resolved is None:
+    region_args = op.region_args
+    if len(region_args) != len(op.results):
         raise EmitError(
-            f"Loop-carried classical value '{var_name}' could not be "
-            f"resolved {when}: the carried update depends on a value "
-            "with no emit-time result (e.g. a measurement outcome). "
-            "Loop-carried classical values must be computable from "
-            "compile-time bindings and runtime parameters.",
+            "Loop RegionArg data is inconsistent: "
+            f"{len(region_args)} region args for {len(op.results)} results.",
+            operation=type(op).__name__,
         )
-    return resolved
 
-
-def _resolve_carry_iter_args(
-    emit_pass: "StandardEmitPass",
-    op: ForOperation | ForItemsOperation | WhileOperation,
-    bindings: dict[str, Any],
-) -> list[Any]:
-    """Resolve every carry slot's loop-entry value.
-
-    Args:
-        emit_pass (StandardEmitPass): The emit pass (for resolver access).
-        op (ForOperation | ForItemsOperation | WhileOperation): The loop
-            being emitted.
-        bindings (dict[str, Any]): The enclosing bindings scope.
-
-    Returns:
-        list[Any]: One resolved value per carry slot.
-
-    Raises:
-        EmitError: If an ``iter_arg`` cannot be resolved (see
-            :func:`_resolve_carry_value`).
-    """
-    return [
-        _resolve_carry_value(
-            emit_pass, carry.iter_arg, bindings, carry.var_name, "entering the loop"
-        )
-        for carry in op.iter_carries()
-    ]
-
-
-def _register_carry_results(
-    op: ForOperation | ForItemsOperation | WhileOperation,
-    carried_values: list[Any],
-    bindings: dict[str, Any],
-) -> None:
-    """Bind the final carried values to the loop's results.
-
-    Post-loop operations read the carry ``result`` values, so the final
-    values must land in the ENCLOSING bindings scope (not a per-iteration
-    copy).
-
-    Args:
-        op (ForOperation | ForItemsOperation | WhileOperation): The loop
-            just emitted.
-        carried_values (list[Any]): Final carried values — the last
-            iteration's yields, or the loop-entry values for a loop that
-            ran zero times.
-        bindings (dict[str, Any]): The enclosing bindings scope, mutated
-            in place.
-    """
-    for carry, value in zip(op.iter_carries(), carried_values, strict=True):
-        _set_emit_value(bindings, carry.result.uuid, value)
+    block_arg_uuids: set[str] = set()
+    result_uuids: set[str] = set()
+    for index, (arg, result) in enumerate(zip(region_args, op.results, strict=True)):
+        if arg.result.uuid != result.uuid:
+            raise EmitError(
+                "Loop RegionArg data is inconsistent: "
+                f"region_args[{index}].result does not match results[{index}].",
+                operation=type(op).__name__,
+            )
+        if not (
+            arg.init.type == arg.block_arg.type == arg.yielded.type == arg.result.type
+        ):
+            raise EmitError(
+                f"Loop RegionArg '{arg.var_name}' has mismatched value types.",
+                operation=type(op).__name__,
+            )
+        if arg.block_arg.uuid in block_arg_uuids or arg.result.uuid in result_uuids:
+            raise EmitError(
+                "Loop RegionArg data contains duplicate block/result identities.",
+                operation=type(op).__name__,
+            )
+        block_arg_uuids.add(arg.block_arg.uuid)
+        result_uuids.add(arg.result.uuid)
+    return region_args
 
 
 # ---------------------------------------------------------------------------
 # For loop
 # ---------------------------------------------------------------------------
+
+
+def _seed_region_args(
+    emit_pass: "StandardEmitPass",
+    op: ForOperation | ForItemsOperation,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve each region argument's init value into a carried-value map.
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        op (ForOperation | ForItemsOperation): The loop carrying
+            ``region_args``.
+        bindings (dict[str, Any]): Current emit-time bindings.
+
+    Returns:
+        dict[str, Any]: ``block_arg.uuid`` → concrete (or backend
+            symbolic ``Parameter``) init value for every region argument.
+
+    Raises:
+        EmitError: If an init value can be neither resolved concretely
+            nor represented as a backend runtime parameter, or if the
+            RegionArg identities are inconsistent.
+    """
+    carried: dict[str, Any] = {}
+    for arg in _validated_region_args(op):
+        init = emit_pass._resolver.resolve_classical_value(arg.init, bindings)
+        if init is None:
+            param_key = emit_pass._resolver.get_parameter_key(arg.init, bindings)
+            if param_key:
+                init = emit_pass._get_or_create_parameter(param_key, arg.init.uuid)
+        if init is None:
+            raise EmitError(
+                f"Loop-carried value '{arg.var_name}' has an initial value "
+                f"that cannot be resolved at emit time. Loop-carried "
+                f"classical scalars must start from a compile-time-"
+                f"resolvable value or a declared runtime parameter.",
+                operation=type(op).__name__,
+            )
+        carried[arg.block_arg.uuid] = init
+    return carried
+
+
+def _advance_region_args(
+    emit_pass: "StandardEmitPass",
+    op: ForOperation | ForItemsOperation,
+    carried: dict[str, Any],
+    loop_bindings: dict[str, Any],
+) -> None:
+    """Carry each region argument's yielded value into the next iteration.
+
+    The body emission has already evaluated classical ops into
+    ``loop_bindings`` (``evaluate_binop`` writes results by UUID), so the
+    yielded value is read from there first and only falls back to the
+    resolver for pass-through shapes (identity carries, constants).
+
+    Args:
+        emit_pass (StandardEmitPass): The emit pass (for resolver access).
+        op (ForOperation | ForItemsOperation): The loop carrying
+            ``region_args``.
+        carried (dict[str, Any]): The carried-value map from
+            ``_seed_region_args``; updated in place.
+        loop_bindings (dict[str, Any]): The just-emitted iteration's
+            bindings.
+
+    Raises:
+        EmitError: If a yielded value cannot be resolved — e.g. it
+            depends on a mid-circuit measurement outcome, which has no
+            emit-time value.
+    """
+    # Resolve all yields before rebinding any block argument.  This is
+    # observable for simultaneous updates such as ``a, b = b, a``.
+    advanced: dict[str, Any] = {}
+    for arg in _validated_region_args(op):
+        nxt = loop_bindings.get(arg.yielded.uuid)
+        if nxt is None:
+            nxt = emit_pass._resolver.resolve_classical_value(
+                arg.yielded, loop_bindings
+            )
+        if nxt is None:
+            raise EmitError(
+                f"Loop-carried value '{arg.var_name}' could not be computed "
+                f"for the next iteration at emit time. Carried classical "
+                f"scalars inside a quantum loop must be computable from "
+                f"compile-time values, runtime parameters, and the loop "
+                f"variable; values derived from measurement results cannot "
+                f"be carried across unrolled iterations.",
+                operation=type(op).__name__,
+            )
+        advanced[arg.block_arg.uuid] = nxt
+    carried.update(advanced)
+
+
+def _publish_region_results(
+    op: ForOperation | ForItemsOperation,
+    carried: dict[str, Any],
+    bindings: dict[str, Any],
+) -> None:
+    """Expose each region argument's final carried value as the loop result.
+
+    Args:
+        op (ForOperation | ForItemsOperation): The emitted loop.
+        carried (dict[str, Any]): The final carried-value map (init
+            values for a zero-trip loop).
+        bindings (dict[str, Any]): The enclosing emit bindings; mutated
+            so post-loop operations resolve the loop results.
+    """
+    for arg in _validated_region_args(op):
+        _set_emit_value(bindings, arg.result.uuid, carried[arg.block_arg.uuid])
 
 
 def emit_for(
@@ -235,6 +305,14 @@ def emit_for(
     force_unroll: bool = False,
 ) -> None:
     """Emit a for loop."""
+    _validated_region_args(op)
+    if op.loop_var_value is None:
+        raise EmitError(
+            f"ForOperation '{op.loop_var or '<unnamed>'}' has no "
+            "loop_var_value; the IR must be rebuilt with the current "
+            "frontend.",
+            operation="ForOperation",
+        )
     start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
 
     if start is None or stop is None or step is None:
@@ -243,14 +321,18 @@ def emit_for(
 
     indexset = range(start, stop, step)
     if len(indexset) == 0:
-        # Zero-trip passthrough: post-loop reads of the carried results
-        # must observe the loop-entry values.
-        _register_carry_results(
-            op, _resolve_carry_iter_args(emit_pass, op, bindings), bindings
-        )
+        # Zero-trip loop: region results still need publishing (they
+        # pass the init values through).
+        if op.region_args:
+            carried = _seed_region_args(emit_pass, op, bindings)
+            _publish_region_results(op, carried, bindings)
         return
 
-    if force_unroll:
+    if force_unroll or op.region_args:
+        # Region-carried values must be threaded iteration by iteration,
+        # which only the unrolled path can do — a native backend loop
+        # re-executes one body and cannot rebind a per-iteration
+        # classical carried value.
         emit_for_unrolled(emit_pass, circuit, op, qubit_map, clbit_map, bindings)
         return
 
@@ -264,7 +346,12 @@ def emit_for(
         loop_bindings = bindings.copy()
         _bind_loop_var(loop_bindings, op, loop_context)
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            loop_bindings,
+            emit_qinit_reset=True,
         )
         emit_pass._emitter.emit_for_loop_end(circuit, loop_context)
     else:
@@ -327,6 +414,14 @@ def emit_for_unrolled(
     bindings: dict[str, Any],
 ) -> None:
     """Emit for loop by unrolling."""
+    _validated_region_args(op)
+    if op.loop_var_value is None:
+        raise EmitError(
+            f"ForOperation '{op.loop_var or '<unnamed>'}' has no "
+            "loop_var_value; the IR must be rebuilt with the current "
+            "frontend.",
+            operation="ForOperation",
+        )
     start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
 
     if start is None or stop is None or step is None:
@@ -342,11 +437,12 @@ def emit_for_unrolled(
         details = ", ".join(unresolved_details)
         carry_note = (
             " Note: this loop carries classical values "
-            f"({', '.join(op.carried_names)}) between iterations; "
+            f"({', '.join(arg.var_name for arg in op.region_args)}) "
+            "between iterations; "
             "loop-carried classical values require "
             "compile-time-resolvable loop bounds, so a native runtime "
             "loop is not an option here."
-            if op.carried_names
+            if op.region_args
             else ""
         )
         raise ValueError(
@@ -359,27 +455,22 @@ def emit_for_unrolled(
             f"through the pipeline (report this as a compiler bug).{carry_note}"
         )
 
-    carried_values = _resolve_carry_iter_args(emit_pass, op, bindings)
-    carries = list(op.iter_carries())
+    carried = _seed_region_args(emit_pass, op, bindings)
     for i in range(start, stop, step):
         loop_bindings = bindings.copy()
+        for uuid, value in carried.items():
+            _set_emit_value(loop_bindings, uuid, value)
         _bind_loop_var(loop_bindings, op, i)
-        for carry, value in zip(carries, carried_values, strict=True):
-            _set_emit_value(loop_bindings, carry.body_arg.uuid, value)
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            loop_bindings,
+            emit_qinit_reset=True,
         )
-        carried_values = [
-            _resolve_carry_value(
-                emit_pass,
-                carry.body_yield,
-                loop_bindings,
-                carry.var_name,
-                "after an iteration",
-            )
-            for carry in carries
-        ]
-    _register_carry_results(op, carried_values, bindings)
+        _advance_region_args(emit_pass, op, carried, loop_bindings)
+    _publish_region_results(op, carried, bindings)
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +508,38 @@ def emit_for_items(
             reason.
     """
     if not op.operands:
-        return
+        raise EmitError(
+            "ForItemsOperation requires an iterable operand.",
+            operation="ForItemsOperation",
+        )
+
+    key_var_values = op.key_var_values
+    value_var_value = op.value_var_value
+    if key_var_values is None or len(key_var_values) != len(op.key_vars):
+        raise EmitError(
+            "ForItemsOperation key identities are missing or inconsistent; "
+            "the IR must be rebuilt with the current frontend.",
+            operation="ForItemsOperation",
+        )
+    if value_var_value is None:
+        raise EmitError(
+            "ForItemsOperation value identity is missing; the IR must be "
+            "rebuilt with the current frontend.",
+            operation="ForItemsOperation",
+        )
+    vector_dim_value = None
+    if op.key_is_vector:
+        if (
+            not key_var_values
+            or not isinstance(key_var_values[0], ArrayValue)
+            or not key_var_values[0].shape
+        ):
+            raise EmitError(
+                "ForItemsOperation vector-key shape identity is missing; "
+                "the IR must be rebuilt with the current frontend.",
+                operation="ForItemsOperation",
+            )
+        vector_dim_value = key_var_values[0].shape[0]
 
     dict_value = op.operands[0]
     entries = resolve_dict_entries(emit_pass, dict_value, bindings)
@@ -437,17 +559,15 @@ def emit_for_items(
             f"Dict value: {dict_value.name if hasattr(dict_value, 'name') else dict_value}"
         )
 
-    key_var_values = op.key_var_values
-    value_var_value = op.value_var_value
-
-    carried_values = _resolve_carry_iter_args(emit_pass, op, bindings)
-    carries = list(op.iter_carries())
+    carried = _seed_region_args(emit_pass, op, bindings)
     for key, value in entries:
         loop_bindings = bindings.copy()
+        for carried_uuid, carried_value in carried.items():
+            _set_emit_value(loop_bindings, carried_uuid, carried_value)
         push = getattr(loop_bindings, "push_loop_var", None)
 
         def _bind(
-            uuid: str | None,
+            uuid: str,
             display_name: str,
             v: Any,
             _push=push,
@@ -462,59 +582,51 @@ def emit_for_items(
             longer write by name. UUID-keyed writes happen alongside
             for canonical identity tracking.
             """
-            if callable(_push) and uuid is not None:
+            if callable(_push):
                 _push(uuid, v, display_name=display_name or None)
             else:
-                if uuid is not None:
-                    _ctx[uuid] = v
+                _ctx[uuid] = v
             if display_name:
                 _ctx[display_name] = v
 
         # Bind key variables (tuple unpacking)
         if len(op.key_vars) > 1:
             for i, kv_name in enumerate(op.key_vars):
-                kv_uuid = (
-                    key_var_values[i].uuid
-                    if key_var_values is not None and i < len(key_var_values)
-                    else None
-                )
                 _bind(
-                    kv_uuid,
+                    key_var_values[i].uuid,
                     kv_name,
                     key[i] if hasattr(key, "__getitem__") else key,
                 )
         elif len(op.key_vars) == 1:
-            kv_uuid = (
-                key_var_values[0].uuid
-                if key_var_values is not None and len(key_var_values) >= 1
-                else None
-            )
-            _bind(kv_uuid, op.key_vars[0], key)
+            _bind(key_var_values[0].uuid, op.key_vars[0], key)
             if op.key_is_vector:
-                # The dim0 Value is a child of the ArrayValue stored in
-                # key_var_values[0]; for now bind the legacy name only
-                # (Vector key dim is rarely accessed by the loop body).
-                _bind(None, f"{op.key_vars[0]}_dim0", len(key))
+                assert vector_dim_value is not None
+                _bind(
+                    vector_dim_value.uuid,
+                    f"{op.key_vars[0]}_dim0",
+                    len(key),
+                )
 
-        value_uuid = value_var_value.uuid if value_var_value is not None else None
-        _bind(value_uuid, op.value_var, value)
+        _bind(value_var_value.uuid, op.value_var, value)
 
-        for carry, carried in zip(carries, carried_values, strict=True):
-            _set_emit_value(loop_bindings, carry.body_arg.uuid, carried)
+        # ``emit_qinit_reset=True`` mirrors ``emit_for_unrolled`` and the
+        # native ``for`` / ``if`` / ``while`` branches. Like those paths,
+        # for-items re-emits the *same* ``op.operations`` once per dict entry
+        # without UUID remapping — the ``ResourceAllocator`` registers each
+        # body ``QInitOperation`` exactly once — so a fresh ``qmc.qubit(...)``
+        # allocated in the body maps to one shared physical qubit reused
+        # across entries. Without an explicit reset the second and later
+        # entries would silently reuse it in its post-measurement state.
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, loop_bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            loop_bindings,
+            emit_qinit_reset=True,
         )
-        carried_values = [
-            _resolve_carry_value(
-                emit_pass,
-                carry.body_yield,
-                loop_bindings,
-                carry.var_name,
-                "after an iteration",
-            )
-            for carry in carries
-        ]
-    _register_carry_results(op, carried_values, bindings)
+        _advance_region_args(emit_pass, op, carried, loop_bindings)
+    _publish_region_results(op, carried, bindings)
 
 
 # ---------------------------------------------------------------------------
@@ -699,11 +811,21 @@ def emit_if(
     if resolved is not None:
         if resolved:
             emit_pass._emit_operations(
-                circuit, op.true_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.true_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         else:
             emit_pass._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.false_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         remap_static_merge_outputs(
             op,
@@ -731,12 +853,22 @@ def emit_if(
     if emit_pass._emitter.supports_if_else():
         context = emit_pass._emitter.emit_if_start(circuit, clbit_idx, 1)
         emit_pass._emit_operations(
-            circuit, op.true_operations, qubit_map, clbit_map, bindings
+            circuit,
+            op.true_operations,
+            qubit_map,
+            clbit_map,
+            bindings,
+            emit_qinit_reset=True,
         )
         if op.false_operations:
             emit_pass._emitter.emit_else_start(circuit, context)
             emit_pass._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
+                circuit,
+                op.false_operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+                emit_qinit_reset=True,
             )
         emit_pass._emitter.emit_if_end(circuit, context)
 
@@ -906,14 +1038,16 @@ def emit_while(
     bindings: dict[str, Any],
 ) -> None:
     """Emit while loop operation."""
-    if op.carried_names:
+    region_args = _validated_region_args(op)
+    if region_args:
         # Backstop for the transpile-time rejection: a while loop's trip
         # count is a runtime measurement outcome, so the loop must stay
         # a runtime loop, and no backend can carry a classical value
         # between runtime-loop iterations.
         raise EmitError(
             "Loop-carried classical values in a while loop cannot be "
-            f"emitted ({', '.join(op.carried_names)}): a runtime loop "
+            f"emitted ({', '.join(arg.var_name for arg in region_args)}): "
+            "a runtime loop "
             "re-executes one static body and cannot thread a classical "
             "value between iterations.",
             operation="WhileOperation",
@@ -947,7 +1081,12 @@ def emit_while(
     if emit_pass._emitter.supports_while_loop():
         context = emit_pass._emitter.emit_while_start(circuit, clbit_idx, 1)
         emit_pass._emit_operations(
-            circuit, op.operations, qubit_map, clbit_map, bindings
+            circuit,
+            op.operations,
+            qubit_map,
+            clbit_map,
+            bindings,
+            emit_qinit_reset=True,
         )
         emit_pass._emitter.emit_while_end(circuit, context)
     else:

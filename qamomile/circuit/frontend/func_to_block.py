@@ -88,7 +88,7 @@ def build_param_slots(
     """Build a ``ParamSlot`` tuple for the classical arguments of a kernel.
 
     Mirrors the argument-classification logic in
-    ``QKernel._create_traced_block`` so the resulting slot list reflects
+    ``qkernel_build.create_traced_block`` so the resulting slot list reflects
     the same decisions that drive symbolic-vs-bound input creation.
     Classical scalar / array arguments are always included; a ``Dict``
     argument is included only when it is a runtime parameter (its slot
@@ -170,8 +170,7 @@ def build_param_slots(
             continue
 
         # Decide the slot's kind. ``Observable`` semantics mirror the
-        # tracer in ``QKernel._create_traced_block`` (see
-        # ``qamomile/circuit/frontend/qkernel.py``): a scalar
+        # tracer in ``qkernel_build.create_traced_block``: a scalar
         # ``Observable`` and an *unbound* ``Vector[Observable]`` are
         # always RUNTIME_PARAMETER (the value is supplied at execute
         # time and ``partial_eval`` cannot fold it). A *bound*
@@ -343,7 +342,7 @@ def create_dummy_input(
         emit_init (bool): If True, emit QInitOperation for qubit arrays
             (default: True). Set to False when creating a nested Block's
             internal dummy inputs, or when the dummy will receive its
-            qubits from a caller's CallBlockOperation.
+            qubits from a caller-side callable invocation.
         shape (tuple[int, ...] | None): Optional concrete shape for array
             types. When provided, the dummy array's shape Values carry
             compile-time constants instead of symbolic placeholders.

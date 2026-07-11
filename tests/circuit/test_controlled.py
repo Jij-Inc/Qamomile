@@ -19,6 +19,7 @@ import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit
 from qamomile.circuit.frontend.operation.control import ControlledGate, control
 from qamomile.circuit.frontend.tracer import trace
+from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType
@@ -1134,6 +1135,73 @@ class TestControlledAcceptsBuiltinGate:
         cg = qmc.control(my_gate)
         assert cg._qkernel is my_gate
 
+    def test_composite_target_identity_is_preserved(self):
+        """control(composite) records the composite callable identity."""
+
+        @qmc.composite_gate(name="boxed_h")
+        def boxed_h(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.h(q)
+
+        @qmc.qkernel
+        def circuit(ctrl: qmc.Qubit, target: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            ctrl, target = qmc.control(boxed_h)(ctrl, target)
+            return ctrl, target
+
+        block = circuit.build()
+        controlled_ops = [
+            op for op in block.operations if isinstance(op, InvokeOperation)
+        ]
+
+        assert len(controlled_ops) == 1
+        op = controlled_ops[0]
+        assert op.target.namespace == "user.composite"
+        assert op.target.name == "boxed_h"
+        assert op.transform is CallTransform.CONTROLLED
+        assert op.attrs["kind"] == "composite"
+        assert op.attrs["custom_name"] == "boxed_h"
+        assert op.attrs["default_policy"] == "PRESERVE_BOX"
+        assert op.definition is not None
+        assert op.definition.body is boxed_h.block
+
+
+class TestControlledOracle:
+    """``control(Oracle)`` routes through controlled InvokeOperation."""
+
+    def test_controlled_oracle_emits_controlled_invoke(self):
+        """control(Oracle) emits a controlled bodyless oracle invocation."""
+        cost = qmc.ResourceEstimate(
+            gates=qmc.GateResources(t=7),
+            calls=qmc.CallResources(queries_by_name={"phase_oracle": 1}),
+        )
+        oracle = qmc.opaque("phase_oracle", num_qubits=1, cost=cost)
+
+        @qmc.qkernel
+        def circuit(ctrl: qmc.Qubit, target: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
+            ctrl, target = qmc.control(oracle)(ctrl, target)
+            return ctrl, target
+
+        block = circuit.build()
+        invokes = [op for op in block.operations if isinstance(op, InvokeOperation)]
+
+        assert len(invokes) == 1
+        op = invokes[0]
+        assert op.target.namespace == "user.oracle"
+        assert op.target.name == "phase_oracle"
+        assert op.transform is CallTransform.CONTROLLED
+        assert op.attrs["kind"] == "oracle"
+        assert op.num_control_qubits == 1
+        assert op.num_target_qubits == 1
+        assert op.body is None
+        assert op.definition is not None
+        assert op.definition.opaque_cost is cost
+
+    def test_controlled_oracle_rejects_symbolic_control_count(self):
+        """control(Oracle) rejects symbolic control counts for now."""
+        oracle = qmc.opaque("phase_oracle", num_qubits=1)
+
+        with pytest.raises(TypeError, match="symbolic num_controls"):
+            qmc.control(oracle, num_controls=qmc.uint(1))
+
 
 # -- Rejection: errors for unsupported callables -----------------------------
 
@@ -1692,8 +1760,9 @@ class TestControlledBuiltinSynthesisInternals:
         cg = qmc.control(_ephemeral_gate)
         assert _ephemeral_gate in _synthesized_kernel_cache
         # Pin the linecache filename for the post-GC check.  The
-        # AST-transformed ``self.func`` is re-compiled under the
-        # ``<qamomile-dsl>`` synthetic filename, so we read the original
+        # AST-transformed ``self.func`` is re-compiled under the filename
+        # ``inspect.getsourcefile`` reports for the wrapper (its
+        # linecache-registered pseudo-filename), so we read the original
         # wrapper's filename from ``raw_func`` instead.
         wrapper_filename = cg._qkernel.raw_func.__code__.co_filename
         assert wrapper_filename in _linecache_module.cache
@@ -2893,26 +2962,14 @@ def _mixed_scalar_vector_targets(
     return head, tail
 
 
-class _BellPairComposite(qmc.CompositeGate):
-    """Custom two-qubit CompositeGate used inside controlled test kernels."""
-
-    custom_name = "controlled_test_bell_pair"
-
-    @property
-    def num_target_qubits(self) -> int:
-        return 2
-
-    def _decompose(
-        self,
-        qubits: qmc.Vector[qmc.Qubit] | tuple[qmc.Qubit, ...],
-    ) -> tuple[qmc.Qubit, ...]:
-        q0, q1 = qubits
-        q0 = qmc.h(q0)
-        q0, q1 = qmc.cx(q0, q1)
-        return q0, q1
-
-
-_BELL_PAIR_COMPOSITE = _BellPairComposite()
+@qmc.composite_gate(name="controlled_test_bell_pair")
+def _bell_pair_composite(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Prepare a Bell pair inside controlled test kernels."""
+    q0 = qmc.h(q0)
+    return qmc.cx(q0, q1)
 
 
 @qmc.qkernel
@@ -2922,7 +2979,7 @@ def _composite_bell_pair(
     """Apply a custom CompositeGate to a two-qubit vector target."""
     q0 = qs[0]
     q1 = qs[1]
-    q0, q1 = _BELL_PAIR_COMPOSITE(q0, q1)
+    q0, q1 = _bell_pair_composite(q0, q1)
     qs[0] = q0
     qs[1] = q1
     return qs
@@ -4505,11 +4562,11 @@ class TestSymbolicMultiArgControl:
 # Regression: control() of a pass-through wrapper kernel
 # =============================================================================
 #
-# A wrapper whose body is a single ``CallBlockOperation`` forwarding to a
+# A wrapper whose body is a single inline ``InvokeOperation`` forwarding to a
 # leaf gate kernel (``def wrap(q): return leaf(q)``) used to lose the inner
 # gate under ``qmc.control``: ``InlinePass`` descended into
 # ``InverseBlockOperation`` blocks but not into ``ControlledUOperation.block``,
-# so the unexpanded ``CallBlockOperation`` survived to emit, where
+# so the unexpanded inline invocation survived to emit, where
 # ``blockvalue_to_gate`` cannot turn a call into a gate and silently produced
 # an empty (identity) unitary. ``control(leaf)`` worked; only the
 # pass-through wrapper collapsed to identity. These tests pin
@@ -4526,7 +4583,7 @@ def _passthrough_leaf_x(q: qmc.Qubit) -> qmc.Qubit:
 
 @qmc.qkernel
 def _passthrough_wrap1_x(q: qmc.Qubit) -> qmc.Qubit:
-    """One-level pass-through wrapper: body is a single CallBlockOperation."""
+    """One-level pass-through wrapper: body is a single InvokeOperation."""
     return _passthrough_leaf_x(q)
 
 
@@ -4554,13 +4611,13 @@ class TestControlledPassThroughWrapperInlined:
     def test_no_call_block_survives_inside_controlled_u(self):
         """White-box: InlinePass descends into ``ControlledUOperation.block``.
 
-        Before the fix the wrapper's lone ``CallBlockOperation`` stayed
+        Before the fix the wrapper's lone inline invocation stayed
         inside ``ControlledUOperation.block`` (and the top block was even
-        mislabeled AFFINE), so the inner gate was dropped at emit. This
-        pins that no ``CallBlockOperation`` remains inside the controlled
-        block after ``inline``.
+        mislabeled AFFINE), so the inner gate was dropped at emit. This pins
+        that no inlineable call remains inside the controlled block after
+        ``inline``.
         """
-        from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+        from qamomile.circuit.ir.operation.callable import InvokeOperation
         from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
@@ -4579,10 +4636,10 @@ class TestControlledPassThroughWrapperInlined:
         for op in controlled:
             assert op.block is not None
             residual = [
-                o for o in op.block.operations if isinstance(o, CallBlockOperation)
+                o for o in op.block.operations if isinstance(o, InvokeOperation)
             ]
             assert not residual, (
-                "CallBlockOperation survived inside ControlledUOperation.block; "
+                "Inlineable call survived inside ControlledUOperation.block; "
                 "InlinePass must descend into the nested controlled block."
             )
 

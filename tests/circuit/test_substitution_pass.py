@@ -4,6 +4,7 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.transpiler.passes.substitution import (
     SignatureCompatibilityError,
     SubstitutionConfig,
@@ -302,6 +303,31 @@ class TestSignatureValidation:
         # Should not raise
         result = pass_.run(block)
         assert result is not None
+
+    def test_substitution_pass_replaces_inline_invoke_body(self):
+        """Test that block replacement updates inline InvokeOperation bodies."""
+
+        @qmc.qkernel
+        def source(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            return qmc.rx(q, theta)
+
+        @qmc.qkernel
+        def target_compatible(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            return qmc.rz(q, theta)
+
+        @qmc.qkernel
+        def main(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+            return source(q, theta)
+
+        pass_ = create_substitution_pass(
+            block_replacements={"source": target_compatible}
+        )
+
+        result = pass_.run(main.block)
+        invoke = next(op for op in result.operations if isinstance(op, InvokeOperation))
+
+        assert invoke.target.name == "target_compatible"
+        assert invoke.effective_body() is target_compatible.block
 
     def test_create_substitution_pass_validate_signatures_false(self):
         """Test that create_substitution_pass respects validate_signatures=False."""

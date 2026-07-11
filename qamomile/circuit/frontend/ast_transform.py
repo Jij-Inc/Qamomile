@@ -14,9 +14,9 @@ from qamomile.circuit.frontend.operation.control_flow import (
     emit_if,
     for_items,
     for_loop,
-    loop_carry_results,
     loop_rebind_snapshot,
-    promote_loop_carry,
+    loop_region_enter,
+    loop_region_result,
     record_loop_rebinds,
     should_trace_for_loop,
     should_trace_items_loop,
@@ -710,14 +710,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
         candidates: list[str],
         classical_candidates: list[str],
         lineno: int,
+        region_bind: bool = False,
     ) -> list[ast.stmt]:
         """Wrap a transformed loop body with rebind snapshot/record probes.
 
-        Prepends ``name = promote_loop_carry(name)`` for each classical
-        candidate (wrapping plain-number initializers in symbolic
-        handles so the loop builder can reconstruct the carry's initial
-        value; see ``promote_loop_carry``), then
-        ``_qm_rebind_snap_N = loop_rebind_snapshot(locals(), (...))``,
+        Prepends ``_qm_rebind_snap_N =
+        loop_rebind_snapshot(locals(), (...))``,
         and appends ``record_loop_rebinds(_qm_rebind_snap_N, locals(),
         (...), (...))`` so the tracer can compare pre/post handle
         identities for each candidate. Snapshot/record candidates are
@@ -732,6 +730,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         probes live inside the loop's ``with`` body, so the zero-trip
         trace guard skips them together with the body.
 
+        When ``region_bind`` is true (``for`` / ``for-items`` loops), a
+        ``name = loop_region_enter(_qm_rebind_snap_N, "name")``
+        assignment is additionally injected after the snapshot for each
+        read-before-write classical candidate, so the body's carried
+        reads go through an explicit region argument (see
+        ``loop_region_enter``). ``while`` loops keep ``region_bind``
+        false — a runtime while loop cannot be unrolled, so its
+        non-condition classical carries keep the record-based rejection.
+
         Args:
             flattened_body (list[ast.stmt]): The already-transformed loop
                 body statements.
@@ -741,6 +748,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 of ``candidates`` eligible for classical rebind records.
             lineno (int): Source line of the loop statement, used for the
                 generated nodes.
+            region_bind (bool): Inject region-argument entry assignments
+                for the classical candidates. Defaults to False.
 
         Returns:
             list[ast.stmt]: The wrapped body; ``flattened_body`` itself
@@ -774,18 +783,6 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]
             )
 
-        promote_stmts: list[ast.stmt] = [
-            ast.Assign(
-                targets=[ast.Name(id=name, ctx=ast.Store())],
-                value=ast.Call(
-                    func=ast.Name(id="promote_loop_carry", ctx=ast.Load()),
-                    args=[ast.Name(id=name, ctx=ast.Load())],
-                    keywords=[],
-                ),
-                lineno=lineno,
-            )
-            for name in classical_candidates
-        ]
         snap_name = self._get_unique_name("_qm_rebind_snap")
         snap_stmt = ast.Assign(
             targets=[ast.Name(id=snap_name, ctx=ast.Store())],
@@ -809,53 +806,24 @@ class ControlFlowTransformer(ast.NodeTransformer):
             ),
             lineno=lineno,
         )
-        return [*promote_stmts, snap_stmt, *flattened_body, record_stmt]
-
-    def _loop_carry_rebind_stmt(
-        self,
-        classical_candidates: list[str],
-        lineno: int,
-    ) -> ast.stmt | None:
-        """Build the post-loop carried-variable rebinding assignment.
-
-        Generates ``(a, b) = loop_carry_results(locals(), ("a", "b"))``
-        to run immediately after a traced loop's ``with`` block, so each
-        carried variable's post-loop binding switches from the traced
-        body's last value to the loop's carry result. Placed inside the
-        zero-trip trace guard for ``for`` / ``items`` loops, so a
-        statically-zero-trip loop keeps its pre-loop bindings.
-
-        Args:
-            classical_candidates (list[str]): The read-before-write
-                rebind candidates (the only names a carry slot can
-                exist for).
-            lineno (int): Source line of the loop statement, used for
-                the generated node.
-
-        Returns:
-            ast.stmt | None: The assignment statement, or ``None`` when
-                there are no classical candidates.
-        """
-        if not classical_candidates:
-            return None
-        targets = ast.Tuple(
-            elts=[ast.Name(id=name, ctx=ast.Store()) for name in classical_candidates],
-            ctx=ast.Store(),
-        )
-        call = ast.Call(
-            func=ast.Name(id="loop_carry_results", ctx=ast.Load()),
-            args=[
-                ast.Call(
-                    func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]
-                ),
-                ast.Tuple(
-                    elts=[ast.Constant(value=name) for name in classical_candidates],
-                    ctx=ast.Load(),
-                ),
-            ],
-            keywords=[],
-        )
-        return ast.Assign(targets=[targets], value=call, lineno=lineno)
+        entry_stmts: list[ast.stmt] = []
+        if region_bind:
+            entry_stmts = [
+                ast.Assign(
+                    targets=[ast.Name(id=name, ctx=ast.Store())],
+                    value=ast.Call(
+                        func=ast.Name(id="loop_region_enter", ctx=ast.Load()),
+                        args=[
+                            ast.Name(id=snap_name, ctx=ast.Load()),
+                            ast.Constant(value=name),
+                        ],
+                        keywords=[],
+                    ),
+                    lineno=lineno,
+                )
+                for name in classical_candidates
+            ]
+        return [snap_stmt, *entry_stmts, *flattened_body, record_stmt]
 
     def visit_While(self, node: ast.While) -> Any:
         if node.orelse:
@@ -927,12 +895,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=node.col_offset,
         )
 
-        rebind_stmt = self._loop_carry_rebind_stmt(
-            classical_rebind_candidates, node.lineno
-        )
-        if rebind_stmt is None:
-            return with_stmt
-        return [with_stmt, rebind_stmt]
+        return with_stmt
 
     def _is_range_call(self, node: ast.expr) -> bool:
         """Check if node is a range() or qm.range() call."""
@@ -1194,7 +1157,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_load_vars = saved_after_load
 
         flattened_body = self._wrap_body_with_rebind_probes(
-            flattened_body, rebind_candidates, classical_rebind_candidates, node.lineno
+            flattened_body,
+            rebind_candidates,
+            classical_rebind_candidates,
+            node.lineno,
+            region_bind=True,
         )
 
         # Dispatch to the appropriate transform.
@@ -1219,11 +1186,47 @@ class ControlFlowTransformer(ast.NodeTransformer):
             f"iter={ast.dump(node.iter)}"
         )
 
+    def _region_result_stmts(
+        self, classical_candidates: list[str], lineno: int
+    ) -> list[ast.stmt]:
+        """Build post-loop ``loop_region_result`` rebinding assignments.
+
+        One ``name = loop_region_result("name", name)`` statement per
+        read-before-write classical candidate, to run immediately after
+        the loop's ``with`` block (inside the zero-trip guard) so
+        post-loop reads reference the loop operation's region-argument
+        result value instead of the body's final yielded value.
+
+        Args:
+            classical_candidates (list[str]): The read-before-write
+                classical candidate names of the loop.
+            lineno (int): Source line of the loop statement.
+
+        Returns:
+            list[ast.stmt]: The rebinding assignments (empty when there
+                are no candidates).
+        """
+        return [
+            ast.Assign(
+                targets=[ast.Name(id=name, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name(id="loop_region_result", ctx=ast.Load()),
+                    args=[
+                        ast.Constant(value=name),
+                        ast.Name(id=name, ctx=ast.Load()),
+                    ],
+                    keywords=[],
+                ),
+                lineno=lineno,
+            )
+            for name in classical_candidates
+        ]
+
     def _transform_for_range(
         self,
         node: ast.For,
         flattened_body: list[ast.stmt],
-        classical_rebind_candidates: list[str],
+        classical_candidates: list[str],
     ) -> ast.stmt:
         """Transform 'for i in range(...)' to 'with for_loop(...)'.
 
@@ -1232,10 +1235,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
             for i in range(start, stop):  ->  for_loop(start, stop, 1)
             for i in range(start, stop, step):  ->  for_loop(start, stop, step)
 
-        When the body has classical rebind candidates, a post-loop
-        ``loop_carry_results`` assignment follows the with-statement
-        inside the zero-trip trace guard (see
-        :meth:`_loop_carry_rebind_stmt`).
+        When the body has classical rebind candidates, post-loop
+        ``loop_region_result`` assignments follow the with-statement
+        inside the zero-trip trace guard.
         """
 
         # Read range() arguments (arity already validated in _validate_for_loop)
@@ -1280,13 +1282,6 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=node.col_offset,
         )
 
-        guard_body: list[ast.stmt] = [with_stmt]
-        rebind_stmt = self._loop_carry_rebind_stmt(
-            classical_rebind_candidates, node.lineno
-        )
-        if rebind_stmt is not None:
-            guard_body.append(rebind_stmt)
-
         return ast.If(
             test=ast.Call(
                 func=ast.Name(id="should_trace_for_loop", ctx=ast.Load()),
@@ -1297,7 +1292,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 ],
                 keywords=[],
             ),
-            body=guard_body,
+            body=[
+                with_stmt,
+                *self._region_result_stmts(classical_candidates, node.lineno),
+            ],
             orelse=[],
             lineno=node.lineno,
             col_offset=node.col_offset,
@@ -1307,15 +1305,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self,
         node: ast.For,
         flattened_body: list[ast.stmt],
-        classical_rebind_candidates: list[str],
+        classical_candidates: list[str],
     ) -> ast.stmt:
         """Transform 'for (k, v) in items(d)' or 'for (k, v) in d.items()' to 'with for_items(d, [...], "v")'.
 
         The with-statement is wrapped in ``if should_trace_items_loop(d):``
         so a compile-time-known EMPTY dict skips tracing the body, exactly
         like the ``qmc.range`` zero-trip guard. When the body has
-        classical rebind candidates, a post-loop ``loop_carry_results``
-        assignment follows the with-statement inside that guard.
+        classical rebind candidates, post-loop ``loop_region_result``
+        assignments follow the with-statement inside that guard.
 
         Supports patterns:
             for key, value in items(d):  ->  for_items(d, ["key"], "value")
@@ -1369,13 +1367,6 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=node.col_offset,
         )
 
-        guard_body: list[ast.stmt] = [with_stmt]
-        rebind_stmt = self._loop_carry_rebind_stmt(
-            classical_rebind_candidates, node.lineno
-        )
-        if rebind_stmt is not None:
-            guard_body.append(rebind_stmt)
-
         # Mirror the qmc.range zero-trip guard: a compile-time-known
         # EMPTY dict must not trace the body at all, so post-loop code
         # keeps the pre-loop handles exactly like Python's zero-pass
@@ -1386,7 +1377,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 args=[copy.deepcopy(dict_arg)],
                 keywords=[],
             ),
-            body=guard_body,
+            body=[
+                with_stmt,
+                *self._region_result_stmts(classical_candidates, node.lineno),
+            ],
             orelse=[],
             lineno=node.lineno,
             col_offset=node.col_offset,
@@ -1732,6 +1726,19 @@ def transform_control_flow(func: Callable):
         ) from e
     src = textwrap.dedent(src)
     tree = ast.parse(src)
+    # Re-anchor the tree to the original source file before any transform
+    # runs, so that (a) transform-time diagnostics report absolute line
+    # numbers and (b) frames executing the traced kernel body carry the
+    # user's real ``file:line``. ``getsource`` yields line numbers relative
+    # to the decorator line, so shifting by ``co_firstlineno - 1`` restores
+    # absolute positions (``dedent`` only changes columns, never lines).
+    # Nodes synthesized by the transformer inherit these absolute positions
+    # via ``fix_missing_locations`` below. This gives readable tracebacks
+    # for any error raised while tracing — and lets trace-time diagnostics
+    # such as ``Handle.consume`` report the offending source line — instead
+    # of pointing into an opaque ``<qamomile-dsl>`` buffer.
+    ast.increment_lineno(tree, func.__code__.co_firstlineno - 1)
+    source_filename = inspect.getsourcefile(func) or "<qamomile-dsl>"
 
     # Collect global names (modules, builtins, etc.)
     global_names = set(func.__globals__.keys())
@@ -1783,9 +1790,9 @@ def transform_control_flow(func: Callable):
             "branch_rebind_pre_bindings": branch_rebind_pre_bindings,
             "dead_rebind_binding": dead_rebind_binding,
             "loop_rebind_snapshot": loop_rebind_snapshot,
+            "loop_region_enter": loop_region_enter,
+            "loop_region_result": loop_region_result,
             "record_loop_rebinds": record_loop_rebinds,
-            "promote_loop_carry": promote_loop_carry,
-            "loop_carry_results": loop_carry_results,
             "Any": Any,  # For type annotations in generated code
         }
     )
@@ -1805,7 +1812,7 @@ def transform_control_flow(func: Callable):
                     f"This typically happens with forward references in nested functions."
                 ) from None
 
-    code_obj = compile(tree, filename="<qamomile-dsl>", mode="exec")
+    code_obj = compile(tree, filename=source_filename, mode="exec")
     exec(code_obj, name_space)
 
     return name_space[func.__name__]

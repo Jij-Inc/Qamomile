@@ -944,6 +944,10 @@ class CudaqKernelEmitter:
         self._emit(self._clbit_store(clbit, f"mz({self._qref(qubit)})"))
         self._measurement_map[clbit] = qubit
 
+    def emit_reset(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
+        """Emit reset to the |0> state."""
+        self._emit(f"reset({self._qref(qubit)})")
+
     # ------------------------------------------------------------------
     # Barrier
     # ------------------------------------------------------------------
