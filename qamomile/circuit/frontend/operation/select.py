@@ -449,9 +449,17 @@ class SelectGate:
         """
         # Reuse ``qmc.control``'s concrete prepare choreography: the index
         # register plays the role of the control prefix and the targets /
-        # params play the role of the sub-kernel arguments.
+        # params play the role of the sub-kernel arguments. The Select /
+        # index labels flow into consume tags and boundary errors so misuse
+        # diagnostics name the API the caller actually used.
         driver = ControlledGate(self._cases[0], num_controls=self._num_index_qubits)
-        prep = driver._prepare_concrete(args, params, self._num_index_qubits)
+        prep = driver._prepare_concrete(
+            args,
+            params,
+            self._num_index_qubits,
+            operation_label="Select",
+            control_role="index",
+        )
 
         # Specialize every case block for this concrete call site (so a
         # shape-dependent stdlib unitary used as a case does not no-op on

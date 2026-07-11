@@ -695,6 +695,8 @@ class ControlledGate:
         self,
         args: tuple[Any, ...],
         num_controls: int,
+        operation_label: str = "ControlledU",
+        control_role: str = "control",
     ) -> tuple[list[Any], list[Any]]:
         """Split *args* into the leading ``num_controls`` qubits and the rest.
 
@@ -711,6 +713,11 @@ class ControlledGate:
                 :meth:`ControlledGate.__call__` in concrete-mode.
             num_controls (int): The concrete control qubit count
                 ``N`` configured on this gate.
+            operation_label (str): User-facing operation name used in
+                error messages (``"ControlledU"`` here, ``"Select"``
+                when called from ``qmc.select``).
+            control_role (str): User-facing role name of the prefix
+                qubits (``"control"`` here, ``"index"`` for SELECT).
 
         Returns:
             tuple[list[Any], list[Any]]: A pair ``(controls,
@@ -740,7 +747,7 @@ class ControlledGate:
                 if not _is_quantum_handle(arg):
                     raise ValueError(
                         f"concrete num_controls: positional argument #{idx} "
-                        f"in the control region must be a Qubit, "
+                        f"in the {control_role} region must be a Qubit, "
                         f"Vector[Qubit], or VectorView[Qubit]; got "
                         f"{type(arg).__name__} with non-quantum element type."
                     )
@@ -768,26 +775,27 @@ class ControlledGate:
             else:
                 raise ValueError(
                     f"concrete num_controls: positional argument #{idx} "
-                    f"in the control region must be a Qubit, Vector[Qubit], "
-                    f"or VectorView[Qubit]; got {type(arg).__name__}."
+                    f"in the {control_role} region must be a Qubit, "
+                    f"Vector[Qubit], or VectorView[Qubit]; got "
+                    f"{type(arg).__name__}."
                 )
             if next_running > num_controls:
                 raise ValueError(
                     f"concrete num_controls={num_controls}: positional "
-                    f"argument #{idx} would push the control qubit count "
-                    f"from {running} to {next_running}, crossing the "
-                    f"control / sub-kernel boundary mid-argument.  Split "
-                    f"the argument so the boundary falls between args."
+                    f"argument #{idx} would push the {control_role} qubit "
+                    f"count from {running} to {next_running}, crossing the "
+                    f"{control_role} / sub-kernel boundary mid-argument.  "
+                    f"Split the argument so the boundary falls between args."
                 )
             controls.append(arg)
             running = next_running
 
         if running < num_controls:
             raise ValueError(
-                f"ControlledU requires at least {num_controls + 1} qubits "
-                f"({num_controls} controls + at least 1 sub-kernel target); "
-                f"got only {running} control qubit(s) and no sub-kernel "
-                f"arguments after them."
+                f"{operation_label} requires at least {num_controls + 1} "
+                f"qubits ({num_controls} {control_role} qubit(s) + at least "
+                f"1 sub-kernel target); got only {running} {control_role} "
+                f"qubit(s) and no sub-kernel arguments after them."
             )
         return controls, []
 
@@ -1438,6 +1446,8 @@ class ControlledGate:
         args: tuple[Any, ...],
         sub_kwargs: dict[str, Any],
         num_controls: int,
+        operation_label: str = "ControlledU",
+        control_role: str = "control",
     ) -> _ConcreteCallPrep:
         """Prepare a concrete controlled call without emitting an operation.
 
@@ -1450,6 +1460,12 @@ class ControlledGate:
             args (tuple[Any, ...]): Positional inputs with controls first.
             sub_kwargs (dict[str, Any]): Keyword arguments for the unitary.
             num_controls (int): Concrete number of control qubits.
+            operation_label (str): User-facing operation name used in
+                consume tags and error messages (``"ControlledU"`` here,
+                ``"Select"`` when called from ``qmc.select``), so misuse
+                diagnostics name the API the caller actually used.
+            control_role (str): User-facing role name of the control-prefix
+                qubits (``"control"`` here, ``"index"`` for SELECT).
 
         Returns:
             _ConcreteCallPrep: Prepared operands, results, consumed handles,
@@ -1462,20 +1478,29 @@ class ControlledGate:
             QubitConsumedError: If a quantum handle was already consumed.
             QubitBorrowConflictError: If quantum views overlap illegally.
         """
-        controls, sub_positional = self._split_controls_by_count(args, num_controls)
+        controls, sub_positional = self._split_controls_by_count(
+            args, num_controls, operation_label, control_role
+        )
         sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
         _validate_bound_handles(
             self._qkernel.input_types,
             sub_args_resolved,
-            context="control()",
+            context="control()" if operation_label == "ControlledU" else "select()",
             allow_broadcast=True,
         )
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
+            if operation_label == "ControlledU":
+                raise ValueError(
+                    f"ControlledU requires at least one quantum sub-kernel "
+                    f"argument (target).  Got {num_controls} control(s) and "
+                    f"no sub-kernel quantum arg (see design decision #9)."
+                )
             raise ValueError(
-                f"ControlledU requires at least one quantum sub-kernel "
-                f"argument (target).  Got {num_controls} control(s) and "
-                f"no sub-kernel quantum arg (see design decision #9)."
+                f"{operation_label} requires at least one quantum target "
+                f"argument after the {control_role} qubits.  Got "
+                f"{num_controls} {control_role} qubit(s) and no quantum "
+                f"target."
             )
         # Anything left over is classical.  ``id``-based filtering is
         # used because two distinct Handle instances may compare equal
@@ -1493,10 +1518,10 @@ class ControlledGate:
         # second consume, and view-touching overlaps raise
         # ``QubitBorrowConflictError`` at element / slice access time.
         consumed_controls = self._consume_with_borrow_transfer(
-            controls, "ControlledU[control]"
+            controls, f"{operation_label}[{control_role}]"
         )
         consumed_sub_quantum = self._consume_with_borrow_transfer(
-            sub_quantum_args, "ControlledU[target]"
+            sub_quantum_args, f"{operation_label}[target]"
         )
 
         operands = self._build_operands(
@@ -2455,17 +2480,18 @@ def control(
     control a primitive gate.
 
     Args:
-        qkernel: A qkernel-like object defining the gate to control, an
-            ``Oracle``, or a built-in
+        qkernel (Oracle | QKernelLike | Callable[..., Any]): A qkernel-like
+            object defining the gate to control, an ``Oracle``, or a built-in
             gate callable whose parameters are annotated with ``Qubit``,
             ``Float`` / ``float``, or ``UInt`` / ``int`` (possibly inside a
             ``Union`` such as ``Union[Qubit, Vector[Qubit]]``).
-        num_controls: Number of control qubits (default: 1).  Can be ``int``
-            (concrete) or ``UInt`` (symbolic).
-        control_values: Per-control activation pattern. ``None`` means all
-            controls fire on ``|1>``; zero entries fire on ``|0>``. Integer
-            masks use bit ``j`` for control operand ``j``. Opaque oracles do
-            not yet support a pattern containing zero.
+        num_controls (int | UInt): Number of control qubits (default: 1).
+            Can be ``int`` (concrete) or ``UInt`` (symbolic).
+        control_values (int | Sequence[int] | None): Per-control activation
+            pattern. ``None`` means all controls fire on ``|1>``; zero
+            entries fire on ``|0>``. Integer masks use bit ``j`` for control
+            operand ``j``. Opaque oracles do not yet support a pattern
+            containing zero.
 
     Returns:
         A ``ControlledGate`` that can be called with

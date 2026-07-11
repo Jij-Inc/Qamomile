@@ -441,6 +441,37 @@ class TestZeroControlCrossBackend:
             f"{sdk_transpiler.backend_name}: expected <Z>=-1, got {val}"
         )
 
+    @pytest.mark.parametrize("seed", [3, 11])
+    def test_anti_control_runtime_parameter_expval(self, sdk_transpiler, seed):
+        """An anti-controlled rotation angle supplied via ``parameters=``.
+
+        Same physics as ``test_single_anti_control_expval`` but with an
+        ``ry(angle)`` case whose ``angle`` stays a runtime parameter of the
+        emitted circuit instead of a compile-time binding. This exercises the
+        interplay between the anti-control X-bracket and backend ``Parameter``
+        objects inside the bracketed controlled emission. Control stays
+        ``|0>`` so the anti-control fires: ``<Z> = cos(angle)``.
+        """
+        rng = np.random.default_rng(seed)
+        angle = float(rng.uniform(0.25, math.pi - 0.25))
+
+        @qkernel
+        def circ(angle: Float, obs: Observable) -> Float:
+            c = qmc.qubit(name="c")
+            t = qmc.qubit(name="t")
+            c, t = qmc.control(qmc.ry, num_controls=1, control_values=(0,))(c, t, angle)
+            return qmc.expval(t, obs)
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(
+            circ, bindings={"obs": qm_o.Z(0)}, parameters=["angle"]
+        )
+        val = exe.run(transpiler.executor(), bindings={"angle": angle}).result()
+        assert np.isclose(val, math.cos(angle), atol=_expval_atol(sdk_transpiler)), (
+            f"{sdk_transpiler.backend_name}: angle={angle} expected "
+            f"<Z>={math.cos(angle)}, got {val}"
+        )
+
     @pytest.mark.parametrize("pattern", [(0, 0), (0, 1), (1, 0), (1, 1)])
     @pytest.mark.parametrize("prep", [(0, 0), (0, 1), (1, 0), (1, 1)])
     def test_two_control_pattern_sampling(self, sdk_transpiler, pattern, prep):
@@ -1039,6 +1070,37 @@ class TestSelectCrossBackend:
             f"<Z>={math.cos(theta)}, got {val}"
         )
 
+    @pytest.mark.parametrize("seed", [4, 9])
+    def test_select_runtime_parameter_expval(self, sdk_transpiler, seed):
+        """A select case angle supplied via ``parameters=`` at run time.
+
+        Same circuit as ``test_two_case_select_expval`` but ``theta`` stays
+        a runtime parameter of the emitted circuit instead of a compile-time
+        binding, exercising the per-case classical-parameter pairing
+        (``bind_block_params`` over ``param_operands``) with backend
+        ``Parameter`` objects inside the SELECT decomposition:
+        ``<Z> = cos(theta)``.
+        """
+        rng = np.random.default_rng(seed)
+        theta = float(rng.uniform(0.25, math.pi - 0.25))
+
+        @qkernel
+        def circ(theta: Float, obs: Observable) -> Float:
+            idx = qmc.qubit(name="idx")
+            t = qmc.qubit(name="t")
+            idx, t = qmc.select([_ry_case, _rz_case])(idx, t, theta=theta)
+            return qmc.expval(t, obs)
+
+        transpiler = sdk_transpiler.transpiler
+        exe = transpiler.transpile(
+            circ, bindings={"obs": qm_o.Z(0)}, parameters=["theta"]
+        )
+        val = exe.run(transpiler.executor(), bindings={"theta": theta}).result()
+        assert np.isclose(val, math.cos(theta), atol=_expval_atol(sdk_transpiler)), (
+            f"{sdk_transpiler.backend_name}: theta={theta} expected "
+            f"<Z>={math.cos(theta)}, got {val}"
+        )
+
     @pytest.mark.parametrize("index_value", [0, 1, 2, 3])
     def test_four_case_select_sampling(self, sdk_transpiler, index_value):
         """``select([_id, _id, X, _id])`` flips target iff index reads 2.
@@ -1338,6 +1400,41 @@ class TestSelectValidation:
         """A select with fewer than two cases raises ``ValueError``."""
         with pytest.raises(ValueError, match="at least 2 cases"):
             qmc.select([_x_gate])
+
+    def test_aliased_index_and_target_names_select(self):
+        """Aliasing the index qubit as the target names Select, not ControlledU.
+
+        The shared prepare choreography consumes the index register under a
+        ``Select[index]`` tag, so the double-use diagnostic tells the caller
+        which ``qmc.select`` argument role consumed the qubit first.
+        """
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+        @qkernel
+        def circ() -> Bit:
+            q = qmc.qubit(name="q")
+            q, t = qmc.select([_id_gate, _x_gate])(q, q)
+            return qmc.measure(t)
+
+        with pytest.raises(QubitConsumedError, match=r"Select\[index\]"):
+            _ = circ.block
+
+    def test_short_qubit_supply_names_select(self):
+        """Running out of qubits before the index width names Select.
+
+        A 4-case select needs two index qubits; supplying one qubit and
+        nothing else must fail with a message phrased in terms of the
+        select's index register rather than ControlledU controls.
+        """
+
+        @qkernel
+        def circ() -> Bit:
+            q = qmc.qubit(name="q")
+            out = qmc.select([_id_gate, _x_gate, _id_gate, _x_gate])(q)
+            return qmc.measure(out[0])
+
+        with pytest.raises(ValueError, match=r"Select requires at least 3"):
+            _ = circ.block
 
     def test_mismatched_signatures_rejected(self):
         """Cases with differing signatures raise ``ValueError``."""
