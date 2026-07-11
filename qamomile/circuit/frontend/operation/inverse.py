@@ -1860,3 +1860,72 @@ def inverse(target: QKernel | Callable[..., Any]) -> Any:
         )
     qkernel = _qkernel_for_callable(target, caller="inverse")
     return InverseGate(qkernel)
+
+
+def uncompute(
+    target: QKernel | Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Uncompute an operation by applying its adjoint at the current site.
+
+    Many quantum algorithms (Grover oracles, phase-kickback tricks,
+    amplitude amplification, arithmetic and chemistry subroutines) follow a
+    *compute -- use -- uncompute* pattern in which the uncompute step is the
+    adjoint (dagger) of the compute step. `uncompute` makes that final step
+    explicit and applies it immediately, so
+
+        >>> q = qmc.uncompute(layer, q, theta)  # doctest: +SKIP
+
+    reads as "undo ``layer(q, theta)``" and is equivalent to the more
+    verbose `qmc.inverse(layer)(q, theta)`. It is a thin, intent-revealing
+    wrapper over `inverse`: `target` is inverted with the same machinery
+    (native gates, QFT/IQFT, and user `QKernel`s are all supported), and the
+    resulting adjoint is invoked with the supplied arguments.
+
+    Unlike `inverse`, which returns a *callable* adjoint wrapper for later
+    application, `uncompute` applies the adjoint at the call site and returns
+    the resulting quantum handle(s). Use `inverse` when a reusable inverse
+    callable is needed (for example to pass it around or call it multiple
+    times); use `uncompute` to undo a computation in place.
+
+    Args:
+        target (QKernel | Callable[..., Any]): Native gate function,
+            `QKernel`, or supported stdlib function (e.g. `qmc.qft`) whose
+            adjoint should be applied. The same targets accepted by
+            `inverse` are accepted here.
+        *args (Any): Positional arguments forwarded to the adjoint of
+            `target` -- typically the quantum handle(s) (and any classical
+            parameters) the forward computation was applied to.
+        **kwargs (Any): Keyword arguments forwarded to the adjoint of
+            `target`.
+
+    Returns:
+        Any: The quantum output handle produced by applying the adjoint, or
+            a tuple of handles when `target` has multiple quantum inputs --
+            mirroring the return shape of the forward call.
+
+    Raises:
+        TypeError: If `target` cannot be interpreted as a gate-like callable,
+            if a `CompositeGate` instance is passed directly, or if the
+            forwarded arguments do not match the adjoint's signature.
+        NotImplementedError: If the inverted kernel uses operations that the
+            inverse machinery cannot reverse (e.g. `if`/`while`/`for items`
+            control flow, `QInit`, or a `ForOperation` whose bounds are not
+            compile-time constants).
+
+    Example:
+        >>> import qamomile.circuit as qmc
+        >>> @qmc.qkernel
+        ... def prep(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
+        ...     q = qmc.h(q)
+        ...     q = qmc.rz(q, angle)
+        ...     return q
+        >>> @qmc.qkernel
+        ... def circuit(angle: qmc.Float) -> qmc.Qubit:
+        ...     q = qmc.qubit("q")
+        ...     q = prep(q, angle)              # compute
+        ...     q = qmc.uncompute(prep, q, angle)  # uncompute (q back to |0>)
+        ...     return q
+    """
+    return inverse(target)(*args, **kwargs)
