@@ -254,19 +254,20 @@ def count_unrollable_inline_invokes(operations: list[Operation]) -> int:
 
     This mirrors :func:`count_inline_invokes` but **does not** descend into
     a ``ControlledUOperation.block`` or an ``InverseBlockOperation``'s
-    nested blocks. A call trapped inside one of those operation-owned
-    blocks cannot be resolved by the ``unroll_recursion`` fixed-point
-    loop: ``partial_eval`` (``ConstantFoldingPass`` /
-    ``CompileTimeIfLoweringPass``) only recurses into ``HasNestedOps``
-    bodies, never into operation-owned blocks, so a self-recursive
-    kernel's base-case ``if`` is never folded there. Such a call is therefore
-    *not* unrollable. Calls at the top level or inside
-    ``For`` / ``If`` / ``While`` bodies are unrollable and are counted.
+    nested blocks. A call still inside one of those operation-owned blocks
+    after a full ``inline`` pass is a self-recursive call that inline's
+    cycle guard could not unroll — it stops after one layer and does not
+    re-enter the operation-owned block — so no later ``unroll_recursion``
+    iteration can resolve it. Folding compile-time ``if``s there (which
+    ``CompileTimeIfLoweringPass`` does do for a ``ControlledUOperation``'s
+    block) never removes the trapped call itself. Such a call is therefore
+    *not* unrollable. Calls at the top level or inside ``For`` / ``If`` /
+    ``While`` bodies are unrollable and are counted.
 
     The unroll loop uses this to tell two failure modes apart: a non-zero
     :func:`count_inline_invokes` with a zero ``count_unrollable_inline_invokes``
     means every residual call is trapped inside a controlled / inverted
-    block (i.e. a recursive ``@qkernel`` was passed to ``qmc.control`` /
+    block (i.e. a recursive qkernel was passed to ``qmc.control`` /
     ``qmc.inverse``), as opposed to a genuinely non-terminating top-level
     recursion.
 

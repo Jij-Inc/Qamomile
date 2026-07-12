@@ -814,9 +814,12 @@ class InvokeOperation(Operation):
 
         Returns:
             int: Target arity recorded in ``attrs``. Defaults to the operand
-            count after controls.
+            count of quantum operands after controls.
         """
-        default = max(0, len(self.operands) - self.num_control_qubits)
+        default = sum(
+            operand.type.is_quantum()
+            for operand in self.operands[self.num_control_qubits :]
+        )
         return int(self.attrs.get("num_target_qubits", default))
 
     @property
@@ -833,27 +836,30 @@ class InvokeOperation(Operation):
         """Return the target-qubit operands.
 
         Returns:
-            list[Value]: Quantum target operands following any controls. A
-            vector target counts as one operand even when
+            list[Value]: Quantum target operands after any controls, preserving
+            their relative order even when classical parameters are interleaved
+            in the callable signature. A vector target counts as one operand even when
             ``num_target_qubits`` records its scalar backend width.
         """
         start = self.num_control_qubits
-        targets: list["Value"] = []
-        for operand in self.operands[start:]:
-            if not operand.type.is_quantum():
-                break
-            targets.append(operand)
-        return targets
+        return [
+            operand for operand in self.operands[start:] if operand.type.is_quantum()
+        ]
 
     @property
     def parameters(self) -> list["Value"]:
         """Return non-qubit parameter operands.
 
         Returns:
-            list[Value]: Operands after control and target qubits.
+            list[Value]: Classical/object operands after the control prefix,
+            preserving their relative declaration order.
         """
-        start = self.num_control_qubits + len(self.target_qubits)
-        return list(self.operands[start:])
+        start = self.num_control_qubits
+        return [
+            operand
+            for operand in self.operands[start:]
+            if operand.type.is_classical() or operand.type.is_object()
+        ]
 
     @property
     def gate_type(self) -> CompositeGateType:

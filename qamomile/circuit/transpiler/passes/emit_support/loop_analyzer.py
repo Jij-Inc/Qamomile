@@ -21,8 +21,12 @@ from typing import TYPE_CHECKING
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
     RuntimeClassicalExpr,
 )
+from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
 from qamomile.circuit.ir.operation.classical_ops import DictGetItemOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
@@ -30,6 +34,8 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.value import Value
@@ -67,12 +73,65 @@ class LoopAnalyzer:
             return True
         if self._has_array_element_access(op.operations, loop_uuid):
             return True
-        if self._has_loop_var_binop(op.operations, loop_uuid):
+        if self._has_loop_var_classical_op(op.operations, loop_uuid):
+            return True
+        if self._has_loop_var_structural_body_parameter(op.operations, loop_uuid):
             return True
         if self._has_loop_var_condition(op.operations, loop_uuid):
             return True
         if self._has_loop_var_dict_getitem(op.operations, loop_uuid):
             return True
+        return False
+
+    def _has_loop_var_structural_body_parameter(
+        self,
+        operations: list[Operation],
+        loop_var_uuid: str | None,
+    ) -> bool:
+        """Check whether a structural owned body receives the loop variable.
+
+        A native backend loop represents its induction value as a backend loop
+        parameter. Operation-owned controlled bodies have a fresh namespace and
+        may use the corresponding formal for structural decisions such as a
+        compile-time ``if``. Such a body must be specialized once per concrete
+        iteration, so the enclosing loop is conservatively unrolled. A direct
+        boxed invocation remains eligible for native-loop emission because its
+        ordinary runtime parameters do not imply structural control.
+
+        Args:
+            operations (list[Operation]): Enclosing loop-body operations.
+            loop_var_uuid (str | None): UUID of the enclosing loop variable,
+                or ``None`` for legacy IR.
+
+        Returns:
+            bool: ``True`` when a controlled/inverse operation-owned body
+            receives the enclosing loop variable as a parameter operand.
+        """
+        for operation in operations:
+            parameter_operands: list["Value"] = []
+            if isinstance(operation, ControlledUOperation):
+                parameter_operands = operation.param_operands
+            elif (
+                isinstance(operation, InvokeOperation)
+                and operation.transform is CallTransform.CONTROLLED
+            ):
+                parameter_operands = operation.parameters
+            elif isinstance(operation, InverseBlockOperation):
+                parameter_operands = operation.parameters
+
+            if any(
+                self._value_depends_on_loop_var(operand, loop_var_uuid)
+                for operand in parameter_operands
+            ):
+                return True
+            if isinstance(operation, HasNestedOps) and any(
+                self._has_loop_var_structural_body_parameter(
+                    nested,
+                    loop_var_uuid,
+                )
+                for nested in operation.nested_op_lists()
+            ):
+                return True
         return False
 
     def _has_loop_var_dict_getitem(
@@ -201,23 +260,38 @@ class LoopAnalyzer:
             parent = parent.slice_of
         return False
 
-    def _has_loop_var_binop(
+    def _has_loop_var_classical_op(
         self,
         operations: list[Operation],
         loop_var_uuid: str | None,
     ) -> bool:
-        from qamomile.circuit.ir.value import Value
+        """Check whether a classical expression directly reads the loop value.
+
+        Any expression chain derived from the loop variable starts with at
+        least one arithmetic or predicate operation that directly reads it.
+        Unrolling at that producer keeps later structural uses of its result
+        concrete, including passing a comparison result into a controlled
+        operation-owned block.
+
+        Args:
+            operations (list[Operation]): Loop-body operations to scan.
+            loop_var_uuid (str | None): UUID of the enclosing loop variable,
+                or ``None`` for legacy IR.
+
+        Returns:
+            bool: ``True`` when an arithmetic or predicate operation directly
+            depends on the enclosing loop variable.
+        """
 
         for op in operations:
-            if isinstance(op, BinOp):
-                for operand in op.operands:
-                    if isinstance(operand, Value) and _is_loop_var(
-                        operand, loop_var_uuid
-                    ):
-                        return True
+            if isinstance(op, (BinOp, CompOp, CondOp, NotOp)) and any(
+                self._value_depends_on_loop_var(operand, loop_var_uuid)
+                for operand in op.operands
+            ):
+                return True
             if isinstance(op, HasNestedOps):
                 if any(
-                    self._has_loop_var_binop(op_list, loop_var_uuid)
+                    self._has_loop_var_classical_op(op_list, loop_var_uuid)
                     for op_list in op.nested_op_lists()
                 ):
                     return True

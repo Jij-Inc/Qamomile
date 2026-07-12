@@ -39,6 +39,7 @@ from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
     find_measurement_derived_values,
@@ -4655,9 +4656,7 @@ def _controlled_u_child_resolver(
         return resolver.child_scope(block)
 
     extra: dict[str, ResourceExpr] = {}
-    quantum_formals = [value for value in block.input_values if value.type.is_quantum()]
-    actuals = [value for value in operation.target_operands if value.type.is_quantum()]
-    for formal, actual in zip(quantum_formals, actuals):
+    for formal, actual in pair_block_operands(block, operation.target_operands):
         extra[formal.uuid] = resolver.resolve(actual)
         if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
             for formal_dim, actual_dim in zip(formal.shape, actual.shape):
@@ -4696,21 +4695,12 @@ def _inverse_block_child_resolver(
         return resolver.child_scope(impl)
 
     extra: dict[str, ResourceExpr] = {}
-    quantum_actuals = iter(operation.target_qubits)
-    parameter_actuals = iter(operation.parameters)
-    for formal in impl.input_values:
-        if formal.type.is_quantum():
-            actual = next(quantum_actuals, None)
-            if actual is None:
-                continue
-            extra[formal.uuid] = resolver.resolve(actual)
-            if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
-                for formal_dim, actual_dim in zip(formal.shape, actual.shape):
-                    extra[formal_dim.uuid] = resolver.resolve(actual_dim)
-            continue
-        actual = next(parameter_actuals, None)
-        if actual is not None:
-            extra[formal.uuid] = resolver.resolve(actual)
+    operands = [*operation.target_qubits, *operation.parameters]
+    for formal, actual in pair_block_operands(impl, operands):
+        extra[formal.uuid] = resolver.resolve(actual)
+        if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
+            for formal_dim, actual_dim in zip(formal.shape, actual.shape):
+                extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
     context = resolver.context
     context.update(extra)
