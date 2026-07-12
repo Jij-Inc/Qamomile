@@ -134,6 +134,33 @@ def test_qmc_control_accepts_vector_composite_targets() -> None:
     assert controlled.num_control_qubits == 1
 
 
+def test_interleaved_composite_operands_classify_by_type() -> None:
+    """Quantum targets remain visible after an interleaved parameter."""
+
+    @qmc.composite_gate(name="interleaved_box")
+    def interleaved_box(
+        first: qmc.Qubit,
+        theta: qmc.Float,
+        second: qmc.Qubit,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Rotate the first qubit and flip the second qubit."""
+        first = qmc.ry(first, theta)
+        second = qmc.x(second)
+        return first, second
+
+    @qmc.qkernel
+    def circuit(theta: qmc.Float) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Invoke a composite whose Python signature interleaves operand kinds."""
+        first = qmc.qubit("first")
+        second = qmc.qubit("second")
+        return interleaved_box(first, theta, second)
+
+    [invoke] = _invokes(circuit)
+
+    assert [value.name for value in invoke.target_qubits] == ["first", "second"]
+    assert [value.name for value in invoke.parameters] == ["theta"]
+
+
 def test_inverse_accepts_a_composite_qkernel() -> None:
     """Inverse preserves the same callable identity and uses a transform."""
     inverse_bell = qmc.inverse(bell_pair)
