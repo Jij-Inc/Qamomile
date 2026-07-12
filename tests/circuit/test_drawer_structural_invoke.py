@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     GateOperation,
     GateOperationType,
+    SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
@@ -1098,6 +1099,60 @@ def _build_nested_unresolved_slice_widening_graph(leaf_kind: str) -> Block:
     )
 
 
+def _build_unresolved_widened_control_graph(selected_index: int) -> Block:
+    """Build a symbolic controlled gate on a marker-backed widened result.
+
+    Args:
+        selected_index (int): Semantic control-pool slot selected by the
+            symbolic controlled operation.
+
+    Returns:
+        Block: Graph with unresolved root candidates, one exact widening
+            suffix, and a controlled gate selecting one semantic slot.
+    """
+    graph = _build_nested_unresolved_slice_widening_graph("opaque")
+    forwarding_call = graph.operations[-2]
+    assert isinstance(forwarding_call, InvokeOperation), (
+        "[FOR DEVELOPER] The widening fixture must end with an opaque call "
+        "followed by its gate."
+    )
+    control_pool = forwarding_call.results[0]
+    assert isinstance(control_pool, ArrayValue), (
+        "[FOR DEVELOPER] The opaque widening result must be an ArrayValue."
+    )
+
+    target = Value(type=QubitType(), name="target")
+    formal_target = Value(type=QubitType(), name="target")
+    formal_result = formal_target.next_version()
+    body = Block(
+        name="selected_control_body",
+        label_args=["target"],
+        input_values=[formal_target],
+        output_values=[formal_result],
+        output_names=["target"],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [formal_target],
+                [formal_result],
+            ),
+            ReturnOperation(operands=[formal_result]),
+        ],
+    )
+    num_controls = Value(type=UIntType(), name="num_controls").with_const(1)
+    selected = Value(type=UIntType(), name="selected").with_const(selected_index)
+    controlled = SymbolicControlledU(
+        operands=[control_pool, target],
+        results=[control_pool.next_version(), target.next_version()],
+        block=body,
+        num_controls=num_controls,
+        control_indices=(selected,),
+        num_control_args=1,
+    )
+    graph.operations.extend([QInitOperation(results=[target]), controlled])
+    return graph
+
+
 def _build_opaque_widening_result_graph(
     *,
     occupy_next_wire: bool = False,
@@ -2078,6 +2133,37 @@ def test_nested_unresolved_slice_widening_preserves_exact_suffix(
             gate for gate in gates if gate.label == "OPAQUE_WIDENED_SLICE"
         ]
         assert opaque_forward.qubit_indices == expected_wires
+
+
+@pytest.mark.parametrize(
+    ("selected_index", "expected_controls"),
+    [(0, list(range(5))), (2, [5])],
+)
+def test_unresolved_widened_control_indices_preserve_alias_semantics(
+    selected_index: int,
+    expected_controls: list[int],
+) -> None:
+    """Control selection keeps unknown candidates or an exact suffix wire."""
+    graph = _build_unresolved_widened_control_graph(selected_index)
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 7
+    assert qubit_names[5] == "fresh[2]"
+    assert qubit_names[6] == "target"
+    [controlled] = [
+        node
+        for node in circuit.children
+        if isinstance(node, VInlineBlock) and node.label == "selected_control_body"
+    ]
+    assert controlled.control_qubit_indices == expected_controls
+    assert controlled.affected_qubits == [*expected_controls, 6]
 
 
 def test_legacy_stack_parameter_name_does_not_shadow_compile_time_binding() -> None:
