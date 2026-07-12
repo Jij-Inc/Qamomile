@@ -931,8 +931,8 @@ class CudaqKernelEmitter:
             self.emit_p(circuit, target_idx, angle)
             return
         a = self._angle_expr(angle)
-        controls = ", ".join(f"q[{i}]" for i in control_indices)
-        self._emit(f"r1.ctrl({a}, {controls}, q[{target_idx}])")
+        controls = ", ".join(self._qref(index) for index in control_indices)
+        self._emit(f"r1.ctrl({a}, {controls}, {self._qref(target_idx)})")
 
     def emit_multi_controlled_rx(
         self,

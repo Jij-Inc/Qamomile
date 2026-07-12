@@ -2046,8 +2046,8 @@ def test_inverse_vector_qkernel_lowers_directly_to_quri_parts_gates() -> None:
 
 
 @pytest.mark.cudaq
-def test_inverse_qkernel_lowers_directly_to_cudaq_gates() -> None:
-    """inverse(qkernel) lowers directly through the CUDA-Q materializer.
+def test_inverse_qkernel_uses_cudaq_adjoint_helper() -> None:
+    """inverse(qkernel) preserves a named helper and uses CUDA-Q adjoint.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2068,9 +2068,12 @@ def test_inverse_qkernel_lowers_directly_to_cudaq_gates() -> None:
     quantum_step = executable.compiled_quantum[0]
     cudaq_circuit = quantum_step.circuit
 
-    assert "rz(thetas[0], q[1])" in cudaq_circuit.source
-    assert "rz(-(thetas[0]), q[1])" in cudaq_circuit.source
-    assert "cudaq.adjoint" not in cudaq_circuit.source
+    assert "def _qamomile_U_0(q0: cudaq.qubit, thetas: list[float]):" in (
+        cudaq_circuit.source
+    )
+    assert "rz(thetas[0], q0)" in cudaq_circuit.source
+    assert "cudaq.adjoint(_qamomile_U_0, q0, thetas)" in cudaq_circuit.source
+    assert "_adjoint_1(q[1], thetas)" in cudaq_circuit.entry_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -2085,8 +2088,8 @@ def test_inverse_qkernel_lowers_directly_to_cudaq_gates() -> None:
 
 
 @pytest.mark.cudaq
-def test_inverse_vector_qkernel_lowers_directly_to_cudaq_gates() -> None:
-    """inverse(qkernel) preserves vector slot order during direct lowering.
+def test_inverse_vector_qkernel_uses_cudaq_adjoint_helper() -> None:
+    """Vector inverse stays atomic in a named CUDA-Q adjoint helper.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2107,9 +2110,13 @@ def test_inverse_vector_qkernel_lowers_directly_to_cudaq_gates() -> None:
     quantum_step = executable.compiled_quantum[0]
     cudaq_circuit = quantum_step.circuit
 
-    assert "rx(-(thetas[0]), q[1])" in cudaq_circuit.source
-    assert "rx(-(thetas[0]), q[0])" in cudaq_circuit.source
-    assert "cudaq.adjoint" not in cudaq_circuit.source
+    assert (
+        "def _qamomile_U_0(q0: cudaq.qubit, q1: cudaq.qubit, thetas: list[float]):"
+    ) in cudaq_circuit.source
+    assert "rx(thetas[0], q0)" in cudaq_circuit.source
+    assert "rx(thetas[0], q1)" in cudaq_circuit.source
+    assert "cudaq.adjoint(_qamomile_U_0, q0, q1, thetas)" in (cudaq_circuit.source)
+    assert "_adjoint_1(q[0], q[1], thetas)" in cudaq_circuit.entry_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -2124,8 +2131,8 @@ def test_inverse_vector_qkernel_lowers_directly_to_cudaq_gates() -> None:
 
 
 @pytest.mark.cudaq
-def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
-    """CUDA-Q inverse-of-inverse falls back before nested adjoint emission.
+def test_inverse_of_inverse_cudaq_uses_explicit_late_fallback() -> None:
+    """Nested adjoint uses the SDK-safe fallback at materialization only.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2155,7 +2162,8 @@ def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
         "@cudaq.kernel\ndef _qamomile_kernel",
         maxsplit=1,
     )
-    assert "cudaq.adjoint(" not in helper_source
+    assert helper_source.count("cudaq.adjoint(") == 1
+    assert "def _qamomile_U_inverse_" in helper_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -2169,7 +2177,7 @@ def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
     assert np.allclose(statevector, expected, atol=1e-8)
 
 
-# The two layers below are shared by the CUDA-Q adjoint-source test in this
+# The two layers below are shared by the CUDA-Q adjoint-helper test in this
 # section and by the nested-call wire-availability test in the nested
 # qkernel call section.
 @qmc.qkernel
@@ -2194,8 +2202,8 @@ def _inverse_runtime_call_then_gate_layer(
 
 
 @pytest.mark.cudaq
-def test_inverse_cudaq_materializer_inlines_nested_source_block() -> None:
-    """CUDA-Q direct inverse lowering includes nested qkernel call bodies.
+def test_inverse_cudaq_materializer_preserves_nested_adjoint_helper() -> None:
+    """CUDA-Q keeps a nested body named and applies adjoint at the call site.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2213,9 +2221,10 @@ def test_inverse_cudaq_materializer_inlines_nested_source_block() -> None:
     executable = CudaqTranspiler().transpile(circuit, parameters=["rotation_angle"])
     source = executable.compiled_quantum[0].circuit.source
 
-    assert "rx(-(thetas[0]), q[0])" in source
-    assert "h(q[0])" in source
-    assert "cudaq.adjoint" not in source
+    assert "h(q0)" in source
+    assert "rx(thetas[0], q0)" in source
+    assert "cudaq.adjoint(_qamomile_U_0, q0, thetas)" in source
+    assert "_adjoint_1(q[0], thetas)" in source
 
 
 # ---------------------------------------------------------------------------

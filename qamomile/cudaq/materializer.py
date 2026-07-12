@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from qamomile._utils import is_close_zero
@@ -46,6 +47,53 @@ from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.gate_emitter import GateKind, MeasurementMode
 
 from .emitter import CudaqKernelEmitter, ExecutionMode
+
+_CUDAQ_CONTROLLED_GATE_KINDS = frozenset(
+    {
+        GateKind.CX,
+        GateKind.CZ,
+        GateKind.CP,
+        GateKind.TOFFOLI,
+        GateKind.CH,
+        GateKind.CY,
+        GateKind.CRX,
+        GateKind.CRY,
+        GateKind.CRZ,
+    }
+)
+_SELF_INVERSE_GATE_KINDS = frozenset(
+    {
+        GateKind.H,
+        GateKind.X,
+        GateKind.Y,
+        GateKind.Z,
+        GateKind.CX,
+        GateKind.CZ,
+        GateKind.SWAP,
+        GateKind.TOFFOLI,
+        GateKind.CH,
+        GateKind.CY,
+    }
+)
+_SWAPPED_INVERSE_GATE_KINDS = {
+    GateKind.S: GateKind.SDG,
+    GateKind.SDG: GateKind.S,
+    GateKind.T: GateKind.TDG,
+    GateKind.TDG: GateKind.T,
+}
+_NEGATED_PARAMETER_GATE_KINDS = frozenset(
+    {
+        GateKind.RX,
+        GateKind.RY,
+        GateKind.RZ,
+        GateKind.P,
+        GateKind.CP,
+        GateKind.RZZ,
+        GateKind.CRX,
+        GateKind.CRY,
+        GateKind.CRZ,
+    }
+)
 
 
 class CudaqMaterializer:
@@ -360,17 +408,306 @@ def _emit_call(
     except ValueError as error:
         raise EmitError(str(error)) from error
     if inverse:
-        helper_name = emitter.define_adjoint_helper(
-            helper_name,
-            callee.body.num_qubits,
+        if _requires_explicit_inverse(callee.body.operations):
+
+            def emit_inverse_helper_body() -> None:
+                """Materialize an SDK-safe explicit inverse helper."""
+                helper_wires = {
+                    wire: index for index, wire in enumerate(callee.body.output_wires)
+                }
+                _emit_inverse_region(
+                    callee.body.operations,
+                    circuit,
+                    helper_wires,
+                    parameters,
+                    {},
+                    {},
+                    emitter,
+                )
+
+            try:
+                helper_name = emitter.define_helper(
+                    ("explicit-inverse", definition_key),
+                    f"{callee.name}_inverse",
+                    callee.body.num_qubits,
+                    emit_inverse_helper_body,
+                )
+            except ValueError as error:
+                raise EmitError(str(error)) from error
+        else:
+            helper_name = emitter.define_adjoint_helper(
+                helper_name,
+                callee.body.num_qubits,
+            )
+    relative_phase = (
+        _program_global_phase(
+            callee.body,
+            parameters,
+            loop_variables,
+            emitter,
         )
+        if controls
+        else 0.0
+    )
+    if inverse:
+        relative_phase = -relative_phase
     for _ in range(callee.power):
         emitter.emit_reusable_call(
             helper_name,
             tuple(targets),
             controls,
         )
+        if controls and not _is_materialized_zero(relative_phase):
+            phase_controls = list(controls)
+            phase_target = phase_controls.pop()
+            emitter.emit_multi_controlled_p(
+                circuit,
+                phase_controls,
+                phase_target,
+                relative_phase,
+            )
     _publish(call_outputs, [*own_controls, *targets], wires)
+
+
+def _requires_explicit_inverse(
+    operations: tuple[CircuitInstruction, ...],
+) -> bool:
+    """Return whether CUDA-Q 0.14 requires inverse-body expansion.
+
+    CUDA-Q's decorator frontend currently accepts adjoint kernels containing
+    controlled operations or another adjoint call, but aborts when executing
+    them. Ordinary helpers continue to use native ``cudaq.adjoint``; only
+    these unsupported shapes take the late explicit-inverse fallback.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Helper region to inspect.
+
+    Returns:
+        bool: Whether the helper must be inverted explicitly.
+    """
+    for operation in operations:
+        if (
+            isinstance(operation, GateInstruction)
+            and operation.kind in _CUDAQ_CONTROLLED_GATE_KINDS
+        ):
+            return True
+        if isinstance(operation, CallInstruction):
+            if operation.callee.inverse or operation.callee.controls:
+                return True
+            if _requires_explicit_inverse(operation.callee.body.operations):
+                return True
+        if isinstance(operation, ForInstruction) and _requires_explicit_inverse(
+            operation.body
+        ):
+            return True
+    return False
+
+
+def _emit_inverse_region(
+    operations: tuple[CircuitInstruction, ...],
+    circuit: Any,
+    input_wires: dict[WireId, int],
+    parameters: dict[str, Any],
+    measurements: dict[int, int],
+    loop_variables: dict[str, int],
+    emitter: CudaqKernelEmitter,
+) -> dict[WireId, int]:
+    """Emit an explicit inverse only for CUDA-Q-unsupported adjoint shapes.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Forward region.
+        circuit (Any): Destination CUDA-Q artifact.
+        input_wires (dict[WireId, int]): Mapping from forward output wires to
+            physical slots.
+        parameters (dict[str, Any]): Runtime parameter cache.
+        measurements (dict[int, int]): Static measurement mapping.
+        loop_variables (dict[str, int]): Active concrete loop values.
+        emitter (CudaqKernelEmitter): CUDA-Q source builder.
+
+    Returns:
+        dict[WireId, int]: Mapping containing the recovered forward inputs.
+
+    Raises:
+        EmitError: If a nonunitary or dynamic construct reaches the fallback.
+    """
+    wires = dict(input_wires)
+    for operation in reversed(operations):
+        if isinstance(operation, GateInstruction):
+            slots = tuple(wires[wire] for wire in operation.outputs)
+            if operation.kind in _SELF_INVERSE_GATE_KINDS:
+                kind = operation.kind
+                parameters_for_gate = operation.parameters
+            elif operation.kind in _SWAPPED_INVERSE_GATE_KINDS:
+                kind = _SWAPPED_INVERSE_GATE_KINDS[operation.kind]
+                parameters_for_gate = operation.parameters
+            elif operation.kind in _NEGATED_PARAMETER_GATE_KINDS:
+                kind = operation.kind
+                parameters_for_gate = tuple(
+                    UnaryExpr(UnaryOperator.NEG, value)
+                    for value in operation.parameters
+                )
+            else:
+                raise EmitError(
+                    f"CUDA-Q cannot explicitly invert gate {operation.kind.name}"
+                )
+            angles = tuple(
+                _scalar(value, parameters, loop_variables, emitter)
+                for value in parameters_for_gate
+            )
+            _emit_gate(emitter, circuit, kind, slots, angles)
+            _publish(operation.inputs, slots, wires)
+        elif isinstance(operation, PauliEvolutionInstruction):
+            transformed = dataclasses.replace(
+                operation,
+                time=UnaryExpr(UnaryOperator.NEG, operation.time),
+                inputs=operation.outputs,
+                outputs=operation.inputs,
+            )
+            _emit_pauli(
+                transformed,
+                circuit,
+                wires,
+                parameters,
+                loop_variables,
+                emitter,
+                use_native=(
+                    transformed.realization is PauliEvolutionRealization.NATIVE
+                ),
+            )
+        elif isinstance(operation, CallInstruction):
+            _emit_call(
+                operation,
+                circuit,
+                wires,
+                parameters,
+                measurements,
+                loop_variables,
+                emitter,
+                (),
+                True,
+            )
+        elif isinstance(operation, ForInstruction):
+            current = [wires[wire] for wire in operation.outputs]
+            for index in reversed(operation.indexset):
+                nested_variables = dict(loop_variables)
+                nested_variables[operation.loop_variable.name] = index
+                body_wires = _emit_inverse_region(
+                    operation.body,
+                    circuit,
+                    dict(zip(operation.body_outputs, current, strict=True)),
+                    parameters,
+                    measurements,
+                    nested_variables,
+                    emitter,
+                )
+                current = [body_wires[wire] for wire in operation.inputs]
+            _publish(operation.inputs, current, wires)
+        elif isinstance(operation, BarrierInstruction):
+            emitter.emit_barrier(circuit, [wires[wire] for wire in operation.wires])
+        else:
+            raise EmitError(
+                "CUDA-Q explicit inverse fallback received a nonunitary or "
+                f"dynamic instruction: {operation!r}"
+            )
+    return wires
+
+
+def _program_global_phase(
+    program: CircuitProgram,
+    parameters: dict[str, Any],
+    loop_variables: dict[str, int],
+    emitter: CudaqKernelEmitter,
+) -> Any:
+    """Evaluate the phase omitted from one CUDA-Q helper definition.
+
+    CUDA-Q can control a named kernel directly, but a Hamiltonian constant is
+    intentionally absent from the helper because it is only a global phase
+    when the helper runs directly. Once that helper is controlled, the phase
+    is relative and observable. This analysis retains the high-level
+    ``cudaq.control`` call and returns only the correction that must be placed
+    on its controls.
+
+    Args:
+        program (CircuitProgram): Reusable helper body.
+        parameters (dict[str, Any]): Runtime parameter cache.
+        loop_variables (dict[str, int]): Active concrete loop values.
+        emitter (CudaqKernelEmitter): CUDA-Q scalar-expression builder.
+
+    Returns:
+        Any: Concrete or source-level phase angle omitted by the helper.
+    """
+    phase = _scalar(program.global_phase, parameters, loop_variables, emitter)
+    return phase + _region_global_phase(
+        program.operations,
+        parameters,
+        loop_variables,
+        emitter,
+    )
+
+
+def _region_global_phase(
+    operations: tuple[CircuitInstruction, ...],
+    parameters: dict[str, Any],
+    loop_variables: dict[str, int],
+    emitter: CudaqKernelEmitter,
+) -> Any:
+    """Evaluate helper-global phase contributions in one static region.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Region to analyze.
+        parameters (dict[str, Any]): Runtime parameter cache.
+        loop_variables (dict[str, int]): Active concrete loop values.
+        emitter (CudaqKernelEmitter): CUDA-Q scalar-expression builder.
+
+    Returns:
+        Any: Sum of omitted global-phase angles in the region.
+    """
+    phase: Any = 0.0
+    for operation in operations:
+        if isinstance(operation, PauliEvolutionInstruction):
+            constant = operation.hamiltonian.constant
+            if not is_close_zero(float(constant.real)):
+                time = _scalar(
+                    operation.time,
+                    parameters,
+                    loop_variables,
+                    emitter,
+                )
+                phase += -float(constant.real) * time
+        elif isinstance(operation, ForInstruction):
+            for index in operation.indexset:
+                nested_variables = dict(loop_variables)
+                nested_variables[operation.loop_variable.name] = index
+                phase += _region_global_phase(
+                    operation.body,
+                    parameters,
+                    nested_variables,
+                    emitter,
+                )
+        elif isinstance(operation, CallInstruction) and not operation.callee.controls:
+            nested = _program_global_phase(
+                operation.callee.body,
+                parameters,
+                loop_variables,
+                emitter,
+            )
+            factor = operation.callee.power
+            if operation.callee.inverse:
+                factor = -factor
+            phase += factor * nested
+    return phase
+
+
+def _is_materialized_zero(value: Any) -> bool:
+    """Return whether a materialized scalar is concretely zero.
+
+    Args:
+        value (Any): Concrete number or CUDA-Q source expression.
+
+    Returns:
+        bool: True only for a concrete numeric zero.
+    """
+    return isinstance(value, (int, float)) and is_close_zero(float(value))
 
 
 def _scalar(
