@@ -1401,6 +1401,66 @@ def _build_unresolved_slice_qfixed_measure_graph() -> Block:
     )
 
 
+def _build_boxed_unresolved_slice_qfixed_output_graph() -> Block:
+    """Build a boxed QFixed cast whose source is an unresolved slice.
+
+    Returns:
+        Block: Graph whose boxed call and measurement must retain every root
+            wire as a conservative candidate.
+    """
+    root_size = Value(type=UIntType(), name="root_size").with_const(5)
+    root = ArrayValue(type=QubitType(), name="q", shape=(root_size,))
+    view_size = Value(type=UIntType(), name="view_size").with_const(2)
+    view_start = Value(type=UIntType(), name="view_start").with_parameter("view_start")
+    view_step = Value(type=UIntType(), name="view_step").with_const(1)
+    view = ArrayValue(
+        type=QubitType(),
+        name="view",
+        shape=(view_size,),
+        slice_of=root,
+        slice_start=view_start,
+        slice_step=view_step,
+    )
+
+    formal = ArrayValue(type=QubitType(), name="target", shape=(view_size,))
+    qfixed = Value(type=QFixedType(), name="qf").with_cast_metadata(
+        source_uuid=formal.uuid,
+        qubit_uuids=[],
+        source_logical_id=formal.logical_id,
+        qubit_logical_ids=[
+            f"{formal.logical_id}_0",
+            f"{formal.logical_id}_1",
+        ],
+    )
+    body = Block(
+        name="boxed_unresolved_slice_qfixed_output",
+        label_args=["target"],
+        input_values=[formal],
+        output_values=[qfixed],
+        output_names=["qf"],
+        operations=[
+            CastOperation(
+                operands=[formal],
+                results=[qfixed],
+                source_type=formal.type,
+                target_type=qfixed.type,
+            ),
+            ReturnOperation(operands=[qfixed]),
+        ],
+    )
+    call = body.call(target=view)
+    measurement = MeasureQFixedOperation(
+        operands=[call.results[0]],
+        results=[Value(type=FloatType(), name="measured")],
+        num_bits=2,
+        int_bits=0,
+    )
+    return Block(
+        name="boxed_unresolved_slice_qfixed_output_graph",
+        operations=[QInitOperation(results=[root]), call, measurement],
+    )
+
+
 def _build_folded_expval_if_graph() -> Block:
     """Build a folded IF whose branches evaluate a two-qubit observable.
 
@@ -2933,6 +2993,36 @@ def test_unresolved_slice_qfixed_measure_keeps_candidate_wires() -> None:
         for node in _iter_visual_nodes(inline_block.children)
         if isinstance(node, VGate) and node.label == "M"
     ]
+    assert measurement.qubit_indices == expected_wires
+
+
+def test_boxed_unresolved_slice_qfixed_output_keeps_candidate_wires() -> None:
+    """A boxed QFixed cast never concretizes unresolved slice candidates."""
+    graph = _build_boxed_unresolved_slice_qfixed_output_graph()
+    invoke = next(op for op in graph.operations if isinstance(op, InvokeOperation))
+    result = invoke.results[0]
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    expected_wires = list(range(5))
+    assert num_qubits == 5
+    assert qubit_names == {index: f"q[{index}]" for index in expected_wires}
+    carrier_root = result.get_cast_source_logical_id()
+    assert carrier_root is not None
+    assert f"{carrier_root}_[0]" not in qubit_map
+    assert f"{carrier_root}_[1]" not in qubit_map
+    gates = [node for node in circuit.children if isinstance(node, VGate)]
+    [call] = [
+        gate for gate in gates if gate.label == "BOXED_UNRESOLVED_SLICE_QFIXED_OUTPUT"
+    ]
+    [measurement] = [gate for gate in gates if gate.label == "M"]
+    assert call.qubit_indices == expected_wires
     assert measurement.qubit_indices == expected_wires
 
 
