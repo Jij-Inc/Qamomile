@@ -464,6 +464,8 @@ class InlinePass(Pass[Block, Block]):
                 duplicate.  Frontend-traced kernels reject this earlier in
                 ``QKernel.__call__``; this guard covers hand-built or
                 deserialized IR.
+            ValueError: If the call operand count differs from the callee
+                input count.
         """
         call_args = call_operands  # Arguments passed to the call
 
@@ -494,7 +496,7 @@ class InlinePass(Pass[Block, Block]):
         # the frontend.
         seen_quantum_args: dict[str, str] = {}
         for arg_index, (block_input, call_arg) in enumerate(
-            zip(block.input_values, call_args)
+            zip(block.input_values, call_args, strict=True)
         ):
             substituted_arg = arg_substitutor.substitute_value(call_arg)
             resolved_arg = cast(ValueLike, substituted_arg)

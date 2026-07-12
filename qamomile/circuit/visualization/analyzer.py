@@ -442,8 +442,16 @@ class CircuitAnalyzer:
                     results in the same order.
                 logical_id_remap (dict[str, str]): Formal-to-actual logical-ID
                     remapping active inside the callee.
+
+            Raises:
+                ValueError: If the callee output count differs from the call
+                    result count.
             """
-            for body_output, call_result in zip(body_outputs, call_results):
+            for body_output, call_result in zip(
+                body_outputs,
+                call_results,
+                strict=True,
+            ):
                 if not isinstance(call_result.type, QubitType):
                     continue
                 source_lid = logical_id_remap.get(

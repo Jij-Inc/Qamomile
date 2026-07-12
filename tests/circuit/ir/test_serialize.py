@@ -1832,6 +1832,35 @@ class TestManualConstruction:
         assert to_dict(restored) == to_dict(block)
         assert isinstance(restored.input_values[0], DictValue)
 
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_structural_invoke_round_trip(self, dump, load):
+        """Invoke operands and results preserve TupleValue and DictValue."""
+        key = Value(type=UIntType(), name="key")
+        value = Value(type=FloatType(), name="value")
+        pair = TupleValue(name="pair", elements=(key, value))
+        mapping = DictValue(name="mapping", entries=((key, value),))
+        invoke = InvokeOperation(operands=[pair], results=[mapping])
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[pair],
+            output_values=[mapping],
+            label_args=["pair"],
+            output_names=["mapping"],
+            operations=[invoke],
+        )
+
+        restored = load(dump(block))
+
+        assert to_dict(restored) == to_dict(block)
+        restored_invoke = restored.operations[0]
+        assert isinstance(restored_invoke, InvokeOperation)
+        assert isinstance(restored_invoke.operands[0], TupleValue)
+        assert isinstance(restored_invoke.results[0], DictValue)
+
     def test_extra_x_gate_changes_bytes(self):
         """Adding a gate changes the serialized bytes (regression guard)."""
         block = _to_affine(_scalar_gate)

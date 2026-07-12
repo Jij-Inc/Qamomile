@@ -915,6 +915,26 @@ def _operands_results(
     return operands, results
 
 
+def _value_like_operands_results(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> tuple[list[ValueLike], list[ValueLike]]:
+    """Materialize structural operation operands and results.
+
+    Args:
+        d (dict[str, Any]): The operation dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[list[ValueLike], list[ValueLike]]: Materialized operands and
+        results, including TupleValue and DictValue containers.
+    """
+    operands = [
+        _materialize_as_value_like(ctx, ref) for ref in d.get("operand_refs", ())
+    ]
+    results = [_materialize_as_value_like(ctx, ref) for ref in d.get("result_refs", ())]
+    return operands, results
+
+
 def _container_operands_results(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> tuple[list[Value], list[Value]]:
@@ -1860,7 +1880,7 @@ def _decode_invoke_operation(d: dict[str, Any], ctx: _DecodeContext) -> InvokeOp
     Raises:
         ValueError: If transform names are unknown.
     """
-    operands, results = _operands_results(d, ctx)
+    operands, results = _value_like_operands_results(d, ctx)
     transform = _enum_by_name(CallTransform, d.get("transform"), "CallTransform")
     attrs = _decode_payload(d.get("attrs"))
     if attrs is None:
