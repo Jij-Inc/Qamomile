@@ -247,7 +247,16 @@ class ControlledUOperation(Operation):
 
     @property
     def param_operands(self) -> list[Value]:
-        """Get parameter operands (non-qubit, non-block)."""
+        """Get the controlled operation's classical/object arguments.
+
+        Returns:
+            list[Value]: Non-quantum operands after the control prefix, in
+            wrapped-kernel signature order.
+
+        Raises:
+            NotImplementedError: Always, because subclasses define their
+                concrete operand layout.
+        """
         raise NotImplementedError  # pragma: no cover
 
     @property
@@ -301,8 +310,16 @@ class ConcreteControlledU(ControlledUOperation):
 
     @property
     def param_operands(self) -> list[Value]:
+        """Get classical/object operands after the concrete control prefix.
+
+        Returns:
+            list[Value]: Classical and object operands in wrapped-kernel
+            signature order.
+        """
         return [
-            op for op in self.operands[self.num_controls :] if op.type.is_classical()
+            op
+            for op in self.operands[self.num_controls :]
+            if op.type.is_classical() or op.type.is_object()
         ]
 
     @property
@@ -393,10 +410,16 @@ class SymbolicControlledU(ControlledUOperation):
 
     @property
     def param_operands(self) -> list[Value]:
+        """Get classical/object operands after the symbolic control prefix.
+
+        Returns:
+            list[Value]: Classical and object operands in wrapped-kernel
+            signature order.
+        """
         return [
             op
             for op in self.operands[self.num_control_args :]
-            if op.type.is_classical()
+            if op.type.is_classical() or op.type.is_object()
         ]
 
     @property

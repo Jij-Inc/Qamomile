@@ -123,9 +123,10 @@ def test_control_of_recursive_kernel_raises_targeted_error():
     """Controlling a self-recursive kernel fails with a cause-specific error.
 
     The recursion lives inside ``ControlledUOperation.block``, where
-    ``partial_eval`` never folds the base-case ``if`` (it does not descend
-    into operation-owned blocks). The unroll loop must recognise that every
-    residual call is trapped there and raise a targeted message naming
+    ``inline``'s cycle guard unrolls the self-call one layer and then
+    declines to re-enter, leaving a residual call the unroll loop cannot
+    resolve. The unroll loop must recognise that every residual call is
+    trapped there and raise a targeted message naming
     ``qmc.control`` / ``qmc.inverse`` — not the generic "did not terminate
     after N iterations" message, which would wrongly blame the (perfectly
     valid, terminating) bindings.

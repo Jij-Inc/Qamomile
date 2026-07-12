@@ -345,6 +345,33 @@ def test_quantum_port_is_not_an_estimation_input() -> None:
         quantum_input.estimate_resources(inputs={"q": 0})
 
 
+def test_interleaved_composite_signature_binds_resource_parameter() -> None:
+    """Resource estimation reweaves grouped operands to formal order."""
+
+    @qmc.composite_gate(name="interleaved_resource_box")
+    def interleaved_resource_box(
+        first: qmc.Qubit,
+        rounds: qmc.UInt,
+        second: qmc.Qubit,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Apply ``rounds`` X gates and one H gate."""
+        for _ in qmc.range(rounds):
+            first = qmc.x(first)
+        second = qmc.h(second)
+        return first, second
+
+    @qmc.qkernel
+    def algorithm(rounds: qmc.UInt) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Invoke the interleaved composite on two fresh qubits."""
+        first = qmc.qubit("first")
+        second = qmc.qubit("second")
+        return interleaved_resource_box(first, rounds, second)
+
+    estimate = algorithm.estimate_resources(inputs={"rounds": 3})
+
+    assert estimate.gates.total == 4
+
+
 def test_inputs_trace_structural_values_and_specialize_scalars() -> None:
     """One input mapping handles structural and symbolic qkernel arguments."""
 
