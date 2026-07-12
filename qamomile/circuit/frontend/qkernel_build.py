@@ -7,6 +7,7 @@ from typing import Any
 
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.func_to_block import (
+    _validate_returned_arrays,
     build_param_slots,
     create_dummy_input,
     is_array_type,
@@ -93,6 +94,11 @@ def create_traced_block(
     Returns:
         Block: Traced block with label arguments, inputs, outputs, and
         parameter slots populated.
+
+    Raises:
+        UnreturnedBorrowError: If a returned quantum array still has
+            outstanding element/view borrows at trace end (whether or
+            not the borrowed element is co-returned with it).
     """
     if qubit_sizes is None:
         qubit_sizes = {}
@@ -141,6 +147,15 @@ def create_traced_block(
             dummy_inputs[name] = handle
 
         result = kernel.func(**dummy_inputs)
+        # Same trace-end borrow validation as ``func_to_block``: this is
+        # the second of the two trace paths (``.build()`` / call-time
+        # specialization), and without the check here a sub-kernel could
+        # return a parent register with outstanding element borrows —
+        # including a still-borrowed element returned ALONGSIDE its
+        # parent, which hands the caller two handles onto one physical
+        # slot. Co-returning the borrowed element does not exempt the
+        # parent: the alias escapes either way.
+        _validate_returned_arrays(result)
         output_values = _extract_output_values(result)
         if emit_return_op:
             tracer.add_operation(ReturnOperation(operands=output_values, results=[]))

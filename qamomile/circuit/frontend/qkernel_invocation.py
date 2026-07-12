@@ -72,10 +72,17 @@ def _prepare_call_inputs(
 
     Raises:
         TypeError: If an argument is not a frontend ``Handle``.
+        UnreturnedBorrowError: If an array argument still has outstanding
+            element/view borrows when it is consumed for the call —
+            including the case where the borrowed element itself is
+            another argument of the same call. A borrowed element and
+            its parent name one physical slot, so passing both would
+            hand the callee two "independent" parameters on one wire;
+            write the element back (``qs[i] = e``) before passing the
+            whole register.
     """
     inputs_map: dict[str, Value] = {}
     provenance_map: dict[str, tuple[Any, tuple]] = {}
-    borrowed_scalars: list[tuple[Any, tuple]] = []
 
     for name, handle in arguments.items():
         if not isinstance(handle, Handle):
@@ -88,13 +95,14 @@ def _prepare_call_inputs(
             and handle._should_enforce_linear()
         ):
             provenance_map[handle.value.logical_id] = (handle.parent, handle.indices)
-            borrowed_scalars.append((handle.parent, handle.indices))
 
-    array_args = {id(h) for h in arguments.values() if is_array_type(type(h))}
-    for parent, indices in borrowed_scalars:
-        if id(parent) in array_args:
-            key = parent._make_indices_key(indices)
-            parent._borrowed_indices.pop(key, None)
+    # Deliberately NO borrow release here: an earlier revision popped the
+    # parent's ``_borrowed_indices`` entry when the borrowed element was
+    # itself another argument of the same call, which silently aliased the
+    # callee's two parameters onto one physical wire (measuring both gave
+    # perfectly correlated bits). Leaving the entry in place lets the
+    # parent's consume-driven ``validate_all_returned`` reject the overlap
+    # like any other unreturned borrow.
 
     input_view_metas = _collect_input_view_metas(arguments)
 
