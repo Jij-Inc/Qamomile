@@ -452,7 +452,7 @@ print("if_else condition:", if_op.condition)
 
 # %% [markdown]
 # Qiskit's classical expression system currently covers the logical, comparison, and arithmetic operations that Qamomile uses in dynamic conditions.
-# However, `FLOORDIV` and `POW` do not have matching Qiskit classical expressions, so Qamomile raises `NotImplementedError` during circuit generation if either one remains in a runtime condition.
+# However, `FLOORDIV` and `POW` do not have matching Qiskit classical expressions, so target-legality verification raises `TargetCapabilityError` before Qiskit circuit construction if either one remains in a runtime condition.
 # If you need those operations, make sure their values are fixed before transpilation.
 
 # %% [markdown]
@@ -494,7 +494,7 @@ assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 
 # %% [markdown]
 # Pass `QiskitTranspiler(use_native_pauli_evolution=False)` when you want a gate-by-gate decomposition instead.
-# The same flag also disables native QFT/IQFT output, which is useful for debugging or for comparing gate counts across quantum SDKs.
+# This flag controls only Pauli evolution. Native QFT/IQFT output is controlled independently by `use_native_composite`.
 
 # %% [markdown]
 # ### Native `QFTGate`

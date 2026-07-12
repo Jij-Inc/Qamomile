@@ -50,7 +50,10 @@ from qamomile.circuit.transpiler.artifact import (
     CompilationMetadata,
     CompiledProgram,
 )
-from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.errors import (
+    CallableDefinitionConflictError,
+    EmitError,
+)
 from qamomile.circuit.transpiler.prepared import PreparedModule
 
 
@@ -86,7 +89,15 @@ class HugrTarget:
 
         Returns:
             HugrCompilationPlan: Stable callable-definition order.
+
+        Raises:
+            CallableDefinitionConflictError: If one source callable produced
+                multiple specialized bodies that cannot share one HUGR symbol.
         """
+        for ref, variants in program.definition_variants.items():
+            if len(variants) > 1:
+                symbol = f"{ref.namespace}.{ref.name}@{ref.version}"
+                raise CallableDefinitionConflictError(symbol)
         definitions = tuple(
             ref
             for ref, definition in program.definitions.items()

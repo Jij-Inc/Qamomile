@@ -89,6 +89,28 @@ def _hugr_x_helper(qubit: qmc.Qubit) -> qmc.Qubit:
     return qmc.x(qubit)
 
 
+@qmc.composite_gate(name="shared_display_name")
+def _hugr_same_name_h(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Apply H through the first of two equally named callables."""
+    return qmc.h(qubit)
+
+
+@qmc.composite_gate(name="shared_display_name")
+def _hugr_same_name_x(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Apply X through the second of two equally named callables."""
+    return qmc.x(qubit)
+
+
+@qmc.qkernel
+def _hugr_same_name_program() -> tuple[qmc.Bit, qmc.Bit]:
+    """Invoke distinct callable bodies that share one display name."""
+    left = qmc.qubit("left")
+    right = qmc.qubit("right")
+    left = _hugr_same_name_h(left)
+    right = _hugr_same_name_x(right)
+    return qmc.measure(left), qmc.measure(right)
+
+
 @qmc.qkernel
 def _hugr_controlled_program() -> tuple[qmc.Bit, qmc.Bit]:
     """Invoke a one-control helper at a HUGR call site."""
@@ -234,10 +256,25 @@ def test_hugr_preserves_body_backed_helper_as_function_call() -> None:
     operations = [data.op for _, data in package.modules[0].nodes()]
 
     assert any(
-        getattr(op, "f_name", None) == "user_qkernel___hugr_helper__v1"
-        for op in operations
+        getattr(op, "f_name", "").endswith("___hugr_helper__v1") for op in operations
     )
     assert any(type(op).__name__ == "Call" for op in operations)
+
+
+@pytest.mark.hugr
+def test_hugr_distinguishes_callables_with_the_same_display_name() -> None:
+    """Origin-qualified symbols prevent same-name callable miscompilation."""
+    package = HugrTranspiler().to_hugr(_hugr_same_name_program)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+    definitions = [
+        op
+        for op in operations
+        if getattr(op, "f_name", "").endswith("__shared_display_name__v1")
+    ]
+
+    assert len(definitions) == 2
+    assert any("name='H'" in str(op) for op in operations)
+    assert any("name='X'" in str(op) for op in operations)
 
 
 @pytest.mark.hugr

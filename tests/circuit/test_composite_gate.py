@@ -72,7 +72,7 @@ def test_composite_call_stays_named_with_body() -> None:
     [invoke] = _invokes(use_bell_pair)
 
     assert invoke.custom_name == "bell_pair"
-    assert invoke.target.namespace == "user.composite"
+    assert invoke.target.namespace.startswith("user.composite.")
     assert invoke.transform is CallTransform.DIRECT
     assert invoke.effective_body() is bell_pair.block
 

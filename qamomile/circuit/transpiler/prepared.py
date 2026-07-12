@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -14,6 +15,7 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.transpiler.errors import CallableDefinitionConflictError
 from qamomile.circuit.transpiler.segments import ProgramABI
 
 
@@ -27,6 +29,10 @@ class PreparedModule:
         entrypoint (Block): Hierarchical semantic block for the entrypoint.
         definitions (Mapping[CallableRef, CallableDef]): Reachable callable
             definitions keyed by their stable symbols.
+        definition_variants (Mapping[CallableRef, tuple[CallableDef, ...]]):
+            Every distinct body observed for a symbol. Multiple variants of
+            one origin may be valid for circuit-family inlining but must be
+            handled or rejected by targets that emit one function per symbol.
         call_graph (Mapping[CallableRef, frozenset[CallableRef]]): Directed
             caller-to-callee relation, including the entrypoint symbol.
         abi (ProgramABI): Classical public input and output contract.
@@ -35,8 +41,39 @@ class PreparedModule:
     entrypoint_ref: CallableRef
     entrypoint: Block
     definitions: Mapping[CallableRef, CallableDef]
+    definition_variants: Mapping[CallableRef, tuple[CallableDef, ...]]
     call_graph: Mapping[CallableRef, frozenset[CallableRef]]
     abi: ProgramABI
+
+    def owned_snapshot(self) -> PreparedModule:
+        """Create a deep, target-owned snapshot of prepared semantics.
+
+        The semantic IR intentionally remains mutable while compiler passes
+        are being developed. Copying the entrypoint and definition registry
+        as one object graph preserves shared callable bodies while preventing
+        one target from mutating the source module observed by another.
+
+        Returns:
+            PreparedModule: Deep snapshot with read-only definition and call
+                graph registries.
+        """
+        entrypoint, definitions, definition_variants, call_graph, abi = copy.deepcopy(
+            (
+                self.entrypoint,
+                dict(self.definitions),
+                dict(self.definition_variants),
+                dict(self.call_graph),
+                self.abi,
+            )
+        )
+        return PreparedModule(
+            entrypoint_ref=self.entrypoint_ref,
+            entrypoint=entrypoint,
+            definitions=MappingProxyType(definitions),
+            definition_variants=MappingProxyType(definition_variants),
+            call_graph=MappingProxyType(call_graph),
+            abi=abi,
+        )
 
     def body(self, ref: CallableRef) -> Block:
         """Return the semantic body associated with a program symbol.
@@ -72,13 +109,15 @@ def prepare_module(entrypoint: Block) -> PreparedModule:
 
     Returns:
         PreparedModule: Entrypoint, reachable definitions, call graph, and
-            public ABI packaged for a target-specific compiler pipeline.
+            public ABI. :class:`QamomileCompiler` creates a deep target-owned
+            snapshot before invoking a target pipeline.
     """
     entrypoint_ref = CallableRef(
         namespace="qamomile.entrypoint",
         name=entrypoint.name or "main",
     )
     definitions: dict[CallableRef, CallableDef] = {}
+    definition_variants: dict[CallableRef, list[CallableDef]] = {}
     edges: dict[CallableRef, set[CallableRef]] = {entrypoint_ref: set()}
     visited_bodies: set[tuple[CallableRef, int]] = set()
 
@@ -103,6 +142,24 @@ def prepare_module(entrypoint: Block) -> PreparedModule:
             definition (CallableDef): Definition referenced by an invocation.
         """
         existing = definitions.get(definition.ref)
+        variants = definition_variants.setdefault(definition.ref, [])
+        if not any(candidate.body is definition.body for candidate in variants):
+            variants.append(definition)
+        if (
+            existing is not None
+            and existing.body is not None
+            and definition.body is not None
+            and existing.body is not definition.body
+            and not (
+                bool(existing.attrs.get("origin_qualified"))
+                and bool(definition.attrs.get("origin_qualified"))
+            )
+        ):
+            symbol = (
+                f"{definition.ref.namespace}.{definition.ref.name}"
+                f"@{definition.ref.version}"
+            )
+            raise CallableDefinitionConflictError(symbol)
         if existing is None or (existing.body is None and definition.body is not None):
             definitions[definition.ref] = definition
         edges.setdefault(definition.ref, set())
@@ -138,6 +195,9 @@ def prepare_module(entrypoint: Block) -> PreparedModule:
         entrypoint_ref=entrypoint_ref,
         entrypoint=entrypoint,
         definitions=MappingProxyType(definitions),
+        definition_variants=MappingProxyType(
+            {ref: tuple(variants) for ref, variants in definition_variants.items()}
+        ),
         call_graph=MappingProxyType(frozen_graph),
         abi=abi,
     )

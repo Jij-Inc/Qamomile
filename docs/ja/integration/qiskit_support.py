@@ -443,7 +443,7 @@ print("if_else condition:", if_op.condition)
 
 # %% [markdown]
 # Qiskitの古典式システムは現在、Qamomileが扱うことのできる多くの論理演算、比較演算、算術演算に対応しています。
-# ただし、`FLOORDIV`と`POW`には対応するQiskitの古典式がないため、どちらかが回路実行時に評価する式として残ると、Qamomileは回路生成時に`NotImplementedError`を発生させます。
+# ただし、`FLOORDIV`と`POW`には対応するQiskitの古典式がないため、どちらかが回路実行時に評価する式として残ると、Qiskit回路を構築する前のtarget legality検証で`TargetCapabilityError`が発生します。
 # これらが必要な場合は、トランスパイル前に具体値として決まる形にしてください。
 
 # %% [markdown]
@@ -484,7 +484,7 @@ assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 
 # %% [markdown]
 # 量子SDKに依存しないゲート分解を確認したい場合は、`QiskitTranspiler(use_native_pauli_evolution=False)`を渡します。
-# 同じフラグでネイティブQFT/IQFT出力も無効化できるため、デバッグや量子SDK非依存のゲート数比較に便利です。
+# このフラグが制御するのはPauli発展だけです。ネイティブQFT/IQFT出力は`use_native_composite`で独立に制御します。
 
 # %% [markdown]
 # ### ネイティブ`QFTGate`

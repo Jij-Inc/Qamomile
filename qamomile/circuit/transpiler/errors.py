@@ -10,6 +10,43 @@ class QamomileCompileError(Exception):
     pass
 
 
+@dataclass(eq=False, init=False)
+class CallableDefinitionConflictError(QamomileCompileError):
+    """Report two incompatible definitions claiming one callable symbol.
+
+    Args:
+        symbol (str): Fully qualified callable symbol with conflicting bodies.
+
+    Example:
+        Correct — give independently implemented callables distinct origins
+        or explicit namespaces::
+
+            configure_composite(left, namespace="example.left")
+            configure_composite(right, namespace="example.right")
+
+        Incorrect — attaching two different bodies to the same explicit
+        symbol causes this error during preparation::
+
+            configure_composite(left, namespace="example.shared", name="op")
+            configure_composite(right, namespace="example.shared", name="op")
+    """
+
+    symbol: str
+
+    def __init__(self, symbol: str) -> None:
+        """Initialize a callable-definition collision diagnosis.
+
+        Args:
+            symbol (str): Fully qualified callable symbol with conflicting
+                definitions.
+        """
+        self.symbol = symbol
+        super().__init__(
+            f"Callable symbol {symbol!r} resolves to multiple incompatible "
+            "definitions. Give each callable a distinct namespace or origin."
+        )
+
+
 class InliningError(QamomileCompileError):
     """Error during inline pass for callable invocations."""
 
@@ -20,6 +57,13 @@ class ValidationError(QamomileCompileError):
     """Error during validation (e.g., non-classical I/O)."""
 
     def __init__(self, message: str, value_name: str | None = None):
+        """Initialize a validation diagnosis.
+
+        Args:
+            message (str): Human-readable validation failure.
+            value_name (str | None): Related IR value name. Defaults to
+                ``None``.
+        """
         self.value_name = value_name
         super().__init__(message)
 
@@ -49,6 +93,15 @@ class DependencyError(QamomileCompileError):
         quantum_op: str | None = None,
         classical_value: str | None = None,
     ):
+        """Initialize a classical-to-quantum dependency diagnosis.
+
+        Args:
+            message (str): Human-readable dependency failure.
+            quantum_op (str | None): Dependent quantum operation. Defaults to
+                ``None``.
+            classical_value (str | None): Unsupported classical dependency.
+                Defaults to ``None``.
+        """
         self.quantum_op = quantum_op
         self.classical_value = classical_value
         super().__init__(message)
@@ -64,6 +117,13 @@ class EmitError(QamomileCompileError):
     """Error during backend code emission."""
 
     def __init__(self, message: str, operation: str | None = None):
+        """Initialize a backend emission diagnosis.
+
+        Args:
+            message (str): Human-readable emission failure.
+            operation (str | None): Related operation description. Defaults
+                to ``None``.
+        """
         self.operation = operation
         super().__init__(message)
 
@@ -156,6 +216,17 @@ class QubitIndexResolutionError(EmitError):
         available_bindings_keys: list[str],
         available_qubit_map_keys: list[str],
     ):
+        """Initialize detailed qubit-index resolution diagnostics.
+
+        Args:
+            gate_type (str): Gate whose operands could not be resolved.
+            operand_infos (list[OperandResolutionInfo]): Per-operand failure
+                details.
+            available_bindings_keys (list[str]): Binding names visible during
+                resolution.
+            available_qubit_map_keys (list[str]): Qubit-map keys visible during
+                resolution.
+        """
         self.gate_type = gate_type
         self.operand_infos = operand_infos
         self.available_bindings_keys = available_bindings_keys
@@ -283,6 +354,17 @@ class AffineTypeError(QamomileCompileError):
         operation_name: str | None = None,
         first_use_location: str | None = None,
     ):
+        """Initialize an affine-resource violation diagnosis.
+
+        Args:
+            message (str): Human-readable affine-type failure.
+            handle_name (str | None): Consumed or borrowed handle. Defaults to
+                ``None``.
+            operation_name (str | None): Operation reporting the violation.
+                Defaults to ``None``.
+            first_use_location (str | None): Original consuming use location.
+                Defaults to ``None``.
+        """
         self.handle_name = handle_name
         self.operation_name = operation_name
         self.first_use_location = first_use_location

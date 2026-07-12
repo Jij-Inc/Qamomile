@@ -136,7 +136,8 @@ class QamomileCompiler:
                 target-native validation fails.
         """
         program = self.prepare(kernel, bindings, parameters)
-        plan = target.plan(program)
-        compiled = target.compile(program, plan)
+        owned_program = program.owned_snapshot()
+        plan = target.plan(owned_program)
+        compiled = target.compile(owned_program, plan)
         target.validate(compiled.artifact)
         return compiled

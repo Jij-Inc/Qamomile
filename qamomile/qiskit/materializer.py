@@ -639,10 +639,13 @@ def _emit_call(
         callee.body,
         preserve_control_flow=False,
     )
+    replacements: dict[Any, Any] = {}
     for parameter in nested.parameters:
-        replacement = parameters.get(parameter.name)
-        if replacement is not None:
-            nested = nested.assign_parameters({parameter: replacement})
+        shared = parameters.setdefault(parameter.name, parameter)
+        if shared is not parameter:
+            replacements[parameter] = shared
+    if replacements:
+        nested = nested.assign_parameters(replacements)
     try:
         gate = nested.to_gate(label=callee.name)
         if callee.power != 1:

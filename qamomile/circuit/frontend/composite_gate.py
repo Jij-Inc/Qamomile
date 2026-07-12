@@ -17,7 +17,7 @@ def configure_composite(
     kernel: QKernel[..., Any],
     *,
     name: str | None = None,
-    namespace: str = "user.composite",
+    namespace: str | None = None,
     gate_type: CompositeGateType = CompositeGateType.CUSTOM,
     policy: CallPolicy = CallPolicy.PRESERVE_BOX,
     implementations: Sequence[CallableImplementation] | None = None,
@@ -30,8 +30,9 @@ def configure_composite(
     Args:
         kernel (QKernel[..., Any]): Kernel to configure.
         name (str | None): Public callable name. Defaults to the kernel name.
-        namespace (str): Stable callable namespace. Defaults to
-            ``"user.composite"``.
+        namespace (str | None): Explicit stable callable namespace. ``None``
+            derives one from the decorated function's module, qualified name,
+            and source location. Defaults to ``None``.
         gate_type (CompositeGateType): Internal stdlib classification.
             Defaults to ``CUSTOM``.
         policy (CallPolicy): Lowering policy. Defaults to ``PRESERVE_BOX``.

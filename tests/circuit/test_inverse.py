@@ -1786,7 +1786,7 @@ def test_inverse_accepts_qkernel_backed_composite_decorator() -> None:
     assert len(inverse_ops) == 1
     op = inverse_ops[0]
     assert op.transform is CallTransform.INVERSE
-    assert op.target.namespace == "user.composite"
+    assert op.target.namespace.startswith("user.composite.")
     assert op.target.name == "boxed_h"
     assert op.attrs["kind"] == "composite"
     assert op.attrs["custom_name"] == "boxed_h"

@@ -85,3 +85,21 @@ def test_qiskit_materializer_materializes_reusable_call() -> None:
 
     [instruction] = circuit.data
     assert instruction.operation.label == "helper"
+
+
+def test_qiskit_materializer_reuses_parameters_across_reusable_calls() -> None:
+    """Repeated parameterized calls share one Qiskit Parameter identity."""
+    body = CircuitBuilder(1, 0, name="rotation")
+    body.append_gate(GateKind.RY, (0,), (ParameterExpr("theta"),))
+    reusable = ReusableCircuit(body.freeze(), "rotation")
+    caller = CircuitBuilder(1, 0)
+    caller.append_call(reusable, (0,))
+    caller.append_call(reusable, (0,))
+
+    circuit = QiskitMaterializer().materialize(caller.freeze()).artifact
+
+    assert [instruction.operation.label for instruction in circuit.data] == [
+        "rotation",
+        "rotation",
+    ]
+    assert {parameter.name for parameter in circuit.parameters} == {"theta"}

@@ -11,7 +11,13 @@ from qamomile.circuit.ir.operation.callable import (
     CallableRef,
     InvokeOperation,
 )
-from qamomile.circuit.transpiler.prepared import prepare_module
+from qamomile.circuit.transpiler.artifact import (
+    CompilationMetadata,
+    CompiledProgram,
+)
+from qamomile.circuit.transpiler.compiler import QamomileCompiler
+from qamomile.circuit.transpiler.errors import CallableDefinitionConflictError
+from qamomile.circuit.transpiler.prepared import PreparedModule, prepare_module
 from qamomile.qiskit import QiskitTranspiler
 
 
@@ -32,6 +38,59 @@ def _prepared_entrypoint() -> tuple[qmc.Bit, qmc.Bit]:
     right = qmc.qubit("right")
     left, right = _prepared_bell(left, right)
     return qmc.measure(left), qmc.measure(right)
+
+
+class _MutatingTarget:
+    """Mutate its owned semantic input to test compiler isolation."""
+
+    @property
+    def name(self) -> str:
+        """Return the synthetic target name.
+
+        Returns:
+            str: Stable test target name.
+        """
+        return "mutating-test"
+
+    def plan(self, program: PreparedModule) -> None:
+        """Clear nested semantic state inside the target-owned snapshot.
+
+        Args:
+            program (PreparedModule): Target-owned prepared snapshot.
+        """
+        program.entrypoint.operations.clear()
+        for definition in program.definitions.values():
+            if definition.body is not None:
+                definition.body.operations.clear()
+
+    def compile(
+        self,
+        program: PreparedModule,
+        plan: None,
+    ) -> CompiledProgram[object]:
+        """Package a synthetic artifact after mutation.
+
+        Args:
+            program (PreparedModule): Mutated target-owned prepared snapshot.
+            plan (None): Synthetic empty plan.
+
+        Returns:
+            CompiledProgram[object]: Synthetic compiled artifact.
+        """
+        del plan
+        return CompiledProgram(
+            artifact=object(),
+            abi=program.abi,
+            metadata=CompilationMetadata(self.name, "test"),
+        )
+
+    def validate(self, artifact: object) -> None:
+        """Accept the synthetic artifact.
+
+        Args:
+            artifact (object): Synthetic artifact to discard.
+        """
+        del artifact
 
 
 def test_prepare_preserves_hierarchy_and_collects_call_graph() -> None:
@@ -71,6 +130,34 @@ def test_prepare_definition_mapping_is_read_only() -> None:
         )
 
 
+def test_prepared_snapshot_isolates_nested_semantic_mutation() -> None:
+    """A target-owned snapshot cannot mutate the shared prepared module."""
+    prepared = QiskitTranspiler().prepare(_prepared_entrypoint)
+    snapshot = prepared.owned_snapshot()
+    original_operation_count = len(prepared.entrypoint.operations)
+
+    snapshot.entrypoint.operations.clear()
+    snapshot_definition = next(iter(snapshot.definitions.values()))
+    assert snapshot_definition.body is not None
+    snapshot_definition.body.operations.clear()
+
+    assert len(prepared.entrypoint.operations) == original_operation_count
+    original_definition = next(iter(prepared.definitions.values()))
+    assert original_definition.body is not None
+    assert original_definition.body.operations
+
+
+def test_compiler_gives_each_target_an_owned_semantic_snapshot() -> None:
+    """Target mutation during compilation cannot change the cached qkernel IR."""
+    original_operation_count = len(_prepared_entrypoint.block.operations)
+    original_body_count = len(_prepared_bell.block.operations)
+
+    QamomileCompiler().compile(_prepared_entrypoint, _MutatingTarget())
+
+    assert len(_prepared_entrypoint.block.operations) == original_operation_count
+    assert len(_prepared_bell.block.operations) == original_body_count
+
+
 def test_prepare_collects_edges_for_shared_body_under_each_owner() -> None:
     """Call-graph collection keys body visits by symbol as well as identity."""
     leaf_ref = CallableRef("test", "leaf")
@@ -99,6 +186,23 @@ def test_prepare_collects_edges_for_shared_body_under_each_owner() -> None:
 
     assert prepared.call_graph[left_definition.ref] == frozenset({leaf_ref})
     assert prepared.call_graph[right_definition.ref] == frozenset({leaf_ref})
+
+
+def test_prepare_rejects_conflicting_definitions_for_one_symbol() -> None:
+    """Different bodies cannot silently claim the same callable symbol."""
+    shared_ref = CallableRef("test", "shared")
+    left_definition = CallableDef(ref=shared_ref, body=Block(name="left"))
+    right_definition = CallableDef(ref=shared_ref, body=Block(name="right"))
+    entrypoint = Block(
+        name="entrypoint",
+        operations=[
+            InvokeOperation(definition=left_definition),
+            InvokeOperation(definition=right_definition),
+        ],
+    )
+
+    with pytest.raises(CallableDefinitionConflictError, match="test.shared"):
+        prepare_module(entrypoint)
 
 
 def test_existing_transpile_pipeline_uses_prepared_entrypoint() -> None:

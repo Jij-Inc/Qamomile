@@ -5,11 +5,33 @@ from __future__ import annotations
 import dataclasses
 import enum
 from collections.abc import Mapping
+from copy import deepcopy
+from types import MappingProxyType
 from typing import Any, Generic, TypeVar
 
 from qamomile.circuit.transpiler.segments import ProgramABI
 
 ArtifactT = TypeVar("ArtifactT")
+
+
+def _freeze_metadata_value(value: Any) -> Any:
+    """Copy metadata values into immutable container shapes.
+
+    Args:
+        value (Any): Serializer-friendly metadata value.
+
+    Returns:
+        Any: Deep-copied scalar or recursively immutable container.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_metadata_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_metadata_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_metadata_value(item) for item in value)
+    return deepcopy(value)
 
 
 class DiagnosticSeverity(enum.Enum):
@@ -51,6 +73,14 @@ class CompilationMetadata:
     target: str
     pipeline: str
     properties: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Snapshot properties into a read-only metadata mapping."""
+        object.__setattr__(
+            self,
+            "properties",
+            _freeze_metadata_value(self.properties),
+        )
 
 
 @dataclasses.dataclass(frozen=True)
