@@ -28,7 +28,7 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.types.primitives import UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase, ValueLike
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.value_mapping import ValueSubstitutor
@@ -84,14 +84,15 @@ class ParameterShapeResolutionPass(Pass[Block, Block]):
         substitutor = ValueSubstitutor(substitutions)
 
         new_operations = self._walk_and_substitute(input.operations, substitutor)
-        # Input/output values of a Block are always Value (or ArrayValue, which
-        # is-a Value); ValueSubstitutor.substitute_value returns ValueBase for
-        # generality, so narrow here for the Block constructor.
+        # Input/output values of a Block may be structural ValueLike objects;
+        # ValueSubstitutor returns ValueBase for generality, so narrow here for
+        # the Block constructor.
         new_input_values = [
-            cast(Value, substitutor.substitute_value(v)) for v in input.input_values
+            cast(ValueLike, substitutor.substitute_value(v)) for v in input.input_values
         ]
         new_output_values = [
-            cast(Value, substitutor.substitute_value(v)) for v in input.output_values
+            cast(ValueLike, substitutor.substitute_value(v))
+            for v in input.output_values
         ]
 
         return Block(

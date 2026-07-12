@@ -41,7 +41,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import ArrayValue, TupleValue, Value
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
@@ -1143,6 +1143,87 @@ class TestMergeSubstitutionOutputs:
         assert lowered.output_values[0].uuid != merge_out.uuid, (
             "Block output should be substituted away from merge output UUID"
         )
+
+    def test_structural_output_substitution_synthetic(self):
+        """Tuple output elements are updated when merge values are substituted."""
+        true_value = _uint_val("true_value")
+        false_value = _uint_val("false_value")
+        flag = _uint_val("flag", const=1)
+        merge_out = _uint_val("merge_out")
+        if_op = IfOperation(
+            operands=[flag],
+            true_operations=[],
+            false_operations=[],
+        )
+        if_op.add_merge(true_value, false_value, merge_out)
+        tuple_out = TupleValue(name="pair", elements=(merge_out, false_value))
+        block = Block(
+            name="test",
+            operations=[if_op],
+            output_values=[tuple_out],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert len(lowered.output_values) == 1
+        output = lowered.output_values[0]
+        assert isinstance(output, TupleValue)
+        assert output.elements[0].uuid == true_value.uuid
+        assert output.elements[0].uuid != merge_out.uuid
+
+    def test_nested_structural_output_substitution_synthetic(self):
+        """Merge substitution descends through nested tuple outputs."""
+        true_value = _uint_val("true_value")
+        false_value = _uint_val("false_value")
+        flag = _uint_val("flag", const=1)
+        merge_out = _uint_val("merge_out")
+        if_op = IfOperation(operands=[flag])
+        if_op.add_merge(true_value, false_value, merge_out)
+        inner = TupleValue(name="inner", elements=(merge_out,))
+        outer = TupleValue(name="outer", elements=(inner, false_value))
+        block = Block(
+            name="test",
+            operations=[if_op],
+            output_values=[outer],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        output = lowered.output_values[0]
+        assert isinstance(output, TupleValue)
+        nested = output.elements[0]
+        assert isinstance(nested, TupleValue)
+        assert nested.elements[0].uuid == true_value.uuid
+        assert nested.elements[0].uuid != merge_out.uuid
+
+    def test_structural_output_inner_condition_keeps_condition_producer(self):
+        """Tuple output elements keep condition producers alive after lowering."""
+        a = _uint_val("a", const=2)
+        b = _uint_val("b", const=1)
+        cond_result = _bit_val("cond")
+        comp_op = CompOp(
+            operands=[a, b],
+            results=[cond_result],
+            kind=CompOpKind.GT,
+        )
+        q = _qubit_val()
+        if_op, merge_out = _make_if_with_x_gate(cond_result, q)
+        tuple_out = TupleValue(name="pair", elements=(cond_result, merge_out))
+
+        block = Block(
+            name="test",
+            operations=[comp_op, if_op],
+            output_values=[tuple_out],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert _find_ops(lowered.operations, CompOp)
+        output = lowered.output_values[0]
+        assert isinstance(output, TupleValue)
+        assert output.elements[0].uuid == cond_result.uuid
+        assert output.elements[1].uuid != merge_out.uuid
 
 
 # ---------------------------------------------------------------------------

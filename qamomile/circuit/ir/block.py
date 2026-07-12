@@ -7,7 +7,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.parameter import ParamSlot
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueLike
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.operation import Operation
@@ -33,8 +33,8 @@ class Block:
 
     name: str = ""
     label_args: list[str] = dataclasses.field(default_factory=list)
-    input_values: list[Value] = dataclasses.field(default_factory=list)
-    output_values: list[Value] = dataclasses.field(default_factory=list)
+    input_values: list[ValueLike] = dataclasses.field(default_factory=list)
+    output_values: list[ValueLike] = dataclasses.field(default_factory=list)
     output_names: list[str] = dataclasses.field(default_factory=list)
     operations: list["Operation"] = dataclasses.field(default_factory=list)
 
@@ -88,11 +88,11 @@ class Block:
         """
         return self.kind in (BlockKind.AFFINE, BlockKind.ANALYZED)
 
-    def call(self, **kwargs: Value) -> "InvokeOperation":
+    def call(self, **kwargs: ValueLike) -> "InvokeOperation":
         """Create an inline callable invocation against this block.
 
         Args:
-            **kwargs (Value): Actual argument values keyed by
+            **kwargs (ValueLike): Actual argument values keyed by
                 ``self.label_args``.
 
         Returns:
@@ -108,19 +108,11 @@ class Block:
             CallableRef,
             CallPolicy,
             InvokeOperation,
+            block_call_operands_and_results,
             signature_from_block,
         )
 
-        inputs = [kwargs[label] for label in self.label_args]
-        dummy_inputs = {v.logical_id: idx for idx, v in enumerate(self.input_values)}
-
-        results = []
-        for dummy_return in self.output_values:
-            if dummy_return.logical_id in dummy_inputs:
-                input_idx = dummy_inputs[dummy_return.logical_id]
-                results.append(inputs[input_idx].next_version())
-            else:
-                results.append(dummy_return)
+        inputs, results = block_call_operands_and_results(self, kwargs)
 
         name = self.name or "anonymous"
         attrs = {"kind": "block", "default_policy": CallPolicy.INLINE.name}

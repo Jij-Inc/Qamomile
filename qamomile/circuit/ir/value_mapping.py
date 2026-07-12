@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.cast import CastOperation
@@ -16,6 +16,7 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
     resolve_root_array_index,
     resolve_root_qubit_address,
@@ -622,18 +623,13 @@ class ValueSubstitutor:
             ValueBase: Rebuilt tuple when any element changes; otherwise
             the original tuple value.
         """
-        new_elements = []
+        new_elements: list[ValueLike] = []
         changed = False
         for elem in value.elements:
-            if elem.uuid in self._value_map:
-                substituted = self._chase_transitive(elem)
-                if isinstance(substituted, Value):
-                    new_elements.append(substituted)
-                    changed = True
-                else:
-                    new_elements.append(elem)
-            else:
-                new_elements.append(elem)
+            substituted = self.substitute_value(elem)
+            new_elements.append(cast(ValueLike, substituted))
+            if substituted is not elem:
+                changed = True
         if changed:
             return dataclasses.replace(value, elements=tuple(new_elements))
         return value
@@ -653,15 +649,15 @@ class ValueSubstitutor:
         for key, entry_value in value.entries:
             new_key = key
             new_value = entry_value
-            if isinstance(key, (TupleValue, Value)) and key.uuid in self._value_map:
-                sub_key = self._chase_transitive(key)
-                if isinstance(sub_key, (TupleValue, Value)):
-                    new_key = sub_key
+            sub_key = self.substitute_value(key)
+            if isinstance(sub_key, (TupleValue, Value)):
+                new_key = sub_key
+                if sub_key is not key:
                     changed = True
-            if entry_value.uuid in self._value_map:
-                sub_value = self._chase_transitive(entry_value)
-                if isinstance(sub_value, Value):
-                    new_value = sub_value
+            sub_value = self.substitute_value(entry_value)
+            if isinstance(sub_value, Value):
+                new_value = sub_value
+                if sub_value is not entry_value:
                     changed = True
             new_entries.append((new_key, new_value))
         if changed:
