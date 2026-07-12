@@ -8,6 +8,7 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -1763,11 +1764,19 @@ def _build_opaque_widening_result_graph(
     )
 
 
-def _build_legacy_stack_parameter_graph() -> Block:
+def _build_legacy_stack_parameter_graph(
+    *,
+    symbolic_actual: bool = False,
+) -> Block:
     """Build a callable whose parameter name matches the former stack key.
 
+    Args:
+        symbolic_actual (bool): Whether the caller keeps the branch driver
+            symbolic instead of binding concrete zero. Defaults to False.
+
     Returns:
-        Block: Graph whose concrete zero binding must select only the X branch.
+        Block: Graph whose concrete binding selects X, or whose symbolic
+            binding preserves the runtime IF merge.
     """
     legacy_stack_name = "__qamomile_visual_call_stack__"
     flag = Value(type=UIntType(), name="flag").with_parameter(legacy_stack_name)
@@ -1813,12 +1822,87 @@ def _build_legacy_stack_parameter_graph() -> Block:
         output_names=["q"],
     )
 
-    actual_flag = Value(type=UIntType(), name="actual_flag").with_const(0)
+    if symbolic_actual:
+        actual_flag = Value(type=UIntType(), name="actual_flag").with_parameter(
+            "actual_flag"
+        )
+    else:
+        actual_flag = Value(type=UIntType(), name="actual_flag").with_const(0)
     actual_qubit = Value(type=QubitType(), name="q")
     call = body.call(flag=actual_flag, q=actual_qubit)
     return Block(
         name="legacy_stack_parameter_caller",
         operations=[QInitOperation(results=[actual_qubit]), call],
+    )
+
+
+def _build_boxed_qfixed_cast_output_graph(*, body_local: bool) -> Block:
+    """Build a callable returning QFixed carrier metadata.
+
+    Args:
+        body_local (bool): Whether carrier qubits are allocated inside the
+            callable instead of supplied by its caller.
+
+    Returns:
+        Block: Graph whose boxed result must alias exactly two carrier wires.
+    """
+    size = Value(type=UIntType(), name="size").with_const(2)
+    operations: list[Operation] = []
+    inputs: list[ArrayValue] = []
+    if body_local:
+        carrier = ArrayValue(type=QubitType(), name="anc", shape=(size,))
+        operations.append(QInitOperation(results=[carrier]))
+    else:
+        carrier = ArrayValue(type=QubitType(), name="target", shape=(size,))
+        inputs.append(carrier)
+
+    qfixed = Value(type=QFixedType(), name="qf").with_cast_metadata(
+        source_uuid=carrier.uuid,
+        qubit_uuids=[],
+        source_logical_id=carrier.logical_id,
+        qubit_logical_ids=[
+            f"{carrier.logical_id}_0",
+            f"{carrier.logical_id}_1",
+        ],
+    )
+    operations.extend(
+        [
+            CastOperation(
+                operands=[carrier],
+                results=[qfixed],
+                source_type=carrier.type,
+                target_type=qfixed.type,
+            ),
+            ReturnOperation(operands=[qfixed]),
+        ]
+    )
+    body = Block(
+        name="boxed_qfixed_cast_output",
+        label_args=[] if body_local else ["target"],
+        input_values=inputs,
+        output_values=[qfixed],
+        output_names=["qf"],
+        operations=operations,
+    )
+    if body_local:
+        call = body.call()
+        caller_operations = [call]
+    else:
+        root = ArrayValue(type=QubitType(), name="root", shape=(size,))
+        call = body.call(target=root)
+        caller_operations = [QInitOperation(results=[root]), call]
+    measured = Value(type=FloatType(), name="measured")
+    caller_operations.append(
+        MeasureQFixedOperation(
+            operands=[call.results[0]],
+            results=[measured],
+            num_bits=2,
+            int_bits=0,
+        )
+    )
+    return Block(
+        name="boxed_qfixed_cast_output_caller",
+        operations=caller_operations,
     )
 
 
@@ -3060,6 +3144,53 @@ def test_legacy_stack_parameter_name_does_not_shadow_compile_time_binding() -> N
         isinstance(node, VUnfoldedSequence)
         for node in _iter_visual_nodes(circuit.children)
     )
+
+
+def test_boxed_runtime_if_output_reuses_merged_input_wire() -> None:
+    """A boxed runtime IF merge preserves its formal-qubit provenance."""
+    graph = _build_legacy_stack_parameter_graph(symbolic_actual=True)
+    invoke = next(op for op in graph.operations if isinstance(op, InvokeOperation))
+    result = invoke.results[0]
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 1
+    assert qubit_names == {0: "q"}
+    assert analyzer._resolve_operand_to_qubit_indices(result, qubit_map) == [0]
+    [call] = [node for node in circuit.children if isinstance(node, VGate)]
+    assert call.qubit_indices == [0]
+
+
+@pytest.mark.parametrize("body_local", [False, True])
+def test_boxed_qfixed_cast_output_reuses_carrier_wires(body_local: bool) -> None:
+    """A boxed QFixed result aliases caller or body-local carrier wires."""
+    graph = _build_boxed_qfixed_cast_output_graph(body_local=body_local)
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    expected_prefix = "anc" if body_local else "root"
+    assert num_qubits == 2
+    assert qubit_names == {
+        0: f"{expected_prefix}[0]",
+        1: f"{expected_prefix}[1]",
+    }
+    gates = [node for node in circuit.children if isinstance(node, VGate)]
+    [call] = [gate for gate in gates if gate.label == "BOXED_QFIXED_CAST_OUTPUT"]
+    [measurement] = [gate for gate in gates if gate.label == "M"]
+    assert call.qubit_indices == [0, 1]
+    assert measurement.qubit_indices == [0, 1]
 
 
 @pytest.mark.parametrize("depth", [0, 1, 3])
