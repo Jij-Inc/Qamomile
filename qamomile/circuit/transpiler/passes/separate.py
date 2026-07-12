@@ -356,7 +356,6 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """
         segments: list[Segment] = []
         self._boundaries: list[HybridBoundary] = []
-        self._current_block_operations = block.operations
 
         # Measurement-taint set: every value transitively derived from a
         # measurement result. Computed with the same dataflow utilities as

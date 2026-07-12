@@ -228,7 +228,7 @@ def _wrap_array_result(
     if isinstance(formal_output, ArrayValue) and formal_output.slice_of is not None:
         for formal_input, input_view in formal_input_views.values():
             if is_full_reslice_of_input(formal_output, formal_input):
-                val = view_result_value_for_full_reslice(formal_output, input_view)
+                val = view_result_value_for_full_reslice(val, input_view)
                 call_op.results[result_idx] = val
                 break
 
