@@ -1580,6 +1580,47 @@ def _build_folded_contextual_slice_loop_graph() -> Block:
     )
 
 
+def _build_folded_if_with_nested_index_loop_graph() -> Block:
+    """Build a folded IF containing a precisely bounded indexed loop.
+
+    Returns:
+        Block: Graph whose nested loop affects only the first two root wires.
+    """
+    root_size = Value(type=UIntType(), name="root_size").with_const(4)
+    root = ArrayValue(type=QubitType(), name="q", shape=(root_size,))
+    loop_index = Value(type=UIntType(), name="i")
+    element = Value(
+        type=QubitType(),
+        name="q[i]",
+        parent_array=root,
+        element_indices=(loop_index,),
+    )
+    gate = GateOperation.fixed(
+        GateOperationType.H,
+        [element],
+        [element.next_version()],
+    )
+    zero = Value(type=UIntType(), name="zero").with_const(0)
+    one = Value(type=UIntType(), name="one").with_const(1)
+    two = Value(type=UIntType(), name="two").with_const(2)
+    loop = ForOperation(
+        operands=[zero, two, one],
+        loop_var="i",
+        loop_var_value=loop_index,
+        operations=[gate],
+    )
+    condition = Value(type=BitType(), name="cond").with_parameter("cond")
+    branch = IfOperation(
+        operands=[condition],
+        true_operations=[loop],
+        false_operations=[],
+    )
+    return Block(
+        name="folded_if_with_nested_index_loop",
+        operations=[QInitOperation(results=[root]), branch],
+    )
+
+
 def _build_opaque_widening_result_graph(
     *,
     occupy_next_wire: bool = False,
@@ -2781,6 +2822,24 @@ def test_folded_loop_uses_current_slice_binding_over_cached_aliases(
         inline=inline,
         fold_loops=True,
     )
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 4
+    [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
+    assert folded.affected_qubits == [0, 1]
+    assert folded.affected_qubits_precise
+
+
+def test_folded_if_uses_precise_nested_loop_footprint() -> None:
+    """A folded IF delegates nested loop bounds to precise loop analysis."""
+    graph = _build_folded_if_with_nested_index_loop_graph()
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, fold_ifs=True)
     qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
     circuit = analyzer.build_visual_ir(
         graph,
