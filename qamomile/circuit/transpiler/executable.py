@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Generic, TypeVar
 
+from qamomile.circuit.ir.value import ValueLike
+
 # Re-export for backward compatibility (used by backends and passes)
 from qamomile.circuit.transpiler.classical_executor import (
     ClassicalExecutor as ClassicalExecutor,  # noqa: F401
@@ -71,11 +73,8 @@ class ExecutableProgram(Generic[T]):
         default_factory=list
     )
 
-    # Final output references
-    output_refs: list[str] = dataclasses.field(default_factory=list)
-
-    # Number of output bits (for result conversion)
-    num_output_bits: int = 0
+    # Final output values
+    output_values: list[ValueLike] = dataclasses.field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Data access properties

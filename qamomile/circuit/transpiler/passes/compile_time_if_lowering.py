@@ -40,6 +40,8 @@ from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
     ValueBase,
+    ValueLike,
+    collect_value_like_uuids,
     resolve_root_array_index,
 )
 from qamomile.circuit.transpiler.block_parameter_binding import (
@@ -1056,21 +1058,18 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
     def _substitute_output_values(
         self,
-        output_values: list[Value],
+        output_values: list[ValueLike],
         subst: dict[str, ValueBase],
-    ) -> list[Value]:
+    ) -> list[ValueLike]:
         """Apply merge substitution to block output values."""
         if not subst:
             return output_values
 
         substitutor = ValueSubstitutor(subst, transitive=True)
-        new_outputs = []
+        new_outputs: list[ValueLike] = []
         for ov in output_values:
             substituted = substitutor.substitute_value(ov)
-            if isinstance(substituted, Value):
-                new_outputs.append(substituted)
-            else:
-                new_outputs.append(ov)
+            new_outputs.append(cast(ValueLike, substituted))
         return new_outputs
 
     # ------------------------------------------------------------------
@@ -1081,7 +1080,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         self,
         operations: list[Operation],
         dead_uuids: set[str],
-        output_values: list[Value] | None = None,
+        output_values: list[ValueLike] | None = None,
     ) -> list[Operation]:
         """Remove operations whose results are only consumed by dead UUIDs.
 
@@ -1099,7 +1098,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # Also include block output UUIDs as used.
         if output_values:
             for ov in output_values:
-                used_uuids.add(ov.uuid)
+                used_uuids.update(collect_value_like_uuids(ov))
 
         result, removed = self._remove_dead_ops_recursive(
             operations, dead_uuids, used_uuids

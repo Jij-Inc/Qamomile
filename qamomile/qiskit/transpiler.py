@@ -27,7 +27,8 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.types.primitives import BitType
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
@@ -395,6 +396,32 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                     f"{op.operands[0]!r}"
                 )
             result = expr.logic_not(inner)
+        elif kind is RuntimeOpKind.SELECT:
+            # ``select(cond, t, f)`` has no direct Qiskit equivalent; for
+            # Bit values it is exactly ``(cond and t) or (not cond and f)``.
+            # Wider types have no Qiskit classical-expr select, so the gap
+            # is loud (mirroring the FLOORDIV/MOD/POW contract).
+            if not isinstance(op.results[0].type, BitType):
+                raise NotImplementedError(
+                    "RuntimeOpKind.SELECT is only supported in-circuit for "
+                    "Bit values on the Qiskit backend (Qiskit's classical "
+                    "expr has no integer/float select). Return the value "
+                    "instead of branching on it in-circuit, or reduce it to "
+                    "a Bit."
+                )
+            resolved = [resolve_operand(operand) for operand in op.operands[:3]]
+            if any(operand is None for operand in resolved):
+                raise EmitError(
+                    f"Cannot resolve operands for RuntimeClassicalExpr({kind!r})"
+                )
+            condition, true_value, false_value = (
+                bool(operand) if isinstance(operand, (bool, int)) else operand
+                for operand in resolved
+            )
+            result = expr.logic_or(
+                expr.logic_and(condition, true_value),
+                expr.logic_and(expr.logic_not(condition), false_value),
+            )
         else:
             assert kind is not None
             lhs = resolve_operand(op.operands[0])
@@ -421,12 +448,23 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
     def _build_qiskit_binary_expr(kind: RuntimeOpKind, lhs: Any, rhs: Any) -> Any:
         """Map a binary ``RuntimeOpKind`` to its Qiskit ``expr`` constructor.
 
-        Every arm of ``RuntimeOpKind`` (except ``NOT``, which is handled
-        upstream) is dispatched here. Kinds without a Qiskit ``expr``
-        equivalent — currently ``FLOORDIV``, ``MOD`` and ``POW`` — raise
-        ``NotImplementedError`` rather than silently returning ``None``,
-        so the contract gap is loud at emit time instead of producing a
-        misleading "Unsupported kind" error.
+        Binary arms of ``RuntimeOpKind`` are dispatched here. ``NOT`` and
+        ``SELECT`` are handled upstream because they are unary and ternary,
+        respectively. Kinds without a Qiskit ``expr`` equivalent — currently
+        ``FLOORDIV``, ``MOD`` and ``POW`` — fail loudly at emit time.
+
+        Args:
+            kind (RuntimeOpKind): Binary runtime operation to translate.
+            lhs (Any): Resolved left operand.
+            rhs (Any): Resolved right operand.
+
+        Returns:
+            Any: Qiskit classical expression for the binary operation.
+
+        Raises:
+            NotImplementedError: If Qiskit has no equivalent expression for
+                ``kind``.
+            ValueError: If ``kind`` is not a binary runtime operation.
         """
         from qiskit.circuit.classical import expr
 
@@ -626,7 +664,6 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         # evolution gate onto only its declared qubits below.
         input_array = op.qubits
         num_h_qubits = hamiltonian.num_qubits
-        from qamomile.circuit.ir.value import ArrayValue
 
         if isinstance(input_array, ArrayValue) and input_array.shape:
             n_resolved = self._resolver.resolve_int_value(
