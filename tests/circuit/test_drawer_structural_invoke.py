@@ -1568,12 +1568,41 @@ def _build_folded_contextual_slice_loop_graph() -> Block:
         target=CallableRef(namespace="user", name="opaque_loop_view"),
     )
     zero = Value(type=UIntType(), name="zero").with_const(0)
+    view_element = Value(
+        type=QubitType(),
+        name="view[0]",
+        parent_array=view,
+        element_indices=(zero,),
+    )
+    element_gate = GateOperation.fixed(
+        GateOperationType.H,
+        [view_element],
+        [view_element.next_version()],
+    )
+    formal = Value(type=QubitType(), name="target")
+    formal_result = formal.next_version()
+    element_body = Block(
+        name="contextual_element_body",
+        label_args=["target"],
+        input_values=[formal],
+        output_values=[formal_result],
+        output_names=["target"],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [formal],
+                [formal_result],
+            ),
+            ReturnOperation(operands=[formal_result]),
+        ],
+    )
+    element_call = element_body.call(target=view_element)
     two = Value(type=UIntType(), name="two").with_const(2)
     loop = ForOperation(
         operands=[zero, two, one],
         loop_var="i",
         loop_var_value=loop_index,
-        operations=[call],
+        operations=[call, element_gate, element_call],
     )
     return Block(
         name="folded_contextual_slice_loop",
@@ -2860,6 +2889,44 @@ def test_folded_loop_uses_current_slice_binding_over_cached_aliases(
     [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
     assert folded.affected_qubits == [0, 1]
     assert folded.affected_qubits_precise
+
+
+def test_unfolded_loop_rebinds_contextual_slice_elements_per_iteration() -> None:
+    """Direct and inline element uses follow each iteration's slice binding."""
+    graph = _build_folded_contextual_slice_loop_graph()
+    analyzer = CircuitAnalyzer(
+        graph,
+        DEFAULT_STYLE,
+        inline=True,
+        fold_loops=False,
+    )
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 4
+    [sequence] = [
+        node for node in circuit.children if isinstance(node, VUnfoldedSequence)
+    ]
+    assert len(sequence.iterations) == 2
+    for expected_wire, iteration in enumerate(sequence.iterations):
+        gates = [
+            node for node in _iter_visual_nodes(iteration) if isinstance(node, VGate)
+        ]
+        [opaque_call] = [gate for gate in gates if gate.label == "OPAQUE_LOOP_VIEW"]
+        [direct_gate] = [
+            gate for gate in gates if gate.gate_type is GateOperationType.H
+        ]
+        [inline_gate] = [
+            gate for gate in gates if gate.gate_type is GateOperationType.X
+        ]
+        assert opaque_call.qubit_indices == [expected_wire]
+        assert direct_gate.qubit_indices == [expected_wire]
+        assert inline_gate.qubit_indices == [expected_wire]
 
 
 def test_folded_if_uses_precise_nested_loop_footprint() -> None:
