@@ -32,6 +32,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
+    ControlledUOperation,
     GateOperation,
     GateOperationType,
     MeasureQFixedOperation,
@@ -1163,6 +1164,30 @@ def _build_unresolved_widened_control_graph(selected_index: int) -> Block:
         num_control_args=1,
     )
     graph.operations.extend([QInitOperation(results=[target]), controlled])
+    return graph
+
+
+def _build_folded_unresolved_widened_control_graph() -> Block:
+    """Build a folded IF around a conservative semantic control slot.
+
+    Returns:
+        Block: Graph whose folded footprint is a candidate union rather than
+            a set of wires that all participate in the controlled operation.
+    """
+    graph = _build_unresolved_widened_control_graph(selected_index=0)
+    controlled = graph.operations.pop()
+    assert isinstance(controlled, ControlledUOperation), (
+        "[FOR DEVELOPER] The unresolved-control fixture must end with a "
+        "ControlledUOperation."
+    )
+    condition = Value(type=BitType(), name="cond").with_parameter("cond")
+    graph.operations.append(
+        IfOperation(
+            operands=[condition],
+            true_operations=[controlled],
+            false_operations=[],
+        )
+    )
     return graph
 
 
@@ -2873,6 +2898,24 @@ def test_unresolved_widened_control_indices_preserve_alias_semantics(
     ]
     assert controlled.control_qubit_indices == expected_controls
     assert controlled.affected_qubits == [*expected_controls, 6]
+
+
+def test_folded_unresolved_control_candidates_are_not_precise() -> None:
+    """A folded semantic control slot keeps its candidate-union precision."""
+    graph = _build_folded_unresolved_widened_control_graph()
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True, fold_ifs=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 7
+    [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
+    assert folded.affected_qubits == [0, 1, 2, 3, 4, 6]
+    assert not folded.affected_qubits_precise
 
 
 def test_unresolved_widened_measure_condition_keeps_candidate_sources() -> None:
