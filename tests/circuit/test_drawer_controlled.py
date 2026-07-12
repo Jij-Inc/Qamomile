@@ -14,7 +14,7 @@ from qamomile.circuit.ir.operation.gate import GateOperationType
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.drawer import MatplotlibDrawer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
-from qamomile.circuit.visualization.visual_ir import VGate, VGateKind
+from qamomile.circuit.visualization.visual_ir import VGate, VGateKind, VInlineBlock
 
 
 @qmc.qkernel
@@ -484,6 +484,184 @@ class TestPhantomWireSuppression:
             "q[3]",
             "q[4]",
         ], qubit_names
+
+
+@qmc.qkernel
+def _apply_controlled_slice_shifts_1d(
+    q: qmc.Vector[qmc.Qubit],
+    num_system: qmc.UInt,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply two controlled modular shifts to one sliced system register.
+
+    Args:
+        q (qmc.Vector[qmc.Qubit]): Full register containing system and control
+            qubits.
+        num_system (qmc.UInt): Number of qubits in the system slice.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated full register.
+    """
+    controlled_decrement = qmc.control(qmc.modular_decrement)
+    controlled_increment = qmc.control(qmc.modular_increment)
+    q[num_system], q[0:num_system] = controlled_decrement(
+        q[num_system],
+        q[0:num_system],
+    )
+    q[num_system + 1], q[0:num_system] = controlled_increment(
+        q[num_system + 1],
+        q[0:num_system],
+    )
+    return q
+
+
+@qmc.qkernel
+def _controlled_slice_shifts_1d(
+    total_qubits: qmc.UInt,
+    num_system: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Draw controlled shifts nested inside an ordinary qkernel call.
+
+    Args:
+        total_qubits (qmc.UInt): Total register width.
+        num_system (qmc.UInt): Number of system qubits targeted by each shift.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurements of the full register.
+    """
+    q = qmc.qubit_array(total_qubits, "q")
+    q = _apply_controlled_slice_shifts_1d(q, num_system)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _apply_controlled_slice_shifts_2d(
+    q: qmc.Vector[qmc.Qubit],
+    num_axis: qmc.UInt,
+    num_system: qmc.UInt,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply four double-controlled shifts to two disjoint slice views.
+
+    Args:
+        q (qmc.Vector[qmc.Qubit]): Full register containing both axes and
+            control qubits.
+        num_axis (qmc.UInt): Width of each disjoint system-axis slice.
+        num_system (qmc.UInt): Combined width of both system slices.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated full register.
+    """
+    controlled_decrement = qmc.control(qmc.modular_decrement, num_controls=2)
+    controlled_increment = qmc.control(qmc.modular_increment, num_controls=2)
+    signal_start = num_system
+
+    q[signal_start + 2], q[signal_start], q[0:num_axis] = controlled_decrement(
+        q[signal_start + 2],
+        q[signal_start],
+        q[0:num_axis],
+    )
+    q[signal_start + 2], q[signal_start + 1], q[0:num_axis] = controlled_increment(
+        q[signal_start + 2],
+        q[signal_start + 1],
+        q[0:num_axis],
+    )
+    q[signal_start + 2], q[signal_start], q[num_axis:num_system] = controlled_decrement(
+        q[signal_start + 2],
+        q[signal_start],
+        q[num_axis:num_system],
+    )
+    q[signal_start + 2], q[signal_start + 1], q[num_axis:num_system] = (
+        controlled_increment(
+            q[signal_start + 2],
+            q[signal_start + 1],
+            q[num_axis:num_system],
+        )
+    )
+    return q
+
+
+@qmc.qkernel
+def _controlled_slice_shifts_2d(
+    total_qubits: qmc.UInt,
+    num_axis: qmc.UInt,
+    num_system: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Draw double-controlled shifts nested inside a qkernel call.
+
+    Args:
+        total_qubits (qmc.UInt): Total register width.
+        num_axis (qmc.UInt): Width of one system-axis slice.
+        num_system (qmc.UInt): Combined system-register width.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurements of the full register.
+    """
+    q = qmc.qubit_array(total_qubits, "q")
+    q = _apply_controlled_slice_shifts_2d(q, num_axis, num_system)
+    return qmc.measure(q)
+
+
+@pytest.mark.parametrize(
+    ("kernel", "bindings", "expected_block_wires"),
+    [
+        pytest.param(
+            _controlled_slice_shifts_1d,
+            {"total_qubits": 5, "num_system": 3},
+            [{0, 1, 2, 3}, {0, 1, 2, 4}],
+            id="one-dimensional",
+        ),
+        pytest.param(
+            _controlled_slice_shifts_2d,
+            {"total_qubits": 9, "num_axis": 3, "num_system": 6},
+            [
+                {0, 1, 2, 6, 8},
+                {0, 1, 2, 7, 8},
+                {3, 4, 5, 6, 8},
+                {3, 4, 5, 7, 8},
+            ],
+            id="two-dimensional",
+        ),
+    ],
+)
+def test_controlled_slice_calls_alias_existing_root_wires(
+    kernel: Any,
+    bindings: dict[str, int],
+    expected_block_wires: list[set[int]],
+) -> None:
+    """Controlled slice actuals neither allocate nor target phantom wires."""
+    graph = kernel._build_graph_for_visualization(**bindings)
+    analyzer = CircuitAnalyzer(
+        graph,
+        DEFAULT_STYLE,
+        inline=True,
+        fold_loops=False,
+    )
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    visual_circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    total_qubits = bindings["total_qubits"]
+    assert num_qubits == total_qubits
+    assert qubit_names == {index: f"q[{index}]" for index in range(total_qubits)}
+    assert all(0 <= wire < total_qubits for wire in qubit_map.values())
+
+    [outer_block] = [
+        node
+        for node in visual_circuit.children
+        if isinstance(node, VInlineBlock) and "controlled_slice_shifts" in node.label
+    ]
+    assert set(outer_block.affected_qubits) == set(range(total_qubits))
+    shift_blocks = [
+        node
+        for node in outer_block.children
+        if isinstance(node, VInlineBlock) and "modular_" in node.label
+    ]
+    assert [set(node.affected_qubits) for node in shift_blocks] == (
+        expected_block_wires
+    )
 
 
 class TestPostInlineVectorAliasing:

@@ -24,7 +24,7 @@ from typing import Any
 import qamomile.circuit as qmc
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
-from qamomile.circuit.visualization.visual_ir import VGate, VGateKind
+from qamomile.circuit.visualization.visual_ir import VGate, VGateKind, VInlineBlock
 
 
 def _controlled_u_box(kernel: Any) -> VGate:
@@ -238,6 +238,45 @@ def test_controlled_box_subset_indices_filter_inactive_pool_slots() -> None:
     # The pool sits on wires 0..3; control_indices=[0, 1, 3]
     # should keep wires 0, 1, 3 and drop wire 2.
     assert controls == [0, 1, 3], controls
+
+
+def test_controlled_inline_subset_indices_filter_inactive_pool_slots() -> None:
+    """Inline controlled bodies omit inactive control-pool slots."""
+
+    @qmc.qkernel
+    def kernel(n: qmc.UInt, k_ctrls: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        """Apply a selected symbolic control subset to one target.
+
+        Args:
+            n (qmc.UInt): Width of the control pool.
+            k_ctrls (qmc.UInt): Number of selected active controls.
+
+        Returns:
+            qmc.Vector[qmc.Bit]: Measurements of the control pool.
+        """
+        pool = qmc.qubit_array(n, "pool")
+        target = qmc.qubit(name="target")
+        controlled_x = qmc.control(qmc.x, num_controls=k_ctrls)
+        pool, target = controlled_x(
+            pool,
+            target,
+            control_indices=[0, 1, 3],
+        )
+        return qmc.measure(pool)
+
+    graph = kernel._build_graph_for_visualization(n=4, k_ctrls=3)
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    [block] = [node for node in circuit.children if isinstance(node, VInlineBlock)]
+    assert block.control_qubit_indices == [0, 1, 3]
+    assert block.affected_qubits == [0, 1, 3, 4]
 
 
 def test_controlled_box_subset_indices_with_uint_entry_resolves_via_bindings() -> None:
