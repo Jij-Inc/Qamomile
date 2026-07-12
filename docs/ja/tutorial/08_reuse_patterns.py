@@ -274,7 +274,7 @@ print("oracle_queries (rounds=4):", oracle_est_4.calls.oracle_queries)
 assert oracle_est_4.calls.oracle_queries == {"oracle": 5, "mixing": 4}
 
 # %% [markdown]
-# この例のように、オラクル内部が不明でも回路解析を進められます。既知部分は通常通りカウントされ、未知オラクル部分は`oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と`oracle_queries`（`query_complexity`で重み付け）として追跡されます。
+# この例のように、オラクル内部が不明でもリソース解析を進められます。既知部分は通常どおりカウントされ、未知のオラクル呼び出しは`calls.oracle_calls`と`calls.oracle_queries`に名前別で記録されます。
 
 # %% [markdown]
 # このように完全な分解を実装する前にアルゴリズムレベルのコスト（量子ビット数、オラクルクエリ数等）を確認できます。
