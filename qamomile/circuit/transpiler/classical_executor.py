@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
+    BinOpKind,
     CompOp,
+    CompOpKind,
     CondOp,
+    CondOpKind,
     NotOp,
+    RuntimeClassicalExpr,
+    RuntimeOpKind,
 )
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
@@ -28,11 +34,81 @@ from qamomile.circuit.ir.value import (
     DictValue,
     TupleValue,
     Value,
+    ValueLike,
     resolve_root_array_index,
 )
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.segments import ClassicalSegment
+
+# ``RuntimeOpKind`` → per-family kind tables for host-side evaluation of
+# ``RuntimeClassicalExpr``. Inverse of the forward maps used by
+# ``ClassicalLoweringPass`` (see ``arithmetic_operations``); dispatching
+# through the same ``eval_utils`` helpers as the ``BinOp`` / ``CompOp`` /
+# ``CondOp`` executors above keeps runtime-expression semantics identical
+# to compile-time folding.
+_RUNTIME_TO_BINOP_KIND: dict[RuntimeOpKind, BinOpKind] = {
+    RuntimeOpKind.ADD: BinOpKind.ADD,
+    RuntimeOpKind.SUB: BinOpKind.SUB,
+    RuntimeOpKind.MUL: BinOpKind.MUL,
+    RuntimeOpKind.DIV: BinOpKind.DIV,
+    RuntimeOpKind.FLOORDIV: BinOpKind.FLOORDIV,
+    RuntimeOpKind.MOD: BinOpKind.MOD,
+    RuntimeOpKind.POW: BinOpKind.POW,
+}
+_RUNTIME_TO_COMPOP_KIND: dict[RuntimeOpKind, CompOpKind] = {
+    RuntimeOpKind.EQ: CompOpKind.EQ,
+    RuntimeOpKind.NEQ: CompOpKind.NEQ,
+    RuntimeOpKind.LT: CompOpKind.LT,
+    RuntimeOpKind.LE: CompOpKind.LE,
+    RuntimeOpKind.GT: CompOpKind.GT,
+    RuntimeOpKind.GE: CompOpKind.GE,
+}
+_RUNTIME_TO_CONDOP_KIND: dict[RuntimeOpKind, CondOpKind] = {
+    RuntimeOpKind.AND: CondOpKind.AND,
+    RuntimeOpKind.OR: CondOpKind.OR,
+}
+
+
+def resolve_runtime_array_location(
+    array: ArrayValue,
+    indices: tuple[int, ...],
+    resolve_int: Callable[[Value], int | None],
+) -> tuple[ArrayValue, tuple[int, ...]] | None:
+    """Resolve local array indices through runtime-bound slice views.
+
+    Args:
+        array (ArrayValue): Array whose local indices should be resolved. May
+            be a root array or a ``slice_of`` view chain.
+        indices (tuple[int, ...]): Concrete indices in ``array``'s local
+            coordinate space.
+        resolve_int (Callable[[Value], int | None]): Callback used to
+            evaluate ``slice_start`` /
+            ``slice_step`` values against the current runtime state.
+
+    Returns:
+        tuple[ArrayValue, tuple[int, ...]] | None: The root array and indices
+            in root coordinates, or ``None`` when a slice bound is unresolved
+            or violates the frontend slice contract.
+    """
+    if len(indices) != 1:
+        return array, indices
+
+    idx = indices[0]
+    if idx < 0:
+        return None
+
+    current = array
+    while current.slice_of is not None:
+        if current.slice_start is None or current.slice_step is None:
+            return None
+        start = resolve_int(current.slice_start)
+        step = resolve_int(current.slice_step)
+        if start is None or step is None or start < 0 or step <= 0:
+            return None
+        idx = start + step * idx
+        current = current.slice_of
+    return current, (idx,)
 
 
 class ClassicalExecutor:
@@ -77,6 +153,8 @@ class ClassicalExecutor:
             self._execute_notop(op, context, results, scoped_locals)
         elif isinstance(op, CondOp):
             self._execute_condop(op, context, results, scoped_locals)
+        elif isinstance(op, RuntimeClassicalExpr):
+            self._execute_runtime_expr(op, context, results, scoped_locals)
         elif isinstance(op, DecodeQFixedOperation):
             self._execute_decode_qfixed(op, context, results, scoped_locals)
         elif isinstance(op, DictGetItemOperation):
@@ -181,6 +259,86 @@ class ClassicalExecutor:
         result_value = evaluate_condop_values(op.kind, lhs, rhs)
         if result_value is None:
             raise ExecutionError(f"CondOp evaluation failed: kind={op.kind}")
+        if op.results:
+            results[op.results[0].uuid] = result_value
+
+    def _execute_runtime_expr(
+        self,
+        op: RuntimeClassicalExpr,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Evaluate a measurement-derived runtime expression host-side.
+
+        ``SegmentationPass`` routes a ``RuntimeClassicalExpr`` into a
+        classical segment when its result is a block output or feeds
+        host-side post-processing (in-circuit consumers instead keep the
+        op in the quantum segment, where backend emit lowers it). The
+        unified ``RuntimeOpKind`` is mapped back to its per-family kind
+        and delegated to the shared ``eval_utils`` helpers so evaluation
+        semantics match compile-time folding exactly. Boolean results are
+        coerced to ``int`` so Bit-typed outputs surface as ``0`` / ``1``,
+        consistent with directly measured bits.
+
+        Args:
+            op (RuntimeClassicalExpr): The runtime expression to evaluate.
+                Binary kinds read ``operands[0]`` / ``operands[1]``; the
+                unary NOT kind reads ``operands[0]`` only; the ternary
+                SELECT kind reads ``[condition, true_value, false_value]``.
+            context (ExecutionContext): Execution context holding measured
+                bit values and bound parameters.
+            results (dict[str, Any]): Segment-local results keyed by value
+                UUID; the expression result is written here.
+            scoped_locals (dict[str, Any]): Loop-scoped local variables.
+
+        Raises:
+            ExecutionError: If ``op.kind`` is not a recognized
+                ``RuntimeOpKind`` or evaluation fails (e.g. division by
+                zero, operand type mismatch).
+        """
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_binop_values,
+            evaluate_compop_values,
+            evaluate_condop_values,
+            evaluate_notop_value,
+        )
+
+        kind = op.kind
+        result_value: float | int | bool | None
+        if kind is RuntimeOpKind.NOT:
+            operand = self._get_value(op.operands[0], context, results, scoped_locals)
+            result_value = evaluate_notop_value(operand)
+        elif kind is RuntimeOpKind.SELECT:
+            condition = self._get_value(op.operands[0], context, results, scoped_locals)
+            selected = op.operands[1] if bool(condition) else op.operands[2]
+            result_value = self._get_value(selected, context, results, scoped_locals)
+        else:
+            lhs = self._get_value(op.operands[0], context, results, scoped_locals)
+            rhs = self._get_value(op.operands[1], context, results, scoped_locals)
+            if kind in _RUNTIME_TO_COMPOP_KIND:
+                result_value = evaluate_compop_values(
+                    _RUNTIME_TO_COMPOP_KIND[kind], lhs, rhs
+                )
+            elif kind in _RUNTIME_TO_CONDOP_KIND:
+                result_value = evaluate_condop_values(
+                    _RUNTIME_TO_CONDOP_KIND[kind], lhs, rhs
+                )
+            elif kind in _RUNTIME_TO_BINOP_KIND:
+                result_value = evaluate_binop_values(
+                    _RUNTIME_TO_BINOP_KIND[kind], lhs, rhs
+                )
+            else:
+                raise ExecutionError(
+                    f"RuntimeClassicalExpr has unsupported kind: {kind}"
+                )
+        if result_value is None:
+            raise ExecutionError(
+                f"RuntimeClassicalExpr evaluation failed (division by zero or "
+                f"operand type mismatch): kind={kind}"
+            )
+        if isinstance(result_value, bool):
+            result_value = int(result_value)
         if op.results:
             results[op.results[0].uuid] = result_value
 
@@ -321,7 +479,7 @@ class ClassicalExecutor:
         updated = tuple(elements)
         # The shared key chains subsequent stores to the same logical array;
         # the per-version uuid entry keeps downstream reads of this SSA
-        # version and block-output resolution via output_refs working.
+        # version and typed block-output resolution working.
         results[state_key] = updated
         results[result_value.uuid] = updated
 
@@ -716,7 +874,31 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> Any:
-        """Resolve an array element from its parent container."""
+        """Resolve an array element from its parent container.
+
+        Resolution order: the parent container as a whole (results /
+        context / locals / constant / parameter), then per-element carrier
+        keys — the ``{array_uuid}_{index}`` composite key under which the
+        orchestrator stores measured bits (see
+        ``ProgramOrchestrator._load_measurements``), then the legacy
+        ``{array_name}[{index}]`` context key.
+
+        Args:
+            value (Value): The array-element value to resolve. Must carry
+                ``parent_array`` metadata.
+            context (ExecutionContext): Execution context holding measured
+                bits and bound parameters.
+            results (dict[str, Any]): Segment-local results keyed by value
+                UUID.
+            scoped_locals (dict[str, Any]): Loop-scoped local variables.
+
+        Returns:
+            Any: The concrete element value.
+
+        Raises:
+            ExecutionError: If ``value`` has no parent array or the element
+                cannot be resolved through any lookup path.
+        """
         parent = value.parent_array
         if parent is None:
             raise ExecutionError(f"Value {value.name} is not an array element")
@@ -733,6 +915,11 @@ class ClassicalExecutor:
             return container[indices]
 
         if len(indices) == 1:
+            composite_key = f"{parent.uuid}_{indices[0]}"
+            if composite_key in results:
+                return results[composite_key]
+            if context.has(composite_key):
+                return context.get(composite_key)
             indexed_key = f"{parent.name}[{indices[0]}]"
             if context.has(indexed_key):
                 return context.get(indexed_key)
@@ -747,9 +934,62 @@ class ClassicalExecutor:
                 if context.has(composite_key):
                     return context.get(composite_key)
 
+        resolved_location = resolve_runtime_array_location(
+            parent,
+            indices,
+            lambda v: self._get_optional_int_value(
+                v,
+                context,
+                results,
+                scoped_locals,
+            ),
+        )
+        if resolved_location is not None:
+            root, root_indices = resolved_location
+            root_container = self._get_array_data(root, context, results, scoped_locals)
+            if root_container is not None:
+                if len(root_indices) == 1:
+                    return root_container[root_indices[0]]
+                return root_container[root_indices]
+
+            if len(root_indices) == 1:
+                root_key = f"{root.uuid}_{root_indices[0]}"
+                if root_key in results:
+                    return results[root_key]
+                if context.has(root_key):
+                    return context.get(root_key)
+                root_indexed_key = f"{root.name}[{root_indices[0]}]"
+                if context.has(root_indexed_key):
+                    return context.get(root_indexed_key)
+
         raise ExecutionError(
             f"Array element {parent.name}{indices} could not be resolved"
         )
+
+    def _get_optional_int_value(
+        self,
+        value: Value,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> int | None:
+        """Resolve ``value`` to ``int`` when available.
+
+        Args:
+            value (Value): Scalar value to resolve.
+            context (ExecutionContext): Execution context holding measured
+                values and bindings.
+            results (dict[str, Any]): Segment-local results.
+            scoped_locals (dict[str, Any]): Loop/branch-local values.
+
+        Returns:
+            int | None: Integer value, or ``None`` when the value is not
+                currently resolvable.
+        """
+        try:
+            return int(self._get_value(value, context, results, scoped_locals))
+        except ExecutionError:
+            return None
 
     def _get_array_data(
         self,
@@ -809,17 +1049,36 @@ class ClassicalExecutor:
 
     def _resolve_structured_value(
         self,
-        value: TupleValue | Value,
+        value: ValueLike,
         context: ExecutionContext,
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> Any:
-        """Resolve a tuple or scalar value to a Python object."""
+        """Resolve a structural or scalar IR value to a Python object.
+
+        Args:
+            value (ValueLike): Scalar or nested structural value to resolve.
+            context (ExecutionContext): Runtime bindings and measured values.
+            results (dict[str, Any]): Results produced by classical execution.
+            scoped_locals (dict[str, Any]): Active control-flow local values.
+
+        Returns:
+            Any: Resolved scalar, tuple, or dictionary value.
+        """
         if isinstance(value, TupleValue):
             return tuple(
-                self._get_value(elem, context, results, scoped_locals)
+                self._resolve_structured_value(elem, context, results, scoped_locals)
                 for elem in value.elements
             )
+        if isinstance(value, DictValue):
+            return {
+                self._resolve_structured_value(
+                    key, context, results, scoped_locals
+                ): self._resolve_structured_value(
+                    entry_value, context, results, scoped_locals
+                )
+                for key, entry_value in value.entries
+            }
         return self._get_value(value, context, results, scoped_locals)
 
     def _bind_for_items_key(

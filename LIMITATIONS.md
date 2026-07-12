@@ -219,3 +219,39 @@ The concrete-index cases (`q[1]`, `q[1::2]`, or a slice bound that has already b
 **Why this trade-off was chosen**: QFixed carrier qubits are recorded as composite keys `"<root_uuid>_<index>"` indexing into the root array's element space, and `QInitOperation` registers physical qubits under `QubitAddress(root_uuid, index)` in that same space. `resolve_root_array_index()` folds a view-local index through the `slice_of` chain (`start + step * i`) into root space, but only when every slice bound on the chain is a compile-time constant; a symbolic affine bound makes it return `None`. With no constant root index the carrier cannot be mapped to a physical qubit, and emitting a verbatim view-local key (`"<view_uuid>_<i>"`) would leave the carrier unregistered and silently drop the measurement at emit. Rather than fail silently, the inline value-substitution path raises `ValueError` (`ValueSubstitutor._resolve_mapped_carrier` in `qamomile/circuit/ir/value_mapping.py`, which lives in the IR layer and therefore cannot depend on the transpiler's `ValidationError`, so it mirrors the frontend's `ValueError`), and the compile-time-`if` lowering path raises `ValidationError` (`qamomile/circuit/transpiler/passes/compile_time_if_lowering.py`). This is the same `(array_uuid: str, index: int)` root-address representation gap described in "Tuple-form expval metadata cannot encode symbolic root indices" above, surfaced for QFixed carrier keys.
 
 **Future fix**: carry a symbolic affine root expression for carrier keys — the same direction proposed for the tuple-form expval metadata limitation, e.g. `(root_uuid, offset_value, stride_value, local_index_value)` — and resolve it at emit with the same binding resolver used for runtime slice chains, or fold the view bounds from `bindings` before carrier substitution runs. Either lets a binding-resolvable view drive the cast instead of being rejected.
+
+## Structural Tuple/Dict branch merges remain unsupported
+
+The runtime output, ordinary qkernel-call paths, IR serialization, inline lowering, compile-time-if output rewriting, and nested tuple runtime binding now preserve `TupleValue` / `DictValue` metadata closely enough for direct tuple outputs, tuple element outputs, post-classical tuple element expressions, structural input/output serialization, caller-side indexing / `qmc.items()` on a sub-qkernel's returned tuple or dict, nested input access such as `pair[0][1]`, structural block outputs rewritten by `InlinePass`, and structural block outputs rewritten by `CompileTimeIfLoweringPass`. Structural values returned directly from dynamic branch helpers still fail before lowering because branch merging remains scalar-oriented.
+
+**When it bites**: `qmc.if_else(...)` branches that return `qmc.Tuple[...]` or `qmc.Dict[...]` handles, because the frontend merge is still scalar-`Value` oriented.
+
+**Why this trade-off was chosen**: the current fix focused on the user-visible paths that were already reproducible in normal transpilation and execution, plus the structural-output substitution gaps that could be fixed by reusing recursive `ValueLike` traversal: post-process sample aggregation, scalar/tuple measured outputs, nested tuple element runtime bindings, structural input/output serialization, top-level sub-qkernel structural return wrapping, `InlinePass` output rewriting, and `CompileTimeIfLoweringPass` output rewriting. Structural branch merging is a broader frontend control-flow contract: it must define how to construct and merge new structural values across branch boundaries rather than merely substitute existing references.
+
+**Workaround**: avoid returning structural `Tuple` / `Dict` values directly from `qmc.if_else` branches. Merge or return their scalar elements separately instead.
+
+**Future fix**: teach the frontend merge to rebuild structural handles from merged structural `ValueLike` results.
+
+## Measurement-derived RegionArg carries cannot stay inside quantum loops
+
+A measurement-dependent branch merge (`if bit: out = x else: out = y`) whose result is returned or post-processed host-side is lowered to a `SELECT` runtime expression. `qmc.range` and `qmc.items` now represent a rebound scalar explicitly as `RegionArg(init, block_arg, yielded, result)`. When the loop is purely classical, the complete loop can run in the post-quantum classical segment and the carried value is recomputed correctly for each raw measurement row. When the same loop also contains quantum work, however, segmentation cannot move the loop to the host or split one loop body across quantum and host segments. Rather than silently resolving the carried output to `None` or a stale iteration, segmentation raises `SeparationError` for the measurement-derived carry.
+
+**When it bites**: returning or classically post-processing a `UInt` / `Float` rebound inside a `qmc.range` or `qmc.items` loop when its update depends on a measurement and that loop also contains gates or other quantum-effective operations. Purely classical RegionArg loops after a measurement are supported. Measurement-backed `Bit` carries and general `while` carries remain covered by the earlier loop-carried-value limitations.
+
+**Why this trade-off was chosen**: RegionArg now captures the iteration semantics in the IR and both the classical executor and ordinary emit-time unrolling can thread values they own. The remaining gap is the segmented execution boundary: a backend runtime classical expression derived from an in-circuit measurement is not surfaced as a host value after each quantum-loop iteration, so the host cannot advance the RegionArg without guessing or replaying backend state.
+
+**Workaround**: keep the measurement-derived reduction in a purely classical loop, move quantum work outside that loop, or return the underlying measurements and compute the reduction in ordinary Python outside the kernel.
+
+**Future fix**: add a segmented control-flow protocol that can expose backend classical-expression results at each loop iteration and feed the updated RegionArg into the next iteration, or let capable backends return the final carried runtime value directly.
+
+## QFixed measurements cannot be decoded inside runtime control flow
+
+`MeasureQFixedOperation` is split before segmentation into one abstract vector measurement in the quantum segment and one `DecodeQFixedOperation` in the host-side classical segment. That split is well-defined at block scope, but a measurement nested inside `if`, `for`, `qmc.items`, or `while` has no explicit branch/loop yield that can carry the selected or last-iteration decoded Float to the host. Segmentation therefore raises `SeparationError` instead of exposing the raw carrier-bit tuple as if it were the declared Float output.
+
+**When it bites**: measuring a `QFixed` value inside runtime control flow, whether the result is returned directly or merged into a value used after the construct.
+
+**Why this trade-off was chosen**: recursively replacing the nested operation with a vector measurement plus an in-body decode would leave a host-only decode inside the quantum segment. Moving only the decode outside would lose branch selection, zero-trip behavior, and last-iteration semantics. A loud plan-time rejection preserves the typed-output contract until control-flow yields can express those semantics.
+
+**Workaround**: move the QFixed measurement outside control flow, or return raw measured bits and decode them in ordinary Python outside the kernel.
+
+**Future fix**: once segmented control flow can carry yielded values across the quantum/host boundary, lower the nested carrier measurement in place and route its selected or loop-carried decode through the post-quantum classical segment.

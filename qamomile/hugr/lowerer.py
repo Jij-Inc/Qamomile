@@ -51,7 +51,10 @@ from qamomile.circuit.ir.types import (
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayValue,
+    DictValue,
+    TupleValue,
     Value,
+    ValueLike,
     resolve_root_array_index,
     resolve_root_qubit_address,
 )
@@ -59,6 +62,7 @@ from qamomile.circuit.transpiler.artifact import (
     CompilationMetadata,
     CompiledProgram,
 )
+from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 from qamomile.circuit.transpiler.errors import (
     CallableDefinitionConflictError,
     EmitError,
@@ -248,7 +252,7 @@ def _symbol_name(ref: CallableRef) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", raw)
 
 
-def _entry_inputs(block: Block, bindings: Mapping[str, Any]) -> list[Value]:
+def _entry_inputs(block: Block, bindings: Mapping[str, Any]) -> list[ValueLike]:
     """Return runtime parameter values exposed by the HUGR entrypoint.
 
     Args:
@@ -257,7 +261,7 @@ def _entry_inputs(block: Block, bindings: Mapping[str, Any]) -> list[Value]:
             public HUGR function ABI.
 
     Returns:
-        list[Value]: Runtime parameter values in block input order.
+        list[ValueLike]: Runtime parameter values in block input order.
     """
     parameter_uuids = {
         value.uuid for name, value in block.parameters.items() if name not in bindings
@@ -297,15 +301,17 @@ def _lower_type(value_type: ValueType) -> Any:
     raise EmitError(f"Unsupported HUGR value type: {value_type.label()}")
 
 
-def _lower_value_type(value: Value) -> Any:
+def _lower_value_type(value: ValueLike) -> Any:
     """Map a scalar or fixed-size array value to a HUGR carrier type.
 
     Args:
-        value (Value): Qamomile value including shape metadata.
+        value (ValueLike): Qamomile value including structural metadata.
 
     Returns:
         Any: Scalar type or fixed-length HUGR tuple type.
     """
+    if isinstance(value, (TupleValue, DictValue)):
+        raise EmitError(f"HUGR structural value {value.name!r} is not supported yet")
     if isinstance(value, ArrayValue):
         _, tys, _, _, _ = _require_hugr()
         return tys.Tuple(*[_lower_type(value.type) for _ in range(_array_size(value))])
@@ -336,7 +342,7 @@ def _lower_block(
     block: Block,
     builder: Any,
     functions: dict[CallableRef, Any],
-    explicit_inputs: list[Value] | None,
+    explicit_inputs: list[ValueLike] | None,
     bindings: Mapping[str, Any] | None = None,
 ) -> None:
     """Lower one Qamomile block into a HUGR function dataflow graph.
@@ -345,7 +351,7 @@ def _lower_block(
         block (Block): Semantic callable body.
         builder (Any): ``hugr.build.Function`` receiving operations.
         functions (dict[CallableRef, Any]): Predeclared callable functions.
-        explicit_inputs (list[Value] | None): Input values corresponding to
+        explicit_inputs (list[ValueLike] | None): Input values corresponding to
             HUGR function ports. ``None`` uses every block input.
         bindings (Mapping[str, Any] | None): Compile-time entrypoint values
             keyed by public parameter name. Defaults to ``None``.
@@ -422,11 +428,15 @@ def _lower_block(
     builder.set_outputs(*outputs)
 
 
-def _pack_value(value: Value, environment: dict[str, Any], builder: Any) -> Any:
+def _pack_value(
+    value: ValueLike,
+    environment: dict[str, Any],
+    builder: Any,
+) -> Any:
     """Return a scalar wire or pack array elements into a HUGR tuple.
 
     Args:
-        value (Value): Value to materialize at a function boundary.
+        value (ValueLike): Value to materialize at a function boundary.
         environment (dict[str, Any]): UUID-to-wire mapping.
         builder (Any): HUGR dataflow builder.
 
@@ -436,6 +446,8 @@ def _pack_value(value: Value, environment: dict[str, Any], builder: Any) -> Any:
     Raises:
         EmitError: If the value is unresolved.
     """
+    if isinstance(value, (TupleValue, DictValue)):
+        raise EmitError(f"HUGR structural value {value.name!r} is not supported yet")
     try:
         resolved = environment[value.uuid]
     except KeyError as error:
@@ -1911,7 +1923,11 @@ def _lower_transformed_call(
             if controls
             else [value for value in operation.operands if value.type.is_quantum()]
         )
-        classical = [value for value in operation.operands if value.type.is_classical()]
+        classical = [
+            value
+            for value in operation.operands
+            if value.type.is_classical() or value.type.is_object()
+        ]
         inverse = operation.transform is CallTransform.INVERSE
         display_name = operation.target.name
     if body is None:
@@ -1927,14 +1943,32 @@ def _lower_transformed_call(
         value for value in body.output_values if value.type.is_quantum()
     ]
     quantum_entry = body_quantum_outputs if inverse else body_quantum_inputs
-    if len(quantum_entry) != len(targets):
-        raise EmitError("HUGR transformed call quantum arity mismatch")
-    for formal, actual in zip(quantum_entry, targets, strict=True):
-        local[formal.uuid] = _resolve_wire(actual, environment)
-    if len(body_classical_inputs) != len(classical):
-        raise EmitError("HUGR transformed call classical arity mismatch")
-    for formal, actual in zip(body_classical_inputs, classical, strict=True):
-        resolved = _resolve_classical_argument(actual, builder, environment)
+    if inverse:
+        if len(quantum_entry) != len(targets):
+            raise EmitError("HUGR transformed call quantum arity mismatch")
+        for formal, actual in zip(quantum_entry, targets, strict=True):
+            local[formal.uuid] = _resolve_wire(actual, environment)
+        if len(body_classical_inputs) != len(classical):
+            raise EmitError("HUGR transformed call classical arity mismatch")
+        pairs = zip(body_classical_inputs, classical, strict=True)
+    else:
+        operand_pairs = pair_block_operands(body, [*targets, *classical])
+        if len(operand_pairs) != len(body.input_values):
+            raise EmitError("HUGR transformed call operand arity mismatch")
+        pairs = (
+            (formal, actual)
+            for formal, actual in operand_pairs
+            if not formal.type.is_quantum()
+        )
+        for formal, actual in operand_pairs:
+            if formal.type.is_quantum():
+                local[formal.uuid] = _resolve_wire(cast(Value, actual), environment)
+    for formal, actual in pairs:
+        resolved = _resolve_classical_argument(
+            cast(Value, actual),
+            builder,
+            environment,
+        )
         local[formal.uuid] = resolved
         parameter_name = formal.parameter_name()
         if parameter_name is not None:

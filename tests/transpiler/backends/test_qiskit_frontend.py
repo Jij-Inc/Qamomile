@@ -2448,45 +2448,28 @@ class TestControlFlowIfElse:
 
 
 class TestLoopIndexedMeasuredBitMerge:
-    """Loop-indexed / measured Bit merges: representable ones run, the mux is rejected.
+    """Exercise loop-indexed measured Bit merges across selection modes.
 
-    A runtime (measurement-conditioned) if-else that merges two DISTINCT
-    ``Vector[Bit]`` elements both measured BEFORE the branch
-    (``if sel[j]: r = a[j] else: r = b[j]``) is an at-runtime multiplexing
-    of two pre-existing clbits. The clbit-aliasing emit model cannot
-    represent it — it would bind the merged bit to the true-branch source
-    unconditionally and silently return the wrong value whenever the
-    condition selects the false branch — so emit rejects it with
-    ``EmitError`` (``map_merge_outputs(reject_runtime_bit_mux=True)`` from
-    ``register_merge_outputs``). Representable merges still work: a
-    compile-time-selected branch re-points its merged bit per unrolled
-    iteration (one reused merge-output UUID across iterations), and a merge
-    of branch-local fresh measurements aliases both onto one shared clbit.
+    A measurement-conditioned merge over two pre-existing clbits lowers to
+    a runtime SELECT expression. Compile-time selection re-points the merge
+    result per unrolled iteration, while branch-local fresh measurements
+    alias both branch results onto one shared clbit.
     """
 
-    def test_runtime_pre_measured_bit_mux_is_rejected(self):
-        """A runtime mux of two pre-measured elements raises EmitError.
-
-        ``a`` and ``b`` are measured before the loop; a runtime selector
-        ``sel[j]`` chooses between ``a[j]`` and ``b[j]``. Clbit aliasing
-        would silently bind the merged bit to ``a[j]`` regardless of
-        ``sel[j]`` (returning a wrong measurement), so emit must reject the
-        shape loudly. The always-true selector here would have masked the
-        bug by coincidence, which is exactly why a value-based test cannot
-        guard it — the rejection must be structural.
-        """
+    def test_runtime_pre_measured_bit_mux_executes(self):
+        """A runtime SELECT multiplexes two pre-measured vector elements."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             a = qmc.qubit_array(2, "a")
-            a[1] = qmc.x(a[1])
-            abits = qmc.measure(a)  # (0, 1)
+            a[0] = qmc.x(a[0])
+            abits = qmc.measure(a)  # (1, 0)
             bb = qmc.qubit_array(2, "bb")
-            bbits = qmc.measure(bb)  # (0, 0)
+            bb[1] = qmc.x(bb[1])
+            bbits = qmc.measure(bb)  # (0, 1)
             sel = qmc.qubit_array(2, "sel")
             sel[0] = qmc.x(sel[0])
-            sel[1] = qmc.x(sel[1])
-            selbits = qmc.measure(sel)  # (1, 1)
+            selbits = qmc.measure(sel)  # (1, 0)
             q = qmc.qubit_array(2, "q")
             for j in qmc.range(2):
                 if selbits[j]:
@@ -2498,8 +2481,9 @@ class TestLoopIndexedMeasuredBitMerge:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises(EmitError, match="multiplex two already-measured"):
-            transpiler.transpile(circuit)
+        exe = transpiler.transpile(circuit)
+        results = exe.sample(transpiler.executor(), shots=200).result().results
+        assert results == [((1, 1), 200)]
 
     def test_branch_local_runtime_bit_merge_executes(self):
         """A merge of branch-local fresh measurements still executes correctly.

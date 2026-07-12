@@ -194,14 +194,14 @@ def is_full_reslice_of_input(
 
 
 def view_result_value_for_full_reslice(
-    callee_output: ArrayValue,
+    result_value: ArrayValue,
     input_view: Vector[Any],
 ) -> ArrayValue:
     """Build the caller-side array value for a full re-sliced view output.
 
     Args:
-        callee_output (ArrayValue): Formal-lineage output produced by the
-            callee block.
+        result_value (ArrayValue): Caller-local output materialized from the
+            callee result.
         input_view (Vector[Any]): Caller-side view argument being preserved.
 
     Returns:
@@ -209,10 +209,10 @@ def view_result_value_for_full_reslice(
     """
     source = input_view.value
     return ArrayValue(
-        type=callee_output.type,
-        name=callee_output.name,
+        type=result_value.type,
+        name=result_value.name,
         version=source.version + 1,
-        metadata=callee_output.metadata,
+        metadata=result_value.metadata,
         logical_id=source.logical_id,
         shape=source.shape,
         slice_of=source.slice_of,

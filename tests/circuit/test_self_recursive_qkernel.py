@@ -60,6 +60,17 @@ def _outer_of_non_terminating(k: qmc.UInt) -> qmc.Bit:
     return qmc.measure(q)
 
 
+@qmc.qkernel
+def _rec_tuple_without_matching_input(
+    k: qmc.UInt,
+) -> qmc.Tuple[qmc.UInt, qmc.UInt]:
+    if k == 0:
+        result = (k, k)
+    else:
+        result = _rec_tuple_without_matching_input(k - 1)
+    return result
+
+
 def test_helper_qkernel_call_is_inline_policy_invoke():
     """A helper qkernel call is represented as an inline InvokeOperation."""
     block = _outer_of_leaf.block
@@ -110,6 +121,12 @@ def test_non_terminating_recursion_raises():
         tr.transpile(_outer_of_non_terminating, bindings={"k": 3})
 
 
+def test_self_recursive_unmatched_tuple_output_raises_targeted_error():
+    """Forward refs reject structural outputs that cannot match inputs."""
+    with pytest.raises(FrontendTransformError, match="tuple output"):
+        _ = _rec_tuple_without_matching_input.block
+
+
 @qmc.qkernel
 def _control_of_rec() -> qmc.Bit:
     """Control a self-recursive kernel — unsupported, must fail clearly."""
@@ -123,9 +140,10 @@ def test_control_of_recursive_kernel_raises_targeted_error():
     """Controlling a self-recursive kernel fails with a cause-specific error.
 
     The recursion lives inside ``ControlledUOperation.block``, where
-    ``partial_eval`` never folds the base-case ``if`` (it does not descend
-    into operation-owned blocks). The unroll loop must recognise that every
-    residual call is trapped there and raise a targeted message naming
+    ``inline``'s cycle guard unrolls the self-call one layer and then
+    declines to re-enter, leaving a residual call the unroll loop cannot
+    resolve. The unroll loop must recognise that every residual call is
+    trapped there and raise a targeted message naming
     ``qmc.control`` / ``qmc.inverse`` — not the generic "did not terminate
     after N iterations" message, which would wrongly blame the (perfectly
     valid, terminating) bindings.

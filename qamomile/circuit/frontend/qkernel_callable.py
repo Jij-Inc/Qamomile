@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from qamomile.circuit.ir.block import Block
@@ -10,9 +11,10 @@ from qamomile.circuit.ir.operation.callable import (
     CallableRef,
     CallPolicy,
     InvokeOperation,
+    block_call_operands_and_results,
     signature_from_block,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ValueLike
 
 
 def _qkernel_callable_name(kernel: Any) -> str:
@@ -28,39 +30,6 @@ def _qkernel_callable_name(kernel: Any) -> str:
         getattr(kernel, "_callable_name", None)
         or getattr(kernel, "name", type(kernel).__name__)
     )
-
-
-def block_call_operands_and_results(
-    block: Block,
-    inputs_map: dict[str, Value],
-) -> tuple[list[Value], list[Value]]:
-    """Map a callee block's ports to call operands and result values.
-
-    Args:
-        block (Block): Callee body whose labels, inputs, and outputs define
-            the call contract.
-        inputs_map (dict[str, Value]): Actual argument values keyed by callee
-            label.
-
-    Returns:
-        tuple[list[Value], list[Value]]: Call operands in callee-label order
-        and result values with pass-through inputs advanced to their next SSA
-        version.
-    """
-    inputs = [inputs_map[label] for label in block.label_args]
-    dummy_inputs = {
-        value.logical_id: idx for idx, value in enumerate(block.input_values)
-    }
-
-    results: list[Value] = []
-    for dummy_return in block.output_values:
-        if dummy_return.logical_id in dummy_inputs:
-            input_idx = dummy_inputs[dummy_return.logical_id]
-            results.append(inputs[input_idx].next_version())
-        else:
-            results.append(dummy_return)
-
-    return inputs, results
 
 
 def qkernel_callable_attrs(kernel: Any) -> dict[str, Any]:
@@ -147,15 +116,15 @@ def qkernel_callable_def(kernel: Any, block: Block) -> CallableDef:
 def qkernel_invoke_block(
     kernel: Any,
     block: Block,
-    inputs_map: dict[str, Value],
+    inputs_map: Mapping[str, ValueLike],
 ) -> InvokeOperation:
     """Create an ``InvokeOperation`` for a qkernel call.
 
     Args:
         kernel (Any): QKernel-like object carrying callable metadata.
         block (Block): Callee body referenced by the callable definition.
-        inputs_map (dict[str, Value]): Actual argument values keyed by callee
-            label.
+        inputs_map (Mapping[str, ValueLike]): Actual argument values keyed by
+            callee label.
 
     Returns:
         InvokeOperation: Inline-by-default qkernel invocation.

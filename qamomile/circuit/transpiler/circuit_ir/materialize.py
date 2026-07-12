@@ -248,6 +248,5 @@ def materialize_executable(
         compiled_quantum=quantum_segments,
         compiled_classical=executable.compiled_classical,
         compiled_expval=executable.compiled_expval,
-        output_refs=executable.output_refs,
-        num_output_bits=executable.num_output_bits,
+        output_values=list(executable.output_values),
     )

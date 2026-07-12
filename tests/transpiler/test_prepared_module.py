@@ -116,9 +116,7 @@ def test_prepare_exposes_program_abi_before_segmentation() -> None:
     prepared = QiskitTranspiler().prepare(_prepared_entrypoint)
 
     assert prepared.abi.public_inputs == {}
-    assert prepared.abi.output_refs == [
-        value.uuid for value in prepared.entrypoint.output_values
-    ]
+    assert prepared.abi.output_values == prepared.entrypoint.output_values
 
 
 def test_prepare_definition_mapping_is_read_only() -> None:

@@ -187,7 +187,7 @@ def prepare_module(
     visit_block(entrypoint_ref, entrypoint)
     abi = ProgramABI(
         public_inputs=dict(entrypoint.parameters),
-        output_refs=[value.uuid for value in entrypoint.output_values],
+        output_values=list(entrypoint.output_values),
     )
     frozen_graph = {caller: frozenset(callees) for caller, callees in edges.items()}
     return PreparedModule(

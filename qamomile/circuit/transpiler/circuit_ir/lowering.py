@@ -180,6 +180,25 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 UnaryOperator.NOT,
                 self._runtime_operand(op.operands[0], clbit_map, bindings),
             )
+        elif op.kind is RuntimeOpKind.SELECT:
+            if len(op.operands) != 3:
+                raise EmitError(
+                    "Circuit runtime SELECT requires condition, true, and false "
+                    "operands"
+                )
+            condition, true_value, false_value = (
+                self._runtime_operand(operand, clbit_map, bindings)
+                for operand in op.operands
+            )
+            result = BinaryExpr(
+                BinaryOperator.OR,
+                BinaryExpr(BinaryOperator.AND, condition, true_value),
+                BinaryExpr(
+                    BinaryOperator.AND,
+                    UnaryExpr(UnaryOperator.NOT, condition),
+                    false_value,
+                ),
+            )
         else:
             if op.kind is None:
                 raise EmitError("Circuit runtime operation has no operation kind")
@@ -656,6 +675,5 @@ def lower_circuit_plan(
         compiled_quantum=quantum_segments,
         compiled_classical=lowered.compiled_classical,
         compiled_expval=lowered.compiled_expval,
-        output_refs=lowered.output_refs,
-        num_output_bits=lowered.num_output_bits,
+        output_values=list(lowered.output_values),
     )
