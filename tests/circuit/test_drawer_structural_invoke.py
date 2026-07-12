@@ -2737,6 +2737,38 @@ def test_dynamic_unresolved_widening_keeps_sparse_exact_aliases() -> None:
     ] == [[5]]
 
 
+def test_boxed_dynamic_unresolved_widening_uses_child_shape_provenance() -> None:
+    """A boxed callable resolves dynamic output width without phantom wires."""
+    graph = _build_dynamic_unresolved_widening_graph()
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=False)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    expected_wires = list(range(6))
+    assert num_qubits == 6
+    assert qubit_names[5] == "wide[2]"
+    gates = [node for node in circuit.children if isinstance(node, VGate)]
+    [body_call] = [
+        gate for gate in gates if gate.label == "DYNAMIC_UNRESOLVED_WIDENING"
+    ]
+    [forwarding_call] = [
+        gate for gate in gates if gate.label == "OPAQUE_DYNAMIC_FORWARD"
+    ]
+    assert body_call.qubit_indices == expected_wires
+    assert forwarding_call.qubit_indices == expected_wires
+    assert [
+        gate.qubit_indices for gate in gates if gate.gate_type is GateOperationType.H
+    ] == [expected_wires]
+    assert [
+        gate.qubit_indices for gate in gates if gate.gate_type is GateOperationType.Z
+    ] == [[5]]
+
+
 @pytest.mark.parametrize("inline", [False, True])
 def test_folded_loop_uses_current_slice_binding_over_cached_aliases(
     inline: bool,
