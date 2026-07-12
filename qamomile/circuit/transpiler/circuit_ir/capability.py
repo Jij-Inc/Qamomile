@@ -13,9 +13,9 @@ import enum
 
 from qamomile.circuit.transpiler.circuit_ir.model import (
     BinaryOperator,
-    CircuitIntrinsic,
     PauliEvolutionRealization,
     ReusableCircuit,
+    SemanticOpKey,
     UnaryOperator,
 )
 from qamomile.circuit.transpiler.gate_emitter import GateKind
@@ -142,17 +142,61 @@ class CallTransformCapabilities:
 
 
 @dataclasses.dataclass(frozen=True)
-class NativeIntrinsicCapabilities:
-    """Declare a native intrinsic realization and its accepted transforms.
+class NativeSemanticOpCapabilities:
+    """Declare a target-native realization of an abstract operation.
 
     Args:
-        intrinsic (CircuitIntrinsic): Intrinsic realized natively.
+        key (SemanticOpKey): Backend-independent semantic operation key.
+        realization (str): Target-owned realization identifier passed to the
+            materializer after legalization.
         call_transforms (CallTransformCapabilities): Call shapes supported by
             the native realization.
+        operand_widths (tuple[int | None, ...] | None): Required semantic
+            operand grouping. ``None`` accepts any grouping; an integer
+            requires that exact width and ``None`` inside the tuple accepts
+            any positive width at that position. Defaults to ``None``.
+        min_qubits (int): Minimum fallback-body width accepted by the native
+            operation. Defaults to zero.
+        max_qubits (int | None): Maximum fallback-body width, or ``None`` for
+            no limit. Defaults to ``None``.
     """
 
-    intrinsic: CircuitIntrinsic
+    key: SemanticOpKey
+    realization: str
     call_transforms: CallTransformCapabilities
+    operand_widths: tuple[int | None, ...] | None = None
+    min_qubits: int = 0
+    max_qubits: int | None = None
+
+    def accepts(self, callee: ReusableCircuit) -> bool:
+        """Return whether this realization accepts one semantic call shape.
+
+        Args:
+            callee (ReusableCircuit): Reusable call retaining source operand
+                grouping and deferred transforms.
+
+        Returns:
+            bool: Whether transform, total-width, and operand-shape contracts
+            all accept the call.
+        """
+        if not self.call_transforms.accepts(callee):
+            return False
+        if callee.body.num_qubits < self.min_qubits:
+            return False
+        if self.max_qubits is not None and callee.body.num_qubits > self.max_qubits:
+            return False
+        if self.operand_widths is None:
+            return True
+        if len(callee.operand_widths) != len(self.operand_widths):
+            return False
+        return all(
+            actual > 0 and (required is None or actual == required)
+            for actual, required in zip(
+                callee.operand_widths,
+                self.operand_widths,
+                strict=True,
+            )
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -163,8 +207,8 @@ class CircuitCapabilities:
         name (str): Stable target name used in diagnostics.
         primitive_gates (frozenset[GateKind]): Primitive gate kinds accepted
             by the target materializer.
-        native_intrinsics (tuple[NativeIntrinsicCapabilities, ...]): Native
-            intrinsic realizations and their supported call shapes.
+        native_semantic_ops (tuple[NativeSemanticOpCapabilities, ...]): Native
+            realizations keyed by open semantic operation identity.
         gate_parameters (ScalarCapabilities): Scalar language accepted by gate
             parameters.
         predicates (ScalarCapabilities): Scalar language accepted by dynamic
@@ -174,7 +218,7 @@ class CircuitCapabilities:
         global_phase (ScalarCapabilities | None): Scalar language accepted for
             nonzero program-level global phase, or ``None`` when unsupported.
         generic_calls (CallTransformCapabilities): Reusable-call forms accepted
-            after intrinsic legalization.
+            after semantic-call legalization.
         supports_dynamic_if (bool): Whether runtime ``if`` regions are
             accepted.
         supports_dynamic_while (bool): Whether runtime ``while`` regions are
@@ -186,7 +230,7 @@ class CircuitCapabilities:
 
     name: str
     primitive_gates: frozenset[GateKind]
-    native_intrinsics: tuple[NativeIntrinsicCapabilities, ...]
+    native_semantic_ops: tuple[NativeSemanticOpCapabilities, ...]
     gate_parameters: ScalarCapabilities
     predicates: ScalarCapabilities
     pauli_time: ScalarCapabilities
@@ -197,21 +241,21 @@ class CircuitCapabilities:
     supports_reset: bool
     pauli_realizations: frozenset[PauliEvolutionRealization]
 
-    def native_intrinsic(
+    def native_semantic_op(
         self,
-        intrinsic: CircuitIntrinsic,
-    ) -> NativeIntrinsicCapabilities | None:
-        """Return the native declaration for one intrinsic.
+        key: SemanticOpKey,
+    ) -> NativeSemanticOpCapabilities | None:
+        """Return the native declaration for one semantic operation.
 
         Args:
-            intrinsic (CircuitIntrinsic): Intrinsic kind to look up.
+            key (SemanticOpKey): Semantic operation key to look up.
 
         Returns:
-            NativeIntrinsicCapabilities | None: Matching declaration, or
+            NativeSemanticOpCapabilities | None: Matching declaration, or
             ``None`` when the target has no native realization.
         """
-        for declaration in self.native_intrinsics:
-            if declaration.intrinsic is intrinsic:
+        for declaration in self.native_semantic_ops:
+            if declaration.key == key:
                 return declaration
         return None
 
@@ -221,14 +265,14 @@ class CompilationPolicy:
     """Select preferred realizations among target-supported alternatives.
 
     Args:
-        prefer_native_intrinsics (bool): Whether legal native intrinsic
-            realizations are preferred over fallback bodies. Defaults to
-            ``True``.
+        prefer_native_semantic_ops (bool): Whether legal target-native
+            realizations are preferred over reusable fallback bodies.
+            Defaults to ``True``.
         prefer_native_pauli_evolution (bool): Whether native Pauli evolution is
             preferred over a gate gadget. Defaults to ``True``.
     """
 
-    prefer_native_intrinsics: bool = True
+    prefer_native_semantic_ops: bool = True
     prefer_native_pauli_evolution: bool = True
 
 

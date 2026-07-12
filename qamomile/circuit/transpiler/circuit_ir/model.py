@@ -410,6 +410,26 @@ class MeasureInstruction:
 
 
 @dataclasses.dataclass(frozen=True)
+class MeasureVectorInstruction:
+    """Measure an ordered group of wires into classical bits.
+
+    This instruction preserves vector measurement as one semantic operation
+    until target materialization. A backend with a vector measurement
+    primitive can consume it directly; scalar-only backends expand it at
+    their own boundary.
+
+    Args:
+        inputs (tuple[WireId, ...]): Measured wire versions in result order.
+        outputs (tuple[WireId, ...]): Post-measurement wire versions.
+        clbits (tuple[int, ...]): Destination classical bits in result order.
+    """
+
+    inputs: tuple[WireId, ...]
+    outputs: tuple[WireId, ...]
+    clbits: tuple[int, ...]
+
+
+@dataclasses.dataclass(frozen=True)
 class ResetInstruction:
     """Reset a wire and produce a fresh zero-state wire.
 
@@ -461,18 +481,33 @@ class PauliEvolutionInstruction:
     realization: PauliEvolutionRealization = PauliEvolutionRealization.ABSTRACT
 
 
-class CircuitIntrinsic(enum.Enum):
-    """Enumerate composite operations whose identity survives lowering.
+@dataclasses.dataclass(frozen=True, order=True)
+class SemanticOpKey:
+    """Identify an abstract operation independently of any backend.
 
-    Lowering may erase how a composite was written (semantic values, call
-    machinery), but never what it means: a call tagged with an intrinsic
-    stays recognizable until target legalization decides — per declared
-    target capability — whether to preserve it natively or lower it to its
-    fallback body.
+    The key is deliberately open rather than an enum. Standard-library,
+    algorithm, provider, and user callables can therefore participate in
+    native realization without modifying the compiler's closed vocabulary.
+
+    Args:
+        namespace (str): Stable owner namespace such as ``qamomile.stdlib``.
+        name (str): Stable operation name within the namespace.
+        version (str): Semantic contract version. Defaults to ``"1"``.
+        variant (str | None): Optional exact semantic variant, such as a
+            decomposition strategy. Defaults to ``None``.
     """
 
-    QFT = "qft"
-    IQFT = "iqft"
+    namespace: str
+    name: str
+    version: str = "1"
+    variant: str | None = None
+
+
+QFT_SEMANTIC_KEY = SemanticOpKey("qamomile.stdlib", "qft")
+"""Semantic key for the exact standard quantum Fourier transform."""
+
+IQFT_SEMANTIC_KEY = SemanticOpKey("qamomile.stdlib", "iqft")
+"""Semantic key for the exact inverse quantum Fourier transform."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -480,15 +515,13 @@ class CallableIdentity:
     """Preserve the semantic identity of a reusable circuit body.
 
     Args:
-        symbol (str): Stable semantic callable name (e.g. ``"qft"``).
-        intrinsic (CircuitIntrinsic | None): Recognized intrinsic kind that
-            targets may implement natively. ``None`` marks a user-defined
-            callable that is always realized through its body. Defaults to
-            ``None``.
+        key (SemanticOpKey): Open semantic identity used by target-native
+            realization registries.
+        symbol (str): Human-readable callable name used for diagnostics.
     """
 
+    key: SemanticOpKey
     symbol: str
-    intrinsic: CircuitIntrinsic | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -504,6 +537,13 @@ class ReusableCircuit:
         identity (CallableIdentity | None): Semantic identity preserved for
             target legalization. ``None`` marks an anonymous body. Defaults
             to ``None``.
+        native_realization (str | None): Target-owned realization identifier
+            selected during legalization. ``None`` keeps the reusable body as
+            the fallback implementation. Defaults to ``None``.
+        operand_widths (tuple[int, ...]): Flattened width of each semantic
+            quantum operand before backend lowering. A vector contributes its
+            element count and a scalar qubit contributes one. An empty tuple
+            means the source boundary did not expose operand grouping.
     """
 
     body: CircuitProgram
@@ -512,6 +552,8 @@ class ReusableCircuit:
     controls: int = 0
     inverse: bool = False
     identity: CallableIdentity | None = None
+    native_realization: str | None = None
+    operand_widths: tuple[int, ...] = ()
 
     @property
     def num_qubits(self) -> int:
@@ -605,6 +647,7 @@ class WhileInstruction:
 CircuitInstruction: TypeAlias = (
     GateInstruction
     | MeasureInstruction
+    | MeasureVectorInstruction
     | ResetInstruction
     | BarrierInstruction
     | PauliEvolutionInstruction
@@ -801,6 +844,36 @@ class CircuitBuilder:
         output_wire = self.fresh_wire()
         self.operations.append(MeasureInstruction(input_wire, output_wire, clbit))
         self._regions[-1].wires[qubit] = output_wire
+
+    def append_measure_vector(
+        self,
+        qubits: tuple[int, ...],
+        clbits: tuple[int, ...],
+    ) -> None:
+        """Append one ordered vector measurement.
+
+        Args:
+            qubits (tuple[int, ...]): Measured qubit slots in result order.
+            clbits (tuple[int, ...]): Destination classical slots.
+
+        Raises:
+            ValueError: If qubit and classical-bit arities differ or either
+                sequence contains duplicate slots.
+            IndexError: If a classical-bit slot is outside the circuit.
+        """
+        if len(qubits) != len(clbits):
+            raise ValueError("Vector measurement qubit/clbit arities must match")
+        if len(set(qubits)) != len(qubits):
+            raise ValueError("Vector measurement qubit slots must be unique")
+        if len(set(clbits)) != len(clbits):
+            raise ValueError("Vector measurement classical slots must be unique")
+        if any(clbit < 0 or clbit >= self.num_clbits for clbit in clbits):
+            raise IndexError("Vector measurement classical bit is out of range")
+        inputs = tuple(self.current_wire(qubit) for qubit in qubits)
+        outputs = tuple(self.fresh_wire() for _ in qubits)
+        self.operations.append(MeasureVectorInstruction(inputs, outputs, clbits))
+        for qubit, output in zip(qubits, outputs, strict=True):
+            self._regions[-1].wires[qubit] = output
 
     def append_reset(self, qubit: int) -> None:
         """Append reset and advance the affected wire.

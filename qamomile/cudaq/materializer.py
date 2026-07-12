@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 from typing import Any
 
 from qamomile._utils import is_close_zero
@@ -28,6 +27,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     LoopVariableExpr,
     MaterializedCircuit,
     MeasureInstruction,
+    MeasureVectorInstruction,
     ParameterExpr,
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
@@ -74,7 +74,7 @@ class CudaqMaterializer:
         return CircuitCapabilities(
             name="cudaq",
             primitive_gates=ALL_PRIMITIVE_GATES,
-            native_intrinsics=(),
+            native_semantic_ops=(),
             gate_parameters=numeric,
             predicates=ScalarCapabilities(
                 atoms=frozenset(ScalarAtom),
@@ -89,20 +89,17 @@ class CudaqMaterializer:
                 supports_inverse=True,
                 max_controls=None,
                 supports_barrier_body=True,
-                control_mode=CallControlMode.DISTRIBUTE,
-                controlled_gate_kinds=ALL_PRIMITIVE_GATES
-                - {
-                    GateKind.CH,
-                    GateKind.CRX,
-                    GateKind.CRY,
-                    GateKind.CRZ,
-                },
-                controlled_pauli_time=numeric,
+                control_mode=CallControlMode.WHOLE_CALL,
             ),
             supports_dynamic_if=True,
             supports_dynamic_while=True,
             supports_reset=True,
-            pauli_realizations=frozenset({PauliEvolutionRealization.GADGET}),
+            pauli_realizations=frozenset(
+                {
+                    PauliEvolutionRealization.NATIVE,
+                    PauliEvolutionRealization.GADGET,
+                }
+            ),
         )
 
     def materialize(self, program: CircuitProgram) -> MaterializedCircuit[Any]:
@@ -193,6 +190,12 @@ def _emit_region(
             emitter.emit_measure(circuit, slot, operation.clbit)
             measurements[operation.clbit] = slot
             wires[operation.output] = slot
+        elif isinstance(operation, MeasureVectorInstruction):
+            slots = tuple(wires[wire] for wire in operation.inputs)
+            for slot, clbit in zip(slots, operation.clbits, strict=True):
+                emitter.emit_measure(circuit, slot, clbit)
+                measurements[clbit] = slot
+            _publish(operation.outputs, slots, wires)
         elif isinstance(operation, ResetInstruction):
             slot = wires[operation.input]
             emitter.emit_reset(circuit, slot)
@@ -200,9 +203,17 @@ def _emit_region(
         elif isinstance(operation, BarrierInstruction):
             emitter.emit_barrier(circuit, [wires[wire] for wire in operation.wires])
         elif isinstance(operation, PauliEvolutionInstruction):
-            if operation.realization is not PauliEvolutionRealization.GADGET:
-                raise AssertionError("CUDA-Q Pauli evolution was not gadget-legalized")
-            _emit_pauli(operation, circuit, wires, parameters, loop_variables, emitter)
+            if operation.realization is PauliEvolutionRealization.ABSTRACT:
+                raise AssertionError("CUDA-Q Pauli evolution was not legalized")
+            _emit_pauli(
+                operation,
+                circuit,
+                wires,
+                parameters,
+                loop_variables,
+                emitter,
+                use_native=operation.realization is PauliEvolutionRealization.NATIVE,
+            )
         elif isinstance(operation, ForInstruction):
             current = [wires[wire] for wire in operation.inputs]
             for index in operation.indexset:
@@ -297,7 +308,7 @@ def _emit_call(
     inherited_controls: tuple[int, ...],
     inherited_inverse: bool,
 ) -> None:
-    """Inline a reusable call while composing its transforms.
+    """Emit a reusable call through CUDA-Q's named-kernel operations.
 
     Args:
         operation (CallInstruction): Reusable circuit invocation.
@@ -318,130 +329,48 @@ def _emit_call(
     targets = actual[callee.controls :]
     controls = (*inherited_controls, *own_controls)
     inverse = inherited_inverse ^ callee.inverse
-    for _ in range(callee.power):
-        entry = callee.body.output_wires if inverse else callee.body.input_wires
-        exit_wires = callee.body.input_wires if inverse else callee.body.output_wires
-        body_wires = _emit_transformed_region(
+
+    def emit_helper_body() -> None:
+        """Materialize the target-neutral fallback as one CUDA-Q helper."""
+        helper_wires = {
+            wire: index for index, wire in enumerate(callee.body.input_wires)
+        }
+        _emit_region(
             callee.body.operations,
             circuit,
-            dict(zip(entry, targets, strict=True)),
+            helper_wires,
             parameters,
-            measurements,
-            loop_variables,
+            {},
+            {},
             emitter,
-            controls,
-            inverse,
         )
-        targets = [body_wires[wire] for wire in exit_wires]
+
+    try:
+        try:
+            hash(callee.body)
+            definition_key = (callee.name, callee.body)
+        except TypeError:
+            definition_key = (callee.name, id(callee.body))
+        helper_name = emitter.define_helper(
+            definition_key,
+            callee.name,
+            callee.body.num_qubits,
+            emit_helper_body,
+        )
+    except ValueError as error:
+        raise EmitError(str(error)) from error
+    if inverse:
+        helper_name = emitter.define_adjoint_helper(
+            helper_name,
+            callee.body.num_qubits,
+        )
+    for _ in range(callee.power):
+        emitter.emit_reusable_call(
+            helper_name,
+            tuple(targets),
+            controls,
+        )
     _publish(call_outputs, [*own_controls, *targets], wires)
-
-
-def _emit_transformed_region(
-    operations: tuple[CircuitInstruction, ...],
-    circuit: Any,
-    input_wires: dict[WireId, int],
-    parameters: dict[str, Any],
-    measurements: dict[int, int],
-    loop_variables: dict[str, int],
-    emitter: CudaqKernelEmitter,
-    controls: tuple[int, ...],
-    inverse: bool,
-) -> dict[WireId, int]:
-    """Emit a unitary region with composed control and inverse transforms.
-
-    Args:
-        operations (tuple[CircuitInstruction, ...]): Unitary instructions.
-        circuit (Any): Destination CUDA-Q artifact.
-        input_wires (dict[WireId, int]): Body input slots.
-        parameters (dict[str, Any]): Runtime parameter cache.
-        measurements (dict[int, int]): Static measurement mapping.
-        loop_variables (dict[str, int]): Concrete loop values.
-        emitter (CudaqKernelEmitter): CUDA-Q source builder.
-        controls (tuple[int, ...]): Accumulated physical controls.
-        inverse (bool): Whether to reverse and adjoint the region.
-
-    Returns:
-        dict[WireId, int]: Mapping containing transformed outputs.
-    """
-    wires = dict(input_wires)
-    sequence = reversed(operations) if inverse else operations
-    for operation in sequence:
-        if isinstance(operation, GateInstruction):
-            inputs = operation.outputs if inverse else operation.inputs
-            outputs = operation.inputs if inverse else operation.outputs
-            slots = tuple(wires[wire] for wire in inputs)
-            angles = tuple(
-                _scalar(value, parameters, loop_variables, emitter)
-                for value in operation.parameters
-            )
-            kind, angles = _inverse_gate(operation.kind, angles, inverse)
-            if controls:
-                _emit_controlled_gate(emitter, circuit, kind, controls, slots, angles)
-            else:
-                _emit_gate(emitter, circuit, kind, slots, angles)
-            _publish(outputs, slots, wires)
-        elif isinstance(operation, ForInstruction):
-            loop_inputs = operation.outputs if inverse else operation.inputs
-            loop_outputs = operation.inputs if inverse else operation.outputs
-            body_entry = operation.body_outputs if inverse else operation.inputs
-            body_exit = operation.inputs if inverse else operation.body_outputs
-            current = [wires[wire] for wire in loop_inputs]
-            indices = list(operation.indexset)
-            if inverse:
-                indices.reverse()
-            for index in indices:
-                nested = dict(loop_variables)
-                nested[operation.loop_variable.name] = index
-                body_wires = _emit_transformed_region(
-                    operation.body,
-                    circuit,
-                    dict(zip(body_entry, current, strict=True)),
-                    parameters,
-                    measurements,
-                    nested,
-                    emitter,
-                    controls,
-                    inverse,
-                )
-                current = [body_wires[wire] for wire in body_exit]
-            _publish(loop_outputs, current, wires)
-        elif isinstance(operation, CallInstruction):
-            _emit_call(
-                operation,
-                circuit,
-                wires,
-                parameters,
-                measurements,
-                loop_variables,
-                emitter,
-                controls,
-                inverse,
-            )
-        elif isinstance(operation, PauliEvolutionInstruction):
-            transformed = (
-                dataclasses.replace(
-                    operation,
-                    time=UnaryExpr(UnaryOperator.NEG, operation.time),
-                )
-                if inverse
-                else operation
-            )
-            _emit_pauli(
-                transformed,
-                circuit,
-                wires,
-                parameters,
-                loop_variables,
-                emitter,
-                controls,
-            )
-        elif isinstance(operation, BarrierInstruction):
-            continue
-        else:
-            raise EmitError(
-                f"Cannot apply CUDA-Q reusable transform to {type(operation).__name__}"
-            )
-    return wires
 
 
 def _scalar(
@@ -629,82 +558,6 @@ def _emit_gate(
     raise EmitError(f"Unsupported CUDA-Q gate {kind.name}")
 
 
-def _emit_controlled_gate(
-    emitter: CudaqKernelEmitter,
-    circuit: Any,
-    kind: GateKind,
-    controls: tuple[int, ...],
-    slots: tuple[int, ...],
-    angles: tuple[Any, ...],
-) -> None:
-    """Emit a primitive gate under accumulated controls.
-
-    Args:
-        emitter (CudaqKernelEmitter): CUDA-Q gate adapter.
-        circuit (Any): Destination artifact.
-        kind (GateKind): Primitive body gate.
-        controls (tuple[int, ...]): Accumulated control slots.
-        slots (tuple[int, ...]): Body gate slots.
-        angles (tuple[Any, ...]): Materialized angles.
-    """
-    if kind in {GateKind.X, GateKind.CX, GateKind.TOFFOLI}:
-        intrinsic = slots[:-1]
-        emitter.emit_multi_controlled_x(circuit, [*controls, *intrinsic], slots[-1])
-        return
-    if kind in {GateKind.Z, GateKind.CZ}:
-        intrinsic = slots[:-1]
-        emitter.emit_h(circuit, slots[-1])
-        emitter.emit_multi_controlled_x(circuit, [*controls, *intrinsic], slots[-1])
-        emitter.emit_h(circuit, slots[-1])
-        return
-    if kind in {GateKind.Y, GateKind.CY}:
-        intrinsic = slots[:-1]
-        emitter.emit_sdg(circuit, slots[-1])
-        emitter.emit_multi_controlled_x(circuit, [*controls, *intrinsic], slots[-1])
-        emitter.emit_s(circuit, slots[-1])
-        return
-    if kind in {GateKind.RX, GateKind.RY, GateKind.RZ, GateKind.P}:
-        methods = {
-            GateKind.RX: emitter.emit_multi_controlled_rx,
-            GateKind.RY: emitter.emit_multi_controlled_ry,
-            GateKind.RZ: emitter.emit_multi_controlled_rz,
-            GateKind.P: emitter.emit_multi_controlled_p,
-        }
-        methods[kind](circuit, list(controls), slots[0], angles[0])
-        return
-    if kind is GateKind.H:
-        refs = ", ".join(emitter.qubit_ref(slot) for slot in (*controls, slots[0]))
-        emitter.emit_source_line(f"h.ctrl({refs})")
-        return
-    if kind in {GateKind.S, GateKind.SDG, GateKind.T, GateKind.TDG}:
-        phase = {
-            GateKind.S: 1.5707963267948966,
-            GateKind.SDG: -1.5707963267948966,
-            GateKind.T: 0.7853981633974483,
-            GateKind.TDG: -0.7853981633974483,
-        }[kind]
-        emitter.emit_multi_controlled_p(circuit, list(controls), slots[0], phase)
-        return
-    if kind is GateKind.CP:
-        emitter.emit_multi_controlled_p(
-            circuit, [*controls, slots[0]], slots[1], angles[0]
-        )
-        return
-    if kind is GateKind.SWAP:
-        left, right = slots
-        emitter.emit_cx(circuit, left, right)
-        emitter.emit_multi_controlled_x(circuit, [*controls, right], left)
-        emitter.emit_cx(circuit, left, right)
-        return
-    if kind is GateKind.RZZ:
-        left, right = slots
-        emitter.emit_cx(circuit, left, right)
-        emitter.emit_multi_controlled_rz(circuit, list(controls), right, angles[0])
-        emitter.emit_cx(circuit, left, right)
-        return
-    raise EmitError(f"CUDA-Q cannot legalize controlled {kind.name}")
-
-
 def _emit_pauli(
     operation: PauliEvolutionInstruction,
     circuit: Any,
@@ -713,6 +566,7 @@ def _emit_pauli(
     loop_variables: dict[str, int],
     emitter: CudaqKernelEmitter,
     controls: tuple[int, ...] = (),
+    use_native: bool = False,
 ) -> None:
     """Emit Pauli evolution as native or controlled phase gadgets.
 
@@ -724,6 +578,8 @@ def _emit_pauli(
         loop_variables (dict[str, int]): Concrete loop values.
         emitter (CudaqKernelEmitter): CUDA-Q source builder.
         controls (tuple[int, ...]): Optional accumulated controls.
+        use_native (bool): Whether direct terms use CUDA-Q ``exp_pauli``.
+            Defaults to ``False``.
     """
     import qamomile.observable as qm_o
 
@@ -734,7 +590,7 @@ def _emit_pauli(
             continue
         selected = [slots[item.index] for item in operators]
         angle = 2.0 * float(coefficient.real) * time
-        if not controls:
+        if not controls and use_native:
             word = "".join(item.pauli.name for item in operators)
             emitter.emit_exp_pauli(circuit, selected, word, -0.5 * angle)
             continue
@@ -762,34 +618,6 @@ def _emit_pauli(
         target = phase_slots.pop()
         emitter.emit_multi_controlled_p(circuit, phase_slots, target, phase)
     _publish(operation.outputs, slots, wires)
-
-
-def _inverse_gate(
-    kind: GateKind,
-    angles: tuple[Any, ...],
-    inverse: bool,
-) -> tuple[GateKind, tuple[Any, ...]]:
-    """Return an inverse primitive representation when requested.
-
-    Args:
-        kind (GateKind): Original gate kind.
-        angles (tuple[Any, ...]): Materialized angles.
-        inverse (bool): Whether inversion is requested.
-
-    Returns:
-        tuple[GateKind, tuple[Any, ...]]: Inverted kind and angles.
-    """
-    if not inverse:
-        return kind, angles
-    adjoints = {
-        GateKind.S: GateKind.SDG,
-        GateKind.SDG: GateKind.S,
-        GateKind.T: GateKind.TDG,
-        GateKind.TDG: GateKind.T,
-    }
-    if kind in adjoints:
-        return adjoints[kind], angles
-    return kind, tuple(-angle for angle in angles)
 
 
 def _publish(

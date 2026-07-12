@@ -33,6 +33,27 @@ def test_qiskit_materializer_emits_primitive_circuit() -> None:
     ]
 
 
+def test_qiskit_materializer_lowers_vector_measurement_at_sdk_boundary() -> None:
+    """One vector instruction becomes Qiskit's ordered measurement API call."""
+    builder = CircuitBuilder(3, 3, name="vector-measure")
+    builder.append_measure_vector((2, 0, 1), (0, 1, 2))
+
+    circuit = QiskitMaterializer().materialize(builder.freeze()).artifact
+
+    assert [instruction.operation.name for instruction in circuit.data] == [
+        "measure",
+        "measure",
+        "measure",
+    ]
+    assert [
+        circuit.find_bit(instruction.qubits[0]).index for instruction in circuit.data
+    ] == [
+        2,
+        0,
+        1,
+    ]
+
+
 def test_qiskit_materializer_preserves_symbolic_expression() -> None:
     """Runtime expressions become native Qiskit ParameterExpression values."""
     builder = CircuitBuilder(1, 0)

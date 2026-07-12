@@ -5,8 +5,10 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, cast
 
+from qamomile._utils import is_close_zero
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -37,8 +39,15 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.types import BitType, FloatType, QubitType, UIntType
+from qamomile.circuit.ir.types import (
+    BitType,
+    FloatType,
+    ObservableType,
+    QubitType,
+    UIntType,
+)
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -204,7 +213,7 @@ def _lower_module(program: PreparedModule, plan: HugrCompilationPlan) -> Any:
             [_lower_value_type(value) for value in body.output_values],
         )
 
-    entry_inputs = _entry_inputs(program.entrypoint)
+    entry_inputs = _entry_inputs(program.entrypoint, program.bindings)
     main = module.define_function(
         "main",
         [_lower_value_type(value) for value in entry_inputs],
@@ -214,7 +223,13 @@ def _lower_module(program: PreparedModule, plan: HugrCompilationPlan) -> Any:
 
     for ref in plan.definitions:
         _lower_block(program.body(ref), functions[ref], functions, None)
-    _lower_block(program.entrypoint, main, functions, entry_inputs)
+    _lower_block(
+        program.entrypoint,
+        main,
+        functions,
+        entry_inputs,
+        bindings=program.bindings,
+    )
 
     extensions = [tket_exts.quantum(), tket_exts.rotation(), tket_exts.bool()]
     return Package([module.hugr], extensions)
@@ -233,17 +248,25 @@ def _symbol_name(ref: CallableRef) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", raw)
 
 
-def _entry_inputs(block: Block) -> list[Value]:
+def _entry_inputs(block: Block, bindings: Mapping[str, Any]) -> list[Value]:
     """Return runtime parameter values exposed by the HUGR entrypoint.
 
     Args:
         block (Block): Prepared top-level semantic block.
+        bindings (Mapping[str, Any]): Compile-time values excluded from the
+            public HUGR function ABI.
 
     Returns:
         list[Value]: Runtime parameter values in block input order.
     """
-    parameter_uuids = {value.uuid for value in block.parameters.values()}
-    return [value for value in block.input_values if value.uuid in parameter_uuids]
+    parameter_uuids = {
+        value.uuid for name, value in block.parameters.items() if name not in bindings
+    }
+    return [
+        value
+        for value in block.input_values
+        if value.uuid in parameter_uuids and not value.is_constant()
+    ]
 
 
 def _lower_type(value_type: ValueType) -> Any:
@@ -314,6 +337,7 @@ def _lower_block(
     builder: Any,
     functions: dict[CallableRef, Any],
     explicit_inputs: list[Value] | None,
+    bindings: Mapping[str, Any] | None = None,
 ) -> None:
     """Lower one Qamomile block into a HUGR function dataflow graph.
 
@@ -323,12 +347,25 @@ def _lower_block(
         functions (dict[CallableRef, Any]): Predeclared callable functions.
         explicit_inputs (list[Value] | None): Input values corresponding to
             HUGR function ports. ``None`` uses every block input.
+        bindings (Mapping[str, Any] | None): Compile-time entrypoint values
+            keyed by public parameter name. Defaults to ``None``.
 
     Raises:
         EmitError: If an operation or value is unsupported or unresolved.
     """
     inputs = block.input_values if explicit_inputs is None else explicit_inputs
     environment: dict[str, Any] = {}
+    for name, concrete in (bindings or {}).items():
+        value = block.parameters.get(name)
+        if value is None:
+            continue
+        if isinstance(value.type, ObservableType):
+            resolved = concrete
+        else:
+            scalar = cast(int | float | bool, concrete)
+            [resolved] = builder.load(_constant_value(value.with_const(scalar)))
+        environment[value.uuid] = resolved
+        environment[f"__parameter__:{name}"] = resolved
     for value, wire in zip(inputs, builder.inputs(), strict=True):
         if isinstance(value, ArrayValue):
             from hugr import ops
@@ -339,6 +376,9 @@ def _lower_block(
             )
         else:
             environment[value.uuid] = wire
+        parameter_name = value.parameter_name()
+        if parameter_name is not None:
+            environment[f"__parameter__:{parameter_name}"] = environment[value.uuid]
     live_qubits: dict[str, Any] = {}
     for value in inputs:
         if not value.type.is_quantum():
@@ -445,6 +485,8 @@ def _lower_operation(
             _lower_project(operation, builder, environment, live_qubits)
         case ResetOperation():
             _lower_reset(operation, builder, environment, live_qubits)
+        case PauliEvolveOp():
+            _lower_pauli_evolution(operation, builder, environment, live_qubits)
         case InvokeOperation():
             _lower_call(operation, builder, environment, live_qubits, functions)
         case ForOperation():
@@ -1227,6 +1269,40 @@ def _resolve_wire(value: Value, environment: dict[str, Any]) -> Any:
     raise EmitError(f"Unresolved HUGR value {value.name!r}")
 
 
+def _resolve_classical_argument(
+    value: Value,
+    builder: Any,
+    environment: dict[str, Any],
+) -> Any:
+    """Resolve a classical call argument as a wire or compile-time object.
+
+    Args:
+        value (Value): Actual classical call operand.
+        builder (Any): HUGR dataflow builder used to load scalar constants.
+        environment (dict[str, Any]): Parent environment including stable
+            public-parameter aliases.
+
+    Returns:
+        Any: HUGR scalar wire or a compile-time semantic object such as a
+        Hamiltonian.
+
+    Raises:
+        EmitError: If the argument has no constant, UUID, or parameter-name
+            resolution.
+    """
+    if value.uuid in environment:
+        return environment[value.uuid]
+    parameter_name = value.parameter_name()
+    if parameter_name is not None:
+        alias = f"__parameter__:{parameter_name}"
+        if alias in environment:
+            return environment[alias]
+    if value.is_constant():
+        [wire] = builder.load(_constant_value(value))
+        return wire
+    raise EmitError(f"Unresolved HUGR classical argument {value.name!r}")
+
+
 def _array_address(
     value: Value,
     environment: dict[str, Any],
@@ -1499,13 +1575,112 @@ def _rotation_wire(
         assert concrete is not None
         [halfturns] = builder.load(FloatVal(float(concrete) * scale / math.pi))
     else:
-        if theta.uuid not in environment:
+        resolved_theta = environment.get(theta.uuid)
+        parameter_name = theta.parameter_name()
+        if resolved_theta is None and parameter_name is not None:
+            resolved_theta = environment.get(f"__parameter__:{parameter_name}")
+        if resolved_theta is None:
             raise EmitError(f"Unresolved HUGR rotation value {theta.name!r}")
         [factor] = builder.load(FloatVal(scale / math.pi))
         multiply = FLOAT_OPS_EXTENSION.get_op("fmul").instantiate()
-        [halfturns] = builder.add_op(multiply, environment[theta.uuid], factor)
+        [halfturns] = builder.add_op(multiply, resolved_theta, factor)
     [result] = builder.add_op(rotation.from_halfturns_unchecked, halfturns)
     return result
+
+
+def _lower_pauli_evolution(
+    operation: PauliEvolveOp,
+    builder: Any,
+    environment: dict[str, Any],
+    live_qubits: dict[str, Any],
+) -> None:
+    """Lower Pauli evolution at the HUGR target boundary.
+
+    HUGR's installed TKET extension has no whole-Hamiltonian evolution node,
+    so each Pauli term is lowered here, after the semantic operation has
+    survived every shared compiler stage.
+
+    Args:
+        operation (PauliEvolveOp): Bound Pauli evolution operation.
+        builder (Any): HUGR dataflow builder.
+        environment (dict[str, Any]): UUID-to-wire mapping to update.
+        live_qubits (dict[str, Any]): Live quantum mapping to update.
+
+    Raises:
+        EmitError: If the Hamiltonian is unbound, the qubit operand is not a
+            fixed vector, or a Pauli term addresses outside the register.
+    """
+    from tket_exts import quantum
+
+    import qamomile.observable as qm_o
+
+    qubit_operand = operation.qubits
+    result = operation.evolved_qubits
+    if not isinstance(qubit_operand, ArrayValue) or not isinstance(result, ArrayValue):
+        raise EmitError("HUGR Pauli evolution requires a fixed qubit vector")
+    if qubit_operand.uuid not in environment:
+        raise EmitError("HUGR Pauli evolution cannot resolve its qubit vector")
+    hamiltonian = (
+        cast(Any, operation.observable.get_const())
+        if operation.observable.is_constant()
+        else environment.get(operation.observable.uuid)
+    )
+    if hamiltonian is None:
+        raise EmitError("HUGR Pauli evolution requires a bound Hamiltonian")
+    if not isinstance(hamiltonian, qm_o.Hamiltonian):
+        raise EmitError("HUGR Pauli evolution binding is not a Hamiltonian")
+
+    qubits = list(environment[qubit_operand.uuid])
+    for operators, coefficient in hamiltonian:
+        if not operators or is_close_zero(abs(coefficient)):
+            continue
+        selected_indices = [item.index for item in operators]
+        if any(index < 0 or index >= len(qubits) for index in selected_indices):
+            raise EmitError("HUGR Pauli term addresses outside the qubit vector")
+        selected = [qubits[index] for index in selected_indices]
+        for item_index, (item, wire) in enumerate(
+            zip(operators, selected, strict=True)
+        ):
+            if item.pauli is qm_o.Pauli.X:
+                [wire] = builder.add_op(quantum.H, wire)
+            elif item.pauli is qm_o.Pauli.Y:
+                [wire] = builder.add_op(quantum.Sdg, wire)
+                [wire] = builder.add_op(quantum.H, wire)
+            selected[item_index] = wire
+        for index in range(len(selected) - 1):
+            selected[index], selected[index + 1] = builder.add_op(
+                quantum.CX,
+                selected[index],
+                selected[index + 1],
+            )
+        rotation = _rotation_wire(
+            builder,
+            operation.gamma,
+            environment,
+            scale=2.0 * float(coefficient.real),
+        )
+        [selected[-1]] = builder.add_op(quantum.Rz, selected[-1], rotation)
+        for index in range(len(selected) - 2, -1, -1):
+            selected[index], selected[index + 1] = builder.add_op(
+                quantum.CX,
+                selected[index],
+                selected[index + 1],
+            )
+        for item_index in range(len(operators) - 1, -1, -1):
+            item = operators[item_index]
+            wire = selected[item_index]
+            if item.pauli is qm_o.Pauli.X:
+                [wire] = builder.add_op(quantum.H, wire)
+            elif item.pauli is qm_o.Pauli.Y:
+                [wire] = builder.add_op(quantum.H, wire)
+                [wire] = builder.add_op(quantum.S, wire)
+            qubits[item.index] = wire
+
+    environment[result.uuid] = qubits
+    environment[qubit_operand.uuid] = qubits
+    for index in range(len(qubits)):
+        live_qubits.pop(f"{qubit_operand.uuid}:{index}", None)
+        live_qubits[f"{result.uuid}:{index}"] = qubits[index]
 
 
 def _lower_measure(
@@ -1720,7 +1895,11 @@ def _lower_transformed_call(
     if len(body_classical_inputs) != len(classical):
         raise EmitError("HUGR transformed call classical arity mismatch")
     for formal, actual in zip(body_classical_inputs, classical, strict=True):
-        local[formal.uuid] = environment[actual.uuid]
+        resolved = _resolve_classical_argument(actual, builder, environment)
+        local[formal.uuid] = resolved
+        parameter_name = formal.parameter_name()
+        if parameter_name is not None:
+            local[f"__parameter__:{parameter_name}"] = resolved
 
     control_wires = [_resolve_wire(value, environment) for value in controls]
     sequence = reversed(body.operations) if inverse else body.operations
@@ -1729,6 +1908,19 @@ def _lower_transformed_call(
             continue
         if isinstance(nested, CInitOperation):
             _lower_cinit(nested, builder, local)
+            continue
+        if isinstance(nested, PauliEvolveOp):
+            if len(control_wires) != 1:
+                raise EmitError(
+                    "HUGR transformed Pauli evolution supports exactly one control"
+                )
+            control_wires[0] = _lower_controlled_pauli_evolution(
+                nested,
+                builder,
+                local,
+                control_wires[0],
+                inverse,
+            )
             continue
         if not isinstance(nested, GateOperation):
             raise EmitError(
@@ -1791,6 +1983,22 @@ def _publish_transformed_result(
     Raises:
         EmitError: If a result array version cannot be reconstructed.
     """
+    if isinstance(result, ArrayValue):
+        if not isinstance(wire, list):
+            raise EmitError(
+                f"HUGR array result {result.name!r} did not produce linear elements"
+            )
+        environment[result.uuid] = wire
+        source_wires: list[Any] = (
+            environment.get(source.uuid, []) if isinstance(source, ArrayValue) else []
+        )
+        for key, live_wire in list(live_qubits.items()):
+            if any(live_wire == source_wire for source_wire in source_wires):
+                live_qubits.pop(key)
+        for index, element in enumerate(wire):
+            live_qubits[f"{result.uuid}:{index}"] = element
+        return
+
     environment[result.uuid] = wire
     address = _array_address(result, environment)
     if address is not None:
@@ -1802,6 +2010,121 @@ def _publish_transformed_result(
             environment[root_uuid] = list(environment[source_address[0]])
         environment[root_uuid][index] = wire
     live_qubits[_quantum_key(result, environment)] = wire
+
+
+def _lower_controlled_pauli_evolution(
+    operation: PauliEvolveOp,
+    builder: Any,
+    environment: dict[str, Any],
+    control: Any,
+    inverse: bool,
+) -> Any:
+    """Lower a one-control Pauli evolution through TKET controlled rotations.
+
+    Basis changes and parity ladders are emitted unconditionally around each
+    controlled rotation; they cancel when the control is zero and therefore
+    preserve the whole-call semantics without distributing control onto every
+    primitive gate.
+
+    Args:
+        operation (PauliEvolveOp): Pauli evolution inside a transformed body.
+        builder (Any): HUGR dataflow builder.
+        environment (dict[str, Any]): Body-local UUID-to-wire mapping.
+        control (Any): Current linear control-qubit wire.
+        inverse (bool): Whether to apply the inverse evolution.
+
+    Returns:
+        Any: Updated linear control-qubit wire.
+
+    Raises:
+        EmitError: If the Hamiltonian or fixed target vector cannot be
+            resolved, or a term addresses outside that vector.
+    """
+    from tket_exts import quantum
+
+    import qamomile.observable as qm_o
+
+    qubit_operand = operation.qubits
+    result = operation.evolved_qubits
+    if not isinstance(qubit_operand, ArrayValue) or not isinstance(result, ArrayValue):
+        raise EmitError("Controlled HUGR Pauli evolution requires a fixed vector")
+    if qubit_operand.uuid not in environment:
+        raise EmitError("Controlled HUGR Pauli evolution cannot resolve its vector")
+    if operation.observable.is_constant():
+        hamiltonian = cast(Any, operation.observable.get_const())
+    else:
+        hamiltonian = environment.get(operation.observable.uuid)
+        parameter_name = operation.observable.parameter_name()
+        if hamiltonian is None and parameter_name is not None:
+            hamiltonian = environment.get(f"__parameter__:{parameter_name}")
+    if not isinstance(hamiltonian, qm_o.Hamiltonian):
+        raise EmitError("Controlled HUGR Pauli evolution requires a bound Hamiltonian")
+
+    qubits = list(environment[qubit_operand.uuid])
+    direction = -1.0 if inverse else 1.0
+    for operators, coefficient in hamiltonian:
+        coefficient_value = float(coefficient.real)
+        if is_close_zero(abs(coefficient_value)):
+            continue
+        if not operators:
+            rotation = _rotation_wire(
+                builder,
+                operation.gamma,
+                environment,
+                scale=-direction * coefficient_value,
+            )
+            [control] = builder.add_op(quantum.Rz, control, rotation)
+            continue
+        selected_indices = [item.index for item in operators]
+        if any(index < 0 or index >= len(qubits) for index in selected_indices):
+            raise EmitError("Controlled HUGR Pauli term exceeds the target vector")
+        selected = [qubits[index] for index in selected_indices]
+        for item_index, (item, wire) in enumerate(
+            zip(operators, selected, strict=True)
+        ):
+            if item.pauli is qm_o.Pauli.X:
+                [wire] = builder.add_op(quantum.H, wire)
+            elif item.pauli is qm_o.Pauli.Y:
+                [wire] = builder.add_op(quantum.Sdg, wire)
+                [wire] = builder.add_op(quantum.H, wire)
+            selected[item_index] = wire
+        for index in range(len(selected) - 1):
+            selected[index], selected[index + 1] = builder.add_op(
+                quantum.CX,
+                selected[index],
+                selected[index + 1],
+            )
+        rotation = _rotation_wire(
+            builder,
+            operation.gamma,
+            environment,
+            scale=direction * 2.0 * coefficient_value,
+        )
+        control, selected[-1] = builder.add_op(
+            quantum.CRz,
+            control,
+            selected[-1],
+            rotation,
+        )
+        for index in range(len(selected) - 2, -1, -1):
+            selected[index], selected[index + 1] = builder.add_op(
+                quantum.CX,
+                selected[index],
+                selected[index + 1],
+            )
+        for item_index in range(len(operators) - 1, -1, -1):
+            item = operators[item_index]
+            wire = selected[item_index]
+            if item.pauli is qm_o.Pauli.X:
+                [wire] = builder.add_op(quantum.H, wire)
+            elif item.pauli is qm_o.Pauli.Y:
+                [wire] = builder.add_op(quantum.H, wire)
+                [wire] = builder.add_op(quantum.S, wire)
+            qubits[item.index] = wire
+
+    environment[qubit_operand.uuid] = qubits
+    environment[result.uuid] = qubits
+    return control
 
 
 def _lower_controlled_gate(

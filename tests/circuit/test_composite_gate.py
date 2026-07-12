@@ -204,14 +204,20 @@ def test_symbolic_composite_transforms_remain_estimable() -> None:
     assert len({operation.target for operation in invokes}) == 1
 
 
-def test_custom_composite_transpiles_through_its_body() -> None:
-    """A backend without a native emitter lowers the embedded qkernel body."""
+def test_custom_composite_retains_a_decomposable_named_body() -> None:
+    """A generic backend gate keeps identity and an equivalent fallback body."""
     pytest.importorskip("qiskit")
     from qamomile.qiskit import QiskitTranspiler
 
     executable = QiskitTranspiler().transpile(use_bell_pair)
 
     assert executable.quantum_circuit.num_qubits == 2
-    decomposed = executable.quantum_circuit.decompose()
+    [boxed] = [
+        instruction
+        for instruction in executable.quantum_circuit.data
+        if instruction.operation.name != "measure"
+    ]
+    assert boxed.operation.label == "bell_pair"
+    decomposed = executable.quantum_circuit.decompose(reps=2)
     assert decomposed.count_ops()["h"] == 1
     assert decomposed.count_ops()["cx"] == 1

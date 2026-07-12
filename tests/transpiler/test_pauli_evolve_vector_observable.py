@@ -217,8 +217,8 @@ class TestTrotterBackendPortability:
         circuit = exe.compiled_quantum[0].circuit
         # PauliRotation is QuriParts' native exp(-i*theta/2 * P_string),
         # which the default emitter lowers per term.
-        gate_names = [type(g).__name__ for g in getattr(circuit, "gates", ())]
-        assert gate_names, "QuriParts circuit should contain gates"
+        gate_names = [gate.name for gate in getattr(circuit, "gates", ())]
+        assert gate_names.count("PauliRotation") == 3
 
     @pytest.mark.cudaq
     def test_cudaq(self):

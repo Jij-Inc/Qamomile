@@ -154,10 +154,13 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     its immutable result instead of subclassing this class.
 
     Args:
-        gate_emitter: Backend-specific gate emitter
-        bindings: Parameter bindings for the circuit
-        parameters: List of parameter names to preserve as backend parameters
-        composite_emitters: Optional list of CompositeGateEmitter for native implementations
+        gate_emitter (GateEmitter[T]): Instruction builder used during the
+            semantic traversal.
+        bindings (dict[str, Any] | None): Compile-time parameter bindings.
+        parameters (list[str] | None): Parameter names preserved at runtime.
+        composite_emitters (list[CompositeGateEmitter[T]] | None): Optional
+            callable-preservation or lowering hooks.
+        backend_name (str | None): Diagnostic name for the traversal target.
     """
 
     def __init__(

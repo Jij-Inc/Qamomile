@@ -6,6 +6,8 @@ from typing import Any
 
 from qamomile.circuit.transpiler.circuit_ir import (
     ALL_PRIMITIVE_GATES,
+    IQFT_SEMANTIC_KEY,
+    QFT_SEMANTIC_KEY,
     BarrierInstruction,
     BinaryExpr,
     BinaryOperator,
@@ -13,7 +15,6 @@ from qamomile.circuit.transpiler.circuit_ir import (
     CallTransformCapabilities,
     CircuitCapabilities,
     CircuitInstruction,
-    CircuitIntrinsic,
     CircuitProgram,
     ClassicalBitExpr,
     ForInstruction,
@@ -23,7 +24,8 @@ from qamomile.circuit.transpiler.circuit_ir import (
     LoopVariableExpr,
     MaterializedCircuit,
     MeasureInstruction,
-    NativeIntrinsicCapabilities,
+    MeasureVectorInstruction,
+    NativeSemanticOpCapabilities,
     ParameterExpr,
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
@@ -49,15 +51,15 @@ class QiskitMaterializer:
     def capabilities(self) -> CircuitCapabilities:
         """Declare Qiskit's circuit-IR capabilities.
 
-        Native intrinsic support is probed against the installed Qiskit at
-        declaration time: ``QFTGate`` is only available on recent releases,
+        Native semantic-operation support is probed against the installed
+        Qiskit at declaration time: ``QFTGate`` is only available on recent releases,
         so the declaration — not a materialize-time failure — tells
-        legalization whether intrinsic calls may stay native.
+        legalization whether semantic calls may stay native.
 
         Returns:
             CircuitCapabilities: Immutable capability declaration.
         """
-        native_intrinsics: tuple[NativeIntrinsicCapabilities, ...] = ()
+        native_semantic_ops: tuple[NativeSemanticOpCapabilities, ...] = ()
         call_transforms = CallTransformCapabilities(
             supports_power=True,
             supports_inverse=True,
@@ -66,9 +68,21 @@ class QiskitMaterializer:
         try:
             from qiskit.circuit.library import QFTGate  # noqa: F401
 
-            native_intrinsics = tuple(
-                NativeIntrinsicCapabilities(intrinsic, call_transforms)
-                for intrinsic in (CircuitIntrinsic.QFT, CircuitIntrinsic.IQFT)
+            native_semantic_ops = (
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "qiskit.qft",
+                    call_transforms,
+                    operand_widths=(None,),
+                    min_qubits=1,
+                ),
+                NativeSemanticOpCapabilities(
+                    IQFT_SEMANTIC_KEY,
+                    "qiskit.iqft",
+                    call_transforms,
+                    operand_widths=(None,),
+                    min_qubits=1,
+                ),
             )
         except ImportError:
             pass
@@ -112,7 +126,7 @@ class QiskitMaterializer:
         return CircuitCapabilities(
             name="qiskit",
             primitive_gates=ALL_PRIMITIVE_GATES,
-            native_intrinsics=native_intrinsics,
+            native_semantic_ops=native_semantic_ops,
             gate_parameters=numeric,
             predicates=predicates,
             pauli_time=numeric,
@@ -237,6 +251,11 @@ def _emit_region(
             qubit = wires[operation.input]
             circuit.measure(qubit, circuit.clbits[operation.clbit])
             wires[operation.output] = qubit
+        elif isinstance(operation, MeasureVectorInstruction):
+            qubits = tuple(wires[wire] for wire in operation.inputs)
+            clbits = tuple(circuit.clbits[index] for index in operation.clbits)
+            circuit.measure(qubits, clbits)
+            _publish_wires(operation.outputs, qubits, wires)
         elif isinstance(operation, ResetInstruction):
             qubit = wires[operation.input]
             try:
@@ -629,9 +648,8 @@ def _emit_call(
             arity.
     """
     callee = operation.callee
-    identity = callee.identity
-    if identity is not None and identity.intrinsic is not None:
-        _emit_native_intrinsic(operation, circuit, wires)
+    if callee.native_realization is not None:
+        _emit_native_semantic_op(operation, circuit, wires)
         return
     if callee.body.num_clbits:
         raise EmitError("A measured circuit cannot be materialized as a Qiskit gate")
@@ -646,6 +664,8 @@ def _emit_call(
             replacements[parameter] = shared
     if replacements:
         nested = nested.assign_parameters(replacements)
+    from qiskit.exceptions import QiskitError
+
     try:
         gate = nested.to_gate(label=callee.name)
         if callee.power != 1:
@@ -654,7 +674,7 @@ def _emit_call(
             gate = gate.inverse()
         if callee.controls:
             gate = gate.control(callee.controls)
-    except Exception as error:
+    except (QiskitError, TypeError, ValueError) as error:
         raise EmitError(
             f"Reusable circuit {callee.name!r} cannot become a Qiskit gate"
         ) from error
@@ -668,37 +688,39 @@ def _emit_call(
     _publish_wires(operation.outputs, qubits, wires)
 
 
-def _emit_native_intrinsic(
+def _emit_native_semantic_op(
     operation: CallInstruction,
     circuit: Any,
     wires: dict[WireId, Any],
 ) -> None:
-    """Materialize an intrinsic-tagged call with Qiskit's native library.
+    """Materialize a semantic-tagged call with Qiskit's native library.
 
-    Target verification guarantees the intrinsic is declared native before
-    this runs, so the body is intentionally ignored: the intrinsic identity
-    is the meaning, and the native gate is Qiskit's realization of it.
+    Target verification guarantees the semantic operation is declared native
+    before this runs, so the body is intentionally ignored: the semantic
+    identity is the meaning, and the native gate is Qiskit's realization of it.
 
     Args:
-        operation (CallInstruction): Intrinsic-tagged reusable call.
+        operation (CallInstruction): Semantic-tagged reusable call.
         circuit (Any): Destination Qiskit circuit.
         wires (dict[WireId, Any]): Virtual-to-Qiskit wire mapping.
 
     Raises:
-        EmitError: If the intrinsic kind has no native Qiskit realization or
-            the requested transforms cannot be applied.
+        EmitError: If the semantic operation has no native Qiskit realization
+            or the requested transforms cannot be applied.
     """
     from qiskit.circuit.library import QFTGate
+    from qiskit.exceptions import QiskitError
 
     callee = operation.callee
     identity = callee.identity
-    assert identity is not None and identity.intrinsic is not None
-    if identity.intrinsic not in (CircuitIntrinsic.QFT, CircuitIntrinsic.IQFT):
+    assert identity is not None and callee.native_realization is not None
+    if identity.key not in (QFT_SEMANTIC_KEY, IQFT_SEMANTIC_KEY):
         raise EmitError(
-            f"Qiskit has no native realization for intrinsic {identity.intrinsic.name}"
+            f"Qiskit has no native realization for semantic operation "
+            f"{identity.key.namespace}.{identity.key.name}"
         )
     gate: Any = QFTGate(callee.body.num_qubits)
-    if identity.intrinsic is CircuitIntrinsic.IQFT:
+    if identity.key == IQFT_SEMANTIC_KEY:
         gate = gate.inverse(annotated=True)
     try:
         if callee.power != 1:
@@ -707,9 +729,9 @@ def _emit_native_intrinsic(
             gate = gate.inverse()
         if callee.controls:
             gate = gate.control(callee.controls)
-    except Exception as error:
+    except (QiskitError, TypeError, ValueError) as error:
         raise EmitError(
-            f"Native intrinsic {identity.intrinsic.name} cannot apply the "
+            f"Native semantic operation {identity.key.name} cannot apply the "
             f"requested transforms (power={callee.power}, "
             f"inverse={callee.inverse}, controls={callee.controls})"
         ) from error

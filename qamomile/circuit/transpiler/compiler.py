@@ -108,7 +108,7 @@ class QamomileCompiler:
         if self.config.substitutions.rules:
             block = SubstitutionPass(self.config.substitutions).run(block)
         block = ParameterShapeResolutionPass(bindings).run(block)
-        return prepare_module(block)
+        return prepare_module(block, bindings)
 
     def compile(
         self,

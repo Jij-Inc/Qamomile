@@ -14,6 +14,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     GateInstruction,
     IfInstruction,
     MaterializedCircuit,
+    MeasureVectorInstruction,
     ParameterExpr,
     ReusableCircuit,
     WireId,
@@ -44,6 +45,28 @@ def _two_parameter_rotation(alpha: qmc.Float, beta: qmc.Float) -> qmc.Bit:
     return qmc.measure(qubit)
 
 
+@qmc.qkernel
+def _vector_measurement() -> qmc.Vector[qmc.Bit]:
+    """Measure a complete register as one semantic vector operation."""
+    qubits = qmc.qubit_array(3, "qubits")
+    qubits[1] = qmc.x(qubits[1])
+    return qmc.measure(qubits)
+
+
+@qmc.composite_gate(name="semantic_helper")
+def _semantic_helper(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Provide a user-defined callable identity for lowering tests."""
+    return qmc.h(qubit)
+
+
+@qmc.qkernel
+def _semantic_helper_caller() -> qmc.Bit:
+    """Invoke a user-defined composite and measure its result."""
+    qubit = qmc.qubit("qubit")
+    qubit = _semantic_helper(qubit)
+    return qmc.measure(qubit)
+
+
 def test_builder_versions_wires_and_preserves_symbolic_parameters() -> None:
     """Primitive gates consume old wires and produce target-neutral versions."""
     builder = CircuitBuilder(2, 1)
@@ -60,6 +83,19 @@ def test_builder_versions_wires_and_preserves_symbolic_parameters() -> None:
     assert gates[0].inputs == (WireId(0),)
     assert gates[1].inputs[0] == gates[0].outputs[0]
     assert program.output_wires[1].value > gates[-1].outputs[0].value
+
+
+def test_builder_preserves_vector_measurement_as_one_instruction() -> None:
+    """Vector measurement remains grouped at the circuit-codegen boundary."""
+    builder = CircuitBuilder(3, 3)
+    builder.append_measure_vector((2, 0, 1), (0, 1, 2))
+    program = builder.freeze()
+
+    verify_circuit(program)
+    [measurement] = program.operations
+    assert isinstance(measurement, MeasureVectorInstruction)
+    assert measurement.clbits == (0, 1, 2)
+    assert len(measurement.inputs) == 3
 
 
 def test_builder_encodes_structured_if_with_explicit_wire_merges() -> None:
@@ -250,3 +286,41 @@ def test_qamomile_plan_lowers_to_backend_neutral_circuit_ir() -> None:
     assert isinstance(gates[0].parameters[0], ParameterExpr)
     assert program.num_qubits == 2
     assert program.num_clbits == 2
+
+
+def test_lowering_keeps_semantic_vector_measurement_grouped() -> None:
+    """Semantic vector measurement reaches CircuitProgram without expansion."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_vector_measurement)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    measurements = [
+        operation
+        for operation in program.operations
+        if isinstance(operation, MeasureVectorInstruction)
+    ]
+    assert len(measurements) == 1
+    assert len(measurements[0].inputs) == 3
+    verify_circuit(program)
+
+
+def test_lowering_keeps_open_user_composite_identity() -> None:
+    """User composites retain an open semantic key and fallback body."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_semantic_helper_caller)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    calls = [
+        operation
+        for operation in program.operations
+        if isinstance(operation, CallInstruction)
+    ]
+    assert len(calls) == 1
+    identity = calls[0].callee.identity
+    assert identity is not None
+    assert identity.key.namespace.startswith("user.composite.")
+    assert identity.key.name == "semantic_helper"
+    assert calls[0].callee.operand_widths == (1,)
+    assert calls[0].callee.body.operations

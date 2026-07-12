@@ -403,6 +403,21 @@ class CircuitGateEmitter:
         """
         circuit.append_measure(qubit, clbit)
 
+    def emit_measure_vector(
+        self,
+        circuit: CircuitBuilder,
+        qubits: tuple[int, ...],
+        clbits: tuple[int, ...],
+    ) -> None:
+        """Preserve an ordered vector measurement as one instruction.
+
+        Args:
+            circuit (CircuitBuilder): Destination builder.
+            qubits (tuple[int, ...]): Measured qubit slots in result order.
+            clbits (tuple[int, ...]): Destination classical slots.
+        """
+        circuit.append_measure_vector(qubits, clbits)
+
     def emit_reset(self, circuit: CircuitBuilder, qubit: int) -> None:
         """Emit a reset-to-zero operation.
 
@@ -436,7 +451,11 @@ class CircuitGateEmitter:
             ReusableCircuit: Reusable body without target-native state.
         """
         body = circuit.freeze() if isinstance(circuit, CircuitBuilder) else circuit
-        return ReusableCircuit(body=body, name=name)
+        return ReusableCircuit(
+            body=body,
+            name=name,
+            operand_widths=(body.num_qubits,),
+        )
 
     def supports_reusable_gates(self) -> bool:
         """Report support for deferred reusable circuit calls.

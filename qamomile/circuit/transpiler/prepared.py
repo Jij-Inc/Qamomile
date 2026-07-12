@@ -6,6 +6,7 @@ import copy
 import dataclasses
 from collections.abc import Mapping
 from types import MappingProxyType
+from typing import Any
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
@@ -15,7 +16,6 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
-from qamomile.circuit.transpiler.errors import CallableDefinitionConflictError
 from qamomile.circuit.transpiler.segments import ProgramABI
 
 
@@ -36,6 +36,9 @@ class PreparedModule:
         call_graph (Mapping[CallableRef, frozenset[CallableRef]]): Directed
             caller-to-callee relation, including the entrypoint symbol.
         abi (ProgramABI): Classical public input and output contract.
+        bindings (Mapping[str, Any]): Compile-time values retained for direct
+            program-graph targets. Circuit-family targets receive the same
+            values through their emit pass.
     """
 
     entrypoint_ref: CallableRef
@@ -44,6 +47,7 @@ class PreparedModule:
     definition_variants: Mapping[CallableRef, tuple[CallableDef, ...]]
     call_graph: Mapping[CallableRef, frozenset[CallableRef]]
     abi: ProgramABI
+    bindings: Mapping[str, Any]
 
     def owned_snapshot(self) -> PreparedModule:
         """Create a deep, target-owned snapshot of prepared semantics.
@@ -57,13 +61,16 @@ class PreparedModule:
             PreparedModule: Deep snapshot with read-only definition and call
                 graph registries.
         """
-        entrypoint, definitions, definition_variants, call_graph, abi = copy.deepcopy(
-            (
-                self.entrypoint,
-                dict(self.definitions),
-                dict(self.definition_variants),
-                dict(self.call_graph),
-                self.abi,
+        entrypoint, definitions, definition_variants, call_graph, abi, bindings = (
+            copy.deepcopy(
+                (
+                    self.entrypoint,
+                    dict(self.definitions),
+                    dict(self.definition_variants),
+                    dict(self.call_graph),
+                    self.abi,
+                    dict(self.bindings),
+                )
             )
         )
         return PreparedModule(
@@ -73,6 +80,7 @@ class PreparedModule:
             definition_variants=MappingProxyType(definition_variants),
             call_graph=MappingProxyType(call_graph),
             abi=abi,
+            bindings=MappingProxyType(bindings),
         )
 
     def body(self, ref: CallableRef) -> Block:
@@ -96,7 +104,10 @@ class PreparedModule:
         return definition.body
 
 
-def prepare_module(entrypoint: Block) -> PreparedModule:
+def prepare_module(
+    entrypoint: Block,
+    bindings: Mapping[str, Any] | None = None,
+) -> PreparedModule:
     """Collect a hierarchical block into an immutable program-level view.
 
     The collector follows calls in nested control-flow regions and in every
@@ -106,6 +117,9 @@ def prepare_module(entrypoint: Block) -> PreparedModule:
     Args:
         entrypoint (Block): Hierarchical entrypoint after target-independent
             frontend preparation.
+        bindings (Mapping[str, Any] | None): Compile-time values that cannot
+            be embedded in scalar value metadata, such as Hamiltonians.
+            Defaults to ``None``.
 
     Returns:
         PreparedModule: Entrypoint, reachable definitions, call graph, and
@@ -145,21 +159,6 @@ def prepare_module(entrypoint: Block) -> PreparedModule:
         variants = definition_variants.setdefault(definition.ref, [])
         if not any(candidate.body is definition.body for candidate in variants):
             variants.append(definition)
-        if (
-            existing is not None
-            and existing.body is not None
-            and definition.body is not None
-            and existing.body is not definition.body
-            and not (
-                bool(existing.attrs.get("origin_qualified"))
-                and bool(definition.attrs.get("origin_qualified"))
-            )
-        ):
-            symbol = (
-                f"{definition.ref.namespace}.{definition.ref.name}"
-                f"@{definition.ref.version}"
-            )
-            raise CallableDefinitionConflictError(symbol)
         if existing is None or (existing.body is None and definition.body is not None):
             definitions[definition.ref] = definition
         edges.setdefault(definition.ref, set())
@@ -200,4 +199,5 @@ def prepare_module(entrypoint: Block) -> PreparedModule:
         ),
         call_graph=MappingProxyType(frozen_graph),
         abi=abi,
+        bindings=MappingProxyType(dict(bindings or {})),
     )

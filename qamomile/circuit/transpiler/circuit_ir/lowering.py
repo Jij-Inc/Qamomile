@@ -26,7 +26,6 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     BinaryOperator,
     CallableIdentity,
     CircuitBuilder,
-    CircuitIntrinsic,
     CircuitProgram,
     ClassicalBitExpr,
     LiteralExpr,
@@ -34,6 +33,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     ParameterExpr,
     ReusableCircuit,
     ScalarExpr,
+    SemanticOpKey,
     UnaryExpr,
     UnaryOperator,
 )
@@ -100,7 +100,7 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             parameters=parameters,
             backend_name="circuit_ir",
         )
-        self._composite_emitters.append(_IntrinsicCompositeEmitter(self))
+        self._composite_emitters.append(_SemanticCompositeEmitter(self))
 
     def _runtime_operand(
         self,
@@ -453,16 +453,13 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             )
 
 
-class _IntrinsicCompositeEmitter:
-    """Preserve intrinsic composite identity while lowering to circuit IR.
+class _SemanticCompositeEmitter:
+    """Preserve every executable composite as an abstract callable.
 
-    Instead of expanding QFT/IQFT invocations into loose primitive gates,
-    this emitter builds the exact fallback body once and boxes it as a
-    :class:`ReusableCircuit` tagged with a :class:`CallableIdentity`, so the
-    intrinsic stays recognizable until target legalization decides between
-    native emission and the fallback body. Strategy-specialized variants
-    (approximate QFT) decline, because their bodies are not equivalent to
-    the native intrinsic; the established inline decomposition handles them.
+    The fallback implementation is built once as a reusable circuit, while
+    the callable reference and exact strategy variant remain available to
+    target legalization. This is intentionally not limited to a closed list
+    of standard-library operations.
 
     Args:
         lowering_pass (CircuitLoweringPass): Owning lowering pass whose
@@ -470,7 +467,7 @@ class _IntrinsicCompositeEmitter:
     """
 
     def __init__(self, lowering_pass: "CircuitLoweringPass") -> None:
-        """Initialize the intrinsic-preserving composite emitter.
+        """Initialize the semantic-callable preserving emitter.
 
         Args:
             lowering_pass (CircuitLoweringPass): Owning lowering pass.
@@ -478,15 +475,16 @@ class _IntrinsicCompositeEmitter:
         self._pass = lowering_pass
 
     def can_emit(self, gate_type: CompositeGateType) -> bool:
-        """Report which composite kinds this emitter preserves.
+        """Report whether a composite kind can retain a callable boundary.
 
         Args:
             gate_type (CompositeGateType): Composite kind to check.
 
         Returns:
-            bool: True for QFT and IQFT.
+            bool: Always ``True``; executability is checked by :meth:`emit`.
         """
-        return gate_type in (CompositeGateType.QFT, CompositeGateType.IQFT)
+        del gate_type
+        return True
 
     def emit(
         self,
@@ -495,55 +493,86 @@ class _IntrinsicCompositeEmitter:
         qubit_indices: list[int],
         bindings: dict[str, Any],
     ) -> bool:
-        """Box an intrinsic invocation as an identity-tagged reusable call.
+        """Box an invocation with its semantic key and fallback body.
 
         Args:
             circuit (CircuitBuilder): Builder receiving the call.
-            op (InvokeOperation): QFT or IQFT invocation.
+            op (InvokeOperation): Semantic callable invocation.
             qubit_indices (list[int]): Physical qubit slots in operand order.
-            bindings (dict[str, Any]): Active emit bindings, unused because
-                the intrinsic bodies take no classical parameters.
+            bindings (dict[str, Any]): Active emit bindings used while
+                constructing the fallback body.
 
         Returns:
-            bool: True when the invocation was boxed; False to fall back to
-                the inline decomposition (empty register or strategy-
-                specialized variant).
+            bool: True when the invocation was boxed; ``False`` when no
+                executable fallback exists.
         """
         from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
-            emit_iqft_manual,
-            emit_qft_manual,
+            emit_composite_fallback,
         )
 
-        del bindings
         if not qubit_indices:
             return False
-        strategy = op.strategy_name
-        if strategy and "approximate" in strategy:
+        if op.gate_type is CompositeGateType.CUSTOM and op.effective_body() is None:
             return False
         body_builder = CircuitBuilder(
             len(qubit_indices),
             0,
             name=op.target.name,
         )
-        local_indices = list(range(len(qubit_indices)))
-        if op.gate_type is CompositeGateType.QFT:
-            emit_qft_manual(self._pass, body_builder, local_indices)
-            intrinsic = CircuitIntrinsic.QFT
-        else:
-            emit_iqft_manual(self._pass, body_builder, local_indices)
-            intrinsic = CircuitIntrinsic.IQFT
+        emit_composite_fallback(
+            self._pass,
+            body_builder,
+            op,
+            list(range(len(qubit_indices))),
+            bindings,
+        )
         circuit.append_call(
             ReusableCircuit(
                 body=body_builder.freeze(),
-                name=op.target.name,
+                name=op.custom_name,
+                operand_widths=_semantic_operand_widths(op, len(qubit_indices)),
                 identity=CallableIdentity(
+                    key=SemanticOpKey(
+                        namespace=op.target.namespace,
+                        name=op.target.name,
+                        version=op.target.version,
+                        variant=op.strategy_name,
+                    ),
                     symbol=op.target.name,
-                    intrinsic=intrinsic,
                 ),
             ),
             tuple(qubit_indices),
         )
         return True
+
+
+def _semantic_operand_widths(
+    operation: InvokeOperation,
+    flattened_width: int,
+) -> tuple[int, ...]:
+    """Recover semantic quantum-operand grouping before it is flattened.
+
+    Args:
+        operation (InvokeOperation): Callable invocation whose controls and
+            targets still retain scalar-versus-vector value types.
+        flattened_width (int): Total number of resolved physical qubits.
+
+    Returns:
+        tuple[int, ...]: Width per semantic operand, or an empty tuple when a
+        dynamic shape cannot be recovered without guessing.
+    """
+    widths: list[int] = []
+    for operand in operation.control_qubits + operation.target_qubits:
+        if not isinstance(operand, ArrayValue):
+            widths.append(1)
+            continue
+        if len(operand.shape) != 1 or not operand.shape[0].is_constant():
+            return ()
+        width = int(operand.shape[0].get_const())
+        if width <= 0:
+            return ()
+        widths.append(width)
+    return tuple(widths) if sum(widths) == flattened_width else ()
 
 
 _SCALAR_EXPR_TYPES = (

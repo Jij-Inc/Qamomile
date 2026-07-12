@@ -501,7 +501,7 @@ assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 #
 # Qamomile provides high-level operations for QFT and inverse QFT through `qmc.qft(...)` / `qmc.iqft(...)`.
 # The Qiskit integration can translate these qkernels directly to Qiskit's native `QFTGate`, without decomposing them into elementary quantum gates.
-# If you need a decomposed circuit, pass `use_native_composite=False` to expand the operation into H/controlled-phase/SWAP gates.
+# With `use_native_composite=False`, Qamomile keeps a named Qiskit gate backed by the portable fallback body. Call Qiskit's `decompose()` when you need to inspect its H/controlled-phase/SWAP implementation.
 
 # %%
 # Compare Qiskit's native QFT gate with a decomposed circuit.
@@ -521,12 +521,14 @@ qft_decomposed = QiskitTranspiler(use_native_composite=False).to_circuit(
     bindings={"n": 3},
 )
 native_ops = [inst.operation.name for inst in qft_native.data]
-decomposed_ops = [inst.operation.name for inst in qft_decomposed.data]
+decomposed_ops = [
+    inst.operation.name for inst in qft_decomposed.decompose(reps=1).data
+]
 print("native QFT ops    :", native_ops)
 print("decomposed QFT ops:", decomposed_ops)
 assert any("qft" in name.lower() for name in native_ops)
 assert "cp" in decomposed_ops
-assert len(qft_native.data) < len(qft_decomposed.data)
+assert len(qft_native.data) < len(decomposed_ops)
 
 # %% [markdown]
 # ## Using other Qiskit execution targets

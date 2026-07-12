@@ -7,6 +7,7 @@ import math
 import pytest
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
 
 pytest.importorskip("hugr")
 pytest.importorskip("tket_exts")
@@ -225,6 +226,46 @@ def _hugr_two_control_program() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
     )
 
 
+@qmc.qkernel
+def _hugr_pauli_evolution(
+    hamiltonian: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Exercise semantic Pauli evolution at the HUGR target boundary."""
+    qubits = qmc.qubit_array(2, "qubits")
+    qubits = qmc.h(qubits)
+    qubits = qmc.pauli_evolve(qubits, hamiltonian, gamma)
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_pauli_helper(
+    qubits: qmc.Vector[qmc.Qubit],
+    hamiltonian: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply Pauli evolution through a transformable helper body."""
+    return qmc.pauli_evolve(qubits, hamiltonian, gamma)
+
+
+@qmc.qkernel
+def _hugr_controlled_pauli_evolution(
+    hamiltonian: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Exercise a controlled semantic Pauli evolution at the HUGR edge."""
+    control = qmc.qubit("control")
+    targets = qmc.qubit_array(2, "targets")
+    control = qmc.h(control)
+    control, targets = qmc.control(_hugr_pauli_helper)(
+        control,
+        targets,
+        hamiltonian=hamiltonian,
+        gamma=gamma,
+    )
+    return qmc.measure(targets)
+
+
 @pytest.mark.hugr
 def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
     """A bound quantum program produces a validator-clean HUGR package."""
@@ -348,6 +389,38 @@ def test_hugr_validates_two_control_call_legalization() -> None:
     transpiler.target.validate(package)
     operations = [data.op for _, data in package.modules[0].nodes()]
     assert any("name='Toffoli'" in str(op) for op in operations)
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_pauli_evolution_only_at_target_boundary() -> None:
+    """A semantic Hamiltonian evolution becomes validator-clean TKET ops."""
+    hamiltonian = 0.25 * qm_o.X(0) + 0.5 * qm_o.Y(0) * qm_o.Z(1)
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_pauli_evolution,
+        bindings={"hamiltonian": hamiltonian},
+        parameters=["gamma"],
+    )
+
+    transpiler.target.validate(package)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+    assert sum("name='Rz'" in str(op) for op in operations) == 2
+    assert any("name='CX'" in str(op) for op in operations)
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_controlled_pauli_evolution_at_target_boundary() -> None:
+    """A one-control Pauli evolution uses TKET controlled rotations."""
+    hamiltonian = 0.25 * qm_o.X(0) + 0.5 * qm_o.Y(0) * qm_o.Z(1)
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_controlled_pauli_evolution,
+        bindings={"hamiltonian": hamiltonian, "gamma": 0.125},
+    )
+
+    transpiler.target.validate(package)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+    assert sum("name='CRz'" in str(op) for op in operations) == 2
 
 
 @pytest.mark.hugr

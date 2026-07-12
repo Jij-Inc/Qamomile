@@ -14,7 +14,7 @@ Two rules govern what survives into this IR and how targets consume it:
 
 * **Lowering may erase how a program was written, never what it means.**
   Semantic values, slices, bindings, and call machinery are erased; intent a
-  target could exploit — intrinsic identity (:class:`CallableIdentity`),
+  target could exploit — semantic identity (:class:`CallableIdentity`),
   deferred call transforms, structured control flow, Pauli-evolution
   semantics — is preserved until a target explicitly decides otherwise.
   Erasure is irreversible while preservation costs one tag, so the default
@@ -37,7 +37,7 @@ from qamomile.circuit.transpiler.circuit_ir.capability import (
     CallTransformCapabilities,
     CircuitCapabilities,
     CompilationPolicy,
-    NativeIntrinsicCapabilities,
+    NativeSemanticOpCapabilities,
     ScalarAtom,
     ScalarCapabilities,
     ScalarExpressionForm,
@@ -58,6 +58,8 @@ from qamomile.circuit.transpiler.circuit_ir.materialize import (
     materialize_executable,
 )
 from qamomile.circuit.transpiler.circuit_ir.model import (
+    IQFT_SEMANTIC_KEY,
+    QFT_SEMANTIC_KEY,
     BarrierInstruction,
     BinaryExpr,
     BinaryOperator,
@@ -65,7 +67,6 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     CallInstruction,
     CircuitBuilder,
     CircuitInstruction,
-    CircuitIntrinsic,
     CircuitProgram,
     ClassicalBitExpr,
     ForInstruction,
@@ -74,12 +75,14 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     LiteralExpr,
     LoopVariableExpr,
     MeasureInstruction,
+    MeasureVectorInstruction,
     ParameterExpr,
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
     ResetInstruction,
     ReusableCircuit,
     ScalarExpr,
+    SemanticOpKey,
     UnaryExpr,
     UnaryOperator,
     WhileInstruction,
@@ -103,7 +106,6 @@ __all__ = [
     "CircuitBackendEmitPass",
     "CircuitCapabilities",
     "CircuitGateEmitter",
-    "CircuitIntrinsic",
     "CircuitLoweringPass",
     "CircuitInstruction",
     "CircuitMaterializer",
@@ -117,14 +119,18 @@ __all__ = [
     "LiteralExpr",
     "LoopVariableExpr",
     "MeasureInstruction",
+    "MeasureVectorInstruction",
     "MaterializedCircuit",
-    "NativeIntrinsicCapabilities",
+    "NativeSemanticOpCapabilities",
     "ParameterExpr",
     "PauliEvolutionInstruction",
     "PauliEvolutionRealization",
+    "QFT_SEMANTIC_KEY",
+    "IQFT_SEMANTIC_KEY",
     "ResetInstruction",
     "ReusableCircuit",
     "ScalarExpr",
+    "SemanticOpKey",
     "ScalarAtom",
     "ScalarCapabilities",
     "ScalarExpressionForm",

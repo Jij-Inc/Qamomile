@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Any
 
@@ -26,10 +27,12 @@ from qamomile.circuit.transpiler.circuit_ir import (
     LoopVariableExpr,
     MaterializedCircuit,
     MeasureInstruction,
+    MeasureVectorInstruction,
     ParameterExpr,
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
     ResetInstruction,
+    ReusableCircuit,
     ScalarAtom,
     ScalarCapabilities,
     ScalarExpr,
@@ -212,7 +215,7 @@ class PyQretMaterializer:
         return CircuitCapabilities(
             name="quration",
             primitive_gates=ALL_PRIMITIVE_GATES,
-            native_intrinsics=(),
+            native_semantic_ops=(),
             gate_parameters=numeric,
             predicates=ScalarCapabilities(
                 atoms=frozenset(),
@@ -221,7 +224,7 @@ class PyQretMaterializer:
                 parameter_form=ScalarExpressionForm.CONCRETE_ONLY,
             ),
             pauli_time=numeric,
-            global_phase=None,
+            global_phase=numeric,
             generic_calls=CallTransformCapabilities(
                 supports_power=True,
                 supports_inverse=False,
@@ -257,6 +260,20 @@ class PyQretMaterializer:
         module = frontend.Module(program.name or "qamomile", context)
         builder = frontend.CircuitBuilder(module)
         precision = self.rotation_precision
+        reusable_circuits, reusable_generators = _build_reusable_circuits(
+            program,
+            frontend,
+            intrinsic,
+            builder,
+            precision,
+        )
+        context_data = _PyQretContext(
+            frontend=frontend,
+            intrinsic=intrinsic,
+            builder=builder,
+            precision=precision,
+            reusable_circuits=reusable_circuits,
+        )
 
         class GeneratedCircuit(frontend.CircuitGenerator):  # type: ignore[misc]
             """Define one PyQret circuit from an immutable circuit program."""
@@ -298,12 +315,12 @@ class PyQretMaterializer:
                     wire: qubits[index]
                     for index, wire in enumerate(program.input_wires)
                 }
+                _emit_global_phase(program, context_data)
                 _emit_region(
                     program.operations,
                     wires,
                     registers,
-                    intrinsic,
-                    precision,
+                    context_data,
                     {},
                 )
 
@@ -312,16 +329,188 @@ class PyQretMaterializer:
         # PyQret's native Circuit keeps non-owning references into the
         # definition context. Preserve the complete builder ownership graph
         # for simulation and backend compilation.
-        circuit._qamomile_owners = (context, module, builder, generator)
+        circuit._qamomile_owners = (
+            context,
+            module,
+            builder,
+            generator,
+            *reusable_generators,
+            *reusable_circuits.values(),
+        )
         return MaterializedCircuit(artifact=circuit)
+
+
+@dataclasses.dataclass(frozen=True)
+class _PyQretContext:
+    """Hold PyQret objects shared by nested materialization.
+
+    Args:
+        frontend (Any): Imported ``pyqret.frontend`` module.
+        intrinsic (Any): Imported PyQret intrinsic gate module.
+        builder (Any): Circuit builder owning every generated definition.
+        precision (float): Rotation synthesis precision.
+        reusable_circuits (dict[int, Any]): Reusable-circuit object identity to
+            generated PyQret circuit.
+    """
+
+    frontend: Any
+    intrinsic: Any
+    builder: Any
+    precision: float
+    reusable_circuits: dict[int, Any]
+
+
+def _build_reusable_circuits(
+    program: CircuitProgram,
+    frontend: Any,
+    intrinsic: Any,
+    builder: Any,
+    precision: float,
+) -> tuple[dict[int, Any], list[Any]]:
+    """Predeclare reusable bodies as native PyQret circuits.
+
+    Definitions are generated bottom-up so a parent body can emit native
+    calls to every child definition while its own definition context is
+    active.
+
+    Args:
+        program (CircuitProgram): Root circuit program to inspect.
+        frontend (Any): Imported ``pyqret.frontend`` module.
+        intrinsic (Any): Imported PyQret intrinsic gate module.
+        builder (Any): Shared PyQret circuit builder.
+        precision (float): Rotation synthesis precision.
+
+    Returns:
+        tuple[dict[int, Any], list[Any]]: Mapping from reusable-circuit object
+        identity to native PyQret circuit, plus generators retained for
+        ownership.
+    """
+    circuits: dict[int, Any] = {}
+    generators: list[Any] = []
+    definitions: dict[tuple[str, Any], Any] = {}
+
+    def visit_operations(operations: tuple[CircuitInstruction, ...]) -> None:
+        """Generate definitions reachable from one instruction region.
+
+        Args:
+            operations (tuple[CircuitInstruction, ...]): Region to traverse.
+        """
+        for operation in operations:
+            if isinstance(operation, CallInstruction):
+                visit_callee(operation.callee)
+            elif isinstance(operation, ForInstruction):
+                visit_operations(operation.body)
+            elif isinstance(operation, IfInstruction):
+                visit_operations(operation.true_body)
+                visit_operations(operation.false_body)
+            elif isinstance(operation, WhileInstruction):
+                visit_operations(operation.body)
+
+    def visit_callee(callee: ReusableCircuit) -> None:
+        """Generate one reusable definition after its dependencies.
+
+        Args:
+            callee (ReusableCircuit): Reusable body to materialize.
+        """
+        cache_key = id(callee)
+        if cache_key in circuits:
+            return
+        try:
+            hash(callee.body)
+            definition_key = (callee.name, callee.body)
+        except TypeError:
+            definition_key = (callee.name, id(callee.body))
+        existing = definitions.get(definition_key)
+        if existing is not None:
+            circuits[cache_key] = existing
+            return
+        visit_operations(callee.body.operations)
+        definition_index = len(definitions)
+
+        class GeneratedReusableCircuit(frontend.CircuitGenerator):  # type: ignore[misc]
+            """Define one reusable Qamomile body as a PyQret circuit."""
+
+            def name(self) -> str:
+                """Return a unique readable PyQret definition name.
+
+                Returns:
+                    str: Definition name unique within the shared module.
+                """
+                safe_name = "".join(
+                    character if character.isalnum() or character == "_" else "_"
+                    for character in callee.name
+                )
+                return f"{safe_name or 'callable'}__{definition_index}"
+
+            def arg(self) -> Any:
+                """Declare one scalar qubit argument per body input.
+
+                Returns:
+                    Any: PyQret argument declaration.
+                """
+                argument = frontend.Argument()
+                for index in range(callee.body.num_qubits):
+                    argument.add_operate(f"q{index}")
+                return argument
+
+            def logic(self, arg: Any) -> None:
+                """Emit the reusable body inside its definition context.
+
+                Args:
+                    arg (Any): PyQret argument view.
+                """
+                context = _PyQretContext(
+                    frontend=frontend,
+                    intrinsic=intrinsic,
+                    builder=builder,
+                    precision=precision,
+                    reusable_circuits=circuits,
+                )
+                wires = {
+                    wire: arg[f"q{index}"]
+                    for index, wire in enumerate(callee.body.input_wires)
+                }
+                _emit_global_phase(callee.body, context)
+                _emit_region(callee.body.operations, wires, (), context, {})
+
+        generator = GeneratedReusableCircuit(builder)
+        native_circuit = generator.generate()
+        generators.append(generator)
+        circuits[cache_key] = native_circuit
+        definitions[definition_key] = native_circuit
+
+    visit_operations(program.operations)
+    return circuits, generators
+
+
+def _emit_global_phase(
+    program: CircuitProgram,
+    context: _PyQretContext,
+) -> None:
+    """Emit a concrete program-level global phase through PyQret.
+
+    Args:
+        program (CircuitProgram): Program whose global phase is active.
+        context (_PyQretContext): Shared PyQret materialization context.
+
+    Raises:
+        EmitError: If the global phase is not concrete.
+    """
+    phase = float(evaluate_scalar(program.global_phase))
+    if math.isclose(phase, 0.0, abs_tol=1e-15):
+        return
+    context.intrinsic.global_phase(
+        context.builder,
+        phase,
+        context.precision,
+    )
 
 
 def _emit_region(
     operations: tuple[CircuitInstruction, ...],
     wires: dict[WireId, Any],
     registers: Any,
-    intrinsic: Any,
-    precision: float,
+    context: _PyQretContext,
     loop_values: dict[str, int],
 ) -> dict[WireId, Any]:
     """Emit one circuit region and return its wire-to-qubit mapping.
@@ -330,8 +519,7 @@ def _emit_region(
         operations (tuple[CircuitInstruction, ...]): Region instructions.
         wires (dict[WireId, Any]): Input virtual-wire to PyQret qubit mapping.
         registers (Any): PyQret output-register array.
-        intrinsic (Any): PyQret intrinsic gate module.
-        precision (float): Rotation synthesis precision.
+        context (_PyQretContext): Shared PyQret materialization context.
         loop_values (dict[str, int]): Active loop-variable bindings.
 
     Returns:
@@ -341,6 +529,8 @@ def _emit_region(
         EmitError: If the region contains unsupported dynamic control, reset,
             or transformed reusable calls.
     """
+    intrinsic = context.intrinsic
+    precision = context.precision
     environment = dict(wires)
     for operation in operations:
         if isinstance(operation, GateInstruction):
@@ -352,6 +542,12 @@ def _emit_region(
             qubit = environment[operation.input]
             intrinsic.measure(qubit, registers[operation.clbit])
             environment[operation.output] = qubit
+        elif isinstance(operation, MeasureVectorInstruction):
+            qubits = tuple(environment[wire] for wire in operation.inputs)
+            for qubit, clbit in zip(qubits, operation.clbits, strict=True):
+                intrinsic.measure(qubit, registers[clbit])
+            for output, qubit in zip(operation.outputs, qubits, strict=True):
+                environment[output] = qubit
         elif isinstance(operation, BarrierInstruction):
             continue
         elif isinstance(operation, PauliEvolutionInstruction):
@@ -381,8 +577,7 @@ def _emit_region(
                     operation.body,
                     body_inputs,
                     registers,
-                    intrinsic,
-                    precision,
+                    context,
                     nested_loops,
                 )
                 current = [body_environment[wire] for wire in operation.body_outputs]
@@ -393,8 +588,7 @@ def _emit_region(
                 operation,
                 environment,
                 registers,
-                intrinsic,
-                precision,
+                context,
                 loop_values,
             )
         elif isinstance(operation, (IfInstruction, WhileInstruction)):
@@ -411,18 +605,16 @@ def _emit_call(
     operation: CallInstruction,
     environment: dict[WireId, Any],
     registers: Any,
-    intrinsic: Any,
-    precision: float,
+    context: _PyQretContext,
     loop_values: dict[str, int],
 ) -> None:
-    """Inline an untransformed reusable circuit call during materialization.
+    """Emit an untransformed reusable circuit as a native PyQret call.
 
     Args:
         operation (CallInstruction): Reusable circuit call.
         environment (dict[WireId, Any]): Enclosing wire mapping to update.
         registers (Any): PyQret output-register array.
-        intrinsic (Any): PyQret intrinsic gate module.
-        precision (float): Rotation synthesis precision.
+        context (_PyQretContext): Shared PyQret materialization context.
         loop_values (dict[str, int]): Active loop-variable bindings.
 
     Raises:
@@ -435,17 +627,11 @@ def _emit_call(
             "to be legalized before materialization"
         )
     current = [environment[wire] for wire in operation.inputs]
+    native_circuit = context.reusable_circuits.get(id(callee))
+    if native_circuit is None:
+        raise EmitError(f"Reusable PyQret circuit {callee.name!r} was not predeclared")
     for _ in range(callee.power):
-        call_inputs = dict(zip(callee.body.input_wires, current, strict=True))
-        call_environment = _emit_region(
-            callee.body.operations,
-            call_inputs,
-            registers,
-            intrinsic,
-            precision,
-            loop_values,
-        )
-        current = [call_environment[wire] for wire in callee.body.output_wires]
+        native_circuit(*current)
     for output, qubit in zip(operation.outputs, current, strict=True):
         environment[output] = qubit
 

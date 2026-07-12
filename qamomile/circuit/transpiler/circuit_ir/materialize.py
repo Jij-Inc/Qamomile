@@ -56,7 +56,7 @@ class CircuitMaterializer(Protocol[ArtifactT]):
     A materializer owns two things: a declaration of what it accepts
     (:attr:`capabilities`) and a mechanical conversion of programs that
     verification has already proven against that declaration. Realization
-    decisions (native intrinsic vs fallback body, decomposition choices)
+    decisions (native semantic operation vs fallback body, decomposition choices)
     belong to legalization, never here.
     """
 

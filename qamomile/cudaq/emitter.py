@@ -21,6 +21,7 @@ import enum
 import itertools
 import linecache
 import math
+from collections.abc import Callable, Hashable
 from typing import Any
 
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
@@ -272,6 +273,7 @@ class CudaqKernelEmitter:
     """
 
     _kernel_counter = itertools.count()
+    _parameter_argument_marker = "__QAMOMILE_PARAMETER_ARGUMENT__"
 
     def __init__(self, parametric: bool = False) -> None:
         self._parametric = parametric
@@ -283,6 +285,10 @@ class CudaqKernelEmitter:
         self._num_clbits: int = 0
         self._measurement_mode: MeasurementMode = MeasurementMode.STATIC
         self._boxed_clbits: set[int] = set()
+        self._qubit_references: tuple[str, ...] | None = None
+        self._helper_bodies: list[tuple[str, int, tuple[str, ...]]] = []
+        self._helper_names: dict[Hashable, str] = {}
+        self._helpers_in_progress: set[Hashable] = set()
 
     @property
     def measurement_mode(self) -> MeasurementMode:
@@ -380,6 +386,8 @@ class CudaqKernelEmitter:
         Returns:
             str: Source expression that references the slot.
         """
+        if self._qubit_references is not None:
+            return self._qubit_references[idx]
         return f"q[{idx}]"
 
     def _clbit_ref(self, idx: int) -> str:
@@ -420,6 +428,10 @@ class CudaqKernelEmitter:
         self._param_count = 0
         self._lines.clear()
         self._indent = 1
+        self._qubit_references = None
+        self._helper_bodies.clear()
+        self._helper_names.clear()
+        self._helpers_in_progress.clear()
 
         self._emit(f"q = cudaq.qvector({num_qubits})")
         for i in range(num_clbits):
@@ -433,6 +445,129 @@ class CudaqKernelEmitter:
             num_qubits=num_qubits,
             num_clbits=num_clbits,
         )
+
+    def define_helper(
+        self,
+        key: Hashable,
+        display_name: str,
+        num_qubits: int,
+        emit_body: Callable[[], None],
+    ) -> str:
+        """Define one reusable CUDA-Q kernel without flattening its call site.
+
+        Args:
+            key (Hashable): Materializer-owned identity used to deduplicate
+                repeated references to the same reusable body.
+            display_name (str): Human-readable source-name component.
+            num_qubits (int): Number of scalar qubit arguments.
+            emit_body (Callable[[], None]): Callback that emits the helper body
+                through this emitter.
+
+        Returns:
+            str: Unique generated CUDA-Q kernel name.
+
+        Raises:
+            ValueError: If recursive helper generation is detected.
+        """
+        existing = self._helper_names.get(key)
+        if existing is not None:
+            if key in self._helpers_in_progress:
+                raise ValueError(
+                    f"Recursive CUDA-Q helper {display_name!r} is unsupported"
+                )
+            return existing
+        safe_name = "".join(
+            character if character.isalnum() or character == "_" else "_"
+            for character in display_name
+        )
+        name = f"_qamomile_{safe_name or 'callable'}_{len(self._helper_names)}"
+        self._helper_names[key] = name
+        self._helpers_in_progress.add(key)
+        outer_lines = self._lines
+        outer_indent = self._indent
+        outer_references = self._qubit_references
+        self._lines = []
+        self._indent = 1
+        self._qubit_references = tuple(f"q{index}" for index in range(num_qubits))
+        body: tuple[str, ...]
+        succeeded = False
+        try:
+            emit_body()
+            body = tuple(self._lines)
+            succeeded = True
+        finally:
+            if not succeeded:
+                self._helper_names.pop(key, None)
+            self._lines = outer_lines
+            self._indent = outer_indent
+            self._qubit_references = outer_references
+            self._helpers_in_progress.discard(key)
+        if not body:
+            body = ("    pass",)
+        self._helper_bodies.append((name, num_qubits, body))
+        return name
+
+    def define_adjoint_helper(self, helper_name: str, num_qubits: int) -> str:
+        """Define a reusable adjoint wrapper around another CUDA-Q kernel.
+
+        Args:
+            helper_name (str): Base helper kernel name.
+            num_qubits (int): Number of target-qubit arguments.
+
+        Returns:
+            str: Generated adjoint-wrapper name.
+        """
+        key = ("adjoint", helper_name)
+
+        def emit_body() -> None:
+            arguments = self._kernel_argument_source(tuple(range(num_qubits)))
+            self._emit(f"cudaq.adjoint({helper_name}, {arguments[1:-1]})")
+
+        return self.define_helper(
+            key,
+            f"{helper_name}_adjoint",
+            num_qubits,
+            emit_body,
+        )
+
+    def emit_reusable_call(
+        self,
+        helper_name: str,
+        targets: tuple[int, ...],
+        controls: tuple[int, ...] = (),
+    ) -> None:
+        """Emit one direct or controlled named CUDA-Q kernel invocation.
+
+        Args:
+            helper_name (str): Generated helper-kernel name.
+            targets (tuple[int, ...]): Target qubit slots.
+            controls (tuple[int, ...]): Control qubit slots. Defaults to empty.
+        """
+        arguments = self._kernel_argument_source(targets)
+        if controls:
+            control_source = (
+                self._qref(controls[0])
+                if len(controls) == 1
+                else "[" + ", ".join(self._qref(index) for index in controls) + "]"
+            )
+            self._emit(
+                f"cudaq.control({helper_name}, {control_source}, {arguments[1:-1]})"
+            )
+            return
+        self._emit(f"{helper_name}{arguments}")
+
+    def _kernel_argument_source(self, qubits: tuple[int, ...]) -> str:
+        """Return a parenthesized helper argument list with a parameter marker.
+
+        Args:
+            qubits (tuple[int, ...]): Qubit slots in callable order.
+
+        Returns:
+            str: Source fragment beginning with ``"("`` and ending with
+            ``")"``. Finalization removes or expands the parameter marker.
+        """
+        qubit_source = ", ".join(self._qref(index) for index in qubits)
+        return f"({qubit_source}{self._parameter_argument_marker})"
 
     def finalize(
         self, circuit: CudaqKernelArtifact, mode: ExecutionMode
@@ -465,9 +600,28 @@ class CudaqKernelEmitter:
             else:
                 sig = "def _qamomile_kernel():"
 
-        body = "\n".join(self._lines)
+        parameter_signature = ", thetas: list[float]" if self._parametric else ""
+        parameter_argument = ", thetas" if self._parametric else ""
+        helper_sources = []
+        for name, num_qubits, helper_body in self._helper_bodies:
+            qubit_signature = ", ".join(
+                f"q{index}: cudaq.qubit" for index in range(num_qubits)
+            )
+            signature = f"{qubit_signature}{parameter_signature}"
+            rendered_body = "\n".join(helper_body).replace(
+                self._parameter_argument_marker,
+                parameter_argument,
+            )
+            helper_sources.append(
+                f"@cudaq.kernel\ndef {name}({signature}):\n{rendered_body}\n"
+            )
+
+        body = "\n".join(self._lines).replace(
+            self._parameter_argument_marker,
+            parameter_argument,
+        )
         main_source = f"@cudaq.kernel\n{sig}\n{body}\n"
-        source = main_source
+        source = "\n".join([*helper_sources, main_source])
 
         # Register source in linecache with a unique synthetic filename so
         # that ``inspect.getsource()`` succeeds.  CUDA-Q's decorator calls

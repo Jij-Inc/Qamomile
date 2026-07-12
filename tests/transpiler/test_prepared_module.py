@@ -18,6 +18,7 @@ from qamomile.circuit.transpiler.artifact import (
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.errors import CallableDefinitionConflictError
 from qamomile.circuit.transpiler.prepared import PreparedModule, prepare_module
+from qamomile.hugr.lowerer import HugrTarget
 from qamomile.qiskit import QiskitTranspiler
 
 
@@ -188,8 +189,8 @@ def test_prepare_collects_edges_for_shared_body_under_each_owner() -> None:
     assert prepared.call_graph[right_definition.ref] == frozenset({leaf_ref})
 
 
-def test_prepare_rejects_conflicting_definitions_for_one_symbol() -> None:
-    """Different bodies cannot silently claim the same callable symbol."""
+def test_prepare_records_variants_for_target_specific_resolution() -> None:
+    """Preparation retains same-symbol bodies for the target to resolve."""
     shared_ref = CallableRef("test", "shared")
     left_definition = CallableDef(ref=shared_ref, body=Block(name="left"))
     right_definition = CallableDef(ref=shared_ref, body=Block(name="right"))
@@ -201,8 +202,11 @@ def test_prepare_rejects_conflicting_definitions_for_one_symbol() -> None:
         ],
     )
 
+    prepared = prepare_module(entrypoint)
+
+    assert len(prepared.definition_variants[shared_ref]) == 2
     with pytest.raises(CallableDefinitionConflictError, match="test.shared"):
-        prepare_module(entrypoint)
+        HugrTarget().plan(prepared)
 
 
 def test_existing_transpile_pipeline_uses_prepared_entrypoint() -> None:

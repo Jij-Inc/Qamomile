@@ -29,6 +29,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     LoopVariableExpr,
     MaterializedCircuit,
     MeasureInstruction,
+    MeasureVectorInstruction,
     ParameterExpr,
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
@@ -92,7 +93,7 @@ class QuriPartsMaterializer:
         return CircuitCapabilities(
             name="quri_parts",
             primitive_gates=ALL_PRIMITIVE_GATES,
-            native_intrinsics=(),
+            native_semantic_ops=(),
             gate_parameters=numeric,
             predicates=ScalarCapabilities(
                 atoms=frozenset(),
@@ -120,7 +121,12 @@ class QuriPartsMaterializer:
             supports_dynamic_if=False,
             supports_dynamic_while=False,
             supports_reset=False,
-            pauli_realizations=frozenset({PauliEvolutionRealization.GADGET}),
+            pauli_realizations=frozenset(
+                {
+                    PauliEvolutionRealization.NATIVE,
+                    PauliEvolutionRealization.GADGET,
+                }
+            ),
         )
 
     def materialize(
@@ -218,21 +224,35 @@ def _emit_region(
             slot = wires[operation.input]
             measurements[operation.clbit] = slot
             wires[operation.output] = slot
+        elif isinstance(operation, MeasureVectorInstruction):
+            slots = tuple(wires[wire] for wire in operation.inputs)
+            measurements.update(zip(operation.clbits, slots, strict=True))
+            _publish(operation.outputs, slots, wires)
         elif isinstance(operation, BarrierInstruction):
             emitter.emit_barrier(circuit, [wires[wire] for wire in operation.wires])
         elif isinstance(operation, ResetInstruction):
             raise EmitError("QURI Parts cannot emit a qubit reset")
         elif isinstance(operation, PauliEvolutionInstruction):
-            if operation.realization is not PauliEvolutionRealization.GADGET:
-                raise AssertionError("QURI Pauli evolution was not gadget-legalized")
-            _emit_pauli_evolution(
-                operation,
-                circuit,
-                wires,
-                parameters,
-                loop_variables,
-                emitter,
-            )
+            if operation.realization is PauliEvolutionRealization.NATIVE:
+                _emit_pauli_evolution_native(
+                    operation,
+                    circuit,
+                    wires,
+                    parameters,
+                    loop_variables,
+                    emitter,
+                )
+            elif operation.realization is PauliEvolutionRealization.GADGET:
+                _emit_pauli_evolution_gadget(
+                    operation,
+                    circuit,
+                    wires,
+                    parameters,
+                    loop_variables,
+                    emitter,
+                )
+            else:  # pragma: no cover - target verification owns this invariant
+                raise AssertionError("QURI Pauli evolution was not legalized")
         elif isinstance(operation, ForInstruction):
             current = [wires[wire] for wire in operation.inputs]
             for index in operation.indexset:
@@ -642,14 +662,24 @@ def _emit_transformed_region(
                     operation,
                     time=UnaryExpr(UnaryOperator.NEG, operation.time),
                 )
-            _emit_pauli_evolution(
-                transformed,
-                circuit,
-                wires,
-                parameters,
-                loop_variables,
-                emitter,
-            )
+            if transformed.realization is PauliEvolutionRealization.NATIVE:
+                _emit_pauli_evolution_native(
+                    transformed,
+                    circuit,
+                    wires,
+                    parameters,
+                    loop_variables,
+                    emitter,
+                )
+            else:
+                _emit_pauli_evolution_gadget(
+                    transformed,
+                    circuit,
+                    wires,
+                    parameters,
+                    loop_variables,
+                    emitter,
+                )
         elif isinstance(operation, BarrierInstruction):
             continue
         else:
@@ -659,7 +689,7 @@ def _emit_transformed_region(
     return wires
 
 
-def _emit_pauli_evolution(
+def _emit_pauli_evolution_native(
     operation: PauliEvolutionInstruction,
     circuit: Any,
     wires: dict[WireId, int],
@@ -667,7 +697,47 @@ def _emit_pauli_evolution(
     loop_variables: dict[str, int],
     emitter: QuriPartsGateEmitter,
 ) -> None:
-    """Legalize abstract Pauli evolution to QURI phase gadgets.
+    """Materialize Pauli evolution with native QURI PauliRotation gates.
+
+    Args:
+        operation (PauliEvolutionInstruction): Abstract evolution.
+        circuit (Any): Destination QURI circuit.
+        wires (dict[WireId, int]): Virtual wire mapping.
+        parameters (dict[str, Any]): Parameter cache.
+        loop_variables (dict[str, int]): Concrete induction values.
+        emitter (QuriPartsGateEmitter): Native gate materializer.
+    """
+    time = _materialize_scalar(
+        operation.time,
+        parameters,
+        loop_variables,
+        emitter,
+    )
+    slots = tuple(wires[wire] for wire in operation.inputs)
+    for operators, coefficient in operation.hamiltonian:
+        if not operators or abs(coefficient) == 0:
+            continue
+        selected = [slots[item.index] for item in operators]
+        pauli_ids = [int(item.pauli.value) + 1 for item in operators]
+        factor = 2.0 * float(coefficient.real)
+        angle = (
+            factor * float(time)
+            if isinstance(time, numbers.Real)
+            else emitter.combine_symbolic(BinOpKind.MUL, factor, time)
+        )
+        emitter.emit_pauli_rotation(circuit, selected, pauli_ids, angle)
+    _publish(operation.outputs, slots, wires)
+
+
+def _emit_pauli_evolution_gadget(
+    operation: PauliEvolutionInstruction,
+    circuit: Any,
+    wires: dict[WireId, int],
+    parameters: dict[str, Any],
+    loop_variables: dict[str, int],
+    emitter: QuriPartsGateEmitter,
+) -> None:
+    """Materialize abstract Pauli evolution as primitive phase gadgets.
 
     Args:
         operation (PauliEvolutionInstruction): Abstract evolution.

@@ -491,7 +491,7 @@ assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 #
 # Qamomileには、QFTや逆QFTを`qmc.qft(...)` / `qmc.iqft(...)`で表す高水準の操作があります。
 # Qiskit連携では、これらの量子カーネルを量子ゲートへ分解せず、Qiskitネイティブな`QFTGate`として直接出力できます。
-# 量子ゲートに分解された回路が必要な場合は、`use_native_composite=False`を指定すると、H/controlled-phase/SWAPに展開されます。
+# `use_native_composite=False`では、移植可能なfallback本体を持つ名前付きQiskitゲートが残ります。H/controlled-phase/SWAPの実装を確認したい場合は、Qiskitの`decompose()`を呼び出します。
 # %%
 # QiskitのネイティブQFTゲートと、ゲート分解された回路を比較します。
 @qmc.qkernel
@@ -510,12 +510,14 @@ qft_decomposed = QiskitTranspiler(use_native_composite=False).to_circuit(
     bindings={"n": 3},
 )
 native_ops = [inst.operation.name for inst in qft_native.data]
-decomposed_ops = [inst.operation.name for inst in qft_decomposed.data]
+decomposed_ops = [
+    inst.operation.name for inst in qft_decomposed.decompose(reps=1).data
+]
 print("native QFT ops    :", native_ops)
 print("decomposed QFT ops:", decomposed_ops)
 assert any("qft" in name.lower() for name in native_ops)
 assert "cp" in decomposed_ops
-assert len(qft_native.data) < len(qft_decomposed.data)
+assert len(qft_native.data) < len(decomposed_ops)
 
 # %% [markdown]
 # ## 他のQiskit実行対象の利用

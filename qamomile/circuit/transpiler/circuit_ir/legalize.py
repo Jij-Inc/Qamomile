@@ -1,17 +1,15 @@
 """Target legalization and legality verification for circuit programs.
 
 Legalization is an IR-to-IR pass: it consumes one verified
-:class:`CircuitProgram`, applies capability- and policy-driven decisions
-(currently the intrinsic stage: preserve a native intrinsic call or lower
-it to its fallback body), and returns a new immutable program. Verification
-then proves the result against the target's declared capabilities before
-any materializer runs, so a materializer only ever executes decisions —
-it never makes them.
+:class:`CircuitProgram`, selects target-native realizations without erasing
+callable boundaries, and returns a new immutable program. Verification then
+proves the result against the target's declared capabilities before any
+materializer runs.
 
 The pass rebuilds the program with freshly numbered wires instead of
-patching instruction tuples in place; splicing a callee body into its call
-site is then just a continued walk with a substitution environment, and
-wire-collision bookkeeping disappears by construction.
+patching instruction tuples in place. Fallback bodies stay attached and are
+legalized recursively, allowing each materializer to lower them only at its
+own SDK boundary.
 """
 
 from __future__ import annotations
@@ -44,11 +42,11 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     LiteralExpr,
     LoopVariableExpr,
     MeasureInstruction,
+    MeasureVectorInstruction,
     ParameterExpr,
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
     ResetInstruction,
-    ReusableCircuit,
     ScalarExpr,
     UnaryExpr,
     UnaryOperator,
@@ -65,11 +63,9 @@ def legalize_program(
 ) -> CircuitProgram:
     """Rewrite one circuit program until it is legal for a target.
 
-    Intrinsic calls whose kind the target implements natively are preserved
-    (subject to ``policy.prefer_native_intrinsics``); every other intrinsic
-    call is lowered to its fallback body — inline when the call carries no
-    transforms, otherwise demoted to an anonymous reusable call that the
-    materializer realizes through the body.
+    Calls whose semantic key the target implements natively receive a
+    target-owned realization identifier. Every other call retains its
+    semantic identity and recursively legalized fallback body.
 
     Args:
         program (CircuitProgram): Verified backend-neutral circuit program.
@@ -95,7 +91,7 @@ def verify_target_legal(
 
     Raises:
         TargetCapabilityError: If any instruction requires a gate kind,
-            intrinsic, control-flow construct, reset, Pauli evolution, or
+            semantic realization, control-flow construct, reset, Pauli evolution, or
             scalar-expression shape the target does not declare.
     """
     _verify_legal_program(program, capabilities)
@@ -213,6 +209,14 @@ class _Rewriter:
                         input=environment[operation.input],
                         output=self._define((operation.output,), environment)[0],
                         clbit=operation.clbit,
+                    )
+                )
+            elif isinstance(operation, MeasureVectorInstruction):
+                result.append(
+                    MeasureVectorInstruction(
+                        inputs=self._map(operation.inputs, environment),
+                        outputs=self._define(operation.outputs, environment),
+                        clbits=operation.clbits,
                     )
                 )
             elif isinstance(operation, ResetInstruction):
@@ -336,7 +340,7 @@ class _Rewriter:
         environment: dict[WireId, WireId],
         result: list[CircuitInstruction],
     ) -> None:
-        """Apply the intrinsic legalization decision to one call.
+        """Select a native realization while preserving the call boundary.
 
         Args:
             operation (CallInstruction): Original call instruction.
@@ -345,37 +349,25 @@ class _Rewriter:
         """
         callee = operation.callee
         identity = callee.identity
-        intrinsic = identity.intrinsic if identity is not None else None
-        if intrinsic is not None:
-            native_declaration = self._capabilities.native_intrinsic(intrinsic)
-            native = (
-                self._policy.prefer_native_intrinsics
-                and native_declaration is not None
-                and native_declaration.call_transforms.accepts(callee)
-            )
-            if native:
-                self._keep_call(
-                    operation,
-                    environment,
-                    result,
-                    identity,
-                    legalize_body=False,
-                )
-                return
-            if _call_is_inlinable(callee):
-                self._inline_call(operation, environment, result)
-                return
-            # A transformed or measuring intrinsic body on a target without
-            # native support falls back to an anonymous reusable call so the
-            # materializer realizes it through the body.
+        native_declaration = (
+            self._capabilities.native_semantic_op(identity.key)
+            if identity is not None
+            else None
+        )
+        native = (
+            self._policy.prefer_native_semantic_ops
+            and native_declaration is not None
+            and native_declaration.accepts(callee)
+        )
+        if native:
+            assert native_declaration is not None
             self._keep_call(
                 operation,
                 environment,
                 result,
-                CallableIdentity(symbol=identity.symbol, intrinsic=None)
-                if identity is not None
-                else None,
-                legalize_body=True,
+                identity,
+                legalize_body=False,
+                native_realization=native_declaration.realization,
             )
             return
         self._keep_call(
@@ -384,6 +376,7 @@ class _Rewriter:
             result,
             identity,
             legalize_body=True,
+            native_realization=None,
         )
 
     def _keep_call(
@@ -393,6 +386,7 @@ class _Rewriter:
         result: list[CircuitInstruction],
         identity: CallableIdentity | None,
         legalize_body: bool,
+        native_realization: str | None,
     ) -> None:
         """Retain a call while legalizing its body recursively.
 
@@ -401,9 +395,11 @@ class _Rewriter:
             environment (dict[WireId, WireId]): Original-to-rebuilt mapping.
             result (list[CircuitInstruction]): Region being rebuilt.
             identity (CallableIdentity | None): Identity for the rebuilt
-                callee, possibly demoted from an intrinsic identity.
+                callee, possibly demoted from an semantic identity.
             legalize_body (bool): Whether the fallback body will execute on
                 this target and therefore requires recursive legalization.
+            native_realization (str | None): Selected target realization, or
+                ``None`` to retain the reusable fallback body.
         """
         callee = operation.callee
         rebuilt_body = (
@@ -420,65 +416,12 @@ class _Rewriter:
                     callee,
                     body=rebuilt_body,
                     identity=identity,
+                    native_realization=native_realization,
                 ),
                 inputs=self._map(operation.inputs, environment),
                 outputs=self._define(operation.outputs, environment),
             )
         )
-
-    def _inline_call(
-        self,
-        operation: CallInstruction,
-        environment: dict[WireId, WireId],
-        result: list[CircuitInstruction],
-    ) -> None:
-        """Splice an untransformed callee body into the call site.
-
-        The body owns an independent wire numbering, so it is walked with a
-        private environment seeded from the call-site wires; decisions apply
-        recursively to any nested calls it contains.
-
-        Args:
-            operation (CallInstruction): Original call instruction.
-            environment (dict[WireId, WireId]): Original-to-rebuilt mapping.
-            result (list[CircuitInstruction]): Region being rebuilt.
-        """
-        body = operation.callee.body
-        body_environment = {
-            body_wire: environment[call_wire]
-            for body_wire, call_wire in zip(
-                body.input_wires,
-                operation.inputs,
-                strict=True,
-            )
-        }
-        result.extend(self._rewrite_region(body.operations, body_environment))
-        for call_output, body_output in zip(
-            operation.outputs,
-            body.output_wires,
-            strict=True,
-        ):
-            environment[call_output] = body_environment[body_output]
-
-
-def _call_is_inlinable(callee: ReusableCircuit) -> bool:
-    """Return whether a callee body can be spliced into its call site.
-
-    Args:
-        callee (ReusableCircuit): Callee to inspect.
-
-    Returns:
-        bool: True when the call carries no transforms, the body measures
-            nothing (its classical-bit numbering is body-local), and the
-            body has no residual global phase to preserve.
-    """
-    return (
-        callee.power == 1
-        and callee.controls == 0
-        and not callee.inverse
-        and callee.body.num_clbits == 0
-        and _is_zero_literal(callee.body.global_phase)
-    )
 
 
 def _is_zero_literal(expression: ScalarExpr) -> bool:
@@ -587,18 +530,24 @@ def _verify_legal_region(
             )
         elif isinstance(operation, CallInstruction):
             identity = operation.callee.identity
-            intrinsic = identity.intrinsic if identity is not None else None
-            if intrinsic is not None:
-                declaration = capabilities.native_intrinsic(intrinsic)
-                if declaration is None or not declaration.call_transforms.accepts(
-                    operation.callee
+            realization = operation.callee.native_realization
+            if realization is not None:
+                declaration = (
+                    capabilities.native_semantic_op(identity.key)
+                    if identity is not None
+                    else None
+                )
+                if (
+                    declaration is None
+                    or declaration.realization != realization
+                    or not declaration.accepts(operation.callee)
                 ):
                     raise TargetCapabilityError(
-                        f"Intrinsic {intrinsic.name} call survived legalization "
-                        f"without a matching native realization on target '{name}'; "
+                        f"Native realization {realization!r} survived legalization "
+                        f"without a matching capability on target '{name}'; "
                         "this is a legalization invariant violation",
                         target=name,
-                        operation=intrinsic.name,
+                        operation=identity.symbol if identity is not None else "call",
                     )
                 # The fallback body is retained for other targets but is not
                 # executed by this target's native realization. Structural
@@ -700,7 +649,10 @@ def _is_unitary_region(operations: tuple[CircuitInstruction, ...]) -> bool:
         bool: Whether the region can be treated as a reusable unitary body.
     """
     for operation in operations:
-        if isinstance(operation, (MeasureInstruction, ResetInstruction)):
+        if isinstance(
+            operation,
+            (MeasureInstruction, MeasureVectorInstruction, ResetInstruction),
+        ):
             return False
         if isinstance(operation, (IfInstruction, WhileInstruction)):
             return False

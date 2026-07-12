@@ -13,6 +13,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     GateInstruction,
     IfInstruction,
     MeasureInstruction,
+    MeasureVectorInstruction,
     PauliEvolutionInstruction,
     ResetInstruction,
     ScalarExpr,
@@ -203,6 +204,19 @@ def _verify_region(
                 (operation.output,),
                 definitions,
             )
+        elif isinstance(operation, MeasureVectorInstruction):
+            if len(operation.inputs) != len(operation.clbits):
+                raise ValueError("Vector measurement wire/clbit arities must match")
+            if len(set(operation.clbits)) != len(operation.clbits):
+                raise ValueError("Vector measurement classical bits must be unique")
+            if any(clbit < 0 or clbit >= num_clbits for clbit in operation.clbits):
+                raise ValueError("Vector measurement clbit is out of range")
+            live = _advance(
+                live,
+                operation.inputs,
+                operation.outputs,
+                definitions,
+            )
         elif isinstance(operation, ResetInstruction):
             live = _advance(
                 live,
@@ -221,6 +235,16 @@ def _verify_region(
                 raise ValueError("Reusable call power must be positive")
             if operation.callee.controls < 0:
                 raise ValueError("Reusable call control count must be non-negative")
+            if any(width <= 0 for width in operation.callee.operand_widths):
+                raise ValueError("Reusable call operand widths must be positive")
+            if (
+                operation.callee.operand_widths
+                and sum(operation.callee.operand_widths)
+                != operation.callee.body.num_qubits
+            ):
+                raise ValueError(
+                    "Reusable call operand widths must cover the fallback body"
+                )
             verify_circuit(operation.callee.body)
             if len(operation.inputs) != operation.callee.num_qubits:
                 raise ValueError("Reusable call input arity does not match its callee")

@@ -13,13 +13,14 @@ import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.circuit_ir import (
     BinaryExpr,
     BinaryOperator,
+    CircuitBuilder,
     LiteralExpr,
     LoopVariableExpr,
     ParameterExpr,
 )
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.quration import QurationTranspiler
-from qamomile.quration.materializer import evaluate_scalar
+from qamomile.quration.materializer import PyQretMaterializer, evaluate_scalar
 
 
 @qmc.qkernel
@@ -59,6 +60,22 @@ def _quration_gate_helper(
     left, right = qmc.swap(left, right)
     left, right = qmc.rzz(left, right, 0.25)
     return qmc.cp(left, right, -0.5)
+
+
+@qmc.composite_gate(name="named_rotation")
+def _quration_named_rotation(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Provide a named reusable body for PyQret call-graph tests."""
+    qubit = qmc.h(qubit)
+    return qmc.t(qubit)
+
+
+@qmc.qkernel
+def _quration_named_call() -> qmc.Bit:
+    """Invoke one named composite twice before measurement."""
+    qubit = qmc.qubit("qubit")
+    qubit = _quration_named_rotation(qubit)
+    qubit = _quration_named_rotation(qubit)
+    return qmc.measure(qubit)
 
 
 @qmc.qkernel
@@ -145,6 +162,30 @@ def test_quration_executes_calls_loops_decompositions_and_pauli_evolution() -> N
 
     result = executable.sample(transpiler.executor(seed=7), shots=32).result()
     assert sum(count for _, count in result.results) == 32
+
+
+@pytest.mark.quration
+def test_quration_preserves_named_composites_as_pyqret_calls() -> None:
+    """Named Qamomile composites remain nodes in PyQret's call graph."""
+    pytest.importorskip("pyqret")
+    executable = QurationTranspiler().transpile(_quration_named_call)
+    circuit = executable.compiled_quantum[0].circuit
+
+    call_graph = circuit.get_ir().gen_call_graph(display_num_calls=True)
+    assert call_graph.count('label = "named_rotation') == 1
+    assert 'label = "2"' in call_graph
+
+
+@pytest.mark.quration
+def test_quration_emits_program_global_phase_natively() -> None:
+    """A concrete global phase reaches PyQret's intrinsic phase operation."""
+    pytest.importorskip("pyqret")
+    builder = CircuitBuilder(1, 0, name="global_phase")
+    builder.add_global_phase(0.25)
+
+    artifact = PyQretMaterializer().materialize(builder.freeze()).artifact
+
+    assert "GlobalPhase 0.25" in artifact.get_ir().gen_cfg()
 
 
 @pytest.mark.quration

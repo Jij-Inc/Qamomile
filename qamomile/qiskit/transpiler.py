@@ -191,7 +191,7 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
 
     Args:
         use_native_composite (bool): Whether to prefer native Qiskit library
-            realizations for intrinsic composites such as QFT/IQFT. Defaults
+            realizations for semantic composites such as QFT/IQFT. Defaults
             to ``True``.
         use_native_pauli_evolution (bool): Whether to prefer
             ``PauliEvolutionGate`` over gate gadgets. Defaults to ``True``.
@@ -219,7 +219,7 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
         """Initialize the Qiskit transpiler.
 
         Args:
-            use_native_composite (bool): Whether to prefer native intrinsic
+            use_native_composite (bool): Whether to prefer native semantic operation
                 composites such as QFT/IQFT. Defaults to ``True``.
             use_native_pauli_evolution (bool): Whether to prefer native Pauli
                 evolution over gate gadgets. Defaults to ``True``.
@@ -257,7 +257,7 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
             bindings,
             parameters,
             policy=CompilationPolicy(
-                prefer_native_intrinsics=self._use_native_composite,
+                prefer_native_semantic_ops=self._use_native_composite,
                 prefer_native_pauli_evolution=self._use_native_pauli_evolution,
             ),
         )

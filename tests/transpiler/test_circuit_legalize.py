@@ -1,10 +1,11 @@
 """Circuit-IR capability declarations, legalization decisions, and legality.
 
 Covers the three-layer contract: capabilities declare, legalization decides
-(preserve-native vs lower-to-body per intrinsic call), and target
+(preserve-native vs lower-to-body per semantic call), and target
 verification proves the result before any materializer runs.
 """
 
+import dataclasses
 import math
 
 import pytest
@@ -14,18 +15,17 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ALL_PRIMITIVE_GATES,
     ALL_UNARY_OPERATORS,
     ARITHMETIC_BINARY_OPERATORS,
+    QFT_SEMANTIC_KEY,
     CallableIdentity,
     CallInstruction,
     CallTransformCapabilities,
     CircuitBuilder,
     CircuitCapabilities,
-    CircuitIntrinsic,
     CircuitProgram,
     ClassicalBitExpr,
     CompilationPolicy,
-    GateInstruction,
     LiteralExpr,
-    NativeIntrinsicCapabilities,
+    NativeSemanticOpCapabilities,
     ParameterExpr,
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
@@ -62,7 +62,7 @@ def _capabilities(**overrides: object) -> CircuitCapabilities:
     base = dict(
         name="test-target",
         primitive_gates=ALL_PRIMITIVE_GATES,
-        native_intrinsics=(),
+        native_semantic_ops=(),
         gate_parameters=numeric,
         predicates=ScalarCapabilities(
             atoms=frozenset(ScalarAtom),
@@ -101,20 +101,21 @@ def _qft_body() -> CircuitProgram:
     return body.freeze()
 
 
-def _intrinsic_program(controls: int = 0) -> CircuitProgram:
-    """Build a program invoking an intrinsic-tagged QFT call.
+def _semantic_program(controls: int = 0) -> CircuitProgram:
+    """Build a program invoking an semantic-tagged QFT call.
 
     Args:
         controls (int): Added call-control count. Defaults to zero.
 
     Returns:
-        CircuitProgram: Intrinsic-tagged caller program.
+        CircuitProgram: Semantic-tagged caller program.
     """
     callee = ReusableCircuit(
         body=_qft_body(),
         name="qft",
         controls=controls,
-        identity=CallableIdentity("qft", CircuitIntrinsic.QFT),
+        identity=CallableIdentity(key=QFT_SEMANTIC_KEY, symbol="qft"),
+        operand_widths=(2,),
     )
     num_qubits = 2 + controls
     builder = CircuitBuilder(num_qubits, 2)
@@ -124,44 +125,49 @@ def _intrinsic_program(controls: int = 0) -> CircuitProgram:
     return builder.freeze()
 
 
-class TestIntrinsicLegalization:
-    """Legalization decisions for intrinsic-tagged calls."""
+class TestSemanticLegalization:
+    """Legalization decisions for semantic-tagged calls."""
 
-    def test_native_intrinsic_preserved(self):
-        """A declared-native intrinsic call survives legalization intact."""
+    def test_native_semantic_op_preserved(self):
+        """A declared-native semantic operation call survives legalization intact."""
         capabilities = _capabilities(
-            native_intrinsics=(
-                NativeIntrinsicCapabilities(
-                    CircuitIntrinsic.QFT,
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.qft",
                     CallTransformCapabilities(True, True, None),
+                    operand_widths=(None,),
+                    min_qubits=1,
                 ),
             ),
         )
         legalized = legalize_program(
-            _intrinsic_program(),
+            _semantic_program(),
             capabilities,
             CompilationPolicy(),
         )
         calls = [op for op in legalized.operations if isinstance(op, CallInstruction)]
         assert len(calls) == 1
         assert calls[0].callee.identity is not None
-        assert calls[0].callee.identity.intrinsic is CircuitIntrinsic.QFT
+        assert calls[0].callee.identity.key == QFT_SEMANTIC_KEY
+        assert calls[0].callee.native_realization == "test.qft"
         verify_circuit(legalized)
         verify_target_legal(legalized, capabilities)
 
-    def test_native_intrinsic_does_not_require_fallback_gate_support(self):
-        """A native intrinsic ignores target legality of its fallback body."""
+    def test_native_semantic_op_does_not_require_fallback_gate_support(self):
+        """A native semantic operation ignores target legality of its fallback body."""
         capabilities = _capabilities(
             primitive_gates=frozenset({GateKind.H}),
-            native_intrinsics=(
-                NativeIntrinsicCapabilities(
-                    CircuitIntrinsic.QFT,
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.qft",
                     CallTransformCapabilities(True, True, None),
                 ),
             ),
         )
         legalized = legalize_program(
-            _intrinsic_program(),
+            _semantic_program(),
             capabilities,
             CompilationPolicy(),
         )
@@ -169,18 +175,53 @@ class TestIntrinsicLegalization:
         verify_circuit(legalized)
         verify_target_legal(legalized, capabilities)
 
-    def test_unsupported_native_transform_uses_generic_fallback(self):
-        """A native intrinsic falls back when its native form rejects controls."""
+    def test_native_semantic_op_rejects_incompatible_operand_grouping(self):
+        """A backend vector API is not selected for two scalar operands."""
         capabilities = _capabilities(
-            native_intrinsics=(
-                NativeIntrinsicCapabilities(
-                    CircuitIntrinsic.QFT,
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.qft",
+                    CallTransformCapabilities(True, True, None),
+                    operand_widths=(None,),
+                    min_qubits=1,
+                ),
+            ),
+        )
+        program = _semantic_program()
+        [call, *rest] = program.operations
+        assert isinstance(call, CallInstruction)
+        incompatible = dataclasses.replace(
+            call,
+            callee=dataclasses.replace(call.callee, operand_widths=(1, 1)),
+        )
+        legalized = legalize_program(
+            dataclasses.replace(program, operations=(incompatible, *rest)),
+            capabilities,
+            CompilationPolicy(),
+        )
+        [legalized_call] = [
+            operation
+            for operation in legalized.operations
+            if isinstance(operation, CallInstruction)
+        ]
+
+        assert legalized_call.callee.native_realization is None
+        verify_target_legal(legalized, capabilities)
+
+    def test_unsupported_native_transform_uses_generic_fallback(self):
+        """A native semantic operation falls back when its native form rejects controls."""
+        capabilities = _capabilities(
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.qft",
                     CallTransformCapabilities(True, True, 0),
                 ),
             ),
         )
         legalized = legalize_program(
-            _intrinsic_program(controls=1),
+            _semantic_program(controls=1),
             capabilities,
             CompilationPolicy(),
         )
@@ -191,29 +232,29 @@ class TestIntrinsicLegalization:
         ]
 
         assert call.callee.identity is not None
-        assert call.callee.identity.intrinsic is None
+        assert call.callee.identity.key == QFT_SEMANTIC_KEY
+        assert call.callee.native_realization is None
         verify_target_legal(legalized, capabilities)
 
     def test_policy_forces_fallback_body(self):
-        """prefer_native_intrinsics=False inlines the body on a capable target."""
+        """prefer_native_semantic_ops=False inlines the body on a capable target."""
         capabilities = _capabilities(
-            native_intrinsics=(
-                NativeIntrinsicCapabilities(
-                    CircuitIntrinsic.QFT,
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.qft",
                     CallTransformCapabilities(True, True, None),
                 ),
             ),
         )
         legalized = legalize_program(
-            _intrinsic_program(),
+            _semantic_program(),
             capabilities,
-            CompilationPolicy(prefer_native_intrinsics=False),
+            CompilationPolicy(prefer_native_semantic_ops=False),
         )
-        kinds = [
-            op.kind for op in legalized.operations if isinstance(op, GateInstruction)
-        ]
-        assert kinds == [GateKind.H, GateKind.CP, GateKind.H, GateKind.SWAP]
-        assert not any(isinstance(op, CallInstruction) for op in legalized.operations)
+        calls = [op for op in legalized.operations if isinstance(op, CallInstruction)]
+        assert len(calls) == 1
+        assert calls[0].callee.native_realization is None
         verify_circuit(legalized)
         verify_target_legal(legalized, capabilities)
 
@@ -221,19 +262,21 @@ class TestIntrinsicLegalization:
         """A target without native support receives the inlined fallback."""
         capabilities = _capabilities()
         legalized = legalize_program(
-            _intrinsic_program(),
+            _semantic_program(),
             capabilities,
             CompilationPolicy(),
         )
-        assert not any(isinstance(op, CallInstruction) for op in legalized.operations)
+        calls = [op for op in legalized.operations if isinstance(op, CallInstruction)]
+        assert len(calls) == 1
+        assert calls[0].callee.native_realization is None
         verify_circuit(legalized)
         verify_target_legal(legalized, capabilities)
 
-    def test_transformed_intrinsic_demotes_to_generic_call(self):
-        """A controlled intrinsic on a non-native target keeps its body call."""
+    def test_transformed_semantic_op_uses_generic_call(self):
+        """A controlled semantic op on a non-native target keeps its body call."""
         capabilities = _capabilities()
         legalized = legalize_program(
-            _intrinsic_program(controls=1),
+            _semantic_program(controls=1),
             capabilities,
             CompilationPolicy(),
         )
@@ -243,7 +286,8 @@ class TestIntrinsicLegalization:
         identity = calls[0].callee.identity
         assert identity is not None
         assert identity.symbol == "qft"
-        assert identity.intrinsic is None
+        assert identity.key == QFT_SEMANTIC_KEY
+        assert calls[0].callee.native_realization is None
         verify_circuit(legalized)
         verify_target_legal(legalized, capabilities)
 
@@ -252,7 +296,7 @@ class TestIntrinsicLegalization:
         callee = ReusableCircuit(
             body=_qft_body(),
             name="qft",
-            identity=CallableIdentity("qft", CircuitIntrinsic.QFT),
+            identity=CallableIdentity(key=QFT_SEMANTIC_KEY, symbol="qft"),
         )
         builder = CircuitBuilder(2, 0)
         builder.begin_for(range(3))
@@ -265,7 +309,9 @@ class TestIntrinsicLegalization:
             CompilationPolicy(),
         )
         verify_circuit(legalized)
-        assert not any(isinstance(op, CallInstruction) for op in legalized.operations)
+        assert any(
+            isinstance(op, CallInstruction) for op in legalized.operations[0].body
+        )
 
 
 class TestTargetLegalityVerification:
@@ -374,7 +420,7 @@ class TestTargetLegalityVerification:
 
         capabilities = PyQretMaterializer().capabilities
         legalized = legalize_program(
-            _intrinsic_program(controls=1),
+            _semantic_program(controls=1),
             capabilities,
             CompilationPolicy(),
         )
@@ -466,10 +512,26 @@ class TestTargetLegalityVerification:
         verify_target_legal(native, capabilities)
         verify_target_legal(gadget, capabilities)
 
-    def test_intrinsic_residue_is_invariant_violation(self):
-        """An unlegalized intrinsic call on a non-native target is rejected."""
+    def test_native_residue_is_invariant_violation(self):
+        """An unverified native realization on a target is rejected."""
+        program = _semantic_program()
+        call = program.operations[0]
+        assert isinstance(call, CallInstruction)
+        malformed = dataclasses.replace(
+            program,
+            operations=(
+                dataclasses.replace(
+                    call,
+                    callee=dataclasses.replace(
+                        call.callee,
+                        native_realization="missing.native",
+                    ),
+                ),
+                *program.operations[1:],
+            ),
+        )
         with pytest.raises(
             TargetCapabilityError,
             match="legalization invariant",
         ):
-            verify_target_legal(_intrinsic_program(), _capabilities())
+            verify_target_legal(malformed, _capabilities())
