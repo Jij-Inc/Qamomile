@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
     WhileOperation,
+    genuine_input_values,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
@@ -25,7 +26,15 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    array_physical_region,
+    arrays_share_physical_region,
+)
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
@@ -47,6 +56,7 @@ from qamomile.circuit.transpiler.segments import (
     QuantumStep,
     Segment,
 )
+from qamomile.circuit.transpiler.value_resolver import ValueResolver
 
 # =========================================================================
 # Pre-segmentation transformations (called by SegmentationPass.run)
@@ -63,6 +73,28 @@ def materialize_return(block: Block) -> Block:
         if isinstance(op, ReturnOperation):
             return dataclasses.replace(block, output_values=list(op.operands))
     return block
+
+
+def _collect_compile_time_outputs(output_values: list[Value]) -> dict[str, object]:
+    """Resolve outputs already materialized in IR metadata.
+
+    Args:
+        output_values (list[Value]): Block outputs in public return order.
+
+    Returns:
+        dict[str, object]: Output UUIDs mapped to constant scalar or array
+            values. Structural array elements resolve through their parent
+            array's compile-time contents.
+    """
+    resolver = ValueResolver()
+    resolved_outputs: dict[str, object] = {}
+    for value in output_values:
+        resolved = resolver.resolve(value)
+        if resolved is None and isinstance(value, ArrayValue):
+            resolved = value.get_const_array()
+        if resolved is not None:
+            resolved_outputs[value.uuid] = resolved
+    return resolved_outputs
 
 
 def lower_measure_qfixed(
@@ -185,7 +217,19 @@ class SegmentationStrategy(ABC):
         block: Block,
         boundaries: list[HybridBoundary],
     ) -> ProgramPlan:
-        """Build a ProgramPlan from segmented operations."""
+        """Build a program plan from segmented operations.
+
+        Args:
+            segments (list[Segment]): Ordered execution segments.
+            block (Block): Lowered source block carrying the public ABI.
+            boundaries (list[HybridBoundary]): Quantum/classical boundaries.
+
+        Returns:
+            ProgramPlan: Strategy-specific executable plan.
+
+        Raises:
+            NotImplementedError: Always; subclasses must implement planning.
+        """
         raise NotImplementedError
 
 
@@ -198,6 +242,23 @@ class NisqSegmentationStrategy(SegmentationStrategy):
         block: Block,
         boundaries: list[HybridBoundary],
     ) -> ProgramPlan:
+        """Build the current single-quantum-segment NISQ plan.
+
+        Args:
+            segments (list[Segment]): Ordered classical, quantum, and expval
+                segments.
+            block (Block): Lowered block providing parameters and outputs.
+            boundaries (list[HybridBoundary]): Recorded hybrid transitions.
+
+        Returns:
+            ProgramPlan: Plan with one quantum step and surrounding classical
+                or expectation-value steps.
+
+        Raises:
+            SeparationError: If no quantum segment exists.
+            MultipleQuantumSegmentsError: If more than one quantum segment
+                would require unsupported JIT-style execution.
+        """
         quantum_segs = [s for s in segments if isinstance(s, QuantumSegment)]
         if len(quantum_segs) == 0:
             from qamomile.circuit.transpiler.errors import SeparationError
@@ -227,6 +288,8 @@ class NisqSegmentationStrategy(SegmentationStrategy):
         abi = ProgramABI(
             public_inputs={name: value for name, value in block.parameters.items()},
             output_refs=[v.uuid for v in block.output_values],
+            output_values={v.uuid: v for v in block.output_values},
+            constant_outputs=_collect_compile_time_outputs(block.output_values),
         )
 
         return ProgramPlan(
@@ -260,14 +323,40 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         return "segment"
 
     def run(self, input: Block) -> ProgramPlan:
-        """Segment the block into a ProgramPlan."""
+        """Lower and segment a block into a program plan.
+
+        Args:
+            input (Block): Block whose while contract and hybrid operations
+                should be lowered before segmentation.
+
+        Returns:
+            ProgramPlan: Strategy-produced execution plan.
+
+        Raises:
+            ValidationError: If a runtime while violates its contract.
+            SeparationError: If the strategy finds no quantum segment.
+            MultipleQuantumSegmentsError: If the strategy finds multiple
+                quantum segments.
+        """
         input = ValidateWhileContractPass().run(input)
         block = materialize_return(input)
         block = lower_operations(block)
         return self._segment(block)
 
     def _segment(self, block: Block) -> ProgramPlan:
-        """Build a ProgramPlan from a lowered block."""
+        """Build a plan from an already-lowered block.
+
+        Args:
+            block (Block): Lowered block to split into segments.
+
+        Returns:
+            ProgramPlan: Strategy-produced execution plan.
+
+        Raises:
+            SeparationError: If the strategy finds no quantum segment.
+            MultipleQuantumSegmentsError: If the strategy finds multiple
+                quantum segments.
+        """
         segments = self._build_segments_list(block)
         return self._strategy.create_plan(segments, block, self._boundaries)
 
@@ -275,6 +364,16 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Build list of segments from block operations.
 
         Extracted from _separate_segments to allow reuse.
+
+        Args:
+            block (Block): Lowered block whose operations are segmented.
+
+        Returns:
+            list[Segment]: Ordered execution segments.
+
+        Raises:
+            SeparationError: If an operation cannot be assigned to a valid
+                segment shape.
         """
         segments: list[Segment] = []
         self._boundaries: list[HybridBoundary] = []
@@ -288,6 +387,8 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # classical segment) or a parameter / structural expression that
         # merely feeds a quantum gate (can stay in the quantum segment).
         dependency_graph = build_dependency_graph(block.operations)
+        self._dependency_graph = dependency_graph
+        self._quantum_value_uuids = self._collect_quantum_value_uuids(block.operations)
         measurement_uuids = find_measurement_results(block.operations)
         self._measurement_tainted = find_measurement_derived_values(
             dependency_graph, measurement_uuids
@@ -317,6 +418,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         self._block_output_uuids = {
             v.uuid for v in block.output_values if isinstance(v, ValueBase)
         }
+        self._block_output_values = tuple(block.output_values)
 
         # Absorbable set: classical ops (top-level or nested) whose results are
         # consumed exclusively by quantum / hybrid ops, or by other absorbable
@@ -543,7 +645,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                     self._collect_carry_results(nested, collected)
 
     def _segment_read_uuids(self, operations: list[Operation]) -> set[str]:
-        """Collect every input-value UUID a segment's op tree reads.
+        """Collect every genuine input-value UUID a segment's op tree reads.
+
+        Cloning/substitution metadata exposed by ``all_input_values`` is not a
+        data read. In particular, loop RegionArg formals/results and rebind
+        records must not make an overwritten or otherwise unused value appear
+        live and trigger an escape/divergent-array rejection.
 
         Args:
             operations (list[Operation]): Segment operations (control-flow
@@ -554,13 +661,215 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """
         reads: set[str] = set()
         for op in operations:
-            for value in op.all_input_values():
+            for value in genuine_input_values(op):
                 if isinstance(value, ValueBase):
-                    reads.add(value.uuid)
+                    reads |= self._value_reference_uuids(value)
             if isinstance(op, HasNestedOps):
                 for body in op.nested_op_lists():
                     reads |= self._segment_read_uuids(body)
         return reads
+
+    def _value_reference_uuids(self, value: ValueBase) -> set[str]:
+        """Collect a value UUID and UUIDs embedded in its addressing metadata.
+
+        Array elements and views carry dataflow in structural fields rather
+        than ordinary operation operands.  In particular, ``values[index]``
+        stores ``index`` in ``element_indices``; looking only at the element's
+        own UUID would therefore miss an emit-time loop carry used as the
+        index of a block output or expectation-value operand.
+
+        Args:
+            value (ValueBase): Value whose structural references to walk.
+
+        Returns:
+            set[str]: The value's UUID plus every recursively referenced
+                parent array, element index, shape, slice-bound, tuple-element,
+                and dictionary key/value UUID. A scalar classical value
+                carrying compile-time constant metadata omits only its own UUID
+                because it needs no runtime producer; any structural references
+                attached to it remain included.
+        """
+        references: set[str] = set()
+        visited_objects: set[int] = set()
+        pending: list[ValueBase] = [value]
+        while pending:
+            current = pending.pop()
+            identity = id(current)
+            if identity in visited_objects:
+                continue
+            visited_objects.add(identity)
+            materialized_scalar_constant = (
+                isinstance(current, Value)
+                and not isinstance(current, ArrayValue)
+                and current.type.is_classical()
+                and current.is_constant()
+            )
+            if not materialized_scalar_constant:
+                references.add(current.uuid)
+            for field_name in (
+                "parent_array",
+                "slice_of",
+                "slice_start",
+                "slice_step",
+            ):
+                referenced = getattr(current, field_name, None)
+                if isinstance(referenced, ValueBase):
+                    pending.append(referenced)
+            for field_name in ("element_indices", "shape"):
+                for referenced in getattr(current, field_name, ()):
+                    if isinstance(referenced, ValueBase):
+                        pending.append(referenced)
+            if isinstance(current, TupleValue):
+                pending.extend(current.elements)
+            if isinstance(current, DictValue):
+                for key, item_value in current.entries:
+                    pending.append(key)
+                    pending.append(item_value)
+        return references
+
+    def _collect_classical_merge_results(
+        self,
+        op: Operation,
+        collected: dict[str, str],
+    ) -> None:
+        """Collect non-Bit classical merges embedded in a quantum op tree.
+
+        Measurement-backed ``Bit`` merges have a physical clbit and are
+        handled by backend aliasing.  Other classical merge results created by
+        a runtime ``if`` inside a quantum segment exist only while emitting the
+        circuit; the classical executor cannot later surface them.
+
+        Args:
+            op (Operation): Operation tree to inspect.
+            collected (dict[str, str]): Mutable result-UUID to display-name map,
+                updated in place.
+        """
+        if isinstance(op, IfOperation):
+            condition = op.operands[0] if op.operands else None
+            condition_uuid = (
+                condition.uuid if isinstance(condition, ValueBase) else None
+            )
+            merges = (
+                op.iter_merges() if condition_uuid in self._measurement_tainted else ()
+            )
+            for merge in merges:
+                if not merge.result.type.is_quantum() and not isinstance(
+                    merge.result.type, BitType
+                ):
+                    collected[merge.result.uuid] = merge.result.name or "<anonymous>"
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                for nested in body:
+                    self._collect_classical_merge_results(nested, collected)
+
+    def _collect_divergent_quantum_array_merges(
+        self,
+        op: Operation,
+        collected: dict[str, str],
+    ) -> None:
+        """Collect runtime array merges with statically different regions.
+
+        Args:
+            op (Operation): Operation tree to inspect recursively.
+            collected (dict[str, str]): Mutable result-UUID to display-name
+                map, updated in place.
+        """
+        if isinstance(op, IfOperation):
+            condition = op.operands[0] if op.operands else None
+            condition_uuid = (
+                condition.uuid if isinstance(condition, ValueBase) else None
+            )
+            merges = (
+                op.iter_merges() if condition_uuid in self._measurement_tainted else ()
+            )
+            for merge in merges:
+                result = merge.result
+                true_value = merge.true_value
+                false_value = merge.false_value
+                if not (
+                    isinstance(result, ArrayValue)
+                    and result.type.is_quantum()
+                    and isinstance(true_value, ArrayValue)
+                    and isinstance(false_value, ArrayValue)
+                ):
+                    continue
+                true_region = array_physical_region(true_value)
+                false_region = array_physical_region(false_value)
+                # Symbolic coverage may become concrete at emit time, where
+                # the physical map remains the source of truth. Reject here
+                # only when both regions are known and demonstrably differ.
+                if (
+                    true_region is not None
+                    and false_region is not None
+                    and not arrays_share_physical_region(true_value, false_value)
+                ):
+                    collected[result.uuid] = result.name or "<anonymous>"
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                for nested in body:
+                    self._collect_divergent_quantum_array_merges(nested, collected)
+
+    def _collect_quantum_value_uuids(
+        self,
+        operations: list[Operation],
+    ) -> set[str]:
+        """Collect quantum result UUIDs from an operation tree.
+
+        Args:
+            operations (list[Operation]): Operations to inspect recursively.
+
+        Returns:
+            set[str]: UUIDs of quantum scalar and array results.
+        """
+        quantum_uuids: set[str] = set()
+        for op in operations:
+            quantum_uuids.update(
+                result.uuid for result in op.results if result.type.is_quantum()
+            )
+            if isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    quantum_uuids.update(self._collect_quantum_value_uuids(body))
+        return quantum_uuids
+
+    def _propagate_escape_origins(
+        self,
+        seeds: dict[str, str],
+    ) -> dict[str, set[str]]:
+        """Propagate emit-only value origins through the dependency graph.
+
+        Args:
+            seeds (dict[str, str]): Seed UUIDs mapped to user-facing variable
+                names.
+
+        Returns:
+            dict[str, set[str]]: Every transitively dependent UUID mapped to
+                the seed names from which it derives.
+        """
+        dependents: dict[str, set[str]] = {}
+        for result_uuid, dependencies in self._dependency_graph.items():
+            for dependency_uuid in dependencies:
+                dependents.setdefault(dependency_uuid, set()).add(result_uuid)
+
+        origins = {uuid: {name} for uuid, name in seeds.items()}
+        pending = list(seeds)
+        while pending:
+            current = pending.pop()
+            current_origins = origins[current]
+            for dependent in dependents.get(current, ()):
+                # A classical value that affects a gate has a dependency path
+                # through the gate's quantum result and eventually its final
+                # measurement. That is an ordinary emit-time use, not a value
+                # escaping to the classical executor. Stop propagation at the
+                # quantum SSA boundary while retaining purely classical paths
+                # such as a carried value flowing through a runtime-if merge.
+                if dependent in self._quantum_value_uuids:
+                    continue
+                merged_origins = origins.setdefault(dependent, set())
+                previous_size = len(merged_origins)
+                merged_origins.update(current_origins)
+                if len(merged_origins) != previous_size:
+                    pending.append(dependent)
+        return origins
 
     def _reject_quantum_segment_carry_escapes(
         self,
@@ -583,13 +892,28 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 non-quantum segment.
         """
         quantum_carry_results: dict[str, str] = {}
+        quantum_classical_merges: dict[str, str] = {}
+        divergent_quantum_array_merges: dict[str, str] = {}
         for segment in segments:
             if not isinstance(segment, QuantumSegment):
                 continue
             for op in segment.operations:
                 self._collect_carry_results(op, quantum_carry_results)
-        if not quantum_carry_results:
+                self._collect_classical_merge_results(op, quantum_classical_merges)
+                self._collect_divergent_quantum_array_merges(
+                    op, divergent_quantum_array_merges
+                )
+        if (
+            not quantum_carry_results
+            and not quantum_classical_merges
+            and not divergent_quantum_array_merges
+        ):
             return
+
+        quantum_reads: set[str] = set()
+        for segment in segments:
+            if isinstance(segment, QuantumSegment):
+                quantum_reads |= self._segment_read_uuids(segment.operations)
 
         outside_reads: set[str] = set()
         for segment in segments:
@@ -597,11 +921,39 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 continue
             outside_reads |= self._segment_read_uuids(segment.operations)
 
+        block_output_reads: set[str] = set()
+        for output in self._block_output_values:
+            if isinstance(output, ValueBase):
+                block_output_reads |= self._value_reference_uuids(output)
+        escaped_reads = outside_reads | block_output_reads
+
+        divergent_origins = self._propagate_escape_origins(
+            divergent_quantum_array_merges
+        )
+        used_divergent_merges = sorted(
+            {
+                var_name
+                for uuid in quantum_reads | escaped_reads
+                for var_name in divergent_origins.get(uuid, ())
+            }
+        )
+        if used_divergent_merges:
+            raise MultipleQuantumSegmentsError(
+                "A runtime if inside the quantum segment merges arrays from "
+                "different physical qubit regions "
+                f"({', '.join(used_divergent_merges)}). A single merged "
+                "quantum value cannot dynamically select one physical "
+                "register or slice at runtime. Use the selected view only "
+                "inside each branch, or make the condition compile-time."
+            )
+
+        carry_origins = self._propagate_escape_origins(quantum_carry_results)
+
         escaped_names = sorted(
             {
                 var_name
-                for uuid, var_name in quantum_carry_results.items()
-                if uuid in self._block_output_uuids or uuid in outside_reads
+                for uuid in escaped_reads
+                for var_name in carry_origins.get(uuid, ())
             }
         )
         if escaped_names:
@@ -615,6 +967,25 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 "Compute the reduction in a classical-only loop (before "
                 "or after the quantum operations), or drop it from the "
                 "outputs."
+            )
+
+        merge_origins = self._propagate_escape_origins(quantum_classical_merges)
+        escaped_merges = sorted(
+            {
+                var_name
+                for uuid in escaped_reads
+                for var_name in merge_origins.get(uuid, ())
+            }
+        )
+        if escaped_merges:
+            raise MultipleQuantumSegmentsError(
+                "A runtime if inside the quantum segment has classical merges "
+                f"({', '.join(escaped_merges)}) that are read outside it "
+                "(by classical post-processing or as block outputs). These "
+                "values exist only while emitting the circuit and have no "
+                "runtime representation the classical executor could surface. "
+                "Keep the merged value inside backend-supported quantum "
+                "control flow, or compute it in a classical-only segment."
             )
 
     def _compute_quantum_needed(
@@ -919,7 +1290,15 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
     def _effective_kind(self, op: Operation) -> OperationKind:
         """Determine the effective kind of an operation.
 
-        For control flow, examine the inner operations.
+        Control flow inherits the kinds of its nested operations. An
+        operation-empty loop with hidden quantum ownership/carry records stays
+        quantum so it cannot create a spurious quantum-classical boundary.
+
+        Args:
+            op (Operation): Operation or nested control-flow node to classify.
+
+        Returns:
+            OperationKind: Effective segmentation kind for ``op``.
         """
         kind = op.operation_kind
 
@@ -939,7 +1318,26 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         inner_kinds.discard(OperationKind.CONTROL)
 
         if len(inner_kinds) == 0:
-            return OperationKind.CLASSICAL  # Empty control flow
+            # A marker-only loop may become operation-empty after
+            # ``StripSliceArrayOpsPass`` while still carrying quantum
+            # ownership records for ``AnalyzePass``.  Those records do not
+            # represent host-side classical work and must not split one
+            # quantum stream into Q -> C -> Q segments merely because the
+            # loop body is empty.  Classical carries (including a measured
+            # Bit selected by the final loop index) intentionally remain
+            # classical so the post-quantum executor evaluates them.
+            if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+                if any(
+                    record.before.type.is_quantum() or record.after.type.is_quantum()
+                    for record in op.loop_carried_rebinds
+                ) or any(
+                    region_arg.init.type.is_quantum()
+                    or region_arg.block_arg.type.is_quantum()
+                    or region_arg.result.type.is_quantum()
+                    for region_arg in op.region_args
+                ):
+                    return OperationKind.QUANTUM
+            return OperationKind.CLASSICAL  # Empty classical control flow
         elif len(inner_kinds) == 1:
             return inner_kinds.pop()
         else:
@@ -974,6 +1372,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         A segment reads values defined outside it (inputs)
         and writes values used outside it or returned (outputs).
+
+        Args:
+            segments (list[Segment]): Ordered segments whose boundary refs are
+                populated in place.
+            block (Block): Lowered block whose public outputs seed final
+                liveness.
         """
         # Track which segment defines each value
         value_definitions: dict[str, int] = {}  # uuid -> segment index
@@ -998,8 +1402,20 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 segment_outputs,
             )
 
-            segment.input_refs = list(segment_inputs)
-            segment.output_refs = list(segment_outputs)
+            segment.input_refs = sorted(segment_inputs)
+            segment.output_refs = sorted(segment_outputs)
+
+        block_output_refs: set[str] = set()
+        for output in block.output_values:
+            block_output_refs.update(self._value_reference_uuids(output))
+
+        live_after = set(block_output_refs)
+        for segment in reversed(segments):
+            definitions = segment.output_refs
+            segment.output_refs = [
+                reference for reference in definitions if reference in live_after
+            ]
+            live_after.update(segment.input_refs)
 
     def _collect_segment_io(
         self,
@@ -1009,7 +1425,19 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         segment_inputs: set[str],
         segment_outputs: set[str],
     ) -> None:
-        """Recursively collect input/output refs from operations."""
+        """Recursively collect definitions and external structural reads.
+
+        Args:
+            operations (list[Operation]): Segment operation tree to inspect.
+            segment_index (int): Index of the segment owning local definitions.
+            value_definitions (dict[str, int]): Mutable UUID-to-defining-segment
+                map, including ``-1`` entries for external block inputs.
+            segment_inputs (set[str]): Mutable set receiving external reads.
+            segment_outputs (set[str]): Mutable set receiving local
+                definitions before reverse liveness filtering.
+        """
+
+        value_reference_uuids = self._value_reference_uuids
 
         class SegmentIOCollector(ControlFlowVisitor):
             def visit_operation(self, op: Operation) -> None:
@@ -1018,8 +1446,33 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 Args:
                     op (Operation): The visited operation.
                 """
-                # Operands not defined in this segment are inputs
-                for operand in op.operands:
+                # Loop iteration identities and RegionArg block arguments are
+                # definitions owned by the enclosing control-flow op, not
+                # boundary inputs. Register them before walking the body so a
+                # body read cannot be misclassified as an external segment
+                # dependency. Keeping these definitions also lets a structural
+                # public output retain a final loop key/index UUID when needed.
+                if isinstance(op, ForOperation) and op.loop_var_value is not None:
+                    self._record_definition(op.loop_var_value)
+                if isinstance(op, ForItemsOperation):
+                    for key_value in op.key_var_values or ():
+                        self._record_definition(key_value)
+                    if op.value_var_value is not None:
+                        self._record_definition(op.value_var_value)
+                if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+                    for region_arg in op.region_args:
+                        self._record_definition(region_arg.block_arg)
+
+                # Inputs not defined in this segment are boundary reads.
+                # If yields are deferred until after visiting both branches,
+                # when branch-local definitions are known; recording them here
+                # would misclassify local measurements as segment inputs.
+                inputs = (
+                    list(op.operands)
+                    if isinstance(op, IfOperation)
+                    else genuine_input_values(op)
+                )
+                for operand in inputs:
                     self._record_read(operand)
 
                 # Results are defined by this segment
@@ -1058,18 +1511,19 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                         is a ``ValueBase``.
                 """
                 if isinstance(operand, ValueBase):
-                    if (
-                        operand.uuid not in value_definitions
-                        or value_definitions[operand.uuid] != segment_index
-                    ):
-                        segment_inputs.add(operand.uuid)
+                    for reference in value_reference_uuids(operand):
+                        if (
+                            reference not in value_definitions
+                            or value_definitions[reference] != segment_index
+                        ):
+                            segment_inputs.add(reference)
 
             @staticmethod
-            def _record_definition(result: Value) -> None:
+            def _record_definition(result: ValueBase) -> None:
                 """Mark a value as defined by (and output of) this segment.
 
                 Args:
-                    result (Value): The defined result value.
+                    result (ValueBase): The defined result value.
                 """
                 value_definitions[result.uuid] = segment_index
                 segment_outputs.add(result.uuid)

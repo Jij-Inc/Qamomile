@@ -1055,6 +1055,7 @@ def nested_classical_output_run(
     """Return a nested classical value that also feeds a gate angle."""
     q = qmc.qubit_array(1, "q")
     base = phase * 2.0
+    out = qmc.float_(0.0)
     for i in qmc.range(1):
         q[0] = qmc.rx(q[0], base)
         out = base + 1.0

@@ -43,6 +43,7 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
     emit_controlled_pauli_evolve,
     emit_multi_controlled_gate,
     map_nested_controlled_u_results,
+    replay_controlled_for,
     resolve_controlled_u_call,
     resolve_power,
     try_emit_batched_controlled_operations,
@@ -645,29 +646,15 @@ def _emit_quri_controlled_operations(
             )
             continue
         if isinstance(op, ForOperation):
-            from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-                _bind_loop_var,
-                resolve_loop_bounds,
+            replay_controlled_for(
+                emit_pass,
+                circuit,
+                op,
+                control_indices,
+                qubit_map,
+                bindings,
+                walker=_emit_quri_controlled_operations,
             )
-
-            start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
-            if start is None or stop is None or step is None:
-                raise EmitError(
-                    "Cannot resolve ForOperation bounds in QURI Parts "
-                    "recursive controlled fallback.",
-                    operation="ControlledUOperation",
-                )
-            for i in range(start, stop, step):
-                loop_bindings = bindings.copy()
-                _bind_loop_var(loop_bindings, op, i)
-                _emit_quri_controlled_operations(
-                    emit_pass,
-                    circuit,
-                    op.operations,
-                    control_indices,
-                    qubit_map,
-                    loop_bindings,
-                )
             continue
         if isinstance(op, PauliEvolveOp):
             # Reuse the shared lowering: it emits the basis-change and CX
@@ -1326,15 +1313,22 @@ class QuriPartsExecutor(
         """Execute circuit and return bitstring counts.
 
         Args:
-            circuit: The quantum circuit to execute (bound or unbound)
-            shots: Number of measurement shots
+            circuit (Any): Bound or unbound QURI Parts circuit to execute.
+            shots (int): Number of measurement shots.
 
         Returns:
-            Dictionary mapping bitstrings to counts (e.g., {"00": 512, "11": 512})
-        """
-        counter = self.sampler(circuit, shots)
+            dict[str, int]: Mapping from bitstrings to counts (for example,
+                ``{"00": 512, "11": 512}``). A zero-qubit circuit returns
+                ``{"": shots}`` without invoking the sampler.
 
+        Raises:
+            ImportError: If the default Qulacs sampler dependency is absent.
+        """
         num_qubits = circuit.qubit_count
+        if num_qubits == 0:
+            return {"": shots}
+
+        counter = self.sampler(circuit, shots)
         return {format(k, f"0{num_qubits}b"): v for k, v in counter.items()}
 
     def bind_parameters(  # type: ignore[override]

@@ -536,12 +536,8 @@ class ValueSubstitutor:
         if value.element_indices:
             new_indices: list[Value] = []
             for idx in value.element_indices:
-                if idx.uuid in self._value_map:
-                    sub_idx = self._chase_transitive(idx)
-                    if isinstance(sub_idx, Value):
-                        new_indices.append(sub_idx)
-                        continue
-                new_indices.append(idx)
+                sub_idx = self.substitute_value(idx)
+                new_indices.append(sub_idx if isinstance(sub_idx, Value) else idx)
             new_element_indices = tuple(new_indices)
 
         new_metadata = self._substitute_metadata(value.metadata)
@@ -697,13 +693,10 @@ class ValueSubstitutor:
             new_indices: list[Value] = []
             indices_changed = False
             for idx in value.element_indices:
-                if idx.uuid in self._value_map:
-                    sub_idx = self._chase_transitive(idx)
-                    if isinstance(sub_idx, Value):
-                        new_indices.append(sub_idx)
-                        indices_changed = True
-                    else:
-                        new_indices.append(idx)
+                sub_idx = self.substitute_value(idx)
+                if isinstance(sub_idx, Value):
+                    new_indices.append(sub_idx)
+                    indices_changed = indices_changed or sub_idx is not idx
                 else:
                     new_indices.append(idx)
             if indices_changed:

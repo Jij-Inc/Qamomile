@@ -613,6 +613,109 @@ class ForItemsOperation(HasNestedOps, Operation):
         return OperationKind.CONTROL
 
 
+def validate_region_args(
+    op: ForOperation | ForItemsOperation | WhileOperation,
+) -> tuple[RegionArg, ...]:
+    """Validate the SSA identities owned by a loop's region arguments.
+
+    A loop owns several definition namespaces: its iteration variables,
+    every ``RegionArg.block_arg``, and every ``RegionArg.result``.  Those
+    identities must be pairwise disjoint.  Otherwise different stages can
+    assign incompatible meanings to one UUID (for example, emit-time
+    unrolling binds a colliding range variable after the carried value while
+    constant replay binds them in the opposite order).
+
+    Args:
+        op (ForOperation | ForItemsOperation | WhileOperation): Loop
+            operation whose region arguments should be validated.
+
+    Returns:
+        tuple[RegionArg, ...]: The validated ``op.region_args`` tuple.
+
+    Raises:
+        ValueError: If result counts or positions disagree, slot types differ,
+            or any loop-owned definition identity collides with another
+            definition or with a region initializer/body yield.
+    """
+    region_args = op.region_args
+    if len(region_args) != len(op.results):
+        raise ValueError(
+            "Loop RegionArg data is inconsistent: "
+            f"{len(region_args)} region args for {len(op.results)} results."
+        )
+
+    block_arg_uuids: set[str] = set()
+    result_uuids: set[str] = set()
+    init_uuids = {arg.init.uuid for arg in region_args}
+    yielded_uuids = {arg.yielded.uuid for arg in region_args}
+    for index, (arg, result) in enumerate(zip(region_args, op.results, strict=True)):
+        if arg.result.uuid != result.uuid:
+            raise ValueError(
+                "Loop RegionArg data is inconsistent: "
+                f"region_args[{index}].result does not match results[{index}]."
+            )
+        if not (
+            arg.init.type == arg.block_arg.type == arg.yielded.type == arg.result.type
+        ):
+            raise ValueError(
+                f"Loop RegionArg '{arg.var_name}' has mismatched value types: "
+                f"init={arg.init.type}, block_arg={arg.block_arg.type}, "
+                f"yielded={arg.yielded.type}, result={arg.result.type}."
+            )
+        if arg.block_arg.uuid in block_arg_uuids:
+            raise ValueError(
+                "Loop RegionArg data contains duplicate block-argument identities."
+            )
+        if arg.result.uuid in result_uuids:
+            raise ValueError(
+                "Loop RegionArg data contains duplicate result identities."
+            )
+        block_arg_uuids.add(arg.block_arg.uuid)
+        result_uuids.add(arg.result.uuid)
+
+    if block_arg_uuids & result_uuids:
+        raise ValueError(
+            "Loop RegionArg block-argument and result identities must be disjoint."
+        )
+    if block_arg_uuids & init_uuids:
+        raise ValueError(
+            "Loop RegionArg block arguments must not reuse initializer identities."
+        )
+    if result_uuids & init_uuids:
+        raise ValueError(
+            "Loop RegionArg results must not reuse initializer identities."
+        )
+    if result_uuids & yielded_uuids:
+        raise ValueError("Loop RegionArg results must not reuse body-yield identities.")
+
+    loop_formal_uuids: set[str] = set()
+    if isinstance(op, ForOperation):
+        if op.loop_var_value is not None:
+            loop_formal_uuids.add(op.loop_var_value.uuid)
+    elif isinstance(op, ForItemsOperation):
+        if op.key_var_values is not None:
+            for key_value in op.key_var_values:
+                loop_formal_uuids.add(key_value.uuid)
+                if hasattr(key_value, "shape"):
+                    loop_formal_uuids.update(dim.uuid for dim in key_value.shape)
+        if op.value_var_value is not None:
+            loop_formal_uuids.add(op.value_var_value.uuid)
+
+    collisions = loop_formal_uuids & (block_arg_uuids | result_uuids)
+    if collisions:
+        raise ValueError(
+            "Loop RegionArg block/result identities must be disjoint from "
+            "loop-variable, item-key, item-value, and key-shape identities: "
+            f"{sorted(collisions)}."
+        )
+    if loop_formal_uuids & init_uuids:
+        raise ValueError(
+            "Loop RegionArg initializers must be defined outside the loop and "
+            "must not reuse a loop-formal identity."
+        )
+    return region_args
+
+
 @dataclasses.dataclass(frozen=True)
 class BranchRebind:
     """Trace-time record of a quantum variable rebound inside an if branch.

@@ -209,9 +209,553 @@ def test_symbolic_loop_with_loop_dependent_cost_is_summed() -> None:
         return q
 
     estimate = circuit.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
+    n = estimate.parameters["n"]
 
     assert sp.simplify(estimate.gates.total - (2**n - 1)) == 0
+
+
+def test_zero_trip_offset_loop_has_zero_body_resources() -> None:
+    """A UInt value of zero preserves Python's empty-range semantics."""
+
+    @qm.qkernel
+    def circuit(n: qm.UInt) -> qm.Qubit:
+        """Allocate work qubits only while an offset range executes."""
+        q = qm.qubit("q")
+        for _ in qm.range(1, n):
+            _work = qm.qubit_array(3, "work")
+            q = qm.h(q)
+        return q
+
+    symbolic = circuit.estimate_resources()
+    n = symbolic.parameters["n"]
+
+    assert n.is_nonnegative is True
+    assert n.is_positive is None
+    assert symbolic.gates.total == sp.Max(0, n - 1)
+    assert symbolic.substitute(n=0).gates.total == 0
+    assert symbolic.substitute(n=0).qubits == 1
+    assert circuit.estimate_resources(inputs={"n": 0}).gates.total == 0
+    assert circuit.estimate_resources(inputs={"n": 1}).qubits == 1
+    with pytest.raises(ValueError, match="negative"):
+        symbolic.substitute(n=-1)
+    with pytest.raises(ValueError, match="negative"):
+        circuit.estimate_resources(inputs={"n": -1})
+
+
+def test_direct_zero_trip_loop_disables_reusable_width() -> None:
+    """A direct range(n) body contributes no workspace when UInt n is zero."""
+
+    @qm.qkernel
+    def circuit(n: qm.UInt) -> qm.Qubit:
+        """Allocate temporary workspace only when the loop executes."""
+        q = qm.qubit("q")
+        for _ in qm.range(n):
+            _work = qm.qubit_array(3, "work")
+            q = qm.h(q)
+        return q
+
+    symbolic = circuit.estimate_resources()
+    n = symbolic.parameters["n"]
+
+    assert n.is_nonnegative is True
+    assert symbolic.substitute(n=0).width.allocated_qubits == 1
+    assert symbolic.substitute(n=0).qubits == 1
+    assert circuit.estimate_resources(inputs={"n": 0}).qubits == 1
+
+
+def test_uint_zero_branch_remains_symbolically_reachable() -> None:
+    """A UInt symbol does not simplify its equality-to-zero branch away."""
+
+    @qm.qkernel
+    def circuit(n: qm.UInt) -> qm.Qubit:
+        """Use different gate counts on the zero and nonzero branches."""
+        q = qm.qubit("q")
+        if n == 0:
+            q = qm.x(q)
+        else:
+            q = qm.h(q)
+            q = qm.z(q)
+        return q
+
+    symbolic = circuit.estimate_resources()
+    n = symbolic.parameters["n"]
+
+    assert symbolic.gates.total == sp.Piecewise((1, sp.Eq(n, 0)), (2, True))
+    assert symbolic.substitute(n=0).gates.total == 1
+    assert symbolic.substitute(n=1).gates.total == 2
+
+
+def test_float_parameter_remains_real_in_symbolic_branches() -> None:
+    """A negative Float input can select a branch after symbolic estimation."""
+
+    @qm.qkernel
+    def circuit(theta: qm.Float) -> qm.Qubit:
+        """Use a real-valued parameter as a compile-time predicate."""
+        q = qm.qubit("q")
+        if theta > 0:
+            q = qm.x(q)
+        else:
+            q = qm.h(q)
+            q = qm.z(q)
+        return q
+
+    symbolic = circuit.estimate_resources()
+
+    assert symbolic.parameters["theta"].is_real is True
+    assert symbolic.parameters["theta"].is_integer is None
+    assert circuit.estimate_resources(inputs={"theta": -0.5}).gates.total == 2
+
+
+def test_float_region_carry_fallback_remains_real() -> None:
+    """An unsupported Float recurrence never becomes an integer condition."""
+
+    @qm.qkernel
+    def circuit(n: qm.UInt) -> qm.Qubit:
+        """Branch on a nonlinear Float carry after a symbolic loop."""
+        total = qm.float_(0.5)
+        for _ in qm.range(n):
+            total = total * total
+        q = qm.qubit("q")
+        if total == 0.25:
+            q = qm.x(q)
+            q = qm.h(q)
+            q = qm.z(q)
+        else:
+            q = qm.x(q)
+        return q
+
+    estimate = circuit.estimate_resources()
+
+    # The nonlinear recurrence is intentionally modeled symbolically. Its
+    # Float-typed result must keep the equality undecidable, so the estimator
+    # preserves the branch instead of simplifying a non-integer equality
+    # against an incorrectly integer-typed symbol.
+    fallback = estimate.parameters["total_after_loop"]
+    assert fallback.is_real is True
+    assert fallback.is_integer is None
+    assert estimate.gates.total == sp.Piecewise(
+        (3, sp.Eq(fallback, sp.Float(0.25))),
+        (1, True),
+    )
+    assert estimate.substitute(total_after_loop=0.25).gates.total == 3
+    assert any(
+        "recurrence could not be reduced" in a.message for a in estimate.assumptions
+    )
+
+
+def test_float_runtime_if_merge_keeps_reachable_resource_branch() -> None:
+    """An undecidable Float merge never collapses a reachable comparison."""
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Branch on a Float selected by a measurement-backed conditional."""
+        predicate = qm.qubit("predicate")
+        measured = qm.measure(predicate)
+        value = qm.float_(0.5)
+        if measured:
+            value = qm.float_(0.25)
+
+        q = qm.qubit("q")
+        if value == 0.25:
+            q = qm.x(q)
+            q = qm.h(q)
+            q = qm.z(q)
+        else:
+            q = qm.x(q)
+        return q
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 3
+
+
+def test_same_named_runtime_if_merges_remain_independent() -> None:
+    """Independent measurement merges never collapse by display name."""
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Compare two independently selected but same-named UInt merges."""
+        left_predicate = qm.measure(qm.qubit("left_predicate"))
+        right_predicate = qm.measure(qm.qubit("right_predicate"))
+
+        left = qm.uint(0)
+        if left_predicate:
+            left = qm.uint(1)
+        right = qm.uint(0)
+        if right_predicate:
+            right = qm.uint(1)
+
+        q = qm.qubit("q")
+        if left != right:
+            q = qm.x(q)
+            q = qm.h(q)
+            q = qm.z(q)
+        else:
+            q = qm.x(q)
+        return q
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 3
+
+
+def test_runtime_if_uint_merge_symbol_keeps_ir_domain() -> None:
+    """An undecidable UInt merge remains a nonnegative integer."""
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Use a runtime-selected UInt as a later resource loop bound."""
+        predicate = qm.qubit("predicate")
+        measured = qm.measure(predicate)
+
+        count = qm.uint(0)
+        if measured:
+            count = qm.uint(2)
+
+        q = qm.qubit("q")
+        for _ in qm.range(count):
+            q = qm.h(q)
+        return q
+
+    estimate = circuit.estimate_resources()
+    (count_symbol,) = estimate.parameters.values()
+
+    assert set(estimate.parameters) == {"uint_const_merge_0"}
+    assert count_symbol.is_integer is True
+    assert count_symbol.is_nonnegative is True
+    assert estimate.substitute(uint_const_merge_0=2).gates.total == 2
+
+
+def test_runtime_if_bit_merge_symbol_keeps_ir_domain() -> None:
+    """An undecidable Bit merge remains a nonnegative integer."""
+    from qamomile.circuit.estimator._resolver import ExprResolver
+    from qamomile.circuit.estimator.resource_estimator import (
+        ResourceEstimatorConfig,
+        ResourceInterpreter,
+        build_if_scopes,
+    )
+    from qamomile.circuit.ir.operation.control_flow import IfOperation
+    from qamomile.circuit.ir.types.primitives import BitType
+    from qamomile.circuit.ir.value import Value
+
+    condition = Value(type=BitType(), name="condition")
+    true_value = Value(type=BitType(), name="true").with_const(True)
+    false_value = Value(type=BitType(), name="false").with_const(False)
+    result = Value(type=BitType(), name="merged")
+    operation = IfOperation(
+        operands=[condition],
+        true_operations=[],
+        false_operations=[],
+    )
+    operation.add_merge(true_value, false_value, result)
+
+    resolver = ExprResolver()
+    true_resolver, false_resolver = build_if_scopes(operation, resolver)
+    interpreter = ResourceInterpreter(
+        config=ResourceEstimatorConfig(),
+        bindings={},
+    )
+    interpreter._publish_if_results(
+        operation,
+        resolver,
+        true_resolver,
+        false_resolver,
+        taken=None,
+    )
+    merged_symbol = resolver.resolve(result)
+
+    assert merged_symbol.is_integer is True
+    assert merged_symbol.is_nonnegative is True
+
+
+def test_condition_values_never_capture_identity_fresh_fallbacks() -> None:
+    """Public condition inputs specialize symbols but not same-named dummies."""
+    from qamomile.circuit.estimator.resource_estimator import (
+        ResourceEstimatorConfig,
+        ResourceInterpreter,
+    )
+
+    public = sp.Symbol("flag", integer=True, nonnegative=True)
+    internal = sp.Dummy("flag", integer=True, nonnegative=True)
+    interpreter = ResourceInterpreter(
+        config=ResourceEstimatorConfig(),
+        bindings={},
+        condition_values={"flag": sp.Integer(1)},
+    )
+
+    specialized = interpreter._apply_condition_values(public + internal)
+    decision, _note = interpreter._decide_branch(sp.Eq(internal, 1))
+
+    assert public not in specialized.free_symbols
+    assert internal in specialized.free_symbols
+    assert decision is None
+
+
+def test_loop_index_domain_preserves_zero_and_negative_branches() -> None:
+    """Loop indices are integers rather than assumed-positive parameters."""
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Take the false branch for indices minus one and zero."""
+        q = qm.qubit("q")
+        for index in qm.range(-1, 1):
+            if index > 0:
+                q = qm.x(q)
+            else:
+                q = qm.h(q)
+                q = qm.z(q)
+        return q
+
+    assert circuit.estimate_resources().gates.total == 4
+
+
+def test_nested_shadowed_loop_names_keep_value_identity() -> None:
+    """A saved outer index remains distinct from a shadowing inner index."""
+
+    @qm.qkernel
+    def circuit(n: qm.UInt) -> qm.Qubit:
+        """Apply outer-index times inner-index gates per index pair."""
+        q = qm.qubit("q")
+        for index in qm.range(n):
+            outer_index = index
+            for index in qm.range(n):
+                for _ in qm.range(outer_index * index):
+                    q = qm.h(q)
+        return q
+
+    # (0 + 1 + 2) * (0 + 1 + 2) = 9.
+    assert circuit.estimate_resources(inputs={"n": 3}).gates.total == 9
+
+
+def test_for_items_uses_concrete_entries_and_rejects_symbolic_dependency() -> None:
+    """Entry-dependent resources are exact when bound and fail closed otherwise."""
+
+    @qm.qkernel
+    def circuit(sizes: qm.Dict[qm.UInt, qm.Float]) -> qm.Qubit:
+        """Apply one gate for every unit encoded by each dictionary key."""
+        q = qm.qubit("q")
+        for size, _ in qm.items(sizes):
+            for _ in qm.range(size):
+                q = qm.h(q)
+        return q
+
+    concrete = circuit.estimate_resources(inputs={"sizes": {1: 0.1, 3: 0.2}})
+
+    assert concrete.gates.total == 4
+    assert concrete.parameters == {}
+    with pytest.raises(NotImplementedError, match="current item key or value"):
+        circuit.estimate_resources()
+
+
+def test_for_items_default_entries_are_evaluated_exactly() -> None:
+    """A concrete dictionary default does not leak cardinality or item symbols."""
+
+    @qm.qkernel
+    def circuit(
+        sizes: qm.Dict[qm.UInt, qm.Float] = {1: 0.1, 3: 0.2},
+    ) -> qm.Qubit:
+        """Apply a key-sized gate sequence for the default dictionary."""
+        q = qm.qubit("q")
+        for size, _ in qm.items(sizes):
+            for _ in qm.range(size):
+                q = qm.h(q)
+        return q
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 4
+    assert estimate.parameters == {}
+
+
+def test_for_items_vector_key_elements_are_bound_per_concrete_entry() -> None:
+    """Concrete Vector-key elements drive exact per-entry resources."""
+
+    @qm.qkernel
+    def circuit(
+        data: qm.Dict[qm.Vector[qm.UInt], qm.Float],
+    ) -> qm.Qubit:
+        """Apply a key-sized gate sequence for every dictionary entry."""
+        q = qm.qubit("q")
+        for key, _value in qm.items(data):
+            for _ in qm.range(key[0]):
+                q = qm.h(q)
+        return q
+
+    estimate = circuit.estimate_resources(inputs={"data": {(1, 2): 0.1, (3, 4): 0.2}})
+
+    assert estimate.gates.total == 4
+    assert estimate.parameters == {}
+
+
+def test_for_items_dynamic_vector_key_index_fails_closed() -> None:
+    """Concrete Vector keys never degrade to an unbound element symbol."""
+
+    @qm.qkernel
+    def circuit(
+        data: qm.Dict[qm.Vector[qm.UInt], qm.Float],
+    ) -> qm.Qubit:
+        """Use every dynamically indexed key element as a loop bound."""
+        q = qm.qubit("q")
+        for key, _value in qm.items(data):
+            for index in qm.range(key.shape[0]):
+                for _ in qm.range(key[index]):
+                    q = qm.h(q)
+        return q
+
+    with pytest.raises(NotImplementedError, match="dynamically indexed"):
+        circuit.estimate_resources(inputs={"data": {(1, 2): 0.1}})
+
+
+def test_zero_cardinality_disables_reusable_loop_width() -> None:
+    """A symbolic empty dictionary does not allocate its loop-body workspace."""
+
+    @qm.qkernel
+    def circuit(coeffs: qm.Dict[qm.UInt, qm.Float]) -> qm.Qubit:
+        """Allocate fixed workspace once per dictionary entry."""
+        q = qm.qubit("q")
+        for _, _ in qm.items(coeffs):
+            _work = qm.qubit_array(3, "work")
+        return q
+
+    symbolic = circuit.estimate_resources()
+    cardinality = symbolic.parameters["|coeffs|"]
+
+    assert cardinality.is_nonnegative is True
+    assert symbolic.substitute(**{"|coeffs|": 0}).qubits == 1
+
+
+def test_for_items_carry_uses_concrete_entry_order() -> None:
+    """A carried accumulator receives every concrete dictionary key in order."""
+
+    @qm.qkernel
+    def circuit(sizes: qm.Dict[qm.UInt, qm.Float]) -> qm.Qubit:
+        """Use the accumulated dictionary keys as a later loop bound."""
+        total = qm.uint(0)
+        for size, _ in qm.items(sizes):
+            total = total + size
+        q = qm.qubit("q")
+        for _ in qm.range(total):
+            q = qm.h(q)
+        return q
+
+    estimate = circuit.estimate_resources(inputs={"sizes": {1: 0.1, 3: 0.2}})
+
+    assert estimate.gates.total == 4
+
+
+def test_symbolic_for_items_carry_sums_each_iteration() -> None:
+    """A carried items-loop bound is summed over the symbolic item index."""
+
+    @qm.qkernel
+    def circuit(data: qm.Dict[qm.UInt, qm.Float]) -> qm.Qubit:
+        """Apply zero, one, two, and so on gates across dictionary entries."""
+        total = qm.uint(0)
+        q = qm.qubit("q")
+        for _key, _value in qm.items(data):
+            for _ in qm.range(total):
+                q = qm.h(q)
+            total = total + 1
+        return q
+
+    estimate = circuit.estimate_resources()
+    cardinality = estimate.parameters["|data|"]
+    expected = cardinality * (cardinality - 1) / 2
+
+    assert sp.simplify(estimate.gates.total - expected) == 0
+    assert set(estimate.parameters) == {"|data|"}
+    for size, gate_count in ((0, 0), (1, 0), (2, 1), (3, 3), (4, 6)):
+        assert estimate.substitute(**{"|data|": size}).gates.total == gate_count
+
+
+def test_while_trip_count_is_nonnegative_and_zero_disables_width() -> None:
+    """A while loop may execute zero times without allocating body workspace."""
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Allocate and measure body-local work under a measured condition."""
+        trigger = qm.qubit("trigger")
+        bit = qm.measure(trigger)
+        while bit:
+            work = qm.qubit_array(3, "work")
+            work[0] = qm.h(work[0])
+            bit = qm.measure(work[0])
+        return qm.qubit("result")
+
+    symbolic = circuit.estimate_resources()
+    trip_count = symbolic.parameters["|while|"]
+    zero = symbolic.substitute(**{"|while|": 0})
+
+    assert trip_count.is_nonnegative is True
+    assert zero.gates.total == 0
+    assert zero.qubits == 1
+
+
+def test_while_classical_recurrence_fails_closed() -> None:
+    """A carried classical while value is not modeled from one traced body."""
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Use a while-carried counter as a later loop bound."""
+        trigger = qm.qubit("trigger")
+        bit = qm.measure(trigger)
+        total = qm.uint(0)
+        while bit:
+            total = total + 1
+            next_trigger = qm.qubit("next_trigger")
+            bit = qm.measure(next_trigger)
+        q = qm.qubit("q")
+        for _ in qm.range(total):
+            q = qm.x(q)
+        return q
+
+    with pytest.raises(NotImplementedError, match="WhileOperation"):
+        circuit.estimate_resources()
+
+
+def test_resource_substitute_matches_symbols_by_printed_name() -> None:
+    """Substitution replaces same-named symbols with different assumptions."""
+    positive_n = sp.Symbol("n", integer=True, positive=True)
+    nonnegative_n = sp.Symbol("n", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        width=qm.WidthResources(peak_qubits=positive_n + nonnegative_n),
+        gates=qm.GateResources(total=nonnegative_n),
+        parameters={"n": positive_n},
+    )
+
+    concrete = estimate.substitute(n=2)
+
+    assert concrete.qubits == 4
+    assert concrete.gates.total == 2
+
+
+def test_input_vector_shape_symbol_is_nonnegative() -> None:
+    """A public array dimension permits an empty input vector."""
+
+    @qm.qkernel
+    def circuit(values: qm.Vector[qm.Float]) -> qm.Vector[qm.Qubit]:
+        """Allocate one qubit per input vector element."""
+        return qm.qubit_array(values.shape[0], "q")
+
+    estimate = circuit.estimate_resources()
+    (dimension,) = estimate.parameters.values()
+
+    assert dimension.is_nonnegative is True
+
+
+def test_unresolved_uint_and_bit_fallbacks_are_nonnegative() -> None:
+    """Identity-qualified UInt and Bit symbols preserve their IR domains."""
+    from qamomile.circuit.estimator._resolver import ExprResolver
+    from qamomile.circuit.ir.types.primitives import BitType, UIntType
+    from qamomile.circuit.ir.value import Value
+
+    resolver = ExprResolver()
+    uint_symbol = resolver.resolve(Value(type=UIntType(), name="value"))
+    bit_symbol = resolver.resolve(Value(type=BitType(), name="value"))
+
+    assert uint_symbol.is_integer is True
+    assert uint_symbol.is_nonnegative is True
+    assert bit_symbol.is_integer is True
+    assert bit_symbol.is_nonnegative is True
 
 
 def test_controlled_composite_body_counts_own_control() -> None:

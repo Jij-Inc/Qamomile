@@ -865,8 +865,8 @@ class TestAllowedPatterns:
         Conservative corner (documented in LIMITATIONS.md): any in-branch
         reference to the original — including a single element measure —
         counts as consumption, so the whole-register rebind passes the
-        analysis stage. The cross-branch physical merge is still stopped at
-        emit (pinned below), so no silent path exists today.
+        analysis stage. The cross-branch physical merge is still stopped while
+        planning the quantum segment, so no silent path exists today.
         """
 
         @qmc.qkernel
@@ -883,7 +883,10 @@ class TestAllowedPatterns:
         analyzed = _run_through_analyze(kernel, bindings={"dummy": 0})
         assert analyzed is not None
 
-        with pytest.raises(EmitError):
+        with pytest.raises(
+            MultipleQuantumSegmentsError,
+            match="different physical qubit regions",
+        ):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_preconsumed_original_rebound_in_both_branches_allowed(self):
@@ -1682,7 +1685,7 @@ class TestAllowedLoopPatterns:
     def test_compile_time_dead_if_inside_loop_accepted_at_analysis(self):
         """A compile-time-dead if inside the loop body passes the variable
         through its collapsed merge — that pass-through read is consumption
-        evidence, so the loop record is exempt at the analysis stage."""
+        evidence, so the loop record is exempt and the lowered loop executes."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt, flag: qmc.UInt) -> qmc.Bit:
@@ -1695,11 +1698,7 @@ class TestAllowedLoopPatterns:
 
         analyzed = _run_through_analyze(kernel, bindings={"n": 2, "flag": 0})
         assert analyzed is not None
-        # Downstream, plan still splits this shape into multiple quantum
-        # segments (pre-existing on the base branch, verified via git
-        # stash); pin that so a future silent-pass regression is caught.
-        with pytest.raises(MultipleQuantumSegmentsError):
-            _transpile(kernel, bindings={"n": 2, "flag": 0})
+        assert _sample_single(kernel, bindings={"n": 2, "flag": 0}) == 1
 
     @pytest.mark.parametrize(
         ("n", "expected"),

@@ -65,6 +65,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     LoopCarriedRebind,
     RegionArg,
     WhileOperation,
+    validate_region_args,
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -1384,7 +1385,7 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
     loop_var_ref = d.get("loop_var_value_ref")
     loop_var_value = _materialize_as_value(ctx, loop_var_ref) if loop_var_ref else None
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return ForOperation(
+    op = ForOperation(
         operands=operands,
         results=results,
         loop_var=d.get("loop_var", ""),
@@ -1393,6 +1394,8 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
         region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperation:
@@ -1416,7 +1419,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
     value_ref = d.get("value_var_value_ref")
     value_var_value = _materialize_as_value(ctx, value_ref) if value_ref else None
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return ForItemsOperation(
+    op = ForItemsOperation(
         operands=operands,
         results=results,
         key_vars=list(d.get("key_vars", ())),
@@ -1428,6 +1431,8 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
         region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
@@ -1443,7 +1448,7 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
     """
     operands, results = _operands_results(d, ctx)
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return WhileOperation(
+    op = WhileOperation(
         operands=operands,
         results=results,
         operations=body,
@@ -1451,6 +1456,8 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
         region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_branch_rebinds(

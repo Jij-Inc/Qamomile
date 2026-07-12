@@ -94,11 +94,27 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         bindings: dict[str, Any],
         force_unroll: bool = False,
     ) -> None:
-        """Emit a for loop using Qiskit's native for_loop context manager."""
+        """Emit a range loop with Qiskit's native or unrolled representation.
+
+        Args:
+            circuit (QuantumCircuit): Qiskit circuit being mutated.
+            op (ForOperation): Range loop to emit.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            clbit_map (ClbitMap): Current logical-to-physical clbit map.
+            bindings (dict[str, Any]): Active compile-time and loop-local
+                bindings.
+            force_unroll (bool): Whether to bypass Qiskit's native loop.
+                Defaults to False.
+
+        Raises:
+            EmitError: If loop identities or carried values are malformed.
+            ValueError: If a loop requiring unrolling has unresolved bounds.
+        """
         from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-            _register_carry_results,
-            _resolve_carry_iter_args,
+            _publish_region_results,
+            _seed_region_args,
             resolve_loop_bounds,
+            validated_loop_indexset,
         )
 
         start, stop, step = resolve_loop_bounds(self._resolver, op, bindings)
@@ -107,14 +123,13 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
             return
 
-        indexset = range(start, stop, step)
+        indexset = validated_loop_indexset(start, stop, step)
         if len(indexset) == 0:
-            # Zero-trip passthrough: post-loop reads of the carried
-            # results must observe the loop-entry values (mirrors the
-            # base emit_for).
-            _register_carry_results(
-                op, _resolve_carry_iter_args(self, op, bindings), bindings
-            )
+            # Zero-trip passthrough: publish each RegionArg initializer
+            # as the loop result, mirroring the shared emit path.
+            if op.region_args:
+                carried = _seed_region_args(self, op, bindings)
+                _publish_region_results(op, carried, bindings)
             return
 
         if force_unroll:
@@ -156,7 +171,20 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> None:
-        """Emit if/else using Qiskit's if_test context manager."""
+        """Emit an if/else with Qiskit's dynamic-control context manager.
+
+        Args:
+            circuit (QuantumCircuit): Qiskit circuit being mutated.
+            op (IfOperation): Conditional operation to emit.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            clbit_map (ClbitMap): Current logical-to-physical clbit map.
+            bindings (dict[str, Any]): Active compile-time and loop-local
+                bindings.
+
+        Raises:
+            EmitError: If the runtime condition or a branch merge cannot be
+                represented safely.
+        """
         condition = op.condition
 
         # Compile-time constant conditions are handled by the base class.
@@ -168,6 +196,7 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
             circuit, condition, clbit_map, bindings
         )
 
+        entry_overwrites = set(self._overwritten_runtime_condition_sources)
         with circuit.if_test(if_test_condition) as else_:
             self._emit_operations(
                 circuit,
@@ -177,6 +206,9 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 bindings,
                 emit_qinit_reset=True,
             )
+        true_overwrites = set(self._overwritten_runtime_condition_sources)
+        self._overwritten_runtime_condition_sources.clear()
+        self._overwritten_runtime_condition_sources.update(entry_overwrites)
         with else_:
             self._emit_operations(
                 circuit,
@@ -186,6 +218,11 @@ class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
                 bindings,
                 emit_qinit_reset=True,
             )
+        false_overwrites = set(self._overwritten_runtime_condition_sources)
+        self._overwritten_runtime_condition_sources.clear()
+        self._overwritten_runtime_condition_sources.update(
+            true_overwrites | false_overwrites
+        )
 
         # Register merge outputs after emitting both branches, matching the
         # base-class runtime contract. ResourceAllocator pre-registers the
@@ -902,16 +939,23 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
         """Execute circuit and return bitstring counts.
 
         Args:
-            circuit: The quantum circuit to execute
-            shots: Number of measurement shots
+            circuit (QuantumCircuit): The quantum circuit to execute.
+            shots (int): Number of measurement shots.
 
         Returns:
-            Dictionary mapping bitstrings to counts (e.g., {"00": 512, "11": 512})
+            dict[str, int]: Mapping from bitstrings to counts (for example,
+                ``{"00": 512, "11": 512}``). A zero-qubit circuit returns
+                ``{"": shots}`` without invoking the backend.
+
+        Raises:
+            RuntimeError: If no Qiskit backend is configured.
         """
         from qiskit import transpile
 
         if self.backend is None:
             raise RuntimeError("No backend available for execution")
+        if circuit.num_qubits == 0 and circuit.num_clbits == 0:
+            return {"": shots}
 
         circuit_with_meas = self._ensure_measurements(circuit)
         transpiled = transpile(circuit_with_meas, self.backend)

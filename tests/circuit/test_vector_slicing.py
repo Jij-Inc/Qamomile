@@ -3228,3 +3228,22 @@ class TestSliceAssignment:
         transpiler = QiskitTranspiler()
         with pytest.raises(SliceBorrowViolationError, match="control-flow body"):
             transpiler.transpile(kern)
+
+    def test_one_entry_items_keeps_outer_view_release_boundary(self):
+        """One-entry items lowering cannot hide an in-body slice release."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(
+            data: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            even = q[0::2]
+            for _key, _value in qmc.items(data):
+                q[0::2] = even
+            return qmc.measure(q)
+
+        with pytest.raises(SliceBorrowViolationError, match="control-flow body"):
+            QiskitTranspiler().transpile(kern, bindings={"data": {0: 1.0}})

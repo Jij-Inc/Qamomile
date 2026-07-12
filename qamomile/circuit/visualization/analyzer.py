@@ -77,6 +77,14 @@ _INTERNAL_TMP_NAMES: frozenset[str] = frozenset({"uint_tmp", "float_tmp", "bit_t
 _IF_BRANCH_SCOPE_KEYS: frozenset[str] = frozenset({"true", "false"})
 
 
+# Folded loops do not materialize visual nodes for every iteration, but a
+# small, concrete loop still needs value replay so RegionArg results used by
+# later gates have their final value.  Cap that analysis to keep drawing a
+# deliberately huge folded loop cheap.
+_MAX_FOLDED_VALUE_REPLAY_ITERATIONS = 1000
+_UNRESOLVED_ENV_VALUE = object()
+
+
 # Single source of truth for the TeX rendering of every built-in
 # gate the drawer knows how to label, keyed by ``GateOperationType``.
 # Used directly by the inline-gate label path
@@ -241,6 +249,185 @@ class CircuitAnalyzer:
         self.expand_composite = expand_composite
         self.inline_depth = inline_depth
         self.fold_ifs = fold_ifs
+
+    def _environment_value(
+        self,
+        value: Value,
+        param_values: dict,
+        operations: list[Operation] | None = None,
+    ) -> object:
+        """Resolve one scalar Value for the visualization value environment.
+
+        Args:
+            value (Value): Scalar IR value to resolve.
+            param_values (dict): Current visualization value environment.
+            operations (list[Operation] | None): Scope containing the value's
+                producer. Defaults to None, which lets ``_evaluate_value``
+                inspect the top-level graph.
+
+        Returns:
+            object: A concrete scalar or symbolic string when resolution
+                succeeds, otherwise the private unresolved sentinel.
+        """
+        if value.logical_id in param_values:
+            return param_values[value.logical_id]
+
+        evaluated = self._evaluate_value(value, param_values, operations)
+        if evaluated is not None:
+            return evaluated
+
+        if value.is_parameter():
+            parameter_name = value.parameter_name() or value.name
+            if parameter_name and not self._is_internal_temp_name(parameter_name):
+                return parameter_name
+
+        if operations is not None:
+            symbolic = self._resolve_binop_as_symbolic(value, param_values, operations)
+            if symbolic is not None:
+                return symbolic
+        return _UNRESOLVED_ENV_VALUE
+
+    def _seed_region_arguments(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+        param_values: dict,
+    ) -> dict:
+        """Create a loop environment with each RegionArg bound to its init.
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): Loop whose
+                body region is about to execute.
+            param_values (dict): Enclosing visualization value environment.
+
+        Returns:
+            dict: A child environment in which every resolvable
+                ``RegionArg.block_arg`` denotes its initializer.
+        """
+        loop_values = dict(param_values)
+        for region_arg in op.region_args:
+            resolved = self._environment_value(region_arg.init, loop_values)
+            if resolved is _UNRESOLVED_ENV_VALUE:
+                loop_values.pop(region_arg.block_arg.logical_id, None)
+            else:
+                loop_values[region_arg.block_arg.logical_id] = resolved
+        return loop_values
+
+    def _advance_region_arguments(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+        body_values: dict,
+        loop_values: dict,
+    ) -> None:
+        """Advance all RegionArgs from one body's yielded values in parallel.
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): Loop whose
+                body just completed one materialized iteration.
+            body_values (dict): Value environment after evaluating that body.
+            loop_values (dict): Persistent loop environment to update for the
+                next iteration.
+        """
+        resolved_yields = [
+            self._environment_value(region_arg.yielded, body_values, op.operations)
+            for region_arg in op.region_args
+        ]
+        for region_arg, resolved in zip(op.region_args, resolved_yields, strict=True):
+            if resolved is _UNRESOLVED_ENV_VALUE:
+                # Never retain the previous iteration's value after an
+                # unresolved yield: a symbolic label is safer than displaying
+                # a stale concrete angle or index.
+                loop_values.pop(region_arg.block_arg.logical_id, None)
+            else:
+                loop_values[region_arg.block_arg.logical_id] = resolved
+
+    def _publish_region_results(
+        self,
+        op: ForOperation | ForItemsOperation | WhileOperation,
+        loop_values: dict,
+        param_values: dict,
+    ) -> None:
+        """Publish final RegionArg states under their post-loop result IDs.
+
+        Args:
+            op (ForOperation | ForItemsOperation | WhileOperation): Completed
+                loop operation.
+            loop_values (dict): Persistent loop environment after its final
+                materialized iteration, or immediately after seeding for a
+                zero-trip loop.
+            param_values (dict): Enclosing environment to receive results.
+        """
+        for region_arg in op.region_args:
+            resolved = loop_values.get(
+                region_arg.block_arg.logical_id, _UNRESOLVED_ENV_VALUE
+            )
+            if resolved is _UNRESOLVED_ENV_VALUE:
+                param_values.pop(region_arg.result.logical_id, None)
+            else:
+                param_values[region_arg.result.logical_id] = resolved
+
+    @staticmethod
+    def _bind_loop_value(
+        param_values: dict,
+        name: str,
+        formal: Value | None,
+        value: object,
+    ) -> None:
+        """Bind a range/items formal by display key and logical identity.
+
+        Args:
+            param_values (dict): Environment to mutate.
+            name (str): Loop-variable display name used by legacy expression
+                formatting.
+            formal (Value | None): Identity-bearing loop formal, when present.
+            value (object): Concrete entry value for this iteration.
+        """
+        param_values[f"_loop_{name}"] = value
+        if formal is not None:
+            param_values[formal.logical_id] = value
+
+    def _bind_for_items_entry(
+        self,
+        op: ForItemsOperation,
+        entry_key: object,
+        entry_value: object,
+        param_values: dict,
+    ) -> None:
+        """Bind one materialized ForItems key/value pair into an environment.
+
+        Args:
+            op (ForItemsOperation): Items loop owning the key/value formals.
+            entry_key (object): Materialized scalar, tuple, or IR tuple key.
+            entry_value (object): Materialized scalar or IR value entry.
+            param_values (dict): Iteration environment to mutate.
+        """
+        if hasattr(entry_key, "elements"):
+            key_elements = tuple(entry_key.elements)
+        elif isinstance(entry_key, tuple):
+            key_elements = entry_key
+        else:
+            key_elements = (entry_key,)
+
+        key_formals = op.key_var_values or ()
+        for index, (name, element) in enumerate(zip(op.key_vars, key_elements)):
+            formal = key_formals[index] if index < len(key_formals) else None
+            if isinstance(element, Value):
+                resolved = self._environment_value(element, param_values)
+            else:
+                resolved = element
+            if resolved is not _UNRESOLVED_ENV_VALUE:
+                self._bind_loop_value(param_values, name, formal, resolved)
+
+        if isinstance(entry_value, Value):
+            resolved_value = self._environment_value(entry_value, param_values)
+        else:
+            resolved_value = entry_value
+        if resolved_value is not _UNRESOLVED_ENV_VALUE:
+            self._bind_loop_value(
+                param_values,
+                op.value_var,
+                op.value_var_value,
+                resolved_value,
+            )
 
     def _should_inline_at_depth(self, depth: int) -> bool:
         """Return whether legacy call/control blocks expand at this depth."""
@@ -692,9 +879,15 @@ class CircuitAnalyzer:
                 elif isinstance(op, ForOperation):
                     start, stop, step = self._evaluate_loop_range(op, param_values)
                     if stop is not None and (not self.fold_loops or self.inline):
+                        loop_values = self._seed_region_arguments(op, param_values)
                         for iter_value in range(start, stop, step):
-                            child_pv = dict(param_values)
-                            child_pv[f"_loop_{op.loop_var}"] = iter_value
+                            child_pv = dict(loop_values)
+                            self._bind_loop_value(
+                                child_pv,
+                                op.loop_var,
+                                op.loop_var_value,
+                                iter_value,
+                            )
                             # Pre-evaluate body BinOps for this iteration
                             # so resolvers that consult ``param_values``
                             # (notably ``_resolve_view_chain_to_root``
@@ -713,31 +906,44 @@ class CircuitAnalyzer:
                                 depth + 1,
                                 child_pv,
                             )
+                            self._advance_region_arguments(op, child_pv, loop_values)
+                        self._publish_region_results(op, loop_values, param_values)
                     else:
+                        child_pv = self._seed_region_arguments(op, param_values)
                         build_chains(
                             op.operations,
                             logical_id_remap,
                             depth + 1,
+                            child_pv,
+                        )
+                        self._replay_for_value_flow(
+                            op,
                             param_values,
+                            logical_id_remap,
+                            _MAX_FOLDED_VALUE_REPLAY_ITERATIONS,
                         )
 
                 elif isinstance(op, WhileOperation):
-                    build_chains(
-                        op.operations, logical_id_remap, depth + 1, param_values
-                    )
+                    child_pv = self._seed_region_arguments(op, param_values)
+                    build_chains(op.operations, logical_id_remap, depth + 1, child_pv)
 
                 elif isinstance(op, IfOperation):
+                    true_values = dict(param_values)
                     build_chains(
                         op.true_operations,
                         logical_id_remap,
                         depth + 1,
-                        param_values,
+                        true_values,
                     )
+                    false_values = dict(param_values)
                     build_chains(
                         op.false_operations,
                         logical_id_remap,
                         depth + 1,
-                        param_values,
+                        false_values,
+                    )
+                    self._publish_if_results(
+                        op, true_values, false_values, param_values, ops
                     )
 
                 elif isinstance(op, ForItemsOperation):
@@ -752,27 +958,37 @@ class CircuitAnalyzer:
                     if materialized is not None and (
                         not self.fold_loops or self.inline
                     ):
+                        loop_values = self._seed_region_arguments(op, param_values)
                         for entry_key, entry_value in materialized:
-                            child_pv = dict(param_values)
-                            if isinstance(entry_key, tuple):
-                                for kv, ek in zip(op.key_vars, entry_key):
-                                    child_pv[f"_loop_{kv}"] = ek
-                            elif op.key_vars:
-                                child_pv[f"_loop_{op.key_vars[0]}"] = entry_key
-                            child_pv[f"_loop_{op.value_var}"] = entry_value
+                            child_pv = dict(loop_values)
+                            self._bind_for_items_entry(
+                                op, entry_key, entry_value, child_pv
+                            )
                             build_chains(
                                 op.operations,
                                 logical_id_remap,
                                 depth + 1,
                                 child_pv,
                             )
+                            self._advance_region_arguments(op, child_pv, loop_values)
+                        self._publish_region_results(op, loop_values, param_values)
                     else:
+                        child_pv = self._seed_region_arguments(op, param_values)
                         build_chains(
                             op.operations,
                             logical_id_remap,
                             depth + 1,
-                            param_values,
+                            child_pv,
                         )
+                        self._replay_for_items_value_flow(
+                            op,
+                            param_values,
+                            logical_id_remap,
+                            _MAX_FOLDED_VALUE_REPLAY_ITERATIONS,
+                        )
+
+                elif isinstance(op, (BinOp, CompOp, CondOp, NotOp)):
+                    self._record_classical_result(op, param_values, ops)
 
                 # GateOperation, non-expanded InvokeOperation:
                 # No-op — next_version() preserves logical_id
@@ -850,7 +1066,8 @@ class CircuitAnalyzer:
                 result.append(VSkip(node_key=node_key))
                 continue
 
-            if isinstance(op, BinOp):
+            if isinstance(op, (BinOp, CompOp, CondOp, NotOp)):
+                self._record_classical_result(op, param_values, ops)
                 continue  # No visual representation
 
             if isinstance(op, ExpvalOp):
@@ -1488,6 +1705,8 @@ class CircuitAnalyzer:
         start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
 
         if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
+            loop_values = self._seed_region_arguments(op, param_values)
+            self._publish_region_results(op, loop_values, param_values)
             return VSkip(node_key=node_key)
 
         affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
@@ -1498,6 +1717,12 @@ class CircuitAnalyzer:
         if self.fold_loops or stop_val_raw is None:
             header, body_lines, folded_width = self._compute_folded_for_info(
                 op, param_values
+            )
+            self._replay_for_value_flow(
+                op,
+                param_values,
+                logical_id_remap,
+                _MAX_FOLDED_VALUE_REPLAY_ITERATIONS,
             )
             return VFoldedBlock(
                 node_key=node_key,
@@ -1515,11 +1740,17 @@ class CircuitAnalyzer:
         )
         iterations: list[list[VisualNode]] = []
         iteration_widths: list[float] = []
+        loop_values = self._seed_region_arguments(op, param_values)
 
         for iteration in range(num_iterations):
             iter_value = start_val + iteration * step_val
-            child_param_values = dict(param_values)
-            child_param_values[f"_loop_{op.loop_var}"] = iter_value
+            child_param_values = dict(loop_values)
+            self._bind_loop_value(
+                child_param_values,
+                op.loop_var,
+                op.loop_var_value,
+                iter_value,
+            )
 
             self._evaluate_loop_body_intermediates(op.operations, child_param_values)
 
@@ -1534,6 +1765,9 @@ class CircuitAnalyzer:
             iter_width = self._sum_visual_widths(children)
             iterations.append(children)
             iteration_widths.append(iter_width)
+            self._advance_region_arguments(op, child_param_values, loop_values)
+
+        self._publish_region_results(op, loop_values, param_values)
 
         return VUnfoldedSequence(
             node_key=node_key,
@@ -1663,6 +1897,17 @@ class CircuitAnalyzer:
             affected_qubits_precise = False
 
         if self.fold_ifs:
+            true_values = dict(param_values)
+            self._replay_value_flow(op.true_operations, true_values, logical_id_remap)
+            false_values = dict(param_values)
+            self._replay_value_flow(op.false_operations, false_values, logical_id_remap)
+            self._publish_if_results(
+                op,
+                true_values,
+                false_values,
+                param_values,
+                body_operations or [],
+            )
             body_lines = self._format_folded_body_lines(
                 op.true_operations, param_values
             )
@@ -1718,6 +1963,14 @@ class CircuitAnalyzer:
             (*node_key, "false"),
         )
         false_width = self._sum_visual_widths(false_children)
+
+        self._publish_if_results(
+            op,
+            true_param_values,
+            false_param_values,
+            param_values,
+            body_operations or [],
+        )
 
         iterations = [true_children]
         iteration_widths = [true_width]
@@ -2184,6 +2437,12 @@ class CircuitAnalyzer:
                     body_lines.extend(expr.split("\n"))
 
             folded_width = self._compute_folded_text_width(header, body_lines)
+            self._replay_for_items_value_flow(
+                op,
+                param_values,
+                logical_id_remap,
+                _MAX_FOLDED_VALUE_REPLAY_ITERATIONS,
+            )
             return VFoldedBlock(
                 node_key=node_key,
                 header_label=header,
@@ -2196,38 +2455,18 @@ class CircuitAnalyzer:
 
         entries = materialized
         if not entries:
+            loop_values = self._seed_region_arguments(op, param_values)
+            self._publish_region_results(op, loop_values, param_values)
             return VSkip(node_key=node_key)
 
         # Unfolded: iterate materialized entries
         iterations: list[list[VisualNode]] = []
         iteration_widths: list[float] = []
+        loop_values = self._seed_region_arguments(op, param_values)
 
         for entry_key, entry_value in entries:
-            child_param_values = dict(param_values)
-            # Set key variables
-            if hasattr(entry_key, "elements"):
-                for key_var, elem in zip(op.key_vars, entry_key.elements):
-                    val = elem.get_const() if hasattr(elem, "get_const") else None
-                    if val is not None:
-                        child_param_values[f"_loop_{key_var}"] = val
-            elif isinstance(entry_key, tuple):
-                for key_var, elem in zip(op.key_vars, entry_key):
-                    child_param_values[f"_loop_{key_var}"] = elem
-            else:
-                if op.key_vars:
-                    if hasattr(entry_key, "get_const"):
-                        val = entry_key.get_const()
-                    else:
-                        val = entry_key
-                    if val is not None:
-                        child_param_values[f"_loop_{op.key_vars[0]}"] = val
-            # Set value variable
-            if hasattr(entry_value, "get_const"):
-                val = entry_value.get_const()
-            else:
-                val = entry_value
-            if val is not None:
-                child_param_values[f"_loop_{op.value_var}"] = val
+            child_param_values = dict(loop_values)
+            self._bind_for_items_entry(op, entry_key, entry_value, child_param_values)
 
             self._evaluate_loop_body_intermediates(op.operations, child_param_values)
 
@@ -2242,6 +2481,9 @@ class CircuitAnalyzer:
             iter_width = self._sum_visual_widths(children)
             iterations.append(children)
             iteration_widths.append(iter_width)
+            self._advance_region_arguments(op, child_param_values, loop_values)
+
+        self._publish_region_results(op, loop_values, param_values)
 
         return VUnfoldedSequence(
             node_key=node_key,
@@ -2442,14 +2684,18 @@ class CircuitAnalyzer:
                 if 0 < num_iters <= 100:
                     precise_affected: set[int] = set()
                     all_resolved = True
+                    loop_values = self._seed_region_arguments(op, param_values)
                     for iter_val in range(
                         int(start_val), int(stop_val_raw), int(step_val)
                     ):
-                        iter_params = dict(param_values)
-                        iter_params[f"_loop_{op.loop_var}"] = iter_val
-                        self._evaluate_loop_body_intermediates(
-                            op.operations, iter_params
+                        iter_params = dict(loop_values)
+                        self._bind_loop_value(
+                            iter_params,
+                            op.loop_var,
+                            op.loop_var_value,
+                            iter_val,
                         )
+                        self._replay_value_flow(op.operations, iter_params)
                         for inner_op in op.operations:
                             if isinstance(
                                 inner_op,
@@ -2498,6 +2744,7 @@ class CircuitAnalyzer:
                                         all_resolved = False
                                 else:
                                     precise_affected.update(indices)
+                        self._advance_region_arguments(op, iter_params, loop_values)
                     if all_resolved and precise_affected:
                         return list(precise_affected), True
 
@@ -2768,38 +3015,281 @@ class CircuitAnalyzer:
                     except (IndexError, TypeError):
                         pass
 
-        # 4. Look for defining BinOp in operations
+        # 4. Look for a defining scalar classical operation in this scope.
         if operations is None:
             operations = getattr(self, "graph", None)
             operations = operations.operations if operations else []
 
         for op in operations:
-            if isinstance(op, BinOp) and op.results and id(op.results[0]) == id(value):
-                lhs_val = self._evaluate_value(op.lhs, param_values, operations)
-                rhs_val = self._evaluate_value(op.rhs, param_values, operations)
-                if lhs_val is not None and rhs_val is not None:
-                    if op.kind == BinOpKind.ADD:
-                        return lhs_val + rhs_val
-                    elif op.kind == BinOpKind.SUB:
-                        return lhs_val - rhs_val
-                    elif op.kind == BinOpKind.MUL:
-                        return lhs_val * rhs_val
-                    elif op.kind == BinOpKind.FLOORDIV:
-                        return lhs_val // rhs_val if rhs_val != 0 else None
-                    elif op.kind == BinOpKind.MOD:
-                        return lhs_val % rhs_val if rhs_val != 0 else None
-                    elif op.kind == BinOpKind.DIV:
-                        return lhs_val / rhs_val if rhs_val != 0 else None
-                    elif op.kind == BinOpKind.POW:
-                        result = lhs_val**rhs_val
-                        if isinstance(rhs_val, (int, float)) and rhs_val < 0:
-                            return result
-                        return int(result)
-                    elif op.kind == BinOpKind.MIN:
-                        return lhs_val if lhs_val <= rhs_val else rhs_val
-                return None
+            if (
+                isinstance(op, (BinOp, CompOp, CondOp, NotOp))
+                and op.results
+                and op.results[0].uuid == value.uuid
+            ):
+                return self._evaluate_classical_operation(op, param_values, operations)
 
         return None
+
+    def _evaluate_classical_operation(
+        self,
+        op: BinOp | CompOp | CondOp | NotOp,
+        param_values: dict,
+        operations: list[Operation],
+    ) -> int | float | bool | None:
+        """Evaluate one scalar classical operation in a visualization scope.
+
+        Args:
+            op (BinOp | CompOp | CondOp | NotOp): Operation to evaluate.
+            param_values (dict): Current visualization value environment.
+            operations (list[Operation]): Scope used to resolve operand
+                producers recursively.
+
+        Returns:
+            int | float | bool | None: Concrete scalar result, or None when an
+                operand remains symbolic or the operation is not foldable.
+        """
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            FoldPolicy,
+            fold_classical_op,
+        )
+
+        return fold_classical_op(
+            op,
+            lambda operand: self._evaluate_value(operand, param_values, operations),
+            parameters=set(),
+            policy=FoldPolicy.COMPILE_TIME,
+        )
+
+    def _record_classical_result(
+        self,
+        op: BinOp | CompOp | CondOp | NotOp,
+        param_values: dict,
+        operations: list[Operation],
+    ) -> None:
+        """Record a classical operation result in the current environment.
+
+        Args:
+            op (BinOp | CompOp | CondOp | NotOp): Operation whose result should
+                become visible to later operations.
+            param_values (dict): Environment to mutate.
+            operations (list[Operation]): Enclosing operation scope.
+        """
+        if not op.results:
+            return
+        result_value = op.results[0]
+        resolved = self._evaluate_classical_operation(op, param_values, operations)
+        if resolved is not None:
+            param_values[result_value.logical_id] = resolved
+            return
+        if isinstance(op, BinOp):
+            symbolic = self._build_symbolic_binop(op, param_values)
+            if symbolic is not None:
+                param_values[result_value.logical_id] = symbolic
+                return
+        param_values.pop(result_value.logical_id, None)
+
+    def _publish_if_results(
+        self,
+        op: IfOperation,
+        true_values: dict,
+        false_values: dict,
+        param_values: dict,
+        enclosing_operations: list[Operation],
+    ) -> None:
+        """Publish every determinable If merge into the parent environment.
+
+        Args:
+            op (IfOperation): Branch operation whose merges should be
+                interpreted.
+            true_values (dict): Environment after replaying the true branch.
+            false_values (dict): Environment after replaying the false branch.
+            param_values (dict): Parent environment to receive merge results.
+            enclosing_operations (list[Operation]): Scope containing the
+                condition producer.
+        """
+        condition = self._evaluate_value(
+            op.condition, param_values, enclosing_operations
+        )
+        selected_true = bool(condition) if condition is not None else None
+
+        for merge in op.iter_merges():
+            true_value = self._environment_value(
+                merge.true_value, true_values, op.true_operations
+            )
+            false_value = self._environment_value(
+                merge.false_value, false_values, op.false_operations
+            )
+            if selected_true is True:
+                resolved = true_value
+            elif selected_true is False:
+                resolved = false_value
+            elif (
+                true_value is not _UNRESOLVED_ENV_VALUE
+                and false_value is not _UNRESOLVED_ENV_VALUE
+                and true_value == false_value
+            ):
+                resolved = true_value
+            else:
+                resolved = _UNRESOLVED_ENV_VALUE
+
+            if resolved is _UNRESOLVED_ENV_VALUE:
+                param_values.pop(merge.result.logical_id, None)
+            else:
+                param_values[merge.result.logical_id] = resolved
+
+    def _replay_if_value_flow(
+        self,
+        op: IfOperation,
+        param_values: dict,
+        enclosing_operations: list[Operation],
+        logical_id_remap: dict[str, str],
+    ) -> None:
+        """Replay branch-local scalar flow and publish resolvable merges.
+
+        Args:
+            op (IfOperation): Branch operation to replay.
+            param_values (dict): Parent visualization value environment.
+            enclosing_operations (list[Operation]): Scope containing ``op``.
+            logical_id_remap (dict[str, str]): Inline formal-to-actual mapping
+                used when nested items loops materialize bound dictionaries.
+        """
+        true_values = dict(param_values)
+        self._replay_value_flow(op.true_operations, true_values, logical_id_remap)
+        false_values = dict(param_values)
+        self._replay_value_flow(op.false_operations, false_values, logical_id_remap)
+        self._publish_if_results(
+            op,
+            true_values,
+            false_values,
+            param_values,
+            enclosing_operations,
+        )
+
+    def _replay_for_value_flow(
+        self,
+        op: ForOperation,
+        param_values: dict,
+        logical_id_remap: dict[str, str],
+        max_iterations: int | None,
+    ) -> bool:
+        """Replay a concrete range loop's scalar RegionArg recurrence.
+
+        Args:
+            op (ForOperation): Range loop to replay.
+            param_values (dict): Parent visualization value environment.
+            logical_id_remap (dict[str, str]): Inline formal-to-actual mapping
+                forwarded to nested items loops.
+            max_iterations (int | None): Maximum number of iterations to
+                replay, or None for no limit.
+
+        Returns:
+            bool: True when the complete loop was replayed and its results
+                were published, otherwise False for a symbolic or over-budget
+                loop.
+        """
+        start, stop, step = self._evaluate_loop_range(op, param_values)
+        if stop is None:
+            return False
+        iteration_range = range(start, stop, step)
+        if max_iterations is not None:
+            try:
+                if len(iteration_range) > max_iterations:
+                    return False
+            except OverflowError:
+                return False
+
+        loop_values = self._seed_region_arguments(op, param_values)
+        for iteration_value in iteration_range:
+            body_values = dict(loop_values)
+            self._bind_loop_value(
+                body_values,
+                op.loop_var,
+                op.loop_var_value,
+                iteration_value,
+            )
+            self._replay_value_flow(op.operations, body_values, logical_id_remap)
+            self._advance_region_arguments(op, body_values, loop_values)
+        self._publish_region_results(op, loop_values, param_values)
+        return True
+
+    def _replay_for_items_value_flow(
+        self,
+        op: ForItemsOperation,
+        param_values: dict,
+        logical_id_remap: dict[str, str],
+        max_iterations: int | None,
+    ) -> bool:
+        """Replay a materialized items loop's scalar RegionArg recurrence.
+
+        Args:
+            op (ForItemsOperation): Items loop to replay.
+            param_values (dict): Parent visualization value environment.
+            logical_id_remap (dict[str, str]): Inline formal-to-actual mapping
+                used to find forwarded bound dictionary data.
+            max_iterations (int | None): Maximum number of entries to replay,
+                or None for no limit.
+
+        Returns:
+            bool: True when every entry was replayed and results were
+                published, otherwise False for an unbound or over-budget
+                dictionary.
+        """
+        dict_value = op.operands[0] if op.operands else None
+        if dict_value is None:
+            return False
+        entries = self._materialize_dict_entries(
+            dict_value, param_values, logical_id_remap
+        )
+        if entries is None:
+            return False
+        if max_iterations is not None and len(entries) > max_iterations:
+            return False
+
+        loop_values = self._seed_region_arguments(op, param_values)
+        for entry_key, entry_value in entries:
+            body_values = dict(loop_values)
+            self._bind_for_items_entry(op, entry_key, entry_value, body_values)
+            self._replay_value_flow(op.operations, body_values, logical_id_remap)
+            self._advance_region_arguments(op, body_values, loop_values)
+        self._publish_region_results(op, loop_values, param_values)
+        return True
+
+    def _replay_value_flow(
+        self,
+        operations: list[Operation],
+        param_values: dict,
+        logical_id_remap: dict[str, str] | None = None,
+    ) -> None:
+        """Replay scalar value flow through nested static control operations.
+
+        Args:
+            operations (list[Operation]): Ordered IR operations to replay.
+            param_values (dict): Visualization value environment to mutate.
+            logical_id_remap (dict[str, str] | None): Inline formal-to-actual
+                mapping used for bound dictionaries. Defaults to an empty map.
+        """
+        logical_id_remap = logical_id_remap or {}
+        for operation in operations:
+            if isinstance(operation, (BinOp, CompOp, CondOp, NotOp)):
+                self._record_classical_result(operation, param_values, operations)
+            elif isinstance(operation, ForOperation):
+                self._replay_for_value_flow(
+                    operation,
+                    param_values,
+                    logical_id_remap,
+                    _MAX_FOLDED_VALUE_REPLAY_ITERATIONS,
+                )
+            elif isinstance(operation, ForItemsOperation):
+                self._replay_for_items_value_flow(
+                    operation,
+                    param_values,
+                    logical_id_remap,
+                    _MAX_FOLDED_VALUE_REPLAY_ITERATIONS,
+                )
+            elif isinstance(operation, IfOperation):
+                self._replay_if_value_flow(
+                    operation, param_values, operations, logical_id_remap
+                )
 
     def _resolve_symbolic_array_name(
         self, value: Value, param_values: dict
@@ -3062,15 +3552,15 @@ class CircuitAnalyzer:
         operations: list[Operation],
         param_values: dict,
     ) -> None:
-        """Pre-evaluate intermediate BinOp results in loop body.
+        """Pre-evaluate intermediate scalar results in a loop body.
 
-        Scans loop body operations for BinOp (e.g., j = i + 1) and stores
-        evaluated results by value ID in param_values. This allows subsequent
-        index resolution to find the concrete values.
+        Scans ``BinOp``, ``CompOp``, ``CondOp``, and ``NotOp`` operations and
+        stores evaluated results by value ID in ``param_values``. This allows
+        subsequent index and branch resolution to find concrete values.
 
-        When a BinOp cannot be fully resolved numerically (e.g., one operand
-        is a symbolic parameter), a symbolic string expression is stored
-        instead (e.g., "2*gamma", "theta+1").
+        When a ``BinOp`` cannot be fully resolved numerically (e.g., one
+        operand is a symbolic parameter), a symbolic string expression is
+        stored instead (e.g., ``"2*gamma"`` or ``"theta+1"``).
 
         Args:
             operations: List of operations in the loop body.
@@ -3078,16 +3568,8 @@ class CircuitAnalyzer:
                 intermediate values keyed by logical_id.
         """
         for op in operations:
-            if isinstance(op, BinOp) and op.results:
-                result_value = op.results[0]
-                resolved = self._evaluate_value(result_value, param_values, operations)
-                if resolved is not None:
-                    param_values[result_value.logical_id] = resolved
-                else:
-                    # Try building a symbolic string expression
-                    symbolic = self._build_symbolic_binop(op, param_values)
-                    if symbolic is not None:
-                        param_values[result_value.logical_id] = symbolic
+            if isinstance(op, (BinOp, CompOp, CondOp, NotOp)):
+                self._record_classical_result(op, param_values, operations)
 
         # Also resolve array element access intermediates (e.g. i = edges[idx, 0])
         for op in operations:

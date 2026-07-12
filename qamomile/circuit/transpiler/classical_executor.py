@@ -10,6 +10,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
+    RuntimeClassicalExpr,
 )
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
@@ -23,13 +24,14 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     RegionArg,
     WhileOperation,
+    validate_region_args,
 )
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
     TupleValue,
     Value,
-    resolve_root_array_index,
+    array_static_length,
 )
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
@@ -78,6 +80,8 @@ class ClassicalExecutor:
             self._execute_notop(op, context, results, scoped_locals)
         elif isinstance(op, CondOp):
             self._execute_condop(op, context, results, scoped_locals)
+        elif isinstance(op, RuntimeClassicalExpr):
+            self._execute_runtime_classical_expr(op, context, results, scoped_locals)
         elif isinstance(op, DecodeQFixedOperation):
             self._execute_decode_qfixed(op, context, results, scoped_locals)
         elif isinstance(op, DictGetItemOperation):
@@ -184,6 +188,53 @@ class ClassicalExecutor:
             raise ExecutionError(f"CondOp evaluation failed: kind={op.kind}")
         if op.results:
             results[op.results[0].uuid] = result_value
+
+    def _execute_runtime_classical_expr(
+        self,
+        op: RuntimeClassicalExpr,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Execute a lowered measurement-derived classical expression.
+
+        ``ClassicalLoweringPass`` preserves every operand/result ``Value``
+        while replacing the original arithmetic/predicate operation with this
+        unified IR node. Resolving operands through :meth:`_get_value` therefore
+        preserves UUID-first identity and loop RegionArg state exactly as for
+        the original operation families.
+
+        Args:
+            op (RuntimeClassicalExpr): Lowered expression to evaluate.
+            context (ExecutionContext): Runtime bindings and measurements.
+            results (dict[str, Any]): Current segment and loop results by UUID.
+            scoped_locals (dict[str, Any]): Legacy loop display-name scope.
+
+        Raises:
+            ExecutionError: If the operation has no single result, has invalid
+                arity/kind, or cannot be evaluated (for example division by
+                zero).
+        """
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_runtime_op_values,
+        )
+
+        if len(op.results) != 1:
+            raise ExecutionError(
+                "RuntimeClassicalExpr requires exactly one result; "
+                f"got {len(op.results)}."
+            )
+        operands = [
+            self._get_value(operand, context, results, scoped_locals)
+            for operand in op.operands
+        ]
+        result_value = evaluate_runtime_op_values(op.kind, operands)
+        if result_value is None:
+            raise ExecutionError(
+                "RuntimeClassicalExpr evaluation failed: "
+                f"kind={op.kind}, operand_count={len(operands)}."
+            )
+        results[op.results[0].uuid] = result_value
 
     def _execute_decode_qfixed(
         self,
@@ -502,39 +553,10 @@ class ClassicalExecutor:
                 block/result UUIDs are duplicated, or one argument's
                 values have different types.
         """
-        region_args = op.region_args
-        if len(region_args) != len(op.results):
-            raise ExecutionError(
-                "Loop RegionArg data is inconsistent: "
-                f"{len(region_args)} region args for {len(op.results)} results."
-            )
-        block_arg_uuids: set[str] = set()
-        result_uuids: set[str] = set()
-        for index, (arg, result) in enumerate(
-            zip(region_args, op.results, strict=True)
-        ):
-            if arg.result.uuid != result.uuid:
-                raise ExecutionError(
-                    "Loop RegionArg data is inconsistent: "
-                    f"region_args[{index}].result does not match "
-                    f"results[{index}]."
-                )
-            if not (
-                arg.init.type
-                == arg.block_arg.type
-                == arg.yielded.type
-                == arg.result.type
-            ):
-                raise ExecutionError(
-                    f"Loop RegionArg '{arg.var_name}' has mismatched value types."
-                )
-            if arg.block_arg.uuid in block_arg_uuids or arg.result.uuid in result_uuids:
-                raise ExecutionError(
-                    "Loop RegionArg data contains duplicate block/result identities."
-                )
-            block_arg_uuids.add(arg.block_arg.uuid)
-            result_uuids.add(arg.result.uuid)
-        return region_args
+        try:
+            return validate_region_args(op)
+        except ValueError as error:
+            raise ExecutionError(str(error)) from error
 
     def _seed_region_args(
         self,
@@ -761,6 +783,15 @@ class ClassicalExecutor:
     ) -> Any:
         """Get the concrete value from context or results.
 
+        Args:
+            value (Value): Scalar, container, or structural element to resolve.
+            context (ExecutionContext): Runtime bindings and measurements.
+            results (dict[str, Any]): Current segment results by UUID.
+            scoped_locals (dict[str, Any]): Legacy loop display-name scope.
+
+        Returns:
+            Any: Resolved runtime or compile-time value.
+
         Raises:
             ExecutionError: If the value cannot be resolved from the
                 execution state — with a slice-view-specific diagnostic
@@ -773,19 +804,29 @@ class ClassicalExecutor:
             return results[value.uuid]
         if context.has(value.uuid):
             return context.get(value.uuid)
-        if value.name in scoped_locals:
-            return scoped_locals[value.name]
-        if context.has(value.name):
-            return context.get(value.name)
-        if value.is_array_element():
-            return self._get_array_element_value(value, context, results, scoped_locals)
-        # Check if it's a constant
+        if isinstance(value, ArrayValue):
+            const_array = value.get_const_array()
+            if const_array is not None:
+                return const_array
+            if array_static_length(value) == 0:
+                return ()
+        if isinstance(value, DictValue) and value.metadata.dict_runtime is not None:
+            return value.get_bound_data()
         if value.is_constant():
             return value.get_const()
         if value.is_parameter():
             param_name = value.parameter_name()
             if param_name and context.has(param_name):
                 return context.get(param_name)
+        if value.is_array_element():
+            return self._get_array_element_value(value, context, results, scoped_locals)
+        # Display-name lookups are a legacy compatibility bridge. Keep them
+        # last so a user parameter named ``uint_const`` (or like an internal
+        # array/dict temporary) cannot shadow typed IR identity/metadata.
+        if value.name in scoped_locals:
+            return scoped_locals[value.name]
+        if value.name and context.has(value.name):
+            return context.get(value.name)
         if isinstance(value, ArrayValue) and value.slice_of is not None:
             raise ExecutionError(
                 f"Array view '{value.name}' could not be resolved in the "
@@ -803,7 +844,21 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> Any:
-        """Resolve an array element from its parent container."""
+        """Resolve an array element from its parent container.
+
+        Args:
+            value (Value): Element value carrying parent/index metadata.
+            context (ExecutionContext): Runtime bindings and measurements.
+            results (dict[str, Any]): Current segment results by UUID.
+            scoped_locals (dict[str, Any]): Legacy loop display-name scope.
+
+        Returns:
+            Any: Resolved element contents.
+
+        Raises:
+            ExecutionError: If indices/slice bounds or array contents cannot
+                be resolved.
+        """
         parent = value.parent_array
         if parent is None:
             raise ExecutionError(f"Value {value.name} is not an array element")
@@ -812,31 +867,145 @@ class ClassicalExecutor:
             int(self._get_value(idx, context, results, scoped_locals))
             for idx in value.element_indices
         )
-        container = self._get_array_data(parent, context, results, scoped_locals)
+        location = self._resolve_array_element_location(
+            parent,
+            indices,
+            context,
+            results,
+            scoped_locals,
+        )
+        if location is None:
+            raise ExecutionError(
+                f"Array element {parent.name}{indices} has unresolved slice bounds"
+            )
+        root, root_indices = location
+        # A view can inherit the root parameter's metadata. Resolve and index
+        # the root container, never the view-local index against that root
+        # payload (``values[1:][0]`` must read root slot 1, not slot 0).
+        container = self._get_array_data_by_identity(root, context, results)
 
         if container is not None:
-            if len(indices) == 1:
-                return container[indices[0]]
-            return container[indices]
+            return self._index_array_container(container, root_indices)
 
-        if len(indices) == 1:
-            indexed_key = f"{parent.name}[{indices[0]}]"
-            if context.has(indexed_key):
-                return context.get(indexed_key)
+        if len(root_indices) == 1:
             # Measurement results are loaded into the context under
             # per-element composite carrier keys ("<root_uuid>_<index>").
             # Compose slice views back onto the root so a view-local
             # index addresses the right physical slot.
-            resolved = resolve_root_array_index(parent, indices[0])
-            if resolved is not None:
-                root_array, root_index = resolved
-                composite_key = f"{root_array.uuid}_{root_index}"
-                if context.has(composite_key):
-                    return context.get(composite_key)
+            composite_key = f"{root.uuid}_{root_indices[0]}"
+            if context.has(composite_key):
+                return context.get(composite_key)
+
+        # Some control-flow merges and host-side transforms materialize a view
+        # under the view's own UUID instead of its root. Preserve that explicit
+        # payload as the final identity-based fallback, indexed in view-local
+        # coordinates.
+        if parent.uuid != root.uuid:
+            parent_container = self._get_array_data_by_identity(
+                parent, context, results
+            )
+            if parent_container is not None:
+                return self._index_array_container(parent_container, indices)
+
+        if len(root_indices) == 1:
+            indexed_key = f"{root.name}[{root_indices[0]}]"
+            if root.name and context.has(indexed_key):
+                return context.get(indexed_key)
+
+        # Programmatic/legacy IR may have only display-name bindings. This is
+        # deliberately after root UUID/metadata/parameter and physical
+        # composite-key resolution.
+        container = self._get_array_data(root, context, results, scoped_locals)
+        if container is not None:
+            return self._index_array_container(container, root_indices)
+        if parent.uuid != root.uuid:
+            legacy_parent_container = self._get_array_data(
+                parent, context, results, scoped_locals
+            )
+            if legacy_parent_container is not None:
+                return self._index_array_container(legacy_parent_container, indices)
 
         raise ExecutionError(
             f"Array element {parent.name}{indices} could not be resolved"
         )
+
+    @staticmethod
+    def _index_array_container(container: Any, indices: tuple[int, ...]) -> Any:
+        """Index a one- or multi-dimensional classical container.
+
+        Args:
+            container (Any): Runtime array-like payload.
+            indices (tuple[int, ...]): One-dimensional scalar index or a
+                multi-dimensional index tuple.
+
+        Returns:
+            Any: Element stored at ``indices``.
+
+        Raises:
+            IndexError: If an index is outside the container bounds.
+            KeyError: If a mapping-like container lacks the indexed key.
+            TypeError: If the container does not support the requested index
+                form.
+        """
+        if len(indices) == 1:
+            return container[indices[0]]
+        return container[indices]
+
+    def _resolve_array_element_location(
+        self,
+        parent: ArrayValue,
+        indices: tuple[int, ...],
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> tuple[ArrayValue, tuple[int, ...]] | None:
+        """Compose an element's indices through its slice ancestry.
+
+        Args:
+            parent (ArrayValue): Immediate parent array or sliced view.
+            indices (tuple[int, ...]): Indices local to ``parent``.
+            context (ExecutionContext): Runtime bindings and measurements.
+            results (dict[str, Any]): Current segment results by UUID.
+            scoped_locals (dict[str, Any]): Legacy loop display-name scope.
+
+        Returns:
+            tuple[ArrayValue, tuple[int, ...]] | None: Root array and root-local
+                indices, or None when a slice frame is unresolved/invalid.
+
+        Raises:
+            ExecutionError: If a symbolic slice bound cannot be resolved from
+                the current execution state.
+        """
+        if not indices:
+            return parent, ()
+        if any(index < 0 for index in indices):
+            return None
+        current = parent
+        leading_index = indices[0]
+        while current.slice_of is not None:
+            if current.slice_start is None or current.slice_step is None:
+                return None
+            start = int(
+                self._get_value(
+                    current.slice_start,
+                    context,
+                    results,
+                    scoped_locals,
+                )
+            )
+            step = int(
+                self._get_value(
+                    current.slice_step,
+                    context,
+                    results,
+                    scoped_locals,
+                )
+            )
+            if start < 0 or step <= 0:
+                return None
+            leading_index = start + step * leading_index
+            current = current.slice_of
+        return current, (leading_index, *indices[1:])
 
     def _get_array_data(
         self,
@@ -845,18 +1014,52 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> Any:
-        """Resolve an array-like container from execution state."""
+        """Resolve an array-like container from execution state.
+
+        Args:
+            array_value (ArrayValue): Array identity to resolve.
+            context (ExecutionContext): Runtime bindings by UUID/provenance.
+            results (dict[str, Any]): Current segment results by UUID.
+            scoped_locals (dict[str, Any]): Legacy loop display-name scope.
+
+        Returns:
+            Any: Resolved container, or None when absent.
+        """
+        resolved = self._get_array_data_by_identity(array_value, context, results)
+        if resolved is not None:
+            return resolved
+        # Legacy display-name fallback comes last.
+        if array_value.name in scoped_locals:
+            return scoped_locals[array_value.name]
+        if array_value.name and context.has(array_value.name):
+            return context.get(array_value.name)
+        return None
+
+    @staticmethod
+    def _get_array_data_by_identity(
+        array_value: ArrayValue,
+        context: ExecutionContext,
+        results: dict[str, Any],
+    ) -> Any:
+        """Resolve an array without consulting its display name.
+
+        Args:
+            array_value (ArrayValue): Array identity to resolve.
+            context (ExecutionContext): Runtime bindings by UUID/provenance.
+            results (dict[str, Any]): Current segment results by UUID.
+
+        Returns:
+            Any: UUID-, metadata-, or parameter-resolved container, or None.
+        """
         if array_value.uuid in results:
             return results[array_value.uuid]
         if context.has(array_value.uuid):
             return context.get(array_value.uuid)
-        if array_value.name in scoped_locals:
-            return scoped_locals[array_value.name]
-        if context.has(array_value.name):
-            return context.get(array_value.name)
         const_array = array_value.get_const_array()
         if const_array is not None:
             return const_array
+        if array_static_length(array_value) == 0:
+            return ()
         if array_value.is_parameter():
             param_name = array_value.parameter_name()
             if param_name and context.has(param_name):
@@ -870,17 +1073,30 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> list[tuple[Any, Any]]:
-        """Resolve a DictValue to concrete key/value pairs."""
+        """Resolve a DictValue to concrete key/value pairs.
+
+        Args:
+            iterable_value (Any): Candidate dictionary IR value.
+            context (ExecutionContext): Runtime bindings and measurements.
+            results (dict[str, Any]): Intermediate results by UUID.
+            scoped_locals (dict[str, Any]): Loop-scoped values by display name.
+
+        Returns:
+            list[tuple[Any, Any]]: Concrete entries in iteration order,
+                including an empty list for an explicitly bound empty dict.
+
+        Raises:
+            ExecutionError: If no concrete dictionary source can be resolved.
+        """
         if isinstance(iterable_value, DictValue):
-            bound_items = iterable_value.get_bound_data_items()
-            if bound_items:
-                return list(bound_items)
             if context.has(iterable_value.uuid):
                 return list(context.get(iterable_value.uuid).items())
-            if iterable_value.name in scoped_locals:
-                return list(scoped_locals[iterable_value.name].items())
-            if context.has(iterable_value.name):
-                return list(context.get(iterable_value.name).items())
+            if iterable_value.metadata.dict_runtime is not None:
+                return list(iterable_value.get_bound_data_items())
+            if iterable_value.is_parameter():
+                parameter_name = iterable_value.parameter_name()
+                if parameter_name and context.has(parameter_name):
+                    return list(context.get(parameter_name).items())
             if iterable_value.entries:
                 return [
                     (
@@ -891,6 +1107,12 @@ class ClassicalExecutor:
                     )
                     for key, val in iterable_value.entries
                 ]
+            # Legacy display-name fallback comes after typed entries and
+            # parameter provenance.
+            if iterable_value.name in scoped_locals:
+                return list(scoped_locals[iterable_value.name].items())
+            if iterable_value.name and context.has(iterable_value.name):
+                return list(context.get(iterable_value.name).items())
 
         raise ExecutionError("ForItemsOperation iterable could not be resolved")
 

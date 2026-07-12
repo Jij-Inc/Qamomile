@@ -24,6 +24,10 @@ BACKENDS = [
     pytest.param("quri_parts", marks=pytest.mark.quri_parts, id="quri_parts"),
     pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
 ]
+RUNTIME_BACKENDS = [
+    pytest.param("qiskit", id="qiskit"),
+    pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
+]
 
 
 def _make_transpiler(backend: str) -> Any:
@@ -72,6 +76,14 @@ def _sample_single(backend: str, kernel: Any, bindings: dict[str, Any]) -> Any:
 
 @qmc.qkernel
 def sum_kernel(n: qmc.UInt) -> qmc.UInt:
+    """Accumulate all indices below ``n``.
+
+    Args:
+        n (qmc.UInt): Exclusive loop bound.
+
+    Returns:
+        qmc.UInt: Sum of ``range(n)``.
+    """
     q = qmc.qubit("q")
     qmc.measure(q)
     total = qmc.uint(0)
@@ -82,6 +94,14 @@ def sum_kernel(n: qmc.UInt) -> qmc.UInt:
 
 @qmc.qkernel
 def swap_kernel(n: qmc.UInt) -> tuple[qmc.UInt, qmc.UInt]:
+    """Swap two carried integers ``n`` times.
+
+    Args:
+        n (qmc.UInt): Number of swaps.
+
+    Returns:
+        tuple[qmc.UInt, qmc.UInt]: Final ordered pair.
+    """
     q = qmc.qubit("q")
     qmc.measure(q)
     a = qmc.uint(1)
@@ -93,12 +113,146 @@ def swap_kernel(n: qmc.UInt) -> tuple[qmc.UInt, qmc.UInt]:
 
 @qmc.qkernel
 def angle_kernel(n: qmc.UInt) -> qmc.Bit:
+    """Rotate by a carried sum of ``n`` pi increments.
+
+    Args:
+        n (qmc.UInt): Number of pi increments.
+
+    Returns:
+        qmc.Bit: Measurement of the rotated qubit.
+    """
     total = 0.0
     for _i in qmc.range(n):
         total = total + math.pi
     q = qmc.qubit("q")
     q = qmc.rx(q, total)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def indexed_while_kernel() -> qmc.Bit:
+    """Update two distinct measured-vector conditions inside a static loop.
+
+    Returns:
+        qmc.Bit: Deterministic zero after both runtime loops terminate.
+    """
+    ancilla = qmc.qubit_array(2, "ancilla")
+    ancilla[0] = qmc.x(ancilla[0])
+    measured = qmc.measure(ancilla)
+    for index in qmc.range(2):
+        condition = measured[index]
+        while condition:
+            fresh = qmc.qubit("fresh")
+            condition = qmc.measure(fresh)
+    return qmc.measure(qmc.qubit("output"))
+
+
+@qmc.qkernel
+def items_indexed_while_kernel(
+    items: qmc.Dict[qmc.UInt, qmc.UInt],
+) -> qmc.Bit:
+    """Update measured-vector conditions selected by bound dictionary keys.
+
+    Args:
+        items (qmc.Dict[qmc.UInt, qmc.UInt]): Ordered keys selecting measured
+            vector elements; values are ignored.
+
+    Returns:
+        qmc.Bit: Deterministic zero after every runtime loop terminates.
+    """
+    ancilla = qmc.qubit_array(2, "ancilla")
+    ancilla[0] = qmc.x(ancilla[0])
+    measured = qmc.measure(ancilla)
+    for index, _value in qmc.items(items):
+        condition = measured[index]
+        while condition:
+            fresh = qmc.qubit("fresh")
+            condition = qmc.measure(fresh)
+    return qmc.measure(qmc.qubit("output"))
+
+
+@qmc.qkernel
+def repeated_indexed_while_kernel() -> qmc.Bit:
+    """Reread one overwritten measurement snapshot through nested loops.
+
+    Returns:
+        qmc.Bit: Unreachable output because emission must reject the stale
+            snapshot read.
+    """
+    measured = qmc.measure(qmc.qubit_array(3, "ancilla"))
+    for outer in qmc.range(2):
+        for inner in qmc.range(2):
+            condition = measured[outer + inner]
+            while condition:
+                fresh = qmc.qubit("fresh")
+                condition = qmc.measure(fresh)
+    return qmc.measure(qmc.qubit("output"))
+
+
+@qmc.qkernel
+def indexed_while_original_vector_output_kernel() -> qmc.Vector[qmc.Bit]:
+    """Keep the original measured vector live after indexed while updates.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Unrepresentable immutable pre-update snapshot.
+    """
+    ancilla = qmc.qubit_array(2, "ancilla")
+    ancilla[0] = qmc.x(ancilla[0])
+    measured = qmc.measure(ancilla)
+    for index in qmc.range(2):
+        condition = measured[index]
+        while condition:
+            condition = qmc.measure(qmc.qubit("fresh"))
+    return measured
+
+
+@qmc.qkernel
+def while_disjoint_element_output_kernel() -> qmc.Bit:
+    """Update element zero while exposing the disjoint element one.
+
+    Returns:
+        qmc.Bit: Original measurement snapshot for untouched element one.
+    """
+    ancilla = qmc.qubit_array(2, "ancilla")
+    ancilla[1] = qmc.x(ancilla[1])
+    measured = qmc.measure(ancilla)
+    condition = measured[0]
+    while condition:
+        condition = qmc.measure(qmc.qubit("fresh"))
+    return measured[1]
+
+
+@qmc.qkernel
+def while_same_element_output_kernel() -> qmc.Bit:
+    """Update and then expose the same immutable measured element.
+
+    Returns:
+        qmc.Bit: Unrepresentable original element-zero snapshot.
+    """
+    measured = qmc.measure(qmc.qubit_array(2, "ancilla"))
+    condition = measured[0]
+    while condition:
+        condition = qmc.measure(qmc.qubit("fresh"))
+    return measured[0]
+
+
+@qmc.qkernel
+def crossed_mixed_merge_kernel() -> tuple[qmc.Bit, qmc.Bit]:
+    """Cross one old measurement through two runtime Bit merge outputs.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit]: Unrepresentable independent merge outputs.
+    """
+    old_qubit = qmc.x(qmc.qubit("old"))
+    old = qmc.measure(old_qubit)
+    condition = qmc.measure(qmc.qubit("condition"))
+    if condition:
+        first = qmc.measure(qmc.qubit("true_fresh"))
+        second = old
+    else:
+        first = old
+        second = qmc.measure(qmc.qubit("false_fresh"))
+    return first, second
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -120,3 +274,57 @@ class TestLoopCarriedValuesAcrossBackends:
         the quantum segment and evaluated by emit-time unrolling.
         """
         assert _sample_single(backend, angle_kernel, {"n": 3}) == 1
+
+
+@pytest.mark.parametrize("backend", RUNTIME_BACKENDS)
+class TestNestedRuntimeLoopConditionsAcrossBackends:
+    """Static replay preserves runtime condition clbits on capable backends."""
+
+    def test_range_indexed_while_updates_the_selected_clbit(self, backend):
+        """Each range iteration remeasures its own condition clbit and exits."""
+        assert _sample_single(backend, indexed_while_kernel, {}) == 0
+
+    def test_items_indexed_while_updates_the_selected_clbit(self, backend):
+        """ForItems keys resolve condition aliases independently per entry."""
+        assert (
+            _sample_single(
+                backend,
+                items_indexed_while_kernel,
+                {"items": {0: 0, 1: 0}},
+            )
+            == 0
+        )
+
+    def test_repeated_indexed_snapshot_is_rejected(self, backend):
+        """A later replay cannot reread a snapshot whose clbit was overwritten."""
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        with pytest.raises(EmitError, match="snapshot is read after"):
+            _make_transpiler(backend).transpile(repeated_indexed_while_kernel)
+
+    def test_original_vector_live_out_is_rejected(self, backend):
+        """The immutable measured vector cannot escape after clbit reuse."""
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        with pytest.raises(EmitError, match="snapshot remains live"):
+            _make_transpiler(backend).transpile(
+                indexed_while_original_vector_output_kernel
+            )
+
+    def test_disjoint_vector_element_live_out_is_allowed(self, backend):
+        """An untouched sibling snapshot remains a valid public output."""
+        assert _sample_single(backend, while_disjoint_element_output_kernel, {}) == 1
+
+    def test_same_vector_element_live_out_is_rejected(self, backend):
+        """The exact overwritten element cannot remain a public output."""
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        with pytest.raises(EmitError, match="snapshot remains live"):
+            _make_transpiler(backend).transpile(while_same_element_output_kernel)
+
+    def test_crossed_mixed_bit_merges_are_rejected(self, backend):
+        """Two outputs cannot simultaneously reuse one pre-existing clbit."""
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        with pytest.raises(EmitError, match="mixes a pre-existing clbit"):
+            _make_transpiler(backend).transpile(crossed_mixed_merge_kernel)

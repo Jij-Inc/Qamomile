@@ -4,10 +4,10 @@ Background — what was wrong with the bare ``dict[str, Any]``:
 
 The pre-EmitContext design used a single ``bindings: dict[str, Any]``
 threaded through every emit-pipeline function. That dict served at least
-seven distinct semantic purposes simultaneously:
+eight distinct semantic purposes simultaneously:
 
 1. User-supplied kernel parameters (keyed by parameter name).
-2. Loop iteration variables (keyed by loop_var name; pushed on entry,
+2. Loop iteration variables (keyed by Value UUID; pushed on entry,
    restored on exit).
 3. Emit-time-computed intermediates — ``BinOp`` / ``CompOp`` /
    ``CondOp`` / ``NotOp`` results (keyed by Value UUID after Fix B;
@@ -16,9 +16,9 @@ seven distinct semantic purposes simultaneously:
    ``register_classical_merge_aliases``).
 5. Backend runtime expressions (e.g. ``qiskit.circuit.classical.expr.Expr``
    for compound runtime if-conditions).
-6. Array data (keyed by array name; bound iterables passed by user).
-7. Dict data (keyed by dict name; bound iterables passed by user).
-8. Pauli observables (keyed by observable name).
+6. Array data (keyed by ArrayValue UUID).
+7. Dict data (keyed by DictValue UUID).
+8. Pauli observables (keyed by Value UUID).
 
 This overloading was the structural cause of every name-collision bug
 class seen in this codebase: ``"bit_tmp"`` chained predicates,
@@ -223,16 +223,14 @@ class EmitContext(dict):
         """Bind array data by ``ArrayValue.uuid``.
 
         Args:
-            uuid: The array Value's UUID.
-            data: The bound iterable / sequence / Vector handle.
-            display_name: Migration shim — also writes the flat-dict view
-                under the array's user-facing name. Remove once Phase 3
-                of #7 lands.
+            uuid (str): The array Value's UUID.
+            data (Any): The bound iterable / sequence / Vector handle.
+            display_name (str | None): Reserved for debug-only display. It is
+                not used as a binding key.
         """
+        del display_name
         self._array_data[uuid] = data
         self[uuid] = data
-        if display_name:
-            self[display_name] = data
 
     def get_array_data(self, uuid: str) -> Any:
         """Get array data by ``ArrayValue.uuid``, or None."""
@@ -247,14 +245,14 @@ class EmitContext(dict):
         """Bind dict data by ``DictValue.uuid``.
 
         Args:
-            uuid: The dict Value's UUID.
-            data: The bound dict / iterable.
-            display_name: Migration shim — see ``set_array_data``.
+            uuid (str): The dict Value's UUID.
+            data (Any): The bound dict / iterable.
+            display_name (str | None): Reserved for debug-only display. It is
+                not used as a binding key.
         """
+        del display_name
         self._dict_data[uuid] = data
         self[uuid] = data
-        if display_name:
-            self[display_name] = data
 
     def get_dict_data(self, uuid: str) -> Any:
         """Get dict data by ``DictValue.uuid``, or None."""
@@ -269,14 +267,14 @@ class EmitContext(dict):
         """Bind a Pauli observable by Value UUID.
 
         Args:
-            uuid: The observable Value's UUID.
-            observable: A ``qm_o.Hamiltonian`` (or backend-equivalent).
-            display_name: Migration shim — see ``set_array_data``.
+            uuid (str): The observable Value's UUID.
+            observable (Any): A ``qm_o.Hamiltonian`` (or backend-equivalent).
+            display_name (str | None): Reserved for debug-only display. It is
+                not used as a binding key.
         """
+        del display_name
         self._observables[uuid] = observable
         self[uuid] = observable
-        if display_name:
-            self[display_name] = observable
 
     def get_observable(self, uuid: str) -> Any:
         """Get a Pauli observable by Value UUID, or None."""

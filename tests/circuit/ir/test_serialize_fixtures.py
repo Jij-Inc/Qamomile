@@ -128,12 +128,11 @@ def _fix_if_merge() -> qmc.Bit:
 
 @qmc.qkernel
 def _fix_loop_carry(n: qmc.UInt) -> qmc.UInt:
-    """Carried accumulation — covers the ``ForOperation`` carry-slot refs.
+    """Carried accumulation — cover ``ForOperation`` region arguments.
 
-    ``total = total + i`` is promoted into a loop-carry slot, so the
-    fixture pins the ``carried_names`` / ``iter_arg_refs`` /
-    ``body_arg_refs`` / ``body_yield_refs`` wire shape (plus the carry
-    result riding the generic ``result_refs``).
+    ``total = total + i`` is represented by a ``RegionArg`` record, so
+    the fixture pins its ``init`` / ``block_arg`` / ``yielded`` / ``result``
+    references together with the loop's generic ``result_refs``.
     """
     q = qmc.qubit(name="q")
     qmc.measure(q)

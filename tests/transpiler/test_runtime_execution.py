@@ -12,6 +12,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
@@ -122,6 +123,7 @@ class TestClassicalExecutorControlFlow:
         loop_out = Value(type=UIntType(), name="loop_out")
         for_op = ForOperation(
             loop_var="i",
+            loop_var_value=loop_var,
             operands=[_uint_const(0), _uint_const(3), _uint_const(1)],
             operations=[
                 BinOp(
@@ -147,7 +149,9 @@ class TestClassicalExecutorControlFlow:
         ).with_dict_runtime_metadata({0: 1.5, 2: 2.5})
         for_items = ForItemsOperation(
             key_vars=["i"],
+            key_var_values=(Value(type=UIntType(), name="i"),),
             value_var="coeff",
+            value_var_value=coeff,
             operands=[iterable],
             operations=[
                 BinOp(
@@ -164,6 +168,39 @@ class TestClassicalExecutorControlFlow:
         )
 
         assert results[out.uuid] == pytest.approx(3.5)
+
+    def test_empty_for_items_publishes_region_arg_initializer(self) -> None:
+        """An explicitly bound empty dict takes the zero-trip carry path."""
+        key = Value(type=UIntType(), name="key")
+        value = Value(type=FloatType(), name="value")
+        init = _uint_const(7, "init")
+        block_arg = Value(type=UIntType(), name="carry")
+        result = Value(type=UIntType(), name="carry_result")
+        operation = ForItemsOperation(
+            key_vars=["key"],
+            key_var_values=(key,),
+            value_var="value",
+            value_var_value=value,
+            operands=[DictValue(name="empty").with_dict_runtime_metadata({})],
+            operations=[],
+            region_args=(
+                RegionArg(
+                    var_name="carry",
+                    init=init,
+                    block_arg=block_arg,
+                    yielded=block_arg,
+                    result=result,
+                ),
+            ),
+            results=[result],
+        )
+
+        results = ClassicalExecutor().execute(
+            ClassicalSegment(operations=[operation]),
+            ExecutionContext(),
+        )
+
+        assert results[result.uuid] == 7
 
     def test_executes_while_loop(self) -> None:
         cond_in = Value(type=BitType(), name="cond")
@@ -189,6 +226,7 @@ class TestClassicalExecutorControlFlow:
             true_operations=[
                 ForOperation(
                     loop_var="i",
+                    loop_var_value=loop_var,
                     operands=[_uint_const(0), _uint_const(2), _uint_const(1)],
                     operations=[
                         BinOp(

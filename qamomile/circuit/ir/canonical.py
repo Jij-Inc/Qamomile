@@ -75,7 +75,16 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
+    ForItemsOperation,
+    ForOperation,
+    HasNestedOps,
+    LoopCarriedRebind,
+    RegionArg,
+    WhileOperation,
+    validate_region_args,
+)
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
@@ -393,6 +402,9 @@ class _Canonicalizer:
         Raises:
             NotImplementedError: If ``op`` contains unsupported nested data.
         """
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            validate_region_args(op)
+
         sub_map: dict[str, ValueBase] = {}
         for v in op.all_input_values():
             sub_map[v.uuid] = self.canonical_value(v)
@@ -659,6 +671,32 @@ def _token(obj: Any) -> str:
         return _value_token(obj)
     if isinstance(obj, ValueType):
         return f"Type<{obj.label()}>"
+    if isinstance(obj, RegionArg):
+        # ``var_name`` is a diagnostic label; only the four SSA identities
+        # participate in loop semantics.
+        return (
+            "RegionArg("
+            f"init={_token(obj.init)},"
+            f"block_arg={_token(obj.block_arg)},"
+            f"yielded={_token(obj.yielded)},"
+            f"result={_token(obj.result)})"
+        )
+    if isinstance(obj, LoopCarriedRebind):
+        # ``var_name`` is display-only and must not perturb content identity.
+        return (
+            "LoopCarriedRebind("
+            f"before={_token(obj.before)},"
+            f"after={_token(obj.after)},"
+            f"before_synthesized={_token(obj.before_synthesized)})"
+        )
+    if isinstance(obj, BranchRebind):
+        # ``var_name`` is display-only and must not perturb content identity.
+        return (
+            "BranchRebind("
+            f"before={_token(obj.before)},"
+            f"rebound_in_true={_token(obj.rebound_in_true)},"
+            f"rebound_in_false={_token(obj.rebound_in_false)})"
+        )
     if isinstance(obj, (list, tuple)):
         return "[" + ",".join(_token(x) for x in obj) + "]"
     if isinstance(obj, dict):
@@ -908,6 +946,11 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         "implementation_block",
         "source_block",
         "block",
+        # Control-flow source labels. Their UUID-bearing formal Values and
+        # operation structure carry the semantics.
+        "loop_var",
+        "key_vars",
+        "value_var",
     }
 )
 

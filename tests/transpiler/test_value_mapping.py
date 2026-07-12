@@ -735,6 +735,46 @@ class TestArrayValueShapeSubstitution:
         assert result.shape[1].uuid == dim1.uuid
 
 
+class TestNestedArrayIndexSubstitution:
+    """Test recursive substitution through nested array element indices."""
+
+    def test_loop_index_inside_nested_array_element_is_substituted(self) -> None:
+        """A mapped loop index reaches an array element used as another index."""
+        loop_index = _make_value("k")
+        zero = _make_const_value("zero", const=0)
+        one = _make_const_value("one", const=1)
+        matrix = _make_array_value(
+            "indices",
+            shape_vals=(
+                _make_const_value("rows", 1),
+                _make_const_value("cols", 2),
+            ),
+            type_cls=UIntType,
+        )
+        nested_index = Value(
+            type=UIntType(),
+            name="indices[k,1]",
+            parent_array=matrix,
+            element_indices=(loop_index, one),
+        )
+        qubits = _make_array_value("q")
+        operand = Value(
+            type=QubitType(),
+            name="q[indices[k,1]]",
+            parent_array=qubits,
+            element_indices=(nested_index,),
+        )
+
+        substituted = ValueSubstitutor(
+            {loop_index.uuid: zero}, transitive=True
+        ).substitute_value(operand)
+
+        assert isinstance(substituted, Value)
+        resolved_nested = substituted.element_indices[0]
+        assert resolved_nested.element_indices[0].uuid == zero.uuid
+        assert resolved_nested.element_indices[1].uuid == one.uuid
+
+
 # ===========================================================================
 # Bug #6: IfOperation merge-slot cloning and substitution
 # ===========================================================================

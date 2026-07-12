@@ -2501,6 +2501,243 @@ class TestLoopIndexedMeasuredBitMerge:
         with pytest.raises(EmitError, match="multiplex two already-measured"):
             transpiler.transpile(circuit)
 
+    def test_runtime_constant_index_pre_measured_bit_mux_is_rejected(self):
+        """A constant-index mux of pre-measured elements is rejected.
+
+        Unlike the loop-indexed case above, both element addresses are known
+        during resource allocation. The allocator must reject before aliasing
+        the two source clbits together, because that alias would erase the
+        evidence needed by the emit-time guard.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            a = qmc.qubit_array(1, "a")
+            a[0] = qmc.x(a[0])
+            abits = qmc.measure(a)
+            b = qmc.qubit_array(1, "b")
+            bbits = qmc.measure(b)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = abits[0]
+            else:
+                work = qmc.z(work)
+                selected = bbits[0]
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="multiplex two already-measured"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_runtime_scalar_pre_measured_bit_mux_is_rejected(self):
+        """The ordinary scalar pre-measured mux fails before aliasing."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            true_q = qmc.qubit("true")
+            true_q = qmc.x(true_q)
+            true_bit = qmc.measure(true_q)
+            false_q = qmc.qubit("false")
+            false_bit = qmc.measure(false_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = true_bit
+            else:
+                work = qmc.z(work)
+                selected = false_bit
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="multiplex two already-measured"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_runtime_measured_bit_and_constant_mux_is_rejected(self):
+        """A branch constant cannot silently reuse the measured clbit."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            measured_q = qmc.qubit("measured")
+            measured_q = qmc.x(measured_q)
+            measured = qmc.measure(measured_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = measured
+            else:
+                work = qmc.z(work)
+                selected = qmc.bit(False)
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="without a physical clbit"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_runtime_pre_measured_bit_vector_mux_is_rejected(self):
+        """A whole-vector mux of pre-measured regions is rejected."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            a = qmc.qubit_array(2, "a")
+            a[0] = qmc.x(a[0])
+            abits = qmc.measure(a)
+            b = qmc.qubit_array(2, "b")
+            bbits = qmc.measure(b)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = abits
+            else:
+                work = qmc.z(work)
+                selected = bbits
+            if selected[0]:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="multiplex two already-measured"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_branch_local_bit_vector_length_mismatch_is_rejected(self):
+        """Runtime branches cannot merge fresh vectors of different lengths."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            selector = qmc.measure(qmc.qubit("selector"))
+            if selector:
+                selected = qmc.measure(qmc.qubit_array(1, "short"))
+            else:
+                long = qmc.qubit_array(2, "long")
+                long[1] = qmc.x(long[1])
+                selected = qmc.measure(long)
+            return selected
+
+        with pytest.raises(EmitError, match="different vector lengths"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_pre_measured_bit_mux_nested_in_while_is_rejected(self):
+        """The same unsafe mux is found recursively inside a while body."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            true_q = qmc.qubit("true")
+            true_q = qmc.x(true_q)
+            true_bit = qmc.measure(true_q)
+            false_q = qmc.qubit("false")
+            false_bit = qmc.measure(false_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            while run:
+                if selector:
+                    work = qmc.x(work)
+                    selected = true_bit
+                else:
+                    work = qmc.z(work)
+                    selected = false_bit
+                if selected:
+                    work = qmc.x(work)
+                stop_q = qmc.qubit("stop")
+                run = qmc.measure(stop_q)
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="multiplex two already-measured"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_nested_merge_cannot_hide_pre_measured_bit_mux(self):
+        """A nested identity merge retains its external clbit provenance.
+
+        Defining the inner merge result inside the outer true branch does not
+        make its two pre-measured sources branch-local fresh measurements. If
+        the outer merge aliased that result with another pre-measured clbit,
+        the emitted circuit would dynamically select the wrong physical bit.
+        """
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            a = qmc.qubit_array(1, "a")
+            a[0] = qmc.x(a[0])
+            abits = qmc.measure(a)
+            b = qmc.qubit_array(1, "b")
+            bbits = qmc.measure(b)
+
+            inner_q = qmc.qubit("inner")
+            inner_q = qmc.h(inner_q)
+            inner = qmc.measure(inner_q)
+            outer_q = qmc.qubit("outer")
+            outer_q = qmc.h(outer_q)
+            outer = qmc.measure(outer_q)
+
+            work = qmc.qubit("work")
+            if outer:
+                work = qmc.x(work)
+                if inner:
+                    selected = abits[0]
+                else:
+                    selected = abits[0]
+            else:
+                work = qmc.z(work)
+                selected = bbits[0]
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="multiplex two already-measured"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_nested_branch_local_measurements_remain_supported(self):
+        """Nested merges of freshly measured branch values still execute."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            inner_q = qmc.qubit("inner")
+            inner_q = qmc.h(inner_q)
+            inner = qmc.measure(inner_q)
+            outer_q = qmc.qubit("outer")
+            outer_q = qmc.h(outer_q)
+            outer = qmc.measure(outer_q)
+
+            if outer:
+                if inner:
+                    true_q = qmc.qubit("true")
+                    selected = qmc.measure(true_q)
+                else:
+                    false_q = qmc.qubit("false")
+                    selected = qmc.measure(false_q)
+            else:
+                outer_false_q = qmc.qubit("outer_false")
+                selected = qmc.measure(outer_false_q)
+            return selected
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(
+            transpiler.executor(),
+            bindings={},
+            shots=100,
+        ).result()
+
+        assert result.results == [(0, 100)]
+
     def test_branch_local_runtime_bit_merge_executes(self):
         """A merge of branch-local fresh measurements still executes correctly.
 
@@ -2534,6 +2771,218 @@ class TestLoopIndexedMeasuredBitMerge:
             assert value == 1, result.results
             assert count > 0
         assert sum(count for _, count in result.results) == 100
+
+    def test_branch_local_multi_output_alias_partition_mismatch_is_rejected(self):
+        """Different source-sharing patterns cannot preserve both outputs.
+
+        The true branch assigns one measurement to both outputs, whereas the
+        false branch assigns two distinct measurements. Per-output aliasing
+        would collapse the false measurements onto one clbit and silently
+        replace the first result with the second.
+        """
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            selector_q = qmc.qubit("selector")
+            selector = qmc.measure(selector_q)
+            if selector:
+                true_q = qmc.qubit("true")
+                shared = qmc.measure(true_q)
+                first = shared
+                second = shared
+            else:
+                first_q = qmc.qubit("first")
+                first = qmc.measure(first_q)
+                second_q = qmc.qubit("second")
+                second_q = qmc.x(second_q)
+                second = qmc.measure(second_q)
+            return first, second
+
+        with pytest.raises(EmitError, match="incompatible clbit alias pattern"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_preexisting_and_branch_local_bit_merge_is_rejected(self):
+        """A fresh branch measurement cannot overwrite a live earlier clbit.
+
+        The false branch executes deterministically and measures ``fresh_q``
+        into the merged output. Aliasing that write onto ``prior`` would also
+        change the independently returned earlier measurement from one to
+        zero, so mixed provenance must be rejected before circuit execution.
+        """
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            prior_q = qmc.qubit("prior")
+            prior_q = qmc.x(prior_q)
+            prior = qmc.measure(prior_q)
+            selector_q = qmc.qubit("selector")
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = prior
+            else:
+                work = qmc.z(work)
+                fresh_q = qmc.qubit("fresh")
+                selected = qmc.measure(fresh_q)
+            if selected:
+                work = qmc.x(work)
+            return prior, qmc.measure(work)
+
+        with pytest.raises(EmitError, match="mixes a pre-existing clbit"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_dead_preexisting_and_branch_local_bit_merge_executes(self):
+        """A dead prior measurement may safely become the merge clbit."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            prior_q = qmc.qubit("prior")
+            prior_q = qmc.x(prior_q)
+            prior = qmc.measure(prior_q)
+            selector = qmc.measure(qmc.qubit("selector"))
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = prior
+            else:
+                work = qmc.z(work)
+                selected = qmc.measure(qmc.qubit("fresh"))
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [(0, 50)]
+
+    def test_dead_preexisting_and_branch_local_bit_vector_merge_executes(self):
+        """A dead prior measured region may back a fresh vector merge."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            prior_q = qmc.qubit_array(2, "prior")
+            prior_q[0] = qmc.x(prior_q[0])
+            prior = qmc.measure(prior_q)
+            selector = qmc.measure(qmc.qubit("selector"))
+            if selector:
+                selected = prior
+            else:
+                fresh_q = qmc.qubit_array(2, "fresh")
+                fresh_q[1] = qmc.x(fresh_q[1])
+                selected = qmc.measure(fresh_q)
+            return selected
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [((0, 1), 50)]
+
+    def test_branch_local_project_bit_merge_executes(self):
+        """Projection results created in both branches have fresh provenance."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            selector = qmc.measure(qmc.qubit("selector"))
+            probe = qmc.qubit("probe")
+            if selector:
+                probe, selected = qmc.project_z(probe)
+            else:
+                probe, selected = qmc.project_z(probe)
+            return selected
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [(0, 50)]
+
+    def test_branch_local_measured_vector_element_merge_executes(self):
+        """Elements of branch-local measured vectors retain fresh provenance."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            selector = qmc.measure(qmc.qubit("selector"))
+            if selector:
+                true_q = qmc.qubit_array(2, "true")
+                true_bits = qmc.measure(true_q)
+                selected = true_bits[1]
+            else:
+                false_q = qmc.qubit_array(2, "false")
+                false_q[1] = qmc.x(false_q[1])
+                false_bits = qmc.measure(false_q)
+                selected = false_bits[1]
+            return selected
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [(1, 50)]
+
+    def test_classical_boundary_keeps_prior_measurement_live(self):
+        """A post-quantum expression keeps its measurement input live."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            prior_q = qmc.qubit("prior")
+            prior_q = qmc.x(prior_q)
+            prior = qmc.measure(prior_q)
+            selector = qmc.measure(qmc.qubit("selector"))
+            if selector:
+                selected = prior
+            else:
+                selected = qmc.measure(qmc.qubit("fresh"))
+            return prior & selected
+
+        with pytest.raises(EmitError, match="mixes a pre-existing clbit"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_nested_loop_prefix_keeps_prior_measurement_live(self):
+        """An outer next-iteration prefix is live across an inner merge."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            prior_q = qmc.qubit("prior")
+            prior_q = qmc.x(prior_q)
+            prior = qmc.measure(prior_q)
+            selector = qmc.measure(qmc.qubit("selector"))
+            work = qmc.qubit("work")
+            for _i in qmc.range(2):
+                if prior:
+                    work = qmc.x(work)
+                for _j in qmc.range(2):
+                    if selector:
+                        work = qmc.z(work)
+                        selected = prior
+                    else:
+                        work = qmc.z(work)
+                        selected = qmc.measure(qmc.qubit("fresh"))
+                    if selected:
+                        work = qmc.x(work)
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="mixes a pre-existing clbit"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_preexisting_and_branch_local_bit_vector_merge_is_rejected(self):
+        """A fresh vector measurement cannot overwrite a live prior region."""
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            prior_q = qmc.qubit_array(2, "prior")
+            prior_q[0] = qmc.x(prior_q[0])
+            prior = qmc.measure(prior_q)
+            selector_q = qmc.qubit("selector")
+            selector = qmc.measure(selector_q)
+            if selector:
+                selected = prior
+            else:
+                fresh_q = qmc.qubit_array(2, "fresh")
+                selected = qmc.measure(fresh_q)
+            return prior[0], selected[0]
+
+        with pytest.raises(EmitError, match="mixes a pre-existing clbit"):
+            QiskitTranspiler().transpile(circuit)
 
     def test_static_if_loop_indexed_merge_reregisters_per_iteration(self):
         """A compile-time-if per unrolled iteration re-points its merged bit.
@@ -3371,6 +3820,120 @@ class TestControlFlowWhileStructure:
                 f"Expected all shots to return 0 but got value={value} "
                 f"({count} shots). While + if-only loop is not terminating."
             )
+
+    def test_while_condition_cannot_select_foreign_measured_bit(self):
+        """A loop condition cannot copy a pre-measured foreign clbit."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            other = qmc.measure(qmc.qubit("other"))
+            work = qmc.qubit("work")
+            while run:
+                work = qmc.x(work)
+                run = other
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="not the current condition"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_while_condition_merge_cannot_hide_foreign_measured_bit(self):
+        """A branch merge cannot disguise a foreign condition source."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            other = qmc.measure(qmc.qubit("other"))
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            while run:
+                work = qmc.x(work)
+                if selector:
+                    run = other
+                else:
+                    run = qmc.measure(qmc.qubit("stop"))
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="not the current condition"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_while_condition_snapshot_live_after_update_is_rejected(self):
+        """A condition update cannot mutate an independently live snapshot."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            out = qmc.qubit("out")
+            while run:
+                old = run
+                if selector:
+                    run = qmc.measure(qmc.qubit("stop"))
+                if old:
+                    out = qmc.x(out)
+            return qmc.measure(out)
+
+        with pytest.raises(ValidationError, match="Loop-carried while-condition"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_while_condition_expression_snapshot_after_update_is_rejected(self):
+        """Lazy expressions of the old condition keep its clbit live."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            out = qmc.qubit("out")
+            while run:
+                old_not = ~run
+                if selector:
+                    run = qmc.measure(qmc.qubit("stop"))
+                if old_not:
+                    out = qmc.x(out)
+            return qmc.measure(out)
+
+        with pytest.raises(ValidationError, match="Loop-carried while-condition"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_while_condition_element_update_keeps_sibling_element_live(self):
+        """Updating flags[0] does not make a later flags[1] read stale."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            flag_q = qmc.qubit_array(2, "flags")
+            flag_q[0] = qmc.x(flag_q[0])
+            flag_q[1] = qmc.x(flag_q[1])
+            flags = qmc.measure(flag_q)
+            run = flags[0]
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            out = qmc.qubit("out")
+            while run:
+                if selector:
+                    run = qmc.measure(qmc.qubit("stop"))
+                if flags[1]:
+                    out = qmc.x(out)
+            return qmc.measure(out)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [(1, 50)]
 
     def test_while_loop_with_nested_if_only_no_else(self):
         """While loop with nested if-only (no else): clbit count must not leak.

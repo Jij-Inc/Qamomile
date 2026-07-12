@@ -58,7 +58,6 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     QubitAddress,
     QubitMap,
     ValueResolver,
-    resolve_condition_address,
     resolve_if_condition,
 )
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
@@ -1003,6 +1002,10 @@ def _collect_loop_carried_clbits(
     Returns:
         set[int]: Physical clbit indices that back a while-loop condition.
     """
+    from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
+        resolve_condition_address_detailed,
+    )
+
     result: set[int] = set()
     for op in operations:
         if isinstance(op, WhileOperation) and op.operands:
@@ -1012,13 +1015,35 @@ def _collect_loop_carried_clbits(
                 # Forward the real bindings / resolver so a Vector[Bit]
                 # element indexed by a bound parameter resolves to its
                 # (parent_array, index) clbit key; an index that is still
-                # unresolved here (e.g. an outer loop variable not yet
-                # bound at pre-scan time) falls back to the scalar UUID.
-                cond_addr = resolve_condition_address(cond_val, bindings, resolver)
+                # unresolved here (e.g. an outer loop variable not yet bound
+                # at pre-scan time) conservatively boxes the whole measured
+                # root vector. Emit-time static-loop replay will select one
+                # concrete element per iteration, and every possible target
+                # must use CUDA-Q's mutable singleton-list representation.
+                cond_addr, resolved_as_element = resolve_condition_address_detailed(
+                    cond_val,
+                    bindings,
+                    resolver,
+                )
             else:
                 cond_addr = QubitAddress(str(cond_val))
+                resolved_as_element = False
             if cond_addr in clbit_map:
                 result.add(clbit_map[cond_addr])
+            elif (
+                isinstance(cond_val, Value)
+                and cond_val.parent_array is not None
+                and cond_val.element_indices
+                and not resolved_as_element
+            ):
+                root = cond_val.parent_array
+                while root.slice_of is not None:
+                    root = root.slice_of
+                result.update(
+                    physical
+                    for address, physical in clbit_map.items()
+                    if address.matches_array(root.uuid)
+                )
             # Also scan inside the while body
             result |= _collect_loop_carried_clbits(
                 op.operations, clbit_map, bindings, resolver
@@ -1076,8 +1101,25 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         Determines the execution mode via ``_has_runtime_control_flow``,
         configures the emitter accordingly, emits all operations, and
         finalizes the artifact.
+
+        Args:
+            operations (list[Operation]): Quantum/control-flow operation tree
+                to allocate and emit.
+            bindings (dict[str, Any]): Compile-time and emit-local bindings.
+
+        Returns:
+            tuple[CudaqKernelArtifact, QubitMap, ClbitMap]: Final CUDA-Q
+                artifact and its logical-to-physical resource maps.
+
+        Raises:
+            EmitError: If resource allocation, control flow, or CUDA-Q code
+                generation cannot represent the operation tree safely.
+            RuntimeError: If an invalid pipeline-stage artifact reaches
+                emission or CUDA-Q finalization fails.
+            ValueError: If required loop values cannot be resolved.
         """
         emitter: CudaqKernelEmitter = self._emitter  # type: ignore[assignment]
+        self._overwritten_runtime_condition_sources.clear()
         is_runtime = _has_runtime_control_flow(operations, bindings)
         mode = ExecutionMode.RUNNABLE if is_runtime else ExecutionMode.STATIC
 
@@ -1089,7 +1131,14 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         )
 
         # Allocate resources
-        qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
+        qubit_map, clbit_map = self._allocator.allocate(
+            operations,
+            bindings,
+            public_output_uuids=self._allocator_live_output_refs(),
+        )
+        self._safe_mixed_bit_merge_outputs = (
+            self._allocator.safe_mixed_bit_merge_outputs
+        )
         qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
         clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
 
@@ -1102,6 +1151,7 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         circuit = emitter.create_circuit(qubit_count, clbit_count)
         self._measurement_qubit_map.clear()
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
+        self._reject_overwritten_live_condition_outputs()
 
         # Late-bind parametricity: if all parameters were eliminated by
         # compile-time dead branch removal, the kernel signature must be
@@ -2829,7 +2879,19 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
 
         Both paths return bitstrings in big-endian format (highest qubit
         index = leftmost bit).
+
+        Args:
+            circuit (Any): CUDA-Q kernel artifact to execute.
+            shots (int): Number of measurement shots.
+
+        Returns:
+            dict[str, int]: Canonical big-endian bitstring counts. A zero-qubit,
+                zero-clbit artifact returns ``{"": shots}`` without invoking
+                the CUDA-Q runtime.
         """
+        if circuit.num_qubits == 0 and circuit.num_clbits == 0:
+            return {"": shots}
+
         mode = getattr(circuit, "execution_mode", ExecutionMode.STATIC)
         if mode == ExecutionMode.RUNNABLE:
             return self._execute_runtime(circuit, shots)
