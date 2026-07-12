@@ -3,6 +3,7 @@ import contextlib
 import contextvars
 import copy
 import dataclasses
+import struct
 import typing
 
 from qamomile.circuit.frontend.func_to_block import handle_type_map, is_array_type
@@ -557,8 +558,10 @@ def _same_plain_scalar(true_val: typing.Any, false_val: typing.Any) -> bool:
 
     Returns:
         bool: True when both values are plain scalars of the exact same
-            type comparing equal (a NaN float compares unequal and
-            therefore still promotes).
+            type comparing equal. Floats compare bit-exactly (matching
+            ``_same_exact_typed_constant`` on the analyze side): a NaN
+            float and a ``0.0`` / ``-0.0`` pair both still promote, so
+            no sign bit or payload is frozen to one branch's value.
     """
     if isinstance(true_val, (Handle, Value)) or isinstance(false_val, (Handle, Value)):
         return False
@@ -566,6 +569,8 @@ def _same_plain_scalar(true_val: typing.Any, false_val: typing.Any) -> bool:
         return False
     if type(true_val) is not type(false_val):
         return False
+    if isinstance(true_val, float):
+        return struct.pack("!d", true_val) == struct.pack("!d", false_val)
     return true_val == false_val
 
 
