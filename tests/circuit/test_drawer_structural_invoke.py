@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 
@@ -16,15 +16,18 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
     signature_from_values,
 )
+from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
 )
+from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     GateOperation,
     GateOperationType,
+    MeasureQFixedOperation,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
@@ -36,6 +39,8 @@ from qamomile.circuit.ir.types.primitives import (
     QubitType,
     UIntType,
 )
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
+from qamomile.circuit.ir.types.q_register import QFixedType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
@@ -1234,6 +1239,149 @@ def _build_unresolved_widened_slice_output_graph() -> Block:
     )
 
 
+def _build_folded_qfixed_measure_if_graph() -> Block:
+    """Build a folded IF whose branches measure a two-qubit QFixed carrier.
+
+    Returns:
+        Block: Graph whose folded footprint must contain both carrier wires.
+    """
+    size = Value(type=UIntType(), name="size").with_const(2)
+    qubits = ArrayValue(type=QubitType(), name="q", shape=(size,))
+    qfixed = Value(type=QFixedType(), name="qf").with_cast_metadata(
+        source_uuid=qubits.uuid,
+        qubit_uuids=[],
+        source_logical_id=qubits.logical_id,
+        qubit_logical_ids=[
+            f"{qubits.logical_id}_0",
+            f"{qubits.logical_id}_1",
+        ],
+    )
+    cast_op = CastOperation(
+        operands=[qubits],
+        results=[qfixed],
+        source_type=qubits.type,
+        target_type=qfixed.type,
+    )
+    condition = Value(type=BitType(), name="cond").with_parameter("cond")
+
+    def measure(result_name: str) -> MeasureQFixedOperation:
+        """Build one branch-local QFixed measurement.
+
+        Args:
+            result_name (str): Display name for the classical result.
+
+        Returns:
+            MeasureQFixedOperation: Two-carrier measurement operation.
+        """
+        return MeasureQFixedOperation(
+            operands=[qfixed],
+            results=[Value(type=FloatType(), name=result_name)],
+            num_bits=2,
+            int_bits=0,
+        )
+
+    branch = IfOperation(
+        operands=[condition],
+        true_operations=[measure("true_value")],
+        false_operations=[measure("false_value")],
+    )
+    return Block(
+        name="folded_qfixed_measure_if",
+        operations=[QInitOperation(results=[qubits]), cast_op, branch],
+    )
+
+
+def _build_folded_expval_if_graph() -> Block:
+    """Build a folded IF whose branches evaluate a two-qubit observable.
+
+    Returns:
+        Block: Graph whose folded footprint must contain both input wires.
+    """
+    size = Value(type=UIntType(), name="size").with_const(2)
+    qubits = ArrayValue(type=QubitType(), name="q", shape=(size,))
+    observable = Value(type=ObservableType(), name="H").with_parameter("H")
+    condition = Value(type=BitType(), name="cond").with_parameter("cond")
+
+    def expval(result_name: str) -> ExpvalOp:
+        """Build one branch-local expectation-value operation.
+
+        Args:
+            result_name (str): Display name for the classical result.
+
+        Returns:
+            ExpvalOp: Expectation-value operation over the full register.
+        """
+        return ExpvalOp(
+            operands=[qubits, observable],
+            results=[Value(type=FloatType(), name=result_name)],
+        )
+
+    branch = IfOperation(
+        operands=[condition],
+        true_operations=[expval("true_value")],
+        false_operations=[expval("false_value")],
+    )
+    return Block(
+        name="folded_expval_if",
+        operations=[QInitOperation(results=[qubits]), branch],
+    )
+
+
+def _build_folded_selected_control_if_graph() -> Block:
+    """Build a folded IF containing a non-contiguous control selection.
+
+    Returns:
+        Block: Graph whose inactive control-pool wire must stay outside the
+            folded footprint.
+    """
+    pool_size = Value(type=UIntType(), name="pool_size").with_const(4)
+    pool = ArrayValue(type=QubitType(), name="pool", shape=(pool_size,))
+    target = Value(type=QubitType(), name="target")
+    formal_target = Value(type=QubitType(), name="target")
+    formal_result = formal_target.next_version()
+    body = Block(
+        name="selected_control_body",
+        label_args=["target"],
+        input_values=[formal_target],
+        output_values=[formal_result],
+        output_names=["target"],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [formal_target],
+                [formal_result],
+            ),
+            ReturnOperation(operands=[formal_result]),
+        ],
+    )
+    selected = tuple(
+        Value(type=UIntType(), name=f"selected_{index}").with_const(index)
+        for index in (0, 1, 3)
+    )
+    controlled = SymbolicControlledU(
+        operands=[pool, target],
+        results=[pool.next_version(), target.next_version()],
+        block=body,
+        num_controls=Value(type=UIntType(), name="num_controls").with_const(3),
+        control_indices=selected,
+        num_control_args=1,
+    )
+    condition = Value(type=BitType(), name="cond").with_parameter("cond")
+    branch = IfOperation(
+        operands=[condition],
+        true_operations=[controlled],
+        false_operations=[],
+    )
+    return Block(
+        name="folded_selected_control_if",
+        operations=[
+            QInitOperation(results=[pool]),
+            QInitOperation(results=[target]),
+            branch,
+        ],
+    )
+
+
 def _build_opaque_widening_result_graph(
     *,
     occupy_next_wire: bool = False,
@@ -2281,6 +2429,54 @@ def test_unresolved_widened_slice_output_preserves_alias_provenance() -> None:
     assert [
         gate.qubit_indices for gate in gates if gate.gate_type is GateOperationType.Z
     ] == [[5]]
+
+
+@pytest.mark.parametrize(
+    ("graph_builder", "expected_expression"),
+    [
+        (_build_folded_qfixed_measure_if_graph, "measure(qf)"),
+        (_build_folded_expval_if_graph, "expval(q, H)"),
+    ],
+)
+def test_folded_if_hybrid_operations_keep_footprint_and_body_text(
+    graph_builder: Callable[[], Block],
+    expected_expression: str,
+) -> None:
+    """Folded hybrid operations retain every wire and visible expression."""
+    graph = graph_builder()
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, fold_ifs=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 2
+    [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
+    assert folded.affected_qubits == [0, 1]
+    assert folded.affected_qubits_precise
+    assert sum(expected_expression in line for line in folded.body_lines) == 2
+
+
+def test_folded_if_selected_controls_exclude_inactive_pool_wires() -> None:
+    """A folded controlled operation uses its selected control footprint."""
+    graph = _build_folded_selected_control_if_graph()
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, fold_ifs=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 5
+    [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
+    assert folded.affected_qubits == [0, 1, 3, 4]
+    assert folded.affected_qubits_precise
+    assert 2 not in folded.affected_qubits
 
 
 def test_legacy_stack_parameter_name_does_not_shadow_compile_time_binding() -> None:
