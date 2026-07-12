@@ -34,6 +34,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     GateOperationType,
     MeasureQFixedOperation,
+    MeasureVectorOperation,
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
@@ -1161,6 +1162,47 @@ def _build_unresolved_widened_control_graph(selected_index: int) -> Block:
         num_control_args=1,
     )
     graph.operations.extend([QInitOperation(results=[target]), controlled])
+    return graph
+
+
+def _build_unresolved_widened_measure_condition_graph() -> Block:
+    """Build an IF conditioned on slot zero of a marker-backed measurement.
+
+    Returns:
+        Block: Graph whose condition source is every unresolved root candidate,
+            excluding the exact widening suffix at semantic slot two.
+    """
+    graph = _build_nested_unresolved_slice_widening_graph("opaque")
+    forwarding_call = graph.operations[-2]
+    assert isinstance(forwarding_call, InvokeOperation), (
+        "[FOR DEVELOPER] The widening fixture must contain an opaque forward."
+    )
+    measured_qubits = forwarding_call.results[0]
+    assert isinstance(measured_qubits, ArrayValue), (
+        "[FOR DEVELOPER] The opaque forward must return an ArrayValue."
+    )
+    bits = ArrayValue(
+        type=BitType(),
+        name="bits",
+        shape=measured_qubits.shape,
+    )
+    measure = MeasureVectorOperation(
+        operands=[measured_qubits],
+        results=[bits],
+    )
+    zero = Value(type=UIntType(), name="zero").with_const(0)
+    condition = Value(
+        type=BitType(),
+        name="bits[0]",
+        parent_array=bits,
+        element_indices=(zero,),
+    )
+    branch = IfOperation(
+        operands=[condition],
+        true_operations=[],
+        false_operations=[],
+    )
+    graph.operations.extend([measure, branch])
     return graph
 
 
@@ -2689,6 +2731,36 @@ def test_unresolved_widened_control_indices_preserve_alias_semantics(
     assert controlled.affected_qubits == [*expected_controls, 6]
 
 
+def test_unresolved_widened_measure_condition_keeps_candidate_sources() -> None:
+    """A measured unknown slot keeps candidates and suppresses precision."""
+    graph = _build_unresolved_widened_measure_condition_graph()
+    analyzer = CircuitAnalyzer(
+        graph,
+        DEFAULT_STYLE,
+        inline=True,
+        fold_ifs=True,
+    )
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 6
+    [measurement] = [
+        node
+        for node in circuit.children
+        if isinstance(node, VGate) and node.label == "M"
+    ]
+    assert measurement.qubit_indices == list(range(6))
+    [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
+    assert folded.condition_measure_qubit_indices == list(range(5))
+    assert folded.affected_qubits == list(range(5))
+    assert not folded.affected_qubits_precise
+
+
 def test_unresolved_widened_slice_output_preserves_alias_provenance() -> None:
     """A returned derived slice keeps unknown roots and its exact suffix."""
     graph = _build_unresolved_widened_slice_output_graph()
@@ -2962,7 +3034,7 @@ def test_folded_while_uses_nested_loop_footprint() -> None:
     assert num_qubits == 4
     [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
     assert folded.affected_qubits == [0, 1]
-    assert not folded.affected_qubits_precise
+    assert folded.affected_qubits_precise
 
 
 def test_legacy_stack_parameter_name_does_not_shadow_compile_time_binding() -> None:
