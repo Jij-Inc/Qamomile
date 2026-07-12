@@ -2154,9 +2154,13 @@ class ResourceInterpreter:
             controls (ResourceExpr | int): Surrounding controls.
 
         Returns:
-            ResourceEstimate: Sequential composition of every concrete entry.
+            ResourceEstimate: Per-entry composition — gates, depth, and
+                calls accumulate sequentially, while width is the
+                per-entry maximum (loop iterations reuse wires, exactly
+                like ``repeat``).
         """
         estimate = ResourceEstimate.zero()
+        iteration_width = WidthResources.zero()
         for key, value in entries:
             child = resolver.child_scope(
                 inner_block=_LocalBlock(operation.operations),
@@ -2166,14 +2170,18 @@ class ResourceInterpreter:
                     value,
                 ),
             )
-            estimate = estimate.seq(
-                self.eval_operations(
-                    operation.operations,
-                    child,
-                    controls=controls,
-                )
+            entry_estimate = self.eval_operations(
+                operation.operations,
+                child,
+                controls=controls,
             )
-        return estimate
+            estimate = estimate.seq(entry_estimate)
+            iteration_width = _max_width(iteration_width, entry_estimate.width)
+        # ``seq`` sums allocated_qubits across entries, but the emitted
+        # circuit resets and reuses dead wires between iterations; keep
+        # the sequential gate/depth/call totals and take the per-entry
+        # width maximum instead, mirroring ``repeat``'s reuse semantics.
+        return dataclasses.replace(estimate, width=iteration_width)
 
     def _eval_concrete_region_for_items(
         self,

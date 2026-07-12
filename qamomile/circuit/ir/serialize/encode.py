@@ -1150,6 +1150,10 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
             ``loop_var_value_ref`` (or ``None``), the
             ``loop_carried_rebinds`` and ``region_args`` record lists,
             and ``body`` op list.
+
+    Raises:
+        ValueError: If the loop's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
     """
     validate_region_args(op)
     d = _base_op_dict("ForOperation", op)
@@ -1174,6 +1178,10 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
         dict[str, Any]: Base op dict plus display key/value var names,
             their UUID refs (or ``None`` for legacy IR), the
             ``key_is_vector`` flag, and the ``body`` op list.
+
+    Raises:
+        ValueError: If the loop's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
     """
     validate_region_args(op)
     d = _base_op_dict("ForItemsOperation", op)
@@ -1203,6 +1211,10 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
         dict[str, Any]: Base op dict plus ``max_iterations``, the
             ``loop_carried_rebinds`` and ``region_args`` record lists,
             and the loop ``body``.
+
+    Raises:
+        ValueError: If the loop's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
     """
     validate_region_args(op)
     d = _base_op_dict("WhileOperation", op)

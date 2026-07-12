@@ -10,7 +10,7 @@ import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle.primitives import Bit, UInt
 from qamomile.circuit.frontend.operation.control_flow import emit_if
 from qamomile.circuit.frontend.tracer import Tracer, trace
-from qamomile.circuit.ir.operation.control_flow import ForItemsOperation, IfOperation
+from qamomile.circuit.ir.operation.control_flow import ForItemsOperation
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import DependencyError
@@ -293,8 +293,15 @@ def test_plain_scalar_compile_time_branch_selects_bound_side(
     assert _sample_single(_plain_uint_compile_time_branch, {"flag": flag}) == expected
 
 
-def test_equal_plain_scalars_are_promoted_to_a_represented_merge() -> None:
-    """Equal plain scalars still become an explicit runtime-capable merge."""
+def test_equal_plain_scalars_pass_through_unpromoted() -> None:
+    """Equal plain scalars stay plain Python values across the if.
+
+    Both branches yielding the exact same typed scalar cannot diverge at
+    runtime, so no merge is represented and the caller keeps a genuine
+    Python value — trace-time interop (list indexing, builtin range)
+    must keep working for values that merely live across an if.
+    Divergent plain scalars are covered by the promotion tests above.
+    """
     condition = Bit(value=Value(type=BitType(), name="condition"))
     tracer = Tracer()
 
@@ -306,12 +313,30 @@ def test_equal_plain_scalars_are_promoted_to_a_represented_merge() -> None:
             [],
         )
 
-    assert isinstance(merged, UInt)
-    branch = tracer.operations[-1]
-    assert isinstance(branch, IfOperation)
-    assert len(branch.results) == 1
-    assert branch.true_yields[0].get_const() == 7
-    assert branch.false_yields[0].get_const() == 7
+    assert merged == 7
+    assert isinstance(merged, int)
+    assert not isinstance(merged, UInt)
+
+
+def test_equal_value_different_type_scalars_still_promote() -> None:
+    """`True` vs `1` compare equal but differ in type: not a passthrough.
+
+    The equal-scalar passthrough requires the exact same Python type, so
+    this pair still goes through promotion, where the Bit/UInt type
+    mismatch is rejected exactly like any divergent-type branch pair.
+    """
+    condition = Bit(value=Value(type=BitType(), name="condition"))
+
+    with (
+        trace(Tracer()),
+        pytest.raises(TypeError, match="Type mismatch in if-else branches"),
+    ):
+        emit_if(
+            lambda: condition,
+            lambda: True,
+            lambda: 1,
+            [],
+        )
 
 
 def test_identical_opaque_branch_value_is_safe_passthrough() -> None:
@@ -429,3 +454,30 @@ def test_bit_item_value_placeholder_is_typed_bit() -> None:
     loop = next(op for op in block.operations if isinstance(op, ForItemsOperation))
     assert isinstance(loop.value_var_value.type, BitType)
     assert _sample_single(kernel, {"items": {0: True}}) == 1
+
+
+_APPLY_X_BEFORE_ROTATION = True
+
+
+def test_plain_scalar_across_if_keeps_python_interop() -> None:
+    """A plain int living across an if still drives Python-level indexing.
+
+    ``n`` is not yielded differently by any branch — it merely lives
+    across the if. The equal-scalar passthrough must hand the code after
+    the if a genuine Python ``int`` so ``angles[n]`` (Python list
+    indexing) keeps working; a promoted symbolic handle raises
+    ``TypeError`` at trace time. The x + rx(0.0) body pins the executed
+    value deterministically.
+    """
+
+    @qmc.qkernel
+    def kernel(dummy: qmc.UInt) -> qmc.Bit:
+        angles = [0.1, 0.0, 0.3]
+        n = 1
+        q = qmc.qubit("q")
+        if _APPLY_X_BEFORE_ROTATION:
+            q = qmc.x(q)
+        q = qmc.rx(q, angles[n])
+        return qmc.measure(q)
+
+    assert _sample_single(kernel, {"dummy": 0}) == 1

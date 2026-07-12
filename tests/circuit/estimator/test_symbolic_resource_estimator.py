@@ -799,3 +799,32 @@ def test_controlled_composite_body_counts_own_control() -> None:
     # The control turns the single-qubit H into a two-qubit controlled gate.
     assert ctrl.gates.single_qubit == 0
     assert ctrl.gates.two_qubit == 1
+
+
+def test_for_items_width_reuses_wires_across_entries() -> None:
+    """A bound items loop's width is the per-entry max, not the entry sum.
+
+    Each entry's body allocates one fresh qubit, but the emitted circuit
+    resets and reuses dead wires between iterations — exactly like
+    ``repeat``. Sequential composition alone would report
+    1 (outs) + 2 (one fresh per entry) == 3 qubits; the loop must
+    report 2, matching the emitted circuit.
+    """
+
+    @qm.qkernel
+    def circuit(data: qm.Dict[qm.UInt, qm.Float]) -> qm.Vector[qm.Bit]:
+        """Rotate one fresh qubit per entry against a persistent register."""
+        outs = qm.qubit_array(1, "outs")
+        for _key, val in qm.items(data):
+            fresh = qm.qubit("fresh")
+            fresh = qm.rx(fresh, val)
+            outs[0], fresh = qm.cx(outs[0], fresh)
+            qm.measure(fresh)
+        return qm.measure(outs)
+
+    estimate = circuit.estimate_resources(inputs={"data": {1: 0.5, 2: 1.5}})
+
+    assert estimate.qubits == 2
+    # Gates still accumulate sequentially across entries: one rx + one
+    # cx per entry.
+    assert estimate.gates.total >= 4

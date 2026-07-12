@@ -123,7 +123,9 @@ def canonicalize(block: Block) -> Block:
             manifest (carried over verbatim) are preserved.
 
     Raises:
-        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
+        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``,
+            or if a loop operation's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
         NotImplementedError: If an unsupported operation is encountered.
 
     Example:
@@ -159,7 +161,9 @@ def canonicalize_and_remap(
             tracked in separate maps.
 
     Raises:
-        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
+        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``,
+            or if a loop operation's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
         NotImplementedError: If an unsupported operation is encountered.
     """
     if block.kind not in _SUPPORTED_KINDS:
@@ -671,32 +675,18 @@ def _token(obj: Any) -> str:
         return _value_token(obj)
     if isinstance(obj, ValueType):
         return f"Type<{obj.label()}>"
-    if isinstance(obj, RegionArg):
-        # ``var_name`` is a diagnostic label; only the four SSA identities
-        # participate in loop semantics.
-        return (
-            "RegionArg("
-            f"init={_token(obj.init)},"
-            f"block_arg={_token(obj.block_arg)},"
-            f"yielded={_token(obj.yielded)},"
-            f"result={_token(obj.result)})"
+    if isinstance(obj, (RegionArg, LoopCarriedRebind, BranchRebind)):
+        # ``var_name`` is a display-only diagnostic label and must not
+        # perturb content identity; every other field participates.
+        # Iterate the dataclass fields dynamically so a functional field
+        # added later is hashed automatically instead of being silently
+        # ignored by a hand-frozen list.
+        parts = ",".join(
+            f"{field.name}={_token(getattr(obj, field.name))}"
+            for field in dataclasses.fields(obj)
+            if field.name != "var_name"
         )
-    if isinstance(obj, LoopCarriedRebind):
-        # ``var_name`` is display-only and must not perturb content identity.
-        return (
-            "LoopCarriedRebind("
-            f"before={_token(obj.before)},"
-            f"after={_token(obj.after)},"
-            f"before_synthesized={_token(obj.before_synthesized)})"
-        )
-    if isinstance(obj, BranchRebind):
-        # ``var_name`` is display-only and must not perturb content identity.
-        return (
-            "BranchRebind("
-            f"before={_token(obj.before)},"
-            f"rebound_in_true={_token(obj.rebound_in_true)},"
-            f"rebound_in_false={_token(obj.rebound_in_false)})"
-        )
+        return f"{type(obj).__name__}({parts})"
     if isinstance(obj, (list, tuple)):
         return "[" + ",".join(_token(x) for x in obj) + "]"
     if isinstance(obj, dict):

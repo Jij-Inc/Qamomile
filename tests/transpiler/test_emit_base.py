@@ -1653,3 +1653,58 @@ class TestEmitArrayElementResolution:
         results = exe.sample(transpiler.executor(), shots=200).result().results
 
         assert results == [((1,), 200)]
+
+
+class TestAllocatorAnalysisStateIsolation:
+    """Nested allocations must not leak analysis state into the segment.
+
+    ``allocate`` recomputes the measurement-taint set, the safe
+    mixed-merge allowlist, and the monotonic counters for the operation
+    list it receives. Controlled-block / native-inverse emission reuses
+    the segment allocator on a sub-block mid-emission; without the
+    ``preserving_analysis_state`` snapshot, later
+    ``resolve_iteration_maps`` replays of the enclosing segment consult
+    the sub-block's (typically empty) sets — silently disarming the
+    runtime-mux guards.
+    """
+
+    def test_preserving_analysis_state_restores_segment_sets(self) -> None:
+        """The context manager restores every analysis field on exit."""
+        from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+            ResourceAllocator,
+        )
+
+        allocator = ResourceAllocator()
+        allocator._measurement_tainted = {"segment-tainted-uuid"}
+        allocator._safe_mixed_bit_merge_outputs = frozenset({"segment-safe-uuid"})
+        allocator._next_qubit_index = 5
+        allocator._next_clbit_index = 3
+
+        with allocator.preserving_analysis_state():
+            allocator._measurement_tainted = set()
+            allocator._safe_mixed_bit_merge_outputs = frozenset()
+            allocator._next_qubit_index = 0
+            allocator._next_clbit_index = 0
+
+        assert allocator._measurement_tainted == {"segment-tainted-uuid"}
+        assert allocator._safe_mixed_bit_merge_outputs == frozenset(
+            {"segment-safe-uuid"}
+        )
+        assert allocator._next_qubit_index == 5
+        assert allocator._next_clbit_index == 3
+
+    def test_preserving_analysis_state_restores_on_error(self) -> None:
+        """State is restored even when the nested work raises."""
+        from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+            ResourceAllocator,
+        )
+
+        allocator = ResourceAllocator()
+        allocator._measurement_tainted = {"segment-tainted-uuid"}
+
+        with pytest.raises(RuntimeError, match="nested failure"):
+            with allocator.preserving_analysis_state():
+                allocator._measurement_tainted = set()
+                raise RuntimeError("nested failure")
+
+        assert allocator._measurement_tainted == {"segment-tainted-uuid"}

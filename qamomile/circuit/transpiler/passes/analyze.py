@@ -660,6 +660,21 @@ def _loop_carried_rebind_error(var_name: str, loop_kind: str) -> ValidationError
     Returns:
         ValidationError: The error to raise.
     """
+    if loop_kind == "while":
+        # No while shape is promotable: a runtime trip count cannot
+        # thread classical values between iterations, so the only legal
+        # carried update is the loop-condition pair itself.
+        return ValidationError(
+            f"Loop-carried update of classical variable '{var_name}' "
+            f"inside a qkernel while loop is not supported: a while "
+            f"loop's trip count is a runtime measurement outcome, so no "
+            f"classical value can be threaded between its iterations "
+            f"(only the `while bit:` condition variable itself may be "
+            f"re-measured in the body). Compute the reduction in "
+            f"ordinary Python — outside the qkernel or in an "
+            f"undecorated helper function — or restructure the loop as "
+            f"a compile-time-bounded qmc.range loop."
+        )
     return ValidationError(
         f"Loop-carried update of classical variable '{var_name}' inside a "
         f"qkernel {loop_kind} loop is not supported for this update's "
@@ -1054,13 +1069,24 @@ def _check_loop_carried_rebinds(
             isinstance(loop_op, WhileOperation)
             and len(loop_op.operands) >= 2
             and record.after.uuid == loop_op.operands[1].uuid
+            and (
+                record.before_synthesized
+                or record.before.uuid == loop_op.operands[0].uuid
+            )
         ):
             # The frontend may synthesize ``record.before`` when the
             # Python initial condition is a plain bool, so its UUID need
             # not equal operands[0].  This is still the condition-update
             # record: defer it to ValidateWhileContractPass, which emits
             # the precise diagnostic when that initial operand is not a
-            # measurement-backed Bit.
+            # measurement-backed Bit. The ``before`` requirement keeps
+            # the exemption to the condition variable itself: a SECOND
+            # variable rebound to the same in-body measurement
+            # (``saved = bit``) shares the ``after`` UUID but not the
+            # ``before``, and its post-loop read would observe the
+            # final measurement instead of its pre-loop snapshot on the
+            # always-live zero-trip path — it falls through to the
+            # Bit-family rejection below.
             continue
 
         canon_uuid = canonical(record.after.uuid)
@@ -1181,6 +1207,17 @@ def _check_loop_carried_rebinds(
         # embedded constant with no uuid, so the AST-certified
         # read-before-write is the evidence.
         if record.before_synthesized:
+            raise _loop_carried_rebind_error(record.var_name, loop_kind)
+
+        # While bodies get no RegionArg promotion — a runtime trip count
+        # cannot thread a classical value between iterations — and every
+        # while loop has an always-live zero-trip path, so the
+        # trip-count acceptance can never apply either. For / for-items
+        # records reaching this fall-through are store-only shapes the
+        # per-iteration emit scope can represent; for a while loop the
+        # same shape surfaces the traced body value (or nothing) after
+        # the loop, so it stays rejected.
+        if isinstance(loop_op, WhileOperation):
             raise _loop_carried_rebind_error(record.var_name, loop_kind)
 
 

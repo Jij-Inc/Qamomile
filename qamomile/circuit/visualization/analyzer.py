@@ -3184,9 +3184,17 @@ class CircuitAnalyzer:
 
         Returns:
             bool: True when the complete loop was replayed and its results
-                were published, otherwise False for a symbolic or over-budget
+                were published (trivially so for a loop that carries
+                nothing), otherwise False for a symbolic or over-budget
                 loop.
         """
+        if not op.region_args:
+            # Nothing to publish: every replayed value lands in a
+            # per-iteration scratch environment that is discarded, and
+            # nested carries only escape through THIS loop's region
+            # results. Skipping avoids the multiplicative replay cost
+            # for deeply nested concrete loops that carry nothing.
+            return True
         start, stop, step = self._evaluate_loop_range(op, param_values)
         if stop is None:
             return False
@@ -3231,9 +3239,13 @@ class CircuitAnalyzer:
 
         Returns:
             bool: True when every entry was replayed and results were
-                published, otherwise False for an unbound or over-budget
-                dictionary.
+                published (trivially so for a loop that carries nothing),
+                otherwise False for an unbound or over-budget dictionary.
         """
+        if not op.region_args:
+            # Mirror _replay_for_value_flow: a carry-less loop publishes
+            # nothing, so the replay is pure discarded scratch work.
+            return True
         dict_value = op.operands[0] if op.operands else None
         if dict_value is None:
             return False

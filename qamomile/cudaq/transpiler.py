@@ -1740,6 +1740,10 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 )
                 continue
             if isinstance(op, ForOperation):
+                # NOTE: no region-arg guard here — this walker only
+                # COLLECTS constant phases (it emits nothing per se), and
+                # carry-dependent bounds/angles already fail closed via
+                # the unresolved-bounds check below.
                 start, stop, step = resolve_loop_bounds(self._resolver, op, bindings)
                 if start is None or stop is None or step is None:
                     if _subtree_drops_constant_phase(
@@ -1974,6 +1978,18 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 )
                 continue
             if isinstance(op, ForOperation):
+                if op.region_args:
+                    # This nested controlled walker replays the body with
+                    # bare loop-variable bindings and has no region-arg
+                    # threading (seed/advance/publish); fail loudly
+                    # instead of surfacing an unbound block_arg as a
+                    # confusing unresolved operand deep in the body.
+                    raise EmitError(
+                        "Loop-carried values inside a controlled block "
+                        "body are not supported on the CUDA-Q nested "
+                        "walker.",
+                        operation="ControlledUOperation",
+                    )
                 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
                     resolve_loop_bounds,
                 )

@@ -1977,12 +1977,24 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         counts, ``IfOperation`` branch-merge yields) count as uses while
         rebind-record values — exposed only for cloning — do not.
 
+        Loop region yields are re-added on top of that: a region's
+        ``yielded`` may be defined OUTSIDE the loop body (the
+        loop-invariant overwrite shape ``x = c``), in which case the
+        region back-edge is the producer's only read. That read is
+        deliberately hidden from read-based *analyses* by
+        ``genuine_input_values``, but liveness must still keep the
+        producer alive — the executors resolve the yield by UUID on
+        every iteration.
+
         Args:
             op (Operation): Operation to inspect.
             used (set[str]): Mutable set of used UUIDs, updated in place.
         """
         for operand in genuine_input_values(op):
             CompileTimeIfLoweringPass._collect_value_uuids(operand, used)
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            for region_arg in op.region_args:
+                CompileTimeIfLoweringPass._collect_value_uuids(region_arg.yielded, used)
 
         # Recurse into control flow (For/ForItems/While/If).
         if isinstance(op, HasNestedOps):

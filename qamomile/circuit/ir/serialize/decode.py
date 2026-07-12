@@ -1408,6 +1408,10 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
     Returns:
         ForItemsOperation: The reconstructed op, including key /
             value identity Values and the recursively-decoded body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _container_operands_results(d, ctx)
     key_refs = d.get("key_var_value_refs")
@@ -1445,6 +1449,10 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
     Returns:
         WhileOperation: The reconstructed op, including the
             recursively-decoded loop body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _operands_results(d, ctx)
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]

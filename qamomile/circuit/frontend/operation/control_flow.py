@@ -540,6 +540,35 @@ def _promote_branch_scalar(value: typing.Any) -> typing.Any:
     return value
 
 
+def _same_plain_scalar(true_val: typing.Any, false_val: typing.Any) -> bool:
+    """Report whether both branch results are the identical plain scalar.
+
+    A plain Python ``bool`` / ``int`` / ``float`` that both branches
+    yield with the exact same type and value cannot diverge at runtime,
+    so it needs no merge and must NOT be promoted: promotion would hand
+    the tracing frame a symbolic handle where the user wrote a plain
+    Python value, breaking trace-time interop (list indexing, builtin
+    ``range``, format strings). Divergent plain scalars still promote —
+    that is the represented-merge fix for the trace-time freeze bug.
+
+    Args:
+        true_val (typing.Any): True branch result slot.
+        false_val (typing.Any): False branch result slot.
+
+    Returns:
+        bool: True when both values are plain scalars of the exact same
+            type comparing equal (a NaN float compares unequal and
+            therefore still promotes).
+    """
+    if isinstance(true_val, (Handle, Value)) or isinstance(false_val, (Handle, Value)):
+        return False
+    if not isinstance(true_val, (bool, int, float)):
+        return False
+    if type(true_val) is not type(false_val):
+        return False
+    return true_val == false_val
+
+
 def _const_int_for_loop_bound(val: typing.Any) -> int | None:
     """Return a concrete loop-bound integer when available.
 
@@ -1747,6 +1776,12 @@ def emit_if(
     false_result = false_result[:n_merged]
     merged_results = []
     for true_val, false_val in zip(true_result, false_result, strict=True):
+        if _same_plain_scalar(true_val, false_val):
+            # Identical plain scalar on both sides: no runtime divergence
+            # to represent, and the surrounding Python code may rely on
+            # it staying a genuine Python value after the if.
+            merged_results.append(true_val)
+            continue
         true_val = _promote_branch_scalar(true_val)
         false_val = _promote_branch_scalar(false_val)
         if isinstance(true_val, (Handle, Value)):

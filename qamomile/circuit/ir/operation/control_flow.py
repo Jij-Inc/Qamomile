@@ -116,8 +116,16 @@ class RegionArg:
         block_arg (Value): The region argument the body reads each
             iteration. A definition owned by the loop operation (like
             ``ForOperation.loop_var_value``), not an outer-scope read.
-        yielded (Value): The body-produced value carried into the next
-            iteration (produced by an operation inside ``operations``).
+        yielded (Value): The value carried into the next iteration —
+            the body's final binding of the variable. Usually produced
+            by an operation inside ``operations``, but NOT always: a
+            loop-invariant overwrite (``x = c`` with ``c`` defined
+            before the loop) yields the outer-scope value directly, and
+            an identity carry yields ``block_arg`` itself. Consumers
+            must not assume a body-internal producer; in particular,
+            liveness must treat the yield as a read that keeps an
+            outer-scope producer alive (see
+            ``CompileTimeIfLoweringPass._collect_used_uuids``).
         result (Value): The value visible after the loop. A definition
             owned by the loop operation; also present in ``results``.
     """
@@ -710,8 +718,10 @@ def validate_region_args(
         )
     if loop_formal_uuids & init_uuids:
         raise ValueError(
-            "Loop RegionArg initializers must be defined outside the loop and "
-            "must not reuse a loop-formal identity."
+            "Loop RegionArg initializers must not reuse a loop-formal "
+            "identity (loop variable, item key/value, or key shape); an "
+            "initializer is a pre-loop value the loop reads, never a "
+            "definition the loop owns."
         )
     return region_args
 
@@ -1011,10 +1021,17 @@ def genuine_input_values(op: Operation) -> list[ValueBase]:
     ``after`` of a loop operation's ``loop_carried_rebinds``, the
     ``before`` of an ``IfOperation``'s ``branch_rebinds``, and the
     loop-owned fields of a ``RegionArg`` (``block_arg`` / ``yielded`` /
-    ``result``). Those are NOT outer-scope data reads, so read-based analyses
-    (liveness / dead-op elimination, measurement-taint tracing,
-    loop-carried stale-read checks) must exclude them. ``RegionArg.init``
+    ``result``). Those are NOT outer-scope data reads, so read-based
+    analyses (measurement-taint tracing, loop-carried stale-read
+    checks, segmentation demand) must exclude them. ``RegionArg.init``
     stays: it is the genuine read of the pre-loop value.
+
+    LIVENESS IS THE EXCEPTION: ``RegionArg.yielded`` may be an
+    outer-scope value (the loop-invariant overwrite shape ``x = c``),
+    in which case the region back-edge is the producer's only read.
+    Dead-op elimination therefore re-adds yields on top of this
+    helper's result (``CompileTimeIfLoweringPass._collect_used_uuids``)
+    — a consumer deciding what may be DELETED must do the same.
 
     The exclusion is by **last occurrence**, not by UUID set: a single
     value can be BOTH a genuine input AND a rebind ``before``. The

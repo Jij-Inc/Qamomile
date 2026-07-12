@@ -420,17 +420,24 @@ def _emit_quri_inverse_operation(
         "inverse block (QURI Parts)", effective_controls + target_indices
     )
 
-    if not effective_controls and emit_pass._try_emit_backend_inverse(
-        circuit,
-        op.source_block,
-        input_operands,
-        target_indices,
-        bindings,
-    ):
-        _map_inverse_block_results(
-            op, control_index_groups, target_index_groups, qubit_map
-        )
-        return
+    if not effective_controls:
+        # The native inverse path re-runs the segment allocator on the
+        # source block; snapshot the segment-level analysis state so
+        # later iteration replays keep consulting the segment's own
+        # taint/allowlist sets.
+        with emit_pass._allocator.preserving_analysis_state():
+            emitted_native_inverse = emit_pass._try_emit_backend_inverse(
+                circuit,
+                op.source_block,
+                input_operands,
+                target_indices,
+                bindings,
+            )
+        if emitted_native_inverse:
+            _map_inverse_block_results(
+                op, control_index_groups, target_index_groups, qubit_map
+            )
+            return
 
     if effective_controls:
         local_qubit_map, _local_clbit_map, local_bindings = (

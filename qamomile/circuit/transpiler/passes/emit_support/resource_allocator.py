@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import numbers
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +62,8 @@ from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from qamomile.circuit.ir.value import Value
 
 
@@ -90,7 +93,39 @@ class ResourceAllocator:
         self._next_qubit_index: int = 0
         self._next_clbit_index: int = 0
         self._resolver = resolver or ValueResolver()
+        self._measurement_tainted: set[str] = set()
         self._safe_mixed_bit_merge_outputs: frozenset[str] = frozenset()
+
+    @contextlib.contextmanager
+    def preserving_analysis_state(self) -> Iterator[None]:
+        """Preserve segment-level analysis state across a nested allocation.
+
+        ``allocate`` recomputes the measurement-taint set, the safe
+        mixed-merge allowlist, and the monotonic resource counters for
+        the operation list it receives. Nested sub-circuit emission
+        (controlled blocks, native inverses) reuses the SEGMENT
+        allocator on a different operation list mid-emission; without a
+        snapshot that leaves the sub-block's analysis state behind, and
+        later ``resolve_iteration_maps`` replays of the enclosing
+        segment consult the wrong taint/allowlist sets — silently
+        disarming the runtime-mux guards.
+
+        Yields:
+            None: The nested allocation and emission run inside the
+                snapshot; the segment state is restored on exit even
+                when the nested work raises.
+        """
+        saved_tainted = self._measurement_tainted
+        saved_safe = self._safe_mixed_bit_merge_outputs
+        saved_next_qubit = self._next_qubit_index
+        saved_next_clbit = self._next_clbit_index
+        try:
+            yield
+        finally:
+            self._measurement_tainted = saved_tainted
+            self._safe_mixed_bit_merge_outputs = saved_safe
+            self._next_qubit_index = saved_next_qubit
+            self._next_clbit_index = saved_next_clbit
 
     @property
     def safe_mixed_bit_merge_outputs(self) -> frozenset[str]:
@@ -745,8 +780,7 @@ class ResourceAllocator:
         Raises:
             EmitError: If resolving the bound body exposes an invalid quantum
                 merge, classical-bit merge, array size, or while-condition
-                lineage.
-            AssertionError: If replay unexpectedly allocates a new physical
+                lineage — or if replay unexpectedly allocates a new physical
                 qubit or clbit instead of only adding or changing aliases.
         """
         iteration_qubit_map = dict(qubit_map)
@@ -768,14 +802,20 @@ class ResourceAllocator:
             self._next_qubit_index = next_qubit
             self._next_clbit_index = next_clbit
 
-        assert set(iteration_qubit_map.values()) <= existing_qubits, (
-            "[FOR DEVELOPER] Iteration resource replay allocated a new physical "
-            "qubit; the initial allocation must cover every loop-body resource."
-        )
-        assert set(iteration_clbit_map.values()) <= existing_clbits, (
-            "[FOR DEVELOPER] Iteration resource replay allocated a new physical "
-            "clbit; the initial allocation must cover every loop-body resource."
-        )
+        if not set(iteration_qubit_map.values()) <= existing_qubits:
+            raise EmitError(
+                "[FOR DEVELOPER] Iteration resource replay allocated a new "
+                "physical qubit; the initial allocation must cover every "
+                "loop-body resource.",
+                operation="resolve_iteration_maps",
+            )
+        if not set(iteration_clbit_map.values()) <= existing_clbits:
+            raise EmitError(
+                "[FOR DEVELOPER] Iteration resource replay allocated a new "
+                "physical clbit; the initial allocation must cover every "
+                "loop-body resource.",
+                operation="resolve_iteration_maps",
+            )
         return iteration_qubit_map, iteration_clbit_map
 
     def _allocate_recursive(

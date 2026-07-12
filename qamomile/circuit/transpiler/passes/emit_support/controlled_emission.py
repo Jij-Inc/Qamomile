@@ -2986,32 +2986,38 @@ def blockvalue_to_gate(
             operation_name=operation_name,
         )
 
-        local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
-            block_value.operations,
-            local_bindings,
-            initial_qubit_map=local_qubit_map,
-            initial_clbit_map=local_clbit_map,
-        )
-
-        qubit_count = (
-            max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
-        )
-        sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
-
-        # The segment ancilla pool addresses the parent circuit; suspend
-        # it so a multi-controlled gate inside this block cannot index it
-        # against the narrower sub-circuit. If one is present, the shared
-        # cascade raises EmitError (caught below) and the caller falls
-        # back to gate-by-gate emission on the parent circuit.
-        with emit_pass._suspended_mc_ancilla_pool():
-            emit_pass._emit_operations(
-                sub_circuit,
+        # The nested allocate() below recomputes the allocator's
+        # segment-level analysis state (measurement taint, safe-merge
+        # allowlist, counters) for the SUB-block; snapshot it so later
+        # iteration replays of the enclosing segment keep consulting
+        # the segment's own sets.
+        with emit_pass._allocator.preserving_analysis_state():
+            local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
                 block_value.operations,
-                local_qubit_map,
-                local_clbit_map,
                 local_bindings,
-                force_unroll=True,
+                initial_qubit_map=local_qubit_map,
+                initial_clbit_map=local_clbit_map,
             )
+
+            qubit_count = (
+                max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
+            )
+            sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
+
+            # The segment ancilla pool addresses the parent circuit; suspend
+            # it so a multi-controlled gate inside this block cannot index it
+            # against the narrower sub-circuit. If one is present, the shared
+            # cascade raises EmitError (caught below) and the caller falls
+            # back to gate-by-gate emission on the parent circuit.
+            with emit_pass._suspended_mc_ancilla_pool():
+                emit_pass._emit_operations(
+                    sub_circuit,
+                    block_value.operations,
+                    local_qubit_map,
+                    local_clbit_map,
+                    local_bindings,
+                    force_unroll=True,
+                )
 
         return emit_pass._emitter.circuit_to_gate(sub_circuit, "U")
 

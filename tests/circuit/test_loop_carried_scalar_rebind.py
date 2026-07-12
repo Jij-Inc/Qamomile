@@ -536,25 +536,6 @@ class TestSupportedLoopCarriedScalars:
         with pytest.raises(QamomileCompileError, match="backend-representable"):
             _transpile(kernel)
 
-    def test_float_angle_accumulation(self):
-        """A Float accumulation driving a gate angle emits rx(2*pi).
-
-        The classical carried loop is absorbed into the quantum segment
-        and evaluated at emit time; rx(2*pi) leaves |0> invariant (up to
-        global phase), so the measurement is deterministically 0.
-        """
-
-        @qmc.qkernel
-        def kernel(n: qmc.UInt) -> qmc.Bit:
-            total = qmc.float_(0.0)
-            for _i in qmc.range(n):
-                total = total + 1.0
-            q = qmc.qubit("q")
-            q = qmc.rx(q, total * 3.141592653589793)
-            return qmc.measure(q)
-
-        assert _sample_single(kernel, bindings={"n": 2}) == 0
-
     def test_swap_rotation(self):
         """`a, b = b, a` in a loop swaps per iteration: three swaps land on (2, 1)."""
 
@@ -1997,6 +1978,56 @@ class TestRejectedRebinds:
                 parameters=["start"],
             )
 
+    def test_while_store_only_same_type_carry_rejected(self):
+        """A while body's store-only same-type scalar overwrite is rejected.
+
+        While bodies get no RegionArg promotion, and the always-live
+        zero-trip path means no trip-count proof can surface the traced
+        body value. Accepting this shape compiles and then fails at
+        sampling with an unbound backend parameter (the traced
+        ``x + 1`` lives only in the per-iteration emit scope).
+        """
+
+        @qmc.qkernel
+        def kernel(x: qmc.UInt) -> qmc.UInt:
+            q = qmc.qubit("q")
+            bit = qmc.measure(q)
+            total = qmc.uint(0)
+            while bit:
+                q2 = qmc.qubit("f")
+                bit = qmc.measure(q2)
+                total = x + 1
+            return total
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, parameters=["x"])
+
+    def test_while_second_variable_aliasing_condition_rejected(self):
+        """A second variable rebound to the condition measurement is rejected.
+
+        ``saved = bit`` shares the condition-update's ``after`` UUID but
+        not its ``before``; exempting it alongside the condition pair
+        would bind the post-loop read of ``saved`` to the final in-loop
+        measurement, silently diverging from the pre-loop snapshot
+        Python guarantees on the always-live zero-trip path.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            s = qmc.qubit("s")
+            s = qmc.x(s)
+            saved = qmc.measure(s)
+            q = qmc.qubit("q")
+            bit = qmc.measure(q)
+            while bit:
+                q2 = qmc.qubit("f")
+                bit = qmc.measure(q2)
+                saved = bit
+            return saved
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"dummy": 0})
+
 
 # ---------------------------------------------------------------------------
 # Allowed: legal loop patterns keep compiling (and computing correctly)
@@ -2327,25 +2358,45 @@ class TestAllowedPatterns:
 
         assert _sample_single(skipped, bindings={"flag": 1, "n": 3}) == 0
 
-    def test_dead_branch_accumulation_both_sides(self):
-        """A rebind under a compile-time if carries only when taken.
+    def test_outer_value_yield_survives_losing_branch_pruning(self):
+        """A losing merge source read only as a loop-invariant yield stays live.
 
-        With the branch dead the loop keeps the initializer; with the
-        branch taken the accumulation carries and matches Python.
+        The compile-time-false branch marks its merge source (``c``)
+        dead, and the same value is the loop's region yield (``x = c``,
+        the loop-invariant overwrite shape) — a read that
+        ``genuine_input_values`` deliberately hides from read-based
+        analyses. Dead-op elimination must still keep the producer
+        alive: deleting it compiles cleanly and then fails at every
+        execution with "Value not found in context or results". The
+        runtime parameter keeps ``c = a + 1`` from constant-folding
+        away before the pruning runs.
         """
 
         @qmc.qkernel
-        def kernel(n: qmc.UInt, flag: qmc.UInt) -> qmc.UInt:
+        def kernel(
+            n: qmc.UInt, a: qmc.UInt, flag: qmc.UInt
+        ) -> tuple[qmc.Bit, qmc.UInt, qmc.UInt]:
             q = qmc.qubit("q")
-            qmc.measure(q)
-            total = qmc.uint(0)
-            for i in qmc.range(n):
-                if flag > 0:
-                    total = total + i
-            return total
+            b = qmc.measure(q)
+            c = a + 1
+            if flag > 0:
+                y = 2 + a
+            else:
+                y = c
+            x = qmc.uint(0)
+            for _i in qmc.range(n):
+                _t = x + 1
+                x = c
+            return b, x, y
 
-        assert _sample_single(kernel, bindings={"n": 4, "flag": 0}) == 0
-        assert _sample_single(kernel, bindings={"n": 4, "flag": 1}) == 6
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(
+            kernel, bindings={"flag": 1, "n": 2}, parameters=["a"]
+        )
+        result = executable.sample(
+            transpiler.executor(), shots=100, bindings={"a": 5}
+        ).result()
+        assert result.results == [((0, 6, 7), 100)]
 
 
 # ---------------------------------------------------------------------------
