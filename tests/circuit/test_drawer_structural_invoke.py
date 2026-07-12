@@ -8,7 +8,12 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation.arithmetic_operations import CompOp, CompOpKind
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
+    CompOp,
+    CompOpKind,
+)
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
     CallableRef,
@@ -1382,6 +1387,100 @@ def _build_folded_selected_control_if_graph() -> Block:
     )
 
 
+def _build_dynamic_unresolved_widening_graph() -> Block:
+    """Build unresolved widening whose result width is a body-local expression.
+
+    Returns:
+        Block: Graph with a dynamic caller result, conservative root aliases,
+            and one exact widening suffix forwarded through an opaque call.
+    """
+    root_size = Value(type=UIntType(), name="root_size").with_const(5)
+    root = ArrayValue(type=QubitType(), name="q", shape=(root_size,))
+    view_size = Value(type=UIntType(), name="view_size").with_const(2)
+    view_start = Value(type=UIntType(), name="view_start").with_parameter("view_start")
+    one = Value(type=UIntType(), name="one").with_const(1)
+    view = ArrayValue(
+        type=QubitType(),
+        name="view",
+        shape=(view_size,),
+        slice_of=root,
+        slice_start=view_start,
+        slice_step=one,
+    )
+
+    formal_size = Value(type=UIntType(), name="formal_size").with_parameter(
+        "formal_size"
+    )
+    formal = ArrayValue(type=QubitType(), name="target", shape=(formal_size,))
+    widened_size = Value(type=UIntType(), name="widened_size")
+    size_add = BinOp(
+        operands=[formal_size, one],
+        results=[widened_size],
+        kind=BinOpKind.ADD,
+    )
+    widened = ArrayValue(
+        type=QubitType(),
+        name="wide",
+        shape=(widened_size,),
+    )
+    widening_call = InvokeOperation(
+        operands=[formal],
+        results=[widened],
+        target=CallableRef(namespace="user", name="opaque_dynamic_widening"),
+    )
+    body = Block(
+        name="dynamic_unresolved_widening",
+        label_args=["target"],
+        input_values=[formal],
+        output_values=[widened],
+        output_names=["wide"],
+        operations=[
+            size_add,
+            widening_call,
+            ReturnOperation(operands=[widened]),
+        ],
+    )
+    body_call = body.call(target=view)
+    caller_result = body_call.results[0]
+    whole_gate = GateOperation.fixed(
+        GateOperationType.H,
+        [caller_result],
+        [caller_result.next_version()],
+    )
+    forwarded = ArrayValue(
+        type=QubitType(),
+        name="forwarded",
+        shape=caller_result.shape,
+    )
+    forwarding_call = InvokeOperation(
+        operands=[caller_result],
+        results=[forwarded],
+        target=CallableRef(namespace="user", name="opaque_dynamic_forward"),
+    )
+    suffix_index = Value(type=UIntType(), name="suffix_index").with_const(2)
+    suffix = Value(
+        type=QubitType(),
+        name="forwarded[2]",
+        parent_array=forwarded,
+        element_indices=(suffix_index,),
+    )
+    suffix_gate = GateOperation.fixed(
+        GateOperationType.Z,
+        [suffix],
+        [suffix.next_version()],
+    )
+    return Block(
+        name="dynamic_unresolved_widening_graph",
+        operations=[
+            QInitOperation(results=[root]),
+            body_call,
+            whole_gate,
+            forwarding_call,
+            suffix_gate,
+        ],
+    )
+
+
 def _build_opaque_widening_result_graph(
     *,
     occupy_next_wire: bool = False,
@@ -2477,6 +2576,40 @@ def test_folded_if_selected_controls_exclude_inactive_pool_wires() -> None:
     assert folded.affected_qubits == [0, 1, 3, 4]
     assert folded.affected_qubits_precise
     assert 2 not in folded.affected_qubits
+
+
+def test_dynamic_unresolved_widening_keeps_sparse_exact_aliases() -> None:
+    """Dynamic result shapes retain exact suffixes across whole and next calls."""
+    graph = _build_dynamic_unresolved_widening_graph()
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    expected_wires = list(range(6))
+    assert num_qubits == 6
+    assert qubit_names[5] == "wide[2]"
+    gates = [
+        node for node in _iter_visual_nodes(circuit.children) if isinstance(node, VGate)
+    ]
+    [widening_call] = [
+        gate for gate in gates if gate.label == "OPAQUE_DYNAMIC_WIDENING"
+    ]
+    [forwarding_call] = [
+        gate for gate in gates if gate.label == "OPAQUE_DYNAMIC_FORWARD"
+    ]
+    assert widening_call.qubit_indices == expected_wires
+    assert forwarding_call.qubit_indices == expected_wires
+    assert [
+        gate.qubit_indices for gate in gates if gate.gate_type is GateOperationType.H
+    ] == [expected_wires]
+    assert [
+        gate.qubit_indices for gate in gates if gate.gate_type is GateOperationType.Z
+    ] == [[5]]
 
 
 def test_legacy_stack_parameter_name_does_not_shadow_compile_time_binding() -> None:
