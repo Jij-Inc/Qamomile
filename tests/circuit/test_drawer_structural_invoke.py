@@ -1153,6 +1153,87 @@ def _build_unresolved_widened_control_graph(selected_index: int) -> Block:
     return graph
 
 
+def _build_unresolved_widened_slice_output_graph() -> Block:
+    """Build a callable returning a slice of a marker-backed widened array.
+
+    Returns:
+        Block: Graph whose returned local slot zero remains conservative while
+            local slot one maps exactly to the widening suffix.
+    """
+    root_size = Value(type=UIntType(), name="root_size").with_const(5)
+    root = ArrayValue(type=QubitType(), name="q", shape=(root_size,))
+    view_size = Value(type=UIntType(), name="view_size").with_const(2)
+    view_start = Value(type=UIntType(), name="view_start").with_parameter("view_start")
+    one = Value(type=UIntType(), name="one").with_const(1)
+    view = ArrayValue(
+        type=QubitType(),
+        name="view",
+        shape=(view_size,),
+        slice_of=root,
+        slice_start=view_start,
+        slice_step=one,
+    )
+
+    formal = ArrayValue(type=QubitType(), name="target", shape=(view_size,))
+    widened_size = Value(type=UIntType(), name="widened_size").with_const(3)
+    widened = ArrayValue(
+        type=QubitType(),
+        name="wide",
+        shape=(widened_size,),
+    )
+    widening_call = InvokeOperation(
+        operands=[formal],
+        results=[widened],
+        target=CallableRef(namespace="user", name="opaque_slice_widening"),
+    )
+    returned_slice = ArrayValue(
+        type=QubitType(),
+        name="wide[1:3]",
+        shape=(view_size,),
+        slice_of=widened,
+        slice_start=one,
+        slice_step=one,
+    )
+    middle = Block(
+        name="unresolved_widened_slice_output",
+        label_args=["target"],
+        input_values=[formal],
+        output_values=[returned_slice],
+        output_names=["wide_slice"],
+        operations=[
+            widening_call,
+            ReturnOperation(operands=[returned_slice]),
+        ],
+    )
+    middle_call = middle.call(target=view)
+    caller_result = middle_call.results[0]
+    whole_gate = GateOperation.fixed(
+        GateOperationType.H,
+        [caller_result],
+        [caller_result.next_version()],
+    )
+    suffix_element = Value(
+        type=QubitType(),
+        name="wide_slice[1]",
+        parent_array=caller_result,
+        element_indices=(one,),
+    )
+    suffix_gate = GateOperation.fixed(
+        GateOperationType.Z,
+        [suffix_element],
+        [suffix_element.next_version()],
+    )
+    return Block(
+        name="unresolved_widened_slice_output_graph",
+        operations=[
+            QInitOperation(results=[root]),
+            middle_call,
+            whole_gate,
+            suffix_gate,
+        ],
+    )
+
+
 def _build_opaque_widening_result_graph(
     *,
     occupy_next_wire: bool = False,
@@ -2164,6 +2245,42 @@ def test_unresolved_widened_control_indices_preserve_alias_semantics(
     ]
     assert controlled.control_qubit_indices == expected_controls
     assert controlled.affected_qubits == [*expected_controls, 6]
+
+
+def test_unresolved_widened_slice_output_preserves_alias_provenance() -> None:
+    """A returned derived slice keeps unknown roots and its exact suffix."""
+    graph = _build_unresolved_widened_slice_output_graph()
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    expected_wires = list(range(6))
+    assert num_qubits == 6
+    assert qubit_names[5] == "wide[2]"
+    assert all(0 <= wire < num_qubits for wire in qubit_map.values())
+    [middle] = [
+        node
+        for node in circuit.children
+        if isinstance(node, VInlineBlock)
+        and node.label == "unresolved_widened_slice_output"
+    ]
+    assert middle.affected_qubits == expected_wires
+    gates = [
+        node for node in _iter_visual_nodes(circuit.children) if isinstance(node, VGate)
+    ]
+    [widening_call] = [gate for gate in gates if gate.label == "OPAQUE_SLICE_WIDENING"]
+    assert widening_call.qubit_indices == expected_wires
+    assert [
+        gate.qubit_indices for gate in gates if gate.gate_type is GateOperationType.H
+    ] == [expected_wires]
+    assert [
+        gate.qubit_indices for gate in gates if gate.gate_type is GateOperationType.Z
+    ] == [[5]]
 
 
 def test_legacy_stack_parameter_name_does_not_shadow_compile_time_binding() -> None:
