@@ -1542,6 +1542,44 @@ def _build_dynamic_unresolved_widening_graph() -> Block:
     )
 
 
+def _build_folded_contextual_slice_loop_graph() -> Block:
+    """Build a folded loop whose one-element view changes per iteration.
+
+    Returns:
+        Block: Graph where precise iteration analysis must ignore aliases
+            cached under a different loop-variable binding.
+    """
+    root_size = Value(type=UIntType(), name="root_size").with_const(4)
+    root = ArrayValue(type=QubitType(), name="q", shape=(root_size,))
+    loop_index = Value(type=UIntType(), name="i")
+    one = Value(type=UIntType(), name="one").with_const(1)
+    view = ArrayValue(
+        type=QubitType(),
+        name="view",
+        shape=(one,),
+        slice_of=root,
+        slice_start=loop_index,
+        slice_step=one,
+    )
+    call = InvokeOperation(
+        operands=[view],
+        results=[view.next_version()],
+        target=CallableRef(namespace="user", name="opaque_loop_view"),
+    )
+    zero = Value(type=UIntType(), name="zero").with_const(0)
+    two = Value(type=UIntType(), name="two").with_const(2)
+    loop = ForOperation(
+        operands=[zero, two, one],
+        loop_var="i",
+        loop_var_value=loop_index,
+        operations=[call],
+    )
+    return Block(
+        name="folded_contextual_slice_loop",
+        operations=[QInitOperation(results=[root]), loop],
+    )
+
+
 def _build_opaque_widening_result_graph(
     *,
     occupy_next_wire: bool = False,
@@ -2697,6 +2735,32 @@ def test_dynamic_unresolved_widening_keeps_sparse_exact_aliases() -> None:
     assert [
         gate.qubit_indices for gate in gates if gate.gate_type is GateOperationType.Z
     ] == [[5]]
+
+
+@pytest.mark.parametrize("inline", [False, True])
+def test_folded_loop_uses_current_slice_binding_over_cached_aliases(
+    inline: bool,
+) -> None:
+    """Precise loop analysis ignores aliases cached for another iteration."""
+    graph = _build_folded_contextual_slice_loop_graph()
+    analyzer = CircuitAnalyzer(
+        graph,
+        DEFAULT_STYLE,
+        inline=inline,
+        fold_loops=True,
+    )
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 4
+    [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
+    assert folded.affected_qubits == [0, 1]
+    assert folded.affected_qubits_precise
 
 
 def test_legacy_stack_parameter_name_does_not_shadow_compile_time_binding() -> None:
