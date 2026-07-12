@@ -26,6 +26,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
+    WhileOperation,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
@@ -38,13 +39,13 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
     QubitType,
     UIntType,
 )
-from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.q_register import QFixedType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
@@ -1621,6 +1622,31 @@ def _build_folded_if_with_nested_index_loop_graph() -> Block:
     )
 
 
+def _build_folded_while_with_nested_index_loop_graph() -> Block:
+    """Build a folded WHILE containing a precisely bounded indexed loop.
+
+    Returns:
+        Block: Graph whose nested loop affects only the first two root wires.
+    """
+    graph = _build_folded_if_with_nested_index_loop_graph()
+    root_init = graph.operations[0]
+    branch = graph.operations[1]
+    assert isinstance(branch, IfOperation), (
+        "[FOR DEVELOPER] The nested-loop fixture must contain one IfOperation."
+    )
+    nested_loop = branch.true_operations[0]
+    condition = Value(type=BitType(), name="cond").with_parameter("cond")
+    loop = WhileOperation(
+        operands=[condition],
+        operations=[nested_loop],
+        max_iterations=2,
+    )
+    return Block(
+        name="folded_while_with_nested_index_loop",
+        operations=[root_init, loop],
+    )
+
+
 def _build_opaque_widening_result_graph(
     *,
     occupy_next_wire: bool = False,
@@ -2852,6 +2878,24 @@ def test_folded_if_uses_precise_nested_loop_footprint() -> None:
     [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
     assert folded.affected_qubits == [0, 1]
     assert folded.affected_qubits_precise
+
+
+def test_folded_while_uses_nested_loop_footprint() -> None:
+    """A folded WHILE delegates its bounded nested FOR to precise analysis."""
+    graph = _build_folded_while_with_nested_index_loop_graph()
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, fold_whiles=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    assert num_qubits == 4
+    [folded] = [node for node in circuit.children if isinstance(node, VFoldedBlock)]
+    assert folded.affected_qubits == [0, 1]
+    assert not folded.affected_qubits_precise
 
 
 def test_legacy_stack_parameter_name_does_not_shadow_compile_time_binding() -> None:
