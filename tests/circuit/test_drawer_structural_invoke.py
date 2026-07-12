@@ -1296,6 +1296,67 @@ def _build_folded_qfixed_measure_if_graph() -> Block:
     )
 
 
+def _build_unresolved_slice_qfixed_measure_graph() -> Block:
+    """Build an inline QFixed measurement over an unresolved slice.
+
+    Returns:
+        Block: Graph whose measurement must retain every root candidate wire.
+    """
+    root_size = Value(type=UIntType(), name="root_size").with_const(5)
+    root = ArrayValue(type=QubitType(), name="q", shape=(root_size,))
+    view_size = Value(type=UIntType(), name="view_size").with_const(2)
+    view_start = Value(type=UIntType(), name="view_start").with_parameter("view_start")
+    view_step = Value(type=UIntType(), name="view_step").with_const(1)
+    view = ArrayValue(
+        type=QubitType(),
+        name="view",
+        shape=(view_size,),
+        slice_of=root,
+        slice_start=view_start,
+        slice_step=view_step,
+    )
+
+    formal = ArrayValue(type=QubitType(), name="target", shape=(view_size,))
+    qfixed = Value(type=QFixedType(), name="qf").with_cast_metadata(
+        source_uuid=formal.uuid,
+        qubit_uuids=[],
+        source_logical_id=formal.logical_id,
+        qubit_logical_ids=[
+            f"{formal.logical_id}_0",
+            f"{formal.logical_id}_1",
+        ],
+    )
+    cast_op = CastOperation(
+        operands=[formal],
+        results=[qfixed],
+        source_type=formal.type,
+        target_type=qfixed.type,
+    )
+    measured = Value(type=FloatType(), name="measured")
+    measure = MeasureQFixedOperation(
+        operands=[qfixed],
+        results=[measured],
+        num_bits=2,
+        int_bits=0,
+    )
+    body = Block(
+        name="unresolved_slice_qfixed_measure",
+        label_args=["target"],
+        input_values=[formal],
+        output_values=[measured],
+        output_names=["measured"],
+        operations=[
+            cast_op,
+            measure,
+            ReturnOperation(operands=[measured]),
+        ],
+    )
+    return Block(
+        name="unresolved_slice_qfixed_measure_graph",
+        operations=[QInitOperation(results=[root]), body.call(target=view)],
+    )
+
+
 def _build_folded_expval_if_graph() -> Block:
     """Build a folded IF whose branches evaluate a two-qubit observable.
 
@@ -2557,6 +2618,32 @@ def test_folded_if_hybrid_operations_keep_footprint_and_body_text(
     assert folded.affected_qubits == [0, 1]
     assert folded.affected_qubits_precise
     assert sum(expected_expression in line for line in folded.body_lines) == 2
+
+
+def test_unresolved_slice_qfixed_measure_keeps_candidate_wires() -> None:
+    """An inline QFixed measurement uses every unresolved slice candidate."""
+    graph = _build_unresolved_slice_qfixed_measure_graph()
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, inline=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    circuit = analyzer.build_visual_ir(
+        graph,
+        qubit_map,
+        qubit_names,
+        num_qubits,
+    )
+
+    expected_wires = list(range(5))
+    assert num_qubits == 5
+    [inline_block] = [
+        node for node in circuit.children if isinstance(node, VInlineBlock)
+    ]
+    assert inline_block.affected_qubits == expected_wires
+    [measurement] = [
+        node
+        for node in _iter_visual_nodes(inline_block.children)
+        if isinstance(node, VGate) and node.label == "M"
+    ]
+    assert measurement.qubit_indices == expected_wires
 
 
 def test_folded_if_selected_controls_exclude_inactive_pool_wires() -> None:
