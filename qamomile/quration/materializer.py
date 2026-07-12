@@ -10,6 +10,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ALL_BINARY_OPERATORS,
     ALL_PRIMITIVE_GATES,
     ALL_UNARY_OPERATORS,
+    MULTI_CONTROLLED_X_SEMANTIC_KEY,
     BarrierInstruction,
     BinaryExpr,
     BinaryOperator,
@@ -28,6 +29,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     MaterializedCircuit,
     MeasureInstruction,
     MeasureVectorInstruction,
+    NativeSemanticOpCapabilities,
     ParameterExpr,
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
@@ -212,10 +214,30 @@ class PyQretMaterializer:
             binary_operators=ALL_BINARY_OPERATORS,
             parameter_form=ScalarExpressionForm.CONCRETE_ONLY,
         )
+        generic_call = CallTransformCapabilities(
+            supports_power=True,
+            supports_inverse=False,
+            max_controls=0,
+            supports_barrier_body=True,
+            control_mode=CallControlMode.UNSUPPORTED,
+        )
+        native_direct_call = dataclasses.replace(
+            generic_call,
+            supports_power=False,
+        )
         return CircuitCapabilities(
             name="quration",
             primitive_gates=ALL_PRIMITIVE_GATES,
-            native_semantic_ops=(),
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    MULTI_CONTROLLED_X_SEMANTIC_KEY,
+                    "pyqret.multi_controlled_x",
+                    native_direct_call,
+                    operand_widths=(None, 1),
+                    min_qubits=2,
+                    max_qubits=3,
+                ),
+            ),
             gate_parameters=numeric,
             predicates=ScalarCapabilities(
                 atoms=frozenset(),
@@ -225,13 +247,7 @@ class PyQretMaterializer:
             ),
             pauli_time=numeric,
             global_phase=numeric,
-            generic_calls=CallTransformCapabilities(
-                supports_power=True,
-                supports_inverse=False,
-                max_controls=0,
-                supports_barrier_body=True,
-                control_mode=CallControlMode.UNSUPPORTED,
-            ),
+            generic_calls=generic_call,
             supports_dynamic_if=False,
             supports_dynamic_while=False,
             supports_reset=False,
@@ -412,6 +428,8 @@ def _build_reusable_circuits(
         Args:
             callee (ReusableCircuit): Reusable body to materialize.
         """
+        if callee.native_realization is not None:
+            return
         cache_key = id(callee)
         if cache_key in circuits:
             return
@@ -621,6 +639,18 @@ def _emit_call(
         EmitError: If the reusable circuit has control or inverse transforms.
     """
     callee = operation.callee
+    if callee.native_realization == "pyqret.multi_controlled_x":
+        current = [environment[wire] for wire in operation.inputs]
+        control_width, target_width = callee.operand_widths
+        if target_width != 1 or control_width not in (1, 2):
+            raise EmitError("PyQret supports one or two controls for native MCX")
+        if control_width == 1:
+            context.intrinsic.cx(current[0], current[1])
+        else:
+            context.intrinsic.ccx(current[0], current[1], current[2])
+        for output, qubit in zip(operation.outputs, current, strict=True):
+            environment[output] = qubit
+        return
     if callee.controls or callee.inverse:
         raise EmitError(
             "Quration materialization requires controlled and inverse calls "

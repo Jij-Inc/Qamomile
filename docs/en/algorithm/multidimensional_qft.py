@@ -33,7 +33,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm import amplitude_encoding
+from qamomile.circuit.stdlib import amplitude_encoding
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.qiskit import QiskitTranspiler
 

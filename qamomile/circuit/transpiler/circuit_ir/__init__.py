@@ -14,9 +14,10 @@ Two rules govern what survives into this IR and how targets consume it:
 
 * **Lowering may erase how a program was written, never what it means.**
   Semantic values, slices, bindings, and call machinery are erased; intent a
-  target could exploit — semantic identity (:class:`CallableIdentity`),
-  deferred call transforms, structured control flow, Pauli-evolution
-  semantics — is preserved until a target explicitly decides otherwise.
+  target could exploit — semantic identity and immutable semantic arguments
+  (:class:`CallableIdentity`), deferred call transforms, structured control
+  flow, Pauli-evolution semantics — is preserved until a target explicitly
+  decides otherwise.
   Erasure is irreversible while preservation costs one tag, so the default
   is to preserve.
 * **Capabilities declare, legalization decides, materializers execute.**
@@ -59,7 +60,10 @@ from qamomile.circuit.transpiler.circuit_ir.materialize import (
 )
 from qamomile.circuit.transpiler.circuit_ir.model import (
     IQFT_SEMANTIC_KEY,
+    MULTI_CONTROLLED_X_SEMANTIC_KEY,
     QFT_SEMANTIC_KEY,
+    RIPPLE_CARRY_ADD_SEMANTIC_KEY,
+    STATE_PREPARATION_SEMANTIC_KEY,
     BarrierInstruction,
     BinaryExpr,
     BinaryOperator,
@@ -82,6 +86,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     ResetInstruction,
     ReusableCircuit,
     ScalarExpr,
+    SemanticArguments,
     SemanticOpKey,
     UnaryExpr,
     UnaryOperator,
@@ -127,10 +132,14 @@ __all__ = [
     "PauliEvolutionRealization",
     "QFT_SEMANTIC_KEY",
     "IQFT_SEMANTIC_KEY",
+    "MULTI_CONTROLLED_X_SEMANTIC_KEY",
+    "RIPPLE_CARRY_ADD_SEMANTIC_KEY",
+    "STATE_PREPARATION_SEMANTIC_KEY",
     "ResetInstruction",
     "ReusableCircuit",
     "ScalarExpr",
     "SemanticOpKey",
+    "SemanticArguments",
     "ScalarAtom",
     "ScalarCapabilities",
     "ScalarExpressionForm",

@@ -7,7 +7,10 @@ from typing import Any
 from qamomile.circuit.transpiler.circuit_ir import (
     ALL_PRIMITIVE_GATES,
     IQFT_SEMANTIC_KEY,
+    MULTI_CONTROLLED_X_SEMANTIC_KEY,
     QFT_SEMANTIC_KEY,
+    RIPPLE_CARRY_ADD_SEMANTIC_KEY,
+    STATE_PREPARATION_SEMANTIC_KEY,
     BarrierInstruction,
     BinaryExpr,
     BinaryOperator,
@@ -52,9 +55,8 @@ class QiskitMaterializer:
         """Declare Qiskit's circuit-IR capabilities.
 
         Native semantic-operation support is probed against the installed
-        Qiskit at declaration time: ``QFTGate`` is only available on recent releases,
-        so the declaration — not a materialize-time failure — tells
-        legalization whether semantic calls may stay native.
+        Qiskit at declaration time, so the declaration rather than a late
+        materialization failure determines whether calls may stay native.
 
         Returns:
             CircuitCapabilities: Immutable capability declaration.
@@ -65,8 +67,18 @@ class QiskitMaterializer:
             supports_inverse=True,
             max_controls=None,
         )
+        direct_only = CallTransformCapabilities(
+            supports_power=False,
+            supports_inverse=False,
+            max_controls=0,
+        )
         try:
-            from qiskit.circuit.library import QFTGate  # noqa: F401
+            from qiskit.circuit.library import (  # noqa: F401
+                FullAdderGate,
+                MCXGate,
+                QFTGate,
+                StatePreparation,
+            )
 
             native_semantic_ops = (
                 NativeSemanticOpCapabilities(
@@ -82,6 +94,29 @@ class QiskitMaterializer:
                     call_transforms,
                     operand_widths=(None,),
                     min_qubits=1,
+                ),
+                NativeSemanticOpCapabilities(
+                    STATE_PREPARATION_SEMANTIC_KEY,
+                    "qiskit.state_preparation",
+                    direct_only,
+                    operand_widths=(None,),
+                    min_qubits=1,
+                    required_arguments=frozenset({"amplitudes"}),
+                ),
+                NativeSemanticOpCapabilities(
+                    RIPPLE_CARRY_ADD_SEMANTIC_KEY,
+                    "qiskit.ripple_carry_add",
+                    direct_only,
+                    operand_widths=(None, None, 1, 1),
+                    min_qubits=4,
+                    matching_operand_widths=((0, 1),),
+                ),
+                NativeSemanticOpCapabilities(
+                    MULTI_CONTROLLED_X_SEMANTIC_KEY,
+                    "qiskit.multi_controlled_x",
+                    direct_only,
+                    operand_widths=(None, 1),
+                    min_qubits=2,
                 ),
             )
         except ImportError:
@@ -708,20 +743,50 @@ def _emit_native_semantic_op(
         EmitError: If the semantic operation has no native Qiskit realization
             or the requested transforms cannot be applied.
     """
-    from qiskit.circuit.library import QFTGate
+    from qiskit.circuit.library import (
+        FullAdderGate,
+        MCXGate,
+        QFTGate,
+        StatePreparation,
+    )
     from qiskit.exceptions import QiskitError
 
     callee = operation.callee
     identity = callee.identity
     assert identity is not None and callee.native_realization is not None
-    if identity.key not in (QFT_SEMANTIC_KEY, IQFT_SEMANTIC_KEY):
+    realization = callee.native_realization
+    if realization in {"qiskit.qft", "qiskit.iqft"}:
+        gate: Any = QFTGate(callee.body.num_qubits)
+        if realization == "qiskit.iqft":
+            gate = gate.inverse(annotated=True)
+        qubits = [wires[wire] for wire in operation.inputs]
+    elif realization == "qiskit.state_preparation":
+        encoded = identity.arguments.get("amplitudes")
+        amplitudes = _decode_state_preparation_amplitudes(encoded)
+        gate = StatePreparation(amplitudes, normalize=False)
+        qubits = [wires[wire] for wire in operation.inputs]
+    elif realization == "qiskit.ripple_carry_add":
+        left_width, right_width, carry_width, overflow_width = callee.operand_widths
+        if left_width != right_width or (carry_width, overflow_width) != (1, 1):
+            raise EmitError("Ripple-carry adder operand grouping is malformed")
+        gate = FullAdderGate(left_width)
+        original = [wires[wire] for wire in operation.inputs]
+        left_end = left_width
+        right_end = left_end + right_width
+        carry = original[right_end]
+        overflow = original[right_end + 1]
+        qubits = [carry, *original[:left_end], *original[left_end:right_end], overflow]
+    elif realization == "qiskit.multi_controlled_x":
+        control_width, target_width = callee.operand_widths
+        if target_width != 1:
+            raise EmitError("Multi-controlled X requires one target qubit")
+        gate = MCXGate(control_width)
+        qubits = [wires[wire] for wire in operation.inputs]
+    else:
         raise EmitError(
             f"Qiskit has no native realization for semantic operation "
             f"{identity.key.namespace}.{identity.key.name}"
         )
-    gate: Any = QFTGate(callee.body.num_qubits)
-    if identity.key == IQFT_SEMANTIC_KEY:
-        gate = gate.inverse(annotated=True)
     try:
         if callee.power != 1:
             gate = gate.power(callee.power)
@@ -735,9 +800,37 @@ def _emit_native_semantic_op(
             f"requested transforms (power={callee.power}, "
             f"inverse={callee.inverse}, controls={callee.controls})"
         ) from error
-    qubits = [wires[wire] for wire in operation.inputs]
     circuit.append(gate, qubits)
-    _publish_wires(operation.outputs, qubits, wires)
+    original_qubits = [wires[wire] for wire in operation.inputs]
+    _publish_wires(operation.outputs, original_qubits, wires)
+
+
+def _decode_state_preparation_amplitudes(value: Any) -> list[complex]:
+    """Decode immutable real-imaginary pairs for Qiskit state preparation.
+
+    Args:
+        value (Any): Semantic argument expected to contain ``(real, imag)``
+            pairs.
+
+    Returns:
+        list[complex]: Concrete normalized amplitudes in basis-state order.
+
+    Raises:
+        EmitError: If the payload is absent or malformed.
+    """
+    if not isinstance(value, tuple):
+        raise EmitError("State preparation requires encoded amplitudes")
+    amplitudes: list[complex] = []
+    for pair in value:
+        if (
+            not isinstance(pair, tuple)
+            or len(pair) != 2
+            or not isinstance(pair[0], (int, float))
+            or not isinstance(pair[1], (int, float))
+        ):
+            raise EmitError("State preparation amplitudes are malformed")
+        amplitudes.append(complex(float(pair[0]), float(pair[1])))
+    return amplitudes
 
 
 def _emit_pauli_evolution(

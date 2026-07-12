@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast, overload
 
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
@@ -21,6 +21,7 @@ def configure_composite(
     gate_type: CompositeGateType = CompositeGateType.CUSTOM,
     policy: CallPolicy = CallPolicy.PRESERVE_BOX,
     implementations: Sequence[CallableImplementation] | None = None,
+    semantic_arguments: Mapping[str, Any] | None = None,
 ) -> QKernel[..., Any]:
     """Configure a QKernel to remain visible as a named composite call.
 
@@ -38,6 +39,9 @@ def configure_composite(
         policy (CallPolicy): Lowering policy. Defaults to ``PRESERVE_BOX``.
         implementations (Sequence[CallableImplementation] | None): Optional
             implementation candidates.
+        semantic_arguments (Mapping[str, Any] | None): Serializer-friendly
+            arguments that are part of the operation's meaning rather than its
+            decomposition. Defaults to no semantic arguments.
 
     Returns:
         QKernel[..., Any]: The same configured kernel instance.
@@ -48,6 +52,7 @@ def configure_composite(
     kernel._callable_policy = policy
     kernel._callable_gate_type = gate_type
     kernel._callable_implementations = tuple(implementations or ())
+    kernel._callable_semantic_arguments = dict(semantic_arguments or {})
     return kernel
 
 

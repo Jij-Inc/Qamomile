@@ -159,6 +159,10 @@ class NativeSemanticOpCapabilities:
             operation. Defaults to zero.
         max_qubits (int | None): Maximum fallback-body width, or ``None`` for
             no limit. Defaults to ``None``.
+        required_arguments (frozenset[str]): Semantic argument names required
+            by this realization. Defaults to none.
+        matching_operand_widths (tuple[tuple[int, int], ...]): Pairs of
+            operand positions that must have equal widths. Defaults to none.
     """
 
     key: SemanticOpKey
@@ -167,6 +171,8 @@ class NativeSemanticOpCapabilities:
     operand_widths: tuple[int | None, ...] | None = None
     min_qubits: int = 0
     max_qubits: int | None = None
+    required_arguments: frozenset[str] = frozenset()
+    matching_operand_widths: tuple[tuple[int, int], ...] = ()
 
     def accepts(self, callee: ReusableCircuit) -> bool:
         """Return whether this realization accepts one semantic call shape.
@@ -181,21 +187,37 @@ class NativeSemanticOpCapabilities:
         """
         if not self.call_transforms.accepts(callee):
             return False
+        if callee.identity is None:
+            return False
+        if not self.required_arguments <= callee.identity.arguments.names():
+            return False
         if callee.body.num_qubits < self.min_qubits:
             return False
         if self.max_qubits is not None and callee.body.num_qubits > self.max_qubits:
             return False
-        if self.operand_widths is None:
-            return True
-        if len(callee.operand_widths) != len(self.operand_widths):
-            return False
-        return all(
-            actual > 0 and (required is None or actual == required)
-            for actual, required in zip(
-                callee.operand_widths,
-                self.operand_widths,
-                strict=True,
+        widths_match = True
+        if self.operand_widths is not None:
+            if len(callee.operand_widths) != len(self.operand_widths):
+                return False
+            widths_match = all(
+                actual > 0 and (required is None or actual == required)
+                for actual, required in zip(
+                    callee.operand_widths,
+                    self.operand_widths,
+                    strict=True,
+                )
             )
+        if any(
+            left < 0
+            or right < 0
+            or left >= len(callee.operand_widths)
+            or right >= len(callee.operand_widths)
+            for left, right in self.matching_operand_widths
+        ):
+            return False
+        return widths_match and all(
+            callee.operand_widths[left] == callee.operand_widths[right]
+            for left, right in self.matching_operand_widths
         )
 
 

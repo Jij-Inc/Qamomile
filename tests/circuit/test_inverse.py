@@ -28,11 +28,6 @@ from qamomile.circuit.algorithm.fqaoa import (
     mixer_layer,
 )
 from qamomile.circuit.algorithm.qaoa import x_mixer
-from qamomile.circuit.algorithm.state_preparation import (
-    amplitude_encoding,
-    amplitude_encoding_from_angles,
-    computational_basis_state,
-)
 from qamomile.circuit.estimator import estimate_resources
 from qamomile.circuit.frontend.operation.inverse import (
     _BlockInverter,
@@ -62,6 +57,11 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+from qamomile.circuit.stdlib.state_preparation import (
+    amplitude_encoding,
+    amplitude_encoding_from_angles,
+    computational_basis_state,
+)
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import CircuitStyle
 from tests.circuit.conftest import run_statevector

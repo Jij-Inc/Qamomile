@@ -80,6 +80,18 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
 
         circuit_with_meas = self._ensure_measurements(circuit)
         transpiled = transpile(circuit_with_meas, self.backend)
+        # Aer may retain Qiskit's internal multiplexer instruction and crash
+        # in native assembly when it is composed with its inverse. Keep the
+        # public circuit abstract, but lower that private runtime detail before
+        # submitting it to the backend.
+        if type(self.backend).__module__.startswith("qiskit_aer.") and any(
+            instruction.operation.name == "multiplexer"
+            for instruction in transpiled.data
+        ):
+            transpiled = transpile(
+                transpiled.decompose(gates_to_decompose=["multiplexer"], reps=4),
+                self.backend,
+            )
         job = self.backend.run(transpiled, shots=shots)
         return job.result().get_counts()
 
@@ -219,8 +231,10 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
         """Initialize the Qiskit transpiler.
 
         Args:
-            use_native_composite (bool): Whether to prefer native semantic operation
-                composites such as QFT/IQFT. Defaults to ``True``.
+            use_native_composite (bool): Whether to prefer backend-native
+                realizations of semantic composites such as QFT, state
+                preparation, arithmetic, and multi-controlled X. Defaults to
+                ``True``.
             use_native_pauli_evolution (bool): Whether to prefer native Pauli
                 evolution over gate gadgets. Defaults to ``True``.
         """

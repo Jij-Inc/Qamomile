@@ -10,6 +10,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.stdlib import amplitude_encoding
 from qamomile.circuit.transpiler.circuit_ir import (
     BinaryExpr,
     BinaryOperator,
@@ -91,6 +92,47 @@ def _quration_lowering_coverage(
     return qmc.measure(qubits)
 
 
+@qmc.qkernel
+def _quration_state_preparation() -> qmc.Vector[qmc.Bit]:
+    """Exercise semantic state preparation through the PyQret fallback.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Prepared-state measurements.
+    """
+    qubits = qmc.qubit_array(2, "qubits")
+    qubits = amplitude_encoding(qubits, [1.0, 2.0, 3.0, 4.0])
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _quration_ripple_carry() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit, qmc.Bit]:
+    """Exercise semantic full addition through the PyQret fallback.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Bit], qmc.Bit, qmc.Bit]: Accumulator, carry,
+            and overflow measurements.
+    """
+    left = qmc.qubit_array(2, "left")
+    right = qmc.qubit_array(2, "right")
+    carry = qmc.qubit("carry")
+    overflow = qmc.qubit("overflow")
+    _, right, carry, overflow = qmc.ripple_carry_add(left, right, carry, overflow)
+    return qmc.measure(right), qmc.measure(carry), qmc.measure(overflow)
+
+
+@qmc.qkernel
+def _quration_multi_controlled_x() -> qmc.Bit:
+    """Exercise semantic MCX through PyQret's native bounded realization.
+
+    Returns:
+        qmc.Bit: Target measurement.
+    """
+    controls = qmc.x(qmc.qubit_array(2, "controls"))
+    target = qmc.qubit("target")
+    _, target = qmc.mcx(controls, target)
+    return qmc.measure(target)
+
+
 def test_quration_scalar_evaluator_handles_literals_loops_and_arithmetic() -> None:
     """PyQret materialization evaluates only concrete scalar expressions."""
     expression = BinaryExpr(
@@ -162,6 +204,25 @@ def test_quration_executes_calls_loops_decompositions_and_pauli_evolution() -> N
 
     result = executable.sample(transpiler.executor(seed=7), shots=32).result()
     assert sum(count for _, count in result.results) == 32
+
+
+@pytest.mark.quration
+@pytest.mark.parametrize(
+    "kernel",
+    [
+        _quration_state_preparation,
+        _quration_ripple_carry,
+        _quration_multi_controlled_x,
+    ],
+)
+def test_quration_transpiles_semantic_composites(kernel: qmc.QKernel) -> None:
+    """New semantic composites select executable native or fallback paths."""
+    pytest.importorskip("pyqret")
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(kernel)
+
+    result = executable.sample(transpiler.executor(seed=11), shots=4).result()
+    assert sum(count for _, count in result.results) == 4
 
 
 @pytest.mark.quration

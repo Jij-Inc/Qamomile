@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+from collections.abc import Mapping
 from typing import Any, TypeAlias
 
 from qamomile.circuit.transpiler.gate_emitter import GateKind
@@ -509,6 +510,113 @@ QFT_SEMANTIC_KEY = SemanticOpKey("qamomile.stdlib", "qft")
 IQFT_SEMANTIC_KEY = SemanticOpKey("qamomile.stdlib", "iqft")
 """Semantic key for the exact inverse quantum Fourier transform."""
 
+STATE_PREPARATION_SEMANTIC_KEY = SemanticOpKey(
+    "qamomile.stdlib",
+    "state_preparation",
+)
+"""Semantic key for preparing one concrete normalized state vector."""
+
+RIPPLE_CARRY_ADD_SEMANTIC_KEY = SemanticOpKey(
+    "qamomile.stdlib",
+    "ripple_carry_add",
+)
+"""Semantic key for the full reversible ripple-carry adder."""
+
+MULTI_CONTROLLED_X_SEMANTIC_KEY = SemanticOpKey(
+    "qamomile.stdlib",
+    "multi_controlled_x",
+)
+"""Semantic key for an arbitrary-width multi-controlled X operation."""
+
+
+SemanticValue: TypeAlias = None | bool | int | float | str | tuple["SemanticValue", ...]
+
+
+def _freeze_semantic_value(value: Any) -> SemanticValue:
+    """Convert serializer-friendly metadata to an immutable semantic value.
+
+    Args:
+        value (Any): Primitive or nested list, tuple, or mapping value.
+
+    Returns:
+        SemanticValue: Immutable representation suitable for circuit IR.
+
+    Raises:
+        TypeError: If the value cannot cross the semantic circuit boundary.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_semantic_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return tuple(
+            (str(key), _freeze_semantic_value(item))
+            for key, item in sorted(value.items(), key=lambda entry: str(entry[0]))
+        )
+    raise TypeError(
+        f"Semantic argument values must be serializer-friendly primitives, "
+        f"received {type(value).__name__}"
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class SemanticArguments:
+    """Store immutable named arguments belonging to an operation's meaning.
+
+    Args:
+        entries (tuple[tuple[str, SemanticValue], ...]): Sorted name-value
+            entries. Defaults to an empty tuple.
+    """
+
+    entries: tuple[tuple[str, SemanticValue], ...] = ()
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any] | None) -> "SemanticArguments":
+        """Freeze one mapping of semantic operation arguments.
+
+        Args:
+            values (Mapping[str, Any] | None): Serializer-friendly arguments,
+                or ``None`` for no arguments.
+
+        Returns:
+            SemanticArguments: Immutable, deterministically ordered arguments.
+
+        Raises:
+            TypeError: If a nested value is not serializer-friendly.
+        """
+        if not values:
+            return cls()
+        return cls(
+            tuple(
+                (str(key), _freeze_semantic_value(value))
+                for key, value in sorted(values.items())
+            )
+        )
+
+    def get(self, name: str, default: SemanticValue = None) -> SemanticValue:
+        """Return one semantic argument by name.
+
+        Args:
+            name (str): Argument name.
+            default (SemanticValue): Value returned when absent. Defaults to
+                ``None``.
+
+        Returns:
+            SemanticValue: Stored value or ``default``.
+        """
+        for key, value in self.entries:
+            if key == name:
+                return value
+        return default
+
+    def names(self) -> frozenset[str]:
+        """Return all semantic argument names.
+
+        Returns:
+            frozenset[str]: Immutable set of argument names.
+        """
+        return frozenset(key for key, _ in self.entries)
+
 
 @dataclasses.dataclass(frozen=True)
 class CallableIdentity:
@@ -518,10 +626,13 @@ class CallableIdentity:
         key (SemanticOpKey): Open semantic identity used by target-native
             realization registries.
         symbol (str): Human-readable callable name used for diagnostics.
+        arguments (SemanticArguments): Immutable arguments that define this
+            invocation's meaning. Defaults to no arguments.
     """
 
     key: SemanticOpKey
     symbol: str
+    arguments: SemanticArguments = SemanticArguments()
 
 
 @dataclasses.dataclass(frozen=True)

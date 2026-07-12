@@ -1815,17 +1815,56 @@ def _lower_call(
         return
     if operation.target not in functions:
         raise EmitError(f"Opaque HUGR callable {operation.target.name!r}")
-    operands = [environment[value.uuid] for value in operation.operands]
+    operands = [
+        (
+            _pack_value(value, environment, builder)
+            if isinstance(value, ArrayValue)
+            else _resolve_wire(value, environment)
+            if value.type.is_quantum()
+            else _resolve_classical_argument(value, builder, environment)
+        )
+        for value in operation.operands
+    ]
     outputs = list(builder.call(functions[operation.target].parent_node, *operands))
     if len(outputs) != len(operation.results):
         raise EmitError("HUGR callable result arity mismatch")
+    consumed_wires: list[Any] = []
     for operand in operation.operands:
-        if operand.type.is_quantum():
-            live_qubits.pop(operand.uuid, None)
+        if not operand.type.is_quantum():
+            continue
+        resolved = _resolve_wire(operand, environment)
+        consumed_wires.extend(resolved if isinstance(resolved, list) else [resolved])
+    for key, live_wire in list(live_qubits.items()):
+        if any(live_wire == consumed for consumed in consumed_wires):
+            live_qubits.pop(key)
+    quantum_sources = iter(
+        value for value in operation.operands if value.type.is_quantum()
+    )
     for result, wire in zip(operation.results, outputs, strict=True):
-        environment[result.uuid] = wire
-        if result.type.is_quantum():
-            live_qubits[result.uuid] = wire
+        if isinstance(result, ArrayValue):
+            from hugr import ops
+
+            element_types = [
+                _lower_type(result.type) for _ in range(_array_size(result))
+            ]
+            elements = list(builder.add_op(ops.UnpackTuple(element_types), wire))
+            if result.type.is_quantum():
+                next(quantum_sources)
+                environment[result.uuid] = elements
+                for index, element in enumerate(elements):
+                    live_qubits[f"{result.uuid}:{index}"] = element
+            else:
+                environment[result.uuid] = elements
+        elif result.type.is_quantum():
+            _publish_transformed_result(
+                next(quantum_sources),
+                result,
+                wire,
+                environment,
+                live_qubits,
+            )
+        else:
+            environment[result.uuid] = wire
 
 
 def _lower_transformed_call(
@@ -1901,7 +1940,10 @@ def _lower_transformed_call(
         if parameter_name is not None:
             local[f"__parameter__:{parameter_name}"] = resolved
 
-    control_wires = [_resolve_wire(value, environment) for value in controls]
+    control_wires = []
+    for value in controls:
+        resolved = _resolve_wire(value, environment)
+        control_wires.extend(resolved if isinstance(resolved, list) else [resolved])
     sequence = reversed(body.operations) if inverse else body.operations
     for nested in sequence:
         if isinstance(nested, ReturnOperation):
@@ -1953,9 +1995,12 @@ def _lower_transformed_call(
     result_targets = result_quantum[len(controls) :]
     for actual in [*controls, *targets]:
         live_qubits.pop(_quantum_key(actual, environment), None)
-    for source, result, wire in zip(
-        controls, result_controls, control_wires, strict=True
-    ):
+    control_offset = 0
+    for source, result in zip(controls, result_controls, strict=True):
+        width = _array_size(source) if isinstance(source, ArrayValue) else 1
+        selected = control_wires[control_offset : control_offset + width]
+        control_offset += width
+        wire: Any = selected if isinstance(result, ArrayValue) else selected[0]
         _publish_transformed_result(source, result, wire, environment, live_qubits)
     for source, result, formal in zip(
         targets, result_targets, quantum_exit, strict=True
@@ -2189,7 +2234,7 @@ def _lower_binop(
     builder: Any,
     environment: dict[str, Any],
 ) -> None:
-    """Lower supported floating-point arithmetic to HUGR extensions.
+    """Lower supported floating-point and unsigned arithmetic to HUGR.
 
     Args:
         operation (BinOp): Qamomile binary arithmetic operation.
@@ -2199,30 +2244,66 @@ def _lower_binop(
     Raises:
         EmitError: If operand types or operation kind are unsupported.
     """
-    from hugr.std.float import FLOAT_OPS_EXTENSION
-
-    if not all(isinstance(value.type, FloatType) for value in operation.operands):
-        raise EmitError("Only Float HUGR arithmetic is implemented initially")
-    names = {
-        BinOpKind.ADD: "fadd",
-        BinOpKind.SUB: "fsub",
-        BinOpKind.MUL: "fmul",
-        BinOpKind.DIV: "fdiv",
-        BinOpKind.POW: "fpow",
-        BinOpKind.MIN: "fmin",
-    }
     if operation.kind is None:
-        raise EmitError("HUGR floating operation has no operation kind")
+        raise EmitError("HUGR arithmetic operation has no operation kind")
+    if all(isinstance(value.type, FloatType) for value in operation.operands):
+        from hugr.std.float import FLOAT_OPS_EXTENSION
+
+        names = {
+            BinOpKind.ADD: "fadd",
+            BinOpKind.SUB: "fsub",
+            BinOpKind.MUL: "fmul",
+            BinOpKind.DIV: "fdiv",
+            BinOpKind.POW: "fpow",
+            BinOpKind.MIN: "fmin",
+        }
+        extension = FLOAT_OPS_EXTENSION
+        arguments = None
+    elif all(isinstance(value.type, UIntType) for value in operation.operands):
+        from hugr.std.int import IntVal
+
+        concrete = []
+        for value in operation.operands:
+            if value.is_constant():
+                concrete.append(int(value.get_const()))
+                continue
+            known = environment.get(f"__index__:{value.uuid}")
+            if not isinstance(known, int):
+                break
+            concrete.append(known)
+        if len(concrete) == 2:
+            match operation.kind:
+                case BinOpKind.ADD:
+                    value = concrete[0] + concrete[1]
+                case BinOpKind.SUB:
+                    value = concrete[0] - concrete[1]
+                case BinOpKind.MUL:
+                    value = concrete[0] * concrete[1]
+                case BinOpKind.POW:
+                    value = concrete[0] ** concrete[1]
+                case _:
+                    raise EmitError(
+                        f"Unsupported HUGR arithmetic operation: {operation.kind}"
+                    )
+            [wire] = builder.load(IntVal(value))
+            result = operation.results[0]
+            environment[result.uuid] = wire
+            environment[f"__index__:{result.uuid}"] = value
+            return
+        raise EmitError("HUGR UInt arithmetic requires statically known operands")
+    else:
+        raise EmitError("HUGR arithmetic operands must share Float or UInt type")
     name = names.get(operation.kind)
     if name is None:
-        raise EmitError(f"Unsupported HUGR floating operation: {operation.kind}")
-    op = FLOAT_OPS_EXTENSION.get_op(name).instantiate()
+        raise EmitError(f"Unsupported HUGR arithmetic operation: {operation.kind}")
+    op = extension.get_op(name).instantiate(arguments)
     [wire] = builder.add_op(
         op,
-        environment[operation.operands[0].uuid],
-        environment[operation.operands[1].uuid],
+        _resolve_classical_argument(operation.operands[0], builder, environment),
+        _resolve_classical_argument(operation.operands[1], builder, environment),
     )
-    environment[operation.results[0].uuid] = wire
+    result = operation.results[0]
+    environment[result.uuid] = wire
 
 
 def _lower_compop(

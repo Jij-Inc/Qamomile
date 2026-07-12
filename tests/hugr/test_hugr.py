@@ -8,6 +8,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.stdlib import amplitude_encoding
 
 pytest.importorskip("hugr")
 pytest.importorskip("tket_exts")
@@ -119,6 +120,47 @@ def _hugr_controlled_program() -> tuple[qmc.Bit, qmc.Bit]:
     target = qmc.qubit("target")
     control, target = qmc.control(_hugr_x_helper)(control, target)
     return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_state_preparation() -> qmc.Vector[qmc.Bit]:
+    """Exercise a semantic state-preparation callable in HUGR.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Prepared-state measurements.
+    """
+    qubits = qmc.qubit_array(2, "qubits")
+    qubits = amplitude_encoding(qubits, [1.0, 2.0, 3.0, 4.0])
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_ripple_carry() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit, qmc.Bit]:
+    """Exercise a semantic ripple-carry callable in HUGR.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Bit], qmc.Bit, qmc.Bit]: Accumulator, carry,
+            and overflow measurements.
+    """
+    left = qmc.qubit_array(2, "left")
+    right = qmc.qubit_array(2, "right")
+    carry = qmc.qubit("carry")
+    overflow = qmc.qubit("overflow")
+    _, right, carry, overflow = qmc.ripple_carry_add(left, right, carry, overflow)
+    return qmc.measure(right), qmc.measure(carry), qmc.measure(overflow)
+
+
+@qmc.qkernel
+def _hugr_multi_controlled_x() -> qmc.Bit:
+    """Exercise semantic MCX at HUGR's current two-control boundary.
+
+    Returns:
+        qmc.Bit: Target measurement.
+    """
+    controls = qmc.x(qmc.qubit_array(2, "controls"))
+    target = qmc.qubit("target")
+    _, target = qmc.mcx(controls, target)
+    return qmc.measure(target)
 
 
 @qmc.qkernel
@@ -389,6 +431,19 @@ def test_hugr_validates_two_control_call_legalization() -> None:
     transpiler.target.validate(package)
     operations = [data.op for _, data in package.modules[0].nodes()]
     assert any("name='Toffoli'" in str(op) for op in operations)
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    "kernel",
+    [_hugr_state_preparation, _hugr_ripple_carry, _hugr_multi_controlled_x],
+)
+def test_hugr_validates_semantic_composite_fallbacks(kernel: qmc.QKernel) -> None:
+    """New semantic composites remain validator-clean HUGR callables."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(kernel)
+
+    transpiler.target.validate(package)
 
 
 @pytest.mark.hugr

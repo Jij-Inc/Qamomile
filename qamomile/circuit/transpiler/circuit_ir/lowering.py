@@ -33,6 +33,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     ParameterExpr,
     ReusableCircuit,
     ScalarExpr,
+    SemanticArguments,
     SemanticOpKey,
     UnaryExpr,
     UnaryOperator,
@@ -539,6 +540,9 @@ class _SemanticCompositeEmitter:
                         variant=op.strategy_name,
                     ),
                     symbol=op.target.name,
+                    arguments=SemanticArguments.from_mapping(
+                        op.attrs.get("semantic_arguments")
+                    ),
                 ),
             ),
             tuple(qubit_indices),

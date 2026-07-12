@@ -33,6 +33,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ScalarAtom,
     ScalarCapabilities,
     ScalarExpressionForm,
+    SemanticArguments,
     UnaryOperator,
     legalize_program,
     verify_circuit,
@@ -208,6 +209,44 @@ class TestSemanticLegalization:
 
         assert legalized_call.callee.native_realization is None
         verify_target_legal(legalized, capabilities)
+
+    def test_native_declaration_matches_equal_operand_groups_without_shape(self):
+        """Equality constraints apply even without an exact operand shape."""
+        declaration = NativeSemanticOpCapabilities(
+            QFT_SEMANTIC_KEY,
+            "test.equal-widths",
+            CallTransformCapabilities(True, True, None),
+            matching_operand_widths=((0, 1),),
+        )
+        callee = ReusableCircuit(
+            body=_qft_body(),
+            name="equal-widths",
+            identity=CallableIdentity(
+                key=QFT_SEMANTIC_KEY,
+                symbol="equal-widths",
+                arguments=SemanticArguments.from_mapping({"mode": "exact"}),
+            ),
+            operand_widths=(1, 1),
+        )
+
+        assert declaration.accepts(callee)
+
+    def test_native_declaration_rejects_negative_operand_group_index(self):
+        """Negative equality indices cannot accidentally address from the end."""
+        declaration = NativeSemanticOpCapabilities(
+            QFT_SEMANTIC_KEY,
+            "test.invalid-width-index",
+            CallTransformCapabilities(True, True, None),
+            matching_operand_widths=((-1, 0),),
+        )
+        callee = ReusableCircuit(
+            body=_qft_body(),
+            name="invalid-width-index",
+            identity=CallableIdentity(key=QFT_SEMANTIC_KEY, symbol="invalid"),
+            operand_widths=(1, 1),
+        )
+
+        assert not declaration.accepts(callee)
 
     def test_unsupported_native_transform_uses_generic_fallback(self):
         """A native semantic operation falls back when its native form rejects controls."""

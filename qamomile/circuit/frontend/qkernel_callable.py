@@ -94,6 +94,9 @@ def qkernel_callable_attrs(kernel: Any) -> dict[str, Any]:
                 "strategy_name": None,
             }
         )
+        semantic_arguments = getattr(kernel, "_callable_semantic_arguments", {})
+        if semantic_arguments:
+            attrs["semantic_arguments"] = dict(semantic_arguments)
     return attrs
 
 
