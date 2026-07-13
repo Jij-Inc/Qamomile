@@ -41,6 +41,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
     GateOperation,
     GateOperationType,
     MeasureOperation,
@@ -752,7 +753,7 @@ class TestIfMergeAllocation:
 
 
 # ===========================================================================
-# LoopAnalyzer._has_loop_var_binop
+# LoopAnalyzer classical-expression dependency detection
 # ===========================================================================
 
 
@@ -781,6 +782,67 @@ class TestLoopAnalyzerBinOp:
             loop_var="i",
             loop_var_value=loop_var_val,
             operations=[binop, gate],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_controlled_body_parameter_from_loop_var_triggers_unroll(self) -> None:
+        """A controlled fresh scope receives a concrete iteration value."""
+        loop_var = _uint_val("i")
+        control = _qubit("control")
+        target = _qubit("target")
+        inner_target = _qubit("inner_target")
+        inner_selector = _uint_val("inner_selector")
+        controlled = ConcreteControlledU(
+            operands=[control, target, loop_var],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=Block(input_values=[inner_target, inner_selector]),
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[controlled],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_controlled_predicate_from_loop_var_triggers_unroll(self) -> None:
+        """A loop-derived predicate passed into a fresh body forces unrolling."""
+        loop_var = _uint_val("i")
+        predicate = Value(type=BitType(), name="predicate")
+        comparison = CompOp(
+            operands=[loop_var, _uint_val("zero", const=0)],
+            results=[predicate],
+            kind=CompOpKind.EQ,
+        )
+        control = _qubit("control")
+        target = _qubit("target")
+        controlled = ConcreteControlledU(
+            operands=[control, target, predicate],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=Block(
+                input_values=[
+                    _qubit("inner_target"),
+                    Value(type=BitType(), name="inner_predicate"),
+                ]
+            ),
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[comparison, controlled],
         )
 
         assert self.analyzer.should_unroll(for_op, {}) is True

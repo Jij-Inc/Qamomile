@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.value import Value, resolve_root_qubit_address
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    block_parameter_binding_keys,
+    pair_block_parameter_operands,
+)
 from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
@@ -380,7 +384,7 @@ class ValueResolver:
 
     def lookup_in_bindings(
         self,
-        value: "Value",
+        value: Any,
         bindings: dict[str, Any],
         *,
         index_array: bool = False,
@@ -419,10 +423,9 @@ class ValueResolver:
         remain UUID-keyed.
 
         Args:
-            value (Value | Any): The IR Value (or already-concrete Python
-                scalar) to
+            value (Any): The IR value (or already-concrete Python scalar) to
                 resolve.
-            bindings (dict[str, Any]): The active bindings dict.
+            bindings (dict[str, Any]): The active bindings dictionary.
             index_array (bool): When True, also resolve array-element accesses
                 via ``parent_array`` indexing. Off by default because not
                 all callers want to index into bound containers.
@@ -482,7 +485,7 @@ class ValueResolver:
 
     def resolve_operand_for_binding(
         self,
-        operand: "Value",
+        operand: Any,
         bindings: dict[str, Any],
     ) -> Any:
         """Resolve an operand to a concrete value for block parameter binding.
@@ -492,11 +495,11 @@ class ValueResolver:
         callee's parameter bindings.
 
         Args:
-            operand (Value): Actual call-site operand.
-            bindings (dict[str, Any]): Bindings visible at the call site.
+            operand (Any): Call-site value or already-concrete operand.
+            bindings (dict[str, Any]): Parent emit-time bindings.
 
         Returns:
-            Any: Resolved Python/backend value, or ``None`` when symbolic.
+            Any: Resolved value, or ``None`` when the operand is symbolic.
         """
         return self.lookup_in_bindings(operand, bindings, index_array=True)
 
@@ -506,38 +509,37 @@ class ValueResolver:
         param_operands: list["Value"],
         bindings: dict[str, Any],
     ) -> dict[str, Any]:
-        """Create UUID-safe local bindings for a nested block's parameters.
+        """Create local bindings by matching block inputs to call-site operands.
 
         Args:
-            block_value (Any): Nested block whose formal inputs are bound.
-            param_operands (list[Value]): Actual classical operands in formal
-                input order.
-            bindings (dict[str, Any]): Bindings visible at the call site.
+            block_value (Any): Nested block whose classical/object inputs are
+                bound. Objects without ``input_values`` receive no additional
+                local bindings for compatibility with optional backend recipes.
+            param_operands (list[Value]): Classical/object call-site operands
+                in the controlled operation's signature order.
+            bindings (dict[str, Any]): Parent emit-time bindings used to
+                resolve the call-site operands.
 
         Returns:
-            dict[str, Any]: A copy of ``bindings`` extended with each resolved
-                formal's UUID and, for declared parameters, semantic parameter
-                name.
+            dict[str, Any]: Parent bindings with each inner formal rebound under
+                both its UUID and sanctioned parameter-name key.
         """
         local_bindings = bindings.copy()
         if not hasattr(block_value, "input_values"):
             return local_bindings
-        param_inputs = [
-            iv
-            for iv in block_value.input_values
-            if hasattr(iv, "type") and (iv.type.is_classical() or iv.type.is_object())
-        ]
-        for i, operand in enumerate(param_operands):
-            if i >= len(param_inputs):
-                break
+        for param_input in block_value.input_values:
+            if not (param_input.type.is_classical() or param_input.type.is_object()):
+                continue
+            for key in block_parameter_binding_keys(param_input):
+                local_bindings.pop(key, None)
+        for param_input, operand in pair_block_parameter_operands(
+            block_value, param_operands
+        ):
+            inner_keys = block_parameter_binding_keys(param_input)
             resolved = self.resolve_operand_for_binding(operand, bindings)
             if resolved is not None:
-                formal = param_inputs[i]
-                local_bindings[formal.uuid] = resolved
-                if hasattr(formal, "is_parameter") and formal.is_parameter():
-                    parameter_name = formal.parameter_name()
-                    if parameter_name:
-                        local_bindings[parameter_name] = resolved
+                for key in inner_keys:
+                    local_bindings[key] = resolved
         return local_bindings
 
     def resolve_bound_value(

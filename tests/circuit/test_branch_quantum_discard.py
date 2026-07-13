@@ -51,11 +51,11 @@ from qamomile.circuit.transpiler.errors import (
     QamomileCompileError,
     QubitRebindError,
 )
+from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 from qamomile.circuit.transpiler.passes.analyze import (
     _static_loop_trip_count,
     reject_control_flow_quantum_discard,
 )
-from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 
 pytest.importorskip("qiskit")
 
@@ -1682,10 +1682,11 @@ class TestAllowedLoopPatterns:
 
         assert _sample_single(kernel, bindings={"n": 2, "flag": 0}) == 1
 
-    def test_compile_time_dead_if_inside_loop_accepted_at_analysis(self):
+    def test_compile_time_dead_if_inside_loop_executes(self):
         """A compile-time-dead if inside the loop body passes the variable
         through its collapsed merge — that pass-through read is consumption
-        evidence, so the loop record is exempt and the lowered loop executes."""
+        evidence, so the loop record is exempt and dead condition producers
+        do not split the quantum segment."""
 
         @qmc.qkernel
         def kernel(n: qmc.UInt, flag: qmc.UInt) -> qmc.Bit:

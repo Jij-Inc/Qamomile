@@ -69,8 +69,8 @@ class LoopAnalyzer:
 
         Returns:
             bool: True when identities, carries, indices, predicates,
-                dictionary lookups, or nested bounds require concrete
-                per-iteration evaluation.
+                dictionary lookups, structural body parameters, or nested
+                bounds require concrete per-iteration evaluation.
         """
         if op.loop_var_value is None:
             # Never recover compiler identity from a display label. The emit
@@ -95,12 +95,13 @@ class LoopAnalyzer:
         """Return whether any loop-body input structurally depends on the index.
 
         The generic ``Operation.all_input_values()`` protocol is the source of
-        truth so subclass-specific fields such as ``SymbolicControlledU``
-        powers, control counts, and control indices cannot be omitted. Each
-        value is then walked recursively through array-element indices, slice
-        bounds, slice parents, shapes, tuples, and dictionaries. This covers
-        operations such as ``MeasureOperation`` without maintaining a fragile
-        operation-type whitelist.
+        truth so subclass-specific fields such as operation-owned controlled
+        body parameters, ``SymbolicControlledU`` powers, control counts, and
+        control indices cannot be omitted. Each value is then walked recursively
+        through array-element indices, slice bounds, slice parents, shapes,
+        tuples, and dictionaries. This covers operations such as
+        ``MeasureOperation`` without maintaining a fragile operation-type
+        whitelist.
 
         Args:
             operations (list[Operation]): Loop-body operations to scan.

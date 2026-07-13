@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import struct
+from collections.abc import Sequence
 from typing import Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -26,6 +27,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
 )
+from qamomile.circuit.ir.operation.callable import (
+    CallTransform,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -36,7 +41,12 @@ from qamomile.circuit.ir.operation.control_flow import (
     genuine_input_values,
     validate_region_args,
 )
-from qamomile.circuit.ir.operation.gate import MeasureVectorOperation
+from qamomile.circuit.ir.operation.gate import (
+    ControlledUOperation,
+    MeasureVectorOperation,
+    SymbolicControlledU,
+)
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import (
@@ -45,6 +55,9 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     resolve_root_array_index,
+)
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    pair_block_parameter_operands,
 )
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.value_resolver import (
@@ -245,14 +258,28 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
        subsequent operations and block outputs.
     """
 
-    def __init__(self, bindings: dict[str, Any] | None = None):
-        """Initialize compile-time lowering state.
+    def __init__(
+        self,
+        bindings: dict[str, Any] | None = None,
+        *,
+        _under_controlled_unitary: bool = False,
+        _active_block_ids: frozenset[int] | None = None,
+    ):
+        """Initialize compile-time if lowering state.
 
         Args:
-            bindings (dict[str, Any] | None): Compile-time bindings used for
-                condition and bounded-loop evaluation. Defaults to None.
+            bindings (dict[str, Any] | None): Compile-time bindings visible in
+                the current block. Defaults to no bindings.
+            _under_controlled_unitary (bool): Internal context flag indicating
+                that boxed callables encountered here will be decomposed by the
+                controlled emission walker and therefore need their owned
+                bodies lowered too. Defaults to ``False``.
+            _active_block_ids (frozenset[int] | None): Internal recursion-path
+                guard for operation-owned blocks. Defaults to an empty set.
         """
         self._bindings = bindings or {}
+        self._under_controlled_unitary = _under_controlled_unitary
+        self._active_block_ids = _active_block_ids or frozenset()
         self._static_replay_remaining = _MAX_STATIC_CARRY_ITERATIONS
 
     @property
@@ -295,7 +322,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 f"CompileTimeIfLoweringPass expects TRACED, AFFINE, or "
                 f"HIERARCHICAL block, got {input.kind}",
             )
-
         # Track concrete values produced by classical ops.
         # Maps UUID → concrete Python value (int, float, bool).
         concrete_values: dict[str, Any] = {}
@@ -563,9 +589,253 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     if eliminate_loop:
                         continue
 
+            elif isinstance(op, ControlledUOperation) and op.block is not None:
+                # A controlled-U carries its unitary as a nested ``block``
+                # with its OWN value namespace (fresh input-value UUIDs), not
+                # as HasNestedOps children, so the generic recursion above
+                # never reaches it — and applying the outer merge /
+                # concrete-value maps to it would be unsound, since those are
+                # keyed by outer-namespace UUIDs. Recurse with a binding scope
+                # seeded only from the controlled operands so a compile-time
+                # ``if sel == k`` in the body is resolved here, before emit,
+                # uniformly for every backend. Without this the comparison
+                # survives as an unresolved ``CompOp`` inside the controlled
+                # target, which QURI Parts / CUDA-Q reject at emit.
+                op = self._lower_controlled_block(op, concrete_values)
+
+            elif isinstance(op, InvokeOperation) and (
+                op.transform is CallTransform.CONTROLLED
+                or self._under_controlled_unitary
+            ):
+                # A boxed callable reached under structural control also owns
+                # fresh-namespace bodies. Lower every body that controlled
+                # emission may select for this invocation's transform.
+                op = self._lower_invoke_bodies(op, concrete_values)
+
+            elif (
+                isinstance(op, InverseBlockOperation) and self._under_controlled_unitary
+            ):
+                op = self._lower_inverse_block(op, concrete_values)
+
             new_ops.append(op)
 
         return new_ops, merge_subst, dead_uuids
+
+    def _lower_controlled_block(
+        self,
+        op: ControlledUOperation,
+        concrete_values: dict[str, Any],
+    ) -> ControlledUOperation:
+        """Lower compile-time ifs inside a controlled-U's nested unitary block.
+
+        The block is a self-contained unitary with its own value namespace,
+        so it is processed by a fresh pass instance whose bindings are seeded
+        ONLY from the controlled operands — never the outer bindings, which
+        could collide by parameter name and mis-seed an inner parameter. A
+        compile-time ``if`` whose condition depends on a bound classical
+        operand (e.g. ``if sel == 0`` with ``sel`` bound) is resolved here so
+        every backend sees an already-selected branch rather than an
+        unresolved ``CompOp`` inside the controlled target.
+
+        Args:
+            op (ControlledUOperation): The controlled-U operation to descend
+                into. Its ``block`` must not be ``None``.
+            concrete_values (dict[str, Any]): Outer-namespace concrete values
+                used to resolve the controlled operands to compile-time
+                constants.
+
+        Returns:
+            ControlledUOperation: ``op`` with its ``block`` field replaced by
+                the recursively lowered block.
+
+        Raises:
+            AssertionError: If ``op.block`` is ``None``. The sole caller
+                guards this with ``op.block is not None``, so a failure here
+                signals a broken caller contract rather than user error.
+            ValidationError: If the inner block has an unsupported kind, or
+                if lowering selects a ``CastOperation`` source that is a
+                symbolic-bound slice view.
+        """
+        block = op.block
+        assert block is not None
+        new_block = self._lower_operation_owned_block(
+            block,
+            op.param_operands,
+            concrete_values,
+        )
+        return dataclasses.replace(op, block=new_block)
+
+    def _lower_invoke_bodies(
+        self,
+        op: InvokeOperation,
+        concrete_values: dict[str, Any],
+    ) -> InvokeOperation:
+        """Lower compile-time ifs in bodies selected for an invocation.
+
+        A callable definition can provide a default body plus backend- or
+        strategy-specific implementations. Emission first looks for a body
+        whose transform matches the invocation and otherwise falls back to the
+        default body, so both sets must be lowered before backend selection.
+        The definition and implementations are copied per call site to avoid
+        mutating a shared callable body when the same callable is invoked with
+        different compile-time arguments.
+
+        Args:
+            op (InvokeOperation): Boxed invocation reached under structural
+                control, or a controlled invocation at the outer level.
+            concrete_values (dict[str, Any]): Outer-namespace concrete values
+                used to resolve the invocation's parameter operands.
+
+        Returns:
+            InvokeOperation: Invocation with every selectable IR body replaced
+            by an independently lowered copy. Bodyless opaque invocations are
+            returned unchanged.
+
+        Raises:
+            ValidationError: If a selected nested body has an unsupported
+                block kind or contains a symbolic-bound slice-view cast source
+                selected by compile-time lowering.
+        """
+        definition = op.definition
+        if definition is None:
+            return op
+
+        changed = False
+        new_body = definition.body
+        if new_body is not None:
+            new_body = self._lower_operation_owned_block(
+                new_body,
+                op.parameters,
+                concrete_values,
+            )
+            changed = True
+
+        new_implementations = []
+        for implementation in definition.implementations:
+            new_implementation = implementation
+            if (
+                implementation.transform is op.transform
+                and implementation.body is not None
+            ):
+                new_implementation = dataclasses.replace(
+                    implementation,
+                    body=self._lower_operation_owned_block(
+                        implementation.body,
+                        op.parameters,
+                        concrete_values,
+                    ),
+                )
+                changed = True
+            new_implementations.append(new_implementation)
+
+        if not changed:
+            return op
+        new_definition = dataclasses.replace(
+            definition,
+            body=new_body,
+            implementations=new_implementations,
+        )
+        return dataclasses.replace(op, definition=new_definition)
+
+    def _lower_inverse_block(
+        self,
+        op: InverseBlockOperation,
+        concrete_values: dict[str, Any],
+    ) -> InverseBlockOperation:
+        """Lower owned inverse blocks reached by controlled decomposition.
+
+        Args:
+            op (InverseBlockOperation): Inverse operation whose forward and
+                fallback bodies may be selected during controlled emission.
+            concrete_values (dict[str, Any]): Outer-namespace concrete values
+                used to resolve the inverse parameter operands.
+
+        Returns:
+            InverseBlockOperation: Copy with each available body independently
+            lowered in its own namespace.
+
+        Raises:
+            ValidationError: If a nested block has an unsupported kind or
+                lowering selects a symbolic-bound slice-view cast source.
+        """
+        source_block = op.source_block
+        if source_block is not None:
+            source_block = self._lower_operation_owned_block(
+                source_block,
+                op.parameters,
+                concrete_values,
+            )
+        implementation_block = op.implementation_block
+        if implementation_block is not None:
+            implementation_block = self._lower_operation_owned_block(
+                implementation_block,
+                op.parameters,
+                concrete_values,
+            )
+        return dataclasses.replace(
+            op,
+            source_block=source_block,
+            implementation_block=implementation_block,
+        )
+
+    def _lower_operation_owned_block(
+        self,
+        block: Block,
+        param_operands: Sequence[ValueBase],
+        concrete_values: dict[str, Any],
+    ) -> Block:
+        """Lower a fresh-namespace block using its call-site parameters.
+
+        Pairs the block's classical/object inputs with the operation's
+        parameter operands in signature order and resolves each operand via
+        the outer concrete-value map. Resolved values are keyed by inner input
+        UUID only. The fresh map is seeded exclusively from this call's
+        operands, so an outer parameter with the same display name cannot
+        mis-seed the inner parameter.
+
+        The inner UUID key is what carries the value into the fresh inner
+        pass: :meth:`run` copies it into that pass's
+        ``concrete_values`` (the UUID-keyed context map :class:`ValueResolver`
+        consults first), so a scalar comparison condition resolves by context,
+        and the resolver's compile-time-array path keys a bound ``Vector``
+        container by the same UUID. Operands that do not resolve are skipped,
+        leaving the corresponding inner parameter symbolic so its compile-time
+        ``if`` stays unlowered — the pre-existing loud outcome, never a silent
+        miscompile.
+
+        Args:
+            block (Block): Operation-owned block with a fresh value namespace.
+            param_operands (Sequence[ValueBase]): Classical/object call-site
+                operands in the wrapped block's signature order.
+            concrete_values (dict[str, Any]): Outer-namespace concrete values
+                used to resolve the operands to compile-time constants.
+
+        Returns:
+            Block: Independently lowered block whose value namespace remains
+            local to the operation that owns it.
+
+        Raises:
+            ValidationError: If the nested block has an unsupported kind or
+                lowering selects a symbolic-bound slice-view cast source.
+        """
+        block_id = id(block)
+        if block_id in self._active_block_ids:
+            return block
+
+        inner_bindings: dict[str, Any] = {}
+        resolver = UnifiedValueResolver(
+            context=concrete_values, bindings=self._bindings
+        )
+        for inner_iv, operand in pair_block_parameter_operands(block, param_operands):
+            resolved = resolver.resolve(operand)
+            if resolved is None:
+                continue
+            inner_bindings[inner_iv.uuid] = resolved
+        return CompileTimeIfLoweringPass(
+            inner_bindings,
+            _under_controlled_unitary=True,
+            _active_block_ids=self._active_block_ids | {block_id},
+        ).run(block)
 
     # ------------------------------------------------------------------
     # Substitution
@@ -1676,11 +1946,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 ),
             )
 
-        from qamomile.circuit.ir.operation.gate import (
-            ControlledUOperation,
-            SymbolicControlledU,
-        )
-
         if isinstance(op, HasNestedOps):
             # Generic recursion for For/ForItems/While bodies.
             new_lists = [
@@ -1940,33 +2205,67 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             for ov in output_values:
                 self._collect_value_uuids(ov, used_uuids)
 
+        result, removed = self._remove_dead_ops_recursive(
+            operations, dead_uuids, used_uuids
+        )
+
+        # If we removed anything, do another pass for propagation.
+        if removed:
+            return self._eliminate_dead_ops(result, dead_uuids, output_values)
+        return result
+
+    def _remove_dead_ops_recursive(
+        self,
+        operations: list[Operation],
+        dead_uuids: set[str],
+        used_uuids: set[str],
+    ) -> tuple[list[Operation], bool]:
+        """Remove one wave of dead producers throughout control-flow bodies.
+
+        Args:
+            operations (list[Operation]): Operations to filter recursively.
+            dead_uuids (set[str]): Result UUIDs eligible for removal. The set
+                is extended with inputs of removed operations so the next
+                fixed-point iteration can remove newly dead producers.
+            used_uuids (set[str]): UUIDs still read anywhere in the current
+                operation tree or by the enclosing block outputs.
+
+        Returns:
+            tuple[list[Operation], bool]: The rebuilt operation list and
+                whether at least one operation was removed at any depth.
+        """
         result: list[Operation] = []
+        removed = False
         for op in operations:
-            # Check if this is a known-pure expression and all of its results
-            # are dead and unused. Quantum, hybrid, control-flow, and unknown
-            # classical operations remain because unused SSA results do not
-            # prove that executing the operation has no observable effect.
+            if isinstance(op, HasNestedOps):
+                new_lists: list[list[Operation]] = []
+                for body in op.nested_op_lists():
+                    new_body, body_removed = self._remove_dead_ops_recursive(
+                        body, dead_uuids, used_uuids
+                    )
+                    new_lists.append(new_body)
+                    removed = removed or body_removed
+                op = op.rebuild_nested(new_lists)
+
+            # Only known-pure scalar expressions are removable. Quantum,
+            # hybrid, control-flow, and unknown classical operations may have
+            # observable effects even when every SSA result is dead (a
+            # measurement whose result is discarded is the canonical case).
             if (
                 isinstance(op, _PURE_CLASSICAL_EXPRESSION_TYPES)
                 and op.results
                 and all(
-                    r.uuid in dead_uuids and r.uuid not in used_uuids
-                    for r in op.results
-                    if hasattr(r, "uuid")
+                    result_value.uuid in dead_uuids
+                    and result_value.uuid not in used_uuids
+                    for result_value in op.results
                 )
             ):
-                # This op can be safely removed. Mark its operands as
-                # potentially dead too (for iterative propagation).
                 for operand in op.operands:
-                    if hasattr(operand, "uuid"):
-                        dead_uuids.add(operand.uuid)
+                    dead_uuids.add(operand.uuid)
+                removed = True
                 continue
             result.append(op)
-
-        # If we removed anything, do another pass for propagation.
-        if len(result) < len(operations):
-            return self._eliminate_dead_ops(result, dead_uuids, output_values)
-        return result
+        return result, removed
 
     @staticmethod
     def _collect_used_uuids(op: Operation, used: set[str]) -> None:

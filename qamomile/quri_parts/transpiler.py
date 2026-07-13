@@ -9,9 +9,14 @@ from __future__ import annotations
 from numbers import Real
 from typing import TYPE_CHECKING, Any, Sequence, cast
 
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
+)
 from qamomile.circuit.ir.operation.callable import InvokeOperation
-from qamomile.circuit.ir.operation.control_flow import ForOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
@@ -32,16 +37,21 @@ from qamomile.circuit.transpiler.passes.emit_support import (
 )
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
+    evaluate_classical_predicate,
+)
+from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
+    update_composite_result_mapping,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _bind_and_populate_block_inputs,
-    _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
     _populate_input_qubit_map,
     _prepare_nested_block_for_emit,
+    emit_controlled_composite_at_indices,
     emit_controlled_gate,
     emit_controlled_pauli_evolve,
     emit_multi_controlled_gate,
+    emit_static_controlled_if,
     map_nested_controlled_u_results,
     replay_controlled_for,
     resolve_controlled_u_call,
@@ -339,31 +349,6 @@ def _emit_quri_controlled_gate(
     )
 
 
-def _map_quri_composite_results(
-    op: InvokeOperation,
-    control_indices: list[int],
-    target_index_groups: list[list[int]],
-    qubit_map: QubitMap,
-) -> None:
-    """Map composite result values back to their physical qubits.
-
-    Args:
-        op (InvokeOperation): Invocation that was emitted.
-        control_indices (list[int]): Physical qubits for the composite's
-            own control operands.
-        target_index_groups (list[list[int]]): Physical qubits for each
-            target operand.
-        qubit_map (QubitMap): Mutable block-local qubit map.
-    """
-    for result, index in zip(op.results[: op.num_control_qubits], control_indices):
-        qubit_map[QubitAddress(result.uuid)] = index
-
-    target_results = op.results[op.num_control_qubits :]
-    target_indices = [index for group in target_index_groups for index in group]
-    for result, index in zip(target_results, target_indices):
-        qubit_map[QubitAddress(result.uuid)] = index
-
-
 def _emit_quri_inverse_operation(
     emit_pass: Any,
     circuit: Any,
@@ -494,44 +479,21 @@ def _emit_quri_composite_operation(
         EmitError: If the invocation has no implementation block or cannot
             be routed through the guarded recursive fallback.
     """
-    impl = op.effective_body()
-    if impl is None:
-        raise EmitError(
-            "QURI Parts controlled fallback cannot emit an invocation "
-            "without an implementation block.",
-            operation="ControlledUOperation",
-        )
-
-    composite_controls = [
-        index
-        for operand in op.control_qubits
-        for index in _expand_quantum_operands_to_phys(
-            emit_pass, operand, qubit_map, bindings
-        )
-    ]
-    target_index_groups = [
+    quantum_operands = [*op.control_qubits, *op.target_qubits]
+    qubit_groups = [
         _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
-        for operand in op.target_qubits
+        for operand in quantum_operands
     ]
-    target_indices = [index for group in target_index_groups for index in group]
-    local_bindings = emit_pass._resolver.bind_block_params(
-        impl, op.parameters, bindings
-    )
-    _bind_quantum_input_shapes(
-        emit_pass._resolver, impl, op.target_qubits, bindings, local_bindings
-    )
-    inner_qubit_map = _build_quri_controlled_qubit_map(
-        emit_pass, impl, target_indices, local_bindings
-    )
-    _emit_quri_controlled_operations(
+    qubit_indices = [index for group in qubit_groups for index in group]
+    emit_controlled_composite_at_indices(
         emit_pass,
         circuit,
-        impl.operations,
-        outer_control_indices + composite_controls,
-        inner_qubit_map,
-        local_bindings,
+        op,
+        outer_control_indices,
+        qubit_indices,
+        bindings,
     )
-    _map_quri_composite_results(op, composite_controls, target_index_groups, qubit_map)
+    update_composite_result_mapping(op, qubit_groups, qubit_map)
 
 
 def _emit_quri_nested_controlled_u(
@@ -623,6 +585,20 @@ def _emit_quri_controlled_operations(
         if isinstance(op, BinOp):
             evaluate_binop(emit_pass, op, bindings)
             continue
+        if isinstance(op, (CompOp, CondOp, NotOp)):
+            evaluate_classical_predicate(emit_pass, op, bindings)
+            continue
+        if isinstance(op, IfOperation):
+            emit_static_controlled_if(
+                emit_pass,
+                circuit,
+                op,
+                control_indices,
+                qubit_map,
+                bindings,
+                walker=_emit_quri_controlled_operations,
+            )
+            continue
         if isinstance(op, GateOperation):
             target_indices = _resolve_quri_gate_targets(
                 emit_pass, op, qubit_map, bindings
@@ -679,7 +655,9 @@ def _emit_quri_controlled_operations(
             "InvokeOperation values, "
             "InverseBlockOperation values, "
             "PauliEvolveOp values, "
-            "ReturnOperation, and statically resolved ForOperation bodies. "
+            "compile-time classical expressions, ReturnOperation, "
+            "compile-time-resolved IfOperation bodies, and statically "
+            "bounded ForOperation bodies. "
             f"Unsupported operation: {type(op).__name__}.",
             operation="ControlledUOperation",
         )
