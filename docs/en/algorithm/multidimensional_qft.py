@@ -33,7 +33,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import qamomile.circuit as qmc
-from qamomile.circuit.stdlib import amplitude_encoding
+from qamomile.circuit.algorithm import amplitude_encoding
+from qamomile.circuit.stdlib.qft import QFT
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.qiskit import QiskitTranspiler
 
@@ -213,7 +214,7 @@ plt.show()
 # %% [markdown]
 # ### Multidimensional QFT
 #
-# Use Qamomile's `qmc.qft` composite to implement multidimensional QFT.
+# Use Qamomile's `QFT` class to implement multidimensional QFT.
 
 
 # %%

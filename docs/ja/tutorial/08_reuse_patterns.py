@@ -26,7 +26,7 @@
 #
 # さらにトップダウン設計のための第3のパターンもあります：
 #
-# 3. **不透明オラクル** — 実装本体を持たない呼び出しで、トップダウン設計とリソース推定に使います。完全なオラクル実装がなくても、呼び出し構造を推定できます。
+# 3. **スタブゲート** — 実装本体を持たないゲートで、リソース推定に使います。例えば、グローバー探索アルゴリズムを設計しており、オラクルが約40個のTゲートを使用することはわかっているが、まだ実装していないとします。スタブゲートを使用すると、完全なオラクル実装なしでアルゴリズムの総コストを推定できます。
 
 # %%
 # 最新のQamomileをpipからインストールします！
@@ -34,6 +34,7 @@
 
 # %%
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -158,20 +159,27 @@ ghz_with_composite.draw(n=4, fold_loops=False)
 # | `@composite_gate` | 名前付きボックス | ドメインレベルの抽象化/高度なカスタム |
 
 # %% [markdown]
-# ## パターン3:トップダウン設計のための不透明オラクル
+# ## パターン3:トップダウン設計のためのスタブゲート
 #
-# オラクル内部が未知のまま回路を組みたい場合は、名前・量子ビット数だけを持つ`qmc.Oracle`を使えます。
+# オラクルなどを想定する量子アルゴリズムを設計する場合に内部は未知のまま回路を組みたいこともあると思います。**スタブゲート**は実装本体を持たず、名前・量子ビット数・オプションのリソースメタデータだけを持ちます。
 #
 # オラクルあるいはサブルーチンが開発中でも、アルゴリズム全体のコストを推定できます。
 #
-# 推定時に`UnknownResourcePolicy.OPAQUE_CALL`を指定すると、未実装の呼び出しをopaque call/queryとして記録します。
+# スタブゲートを使うためには`@composite_gate`の引数として`stub=True`を指定します。このとき同時にリソース情報を`ResrouceMetadata`として与えられます。
 
 
 # %%
-oracle_box = qmc.Oracle(
+@qmc.composite_gate(
+    stub=True,
     name="oracle",
     num_qubits=3,
+    resource_metadata=ResourceMetadata(
+        query_complexity=1,
+        t_gates=40,
+    ),
 )
+def oracle_box():
+    pass
 
 
 @qmc.qkernel
@@ -187,35 +195,42 @@ def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
 algorithm_skeleton.draw(fold_loops=False)
 
 # %% [markdown]
-# ### 不透明オラクルを含むqkernelのリソース推定
+# ### スタブゲートを含むqkernelのリソース推定
 #
-# `estimate_resources()`は、オラクル内部が未実装でもqkernel全体を解析できます。既知の回路部分は通常どおり集計され、未知部分は`est.calls.oracle_calls` / `est.calls.oracle_queries`として追跡されます。
+# `estimate_resources()`は、オラクル内部が未実装でもqkernel全体を解析できます。既知の回路部分は通常どおり集計され、未知のスタブ部分は`est.gates.oracle_calls` / `est.gates.oracle_queries`として追跡されます。
 
 # %%
-est = algorithm_skeleton.estimate_resources(
-    unknown_policy=qmc.UnknownResourcePolicy.OPAQUE_CALL,
-).simplify()
+est = algorithm_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
 assert est.qubits == 3
 print("total gates:", est.gates.total)
-# Hゲート3個は`gates.total`に、不透明な`oracle_box`は`calls.oracle_calls`に記録されます。
+# H ゲート 3 個(qubit_array(3) へのブロードキャスト); stub の `oracle_box`
+# は gates.total ではなく gates.oracle_calls にカウントされる。
 assert est.gates.total == 3
 
 # %% [markdown]
-# 次に、通常ゲートと複数の不透明オラクルを混在させたqkernelで確認します。
+# 次に、通常ゲートと複数スタブオラクルを混在させたqkernelで確認します。
 
 
 # %%
-phase_oracle = qmc.Oracle(
+@qmc.composite_gate(
+    stub=True,
     name="oracle",
     num_qubits=3,
+    resource_metadata=ResourceMetadata(query_complexity=2),
 )
+def phase_oracle():
+    pass
 
 
-mixing_oracle = qmc.Oracle(
+@qmc.composite_gate(
+    stub=True,
     name="mixing",
     num_qubits=3,
+    resource_metadata=ResourceMetadata(query_complexity=1),
 )
+def mixing_oracle():
+    pass
 
 
 @qmc.qkernel
@@ -245,21 +260,19 @@ iterative_oracle_skeleton.draw(rounds=4, fold_loops=False)
 
 
 # %%
-oracle_est = iterative_oracle_skeleton.estimate_resources(
-    unknown_policy=qmc.UnknownResourcePolicy.OPAQUE_CALL,
-).simplify()
+oracle_est = iterative_oracle_skeleton.estimate_resources().simplify()
 print("total gates:", oracle_est.gates.total)
 assert str(oracle_est.gates.total) == "3*rounds + 3"
 print("two-qubit gates:", oracle_est.gates.two_qubit)
 assert str(oracle_est.gates.two_qubit) == "2*rounds + 1"
-print("oracle_calls:", oracle_est.calls.oracle_calls)
-assert {k: str(v) for k, v in oracle_est.calls.oracle_calls.items()} == {
+print("oracle_calls:", oracle_est.gates.oracle_calls)
+assert {k: str(v) for k, v in oracle_est.gates.oracle_calls.items()} == {
     "oracle": "rounds + 1",
     "mixing": "rounds",
 }
-print("oracle_queries:", oracle_est.calls.oracle_queries)
-assert {k: str(v) for k, v in oracle_est.calls.oracle_queries.items()} == {
-    "oracle": "rounds + 1",
+print("oracle_queries:", oracle_est.gates.oracle_queries)
+assert {k: str(v) for k, v in oracle_est.gates.oracle_queries.items()} == {
+    "oracle": "2*rounds + 2",
     "mixing": "rounds",
 }
 
@@ -268,13 +281,13 @@ assert {k: str(v) for k, v in oracle_est.calls.oracle_queries.items()} == {
 
 # %%
 oracle_est_4 = oracle_est.substitute(rounds=4)
-print("oracle_calls (rounds=4):", oracle_est_4.calls.oracle_calls)
-assert oracle_est_4.calls.oracle_calls == {"oracle": 5, "mixing": 4}
-print("oracle_queries (rounds=4):", oracle_est_4.calls.oracle_queries)
-assert oracle_est_4.calls.oracle_queries == {"oracle": 5, "mixing": 4}
+print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
+assert oracle_est_4.gates.oracle_calls == {"oracle": 5, "mixing": 4}
+print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
+assert oracle_est_4.gates.oracle_queries == {"oracle": 10, "mixing": 4}
 
 # %% [markdown]
-# この例のように、オラクル内部が不明でもリソース解析を進められます。既知部分は通常どおりカウントされ、未知のオラクル呼び出しは`calls.oracle_calls`と`calls.oracle_queries`に名前別で記録されます。
+# この例のように、オラクル内部が不明でも回路解析を進められます。既知部分は通常通りカウントされ、未知オラクル部分は`oracle_calls`（例: `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`）と`oracle_queries`（`query_complexity`で重み付け）として追跡されます。
 
 # %% [markdown]
 # このように完全な分解を実装する前にアルゴリズムレベルのコスト（量子ビット数、オラクルクエリ数等）を確認できます。
@@ -284,7 +297,7 @@ assert oracle_est_4.calls.oracle_queries == {"oracle": 5, "mixing": 4}
 #
 # - ヘルパー`@qkernel`：ある量子カーネルから別の量子カーネルを呼び出してコードを再利用できます。トランスパイラがインライン展開し、結果はフラットな回路になります。
 # - `@composite_gate`：量子カーネルに名前付きの識別子を与え、図で一つのゲートとして可視化します。`@qkernel`の上に`@composite_gate`デコレータを重ねて書きます。
-# - **不透明オラクル**：`qmc.Oracle`により、実装なしでトップダウン設計ができます。
-# - `est.calls.oracle_calls`：`UnknownResourcePolicy.OPAQUE_CALL`を使うと、名前別の呼び出し回数を確認できます。
+# - **スタブゲート**：`stub=True`と`ResourceMetadata`で、実装なしにトップダウン設計とリソース推定が可能です。
+# - `est.gates.oracle_calls`：オラクル内部が不明な状態でも、呼び出し回数を名前別の辞書として確認できます（シンボリックな回数もそのまま扱えます）。
 #
 # 制御ゲート（`qmc.control`）については[チュートリアル04 — 制御ゲート](04_controlled_gates.ipynb)を参照してください。
