@@ -63,7 +63,13 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import MeasureOperation
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.types.primitives import BitType
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    ValueBase,
+    ValueLike,
+    collect_value_like_uuids,
+)
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
@@ -84,10 +90,12 @@ class ClassicalLoweringPass(Pass[Block, Block]):
        as ``AnalyzePass`` (forward propagation from ``MeasureOperation``
        results through the dependency graph).
     2. Walks operations recursively (through ``HasNestedOps``).
-    3. For each ``CompOp`` / ``CondOp`` / ``NotOp`` / ``BinOp`` whose
-       result UUID is in the taint set, replaces it with an equivalent
-       ``RuntimeClassicalExpr`` (same operands and result Value, only
-       the op type and kind enum change).
+    3. For each backend-expressible ``CompOp`` / ``CondOp`` / ``NotOp`` /
+       ``BinOp`` whose result UUID is in the taint set, replaces it with an
+       equivalent ``RuntimeClassicalExpr`` (same operands and result Value,
+       only the op type and kind enum change). Internal slice-clamp ``MIN``
+       operations stay as host-side ``BinOp`` nodes because Circuit IR has no
+       runtime minimum expression.
     4. Non-tainted classical ops are left unchanged so the existing fold
        paths (compile-time fold in ``compile_time_if_lowering``,
        emit-time fold in ``evaluate_classical_predicate``) continue to
@@ -129,9 +137,10 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         """Walk operations recursively; rewrite tainted classical ops."""
         new_ops: list[Operation] = []
         for op in operations:
-            if isinstance(op, (CompOp, CondOp, NotOp, BinOp)) and self._is_tainted(
-                op, tainted
-            ):
+            lowerable = isinstance(op, (CompOp, CondOp, NotOp, BinOp)) and not (
+                isinstance(op, BinOp) and op.kind is BinOpKind.MIN
+            )
+            if lowerable and self._is_tainted(op, tainted):
                 new_ops.append(self._lower(op))
                 continue
             if isinstance(op, HasNestedOps):
@@ -176,10 +185,6 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         elif isinstance(op, CondOp):
             kind = runtime_kind_from_condop(cast(Any, op.kind))
         elif isinstance(op, NotOp):
-            from qamomile.circuit.ir.operation.arithmetic_operations import (
-                RuntimeOpKind,
-            )
-
             kind = RuntimeOpKind.NOT
         else:  # pragma: no cover — guarded by caller
             raise TypeError(f"Cannot lower {type(op).__name__} to RuntimeClassicalExpr")
@@ -505,6 +510,7 @@ class ClassicalLoweringPass(Pass[Block, Block]):
                 RuntimeOpKind.AND,
                 RuntimeOpKind.OR,
                 RuntimeOpKind.NOT,
+                RuntimeOpKind.SELECT,
                 RuntimeOpKind.ADD,
                 RuntimeOpKind.SUB,
                 RuntimeOpKind.MUL,
@@ -540,6 +546,18 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         assert isinstance(loop_op, (ForOperation, ForItemsOperation))
         body_lists = loop_op.nested_op_lists()
 
+        def referenced_uuids(value: ValueBase) -> set[str]:
+            """Collect direct and structural UUID references for one value.
+
+            Args:
+                value (ValueBase): Value whose addressing metadata should be
+                    traversed.
+
+            Returns:
+                set[str]: Direct, parent, index, shape, and slice references.
+            """
+            return collect_value_like_uuids(cast(ValueLike, value))
+
         subtree_produced: set[str] = set()
 
         def collect_produced(operations: list[Operation]) -> None:
@@ -559,6 +577,19 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         for body in body_lists:
             collect_produced(body)
 
+        loop_local_uuids = set(subtree_produced)
+        loop_local_uuids.update(
+            region_arg.block_arg.uuid
+            for region_arg in getattr(loop_op, "region_args", ())
+        )
+        if isinstance(loop_op, ForOperation) and loop_op.loop_var_value is not None:
+            loop_local_uuids.add(loop_op.loop_var_value.uuid)
+        elif isinstance(loop_op, ForItemsOperation):
+            if loop_op.key_var_values is not None:
+                loop_local_uuids.update(value.uuid for value in loop_op.key_var_values)
+            if loop_op.value_var_value is not None:
+                loop_local_uuids.add(loop_op.value_var_value.uuid)
+
         candidates = [
             body_op
             for body in body_lists
@@ -566,10 +597,9 @@ class ClassicalLoweringPass(Pass[Block, Block]):
             if isinstance(body_op, RuntimeClassicalExpr)
         ]
         floating = {id(body_op) for body_op in candidates}
-        region_yielded_uuids = {
-            region_arg.yielded.uuid
-            for region_arg in getattr(loop_op, "region_args", ())
-        }
+        region_yielded_uuids: set[str] = set()
+        for region_arg in getattr(loop_op, "region_args", ()):
+            region_yielded_uuids.update(referenced_uuids(region_arg.yielded))
         for body_op in candidates:
             if any(
                 isinstance(result, ValueBase) and result.uuid in region_yielded_uuids
@@ -587,7 +617,9 @@ class ClassicalLoweringPass(Pass[Block, Block]):
             for body_op in operations:
                 if id(body_op) not in floating:
                     for operand in body_op.all_input_values():
-                        if isinstance(operand, ValueBase) and operand.uuid in uuids:
+                        if isinstance(operand, ValueBase) and not referenced_uuids(
+                            operand
+                        ).isdisjoint(uuids):
                             return True
                 if isinstance(body_op, HasNestedOps) and any(
                     reads(nested, uuids) for nested in body_op.nested_op_lists()
@@ -609,11 +641,10 @@ class ClassicalLoweringPass(Pass[Block, Block]):
                 if id(body_op) not in floating:
                     continue
                 for operand in body_op.all_input_values():
-                    if (
-                        isinstance(operand, ValueBase)
-                        and operand.uuid in subtree_produced
-                        and operand.uuid not in floating_results
-                    ):
+                    if not isinstance(operand, ValueBase):
+                        continue
+                    references = referenced_uuids(operand)
+                    if (references - floating_results) & loop_local_uuids:
                         floating.discard(id(body_op))
                         changed = True
                         break

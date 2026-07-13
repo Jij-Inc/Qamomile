@@ -17,6 +17,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     MeasureVectorInstruction,
     ParameterExpr,
     ReusableCircuit,
+    WhileInstruction,
     WireId,
     lower_circuit_plan,
     materialize_executable,
@@ -65,6 +66,23 @@ def _semantic_helper_caller() -> qmc.Bit:
     qubit = qmc.qubit("qubit")
     qubit = _semantic_helper(qubit)
     return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _branch_local_while_overwrite() -> qmc.Bit:
+    """Read one snapshot only on the branch that does not overwrite it."""
+    selector = qmc.measure(qmc.qubit("selector"))
+    source_qubit = qmc.x(qmc.qubit("source"))
+    source = qmc.measure(source_qubit)
+    target = qmc.qubit("target")
+    if selector:
+        condition = source
+        while condition:
+            condition = qmc.measure(qmc.qubit("stop"))
+    else:
+        if source:
+            target = qmc.x(target)
+    return qmc.measure(target)
 
 
 def test_builder_versions_wires_and_preserves_symbolic_parameters() -> None:
@@ -324,3 +342,18 @@ def test_lowering_keeps_open_user_composite_identity() -> None:
     assert identity.key.name == "semantic_helper"
     assert calls[0].callee.operand_widths == (1,)
     assert calls[0].callee.body.operations
+
+
+def test_lowering_isolates_while_snapshot_overwrites_between_if_branches() -> None:
+    """A while overwrite in one runtime branch does not poison its sibling."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_branch_local_while_overwrite)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    branches = [op for op in program.operations if isinstance(op, IfInstruction)]
+    assert len(branches) == 1
+    [outer] = branches
+    assert any(isinstance(op, WhileInstruction) for op in outer.true_body)
+    assert any(isinstance(op, IfInstruction) for op in outer.false_body)
+    verify_circuit(program)

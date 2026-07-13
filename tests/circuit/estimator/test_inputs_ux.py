@@ -157,7 +157,7 @@ def _messages(est) -> list[str]:
 def test_partially_supplied_branch_remains_exact_piecewise() -> None:
     """A partially specialized compile-time branch keeps its exact predicate."""
     est = _two_param_branch.estimate_resources(inputs={"n": 8})
-    m = sp.Symbol("m", integer=True, positive=True)
+    m = est.parameters["m"]
     assert est.gates.total == sp.Piecewise((1, m < 8), (2, True))
     messages = _messages(est)
     assert not any("'n'" in m and "ignored" in m for m in messages)
@@ -251,7 +251,7 @@ def _carried_branch(n: qmc.UInt) -> qmc.Qubit:
 def test_region_arg_drives_later_symbolic_loop() -> None:
     """A carried counter is published as the symbolic result ``n``."""
     estimate = _carried_loop_bound.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
+    n = estimate.parameters["n"]
 
     assert sp.simplify(estimate.gates.total - n) == 0
     assert set(estimate.parameters) == {"n"}
@@ -312,7 +312,7 @@ def test_inputs_force_symbolic_over_python_default() -> None:
     expression rather than silently baking the execution default.
     """
     default = _toy_qpe.estimate_resources()
-    bits = sp.Symbol("bits", integer=True, positive=True)
+    bits = default.parameters["bits"]
     assert sp.simplify(default.qubits - (bits + 1)) == 0
 
     est = _toy_qpe.estimate_resources(inputs={"bits": 5})

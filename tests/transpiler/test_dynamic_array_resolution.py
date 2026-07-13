@@ -714,6 +714,32 @@ class TestDynamicArraySizeResolution:
         assert len(qubit_map) == 5
         assert clbit_map == {}
 
+    def test_allocator_does_not_resolve_internal_size_by_display_name(self):
+        """An internal size Value cannot capture an unrelated user binding."""
+        internal_size = Value(type=UIntType(), name="n")
+        q = ArrayValue(type=QubitType(), name="q", shape=(internal_size,))
+        allocator = ResourceAllocator()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            allocator.allocate(
+                [QInitOperation([], [q])],
+                bindings={"n": 5},
+            )
+
+    def test_allocator_size_prefers_uuid_over_colliding_display_name(self):
+        """A UUID-bound internal size wins over a same-named user binding."""
+        internal_size = Value(type=UIntType(), name="n")
+        q = ArrayValue(type=QubitType(), name="q", shape=(internal_size,))
+        allocator = ResourceAllocator()
+
+        qubit_map, clbit_map = allocator.allocate(
+            [QInitOperation([], [q])],
+            bindings={internal_size.uuid: 2, "n": 5},
+        )
+
+        assert len(qubit_map) == 2
+        assert clbit_map == {}
+
     def test_allocator_runtime_parameter_vector_element_size_stays_unresolved(self):
         """Test that runtime parameter array elements are not indexed."""
         dim = Value(type=UIntType(), name="dim_0").with_const(1)

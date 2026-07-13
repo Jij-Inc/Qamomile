@@ -55,6 +55,7 @@ from qamomile.circuit.transpiler.passes.analyze import (
     _static_loop_trip_count,
     reject_control_flow_quantum_discard,
 )
+from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 
 pytest.importorskip("qiskit")
 
@@ -864,8 +865,8 @@ class TestAllowedPatterns:
         Conservative corner (documented in LIMITATIONS.md): any in-branch
         reference to the original — including a single element measure —
         counts as consumption, so the whole-register rebind passes the
-        analysis stage. The cross-branch physical merge is still stopped at
-        emit (pinned below), so no silent path exists today.
+        analysis stage. The cross-branch physical merge is still stopped while
+        planning the quantum segment, so no silent path exists today.
         """
 
         @qmc.qkernel
@@ -882,7 +883,10 @@ class TestAllowedPatterns:
         analyzed = _run_through_analyze(kernel, bindings={"dummy": 0})
         assert analyzed is not None
 
-        with pytest.raises(EmitError):
+        with pytest.raises(
+            MultipleQuantumSegmentsError,
+            match="different physical qubit regions",
+        ):
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_preconsumed_original_rebound_in_both_branches_allowed(self):

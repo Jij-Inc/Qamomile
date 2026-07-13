@@ -10,8 +10,9 @@ body references via the ``all_input_values`` / ``replace_values``
 protocol.
 
 There is **no name fallback**: if ``loop_var_value`` is ``None`` (legacy
-IR built before the field existed) we skip the loop-var checks entirely.
-Comparing by name was the soil for nested-loop name-collision bugs.
+IR built before the field existed), analysis conservatively requests
+unrolling and the emit entry point rejects the malformed IR. Comparing by
+name was the soil for nested-loop name-collision bugs.
 """
 
 from __future__ import annotations
@@ -50,6 +51,14 @@ def _is_loop_var(value: "Value", loop_var_uuid: str | None) -> bool:
     ``replace_values`` protocol). When the IR predates the
     ``loop_var_value`` field (``loop_var_uuid is None``), this returns
     ``False`` rather than falling back to name comparison.
+
+    Args:
+        value (Value): Candidate IR value.
+        loop_var_uuid (str | None): Enclosing loop-variable UUID, or None for
+            legacy IR.
+
+    Returns:
+        bool: True when ``value`` is the enclosing loop variable.
     """
     if loop_var_uuid is None:
         return False
@@ -57,136 +66,55 @@ def _is_loop_var(value: "Value", loop_var_uuid: str | None) -> bool:
 
 
 class LoopAnalyzer:
-    """Analyzes loop structures to determine emission strategy."""
+    """Analyze loop structures to determine an emission strategy."""
 
     def should_unroll(
         self,
         op: ForOperation,
         bindings: dict[str, object],
     ) -> bool:
-        loop_uuid = op.loop_var_value.uuid if op.loop_var_value is not None else None
-        if op.region_args:
-            # Loop-carried classical scalars must be threaded iteration
-            # by iteration, which only unrolled emission can do.
+        """Determine whether a for-loop requires emit-time unrolling.
+
+        Args:
+            op (ForOperation): Loop to analyze.
+            bindings (dict[str, object]): Compile-time bindings available to
+                nested-bound analysis.
+
+        Returns:
+            bool: True when identities, carries, indices, predicates,
+                dictionary lookups, structural body parameters, or nested
+                bounds require concrete per-iteration evaluation.
+        """
+        if op.loop_var_value is None:
+            # Never recover compiler identity from a display label. The emit
+            # entry point rejects this legacy/malformed IR, while returning
+            # True here prevents standalone analyzer callers from selecting a
+            # native path that cannot bind the loop index correctly.
             return True
+        if op.region_args:
+            # A native backend loop keeps one static body per iteration and
+            # cannot thread a classical value between iterations.
+            return True
+        loop_uuid = op.loop_var_value.uuid
         if self._has_dynamic_nested_loop(op.operations, bindings, loop_uuid):
             return True
-        if self._has_array_element_access(op.operations, loop_uuid):
-            return True
-        if self._has_loop_var_classical_op(op.operations, loop_uuid):
-            return True
-        if self._has_loop_var_structural_body_parameter(op.operations, loop_uuid):
-            return True
-        if self._has_loop_var_condition(op.operations, loop_uuid):
-            return True
-        if self._has_loop_var_dict_getitem(op.operations, loop_uuid):
-            return True
-        return False
+        return self._has_loop_var_dependency(op.operations, loop_uuid)
 
-    def _has_loop_var_structural_body_parameter(
+    def _has_loop_var_dependency(
         self,
         operations: list[Operation],
         loop_var_uuid: str | None,
     ) -> bool:
-        """Check whether a structural owned body receives the loop variable.
+        """Return whether a loop body needs a concrete Python index.
 
-        A native backend loop represents its induction value as a backend loop
-        parameter. Operation-owned controlled bodies have a fresh namespace and
-        may use the corresponding formal for structural decisions such as a
-        compile-time ``if``. Such a body must be specialized once per concrete
-        iteration, so the enclosing loop is conservatively unrolled. A direct
-        boxed invocation remains eligible for native-loop emission because its
-        ordinary runtime parameters do not imply structural control.
-
-        Args:
-            operations (list[Operation]): Enclosing loop-body operations.
-            loop_var_uuid (str | None): UUID of the enclosing loop variable,
-                or ``None`` for legacy IR.
-
-        Returns:
-            bool: ``True`` when a controlled/inverse operation-owned body
-            receives the enclosing loop variable as a parameter operand.
-        """
-        for operation in operations:
-            parameter_operands: list["Value"] = []
-            if isinstance(operation, ControlledUOperation):
-                parameter_operands = operation.param_operands
-            elif (
-                isinstance(operation, InvokeOperation)
-                and operation.transform is CallTransform.CONTROLLED
-            ):
-                parameter_operands = operation.parameters
-            elif isinstance(operation, InverseBlockOperation):
-                parameter_operands = operation.parameters
-
-            if any(
-                self._value_depends_on_loop_var(operand, loop_var_uuid)
-                for operand in parameter_operands
-            ):
-                return True
-            if isinstance(operation, HasNestedOps) and any(
-                self._has_loop_var_structural_body_parameter(
-                    nested,
-                    loop_var_uuid,
-                )
-                for nested in operation.nested_op_lists()
-            ):
-                return True
-        return False
-
-    def _has_loop_var_dict_getitem(
-        self,
-        operations: list[Operation],
-        loop_var_uuid: str | None,
-    ) -> bool:
-        """True when a dict subscript lookup key depends on the loop var.
-
-        A ``DictGetItemOperation`` resolves its key against the dict's
-        bound data at emit time, which requires a concrete Python value
-        per iteration. A native backend loop (e.g. Qiskit ``for_loop``)
-        keeps the loop variable as a backend loop parameter, which
-        cannot index a Python dict — so the loop must be unrolled.
-
-        Args:
-            operations (list[Operation]): Loop-body operations to scan.
-            loop_var_uuid (str | None): UUID of the enclosing loop
-                variable, or None for legacy IR without
-                ``loop_var_value``.
-
-        Returns:
-            bool: True if any dict lookup key depends on the loop
-                variable.
-        """
-        for op in operations:
-            if isinstance(op, DictGetItemOperation):
-                if any(
-                    self._value_depends_on_loop_var(key_value, loop_var_uuid)
-                    for key_value in op.operands[1:]
-                ):
-                    return True
-            if isinstance(op, HasNestedOps):
-                if any(
-                    self._has_loop_var_dict_getitem(op_list, loop_var_uuid)
-                    for op_list in op.nested_op_lists()
-                ):
-                    return True
-        return False
-
-    def _has_loop_var_condition(
-        self,
-        operations: list[Operation],
-        loop_var_uuid: str | None,
-    ) -> bool:
-        """True when a runtime control-flow condition depends on the loop var.
-
-        A native backend loop (e.g. Qiskit ``for_loop``) keeps the loop
-        variable as a backend loop parameter that classical-register
-        indexing cannot consume. So when an ``IfOperation`` / ``WhileOperation``
-        condition — or a ``RuntimeClassicalExpr`` operand — reads a measured
-        ``Vector[Bit]`` element indexed by the loop variable (``if s[j]:``)
-        or sliced by it (``if s[j:j+1][0]:``), the loop must be unrolled so
-        the index resolves to a concrete clbit per iteration. Without this
-        the condition's clbit address cannot be resolved and emit fails.
+        Preserve native backend-loop parameters for ordinary gate angles and
+        direct boxed-call parameters, while forcing unrolling for structural
+        decisions: classical expression evaluation, runtime conditions,
+        dictionary lookup, operation-owned controlled/inverse bodies, and any
+        array/slice/container address derived from the induction value. The
+        generic ``all_input_values`` scan is retained for structural ancestry so
+        subclass-specific fields such as symbolic control indices cannot be
+        omitted.
 
         Args:
             operations (list[Operation]): Loop-body operations to scan.
@@ -194,108 +122,154 @@ class LoopAnalyzer:
                 or None for legacy IR without ``loop_var_value``.
 
         Returns:
-            bool: True if any runtime condition depends on the loop variable.
+            bool: True if any operation input depends on the loop variable.
         """
         for op in operations:
-            if isinstance(op, IfOperation):
-                if self._value_depends_on_loop_var(op.condition, loop_var_uuid):
-                    return True
-            elif isinstance(op, WhileOperation):
-                if any(
-                    self._value_depends_on_loop_var(operand, loop_var_uuid)
-                    for operand in op.operands
-                ):
-                    return True
-            elif isinstance(op, RuntimeClassicalExpr):
-                if any(
-                    self._value_depends_on_loop_var(operand, loop_var_uuid)
-                    for operand in op.operands
-                ):
-                    return True
-            if isinstance(op, HasNestedOps):
-                if any(
-                    self._has_loop_var_condition(op_list, loop_var_uuid)
-                    for op_list in op.nested_op_lists()
-                ):
-                    return True
+            if self._operation_requires_concrete_loop_var(op, loop_var_uuid):
+                return True
+            if isinstance(op, HasNestedOps) and any(
+                self._has_loop_var_dependency(op_list, loop_var_uuid)
+                for op_list in op.nested_op_lists()
+            ):
+                return True
         return False
+
+    def _operation_requires_concrete_loop_var(
+        self,
+        op: Operation,
+        loop_var_uuid: str | None,
+    ) -> bool:
+        """Return whether one operation cannot consume a backend loop value.
+
+        Args:
+            op (Operation): Loop-body operation to inspect.
+            loop_var_uuid (str | None): UUID of the enclosing loop variable.
+
+        Returns:
+            bool: True when ``op`` needs the induction value as a concrete
+                Python scalar during emission.
+        """
+        requires_direct = False
+        if isinstance(op, (BinOp, CompOp, CondOp, NotOp, RuntimeClassicalExpr)):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.all_input_values()
+            )
+        elif isinstance(op, IfOperation):
+            requires_direct = self._value_depends_on_loop_var(
+                op.condition, loop_var_uuid
+            )
+        elif isinstance(op, WhileOperation):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.operands
+            )
+        elif isinstance(op, DictGetItemOperation):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.operands[1:]
+            )
+        elif isinstance(op, ControlledUOperation):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.all_input_values()
+            )
+        elif isinstance(op, InverseBlockOperation):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.parameters
+            )
+        elif (
+            isinstance(op, InvokeOperation) and op.transform is CallTransform.CONTROLLED
+        ):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.parameters
+            )
+        if requires_direct:
+            return True
+
+        # Ordinary gate operands and direct boxed-call parameters may consume a
+        # backend-native loop parameter directly. Only structural descendants
+        # (array indices, slice bounds, shapes, tuple/dict members) force a
+        # concrete Python iteration value for these operations.
+        return any(
+            self._value_depends_on_loop_var(
+                value,
+                loop_var_uuid,
+                include_direct=False,
+            )
+            for value in op.all_input_values()
+        )
 
     def _value_depends_on_loop_var(
         self,
         value: object,
         loop_var_uuid: str | None,
+        visiting: frozenset[int] = frozenset(),
+        *,
+        include_direct: bool = True,
     ) -> bool:
-        """True when a condition Value reads the loop variable.
-
-        Covers three forms: the value *is* the loop variable; its element
-        index depends on it (``s[j]``); or a ``slice_start`` / ``slice_step``
-        along its ``parent_array``'s ``slice_of`` chain depends on it
-        (``s[j:j+1][0]``).
+        """Return whether an IR value structurally reads the loop variable.
 
         Args:
-            value (object): Candidate condition operand (an IR ``Value`` or
-                a non-Value, which never depends on the loop variable).
+            value (object): Candidate operation input or nested IR value.
             loop_var_uuid (str | None): UUID of the enclosing loop variable.
+            visiting (frozenset[int]): Object identities already visited on
+                the current recursive path. Defaults to an empty set.
+            include_direct (bool): Whether ``value`` itself matching the loop
+                variable counts. Defaults to True; callers pass False when a
+                backend may consume a direct loop parameter but not a value
+                nested inside an address/container structure.
 
         Returns:
             bool: True if ``value`` depends on the loop variable.
         """
-        from qamomile.circuit.ir.value import Value as _Value
+        from qamomile.circuit.ir.value import (
+            ArrayValue,
+            DictValue,
+            TupleValue,
+            Value,
+            ValueBase,
+        )
 
-        if not isinstance(value, _Value):
+        if not isinstance(value, ValueBase):
             return False
-        if _is_loop_var(value, loop_var_uuid):
+        object_id = id(value)
+        if object_id in visiting:
+            return False
+        next_visiting = visiting | {object_id}
+
+        if (
+            include_direct
+            and isinstance(value, Value)
+            and _is_loop_var(value, loop_var_uuid)
+        ):
             return True
-        if value.element_indices:
-            for idx in value.element_indices:
-                if self._index_depends_on_loop_var(idx, loop_var_uuid):
-                    return True
-        parent = value.parent_array
-        while parent is not None:
-            for bound in (parent.slice_start, parent.slice_step):
-                if isinstance(bound, _Value) and self._index_depends_on_loop_var(
-                    bound, loop_var_uuid
-                ):
-                    return True
-            parent = parent.slice_of
-        return False
 
-    def _has_loop_var_classical_op(
-        self,
-        operations: list[Operation],
-        loop_var_uuid: str | None,
-    ) -> bool:
-        """Check whether a classical expression directly reads the loop value.
+        children: list[object] = []
+        if isinstance(value, Value):
+            children.extend(value.element_indices)
+            if value.parent_array is not None:
+                children.append(value.parent_array)
+        if isinstance(value, ArrayValue):
+            children.extend(value.shape)
+            if value.slice_of is not None:
+                children.append(value.slice_of)
+            if value.slice_start is not None:
+                children.append(value.slice_start)
+            if value.slice_step is not None:
+                children.append(value.slice_step)
+        elif isinstance(value, TupleValue):
+            children.extend(value.elements)
+        elif isinstance(value, DictValue):
+            for key, item in value.entries:
+                children.extend((key, item))
 
-        Any expression chain derived from the loop variable starts with at
-        least one arithmetic or predicate operation that directly reads it.
-        Unrolling at that producer keeps later structural uses of its result
-        concrete, including passing a comparison result into a controlled
-        operation-owned block.
-
-        Args:
-            operations (list[Operation]): Loop-body operations to scan.
-            loop_var_uuid (str | None): UUID of the enclosing loop variable,
-                or ``None`` for legacy IR.
-
-        Returns:
-            bool: ``True`` when an arithmetic or predicate operation directly
-            depends on the enclosing loop variable.
-        """
-
-        for op in operations:
-            if isinstance(op, (BinOp, CompOp, CondOp, NotOp)) and any(
-                self._value_depends_on_loop_var(operand, loop_var_uuid)
-                for operand in op.operands
-            ):
-                return True
-            if isinstance(op, HasNestedOps):
-                if any(
-                    self._has_loop_var_classical_op(op_list, loop_var_uuid)
-                    for op_list in op.nested_op_lists()
-                ):
-                    return True
-        return False
+        return any(
+            self._value_depends_on_loop_var(child, loop_var_uuid, next_visiting)
+            for child in children
+        )
 
     def _has_dynamic_nested_loop(
         self,
@@ -303,6 +277,19 @@ class LoopAnalyzer:
         bindings: dict[str, object],
         parent_loop_var_uuid: str | None,
     ) -> bool:
+        """Return whether a nested loop needs the parent's concrete index.
+
+        Args:
+            operations (list[Operation]): Operations in the parent loop body.
+            bindings (dict[str, object]): Compile-time bindings available for
+                nested loop bounds.
+            parent_loop_var_uuid (str | None): UUID of the parent loop variable,
+                or None for legacy IR without ``loop_var_value``.
+
+        Returns:
+            bool: True if a nested bound directly uses the parent index or
+                resolves to a non-numeric binding.
+        """
         from qamomile.circuit.ir.value import Value
 
         for op in operations:
@@ -311,11 +298,6 @@ class LoopAnalyzer:
                     if isinstance(bound_val, Value):
                         if _is_loop_var(bound_val, parent_loop_var_uuid):
                             return True
-                        # UUID-keyed bindings lookup. Names are kept around
-                        # only for legacy migration-shim parameters; since
-                        # those use is_parameter()-flagged Values, the
-                        # name path is exercised by the dedicated parameter
-                        # binding mechanism and not here.
                         if bound_val.uuid in bindings:
                             bound = bindings[bound_val.uuid]
                             if not isinstance(bound, (int, float)):
@@ -326,85 +308,9 @@ class LoopAnalyzer:
                                 bound = bindings[param_name]
                                 if not isinstance(bound, (int, float)):
                                     return True
-            if isinstance(op, HasNestedOps):
-                if any(
-                    self._has_dynamic_nested_loop(
-                        op_list, bindings, parent_loop_var_uuid
-                    )
-                    for op_list in op.nested_op_lists()
-                ):
-                    return True
-        return False
-
-    def _has_array_element_access(
-        self,
-        operations: list[Operation],
-        loop_var_uuid: str | None,
-    ) -> bool:
-        """True when any operation reads an array element indexed by the loop var.
-
-        A native backend loop (e.g. Qiskit ``for_loop``) keeps the loop
-        variable as an opaque backend loop parameter, which cannot index a
-        quantum/classical register at emit time. So any operation that reads
-        ``arr[loop_var]`` — a gate qubit, a rotation angle, a control qubit,
-        a ``pauli_evolve`` gamma/observable, **or a measurement / reset /
-        projection qubit** — forces the loop to be unrolled so the index
-        resolves to a concrete address per iteration.
-
-        The scan is generic over ``op.all_input_values()`` rather than an
-        enumerated set of operation types. Every input Value that carries a
-        ``parent_array`` + ``element_indices`` (gate operands, the rotation
-        angle which lives in ``operands``, ``pauli_evolve`` gamma/observable
-        which are ``operands[1:3]``, and ``ControlledUOperation.power`` which
-        ``all_input_values`` appends) is covered uniformly. The previous
-        type-enumerated implementation omitted ``MeasureOperation`` /
-        ``MeasureVectorOperation`` / ``MeasureQFixedOperation`` /
-        ``ProjectOperation`` / ``ResetOperation`` (none of which are
-        ``GateOperation`` subclasses), so a loop whose only loop-var element
-        access was ``measure(q[i])`` silently took the native path and
-        dropped the measurement at emit. Scanning ``all_input_values``
-        closes that whole class of miscompilation.
-
-        Args:
-            operations (list[Operation]): Loop-body operations to scan.
-            loop_var_uuid (str | None): UUID of the enclosing loop variable,
-                or None for legacy IR without ``loop_var_value``.
-
-        Returns:
-            bool: True if any operation reads an array element whose index
-                depends on the loop variable.
-        """
-        from qamomile.circuit.ir.value import Value as _Value
-
-        for op in operations:
-            for v in op.all_input_values():
-                if (
-                    isinstance(v, _Value)
-                    and v.parent_array is not None
-                    and v.element_indices
-                ):
-                    for idx in v.element_indices:
-                        if self._index_depends_on_loop_var(idx, loop_var_uuid):
-                            return True
-
-            if isinstance(op, HasNestedOps):
-                if any(
-                    self._has_array_element_access(op_list, loop_var_uuid)
-                    for op_list in op.nested_op_lists()
-                ):
-                    return True
-
-        return False
-
-    def _index_depends_on_loop_var(
-        self,
-        idx: "Value",
-        loop_var_uuid: str | None,
-    ) -> bool:
-        if _is_loop_var(idx, loop_var_uuid):
-            return True
-        if idx.parent_array is not None and idx.element_indices:
-            for sub_idx in idx.element_indices:
-                if self._index_depends_on_loop_var(sub_idx, loop_var_uuid):
-                    return True
+            if isinstance(op, HasNestedOps) and any(
+                self._has_dynamic_nested_loop(op_list, bindings, parent_loop_var_uuid)
+                for op_list in op.nested_op_lists()
+            ):
+                return True
         return False

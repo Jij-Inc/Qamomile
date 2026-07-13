@@ -42,16 +42,23 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeOpKind,
 )
 from qamomile.circuit.ir.operation.callable import InvokeOperation
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.control_flow import (
+    ForOperation,
+    HasNestedOps,
+    RegionArg,
+)
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.types.primitives import UIntType
-from qamomile.circuit.ir.value import TupleValue, Value
+from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, TupleValue, Value
 from qamomile.circuit.transpiler.errors import (
     ExecutionError,
     SeparationError,
     ValidationError,
 )
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
+from qamomile.circuit.transpiler.passes.classical_lowering import (
+    ClassicalLoweringPass,
+)
 from qamomile.circuit.transpiler.passes.inline import InlinePass
 from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
 
@@ -309,6 +316,105 @@ class TestClassicalLoweringIR:
         ]
         # Loop-bound CompOp resolves at emit time, never measurement-derived.
         assert len(runtime_ops) == 0
+
+    def test_structural_consumer_keeps_runtime_select_inside_loop(self) -> None:
+        """An index dependency prevents floating its producer past the loop."""
+        condition = Value(type=BitType(), name="condition")
+        selected_index = Value(type=UIntType(), name="selected_index")
+        select = RuntimeClassicalExpr(
+            operands=[
+                condition,
+                Value(type=UIntType(), name="zero").with_const(0),
+                Value(type=UIntType(), name="one").with_const(1),
+            ],
+            results=[selected_index],
+            kind=RuntimeOpKind.SELECT,
+        )
+        values = ArrayValue(
+            type=FloatType(),
+            name="values",
+            shape=(Value(type=UIntType(), name="size").with_const(2),),
+        )
+        selected_value = Value(
+            type=FloatType(),
+            name="values[selected_index]",
+            parent_array=values,
+            element_indices=(selected_index,),
+        )
+        consumer = BinOp(
+            operands=[
+                selected_value,
+                Value(type=FloatType(), name="offset").with_const(1.0),
+            ],
+            results=[Value(type=FloatType(), name="sum")],
+            kind=BinOpKind.ADD,
+        )
+        loop = ForOperation(
+            operands=[
+                Value(type=UIntType(), name="start").with_const(0),
+                Value(type=UIntType(), name="stop").with_const(1),
+                Value(type=UIntType(), name="step").with_const(1),
+            ],
+            loop_var="index",
+            loop_var_value=Value(type=UIntType(), name="index"),
+            operations=[select, consumer],
+        )
+
+        rebuilt, floated = ClassicalLoweringPass()._float_loop_invariant_exprs(loop)
+
+        assert floated == []
+        assert isinstance(rebuilt, ForOperation)
+        assert rebuilt.operations == [select, consumer]
+
+    def test_structural_region_yield_keeps_runtime_select_inside_loop(self) -> None:
+        """A RegionArg yield index keeps its runtime producer in the body."""
+        condition = Value(type=BitType(), name="condition")
+        selected_index = Value(type=UIntType(), name="selected_index")
+        select = RuntimeClassicalExpr(
+            operands=[
+                condition,
+                Value(type=UIntType(), name="zero").with_const(0),
+                Value(type=UIntType(), name="one").with_const(1),
+            ],
+            results=[selected_index],
+            kind=RuntimeOpKind.SELECT,
+        )
+        values = ArrayValue(
+            type=FloatType(),
+            name="values",
+            shape=(Value(type=UIntType(), name="size").with_const(2),),
+        )
+        yielded = Value(
+            type=FloatType(),
+            name="values[selected_index]",
+            parent_array=values,
+            element_indices=(selected_index,),
+        )
+        region = RegionArg(
+            var_name="carried",
+            init=Value(type=FloatType(), name="init"),
+            block_arg=Value(type=FloatType(), name="carried"),
+            yielded=yielded,
+            result=Value(type=FloatType(), name="result"),
+        )
+        loop = ForOperation(
+            operands=[
+                Value(type=UIntType(), name="start").with_const(0),
+                Value(type=UIntType(), name="stop").with_const(1),
+                Value(type=UIntType(), name="step").with_const(1),
+            ],
+            results=[region.result],
+            loop_var="index",
+            loop_var_value=Value(type=UIntType(), name="index"),
+            operations=[select],
+            region_args=(region,),
+        )
+
+        rebuilt, floated = ClassicalLoweringPass()._float_loop_invariant_exprs(loop)
+
+        assert floated == []
+        assert isinstance(rebuilt, ForOperation)
+        assert rebuilt.operations == [select]
 
 
 # ---------------------------------------------------------------------------
@@ -1188,8 +1294,8 @@ class TestMeasurementDerivedOutput:
         )
         assert counts == (2, 3, 5, 7)
 
-    def test_qfixed_measurement_inside_loop_is_rejected(self, transpiler):
-        """A nested QFixed decode fails before raw carrier bits can escape."""
+    def test_qfixed_measurement_inside_static_loop_decodes_output(self, transpiler):
+        """A one-trip loop preserves QFixed carrier decoding host-side."""
 
         @qmc.qkernel
         def kernel() -> qmc.Float:
@@ -1199,8 +1305,22 @@ class TestMeasurementDerivedOutput:
                 out = qmc.measure(qmc.cast(qs, qmc.QFixed, int_bits=0))
             return out
 
-        with pytest.raises(SeparationError, match="QFixed measurement inside"):
+        result = (
             transpiler.transpile(kernel)
+            .sample(
+                _CountsExecutor({"00": 2, "01": 3, "10": 5, "11": 7}),
+                shots=17,
+            )
+            .result()
+        )
+        values, counts = zip(*result.results)
+        np.testing.assert_allclose(
+            values,
+            (0.0, 0.25, 0.5, 0.75),
+            rtol=0.0,
+            atol=1e-12,
+        )
+        assert counts == (2, 3, 5, 7)
 
     def test_qfixed_measurement_inside_dynamic_if_is_rejected(self, transpiler):
         """A branch-local QFixed value cannot become an unresolved SELECT."""
@@ -1719,6 +1839,144 @@ class TestMeasurementDerivedOutput:
         exe = transpiler.transpile(kernel, bindings={"spec": {0: 1}})
         assert exe.sample(transpiler.executor(), shots=20).result().results == [(1, 20)]
 
+    def test_loop_varying_vector_element_select_cannot_fake_invariant_overwrite(
+        self,
+        transpiler,
+    ):
+        """A body-produced vector element remains a varying loop selector."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            selectors = qmc.qubit_array(1, "selectors")
+            qa = qmc.qubit("qa")
+            qb = qmc.x(qmc.qubit("qb"))
+            a = qmc.measure(qa)
+            b = qmc.measure(qb)
+            out = a
+            for _ in qmc.range(2):
+                selected = qmc.measure(selectors)
+                if selected[0]:
+                    out = out
+                else:
+                    out = b
+                selectors[0] = qmc.x(selectors[0])
+            return out
+
+        with pytest.raises(ValidationError, match="Loop-carried"):
+            transpiler.transpile(kernel)
+
+    def test_loop_indexed_vector_select_cannot_fake_invariant_overwrite(
+        self,
+        transpiler,
+    ):
+        """A pre-loop vector still varies when indexed by the loop variable."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            selectors = qmc.qubit_array(2, "selectors")
+            selectors[1] = qmc.x(selectors[1])
+            selected = qmc.measure(selectors)
+            a = qmc.measure(qmc.qubit("a"))
+            b = qmc.measure(qmc.x(qmc.qubit("b")))
+            out = a
+            for index in qmc.range(2):
+                if selected[index]:
+                    out = out
+                else:
+                    out = b
+            return out
+
+        with pytest.raises(ValidationError, match="Loop-carried"):
+            transpiler.transpile(kernel)
+
+    def test_loop_indexed_select_stays_in_loop(
+        self,
+        transpiler,
+    ):
+        """A loop-indexed SELECT resolves its operand on every iteration."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            selectors = qmc.qubit_array(2, "selectors")
+            selectors[1] = qmc.x(selectors[1])
+            selected = qmc.measure(selectors)
+            condition = qmc.measure(qmc.x(qmc.qubit("condition")))
+            target = qmc.qubit("target")
+            out = selected[0]
+            for index in qmc.range(2):
+                if condition:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = selected[index]
+                else:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = selected[0]
+            return out
+
+        with pytest.raises(SeparationError, match="loop-local values"):
+            transpiler.transpile(kernel)
+
+    def test_derived_loop_index_select_cannot_escape(self, transpiler):
+        """A one-hop loop-index expression remains loop-local at the host."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            selectors = qmc.qubit_array(2, "selectors")
+            selectors[1] = qmc.x(selectors[1])
+            selected = qmc.measure(selectors)
+            condition = qmc.measure(qmc.x(qmc.qubit("condition")))
+            target = qmc.qubit("target")
+            out = selected[0]
+            for index in qmc.range(2):
+                computed = index + qmc.uint(0)
+                if condition:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = selected[computed]
+                else:
+                    target = qmc.h(target)
+                    target = qmc.h(target)
+                    out = selected[0]
+            return out
+
+        with pytest.raises(SeparationError, match="loop-local values"):
+            transpiler.transpile(kernel)
+
+    def test_measurement_derived_slice_clamp_runs_host_side(self, transpiler):
+        """Internal MIN stays host-side for a measurement-indexed slice."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            selector = qmc.measure(qmc.x(qmc.qubit("selector")))
+            data = qmc.qubit_array(3, "data")
+            data[1] = qmc.x(data[1])
+            bits = qmc.measure(data)
+            start = qmc.uint(0) + selector
+            return bits[start:]
+
+        result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
+
+        assert result.result().results == [((1, 0), 20)]
+
+    def test_region_arg_slice_clamp_runs_host_side(self, transpiler):
+        """A carried measurement index can bound a post-loop host slice."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            selector = qmc.measure(qmc.x(qmc.qubit("selector")))
+            data = qmc.qubit_array(4, "data")
+            data[2] = qmc.x(data[2])
+            bits = qmc.measure(data)
+            start = qmc.uint(0)
+            for _ in qmc.range(2):
+                start = start + selector
+            return bits[start:]
+
+        result = transpiler.transpile(kernel).sample(transpiler.executor(), shots=20)
+
+        assert result.result().results == [((1, 0), 20)]
+
     def test_measurement_derived_uint_region_arg_runs_post_classically(
         self, transpiler
     ):
@@ -2093,11 +2351,8 @@ class TestMeasurementDerivedOutputSegmentation:
         assert selects, "the merge must surface as a SELECT expression"
         assert len(selects[0].operands) == 3
 
-    def test_loop_varying_merge_output_rejected(self, transpiler):
-        """A merge whose sources are measured per loop iteration cannot be
-        recomputed host-side; returning it fails loudly instead of
-        resolving to ``None``."""
-        from qamomile.circuit.transpiler.errors import SeparationError
+    def test_loop_varying_merge_output_uses_final_iteration_value(self, transpiler):
+        """A post-loop SELECT reads the final iteration's measurement."""
 
         @qmc.qkernel
         def kernel() -> qmc.Bit:
@@ -2118,8 +2373,12 @@ class TestMeasurementDerivedOutputSegmentation:
                     out = sel
             return out
 
-        with pytest.raises(SeparationError, match="varies across iterations"):
-            transpiler.transpile(kernel)
+        result = transpiler.transpile(kernel).sample(
+            transpiler.executor(),
+            shots=20,
+        )
+
+        assert result.result().results == [(0, 20)]
 
     def test_partial_branch_producer_is_not_hoisted(self, transpiler):
         """A branch-local division stays lazy and is rejected as unsupported."""
