@@ -1418,6 +1418,32 @@ def frontend_target_vars_leak_example() -> qmc.Bit:
 
 
 @qmc.qkernel
+def runtime_bit_merge_selects_external_source_example() -> qmc.Bit:
+    """A runtime Bit merge should select a pre-existing measured bit."""
+    q = qmc.qubit_array(4, "q")
+    q[2] = qmc.x(q[2])
+
+    selector = qmc.measure(q[0])  # 0
+    a = qmc.measure(q[1])  # 0
+    b = qmc.measure(q[2])  # 1
+
+    out = a
+    if selector:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = a
+    else:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = b
+
+    if out:
+        q[3] = qmc.x(q[3])
+
+    return qmc.measure(q[3])
+
+
+@qmc.qkernel
 def binop_floordiv_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     """Apply RX(theta) to first n // 2 qubits of a 4-qubit register."""
     q = qmc.qubit_array(4, "q")
@@ -1575,6 +1601,19 @@ class TestMergeAliasRegression:
         )
         assert count == 200
 
+    def test_runtime_bit_merge_selects_external_source(self) -> None:
+        """A runtime Bit merge must select between existing measured bits."""
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(runtime_bit_merge_selects_external_source_example)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200, bindings={})
+        results = job.result().results
+        # selector = 0 chooses b = 1, so q[3] is flipped.
+        assert len(results) == 1
+        bitstring, count = results[0]
+        assert bitstring == 1
+        assert count == 200
+
 
 class TestUIntBinOpFolding:
     """Tests for UInt BinOp kinds (``//``, ``%``, ``**``) that affect loop bounds.
@@ -1722,8 +1761,8 @@ class TestAllocatorAnalysisStateIsolation:
 
     ``allocate`` recomputes the measurement-taint set, the safe
     mixed-merge allowlist, and the monotonic counters for the operation
-    list it receives. Controlled-block / native-inverse emission reuses
-    the segment allocator on a sub-block mid-emission; without the
+    list it receives. Controlled-block emission reuses the segment
+    allocator on a sub-block mid-emission; without the
     ``preserving_analysis_state`` snapshot, later
     ``resolve_iteration_maps`` replays of the enclosing segment consult
     the sub-block's (typically empty) sets — silently disarming the
@@ -1770,96 +1809,3 @@ class TestAllocatorAnalysisStateIsolation:
                 raise RuntimeError("nested failure")
 
         assert allocator._measurement_tainted == {"segment-tainted-uuid"}
-
-
-class TestNestedAllocateKeepsSegmentMuxGuard:
-    """The runtime-mux guard survives a preceding nested allocation.
-
-    End-to-end pin for the allocator-state clobbering regression: a
-    controlled block emitted BEFORE a runtime-if replay used to leave
-    the sub-block's (empty) measurement-taint set on the segment
-    allocator, disarming ``reject_runtime_bit_mux`` — the kernel below
-    compiled and sampled 1 where Python semantics require 0. With
-    ``preserving_analysis_state`` the replay consults the restored
-    segment sets and rejects exactly like the controlled-less twin.
-    """
-
-    @staticmethod
-    def _mux_kernel(with_controlled: bool):
-        """Build the mux kernel, optionally prefixed by a controlled call.
-
-        Args:
-            with_controlled (bool): Whether to emit the controlled
-                sub-block before the runtime-if loop.
-
-        Returns:
-            Any: The qkernel to transpile.
-        """
-
-        @qmc.qkernel
-        def sub(q: qmc.Qubit, r: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            q = qmc.h(q)
-            q = qmc.x(q)
-            r = qmc.x(r)
-            q = qmc.h(q)
-            return q, r
-
-        controlled = qmc.control(sub)
-
-        @qmc.qkernel
-        def mux_with_controlled() -> qmc.Bit:
-            ctrl = qmc.x(qmc.qubit("ctrl"))
-            t1 = qmc.qubit("t1")
-            t2 = qmc.qubit("t2")
-            ctrl, t1, t2 = controlled(ctrl, t1, t2)
-            qmc.measure(t1)
-            reg = qmc.qubit_array(3, "reg")
-            reg[1] = qmc.x(reg[1])
-            reg[2] = qmc.x(reg[2])
-            bits = qmc.measure(reg)
-            cond = qmc.measure(qmc.qubit("cond"))
-            out = bits[0]
-            # >= 2 iterations: a single iteration folds `i` at compile
-            # time and is rejected during the initial allocation walk,
-            # masking the replay path this test pins.
-            for i in qmc.range(1, 3):
-                helper = qmc.qubit("helper")
-                if cond:
-                    helper = qmc.x(helper)
-                    out = bits[i]
-                else:
-                    out = bits[0]
-                qmc.measure(helper)
-            return out
-
-        @qmc.qkernel
-        def mux_plain() -> qmc.Bit:
-            reg = qmc.qubit_array(3, "reg")
-            reg[1] = qmc.x(reg[1])
-            reg[2] = qmc.x(reg[2])
-            bits = qmc.measure(reg)
-            cond = qmc.measure(qmc.qubit("cond"))
-            out = bits[0]
-            for i in qmc.range(1, 3):
-                helper = qmc.qubit("helper")
-                if cond:
-                    helper = qmc.x(helper)
-                    out = bits[i]
-                else:
-                    out = bits[0]
-                qmc.measure(helper)
-            return out
-
-        return mux_with_controlled if with_controlled else mux_plain
-
-    @pytest.mark.parametrize("with_controlled", [True, False])
-    def test_runtime_bit_mux_rejected_after_nested_allocate(
-        self, with_controlled: bool
-    ) -> None:
-        """Both twins raise the same mux rejection at emit replay."""
-        pytest.importorskip("qiskit")
-        from qamomile.qiskit import QiskitTranspiler
-
-        kernel = self._mux_kernel(with_controlled)
-        with pytest.raises(EmitError, match="two distinct pre-existing clbits"):
-            QiskitTranspiler().transpile(kernel)

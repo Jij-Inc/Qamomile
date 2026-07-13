@@ -1,12 +1,13 @@
-"""Standard emit pass using GateEmitter protocol.
+"""Shared semantic-to-circuit lowering engine.
 
-This module provides StandardEmitPass, a reusable emit pass implementation
-that uses the GateEmitter protocol for backend-specific gate emission.
+This module provides the legacy-named ``StandardEmitPass`` used internally
+by ``CircuitLoweringPass`` to walk Qamomile semantic IR and construct the
+backend-neutral circuit-family IR.
 
 The actual emission logic is decomposed into focused modules under
 ``emit_support/``. This class serves as the orchestrator with thin
-wrappers that delegate to those module functions while preserving
-subclass override points (used by QiskitEmitPass, CudaqEmitPass).
+wrappers that delegate to those module functions. SDK backends do not
+subclass this engine; they consume the resulting immutable circuit program.
 """
 
 from __future__ import annotations
@@ -147,18 +148,19 @@ def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
 class StandardEmitPass(EmitPass[T], Generic[T]):
     """Standard emit pass implementation using GateEmitter protocol.
 
-    This class provides the orchestration logic for circuit emission
-    while delegating backend-specific operations to a GateEmitter.
-
-    Subclasses (QiskitEmitPass, CudaqEmitPass) override specific methods
-    to provide native backend support. The thin wrappers here delegate to
-    module functions in ``emit_support/`` by default.
+    This class provides orchestration for semantic IR traversal while
+    delegating circuit instruction construction to a GateEmitter. The
+    concrete compiler use is ``CircuitLoweringPass``; SDK targets materialize
+    its immutable result instead of subclassing this class.
 
     Args:
-        gate_emitter: Backend-specific gate emitter
-        bindings: Parameter bindings for the circuit
-        parameters: List of parameter names to preserve as backend parameters
-        composite_emitters: Optional list of CompositeGateEmitter for native implementations
+        gate_emitter (GateEmitter[T]): Instruction builder used during the
+            semantic traversal.
+        bindings (dict[str, Any] | None): Compile-time parameter bindings.
+        parameters (list[str] | None): Parameter names preserved at runtime.
+        composite_emitters (list[CompositeGateEmitter[T]] | None): Optional
+            callable-preservation or lowering hooks.
+        backend_name (str | None): Diagnostic name for the traversal target.
     """
 
     def __init__(
@@ -259,6 +261,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             EmitError: If a public or inter-segment live output still refers
                 to an overwritten initial condition snapshot.
         """
+        if not self._overwritten_runtime_condition_sources:
+            return
+
         from qamomile.circuit.ir.types.primitives import BitType
         from qamomile.circuit.ir.value import ArrayValue, ValueBase
         from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
@@ -268,7 +273,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         live_refs = self._allocator_live_output_refs()
         if live_refs is None:
             return
-        output_values = getattr(self, "_program_output_values", {})
+        output_values = getattr(self, "_program_output_values", ())
         precise_output_addresses: set[QubitAddress] = set()
         scalar_output_identities: set[str] = set()
         coarse_output_roots: set[str] = set()
@@ -303,7 +308,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 if isinstance(item, ValueBase):
                     collect_structural_refs(item, next_visiting)
 
-        for descriptor in output_values.values():
+        for descriptor in output_values:
             if not isinstance(descriptor, ValueBase):
                 continue
             collect_structural_refs(descriptor)
@@ -924,8 +929,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             ) from e
 
     # ------------------------------------------------------------------
-    # Methods overridden by backend subclasses (QiskitEmitPass, CudaqEmitPass).
-    # Only methods with actual overrides are kept as instance methods.
+    # Structured lowering extension points used by CircuitLoweringPass.
     # ------------------------------------------------------------------
 
     def _emit_for(

@@ -29,7 +29,15 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     SymbolicControlledU,
 )
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    ValueLike,
+    collect_value_like_uuids,
+)
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.value_resolver import (
     ValueResolver as UnifiedValueResolver,
@@ -107,7 +115,9 @@ class ConstantFoldingPass(Pass[Block, Block]):
         # Block-output UUIDs: a folded store whose result is returned must
         # stay in the IR so the classical executor materializes the value
         # at runtime (folding records compile-time metadata only).
-        output_uuids = {v.uuid for v in input.output_values if isinstance(v, ValueBase)}
+        output_uuids: set[str] = set()
+        for value in input.output_values:
+            output_uuids.update(collect_value_like_uuids(value))
 
         # Process operations
         new_ops = self._fold_operations(input.operations, folded_values, output_uuids)
@@ -116,9 +126,9 @@ class ConstantFoldingPass(Pass[Block, Block]):
         # operation fields would then remove the producer while leaving the
         # output table pointing at its pre-fold, metadata-free Value.  Carry
         # the constant replacement onto the output so segmentation can expose
-        # it through ProgramABI.constant_outputs without a runtime operation.
-        new_outputs = [
-            self._substitute_in_value(value, folded_values)
+        # it through ProgramABI.output_values without a runtime operation.
+        new_outputs: list[ValueLike] = [
+            self._substitute_in_value_like(value, folded_values)
             for value in input.output_values
         ]
 
@@ -767,6 +777,48 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 parent_array=new_parent_array,
             )
         return v
+
+    def _substitute_in_value_like(
+        self,
+        value: ValueLike,
+        folded_values: dict[str, Value],
+    ) -> ValueLike:
+        """Recursively substitute folded leaves in a structural value.
+
+        Args:
+            value (ValueLike): Scalar, array, tuple, or dictionary value to
+                rewrite.
+            folded_values (dict[str, Value]): UUID-keyed folded scalar and
+                array replacements.
+
+        Returns:
+            ValueLike: Rewritten value preserving its container structure.
+        """
+        if isinstance(value, TupleValue):
+            elements = tuple(
+                self._substitute_in_value_like(element, folded_values)
+                for element in value.elements
+            )
+            if all(
+                replacement is original
+                for replacement, original in zip(elements, value.elements, strict=True)
+            ):
+                return value
+            return dataclasses.replace(value, elements=elements)
+
+        if isinstance(value, DictValue):
+            entries: list[Any] = []
+            changed = False
+            for key, entry_value in value.entries:
+                new_key = self._substitute_in_value_like(key, folded_values)
+                new_value = self._substitute_in_value_like(entry_value, folded_values)
+                entries.append((new_key, new_value))
+                changed = changed or new_key is not key or new_value is not entry_value
+            if changed:
+                return dataclasses.replace(value, entries=tuple(entries))
+            return value
+
+        return self._substitute_in_value(value, folded_values)
 
     def _substitute_folded_results(
         self,

@@ -924,17 +924,3 @@ def test_inverse_rejects_cancelled_float_region_arg_during_construction() -> Non
         match="Float values only with an identity recurrence",
     ):
         _ = _inverse_with_cancelled_float_recurrence.block
-
-
-def test_qiskit_controlled_fallback_threads_region_args(monkeypatch) -> None:
-    """The generic mapped walker threads carries when native boxing is off."""
-    pytest.importorskip("qiskit")
-    from qamomile.qiskit.transpiler import QiskitEmitPass
-
-    monkeypatch.setattr(
-        QiskitEmitPass,
-        "_blockvalue_to_gate",
-        lambda self, *args, **kwargs: None,
-    )
-
-    assert _sample("qiskit", _nested_carried_index_body) == (1, 1)

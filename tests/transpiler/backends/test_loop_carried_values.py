@@ -237,15 +237,22 @@ def while_same_element_output_kernel() -> qmc.Bit:
 
 
 @qmc.qkernel
-def crossed_mixed_merge_kernel() -> tuple[qmc.Bit, qmc.Bit]:
+def crossed_mixed_merge_kernel(selector: qmc.UInt) -> tuple[qmc.Bit, qmc.Bit]:
     """Cross one old measurement through two runtime Bit merge outputs.
 
+    Args:
+        selector (qmc.UInt): Compile-time flag selecting the measured runtime
+            branch outcome.
+
     Returns:
-        tuple[qmc.Bit, qmc.Bit]: Unrepresentable independent merge outputs.
+        tuple[qmc.Bit, qmc.Bit]: Independently selected merge outputs.
     """
     old_qubit = qmc.x(qmc.qubit("old"))
     old = qmc.measure(old_qubit)
-    condition = qmc.measure(qmc.qubit("condition"))
+    condition_qubit = qmc.qubit("condition")
+    if selector:
+        condition_qubit = qmc.x(condition_qubit)
+    condition = qmc.measure(condition_qubit)
     if condition:
         first = qmc.measure(qmc.qubit("true_fresh"))
         second = old
@@ -322,9 +329,22 @@ class TestNestedRuntimeLoopConditionsAcrossBackends:
         with pytest.raises(EmitError, match="snapshot remains live"):
             _make_transpiler(backend).transpile(while_same_element_output_kernel)
 
-    def test_crossed_mixed_bit_merges_are_rejected(self, backend):
-        """Two outputs cannot simultaneously reuse one pre-existing clbit."""
-        from qamomile.circuit.transpiler.errors import EmitError
+    @pytest.mark.parametrize(
+        ("selector", "expected"),
+        [(0, (1, 0)), (1, (0, 1))],
+    )
+    def test_crossed_mixed_bit_merges_execute(self, backend, selector, expected):
+        """Post-quantum SELECTs preserve two crossed Bit merge outputs.
 
-        with pytest.raises(EmitError, match="mixes a pre-existing clbit"):
-            _make_transpiler(backend).transpile(crossed_mixed_merge_kernel)
+        Classical lowering keeps all branch measurements on independent
+        physical clbits and evaluates each merge as a host-side SELECT. No
+        physical clbit mux or aliasing is needed for this output-only shape.
+        """
+        assert (
+            _sample_single(
+                backend,
+                crossed_mixed_merge_kernel,
+                {"selector": selector},
+            )
+            == expected
+        )

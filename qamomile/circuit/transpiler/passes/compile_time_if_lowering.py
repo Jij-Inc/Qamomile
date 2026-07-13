@@ -54,6 +54,8 @@ from qamomile.circuit.ir.value import (
     DictValue,
     Value,
     ValueBase,
+    ValueLike,
+    collect_value_like_uuids,
     resolve_root_array_index,
 )
 from qamomile.circuit.transpiler.block_parameter_binding import (
@@ -2111,31 +2113,27 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
     def _substitute_output_values(
         self,
-        output_values: list[Value],
+        output_values: list[ValueLike],
         subst: dict[str, ValueBase],
-    ) -> list[Value]:
+    ) -> list[ValueLike]:
         """Apply transitive merge substitutions to block outputs.
 
         Args:
-            output_values (list[Value]): Block output values to rewrite.
+            output_values (list[ValueLike]): Block output values to rewrite.
             subst (dict[str, ValueBase]): UUID-keyed substitution map produced
                 while lowering control flow.
 
         Returns:
-            list[Value]: Rewritten outputs, preserving an original output when
-                its substitution is not a scalar ``Value``.
+            list[ValueLike]: Rewritten output values.
         """
         if not subst:
             return output_values
 
         substitutor = ValueSubstitutor(subst, transitive=True)
-        new_outputs = []
+        new_outputs: list[ValueLike] = []
         for ov in output_values:
             substituted = substitutor.substitute_value(ov)
-            if isinstance(substituted, Value):
-                new_outputs.append(substituted)
-            else:
-                new_outputs.append(ov)
+            new_outputs.append(cast(ValueLike, substituted))
         return new_outputs
 
     # ------------------------------------------------------------------
@@ -2146,7 +2144,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         self,
         operations: list[Operation],
         dead_uuids: set[str],
-        output_values: list[Value] | None = None,
+        output_values: list[ValueLike] | None = None,
     ) -> list[Operation]:
         """Remove operations whose results are only consumed by dead UUIDs.
 
@@ -2165,7 +2163,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             dead_uuids (set[str]): Result UUIDs made dead by compile-time
                 control-flow lowering. Updated in place while deadness is
                 propagated to producer operands.
-            output_values (list[Value] | None): Values that must remain live
+            output_values (list[ValueLike] | None): Values that must remain live
                 at this operation-list boundary. Defaults to None.
 
         Returns:
@@ -2178,7 +2176,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 recursively_pruned.append(op)
                 continue
 
-            nested_outputs: list[list[Value]]
+            nested_outputs: list[list[ValueLike]]
             if isinstance(op, IfOperation):
                 nested_outputs = [list(op.true_yields), list(op.false_yields)]
             elif isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
@@ -2203,7 +2201,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # Also include block output UUIDs as used.
         if output_values:
             for ov in output_values:
-                self._collect_value_uuids(ov, used_uuids)
+                used_uuids.update(collect_value_like_uuids(ov))
 
         result, removed = self._remove_dead_ops_recursive(
             operations, dead_uuids, used_uuids
@@ -2290,59 +2288,16 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             used (set[str]): Mutable set of used UUIDs, updated in place.
         """
         for operand in genuine_input_values(op):
-            CompileTimeIfLoweringPass._collect_value_uuids(operand, used)
+            used.update(collect_value_like_uuids(cast(ValueLike, operand)))
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
             for region_arg in op.region_args:
-                CompileTimeIfLoweringPass._collect_value_uuids(region_arg.yielded, used)
+                used.update(collect_value_like_uuids(region_arg.yielded))
 
         # Recurse into control flow (For/ForItems/While/If).
         if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
                 for inner in body:
                     CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
-
-    @staticmethod
-    def _collect_value_uuids(value: ValueBase, used: set[str]) -> None:
-        """Collect one value and every structural Value reference it carries.
-
-        Array addressing and container membership encode dataflow outside an
-        operation's ordinary operands. A producer used only as an element
-        index, shape dimension, slice bound, tuple member, or dictionary entry
-        must therefore remain live during dead-expression pruning.
-
-        Args:
-            value (ValueBase): Value whose structural ancestry to traverse.
-            used (set[str]): Mutable UUID set updated in place.
-        """
-        visited_objects: set[int] = set()
-
-        def visit(current: ValueBase) -> None:
-            """Visit one structural value while guarding malformed cycles.
-
-            Args:
-                current (ValueBase): Current value or container member.
-            """
-            identity = id(current)
-            if identity in visited_objects:
-                return
-            visited_objects.add(identity)
-            used.add(current.uuid)
-
-            for attr in ("parent_array", "slice_of", "slice_start", "slice_step"):
-                referenced = getattr(current, attr, None)
-                if isinstance(referenced, ValueBase):
-                    visit(referenced)
-            for attr in ("element_indices", "shape", "elements"):
-                for referenced in getattr(current, attr, ()):
-                    if isinstance(referenced, ValueBase):
-                        visit(referenced)
-            for key, item in getattr(current, "entries", ()):
-                if isinstance(key, ValueBase):
-                    visit(key)
-                if isinstance(item, ValueBase):
-                    visit(item)
-
-        visit(value)
 
     def _try_seed_value(
         self,

@@ -79,6 +79,7 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         self._callable_policy = CallPolicy.INLINE
         self._callable_gate_type = CompositeGateType.CUSTOM
         self._callable_implementations: tuple[Any, ...] = ()
+        self._callable_semantic_arguments: dict[str, Any] = {}
 
         # AST-level quantum rebind analysis: a violation is a structural error
         # in the kernel definition itself, so raise eagerly at decoration time

@@ -18,6 +18,7 @@ from qamomile.circuit.ir.value import (
     ValueBase,
     array_physical_region,
 )
+from qamomile.circuit.transpiler.errors import EmitError
 
 from .physical_index_map import (
     array_element_mapping,
@@ -367,8 +368,6 @@ def _validate_runtime_bit_merge_partitions(
             previous_false = true_to_false.setdefault(true_clbit, false_clbit)
             previous_true = false_to_true.setdefault(false_clbit, true_clbit)
             if previous_false != false_clbit or previous_true != true_clbit:
-                from qamomile.circuit.transpiler.errors import EmitError
-
                 raise EmitError(
                     "Runtime if-merge of measured Bits has an incompatible "
                     "clbit alias pattern across multiple outputs; one branch "
@@ -632,8 +631,6 @@ def map_merge_outputs(
                             or false_idx is None
                             or true_idx != false_idx
                         ):
-                            from qamomile.circuit.transpiler.errors import EmitError
-
                             raise EmitError(
                                 "Quantum if-merge requires identical physical "
                                 "resources across branches",
@@ -659,8 +656,6 @@ def map_merge_outputs(
 
                 if true_phys is not None and false_phys is not None:
                     if true_phys != false_phys:
-                        from qamomile.circuit.transpiler.errors import EmitError
-
                         raise EmitError(
                             "Quantum if-merge requires identical physical "
                             "resources across branches",
@@ -668,8 +663,6 @@ def map_merge_outputs(
                         )
                     qubit_map[QubitAddress(output.uuid)] = true_phys
                 elif true_phys is not None or false_phys is not None:
-                    from qamomile.circuit.transpiler.errors import EmitError
-
                     raise EmitError(
                         "Quantum if-merge requires identical physical "
                         "resources across branches",
@@ -689,8 +682,6 @@ def map_merge_outputs(
                 and true_is_local_measurement != false_is_local_measurement
                 and output.uuid not in mixed_output_allowlist
             ):
-                from qamomile.circuit.transpiler.errors import EmitError
-
                 raise EmitError(
                     "Runtime if-merge of measured Bits mixes a pre-existing "
                     "clbit with a branch-local measurement; sharing the "
@@ -720,8 +711,6 @@ def map_merge_outputs(
                         and false_src is not None
                         and set(primary_mapping) != set(secondary_mapping)
                     ):
-                        from qamomile.circuit.transpiler.errors import EmitError
-
                         raise EmitError(
                             "Runtime if-merge of measured Bit vectors requires "
                             "equal, fully resolved local clbit domains on both "
@@ -739,8 +728,6 @@ def map_merge_outputs(
                         and secondary_mapping
                         and primary_mapping != secondary_mapping
                     ):
-                        from qamomile.circuit.transpiler.errors import EmitError
-
                         raise EmitError(
                             "Runtime if-merge of measured Bits selects between "
                             "two distinct pre-existing clbit regions; the "
@@ -803,8 +790,6 @@ def map_merge_outputs(
                     and true_val.uuid != false_val.uuid
                     and (true_clbit is None or false_clbit is None)
                 ):
-                    from qamomile.circuit.transpiler.errors import EmitError
-
                     raise EmitError(
                         "Runtime if-merge of a measured Bit has a branch "
                         "source without a physical clbit; the clbit-aliasing "
@@ -836,8 +821,6 @@ def map_merge_outputs(
                     and false_clbit is not None
                     and true_clbit != false_clbit
                 ):
-                    from qamomile.circuit.transpiler.errors import EmitError
-
                     raise EmitError(
                         "Runtime if-merge of a measured Bit selects between "
                         f"two distinct pre-existing clbits (true={true_clbit}, "

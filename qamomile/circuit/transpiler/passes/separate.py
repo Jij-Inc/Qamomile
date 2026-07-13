@@ -32,14 +32,20 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     array_physical_region,
     arrays_share_physical_region,
+    collect_value_like_uuids,
 )
+from qamomile.circuit.transpiler.errors import SeparationError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
     find_measurement_derived_values,
     find_measurement_results,
+)
+from qamomile.circuit.transpiler.passes.classical_lowering import (
+    _collect_while_operand_uuids,
 )
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 from qamomile.circuit.transpiler.passes.validate_while import ValidateWhileContractPass
@@ -180,13 +186,59 @@ def lower_measure_qfixed(
     return [measure_vec_op, decode_op]
 
 
+def _reject_nested_measure_qfixed(
+    operations: list[Operation], *, nested: bool = False
+) -> None:
+    """Reject QFixed measurements inside runtime control flow.
+
+    Pre-segmentation QFixed lowering splits one hybrid operation into a
+    quantum vector measurement and a host-side decode. A nested control-flow
+    body cannot carry that decoded value across the quantum/host boundary
+    with today's segmented control-flow representation, so leaving the
+    operation nested would expose raw carrier bits as a Float output.
+
+    Args:
+        operations (list[Operation]): Operations in the current lexical body.
+        nested (bool): Whether the body is inside a control-flow operation.
+            Defaults to False.
+
+    Raises:
+        SeparationError: If a nested ``MeasureQFixedOperation`` is found.
+    """
+    for op in operations:
+        if nested and isinstance(op, MeasureQFixedOperation):
+            raise SeparationError(
+                "QFixed measurement inside control flow cannot be split into "
+                "quantum measurement and host-side decode until branch and "
+                "loop values can cross the quantum/host segment boundary. "
+                "Move the QFixed measurement outside the if/loop, or return "
+                "raw measured bits and decode them outside the kernel."
+            )
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                _reject_nested_measure_qfixed(body, nested=True)
+
+
 def lower_operations(block: Block) -> Block:
     """Lower high-level operations like MeasureQFixedOperation.
 
     MeasureQFixedOperation is lowered to:
-    1. MeasureVectorOperation for each qubit (HYBRID -> QUANTUM segment)
+    1. MeasureVectorOperation for the QFixed carrier (HYBRID -> QUANTUM segment)
     2. DecodeQFixedOperation to convert bits to float (CLASSICAL segment)
+
+    Args:
+        block (Block): Block whose top-level high-level operations should be
+            lowered.
+
+    Returns:
+        Block: Block with top-level QFixed measurements split into quantum
+            measurement and classical decode operations.
+
+    Raises:
+        SeparationError: If a QFixed measurement occurs inside control flow,
+            where the decode result cannot cross the segment boundary.
     """
+    _reject_nested_measure_qfixed(block.operations)
     lowered_ops: list[Operation] = []
     qfixed_cast_sources: dict[str, ArrayValue] = {}
     for op in block.operations:
@@ -200,6 +252,20 @@ def lower_operations(block: Block) -> Block:
         else:
             lowered_ops.append(op)
     return dataclasses.replace(block, operations=lowered_ops)
+
+
+def _is_public_runtime_input(value: ValueLike) -> bool:
+    """Return whether a block input belongs in ``ProgramABI.public_inputs``.
+
+    Args:
+        value (ValueLike): Block input or parameter value to classify.
+
+    Returns:
+        bool: ``True`` for classical or classical structural values that can
+            be bound by users at runtime; ``False`` for quantum values, which
+            are allocated and consumed by the quantum segment.
+    """
+    return not value.type.is_quantum()
 
 
 # =========================================================================
@@ -285,11 +351,18 @@ class NisqSegmentationStrategy(SegmentationStrategy):
             elif isinstance(segment, ExpvalSegment):
                 steps.append(ExpvalStep(segment=segment, quantum_step_index=0))
 
+        public_inputs = {
+            name: value
+            for name, value in zip(block.label_args, block.input_values, strict=True)
+            if _is_public_runtime_input(value)
+        }
+        for name, value in block.parameters.items():
+            if _is_public_runtime_input(value):
+                public_inputs.setdefault(name, value)
+
         abi = ProgramABI(
-            public_inputs={name: value for name, value in block.parameters.items()},
-            output_refs=[v.uuid for v in block.output_values],
-            output_values={v.uuid: v for v in block.output_values},
-            constant_outputs=_collect_compile_time_outputs(block.output_values),
+            public_inputs=public_inputs,
+            output_values=list(block.output_values),
         )
 
         return ProgramPlan(
@@ -415,10 +488,15 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # would surface ``None``). Keeping it classical instead surfaces the
         # value, and if that forces a quantum-segment split the user gets an
         # explicit error rather than a silently wrong result.
-        self._block_output_uuids = {
-            v.uuid for v in block.output_values if isinstance(v, ValueBase)
-        }
+        self._block_output_uuids = set()
+        for value in block.output_values:
+            self._block_output_uuids.update(collect_value_like_uuids(value))
         self._block_output_values = tuple(block.output_values)
+
+        # While-condition chain UUIDs: merges carrying a while condition
+        # stay on their IfOperation (the clbit-aliasing machinery owns them), so the
+        # unsupported-merge rejection below must exempt them.
+        self._while_condition_uuids = _collect_while_operand_uuids(block.operations)
 
         # Absorbable set: classical ops (top-level or nested) whose results are
         # consumed exclusively by quantum / hybrid ops, or by other absorbable
@@ -430,7 +508,22 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # correctly. Computing this transitively is what makes a chain like
         # ``(phase * 2) - 1`` feeding a gate fully absorbable while a value read
         # back by later classical work stays in its own classical segment.
-        self._absorbable_op_ids = self._compute_absorbable(block.operations)
+        # The consumers map is computed once and shared with
+        # ``_classify_runtime_exprs`` below to avoid a second traversal of the
+        # nested control flow.
+        consumers = self._build_consumers_map(block.operations)
+        self._consumers = consumers
+        self._absorbable_op_ids = self._compute_absorbable(block.operations, consumers)
+
+        # Runtime-expression placement sets: a ``RuntimeClassicalExpr``
+        # (measurement-derived classical op) may be consumed in-circuit
+        # (runtime if/while conditions), host-side (block outputs, classical
+        # post-processing), or both. Computed once here; used by the routing
+        # loop below to decide quantum-segment vs classical-segment placement.
+        (
+            self._quantum_consumed_expr_ids,
+            self._host_evaluated_expr_ids,
+        ) = self._classify_runtime_exprs(block.operations, consumers)
 
         current_ops: list[Operation] = []
         current_kind: OperationKind | None = None
@@ -440,6 +533,13 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # they end up computed inside the quantum circuit regardless of where
         # the user wrote them — never stranded in a classical prep segment.
         pending_absorbable: list[Operation] = []
+        # Host-evaluated runtime expressions encountered while inside the
+        # quantum segment. They are held here and flushed into the first
+        # post-quantum classical segment (creating one at the end of the
+        # stream if no classical op follows), so a runtime expression written
+        # between measurements never splits the quantum segment and never
+        # gets stranded inside it.
+        pending_post: list[Operation] = []
 
         for op in block.operations:
             # Skip ReturnOperation - it's a terminal operation handled separately
@@ -562,21 +662,38 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             if current_kind is None:
                 current_kind = op_kind
 
-            # Runtime classical expressions bridge a measurement to a
-            # runtime IfOperation/WhileOperation inside a single quantum
-            # segment. After ``ClassicalLoweringPass``, every measurement-
-            # derived classical op is represented as ``RuntimeClassicalExpr``,
-            # so this is a single type-check — no operand-typing heuristic
-            # needed. Examples that work under this rule but the old
-            # BitType-only heuristic could not handle:
-            #   ``if (s0 + 2 * s1 + 4 * s2) == 5:``  (UInt-typed BinOp/CompOp)
-            #   ``if measure(q) == bound_uint_param:`` (mixed Bit/UInt)
+            # Runtime classical expressions (measurement-derived classical
+            # ops, lowered by ``ClassicalLoweringPass``) are placed by
+            # consumer (see :meth:`_classify_runtime_exprs`):
+            #
+            # - An expr bridging a measurement to a runtime IfOperation /
+            #   WhileOperation condition (directly or through other
+            #   in-circuit exprs) stays inside the quantum segment so the
+            #   backend can lower it to a native classical expression.
+            #   Examples that work under this rule but the old BitType-only
+            #   heuristic could not handle:
+            #     ``if (s0 + 2 * s1 + 4 * s2) == 5:``  (UInt-typed BinOp/CompOp)
+            #     ``if measure(q) == bound_uint_param:`` (mixed Bit/UInt)
+            # - An expr whose result is a block output or feeds host-side
+            #   classical post-processing is deferred to a post-quantum
+            #   classical segment (``pending_post``) where
+            #   ``ClassicalExecutor`` computes it per shot. Keeping it in
+            #   the quantum segment would silently drop its value — nothing
+            #   in the quantum runtime surfaces expression results, so the
+            #   orchestrator would resolve the output to ``None``.
+            # - An expr consumed by both worlds is placed in both; it is
+            #   pure, so duplicate evaluation is safe.
             if (
                 op_kind == OperationKind.CLASSICAL
                 and current_kind == OperationKind.QUANTUM
                 and isinstance(op, RuntimeClassicalExpr)
             ):
-                current_ops.append(op)
+                if id(op) in self._quantum_consumed_expr_ids:
+                    current_ops.append(op)
+                    if id(op) in self._host_evaluated_expr_ids:
+                        pending_post.append(op)
+                else:
+                    pending_post.append(op)
                 continue
 
             if op_kind != current_kind and op_kind in (
@@ -597,6 +714,18 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 current_ops.extend(pending_absorbable)
                 pending_absorbable = []
 
+            # Entering (or continuing) a post-quantum classical segment:
+            # flush deferred runtime expressions first so ops that consume
+            # their results execute after them. ``pending_post`` only fills
+            # while the quantum segment is active, so any classical segment
+            # reached with a non-empty list is post-quantum.
+            if current_kind == OperationKind.CLASSICAL and pending_post:
+                current_ops.extend(pending_post)
+                pending_post = []
+
+            if op_kind == OperationKind.QUANTUM:
+                self._reject_unrepresentable_runtime_values(op)
+
             current_ops.append(op)
 
         # Drain any held parameter-expression ops. They are normally emptied
@@ -615,10 +744,37 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             segment = self._create_segment(current_kind, current_ops)
             segments.append(segment)
 
-        self._reject_quantum_segment_carry_escapes(segments)
+        # Deferred runtime expressions with no classical op after them in
+        # the stream still must run host-side.
+        if pending_post:
+            segments.append(ClassicalSegment(operations=pending_post))
+
+        # A pure runtime expression can be nested in quantum control flow yet
+        # still produce a public output. Circuit lowering evaluates it for the
+        # in-circuit consumer; schedule the same semantic op once host-side so
+        # the typed output ABI receives the final clbit-backed value after the
+        # quantum segment. Expressions already reachable from a classical
+        # segment remain nested there and must not be duplicated.
+        scheduled_host_expr_ids = {
+            id(classical_op)
+            for segment in segments
+            if isinstance(segment, ClassicalSegment)
+            for classical_op in self._collect_classical_ops(segment.operations)
+            if isinstance(classical_op, RuntimeClassicalExpr)
+        }
+        nested_host_exprs: list[Operation] = [
+            classical_op
+            for classical_op in self._collect_classical_ops(block.operations)
+            if isinstance(classical_op, RuntimeClassicalExpr)
+            and id(classical_op) in self._host_evaluated_expr_ids
+            and id(classical_op) not in scheduled_host_expr_ids
+        ]
+        if nested_host_exprs:
+            segments.append(ClassicalSegment(operations=nested_host_exprs))
 
         # Compute input/output refs for each segment
         self._compute_segment_io(segments, block)
+        self._reject_quantum_segment_carry_escapes(segments)
 
         return segments
 
@@ -684,47 +840,41 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         Returns:
             set[str]: The value's UUID plus every recursively referenced
                 parent array, element index, shape, slice-bound, tuple-element,
-                and dictionary key/value UUID. A scalar classical value
-                carrying compile-time constant metadata omits only its own UUID
-                because it needs no runtime producer; any structural references
-                attached to it remain included.
+                and dictionary key/value UUID.
         """
-        references: set[str] = set()
-        visited_objects: set[int] = set()
-        pending: list[ValueBase] = [value]
-        while pending:
-            current = pending.pop()
-            identity = id(current)
-            if identity in visited_objects:
-                continue
-            visited_objects.add(identity)
-            materialized_scalar_constant = (
+        assert isinstance(value, (Value, ArrayValue, TupleValue, DictValue))
+        references = collect_value_like_uuids(value)
+
+        def discard_embedded_constants(current: ValueLike) -> None:
+            """Remove scalar constants that need no segment producer."""
+            if (
                 isinstance(current, Value)
-                and not isinstance(current, ArrayValue)
                 and current.type.is_classical()
                 and current.is_constant()
-            )
-            if not materialized_scalar_constant:
-                references.add(current.uuid)
-            for field_name in (
-                "parent_array",
-                "slice_of",
-                "slice_start",
-                "slice_step",
             ):
-                referenced = getattr(current, field_name, None)
-                if isinstance(referenced, ValueBase):
-                    pending.append(referenced)
-            for field_name in ("element_indices", "shape"):
-                for referenced in getattr(current, field_name, ()):
-                    if isinstance(referenced, ValueBase):
-                        pending.append(referenced)
+                references.discard(current.uuid)
             if isinstance(current, TupleValue):
-                pending.extend(current.elements)
-            if isinstance(current, DictValue):
-                for key, item_value in current.entries:
-                    pending.append(key)
-                    pending.append(item_value)
+                for element in current.elements:
+                    discard_embedded_constants(element)
+            elif isinstance(current, DictValue):
+                for key, entry_value in current.entries:
+                    discard_embedded_constants(key)
+                    discard_embedded_constants(entry_value)
+            elif isinstance(current, ArrayValue):
+                for dimension in current.shape:
+                    discard_embedded_constants(dimension)
+                if current.slice_of is not None:
+                    discard_embedded_constants(current.slice_of)
+                if current.slice_start is not None:
+                    discard_embedded_constants(current.slice_start)
+                if current.slice_step is not None:
+                    discard_embedded_constants(current.slice_step)
+            elif current.parent_array is not None:
+                discard_embedded_constants(current.parent_array)
+                for index in current.element_indices:
+                    discard_embedded_constants(index)
+
+        discard_embedded_constants(value)
         return references
 
     def _collect_classical_merge_results(
@@ -1012,7 +1162,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 hybrid operation.
         """
 
-        effective_kind = self._effective_kind
+        segmentation = self
 
         class QuantumInputCollector(ControlFlowVisitor):
             """Collect input-value UUIDs of every quantum / hybrid operation."""
@@ -1036,12 +1186,13 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 Returns:
                     None: Mutates ``self.inputs`` in place.
                 """
-                kind = op.operation_kind
-                if kind == OperationKind.CONTROL:
-                    kind = effective_kind(op)
-                if kind in (
-                    OperationKind.QUANTUM,
-                    OperationKind.HYBRID,
+                if (
+                    op.operation_kind
+                    in (
+                        OperationKind.QUANTUM,
+                        OperationKind.HYBRID,
+                    )
+                    or segmentation._effective_kind(op) == OperationKind.QUANTUM
                 ):
                     for v in op.all_input_values():
                         if isinstance(v, ValueBase):
@@ -1092,21 +1243,24 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Return whether ``op``'s result is needed by a quantum operation.
 
         Checks the quantum-needed set computed in
-        :meth:`_build_segments_list`. Only classical ops that feed a quantum
-        gate (directly or through a chain of other classical expressions) may
-        be absorbed into a quantum segment; ops whose results are block
-        outputs or feed only classical post-processing must stay classical.
+        :meth:`_build_segments_list`. Constant results are excluded because
+        quantum emission resolves their metadata directly and does not need
+        the producing operation in its segment. Only classical ops that feed
+        a non-constant quantum input (directly or through a chain of other
+        classical expressions) may be absorbed into a quantum segment; ops
+        whose results are block outputs or feed only classical
+        post-processing must stay classical.
 
         Args:
             op (Operation): The operation to classify.
 
         Returns:
-            bool: ``True`` if any result UUID is in the quantum-needed set,
-                ``False`` otherwise.
+            bool: ``True`` if any non-constant result UUID is in the
+                quantum-needed set, ``False`` otherwise.
         """
         needed = self._quantum_needed
         for v in op.results:
-            if isinstance(v, ValueBase) and v.uuid in needed:
+            if isinstance(v, ValueBase) and v.uuid in needed and not v.is_constant():
                 return True
         return False
 
@@ -1130,7 +1284,11 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 return True
         return False
 
-    def _compute_absorbable(self, operations: list[Operation]) -> set[int]:
+    def _compute_absorbable(
+        self,
+        operations: list[Operation],
+        consumers: dict[str, list[Operation]],
+    ) -> set[int]:
         """Compute the set of classical ops safe to fold into a quantum segment.
 
         A classical op is *absorbable* when it is non-measurement, feeds a
@@ -1155,36 +1313,14 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         Args:
             operations (list[Operation]): Top-level operations of the block.
+            consumers (dict[str, list[Operation]]): ``value_uuid ->
+                [consumer, ...]`` map over the whole op tree, as built by
+                :meth:`_build_consumers_map`.
 
         Returns:
             set[int]: ``id()`` of every classical op (top-level or nested) that
                 is safe with respect to the quantum-segment absorption.
         """
-
-        class ConsumerCollector(ControlFlowVisitor):
-            """Map each value UUID to the operations that read it."""
-
-            def __init__(self) -> None:
-                """Initialize the empty consumer map."""
-                self.consumers: dict[str, list[Operation]] = {}
-
-            def visit_operation(self, op: Operation) -> None:
-                """Record ``op`` as a consumer of each of its input values.
-
-                Args:
-                    op (Operation): The operation being visited.
-
-                Returns:
-                    None: Mutates ``self.consumers`` in place.
-                """
-                for v in op.all_input_values():
-                    if isinstance(v, ValueBase):
-                        self.consumers.setdefault(v.uuid, []).append(op)
-
-        collector = ConsumerCollector()
-        collector.visit_operations(operations)
-        consumers = collector.consumers
-
         # Candidates: every classical op (recursing into control-flow bodies)
         # that is non-measurement, quantum-feeding, and not a block output.
         classical_ops = self._collect_classical_ops(operations)
@@ -1210,6 +1346,450 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                     absorbable.discard(id(op))
                     changed = True
         return absorbable
+
+    def _build_consumers_map(
+        self,
+        operations: list[Operation],
+    ) -> dict[str, list[Operation]]:
+        """Map each value UUID to the operations that read it.
+
+        Walks the full operation tree (recursing through control-flow
+        bodies) and records every operation as a consumer of each of its
+        semantic input values, including extra value fields exposed via
+        ``all_input_values`` (e.g. an ``IfOperation``'s condition). For a
+        loop ``RegionArg``, ``init`` and ``yielded`` are reads while
+        ``block_arg`` and ``result`` are definitions and are excluded.
+
+        Args:
+            operations (list[Operation]): Top-level operations of the block.
+
+        Returns:
+            dict[str, list[Operation]]: ``value_uuid -> [consumer, ...]``
+                over the whole tree.
+        """
+
+        class ConsumerCollector(ControlFlowVisitor):
+            """Map each value UUID to the operations that read it."""
+
+            def __init__(self) -> None:
+                """Initialize the empty consumer map."""
+                self.consumers: dict[str, list[Operation]] = {}
+
+            def visit_operation(self, op: Operation) -> None:
+                """Record ``op`` as a consumer of each of its input values.
+
+                Args:
+                    op (Operation): The operation being visited.
+
+                Returns:
+                    None: Mutates ``self.consumers`` in place.
+                """
+                region_args = getattr(op, "region_args", ())
+                region_definition_uuids = {
+                    value.uuid
+                    for region_arg in region_args
+                    for value in (region_arg.block_arg, region_arg.result)
+                }
+                semantic_inputs = [
+                    value
+                    for value in op.all_input_values()
+                    if value.uuid not in region_definition_uuids
+                ]
+                semantic_inputs.extend(
+                    value
+                    for region_arg in region_args
+                    for value in (region_arg.init, region_arg.yielded)
+                )
+                seen: set[str] = set()
+                for v in semantic_inputs:
+                    if isinstance(v, ValueBase):
+                        if v.uuid in seen:
+                            continue
+                        seen.add(v.uuid)
+                        self.consumers.setdefault(v.uuid, []).append(op)
+
+        collector = ConsumerCollector()
+        collector.visit_operations(operations)
+        return collector.consumers
+
+    def _reject_unrepresentable_runtime_values(
+        self, op: Operation, nested: bool = False
+    ) -> None:
+        """Reject runtime values that cannot be represented safely.
+
+        ``ClassicalLoweringPass`` lowers every representable scalar
+        classical merge of a runtime ``IfOperation`` to a ``SELECT``
+        expression, and loop-invariant expressions float past their loop,
+        so the normal runtime-expression routing surfaces them host-side.
+        Two shapes remain unrepresentable and would otherwise silently
+        resolve to ``None``:
+
+        - a scalar classical merge that remains on the if because a branch
+          producer cannot be moved safely outside the branch, and
+        - a measurement-derived ``RegionArg`` carry, which the current
+          emit-time loop lowering cannot feed from one iteration to the next.
+
+        Fail loudly for both, regardless of whether the value feeds the host
+        or another in-circuit consumer. While-condition merges are exempt:
+        the while clbit-aliasing machinery owns them. Identity merges are
+        exempt too because they resolve through their common source.
+
+        Args:
+            op (Operation): Quantum-segment operation to scan. The
+                top-level call receives the routed quantum op; recursion
+                sets ``nested``.
+            nested (bool): Whether ``op`` sits inside a control-flow body.
+                Retained for recursive diagnostics. Defaults to False.
+
+        Raises:
+            SeparationError: If a scalar classical merge or measurement-
+                derived RegionArg cannot be represented safely.
+        """
+        if isinstance(op, (ForOperation, ForItemsOperation)):
+            self._reject_host_exprs_with_loop_local_inputs(op)
+            for region_arg in op.region_args:
+                if {
+                    region_arg.yielded.uuid,
+                    region_arg.result.uuid,
+                } & self._measurement_tainted:
+                    raise SeparationError(
+                        f"The loop-carried value '{region_arg.var_name}' is "
+                        "derived from a measurement, but the current circuit "
+                        "loop emission cannot carry runtime classical values "
+                        "between iterations. Return the underlying "
+                        "measurements and post-process outside the kernel, or "
+                        "move the measurement-dependent computation outside "
+                        "the loop."
+                    )
+        if (
+            isinstance(op, IfOperation)
+            and op.condition.uuid in self._measurement_tainted
+        ):
+            for merge in op.iter_merges():
+                output = merge.result
+                if isinstance(output, ArrayValue) or output.type.is_quantum():
+                    continue
+                if merge.is_identity:
+                    continue
+                if output.uuid in self._while_condition_uuids:
+                    continue
+                raise SeparationError(
+                    f"The measurement-dependent branch merge producing "
+                    f"'{output.name}' cannot be lowered safely: a branch "
+                    f"value is produced by nested control flow, depends on "
+                    f"branch-local quantum work, uses an operation that may "
+                    f"fail when evaluated eagerly, or varies across loop "
+                    f"iterations. Compute total branch values from inputs "
+                    f"available before the branch, or return the underlying "
+                    f"measurements and post-process outside the kernel."
+                )
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                for nested_op in body:
+                    self._reject_unrepresentable_runtime_values(nested_op, nested=True)
+
+    def _reject_host_exprs_with_loop_local_inputs(
+        self,
+        loop_op: ForOperation | ForItemsOperation,
+    ) -> None:
+        """Reject host-evaluated expressions that retain loop-local inputs.
+
+        Runtime expressions nested in a quantum loop can execute in-circuit,
+        but an expression needed as a public output is also copied to the
+        post-quantum classical segment. That executor has no binding for a
+        loop variable or region block argument. In particular, an array
+        element such as ``bits[index]`` carries the loop variable only in its
+        structural metadata, so scheduling it host-side would fail after a
+        successful compilation.
+
+        Args:
+            loop_op (ForOperation | ForItemsOperation): Quantum loop whose
+                nested runtime expressions should be checked.
+
+        Raises:
+            SeparationError: If a host-evaluated nested expression references
+                a value defined by the loop.
+        """
+        loop_locals: dict[str, str] = {
+            region_arg.block_arg.uuid: region_arg.var_name
+            for region_arg in loop_op.region_args
+        }
+        if isinstance(loop_op, ForOperation):
+            if loop_op.loop_var_value is not None:
+                loop_locals[loop_op.loop_var_value.uuid] = loop_op.loop_var_value.name
+        else:
+            for key_value in loop_op.key_var_values or ():
+                loop_locals[key_value.uuid] = key_value.name
+            if loop_op.value_var_value is not None:
+                loop_locals[loop_op.value_var_value.uuid] = loop_op.value_var_value.name
+        if not loop_locals:
+            return
+        dependency_origins = self._loop_local_dependency_origins(
+            loop_op,
+            loop_locals,
+        )
+
+        nested_operations = [
+            operation
+            for body in loop_op.nested_op_lists()
+            for operation in self._collect_classical_ops(body)
+        ]
+        for expression in nested_operations:
+            if (
+                not isinstance(expression, RuntimeClassicalExpr)
+                or id(expression) not in self._host_evaluated_expr_ids
+            ):
+                continue
+            references: set[str] = set()
+            for operand in expression.operands:
+                if isinstance(operand, ValueBase):
+                    references |= self._value_reference_uuids(operand)
+            escaped = references & dependency_origins.keys()
+            if not escaped:
+                continue
+            names = ", ".join(
+                sorted({name for uuid in escaped for name in dependency_origins[uuid]})
+            )
+            output = expression.results[0] if expression.results else None
+            output_name = getattr(output, "name", "runtime expression")
+            raise SeparationError(
+                "The measurement-dependent expression producing "
+                f"'{output_name}' cannot be lowered safely: it is needed "
+                "after a quantum loop but references loop-local values "
+                f"({names}) that the post-quantum executor cannot "
+                "reconstruct. Return the underlying measurements and "
+                "post-process outside the qkernel, or avoid using a loop "
+                "variable in the escaping expression."
+            )
+
+    def _loop_local_dependency_origins(
+        self,
+        loop_op: ForOperation | ForItemsOperation,
+        loop_locals: dict[str, str],
+    ) -> dict[str, set[str]]:
+        """Trace classical body values back to loop-local definitions.
+
+        A structural operand can hide a derived loop dependency, for example
+        ``bits[index + 0]``. Propagate each loop-local display name through
+        body producers so the escaping-expression check sees that transitive
+        dependency. Hybrid results deliberately start a new runtime boundary:
+        measurements are materialized in the post-quantum context and do not
+        require the host executor to reconstruct their quantum input index.
+
+        Args:
+            loop_op (ForOperation | ForItemsOperation): Loop whose body should
+                be analyzed.
+            loop_locals (dict[str, str]): Seed UUID-to-display-name mapping.
+
+        Returns:
+            dict[str, set[str]]: Every loop-dependent UUID mapped to the
+                originating loop-local display names.
+        """
+        operations: list[Operation] = []
+
+        def collect(body: list[Operation]) -> None:
+            """Append a control-flow body and all nested operations.
+
+            Args:
+                body (list[Operation]): Operations to collect recursively.
+            """
+            for operation in body:
+                operations.append(operation)
+                if isinstance(operation, HasNestedOps):
+                    for nested in operation.nested_op_lists():
+                        collect(nested)
+
+        for body in loop_op.nested_op_lists():
+            collect(body)
+
+        origins = {uuid: {name} for uuid, name in loop_locals.items()}
+        changed = True
+        while changed:
+            changed = False
+            for operation in operations:
+                if operation.operation_kind is OperationKind.HYBRID:
+                    continue
+                input_origins: set[str] = set()
+                for value in genuine_input_values(operation):
+                    if not isinstance(value, ValueBase):
+                        continue
+                    for uuid in self._value_reference_uuids(value):
+                        input_origins.update(origins.get(uuid, ()))
+                if not input_origins:
+                    continue
+                for result in operation.results:
+                    previous = origins.setdefault(result.uuid, set())
+                    previous_size = len(previous)
+                    previous.update(input_origins)
+                    if len(previous) != previous_size:
+                        changed = True
+        return origins
+
+    def _classify_runtime_exprs(
+        self,
+        operations: list[Operation],
+        consumers: dict[str, list[Operation]],
+    ) -> tuple[set[int], set[int]]:
+        """Classify each ``RuntimeClassicalExpr`` by where it must execute.
+
+        A runtime expression (a measurement-derived classical op lowered by
+        ``ClassicalLoweringPass``) can be consumed by two different worlds:
+
+        - **In-circuit**: its result feeds a quantum / hybrid operation —
+          in practice a runtime ``IfOperation`` / ``WhileOperation``
+          condition — or another in-circuit runtime expression. Such an
+          expr must ride inside the quantum segment so the backend emits
+          it as a native classical expression.
+        - **Host-side**: its result is a block output or is read by
+          classical post-processing (a classical-segment op, classical
+          control flow, or another host-evaluated expression). Such an
+          expr must land in a classical segment so ``ClassicalExecutor``
+          computes its value; stranded in a quantum segment it would be
+          silently dropped and the orchestrator would surface ``None``.
+
+        Both sets are transitive closures over the expression dataflow: an
+        expr feeding an in-circuit expr is itself in-circuit (the backend
+        expression tree needs its operands emitted too), and an expr read
+        by a host-evaluated expr must itself be host-evaluated (the host
+        evaluation needs its operand values). An expr may be in both sets
+        (e.g. used as an if condition *and* returned); segmentation then
+        places it in both segments, which is safe because the op is pure.
+
+        Args:
+            operations (list[Operation]): Top-level operations of the block.
+            consumers (dict[str, list[Operation]]): ``value_uuid ->
+                [consumer, ...]`` map over the whole op tree, as built by
+                :meth:`_build_consumers_map`.
+
+        Returns:
+            tuple[set[int], set[int]]: ``(quantum_consumed, host_evaluated)``
+                — ``id()`` sets of the runtime expressions that must be
+                placed in the quantum segment and evaluated host-side,
+                respectively.
+        """
+        exprs = [
+            op
+            for op in self._collect_classical_ops(operations)
+            if isinstance(op, RuntimeClassicalExpr)
+        ]
+        if not exprs:
+            return set(), set()
+
+        # Ops that execute host-side when reached: every top-level op whose
+        # effective kind is CLASSICAL, plus everything nested inside one.
+        # Consumers nested inside a QUANTUM-effective control op (e.g. the
+        # merge yields of a runtime if) execute in-circuit, not host-side,
+        # and must not drag their operand expressions into a classical
+        # segment.
+        top_level_ids = {id(op) for op in operations}
+        host_scope_ids: set[int] = set()
+        for top in operations:
+            if self._effective_kind(top) == OperationKind.CLASSICAL:
+                host_scope_ids |= self._collect_op_ids([top])
+
+        def result_consumers(op: Operation) -> list[Operation]:
+            """Collect the operations reading any result of ``op``.
+
+            Args:
+                op (Operation): The producer operation.
+
+            Returns:
+                list[Operation]: Consumers of ``op``'s results (``op``
+                    itself excluded).
+            """
+            found: list[Operation] = []
+            for result in op.results:
+                if isinstance(result, ValueBase):
+                    found.extend(
+                        c for c in consumers.get(result.uuid, ()) if c is not op
+                    )
+            return found
+
+        # In-circuit set: seeded by consumption from a quantum / hybrid op
+        # (a runtime if/while's effective kind is QUANTUM when its body
+        # holds gates); grown backward through expression chains until
+        # stable, so every operand-expr of an emitted expr is emitted too.
+        quantum_consumed: set[int] = set()
+        changed = True
+        while changed:
+            changed = False
+            for op in exprs:
+                if id(op) in quantum_consumed:
+                    continue
+                for consumer in result_consumers(op):
+                    if self._effective_kind(consumer) in (
+                        OperationKind.QUANTUM,
+                        OperationKind.HYBRID,
+                    ) or (
+                        isinstance(consumer, RuntimeClassicalExpr)
+                        and id(consumer) in quantum_consumed
+                    ):
+                        quantum_consumed.add(id(op))
+                        changed = True
+                        break
+
+        # Host-side set: an expr that will execute host-side (a top-level
+        # expr not consumed in-circuit, or an expr nested in host-executing
+        # classical control flow) must be evaluated by the executor; a
+        # block output must be available host-side even when also consumed
+        # in-circuit. Grown backward through expression chains and
+        # host-executing non-expression consumers until stable.
+        host_evaluated: set[int] = {
+            id(op)
+            for op in exprs
+            if (
+                (id(op) in top_level_ids or id(op) in host_scope_ids)
+                and id(op) not in quantum_consumed
+            )
+            or self._produces_block_output(op)
+        }
+        changed = True
+        while changed:
+            changed = False
+            for op in exprs:
+                if id(op) in host_evaluated:
+                    continue
+                for consumer in result_consumers(op):
+                    if isinstance(consumer, RuntimeClassicalExpr):
+                        needs_host = id(consumer) in host_evaluated
+                    else:
+                        needs_host = id(consumer) in host_scope_ids
+                    if needs_host:
+                        host_evaluated.add(id(op))
+                        changed = True
+                        break
+
+        return quantum_consumed, host_evaluated
+
+    def _collect_op_ids(self, operations: list[Operation]) -> set[int]:
+        """Collect ``id()`` of every op in the tree, recursing control flow.
+
+        Args:
+            operations (list[Operation]): Operations to walk (including
+                each op's nested control-flow bodies).
+
+        Returns:
+            set[int]: ``id()`` of every operation reachable from
+                ``operations``.
+        """
+        ids: set[int] = set()
+
+        class IdCollector(ControlFlowVisitor):
+            """Record the identity of every visited operation."""
+
+            def visit_operation(self, op: Operation) -> None:
+                """Add ``op``'s identity to the enclosing set.
+
+                Args:
+                    op (Operation): The operation being visited.
+
+                Returns:
+                    None: Mutates the enclosing ``ids`` set in place.
+                """
+                ids.add(id(op))
+
+        IdCollector().visit_operations(operations)
+        return ids
 
     def _collect_classical_ops(self, operations: list[Operation]) -> list[Operation]:
         """Collect every classical-kind op, recursing into control-flow bodies.

@@ -13,9 +13,12 @@ from qamomile.circuit.ir.value import (
     DictValue,
     TupleValue,
     Value,
-    ValueBase,
+    ValueLike,
 )
-from qamomile.circuit.transpiler.classical_executor import ClassicalExecutor
+from qamomile.circuit.transpiler.classical_executor import (
+    ClassicalExecutor,
+    resolve_runtime_array_location,
+)
 from qamomile.circuit.transpiler.compiled_segments import (
     CompiledClassicalSegment,
     CompiledExpvalSegment,
@@ -93,10 +96,11 @@ class ProgramOrchestrator(Generic[T]):
                 self._load_measurements(shot_context, bits)
                 self._execute_post_quantum_steps(shot_context, executor, circuit)
 
-                if program.output_refs:
-                    results.append((self._resolve_outputs(shot_context), count))
+                if program.output_values:
+                    value = self._resolve_outputs(shot_context)
                 else:
-                    results.append((bits, count))
+                    value = bits
+                results.append((value, count))
             return results
 
         return SampleJob(raw_counts, convert_counts, shots)
@@ -129,7 +133,7 @@ class ProgramOrchestrator(Generic[T]):
             self._load_measurements(run_context, bits)
             self._execute_post_quantum_steps(run_context, executor, circuit)
 
-            if program.output_refs:
+            if program.output_values:
                 return self._resolve_outputs(run_context)
             return bits
 
@@ -229,18 +233,7 @@ class ProgramOrchestrator(Generic[T]):
         bindings: dict[str, Any] | None,
         indexed_bindings: dict[str, Any],
     ) -> ExecutionContext:
-        """Create an execution context seeded with every binding source.
-
-        Args:
-            bindings (dict[str, Any] | None): User-facing scalar or container
-                bindings keyed by public parameter name.
-            indexed_bindings (dict[str, Any]): Flattened array-element
-                bindings keyed by backend parameter names.
-
-        Returns:
-            ExecutionContext: Context containing user bindings, compile-time
-                output constants, and UUID aliases from the program ABI.
-        """
+        """Create execution context seeded with user-provided bindings."""
         context = ExecutionContext()
         for key, value in (bindings or {}).items():
             context.set(key, value)
@@ -248,14 +241,183 @@ class ProgramOrchestrator(Generic[T]):
             context.set(key, value)
         plan = self._program.plan
         if plan is not None:
-            for ref, value in plan.abi.constant_outputs.items():
-                context.set(ref, value)
             for name, value in plan.abi.public_inputs.items():
                 if bindings and name in bindings:
                     context.set(value.uuid, bindings[name])
                 elif name in indexed_bindings:
                     context.set(value.uuid, indexed_bindings[name])
+            self._seed_tuple_input_aliases(context, plan.abi.public_inputs)
         return context
+
+    def _seed_tuple_input_aliases(
+        self,
+        context: ExecutionContext,
+        public_inputs: dict[str, ValueLike],
+    ) -> None:
+        """Seed runtime aliases for elements of tuple-typed public inputs.
+
+        Tuple dummy inputs use element Values such as ``pair_0`` while user
+        bindings are supplied as either ``{"pair": (2, 3)}`` or indexed
+        entries such as ``{"pair[0]": 2}``. This helper bridges those names
+        through ABI metadata without creating aliases that collide with other
+        top-level public inputs.
+
+        Args:
+            context (ExecutionContext): Execution context seeded with user
+                bindings.
+            public_inputs (dict[str, ValueLike]): Runtime-visible public
+                inputs from the program ABI.
+
+        Returns:
+            None: This method mutates ``context`` in place.
+        """
+        top_level_names = set(public_inputs)
+        for input_name, value in public_inputs.items():
+            if isinstance(value, TupleValue):
+                self._seed_tuple_elements(
+                    context=context,
+                    tuple_name=input_name,
+                    tuple_value=value,
+                    top_level_names=top_level_names,
+                )
+
+    def _seed_tuple_elements(
+        self,
+        context: ExecutionContext,
+        tuple_name: str,
+        tuple_value: TupleValue,
+        top_level_names: set[str],
+    ) -> None:
+        """Seed aliases recursively for one tuple input's elements.
+
+        Args:
+            context (ExecutionContext): Execution context seeded with user
+                bindings.
+            tuple_name (str): Public input name for the tuple.
+            tuple_value (TupleValue): Tuple IR value whose elements should be
+                aliased.
+            top_level_names (set[str]): Names of all public inputs, used to
+                avoid alias collisions with separate top-level arguments.
+
+        Returns:
+            None: This method mutates ``context`` in place.
+        """
+        tuple_data = self._resolve_tuple_input_data(context, tuple_name, tuple_value)
+        for index, element in enumerate(tuple_value.elements):
+            element_data = self._resolve_tuple_element_data(
+                context,
+                tuple_name,
+                index,
+                tuple_data,
+            )
+            if element_data is _MISSING:
+                continue
+            self._set_context_if_absent(context, element.uuid, element_data)
+            for alias in self._tuple_element_aliases(element, top_level_names):
+                self._set_context_if_absent(context, alias, element_data)
+            if isinstance(element, TupleValue):
+                self._seed_tuple_elements(
+                    context=context,
+                    tuple_name=f"{tuple_name}[{index}]",
+                    tuple_value=element,
+                    top_level_names=top_level_names,
+                )
+
+    def _resolve_tuple_input_data(
+        self,
+        context: ExecutionContext,
+        tuple_name: str,
+        tuple_value: TupleValue,
+    ) -> Any:
+        """Resolve a concrete tuple binding from context when available.
+
+        Args:
+            context (ExecutionContext): Execution context seeded with user
+                bindings.
+            tuple_name (str): Public input name for the tuple.
+            tuple_value (TupleValue): Tuple IR value.
+
+        Returns:
+            Any: The bound tuple-like object, or a private sentinel when only
+                indexed element bindings are available.
+        """
+        if context.has(tuple_value.uuid):
+            return context.get(tuple_value.uuid)
+        if context.has(tuple_name):
+            return context.get(tuple_name)
+        if tuple_value.name and context.has(tuple_value.name):
+            return context.get(tuple_value.name)
+        return _MISSING
+
+    def _resolve_tuple_element_data(
+        self,
+        context: ExecutionContext,
+        tuple_name: str,
+        index: int,
+        tuple_data: Any,
+    ) -> Any:
+        """Resolve one tuple element from whole-tuple or indexed bindings.
+
+        Args:
+            context (ExecutionContext): Execution context seeded with user
+                bindings.
+            tuple_name (str): Public input name for the tuple.
+            index (int): Element index to resolve.
+            tuple_data (Any): Whole tuple binding or the private missing
+                sentinel.
+
+        Returns:
+            Any: The concrete element value, or the private missing sentinel.
+        """
+        if tuple_data is not _MISSING:
+            try:
+                return tuple_data[index]
+            except (IndexError, KeyError, TypeError):
+                pass
+        indexed_key = f"{tuple_name}[{index}]"
+        if context.has(indexed_key):
+            return context.get(indexed_key)
+        return _MISSING
+
+    def _tuple_element_aliases(
+        self,
+        element: ValueLike,
+        top_level_names: set[str],
+    ) -> tuple[str, ...]:
+        """Return non-conflicting context aliases for a tuple element.
+
+        Args:
+            element (ValueLike): Tuple element IR value.
+            top_level_names (set[str]): Names of all public inputs.
+
+        Returns:
+            tuple[str, ...]: Alias keys that do not collide with top-level
+                public input names.
+        """
+        aliases: list[str] = []
+        for alias in (element.name, element.parameter_name()):
+            if alias and alias not in top_level_names and alias not in aliases:
+                aliases.append(alias)
+        return tuple(aliases)
+
+    def _set_context_if_absent(
+        self,
+        context: ExecutionContext,
+        key: str,
+        value: Any,
+    ) -> None:
+        """Set a context value without overwriting explicit bindings.
+
+        Args:
+            context (ExecutionContext): Execution context to update.
+            key (str): Context key to seed.
+            value (Any): Concrete runtime value.
+
+        Returns:
+            None: This method mutates ``context`` in place.
+        """
+        if not context.has(key):
+            context.set(key, value)
 
     @staticmethod
     def _bitstring_to_tuple(bitstring: str) -> tuple[int, ...]:
@@ -392,7 +554,7 @@ class ProgramOrchestrator(Generic[T]):
         program = self._program
 
         if program.plan is None:
-            return self._resolve_outputs(context) if program.output_refs else None
+            return self._resolve_outputs(context) if program.output_values else None
 
         classical_executor = ClassicalExecutor()
         result_value = None
@@ -445,7 +607,7 @@ class ProgramOrchestrator(Generic[T]):
                 context.set(expval_seg.result_ref, exp_val)
                 result_value = exp_val
 
-        if program.output_refs:
+        if program.output_values:
             return self._resolve_outputs(context)
         if result_value is not None:
             return result_value
@@ -487,236 +649,339 @@ class ProgramOrchestrator(Generic[T]):
     # ------------------------------------------------------------------
 
     def _resolve_outputs(self, context: ExecutionContext) -> Any:
-        """Read final output values from execution context.
-
-        Args:
-            context (ExecutionContext): Execution state after quantum and
-                classical post-processing steps.
-
-        Returns:
-            Any: The sole public output or a tuple in public return order.
-        """
-        output_descriptors = (
-            self._program.plan.abi.output_values
-            if self._program.plan is not None
-            else {}
-        )
-        output_values = []
-        for ref in self._program.output_refs:
-            val = context.get(ref) if context.has(ref) else _MISSING
-            descriptor = output_descriptors.get(ref)
-            if val is _MISSING and descriptor is not None:
-                val = self._resolve_structural_output(descriptor, context)
-            if val is _MISSING:
-                array_bits = []
-                i = 0
-                while context.has(f"{ref}_{i}"):
-                    array_bits.append(context.get(f"{ref}_{i}"))
-                    i += 1
-                if array_bits:
-                    val = tuple(array_bits)
-            output_values.append(None if val is _MISSING else val)
-
+        """Read final output values from execution context."""
+        output_values = [
+            self._resolve_output_value_like(value, context)
+            for value in self._program.output_values
+        ]
         output_tuple = tuple(output_values)
         if len(output_tuple) == 1:
             return output_tuple[0]
         return output_tuple
 
-    def _resolve_structural_output(
+    def _resolve_output_value_like(
         self,
-        value: ValueBase,
+        value: ValueLike,
         context: ExecutionContext,
     ) -> Any:
-        """Resolve a public structural output from runtime state.
-
-        Tuple and dictionary descriptors are reconstructed recursively. The
-        reconstruction is atomic: if any nested key, value, or tuple element
-        is unavailable, the complete container remains unresolved instead of
-        exposing a partially populated result.
+        """Resolve an output IR value from the execution context.
 
         Args:
-            value (ValueBase): Public output descriptor retained by the ABI.
-            context (ExecutionContext): Runtime state containing root arrays or
-                per-element measurement keys.
+            value (ValueLike): Output IR value to resolve.
+            context (ExecutionContext): Execution context populated by
+                measurement loading and post-quantum classical execution.
 
         Returns:
-            Any: Resolved scalar, array, tuple, or dictionary contents, or the
-                private ``_MISSING`` sentinel when the complete structure is
-                not materialized.
+            Any: Concrete Python value represented by ``value``.
+
+        Raises:
+            ExecutionError: If typed output metadata cannot be resolved from
+                execution state, bindings, or static metadata.
+        """
+        if isinstance(value, TupleValue):
+            return tuple(
+                self._resolve_output_value_like(element, context)
+                for element in value.elements
+            )
+
+        if isinstance(value, DictValue):
+            resolved = self._resolve_direct_output_value(value, context)
+            if resolved is not None:
+                return resolved
+            return {
+                self._resolve_output_value_like(key, context): (
+                    self._resolve_output_value_like(entry_value, context)
+                )
+                for key, entry_value in value.entries
+            }
+
+        resolved = self._resolve_context_value_uuid(value.uuid, context)
+        if resolved is not None:
+            return resolved
+        if isinstance(value, ArrayValue):
+            array_resolved = self._resolve_array_output(value, context)
+            if array_resolved is not None:
+                return array_resolved
+        if value.is_array_element():
+            element_resolved = self._resolve_array_element_output(value, context)
+            if element_resolved is not None:
+                return element_resolved
+        resolved = self._resolve_direct_output_value(value, context)
+        if resolved is not None:
+            return resolved
+        raise ExecutionError(
+            f"Typed output '{value.name or value.uuid}' "
+            f"({value.type.label()}) could not be resolved from execution "
+            f"state. This indicates missing output provenance or an "
+            f"unsupported control-flow value."
+        )
+
+    def _resolve_direct_output_value(
+        self,
+        value: ValueLike,
+        context: ExecutionContext,
+    ) -> Any:
+        """Resolve a value directly from runtime state or static metadata.
+
+        Args:
+            value (ValueLike): IR value-like object to resolve.
+            context (ExecutionContext): Execution context populated with
+                bindings and results.
+
+        Returns:
+            Any: Concrete value, or ``None`` when no direct binding/constant
+                exists.
         """
         if context.has(value.uuid):
             return context.get(value.uuid)
-
-        if isinstance(value, TupleValue):
-            elements: list[Any] = []
-            for element in value.elements:
-                resolved = self._resolve_structural_output(element, context)
-                if resolved is _MISSING:
-                    return _MISSING
-                elements.append(resolved)
-            return tuple(elements)
-
-        if isinstance(value, DictValue):
-            entries: dict[Any, Any] = {}
-            for key, item in value.entries:
-                resolved_key = self._resolve_structural_output(key, context)
-                resolved_item = self._resolve_structural_output(item, context)
-                if resolved_key is _MISSING or resolved_item is _MISSING:
-                    return _MISSING
-                try:
-                    entries[resolved_key] = resolved_item
-                except TypeError:
-                    return _MISSING
-            return entries
-
-        if isinstance(value, Value) and value.is_array_element():
-            indices: list[int] = []
-            for index_value in value.element_indices:
-                index = self._resolve_output_index(index_value, context)
-                if index is None or index < 0:
-                    return _MISSING
-                indices.append(index)
-            if not indices or value.parent_array is None:
-                return _MISSING
-            location = self._resolve_output_array_location(
-                value.parent_array,
-                indices[0],
-                context,
-            )
-            if location is None:
-                return _MISSING
-            root, root_index = location
-            return self._read_output_array_element(
-                root,
-                (root_index, *indices[1:]),
-                context,
-            )
-
-        if isinstance(value, ArrayValue):
-            if not value.shape:
-                return _MISSING
-            length = self._resolve_output_index(value.shape[0], context)
-            if length is None or length < 0:
-                return _MISSING
-            # A zero-length array has one canonical materialization regardless
-            # of whether it is a root, a view, or a branch merge. There are no
-            # per-element context keys to discover, so resolve it explicitly.
-            if length == 0:
-                return ()
-            if value.slice_of is None:
-                return _MISSING
-            elements: list[Any] = []
-            for local_index in range(length):
-                location = self._resolve_output_array_location(
-                    value,
-                    local_index,
-                    context,
-                )
-                if location is None:
-                    return _MISSING
-                root, root_index = location
-                element = self._read_output_array_element(
-                    root,
-                    (root_index,),
-                    context,
-                )
-                if element is _MISSING:
-                    return _MISSING
-                elements.append(element)
-            return tuple(elements)
-
-        if isinstance(value, Value) and value.is_constant():
+        if value.name and context.has(value.name):
+            return context.get(value.name)
+        if isinstance(value, (Value, ArrayValue)) and value.is_constant():
             return value.get_const()
+        if isinstance(value, ArrayValue):
+            const_array = value.get_const_array()
+            if const_array is not None:
+                return const_array
+        param_name = value.parameter_name()
+        if param_name and context.has(param_name):
+            return context.get(param_name)
+        return None
 
-        return _MISSING
+    def _resolve_array_output(
+        self,
+        value: ArrayValue,
+        context: ExecutionContext,
+    ) -> Any | None:
+        """Resolve a whole array output, including runtime-bound views.
 
-    @staticmethod
-    def _resolve_output_index(
+        Args:
+            value (ArrayValue): Array output value.
+            context (ExecutionContext): Execution context populated with
+                measured bits and runtime bindings.
+
+        Returns:
+            Any | None: Tuple of resolved elements, or ``None`` when the array
+                cannot be reconstructed.
+        """
+        # A sliced view can inherit the root parameter's provenance. Resolving
+        # it directly by parameter name would return the whole root container,
+        # so only root arrays take the general direct-value path. A view may
+        # still have been materialized explicitly under its own UUID.
+        if value.slice_of is None:
+            direct = self._resolve_direct_output_value(value, context)
+            if direct is not None:
+                return direct
+        else:
+            materialized_view = self._resolve_context_value_uuid(value.uuid, context)
+            if materialized_view is not None:
+                return materialized_view
+        if not value.shape:
+            return None
+        length = self._resolve_context_int_value(value.shape[0], context)
+        if length is None or length < 0:
+            return None
+
+        elements: list[Any] = []
+        for local_index in range(length):
+            resolved_location = resolve_runtime_array_location(
+                value,
+                (local_index,),
+                lambda v: self._resolve_context_int_value(v, context),
+            )
+            if resolved_location is None:
+                return None
+            root, root_indices = resolved_location
+            element = self._resolve_array_location_output(root, root_indices, context)
+            if element is None:
+                return None
+            elements.append(element)
+        return tuple(elements)
+
+    def _resolve_context_value_uuid(
+        self,
+        uuid: str,
+        context: ExecutionContext,
+    ) -> Any | None:
+        """Resolve a value UUID from context, including indexed carriers.
+
+        Args:
+            uuid (str): IR value UUID.
+            context (ExecutionContext): Execution context populated by
+                execution.
+
+        Returns:
+            Any | None: Concrete Python value, tuple reconstructed from indexed
+                entries, or ``None`` when no value is available.
+        """
+        val = context.get(uuid) if context.has(uuid) else None
+        if val is None:
+            array_bits = []
+            i = 0
+            while context.has(f"{uuid}_{i}"):
+                array_bits.append(context.get(f"{uuid}_{i}"))
+                i += 1
+            if array_bits:
+                val = tuple(array_bits)
+        return val
+
+    def _resolve_array_element_output(
+        self,
         value: Value,
         context: ExecutionContext,
-    ) -> int | None:
-        """Resolve an output index without display-name fallbacks.
+    ) -> Any | None:
+        """Resolve an array-element output through its parent array carrier.
 
         Args:
-            value (Value): Index or shape value to resolve.
-            context (ExecutionContext): Runtime state keyed by UUID and public
-                parameter provenance.
+            value (Value): Output value that carries ``parent_array``
+                metadata.
+            context (ExecutionContext): Execution context populated by
+                measurement loading.
 
         Returns:
-            int | None: Concrete integer, or None when unresolved or not an
-                integral scalar. In particular, booleans, floats, and numeric
-                strings are rejected instead of being silently coerced.
+            Any | None: Concrete element value, or ``None`` when the element
+                cannot be resolved.
         """
-        raw: Any = _MISSING
-        if context.has(value.uuid):
-            raw = context.get(value.uuid)
-        elif value.is_constant():
-            raw = value.get_const()
-        elif value.is_parameter():
-            parameter_name = value.parameter_name()
-            if parameter_name and context.has(parameter_name):
-                raw = context.get(parameter_name)
-        if isinstance(raw, bool) or not isinstance(raw, numbers.Integral):
+        parent = value.parent_array
+        if parent is None:
             return None
-        return int(raw)
+        indices = self._resolve_output_indices(value, context)
+        if indices is None:
+            return None
 
-    @classmethod
-    def _resolve_output_array_location(
-        cls,
-        array: ArrayValue,
-        index: int,
+        resolved_location = resolve_runtime_array_location(
+            parent,
+            indices,
+            lambda v: self._resolve_context_int_value(v, context),
+        )
+        if resolved_location is None:
+            return None
+        root, root_indices = resolved_location
+
+        # Physical root coordinates are authoritative for both static and
+        # runtime-bound slice chains. This prevents ``values[1:][0]`` from
+        # accidentally indexing slot 0 of the root parameter payload.
+        resolved = self._resolve_array_location_output(root, root_indices, context)
+        if resolved is not None:
+            return resolved
+
+        # Some control-flow paths materialize a view under its own UUID.
+        # Preserve that explicit payload only after the physical lookup, and
+        # index it in the view's local coordinate space.
+        if parent.uuid != root.uuid and context.has(parent.uuid):
+            container = context.get(parent.uuid)
+            try:
+                if len(indices) == 1:
+                    return container[indices[0]]
+                return container[indices]
+            except (IndexError, KeyError, TypeError):
+                return None
+        return None
+
+    def _resolve_array_container_output(
+        self,
+        value: ArrayValue,
         context: ExecutionContext,
-    ) -> tuple[ArrayValue, int] | None:
-        """Compose a view-local output index into root-array coordinates.
+    ) -> Any:
+        """Resolve an array container from output-visible state.
 
         Args:
-            array (ArrayValue): Immediate parent array or sliced view.
-            index (int): Non-negative index local to ``array``.
-            context (ExecutionContext): Runtime state for symbolic slice bounds.
+            value (ArrayValue): Array value to resolve.
+            context (ExecutionContext): Execution context populated with
+                bindings and results.
 
         Returns:
-            tuple[ArrayValue, int] | None: Root array and composed index, or
-                None when a slice frame is unresolved or invalid.
+            Any: Concrete array-like container, or ``None`` when not available.
         """
-        current = array
-        root_index = index
-        while current.slice_of is not None:
-            if current.slice_start is None or current.slice_step is None:
-                return None
-            start = cls._resolve_output_index(current.slice_start, context)
-            step = cls._resolve_output_index(current.slice_step, context)
-            if start is None or step is None or start < 0 or step <= 0:
-                return None
-            root_index = start + step * root_index
-            current = current.slice_of
-        return current, root_index
+        resolved = self._resolve_context_value_uuid(value.uuid, context)
+        if resolved is not None:
+            return resolved
+        return self._resolve_direct_output_value(value, context)
 
-    @staticmethod
-    def _read_output_array_element(
-        root: ArrayValue,
+    def _resolve_array_location_output(
+        self,
+        array: ArrayValue,
         indices: tuple[int, ...],
         context: ExecutionContext,
     ) -> Any:
-        """Read one structural output from a root container or clbit key.
+        """Resolve an array element from root-coordinate indices.
 
         Args:
-            root (ArrayValue): Root array owning the requested element.
-            indices (tuple[int, ...]): Root-local element indices.
-            context (ExecutionContext): Runtime arrays and measurement values.
+            array (ArrayValue): Root array value.
+            indices (tuple[int, ...]): Concrete indices in ``array``
+                coordinates.
+            context (ExecutionContext): Execution context populated with
+                measurements/bindings.
 
         Returns:
-            Any: Element contents, or the private ``_MISSING`` sentinel.
+            Any: Concrete element value, or ``None`` when no carrier is
+                available.
         """
-        if context.has(root.uuid):
-            container = context.get(root.uuid)
-            try:
-                for index in indices:
-                    container = container[index]
-            except (IndexError, KeyError, TypeError):
-                return _MISSING
-            return container
-        if len(indices) == 1:
-            composite_key = f"{root.uuid}_{indices[0]}"
-            if context.has(composite_key):
-                return context.get(composite_key)
-        return _MISSING
+        container = self._resolve_array_container_output(array, context)
+        if container is not None:
+            if len(indices) == 1:
+                return container[indices[0]]
+            return container[indices]
+        if len(indices) != 1:
+            return None
+        root_key = f"{array.uuid}_{indices[0]}"
+        if context.has(root_key):
+            return context.get(root_key)
+        if array.name:
+            indexed_key = f"{array.name}[{indices[0]}]"
+            if context.has(indexed_key):
+                return context.get(indexed_key)
+        return None
+
+    def _resolve_output_indices(
+        self,
+        value: Value,
+        context: ExecutionContext,
+    ) -> tuple[int, ...] | None:
+        """Resolve output array indices to concrete integers.
+
+        Args:
+            value (Value): Array-element output value.
+            context (ExecutionContext): Execution context that may contain
+                runtime index values.
+
+        Returns:
+            tuple[int, ...] | None: Tuple of integer indices, or ``None`` if
+                any index is unresolved.
+        """
+        indices: list[int] = []
+        for index in value.element_indices:
+            resolved = self._resolve_context_int_value(index, context)
+            if resolved is None or resolved < 0:
+                return None
+            indices.append(resolved)
+        return tuple(indices)
+
+    def _resolve_context_int_value(
+        self,
+        value: Value,
+        context: ExecutionContext,
+    ) -> int | None:
+        """Resolve a scalar integer value from execution context.
+
+        Args:
+            value (Value): Scalar value to resolve.
+            context (ExecutionContext): Execution context containing
+                bindings/results.
+
+        Returns:
+            int | None: Integer value, or ``None`` when unresolved.
+        """
+        raw: Any = None
+        if value.is_constant():
+            raw = value.get_const()
+        elif context.has(value.uuid):
+            raw = context.get(value.uuid)
+        elif value.name and context.has(value.name):
+            raw = context.get(value.name)
+        else:
+            param_name = value.parameter_name()
+            if param_name and context.has(param_name):
+                raw = context.get(param_name)
+        if isinstance(raw, bool) or not isinstance(raw, numbers.Integral):
+            return None
+        return int(raw)

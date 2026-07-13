@@ -36,6 +36,7 @@ from qamomile.circuit.ir.operation import (
 )
 from qamomile.circuit.ir.operation.callable import CallTransform, CompositeGateType
 from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.serialize import (
     SCHEMA_VERSION,
@@ -53,12 +54,14 @@ from qamomile.circuit.ir.serialize.hamiltonian_io import (
 from qamomile.circuit.ir.serialize.numpy_io import array_to_dict, dict_to_array
 from qamomile.circuit.ir.types.primitives import (
     FloatType,
+    UIntType,
 )
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
     DictValue,
     ScalarMetadata,
+    TupleValue,
     Value,
     ValueMetadata,
 )
@@ -660,7 +663,9 @@ class TestRoundTripIRFeatures:
             op for op in block.operations if isinstance(op, InvokeOperation)
         ]
         assert controlled_ops
-        assert {op.target.namespace for op in controlled_ops} == {"user.composite"}
+        assert all(
+            op.target.namespace.startswith("user.composite.") for op in controlled_ops
+        )
         assert {op.target.name for op in controlled_ops} == {"boxed_phase"}
         assert {op.transform for op in controlled_ops} == {CallTransform.CONTROLLED}
         assert {op.attrs["kind"] for op in controlled_ops} == {"composite"}
@@ -673,7 +678,9 @@ class TestRoundTripIRFeatures:
             restored_ops = [
                 op for op in restored.operations if isinstance(op, InvokeOperation)
             ]
-            assert [op.target.namespace for op in restored_ops] == ["user.composite"]
+            assert [op.target.namespace for op in restored_ops] == [
+                controlled_ops[0].target.namespace
+            ]
             assert [op.target.name for op in restored_ops] == ["boxed_phase"]
             assert [op.transform for op in restored_ops] == [CallTransform.CONTROLLED]
             assert [op.attrs["kind"] for op in restored_ops] == ["composite"]
@@ -686,7 +693,9 @@ class TestRoundTripIRFeatures:
         block = _to_affine(_inverse_boxed_phase)
         inverse_ops = [op for op in block.operations if isinstance(op, InvokeOperation)]
         assert inverse_ops
-        assert {op.target.namespace for op in inverse_ops} == {"user.composite"}
+        assert all(
+            op.target.namespace.startswith("user.composite.") for op in inverse_ops
+        )
         assert {op.target.name for op in inverse_ops} == {"boxed_phase"}
         assert {op.transform for op in inverse_ops} == {CallTransform.INVERSE}
         assert {op.attrs["kind"] for op in inverse_ops} == {"composite"}
@@ -699,7 +708,9 @@ class TestRoundTripIRFeatures:
             restored_ops = [
                 op for op in restored.operations if isinstance(op, InvokeOperation)
             ]
-            assert [op.target.namespace for op in restored_ops] == ["user.composite"]
+            assert [op.target.namespace for op in restored_ops] == [
+                inverse_ops[0].target.namespace
+            ]
             assert [op.target.name for op in restored_ops] == ["boxed_phase"]
             assert [op.transform for op in restored_ops] == [CallTransform.INVERSE]
             assert [op.attrs["kind"] for op in restored_ops] == ["composite"]
@@ -1712,6 +1723,151 @@ class TestManualConstruction:
         assert restored.input_values[0].metadata.scalar == ScalarMetadata(
             const_value=0.5, parameter_name="theta"
         )
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_tuple_value_output_round_trip(self, dump, load):
+        """Structured ``TupleValue`` block outputs survive serialization."""
+        a = Value(type=UIntType(), name="a")
+        b = Value(type=UIntType(), name="b")
+        pair = TupleValue(name="pair", elements=(a, b))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[a, b],
+            output_values=[pair],
+            label_args=["a", "b"],
+            output_names=["pair"],
+        )
+
+        restored = load(dump(block))
+        assert to_dict(restored) == to_dict(block)
+        assert isinstance(restored.output_values[0], TupleValue)
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_nested_tuple_return_round_trip(self, dump, load):
+        """Nested tuple outputs and Return operands survive serialization."""
+        a = Value(type=UIntType(), name="a")
+        b = Value(type=UIntType(), name="b")
+        inner = TupleValue(name="inner", elements=(a, b))
+        outer = TupleValue(name="outer", elements=(inner, a))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[outer],
+            output_values=[outer],
+            label_args=["outer"],
+            output_names=["outer"],
+            operations=[ReturnOperation(operands=cast(list[Value], [outer]))],
+        )
+
+        restored = load(dump(block))
+
+        assert to_dict(restored) == to_dict(block)
+        restored_outer = restored.output_values[0]
+        assert isinstance(restored_outer, TupleValue)
+        assert isinstance(restored_outer.elements[0], TupleValue)
+        restored_return = restored.operations[0]
+        assert isinstance(restored_return, ReturnOperation)
+        assert isinstance(restored_return.operands[0], TupleValue)
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_dict_value_output_round_trip(self, dump, load):
+        """Structured ``DictValue`` block outputs survive serialization."""
+        key = Value(type=UIntType(), name="key")
+        value = Value(type=FloatType(), name="value")
+        mapping = DictValue(name="mapping", entries=((key, value),))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[key, value],
+            output_values=[mapping],
+            label_args=["key", "value"],
+            output_names=["mapping"],
+        )
+
+        restored = load(dump(block))
+        assert to_dict(restored) == to_dict(block)
+        assert isinstance(restored.output_values[0], DictValue)
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_tuple_value_input_round_trip(self, dump, load):
+        """Structured ``TupleValue`` block inputs survive serialization."""
+        a = Value(type=UIntType(), name="pair_0")
+        b = Value(type=UIntType(), name="pair_1")
+        pair = TupleValue(name="pair", elements=(a, b))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[pair],
+            output_values=[a],
+            label_args=["pair"],
+        )
+
+        restored = load(dump(block))
+        assert to_dict(restored) == to_dict(block)
+        assert isinstance(restored.input_values[0], TupleValue)
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_dict_value_input_round_trip(self, dump, load):
+        """Structured ``DictValue`` block inputs survive serialization."""
+        key = Value(type=UIntType(), name="key")
+        value = Value(type=FloatType(), name="value")
+        mapping = DictValue(name="mapping", entries=((key, value),))
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[mapping],
+            output_values=[value],
+            label_args=["mapping"],
+        )
+
+        restored = load(dump(block))
+        assert to_dict(restored) == to_dict(block)
+        assert isinstance(restored.input_values[0], DictValue)
+
+    @pytest.mark.parametrize(
+        "dump,load",
+        [(dump_json, load_json), (dump_msgpack, load_msgpack)],
+    )
+    def test_structural_invoke_round_trip(self, dump, load):
+        """Invoke operands and results preserve TupleValue and DictValue."""
+        key = Value(type=UIntType(), name="key")
+        value = Value(type=FloatType(), name="value")
+        pair = TupleValue(name="pair", elements=(key, value))
+        mapping = DictValue(name="mapping", entries=((key, value),))
+        invoke = InvokeOperation(operands=[pair], results=[mapping])
+        block = Block(
+            name="manual",
+            kind=BlockKind.AFFINE,
+            input_values=[pair],
+            output_values=[mapping],
+            label_args=["pair"],
+            output_names=["mapping"],
+            operations=[invoke],
+        )
+
+        restored = load(dump(block))
+
+        assert to_dict(restored) == to_dict(block)
+        restored_invoke = restored.operations[0]
+        assert isinstance(restored_invoke, InvokeOperation)
+        assert isinstance(restored_invoke.operands[0], TupleValue)
+        assert isinstance(restored_invoke.results[0], DictValue)
 
     def test_extra_x_gate_changes_bytes(self):
         """Adding a gate changes the serialized bytes (regression guard)."""

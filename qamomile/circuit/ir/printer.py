@@ -51,7 +51,13 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueLike,
+)
 
 __all__ = ["pretty_print_block", "format_value"]
 
@@ -469,12 +475,12 @@ def _format_results(results: list[Value]) -> str:
     return ", ".join(_format_value(v) for v in results)
 
 
-def _format_param(value: Value) -> str:
+def _format_param(value: ValueLike) -> str:
     t = value.type.label() if value.type is not None else "?"
     return f"{value.name or '_'}: {t}"
 
 
-def _format_outputs(outputs: list[Value]) -> str:
+def _format_outputs(outputs: list[ValueLike]) -> str:
     if not outputs:
         return ""
     if len(outputs) == 1:

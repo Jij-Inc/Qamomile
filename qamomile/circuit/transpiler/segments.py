@@ -5,10 +5,10 @@ from __future__ import annotations
 import dataclasses
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.value import Value, ValueBase
+from qamomile.circuit.ir.value import Value, ValueLike
 
 
 class SegmentKind(Enum):
@@ -158,23 +158,10 @@ class MultipleQuantumSegmentsError(Exception):
 
 @dataclasses.dataclass
 class ProgramABI:
-    """Describe the runtime-visible inputs and outputs of a program plan.
+    """Runtime-visible ABI for a segmented program."""
 
-    Args:
-        public_inputs (dict[str, Value]): User-facing input names mapped to
-            their IR values.
-        output_refs (list[str]): Output UUIDs in public return order.
-        output_values (dict[str, ValueBase]): Public output descriptors keyed
-            by UUID. These preserve array-element and slice ancestry needed to
-            recover runtime values stored under root-array physical addresses.
-        constant_outputs (dict[str, Any]): Compile-time output values keyed
-            by UUID when no execution step materializes the output.
-    """
-
-    public_inputs: dict[str, Value] = dataclasses.field(default_factory=dict)
-    output_refs: list[str] = dataclasses.field(default_factory=list)
-    output_values: dict[str, ValueBase] = dataclasses.field(default_factory=dict)
-    constant_outputs: dict[str, Any] = dataclasses.field(default_factory=dict)
+    public_inputs: dict[str, ValueLike] = dataclasses.field(default_factory=dict)
+    output_values: list[ValueLike] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass

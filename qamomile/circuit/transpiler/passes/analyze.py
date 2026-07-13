@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     HasNestedOps,
     IfOperation,
+    LoopCarriedRebind,
     WhileOperation,
     genuine_input_values,
 )
@@ -32,8 +33,10 @@ from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
     ValueBase,
+    ValueLike,
     array_static_length,
     arrays_share_physical_region,
+    collect_value_like_uuids,
     resolve_root_qubit_address,
 )
 from qamomile.circuit.transpiler.errors import (
@@ -1125,6 +1128,65 @@ def _check_loop_carried_rebinds(
         _add_uuid_with_ancestry(source, body_read_uuids)
 
     before_uuids = {r.before.uuid for r in records}
+    loop_local_uuids = {
+        result.uuid for operation in flat_body for result in operation.results
+    }
+    loop_local_uuids.update(region.block_arg.uuid for region in loop_op.region_args)
+    if isinstance(loop_op, ForOperation) and loop_op.loop_var_value is not None:
+        loop_local_uuids.add(loop_op.loop_var_value.uuid)
+    if isinstance(loop_op, ForItemsOperation):
+        if loop_op.key_var_values is not None:
+            loop_local_uuids.update(value.uuid for value in loop_op.key_var_values)
+        if loop_op.value_var_value is not None:
+            loop_local_uuids.add(loop_op.value_var_value.uuid)
+
+    def is_loop_invariant_if_overwrite(
+        record: LoopCarriedRebind,
+        result_uuid: str,
+    ) -> bool:
+        """Return whether an If merge only selects loop-invariant values.
+
+        A merge source is a read for dataflow, but selecting the pre-loop
+        initializer on one side does not make the overwrite a recurrence. The
+        exemption is safe only when the selector is produced outside the loop
+        and no body operation reads the initializer for ordinary computation.
+
+        Args:
+            record (LoopCarriedRebind): Rebind being classified.
+            result_uuid (str): Canonical post-body value UUID.
+
+        Returns:
+            bool: True when the initializer appears only as a direct source of
+                the loop-invariant If merge that produces ``result_uuid``.
+        """
+        producer = producer_by_result.get(result_uuid)
+        if not isinstance(producer, IfOperation):
+            return False
+        matching_merge = next(
+            (
+                merge
+                for merge in producer.iter_merges()
+                if merge.result.uuid == result_uuid
+            ),
+            None,
+        )
+        if matching_merge is None or record.before.uuid not in {
+            matching_merge.true_value.uuid,
+            matching_merge.false_value.uuid,
+        }:
+            return False
+        condition_references: set[str] = set()
+        _add_uuid_with_ancestry(producer.condition, condition_references)
+        if not condition_references.isdisjoint(loop_local_uuids):
+            return False
+        if record.before.uuid in condition_references:
+            return False
+        for operation in flat_body:
+            if operation is producer:
+                continue
+            if record.before.uuid in _op_referenced_uuids_with_ancestry(operation):
+                return False
+        return True
 
     def is_materializable_bit(value: Value) -> bool:
         """Return whether a Bit has a physical clbit after loop unrolling.
@@ -1192,6 +1254,12 @@ def _check_loop_carried_rebinds(
         canon_value = value_table.get(canon_uuid)
         if canon_value is None and canon_uuid == record.after.uuid:
             canon_value = record.after
+        reads_pre_loop_value = record.before.uuid in body_read_uuids
+        if reads_pre_loop_value and is_loop_invariant_if_overwrite(
+            record,
+            canon_uuid,
+        ):
+            reads_pre_loop_value = False
 
         # A store-only post-body binding that no surviving operation or output
         # can observe needs no zero-trip join. This is especially important
@@ -1208,7 +1276,7 @@ def _check_loop_carried_rebinds(
                 (BitType, UIntType, FloatType),
             )
             and record.after.uuid not in externally_live_uuids
-            and record.before.uuid not in body_read_uuids
+            and not reads_pre_loop_value
         ):
             continue
 
@@ -1231,7 +1299,7 @@ def _check_loop_carried_rebinds(
                 or isinstance(record.before.type, BitType)
                 or isinstance(canon_value.type, BitType)
             )
-            and record.before.uuid not in body_read_uuids
+            and not reads_pre_loop_value
         ):
             trip_count = _static_loop_trip_count(
                 loop_op,
@@ -1293,7 +1361,7 @@ def _check_loop_carried_rebinds(
             raise _loop_carried_rebind_error(record.var_name, loop_kind)
 
         # Direct read of the pre-loop value anywhere in the body.
-        if record.before.uuid in body_read_uuids:
+        if reads_pre_loop_value:
             raise _loop_carried_rebind_error(record.var_name, loop_kind)
 
         # Plain-Python-number initialization: the stale read is an
@@ -1317,7 +1385,7 @@ def _check_loop_carried_rebinds(
 def reject_loop_carried_classical_rebinds(
     operations: list[Operation],
     bindings: dict[str, Any] | None = None,
-    output_values: list[Value] | None = None,
+    output_values: list[ValueLike] | None = None,
 ) -> None:
     """Reject in-loop classical scalar rebinds that cannot compile correctly.
 
@@ -1367,9 +1435,12 @@ def reject_loop_carried_classical_rebinds(
             used to resolve ``IfOperation`` conditions, matching what
             ``CompileTimeIfLoweringPass`` will later resolve. Defaults to
             None (no bindings).
-        output_values (list[Value] | None): The block's output values;
+        output_values (list[ValueLike] | None): The block's output values;
             a while condition's pre-loop value escaping through them is
-            a post-loop read. Defaults to None (no outputs known).
+            a post-loop read. Structural outputs (``TupleValue`` /
+            ``DictValue``) are searched recursively so a condition
+            returned inside a tuple is still detected. Defaults to None
+            (no outputs known).
 
     Raises:
         ValidationError: If a loop body rebinds a classical scalar whose
@@ -1384,7 +1455,7 @@ def reject_loop_carried_classical_rebinds(
     )
     output_live_uuids: set[str] = set()
     for value in output_values or []:
-        _add_uuid_with_ancestry(value, output_live_uuids)
+        output_live_uuids.update(collect_value_like_uuids(value))
     loop_external_liveness, operation_external_liveness = (
         _collect_loop_external_liveness(
             pruned.operations,
@@ -3566,7 +3637,7 @@ class AnalyzePass(Pass[Block, Block]):
     def _reject_loop_carried_classical_rebinds(
         self,
         operations: list[Operation],
-        output_values: list[Value],
+        output_values: list[ValueLike],
     ) -> None:
         """Reject in-loop classical scalar rebinds (loop-carried updates).
 
@@ -3580,7 +3651,7 @@ class AnalyzePass(Pass[Block, Block]):
 
         Args:
             operations (list[Operation]): Operations to scan recursively.
-            output_values (list[Value]): Block output values, used to
+            output_values (list[ValueLike]): Block output values, used to
                 detect a while condition's pre-loop value escaping the
                 loop through the return path.
 

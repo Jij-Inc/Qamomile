@@ -878,7 +878,7 @@ class TupleValue(_MetadataValueMixin):
     """A tuple of IR values for structured data."""
 
     name: str
-    elements: tuple[Value, ...] = dataclasses.field(default_factory=tuple)
+    elements: tuple[ValueLike, ...] = dataclasses.field(default_factory=tuple)
     metadata: ValueMetadata = dataclasses.field(default_factory=ValueMetadata)
     uuid: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
     logical_id: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
@@ -899,7 +899,7 @@ class TupleValue(_MetadataValueMixin):
         )
 
     def is_constant(self) -> bool:
-        return all(isinstance(e, Value) and e.is_constant() for e in self.elements)
+        return all(element.is_constant() for element in self.elements)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -935,3 +935,50 @@ class DictValue(_MetadataValueMixin):
 
     def __len__(self) -> int:
         return len(self.entries)
+
+
+def collect_value_like_uuids(value: "ValueLike") -> set[str]:
+    """Collect UUIDs contained in a value-like IR object.
+
+    Args:
+        value (ValueLike): Value-like object to inspect.
+
+    Returns:
+        set[str]: UUIDs for ``value`` itself, recursively contained tuple/dict
+            elements, and array view/element dependencies.
+    """
+    uuids: set[str] = set()
+
+    def collect(current: ValueLike) -> None:
+        """Collect one value and recursively embedded dependencies.
+
+        Args:
+            current (ValueLike): Value-like object to visit.
+        """
+        if current.uuid in uuids:
+            return
+        uuids.add(current.uuid)
+        if isinstance(current, TupleValue):
+            for element in current.elements:
+                collect(element)
+        elif isinstance(current, DictValue):
+            for key, entry_value in current.entries:
+                collect(key)
+                collect(entry_value)
+        elif isinstance(current, ArrayValue):
+            for dimension in current.shape:
+                collect(dimension)
+            if current.slice_of is not None:
+                collect(current.slice_of)
+            if current.slice_start is not None:
+                collect(current.slice_start)
+            if current.slice_step is not None:
+                collect(current.slice_step)
+        elif isinstance(current, Value):
+            if current.parent_array is not None:
+                collect(current.parent_array)
+            for index in current.element_indices:
+                collect(index)
+
+    collect(value)
+    return uuids

@@ -18,6 +18,7 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    collect_value_like_uuids,
     resolve_root_qubit_address,
 )
 from qamomile.circuit.transpiler.executable import (
@@ -55,36 +56,22 @@ C = TypeVar("C", contravariant=True)  # Circuit type for emitter
 
 @runtime_checkable
 class CompositeGateEmitter(Protocol[C]):
-    """Protocol for backend-specific boxed-call emitters.
+    """Protocol for preserving or lowering boxed callable operations.
 
-    Each backend can implement emitters for specific boxed callable types
-    (QPE, QFT, IQFT, etc.) using native backend libraries.
-
-    The emitter pattern allows:
-    1. Backends to use native implementations when available (e.g., Qiskit QFT)
-    2. Fallback to manual decomposition when native is unavailable
-    3. Easy addition of new backends without modifying core code
-
-    Example:
-        class QiskitQFTEmitter:
-            def can_emit(self, gate_type: CompositeGateType) -> bool:
-                return gate_type in (CompositeGateType.QFT, CompositeGateType.IQFT)
-
-            def emit(self, circuit, op, qubit_indices, bindings) -> bool:
-                from qiskit.circuit.library import QFTGate
-                qft_gate = QFTGate(len(qubit_indices))
-                circuit.append(qft_gate, qubit_indices)
-                return True
+    The concrete compiler installs a semantic emitter that boxes every
+    executable callable into circuit IR with its identity and fallback body.
+    Native SDK selection happens later, through target capabilities and
+    legalization; this traversal hook must not import or select a backend.
     """
 
     def can_emit(self, gate_type: CompositeGateType) -> bool:
-        """Check if this emitter can handle the given gate type.
+        """Check whether this emitter handles the given callable kind.
 
         Args:
-            gate_type: The CompositeGateType to check
+            gate_type (CompositeGateType): Callable kind to check.
 
         Returns:
-            True if this emitter supports native emission for the gate type
+            bool: True if this emitter handles the callable kind.
         """
         ...
 
@@ -95,16 +82,17 @@ class CompositeGateEmitter(Protocol[C]):
         qubit_indices: list[int],
         bindings: dict[str, Any],
     ) -> bool:
-        """Emit the boxed callable to the circuit.
+        """Preserve or lower the boxed callable into the output builder.
 
         Args:
-            circuit: The backend-specific circuit to emit to
-            op: The invocation to emit
-            qubit_indices: Physical qubit indices for the operation
-            bindings: Parameter bindings for the operation
+            circuit (C): Output builder receiving the callable representation.
+            op (InvokeOperation): Invocation to preserve or lower.
+            qubit_indices (list[int]): Physical qubit indices for the operation.
+            bindings (dict[str, Any]): Parameter bindings for the operation.
 
         Returns:
-            True if emission succeeded, False to fall back to manual decomposition
+            bool: True if handled, or False to use the generic fallback
+            decomposition.
         """
         ...
 
@@ -178,8 +166,12 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             ExecutableProgram[T]: Executable program containing all compiled
                 segments and the public output contract.
         """
-        self._program_output_refs = frozenset(input.abi.output_refs)
-        self._program_output_values = input.abi.output_values
+        self._program_output_values = tuple(input.abi.output_values)
+        self._program_output_refs = frozenset(
+            uuid
+            for value in self._program_output_values
+            for uuid in collect_value_like_uuids(value)
+        )
         quantum_segments: list[QuantumSegment] = []
         compiled_classical: list[CompiledClassicalSegment] = []
         classical_segments: list[ClassicalSegment] = []
@@ -210,7 +202,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             compiled_quantum=compiled_quantum,
             compiled_classical=compiled_classical,
             compiled_expval=compiled_expval,
-            output_refs=input.abi.output_refs,
+            output_values=list(input.abi.output_values),
         )
 
     def _compile_quantum(
@@ -275,8 +267,8 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             EmitError: If a public Bit view carries slice bounds or a length
                 that cannot be resolved at emit time.
         """
-        output_values = getattr(self, "_program_output_values", {})
-        for descriptor in output_values.values():
+        output_values = getattr(self, "_program_output_values", ())
+        for descriptor in output_values:
             for output in self._flatten_public_output_leaves(descriptor):
                 if isinstance(output, Value) and isinstance(output.type, BitType):
                     address, resolved_as_element = resolve_condition_address_detailed(

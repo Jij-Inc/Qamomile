@@ -226,6 +226,50 @@ def mark_updated_while_condition(
         emit_pass._overwritten_runtime_condition_sources.add(key)
 
 
+def snapshot_runtime_condition_sources(
+    emit_pass: "StandardEmitPass",
+) -> frozenset[tuple[str, int]]:
+    """Snapshot path-local measurement sources overwritten by while loops.
+
+    Args:
+        emit_pass (StandardEmitPass): Emit pass carrying the current path
+            state.
+
+    Returns:
+        frozenset[tuple[str, int]]: Immutable snapshot of the current path.
+    """
+    return frozenset(emit_pass._overwritten_runtime_condition_sources)
+
+
+def restore_runtime_condition_sources(
+    emit_pass: "StandardEmitPass",
+    sources: frozenset[tuple[str, int]],
+) -> None:
+    """Restore one runtime-control-flow path's overwrite state.
+
+    Args:
+        emit_pass (StandardEmitPass): Emit pass whose state is restored.
+        sources (frozenset[tuple[str, int]]): Snapshot to install.
+    """
+    overwritten = emit_pass._overwritten_runtime_condition_sources
+    overwritten.clear()
+    overwritten.update(sources)
+
+
+def join_runtime_condition_sources(
+    emit_pass: "StandardEmitPass",
+    *paths: frozenset[tuple[str, int]],
+) -> None:
+    """Join mutually exclusive overwrite states after runtime control flow.
+
+    Args:
+        emit_pass (StandardEmitPass): Emit pass receiving the joined state.
+        *paths (frozenset[tuple[str, int]]): Completed branch states.
+    """
+    joined = frozenset(source for path in paths for source in path)
+    restore_runtime_condition_sources(emit_pass, joined)
+
+
 # ---------------------------------------------------------------------------
 # Loop-carried classical values (emit-time threading)
 # ---------------------------------------------------------------------------
@@ -1081,7 +1125,7 @@ def emit_if(
     clbit_idx = clbit_map[condition_addr]
 
     if emit_pass._emitter.supports_if_else():
-        entry_overwrites = set(emit_pass._overwritten_runtime_condition_sources)
+        entry_overwrites = snapshot_runtime_condition_sources(emit_pass)
         context = emit_pass._emitter.emit_if_start(circuit, clbit_idx, 1)
         emit_pass._emit_operations(
             circuit,
@@ -1091,9 +1135,8 @@ def emit_if(
             bindings,
             emit_qinit_reset=True,
         )
-        true_overwrites = set(emit_pass._overwritten_runtime_condition_sources)
-        emit_pass._overwritten_runtime_condition_sources.clear()
-        emit_pass._overwritten_runtime_condition_sources.update(entry_overwrites)
+        true_overwrites = snapshot_runtime_condition_sources(emit_pass)
+        restore_runtime_condition_sources(emit_pass, entry_overwrites)
         if op.false_operations:
             emit_pass._emitter.emit_else_start(circuit, context)
             emit_pass._emit_operations(
@@ -1104,13 +1147,14 @@ def emit_if(
                 bindings,
                 emit_qinit_reset=True,
             )
-            false_overwrites = set(emit_pass._overwritten_runtime_condition_sources)
+            false_overwrites = snapshot_runtime_condition_sources(emit_pass)
         else:
             false_overwrites = entry_overwrites
         emit_pass._emitter.emit_if_end(circuit, context)
-        emit_pass._overwritten_runtime_condition_sources.clear()
-        emit_pass._overwritten_runtime_condition_sources.update(
-            true_overwrites | false_overwrites
+        join_runtime_condition_sources(
+            emit_pass,
+            true_overwrites,
+            false_overwrites,
         )
 
         # Register merge output UUIDs so subsequent operations

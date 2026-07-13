@@ -2152,11 +2152,8 @@ class TestRejectedRebinds:
         ):
             _transpile(kernel, bindings={"n": 3})
 
-    def test_quantum_if_classical_merge_escaping_to_output_rejected(self):
-        """A quantum-controlled UInt merge cannot silently surface as None."""
-        from qamomile.circuit.transpiler.segments import (
-            MultipleQuantumSegmentsError,
-        )
+    def test_quantum_if_classical_merge_escaping_to_output_executes(self):
+        """A host-side SELECT resolves a quantum-controlled UInt merge."""
 
         @qmc.qkernel
         def kernel() -> tuple[qmc.Bit, qmc.UInt]:
@@ -2170,8 +2167,7 @@ class TestRejectedRebinds:
                 value = qmc.uint(1)
             return qmc.measure(q), value
 
-        with pytest.raises(MultipleQuantumSegmentsError, match="classical merges"):
-            _transpile(kernel)
+        assert _sample_single(kernel) == (1, 1)
 
     def test_quantum_loop_carry_escaping_through_output_index_rejected(self):
         """An array element's carried index cannot hide an output escape."""

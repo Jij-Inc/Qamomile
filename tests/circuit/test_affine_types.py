@@ -176,6 +176,26 @@ class TestProperReassignment:
 class TestQubitAliasDetection:
     """Test that aliasing errors are detected (same qubit in both positions)."""
 
+    def test_distinct_fresh_subkernel_qubits_do_not_alias(self):
+        """Fresh allocations returned by separate calls have distinct logical IDs."""
+
+        @qkernel
+        def make_q() -> Qubit:
+            return qm.qubit("q")
+
+        @qkernel
+        def top() -> qm.Bit:
+            a = make_q()
+            b = make_q()
+            a, b = qm.cx(a, b)
+            return qm.measure(a)
+
+        graph = top.block
+        assert any(
+            isinstance(op, GateOperation) and op.gate_type == GateOperationType.CX
+            for op in graph.operations
+        )
+
     def test_cx_same_qubit_raises_alias_error(self):
         """Using same qubit as both control and target in cx should raise error."""
 

@@ -17,7 +17,11 @@ from qamomile.circuit.ir.operation.gate import MeasureVectorOperation
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
 from qamomile.circuit.transpiler.classical_executor import ClassicalExecutor
-from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.errors import (
+    EmitError,
+    ExecutionError,
+    TargetCapabilityError,
+)
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
@@ -45,23 +49,23 @@ from qamomile.circuit.transpiler.segments import (
     ]
 )
 def backend_transpiler(request):
-    """Yield each installed backend transpiler for structural output tests."""
+    """Yield each installed target name and transpiler."""
     if request.param == "qiskit":
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
-        return QiskitTranspiler()
+        return request.param, QiskitTranspiler()
     if request.param == "quri_parts":
         pytest.importorskip("quri_parts")
         pytest.importorskip("quri_parts.qulacs")
         from qamomile.quri_parts import QuriPartsTranspiler
 
-        return QuriPartsTranspiler()
+        return request.param, QuriPartsTranspiler()
     if request.param == "cudaq":
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
 
-        return CudaqTranspiler()
+        return request.param, CudaqTranspiler()
     raise AssertionError(f"Unknown backend {request.param!r}")
 
 
@@ -156,6 +160,12 @@ def _empty_quantum_vector_merge() -> qmc.Vector[qmc.Bit]:
     else:
         values = qmc.qubit_array(0, "quantum_empty_right")
     return qmc.measure(values)
+
+
+_DYNAMIC_IF_OUTPUT_KERNELS = (
+    _branch_local_empty_measured_vectors,
+    _empty_quantum_vector_merge,
+)
 
 
 @qmc.qkernel
@@ -288,7 +298,15 @@ def _sample(kernel, *, transpiler=None, bindings=None, parameters=None):
 )
 def test_structural_bit_outputs_resolve(backend_transpiler, kernel, expected):
     """Elements, nested views, stores, and loop-final selections stay live."""
-    assert _sample(kernel, transpiler=backend_transpiler) == expected
+    target, transpiler = backend_transpiler
+    if target == "quri_parts" and kernel in _DYNAMIC_IF_OUTPUT_KERNELS:
+        with pytest.raises(
+            TargetCapabilityError,
+            match="cannot represent measurement-conditioned branching",
+        ):
+            transpiler.transpile(kernel)
+        return
+    assert _sample(kernel, transpiler=transpiler) == expected
 
 
 def test_compile_time_bound_view_is_materialized():
@@ -311,10 +329,11 @@ def test_runtime_classical_expr_executes_inside_loop_carry(
     expected,
 ):
     """Lowered arithmetic executes for both measurement-selected branches."""
+    _, transpiler = backend_transpiler
     assert (
         _sample(
             _runtime_expr_loop_carry,
-            transpiler=backend_transpiler,
+            transpiler=transpiler,
             bindings={"set_condition": set_condition},
         )
         == expected
@@ -426,8 +445,9 @@ def test_structural_output_indices_reject_non_integral_runtime_values(raw):
     """Structural output addressing fails closed on non-integral values."""
     index = Value(type=UIntType(), name="index")
     context = ExecutionContext({index.uuid: raw})
+    orchestrator = ProgramOrchestrator(ExecutableProgram())
 
-    assert ProgramOrchestrator._resolve_output_index(index, context) is None
+    assert orchestrator._resolve_context_int_value(index, context) is None
 
 
 def test_nested_container_public_output_is_reconstructed_atomically():
@@ -446,13 +466,8 @@ def test_nested_container_public_output_is_reconstructed_atomically():
     payload = TupleValue(name="payload", elements=(bit, constant))
     mapping = DictValue(name="mapping", entries=((key, payload),))
     output = TupleValue(name="output", elements=(constant, mapping))
-    plan = ProgramPlan(
-        abi=ProgramABI(
-            output_refs=[output.uuid],
-            output_values={output.uuid: output},
-        )
-    )
-    executable = ExecutableProgram(plan=plan, output_refs=[output.uuid])
+    plan = ProgramPlan(abi=ProgramABI(output_values=[output]))
+    executable = ExecutableProgram(plan=plan, output_values=[output])
     context = ExecutionContext({f"{measured.uuid}_0": 1})
 
     resolved = ProgramOrchestrator(executable)._resolve_outputs(context)
@@ -467,17 +482,11 @@ def test_nested_container_public_output_rejects_partial_materialization():
     payload = TupleValue(name="payload", elements=(constant, missing))
     mapping = DictValue(name="mapping", entries=((constant, payload),))
     output = TupleValue(name="output", elements=(constant, mapping))
-    plan = ProgramPlan(
-        abi=ProgramABI(
-            output_refs=[output.uuid],
-            output_values={output.uuid: output},
-        )
-    )
-    executable = ExecutableProgram(plan=plan, output_refs=[output.uuid])
+    plan = ProgramPlan(abi=ProgramABI(output_values=[output]))
+    executable = ExecutableProgram(plan=plan, output_values=[output])
 
-    resolved = ProgramOrchestrator(executable)._resolve_outputs(ExecutionContext())
-
-    assert resolved is None
+    with pytest.raises(ExecutionError, match="could not be resolved"):
+        ProgramOrchestrator(executable)._resolve_outputs(ExecutionContext())
 
 
 def test_segment_outputs_contain_only_definitions_live_across_boundaries():
@@ -558,7 +567,7 @@ def test_nested_container_bit_outputs_register_structural_clbit_aliases():
     key = TupleValue(name="key", elements=(first,))
     mapping = DictValue(name="mapping", entries=((key, second),))
     emit_pass = StandardEmitPass(object())
-    emit_pass._program_output_values = {mapping.uuid: mapping}
+    emit_pass._program_output_values = (mapping,)
     clbit_map = {
         QubitAddress(measured.uuid, 0): 4,
         QubitAddress(measured.uuid, 1): 7,
@@ -585,7 +594,7 @@ def test_nested_dict_bit_output_detects_overwritten_while_snapshot():
     mapping = DictValue(name="mapping", entries=((key, stale),))
     emit_pass = StandardEmitPass(object())
     emit_pass._program_output_refs = frozenset({mapping.uuid})
-    emit_pass._program_output_values = {mapping.uuid: mapping}
+    emit_pass._program_output_values = (mapping,)
     emit_pass._overwritten_runtime_condition_sources = {
         (str(QubitAddress(measured.uuid, 0)), 3)
     }
@@ -609,7 +618,7 @@ def test_nested_dict_disjoint_bit_output_survives_while_clbit_reuse():
     mapping = DictValue(name="mapping", entries=((key, sibling),))
     emit_pass = StandardEmitPass(object())
     emit_pass._program_output_refs = frozenset({mapping.uuid})
-    emit_pass._program_output_values = {mapping.uuid: mapping}
+    emit_pass._program_output_values = (mapping,)
     emit_pass._overwritten_runtime_condition_sources = {
         (str(QubitAddress(measured.uuid, 0)), 3)
     }
