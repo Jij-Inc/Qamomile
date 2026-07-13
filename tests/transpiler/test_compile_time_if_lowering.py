@@ -9,7 +9,7 @@ import numpy as np
 
 import qamomile.circuit as qm
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import Operation, SliceArrayOperation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -654,7 +654,7 @@ class TestControlledBlockIfLowering:
         loop = ForOperation(
             operands=[
                 _uint_val("start", const=0),
-                _uint_val("stop", const=1),
+                _uint_val("stop", const=2),
                 _uint_val("step", const=1),
             ],
             loop_var="i",
@@ -2075,6 +2075,65 @@ class TestCombinedArrayAndIndexSubstitution:
             f"element_indices[0] should be idx_true ({idx_true.uuid}), "
             f"got {operand.element_indices[0].uuid}"
         )
+
+
+class TestNestedSliceMetadataSubstitution:
+    """Lowered merge indices must reach nested slice-result metadata."""
+
+    def test_slice_result_and_output_drop_nested_merge_index(self):
+        """A slice bound ``bounds[phi]`` rewrites phi everywhere."""
+        selected_index = _uint_val("selected", const=0)
+        losing_index = _uint_val("losing", const=1)
+        merge_index = _uint_val("merge_index")
+        condition = _uint_val("condition", const=1)
+        if_op = IfOperation(operands=[condition])
+        if_op.add_merge(selected_index, losing_index, merge_index)
+
+        two = _uint_val("two", const=2)
+        four = _uint_val("four", const=4)
+        bounds = ArrayValue(type=UIntType(), name="bounds", shape=(two,))
+        start = Value(
+            type=UIntType(),
+            name="bounds[merge_index]",
+            parent_array=bounds,
+            element_indices=(merge_index,),
+        )
+        step = _uint_val("step", const=1)
+        root = ArrayValue(type=QubitType(), name="q", shape=(four,))
+        view = ArrayValue(
+            type=QubitType(),
+            name="view",
+            shape=(two,),
+            slice_of=root,
+            slice_start=start,
+            slice_step=step,
+        )
+        slice_op = SliceArrayOperation(
+            operands=[root, start, step],
+            results=[view],
+        )
+        block = Block(
+            name="test",
+            input_values=[root, bounds],
+            operations=[if_op, slice_op],
+            output_values=[view],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        [lowered_slice] = _find_ops(lowered.operations, SliceArrayOperation)
+        operand_start = lowered_slice.operands[1]
+        result_view = lowered_slice.results[0]
+        output_view = lowered.output_values[0]
+        assert operand_start.element_indices[0] is selected_index
+        assert isinstance(result_view, ArrayValue)
+        assert result_view.slice_start is not None
+        assert result_view.slice_start.element_indices[0] is selected_index
+        assert isinstance(output_view, ArrayValue)
+        assert output_view.slice_start is not None
+        assert output_view.slice_start.element_indices[0] is selected_index
 
 
 # ---------------------------------------------------------------------------

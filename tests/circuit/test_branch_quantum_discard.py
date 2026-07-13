@@ -51,11 +51,11 @@ from qamomile.circuit.transpiler.errors import (
     QamomileCompileError,
     QubitRebindError,
 )
-from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 from qamomile.circuit.transpiler.passes.analyze import (
     _static_loop_trip_count,
     reject_control_flow_quantum_discard,
 )
+from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 
 pytest.importorskip("qiskit")
 

@@ -19,6 +19,39 @@ def _basis_probe(theta: qm.Float) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
     return left, right, target
 
 
+@qm.qkernel
+def _allocation_helper(q: qm.Qubit) -> qm.Qubit:
+    """Allocate and measure one helper-local qubit."""
+    fresh = qm.qubit("fresh")
+    qm.measure(fresh)
+    return q
+
+
+@qm.qkernel
+def _distinct_helper_callsites() -> tuple[qm.Bit, qm.UInt]:
+    """Select two branch-local helper call sites across range iterations."""
+    q = qm.qubit("q")
+    total = qm.uint(0)
+    for index in qm.range(2):
+        if index == 0:
+            q = _allocation_helper(q)
+        else:
+            q = _allocation_helper(q)
+        total = total + 1
+    return qm.measure(q), total
+
+
+@qm.qkernel
+def _repeated_helper_callsite() -> tuple[qm.Bit, qm.UInt]:
+    """Replay one helper call site across two range iterations."""
+    q = qm.qubit("q")
+    total = qm.uint(0)
+    for _index in qm.range(2):
+        q = _allocation_helper(q)
+        total = total + 1
+    return qm.measure(q), total
+
+
 def test_clifford_t_basis_lowers_body_gates_and_reports_quality() -> None:
     """Basis lowering reports aggregate Clifford+T counts and approximation."""
     logical = _basis_probe.estimate_resources()
@@ -822,9 +855,310 @@ def test_for_items_width_reuses_wires_across_entries() -> None:
             qm.measure(fresh)
         return qm.measure(outs)
 
-    estimate = circuit.estimate_resources(inputs={"data": {1: 0.5, 2: 1.5}})
+    data = {1: 0.5, 2: 1.5}
+    estimate = circuit.estimate_resources(inputs={"data": data})
 
     assert estimate.qubits == 2
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    emitted = QiskitTranspiler().transpile(
+        circuit,
+        bindings={"data": data},
+    )
+    assert estimate.width.allocated_qubits == 2
+    assert emitted.quantum_circuit.num_qubits == estimate.qubits
     # Gates still accumulate sequentially across entries: one rx + one
     # cx per entry.
     assert estimate.gates.total >= 4
+
+
+def test_concrete_region_for_width_reuses_wires_across_iterations() -> None:
+    """A concrete carried range loop matches emitted reusable wire width."""
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Bit, qm.UInt]:
+        """Allocate one temporary qubit in each carried loop iteration."""
+        output = qm.qubit("output")
+        total = qm.uint(0)
+        for _index in qm.range(2):
+            fresh = qm.qubit("fresh")
+            qm.measure(fresh)
+            total = total + 1
+        return qm.measure(output), total
+
+    estimate = circuit.estimate_resources()
+
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    emitted = QiskitTranspiler().transpile(circuit)
+    assert estimate.qubits == 2
+    assert emitted.quantum_circuit.num_qubits == estimate.qubits
+
+
+def test_concrete_region_for_items_width_reuses_wires_across_entries() -> None:
+    """A concrete carried items loop matches emitted reusable wire width."""
+
+    @qm.qkernel
+    def circuit(
+        data: qm.Dict[qm.UInt, qm.Float],
+    ) -> tuple[qm.Bit, qm.UInt]:
+        """Allocate one temporary qubit in each carried items entry."""
+        output = qm.qubit("output")
+        total = qm.uint(0)
+        for key, _value in qm.items(data):
+            fresh = qm.qubit("fresh")
+            qm.measure(fresh)
+            total = total + key
+        return qm.measure(output), total
+
+    data = {1: 0.5, 2: 1.5}
+    estimate = circuit.estimate_resources(inputs={"data": data})
+
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    emitted = QiskitTranspiler().transpile(
+        circuit,
+        bindings={"data": data},
+    )
+    assert estimate.qubits == 2
+    assert emitted.quantum_circuit.num_qubits == estimate.qubits
+
+
+def test_concrete_loops_union_distinct_qinit_sites_by_identity() -> None:
+    """Concrete replays deduplicate one QInit site but retain distinct sites.
+
+    Each loop selects allocation site ``a`` on its first iteration/entry and
+    site ``b`` on its second. The sites are never simultaneously live, so the
+    logical peak remains one, but both are static allocations in the emitted
+    circuit. A third site ``out`` after the loop makes the identity-aware
+    allocation total three for RegionArg range, RegionArg ForItems, and
+    carry-less ForItems alike.
+    """
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    @qm.qkernel
+    def region_range() -> tuple[qm.Bit, qm.UInt]:
+        """Select two allocation sites across carried range iterations."""
+        total = qm.uint(0)
+        for index in qm.range(2):
+            if index == 0:
+                a = qm.qubit("a")
+                qm.measure(a)
+            else:
+                b = qm.qubit("b")
+                qm.measure(b)
+            total = total + 1
+        out = qm.qubit("out")
+        return qm.measure(out), total
+
+    @qm.qkernel
+    def region_items(
+        data: qm.Dict[qm.UInt, qm.Float],
+    ) -> tuple[qm.Bit, qm.UInt]:
+        """Select two allocation sites across carried dictionary entries."""
+        total = qm.uint(0)
+        for key, _value in qm.items(data):
+            if key == 0:
+                a = qm.qubit("a")
+                qm.measure(a)
+            else:
+                b = qm.qubit("b")
+                qm.measure(b)
+            total = total + 1
+        out = qm.qubit("out")
+        return qm.measure(out), total
+
+    @qm.qkernel
+    def plain_items(data: qm.Dict[qm.UInt, qm.Float]) -> qm.Bit:
+        """Select two allocation sites across carry-less dictionary entries."""
+        for key, _value in qm.items(data):
+            if key == 0:
+                a = qm.qubit("a")
+                qm.measure(a)
+            else:
+                b = qm.qubit("b")
+                qm.measure(b)
+        out = qm.qubit("out")
+        return qm.measure(out)
+
+    data = {0: 0.5, 1: 1.5}
+    cases = (
+        (region_range, {}),
+        (region_items, {"data": data}),
+        (plain_items, {"data": data}),
+    )
+    for kernel, bindings in cases:
+        estimate = kernel.estimate_resources(inputs=bindings)
+        emitted = QiskitTranspiler().transpile(
+            kernel,
+            bindings=bindings,
+        )
+
+        assert estimate.width.allocated_qubits == 3
+        assert estimate.width.peak_qubits == 1
+        assert emitted.quantum_circuit.num_qubits == (estimate.width.allocated_qubits)
+
+
+def test_nested_qinit_identity_is_namespaced_by_helper_callsite() -> None:
+    """Distinct helper calls allocate separately while one replayed call reuses."""
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    distinct = _distinct_helper_callsites.estimate_resources()
+    repeated = _repeated_helper_callsite.estimate_resources()
+    distinct_emitted = (
+        QiskitTranspiler().transpile(_distinct_helper_callsites).quantum_circuit
+    )
+    repeated_emitted = (
+        QiskitTranspiler().transpile(_repeated_helper_callsite).quantum_circuit
+    )
+
+    assert distinct.width.allocated_qubits == 3
+    assert distinct.width.peak_qubits == 2
+    assert distinct_emitted.num_qubits == distinct.width.allocated_qubits
+    assert repeated.width.allocated_qubits == 2
+    assert repeated.width.peak_qubits == 2
+    assert repeated_emitted.num_qubits == repeated.width.allocated_qubits
+
+
+def test_same_named_range_fallback_symbols_remain_independent() -> None:
+    """Separate unsupported range recurrences never collapse by source name."""
+
+    @qm.qkernel
+    def circuit(n: qm.UInt, m: qm.UInt) -> qm.Bit:
+        """Compare two nonlinear carries created under the same variable name."""
+        total = qm.float_(0.5)
+        for _index in qm.range(n):
+            total = total * total
+        left = total
+
+        total = qm.float_(0.25)
+        for _index in qm.range(m):
+            total = total * total
+        right = total
+
+        q = qm.qubit("q")
+        if left != right:
+            q = qm.x(q)
+            q = qm.h(q)
+            q = qm.z(q)
+        else:
+            q = qm.x(q)
+        return qm.measure(q)
+
+    estimate = circuit.estimate_resources()
+    final_symbols = [
+        symbol
+        for symbol in estimate.gates.total.free_symbols
+        if symbol.name == "total_after_loop"
+    ]
+
+    assert len(final_symbols) == 2
+    assert final_symbols[0] != final_symbols[1]
+    assert estimate.gates.total != 1
+
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    emitted = QiskitTranspiler().transpile(
+        circuit,
+        bindings={"n": 0, "m": 0},
+    )
+    assert emitted.quantum_circuit.count_ops()["x"] == 1
+    assert emitted.quantum_circuit.count_ops()["h"] == 1
+    assert emitted.quantum_circuit.count_ops()["z"] == 1
+
+
+def test_same_named_for_items_fallback_symbols_remain_independent() -> None:
+    """Separate unsupported items recurrences never collapse by source name."""
+
+    @qm.qkernel
+    def circuit(
+        left_data: qm.Dict[qm.UInt, qm.Float],
+        right_data: qm.Dict[qm.UInt, qm.Float],
+    ) -> qm.Qubit:
+        """Compare two nonlinear item carries with one reused variable name."""
+        total = qm.float_(0.5)
+        for _key, _value in qm.items(left_data):
+            total = total * total
+        left = total
+
+        total = qm.float_(0.25)
+        for _key, _value in qm.items(right_data):
+            total = total * total
+        right = total
+
+        q = qm.qubit("q")
+        if left != right:
+            q = qm.x(q)
+            q = qm.h(q)
+            q = qm.z(q)
+        else:
+            q = qm.x(q)
+        return q
+
+    estimate = circuit.estimate_resources()
+    final_symbols = [
+        symbol
+        for symbol in estimate.gates.total.free_symbols
+        if symbol.name == "total_after_items"
+    ]
+
+    assert len(final_symbols) == 2
+    assert final_symbols[0] != final_symbols[1]
+    assert estimate.gates.total != 1
+
+
+def test_allocation_site_identity_is_internal_to_resource_estimates() -> None:
+    """Random QInit UUIDs do not affect equality or public serialization."""
+    left = qm.ResourceEstimate(
+        width=qm.WidthResources(allocated_qubits=1, peak_qubits=1),
+        _allocation_sites={"build-random-left": sp.Integer(1)},
+    )
+    right = qm.ResourceEstimate(
+        width=qm.WidthResources(allocated_qubits=1, peak_qubits=1),
+        _allocation_sites={"build-random-right": sp.Integer(1)},
+    )
+
+    assert left == right
+    assert "_allocation_sites" not in left.to_dict()
+
+
+def test_unknown_branch_allocations_keep_conditional_width_semantics() -> None:
+    """Unknown branch sites remain anonymous and substitute exactly."""
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    left = qm.ResourceEstimate(
+        width=qm.WidthResources(allocated_qubits=1, peak_qubits=1),
+        _allocation_sites={"left": sp.Integer(1)},
+    )
+    right = qm.ResourceEstimate(
+        width=qm.WidthResources(allocated_qubits=2, peak_qubits=2),
+        _allocation_sites={"right": sp.Integer(2)},
+    )
+
+    conditional = left.conditional(right, sp.Eq(flag, 1))
+    choice = left.choice(right)
+
+    assert conditional._allocation_sites == {}
+    assert conditional.substitute(flag=1).width.allocated_qubits == 1
+    assert conditional.substitute(flag=0).width.allocated_qubits == 2
+    assert choice._allocation_sites == {}
+    assert choice.width.allocated_qubits == 2
+
+
+def test_zero_trip_repeat_disables_internal_allocation_sites() -> None:
+    """A zero-trip repeat contributes neither width nor an active QInit site."""
+    body = qm.ResourceEstimate(
+        width=qm.WidthResources(allocated_qubits=1, peak_qubits=1),
+        _allocation_sites={"body": sp.Integer(1)},
+    )
+
+    repeated = body.repeat(0)
+
+    assert repeated.width.allocated_qubits == 0
+    assert repeated.width.peak_qubits == 0
+    assert repeated._allocation_sites == {"body": sp.Integer(0)}

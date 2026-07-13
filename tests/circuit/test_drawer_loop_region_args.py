@@ -9,6 +9,7 @@ from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.drawer import _prepare_graph_for_visualization
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
 from qamomile.circuit.visualization.visual_ir import (
+    VFoldedBlock,
     VGate,
     VInlineBlock,
     VUnfoldedKind,
@@ -75,6 +76,18 @@ def _branch_angle_carry() -> qmc.Bit:
         else:
             angle = angle + 2.0
         q = qmc.rx(q, angle)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _carryless_outer_with_inner_carry() -> qmc.Vector[qmc.Bit]:
+    """Consume an inner loop result inside a carry-less outer loop body."""
+    q = qmc.qubit_array(3, "q")
+    for _outer in qmc.range(2):
+        index = qmc.uint(0)
+        for _inner in qmc.range(2):
+            index = index + 1
+        q[index] = qmc.x(q[index])
     return qmc.measure(q)
 
 
@@ -180,3 +193,34 @@ def test_analyzer_selects_nested_branch_when_advancing_region_arg() -> None:
         "$R_x$(3.00)",
         "M",
     ]
+
+
+def test_carryless_outer_loop_keeps_inner_result_for_unfolded_body() -> None:
+    """An inner carry still resolves an index inside each outer iteration."""
+    graph = _prepare_graph_for_visualization(
+        _carryless_outer_with_inner_carry._build_graph_for_visualization()
+    )
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, fold_loops=False)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    visual = analyzer.build_visual_ir(graph, qubit_map, qubit_names, num_qubits)
+    x_gates = [
+        node
+        for node in _walk(visual.children)
+        if isinstance(node, VGate) and node.label == "$X$"
+    ]
+
+    assert [gate.qubit_indices for gate in x_gates] == [[2], [2]]
+
+
+def test_carryless_outer_loop_keeps_inner_result_for_folded_body() -> None:
+    """Folded text and affected wires retain an inner carry's final index."""
+    graph = _prepare_graph_for_visualization(
+        _carryless_outer_with_inner_carry._build_graph_for_visualization()
+    )
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, fold_loops=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    visual = analyzer.build_visual_ir(graph, qubit_map, qubit_names, num_qubits)
+    folded = next(node for node in visual.children if isinstance(node, VFoldedBlock))
+
+    assert folded.body_lines == ["q[2] = x(q[2])"]
+    assert folded.affected_qubits == [2]

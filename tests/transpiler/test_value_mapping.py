@@ -32,7 +32,9 @@ from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
     CastMetadata,
+    DictValue,
     QFixedMetadata,
+    TupleValue,
     Value,
     ValueMetadata,
 )
@@ -773,6 +775,126 @@ class TestNestedArrayIndexSubstitution:
         resolved_nested = substituted.element_indices[0]
         assert resolved_nested.element_indices[0].uuid == zero.uuid
         assert resolved_nested.element_indices[1].uuid == one.uuid
+
+
+class TestRecursiveStructuralSubstitution:
+    """Test recursive substitution through shape, slice, and containers."""
+
+    @staticmethod
+    def _nested_view(index: Value) -> ArrayValue:
+        """Build a view whose shape/start/step all contain ``index``.
+
+        Args:
+            index (Value): Nested array-element index to embed.
+
+        Returns:
+            ArrayValue: View with three independently nested references.
+        """
+        two = _make_const_value("two", 2)
+        bounds = _make_array_value("bounds", shape_vals=(two,), type_cls=UIntType)
+
+        def bound_element(name: str) -> Value:
+            """Build one symbolic element of the bounds array.
+
+            Args:
+                name (str): Display name for the element.
+
+            Returns:
+                Value: UInt element indexed by ``index``.
+            """
+            return Value(
+                type=UIntType(),
+                name=name,
+                parent_array=bounds,
+                element_indices=(index,),
+            )
+
+        return ArrayValue(
+            type=QubitType(),
+            name="view",
+            shape=(bound_element("length"),),
+            slice_of=_make_array_value("root"),
+            slice_start=bound_element("start"),
+            slice_step=bound_element("step"),
+        )
+
+    def test_direct_mapped_view_recurses_into_shape_and_slice_fields(self) -> None:
+        """A selected view rewrites nested indices below every structural field."""
+        old_index = _make_value("if_result")
+        new_index = _make_const_value("selected", 1)
+        formal = _make_array_value("formal")
+        selected_view = self._nested_view(old_index)
+
+        result = ValueSubstitutor(
+            {
+                formal.uuid: selected_view,
+                old_index.uuid: new_index,
+            },
+            transitive=True,
+        ).substitute_value(formal)
+
+        assert isinstance(result, ArrayValue)
+        assert result is not selected_view
+        assert result.shape[0].element_indices[0] is new_index
+        assert result.slice_start is not None
+        assert result.slice_start.element_indices[0] is new_index
+        assert result.slice_step is not None
+        assert result.slice_step.element_indices[0] is new_index
+
+    def test_direct_container_replacements_recurse_into_nested_views(self) -> None:
+        """Tuple and Dict replacements recursively rewrite their view members."""
+        old_index = _make_value("if_result")
+        new_index = _make_const_value("selected", 1)
+        selected_view = self._nested_view(old_index)
+        tuple_formal = TupleValue(name="tuple_formal")
+        tuple_replacement = TupleValue(
+            name="tuple_replacement", elements=(selected_view,)
+        )
+        dict_formal = DictValue(name="dict_formal")
+        dict_replacement = DictValue(
+            name="dict_replacement",
+            entries=((_make_const_value("key", 0), selected_view),),
+        )
+        substitutor = ValueSubstitutor(
+            {
+                tuple_formal.uuid: tuple_replacement,
+                dict_formal.uuid: dict_replacement,
+                old_index.uuid: new_index,
+            },
+            transitive=True,
+        )
+
+        tuple_result = substitutor.substitute_value(tuple_formal)
+        dict_result = substitutor.substitute_value(dict_formal)
+
+        assert isinstance(tuple_result, TupleValue)
+        tuple_view = tuple_result.elements[0]
+        assert isinstance(tuple_view, ArrayValue)
+        assert tuple_view.slice_start is not None
+        assert tuple_view.slice_start.element_indices[0] is new_index
+        assert isinstance(dict_result, DictValue)
+        dict_view = dict_result.entries[0][1]
+        assert isinstance(dict_view, ArrayValue)
+        assert dict_view.slice_start is not None
+        assert dict_view.slice_start.element_indices[0] is new_index
+
+    def test_unchanged_replacement_and_transitive_cycle_preserve_identity(
+        self,
+    ) -> None:
+        """No-op field walks keep replacement identity and map cycles terminate."""
+        formal = _make_value("formal")
+        replacement = _make_value("replacement")
+        direct = ValueSubstitutor({formal.uuid: replacement}).substitute_value(formal)
+        assert direct is replacement
+
+        cyclic = ValueSubstitutor(
+            {
+                formal.uuid: replacement,
+                replacement.uuid: formal,
+            },
+            transitive=True,
+        ).substitute_value(formal)
+        assert cyclic is formal
 
 
 # ===========================================================================

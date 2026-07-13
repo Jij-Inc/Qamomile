@@ -467,6 +467,10 @@ class ResourceEstimate:
             Defaults to an empty dict.
         quality (EstimateQuality): Confidence classification. Defaults to
             ``EXACT`` for body-derived logical estimates.
+        _allocation_sites (dict[str, ResourceExpr]): Internal QInit-site sizes
+            keyed by stable operation-result UUID. Concrete loop evaluation
+            uses this identity map to count one static allocation site once
+            even when the body is replayed across multiple iterations.
     """
 
     width: WidthResources = dataclasses.field(default_factory=WidthResources.zero)
@@ -477,6 +481,11 @@ class ResourceEstimate:
     trace: ResourceTraceNode | None = None
     parameters: dict[str, sp.Symbol] = dataclasses.field(default_factory=dict)
     quality: EstimateQuality = EstimateQuality.EXACT
+    _allocation_sites: dict[str, ResourceExpr] = dataclasses.field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def qubits(self) -> ResourceExpr:
@@ -556,6 +565,10 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("seq", self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
+            _allocation_sites=_merge_allocation_sites(
+                self._allocation_sites,
+                other._allocation_sites,
+            ),
         )
 
     def parallel(self, other: ResourceEstimate) -> ResourceEstimate:
@@ -575,6 +588,10 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("parallel", self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
+            _allocation_sites=_merge_allocation_sites(
+                self._allocation_sites,
+                other._allocation_sites,
+            ),
         )
 
     def choice(self, other: ResourceEstimate) -> ResourceEstimate:
@@ -636,6 +653,10 @@ class ResourceEstimate:
             WidthResources.zero(),
             sp.Gt(f, _ZERO),
         )
+        active_sites = _activate_allocation_sites(
+            self._allocation_sites,
+            sp.Gt(f, _ZERO),
+        )
         return ResourceEstimate(
             width=active_width,
             gates=_scale_gates(self.gates, f),
@@ -644,6 +665,7 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=_wrap_trace(f"repeat({f})", self.trace),
             quality=self.quality,
+            _allocation_sites=active_sites,
         )
 
     def controlled(self, num_controls: ResourceExpr | int) -> ResourceEstimate:
@@ -676,6 +698,7 @@ class ResourceEstimate:
             calls=self.calls,
             assumptions=(*self.assumptions, assumption),
             trace=_wrap_trace(f"controlled({controls})", self.trace),
+            _allocation_sites=self._allocation_sites,
         )
 
     def inverse(self) -> ResourceEstimate:
@@ -692,6 +715,7 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=_wrap_trace("inverse", self.trace),
             parameters=self.parameters,
+            _allocation_sites=self._allocation_sites,
         )
 
     def sum_over(
@@ -716,17 +740,24 @@ class ResourceEstimate:
         iterations = symbolic_iterations(start, stop, step)
         if loop_symbol not in _free_symbols(self):
             return self.repeat(iterations)
+        condition = sp.Gt(iterations, _ZERO)
+        active_width = _conditional_width(
+            self.width,
+            WidthResources.zero(),
+            condition,
+        )
+        active_sites = _activate_allocation_sites(
+            self._allocation_sites,
+            condition,
+        )
         return ResourceEstimate(
-            width=_conditional_width(
-                self.width,
-                WidthResources.zero(),
-                sp.Gt(iterations, _ZERO),
-            ),
+            width=active_width,
             gates=_sum_gates(self.gates, loop_symbol, start, step, iterations),
             depth=_sum_depth(self.depth, loop_symbol, start, step, iterations),
             calls=_sum_calls(self.calls, loop_symbol, start, step, iterations),
             assumptions=self.assumptions,
             trace=_wrap_trace(f"sum({loop_symbol}={start}..{stop})", self.trace),
+            _allocation_sites=active_sites,
         )
 
     def substitute(self, **values: int | float) -> ResourceEstimate:
@@ -778,6 +809,9 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=self.trace,
             quality=self.quality,
+            _allocation_sites={
+                site: sp.simplify(size) for site, size in self._allocation_sites.items()
+            },
         )
         simplified.parameters = _collect_parameters(simplified)
         return simplified
@@ -903,6 +937,9 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=self.trace,
             quality=self.quality,
+            _allocation_sites={
+                site: fn(size) for site, size in self._allocation_sites.items()
+            },
         )
         mapped.parameters = _collect_parameters(mapped)
         return mapped
@@ -1421,6 +1458,7 @@ class ResourceInterpreter:
         return ResourceEstimate(
             width=width,
             trace=ResourceTraceNode("qinit", "primitive", summary=f"qubits={count}"),
+            _allocation_sites={operation.results[0].uuid: count},
         )
 
     def eval_measure(self, operation: Operation) -> ResourceEstimate:
@@ -1584,13 +1622,16 @@ class ResourceInterpreter:
             controls (ResourceExpr | int): Surrounding controls.
 
         Returns:
-            ResourceEstimate: Sequential composition of every iteration.
+            ResourceEstimate: Sequential work with per-iteration peak width
+                and identity-deduplicated static allocations.
         """
         carried = {
             arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
             for arg in operation.region_args
         }
         estimate = ResourceEstimate.zero()
+        iteration_width = WidthResources.zero()
+        anonymous_allocated = _ZERO
         body = _LocalBlock(operation.operations)
         for loop_value in iterations:
             loop_expr = sp.Integer(loop_value)
@@ -1602,8 +1643,19 @@ class ResourceInterpreter:
                 extra_context=context,
                 extra_loop_vars={operation.loop_var: loop_expr},
             )
-            estimate = estimate.seq(
-                self.eval_operations(operation.operations, child, controls=controls)
+            iteration_estimate = self.eval_operations(
+                operation.operations,
+                child,
+                controls=controls,
+            )
+            estimate = estimate.seq(iteration_estimate)
+            iteration_width = _max_width(iteration_width, iteration_estimate.width)
+            anonymous_allocated = sp.Max(
+                anonymous_allocated,
+                _anonymous_allocation_width(
+                    iteration_estimate.width,
+                    iteration_estimate._allocation_sites,
+                ),
             )
             carried = {
                 arg.block_arg.uuid: self._apply_condition_values(
@@ -1613,7 +1665,14 @@ class ResourceInterpreter:
             }
         for arg in operation.region_args:
             resolver.bind(arg.result, carried[arg.block_arg.uuid])
-        return estimate
+        return dataclasses.replace(
+            estimate,
+            width=_width_with_identity_aware_allocations(
+                iteration_width,
+                estimate._allocation_sites,
+                anonymous_allocated=anonymous_allocated,
+            ),
+        )
 
     def _eval_symbolic_region_for(
         self,
@@ -1685,6 +1744,7 @@ class ResourceInterpreter:
                 final_value = _typed_value_symbol(
                     arg.result,
                     f"{arg.var_name}_after_loop",
+                    fresh=True,
                 )
                 assumptions.append(
                     ResourceAssumption(
@@ -2105,6 +2165,7 @@ class ResourceInterpreter:
                 final_value = _typed_value_symbol(
                     arg.result,
                     f"{arg.var_name}_after_items",
+                    fresh=True,
                 )
                 assumptions.append(
                     ResourceAssumption(
@@ -2156,12 +2217,13 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Per-entry composition — gates, depth, and
-                calls accumulate sequentially, while width is the
-                per-entry maximum (loop iterations reuse wires, exactly
-                like ``repeat``).
+                calls accumulate sequentially; peak and ancilla width use the
+                per-entry maximum, while allocated width is the union of
+                distinct QInit identities.
         """
         estimate = ResourceEstimate.zero()
         iteration_width = WidthResources.zero()
+        anonymous_allocated = _ZERO
         for key, value in entries:
             child = resolver.child_scope(
                 inner_block=_LocalBlock(operation.operations),
@@ -2178,11 +2240,24 @@ class ResourceInterpreter:
             )
             estimate = estimate.seq(entry_estimate)
             iteration_width = _max_width(iteration_width, entry_estimate.width)
-        # ``seq`` sums allocated_qubits across entries, but the emitted
-        # circuit resets and reuses dead wires between iterations; keep
-        # the sequential gate/depth/call totals and take the per-entry
-        # width maximum instead, mirroring ``repeat``'s reuse semantics.
-        return dataclasses.replace(estimate, width=iteration_width)
+            anonymous_allocated = sp.Max(
+                anonymous_allocated,
+                _anonymous_allocation_width(
+                    entry_estimate.width,
+                    entry_estimate._allocation_sites,
+                ),
+            )
+        # ``seq`` counts every concrete visit to a QInit. Keep sequential
+        # gate/depth/call totals, take reusable width fields per-entry, and
+        # replace only allocated_qubits with the distinct static-site union.
+        return dataclasses.replace(
+            estimate,
+            width=_width_with_identity_aware_allocations(
+                iteration_width,
+                estimate._allocation_sites,
+                anonymous_allocated=anonymous_allocated,
+            ),
+        )
 
     def _eval_concrete_region_for_items(
         self,
@@ -2201,13 +2276,16 @@ class ResourceInterpreter:
             controls (ResourceExpr | int): Surrounding controls.
 
         Returns:
-            ResourceEstimate: Sequential composition of all item iterations.
+            ResourceEstimate: Sequential work with per-entry peak width and
+                identity-deduplicated static allocations.
         """
         carried = {
             arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
             for arg in operation.region_args
         }
         estimate = ResourceEstimate.zero()
+        iteration_width = WidthResources.zero()
+        anonymous_allocated = _ZERO
         for key, value in entries:
             context = {
                 **carried,
@@ -2217,8 +2295,19 @@ class ResourceInterpreter:
                 inner_block=_LocalBlock(operation.operations),
                 extra_context=context,
             )
-            estimate = estimate.seq(
-                self.eval_operations(operation.operations, child, controls=controls)
+            iteration_estimate = self.eval_operations(
+                operation.operations,
+                child,
+                controls=controls,
+            )
+            estimate = estimate.seq(iteration_estimate)
+            iteration_width = _max_width(iteration_width, iteration_estimate.width)
+            anonymous_allocated = sp.Max(
+                anonymous_allocated,
+                _anonymous_allocation_width(
+                    iteration_estimate.width,
+                    iteration_estimate._allocation_sites,
+                ),
             )
             carried = {
                 arg.block_arg.uuid: self._apply_condition_values(
@@ -2228,7 +2317,14 @@ class ResourceInterpreter:
             }
         for arg in operation.region_args:
             resolver.bind(arg.result, carried[arg.block_arg.uuid])
-        return estimate
+        return dataclasses.replace(
+            estimate,
+            width=_width_with_identity_aware_allocations(
+                iteration_width,
+                estimate._allocation_sites,
+                anonymous_allocated=anonymous_allocated,
+            ),
+        )
 
     def _for_items_entries(
         self,
@@ -2652,7 +2748,7 @@ class ResourceInterpreter:
                 child,
                 controls=total_controls,
             )
-            return body.repeat(power)
+            return _namespace_allocation_sites(body.repeat(power), operation)
 
         name = (
             operation.callable_ref.name
@@ -2704,11 +2800,12 @@ class ResourceInterpreter:
         if not isinstance(operation.implementation_block, Block):
             return ResourceEstimate.zero(operation.name).inverse()
         child = _inverse_block_child_resolver(operation, resolver)
-        return self.eval_operations(
+        estimate = self.eval_operations(
             operation.implementation_block.operations,
             child,
             controls=_expr(controls) + operation.num_control_qubits,
         ).inverse()
+        return _namespace_allocation_sites(estimate, operation)
 
     def eval_pauli_evolve(self, operation: PauliEvolveOp) -> ResourceEstimate:
         """Evaluate a Pauli evolution operation when its Hamiltonian is bound.
@@ -2886,13 +2983,16 @@ class ResourceInterpreter:
             and not body_implements_transform
         ):
             body_estimate = body_estimate.inverse()
-        return dataclasses.replace(
-            body_estimate,
-            trace=_wrap_trace(
-                operation.custom_name,
-                body_estimate.trace,
-                source_kind="body",
+        return _namespace_allocation_sites(
+            dataclasses.replace(
+                body_estimate,
+                trace=_wrap_trace(
+                    operation.custom_name,
+                    body_estimate.trace,
+                    source_kind="body",
+                ),
             ),
+            operation,
         )
 
     def _handle_unknown_invoke(
@@ -4331,6 +4431,156 @@ def _parallel_width(left: WidthResources, right: WidthResources) -> WidthResourc
         clean_ancilla_qubits=left.clean_ancilla_qubits + right.clean_ancilla_qubits,
         dirty_ancilla_qubits=left.dirty_ancilla_qubits + right.dirty_ancilla_qubits,
         peak_qubits=left.peak_qubits + right.peak_qubits,
+    )
+
+
+def _merge_allocation_sites(
+    left: Mapping[str, ResourceExpr],
+    right: Mapping[str, ResourceExpr],
+) -> dict[str, ResourceExpr]:
+    """Merge static QInit sites without counting one identity twice.
+
+    A QInit operation in a loop body is emitted once and reset before each
+    replayed iteration. The same result UUID therefore denotes one allocation
+    site even when concrete interpretation visits it repeatedly. If a symbolic
+    site size differs between visits, the largest size is retained safely.
+
+    Args:
+        left (Mapping[str, ResourceExpr]): Sites collected so far.
+        right (Mapping[str, ResourceExpr]): Sites from another estimate.
+
+    Returns:
+        dict[str, ResourceExpr]: Union keyed by QInit result UUID.
+    """
+    merged = dict(left)
+    for site, size in right.items():
+        previous = merged.get(site)
+        merged[site] = size if previous is None else sp.Max(previous, size)
+    return merged
+
+
+def _namespace_allocation_sites(
+    estimate: ResourceEstimate,
+    operation: Operation,
+) -> ResourceEstimate:
+    """Qualify nested QInit identities by their static call site.
+
+    Callable implementation Blocks are shared recipes: two distinct Invoke,
+    ControlledU, or Inverse operations may traverse the SAME inner QInit UUID.
+    The emitter clones/allocates those call sites independently, while repeated
+    evaluation of ONE operation in a concrete loop must still reuse its site.
+    Prefixing with the stable in-memory operation identity provides exactly
+    that scope for one estimation run; the map is internal and excluded from
+    equality and serialization, so process-local identities never leak.
+
+    Args:
+        estimate (ResourceEstimate): Nested body estimate to qualify.
+        operation (Operation): Static call-site operation owning the body.
+
+    Returns:
+        ResourceEstimate: Estimate with call-site-qualified allocation keys.
+    """
+    if not estimate._allocation_sites:
+        return estimate
+    namespace = f"{type(operation).__name__}:{id(operation)}"
+    return dataclasses.replace(
+        estimate,
+        _allocation_sites={
+            f"{namespace}/{site}": size
+            for site, size in estimate._allocation_sites.items()
+        },
+    )
+
+
+def _activate_allocation_sites(
+    sites: Mapping[str, ResourceExpr],
+    condition: sp.Basic,
+) -> dict[str, ResourceExpr]:
+    """Guard allocation-site sizes by whether a repeated body executes.
+
+    Args:
+        sites (Mapping[str, ResourceExpr]): Static QInit sites in the body.
+        condition (sp.Basic): Boolean expression that is true when the body
+            executes at least once.
+
+    Returns:
+        dict[str, ResourceExpr]: Site sizes that become zero on a zero-trip
+        path.
+    """
+    return {
+        site: _resource_expr(sp.Piecewise((size, condition), (_ZERO, True)))
+        for site, size in sites.items()
+    }
+
+
+def _allocation_site_total(
+    sites: Mapping[str, ResourceExpr],
+) -> ResourceExpr:
+    """Sum the sizes of distinct static QInit identities.
+
+    Args:
+        sites (Mapping[str, ResourceExpr]): QInit result UUIDs and sizes.
+
+    Returns:
+        ResourceExpr: Total qubits allocated by the distinct sites.
+    """
+    return sum(sites.values(), _ZERO)
+
+
+def _anonymous_allocation_width(
+    width: WidthResources,
+    sites: Mapping[str, ResourceExpr],
+) -> ResourceExpr:
+    """Return allocated width not attributable to explicit QInit sites.
+
+    Opaque cost models may report allocated qubits without exposing an IR
+    QInit identity. Their contribution stays reusable across iterations and
+    is tracked separately from the identity-aware site union.
+
+    Args:
+        width (WidthResources): Width summary containing total allocations.
+        sites (Mapping[str, ResourceExpr]): Explicit QInit sites represented in
+            that summary.
+
+    Returns:
+        ResourceExpr: Nonnegative anonymous allocation contribution.
+    """
+    return sp.Max(
+        _ZERO,
+        sp.simplify(width.allocated_qubits - _allocation_site_total(sites)),
+    )
+
+
+def _width_with_identity_aware_allocations(
+    width: WidthResources,
+    sites: Mapping[str, ResourceExpr],
+    *,
+    anonymous_allocated: ResourceExpr | None = None,
+) -> WidthResources:
+    """Replace only allocated width with a static-site-aware total.
+
+    Peak width and ancilla fields retain their liveness/reuse semantics. Only
+    ``allocated_qubits`` distinguishes repeated visits to one QInit identity
+    from visits to different identities.
+
+    Args:
+        width (WidthResources): Reusable width summary to preserve otherwise.
+        sites (Mapping[str, ResourceExpr]): Distinct explicit QInit sites.
+        anonymous_allocated (ResourceExpr | None): Reusable allocation amount
+            without explicit site identities. Defaults to the residual derived
+            from ``width``.
+
+    Returns:
+        WidthResources: Width with identity-aware ``allocated_qubits``.
+    """
+    residual = (
+        _anonymous_allocation_width(width, sites)
+        if anonymous_allocated is None
+        else anonymous_allocated
+    )
+    return dataclasses.replace(
+        width,
+        allocated_qubits=sp.simplify(_allocation_site_total(sites) + residual),
     )
 
 

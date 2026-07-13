@@ -669,8 +669,9 @@ def _loop_carried_rebind_error(var_name: str, loop_kind: str) -> ValidationError
             f"inside a qkernel while loop is not supported: a while "
             f"loop's trip count is a runtime measurement outcome, so no "
             f"classical value can be threaded between its iterations "
-            f"(only the `while bit:` condition variable itself may be "
-            f"re-measured in the body). Compute the reduction in "
+            f"(only a measurement-backed `while bit:` condition whose "
+            f"initial and updated values are both measurement results may "
+            f"be re-measured in the body). Compute the reduction in "
             f"ordinary Python — outside the qkernel or in an "
             f"undecorated helper function — or restructure the loop as "
             f"a compile-time-bounded qmc.range loop."
@@ -793,7 +794,8 @@ def _reject_stale_while_condition_reads(
             along the same runtime control-flow path, keyed by loop identity.
         operation_liveness (dict[int, set[str]]): Values read after each
             operation along the same path, used to inspect the suffix after
-            the body operation that produces the updated condition.
+            the body operation that produces the updated condition and after
+            each branch-local source of a runtime merge update.
 
     Raises:
         ValidationError: If the initial-condition value of a loop-carried
@@ -826,7 +828,8 @@ def _reject_stale_while_condition_reads(
             if isinstance(item, ValueBase):
                 register_value(item)
 
-    for operation in flatten_ops(pruned.operations):
+    flat_operations = flatten_ops(pruned.operations)
+    for operation in flat_operations:
         for value in (*operation.all_input_values(), *operation.results):
             register_value(value)
     # Compile-time-lowered merges are aliases rather than operations in the
@@ -837,8 +840,108 @@ def _reject_stale_while_condition_reads(
     alias_sources = {
         result.uuid: source.uuid for result, source in pruned.merge_aliases
     }
+    producer_by_result = {
+        result.uuid: operation
+        for operation in flat_operations
+        for result in operation.results
+    }
 
-    for op in flatten_ops(pruned.operations):
+    def canonical_alias_uuid(uuid: str) -> str:
+        """Follow compile-time merge aliases to their selected source.
+
+        Args:
+            uuid (str): Value UUID that may name a pruned merge result.
+
+        Returns:
+            str: Terminal source UUID, or the last non-repeating UUID for a
+                malformed alias cycle.
+        """
+        seen: set[str] = set()
+        while uuid in alias_sources and uuid not in seen:
+            seen.add(uuid)
+            uuid = alias_sources[uuid]
+        return uuid
+
+    def update_source_producers(
+        source_uuid: str,
+        body_operation_ids: set[int],
+        visiting: frozenset[str] = frozenset(),
+    ) -> list[Operation]:
+        """Find branch-local producers that write one condition source.
+
+        A runtime ``IfOperation`` merge is only the phi boundary; its
+        measurement sources update the shared condition clbit earlier, inside
+        their respective branches. Recursing through nested runtime merges and
+        measured-vector ancestry returns those path-local update points so the
+        liveness map can inspect each branch suffix independently.
+
+        Args:
+            source_uuid (str): Updated-condition or merge-source UUID.
+            body_operation_ids (set[int]): Operations contained in the while
+                body. Producers outside the body are pre-existing values, not
+                condition updates performed by this iteration.
+            visiting (frozenset[str]): Source UUIDs already followed on this
+                merge path. Defaults to an empty set.
+
+        Returns:
+            list[Operation]: Body-local leaf producers, one per reachable
+                runtime-merge source path. A path that merely passes through a
+                pre-loop value contributes no producer.
+        """
+        source_uuid = canonical_alias_uuid(source_uuid)
+        if source_uuid in visiting:
+            return []
+        next_visiting = visiting | {source_uuid}
+
+        references: list[str] = [source_uuid]
+        value = value_table.get(source_uuid)
+        seen_references = {source_uuid}
+        while value is not None:
+            parent = getattr(value, "parent_array", None)
+            if not isinstance(parent, ValueBase):
+                parent = getattr(value, "slice_of", None)
+            if not isinstance(parent, ValueBase) or parent.uuid in seen_references:
+                break
+            seen_references.add(parent.uuid)
+            references.append(parent.uuid)
+            value = parent
+
+        for reference_uuid in references:
+            producer = producer_by_result.get(reference_uuid)
+            if producer is None or id(producer) not in body_operation_ids:
+                continue
+            if isinstance(
+                producer,
+                (MeasureOperation, MeasureVectorOperation, ProjectOperation),
+            ):
+                return [producer]
+            if not isinstance(producer, IfOperation):
+                # Structural aliases such as SliceArrayOperation do not write
+                # a clbit. Continue to the measured parent instead of treating
+                # this later view construction as the update point.
+                continue
+            merge = next(
+                (
+                    candidate
+                    for candidate in producer.iter_merges()
+                    if candidate.result.uuid == reference_uuid
+                ),
+                None,
+            )
+            if merge is None:
+                return [producer]
+            return [
+                source_producer
+                for source in (merge.true_value, merge.false_value)
+                for source_producer in update_source_producers(
+                    source.uuid,
+                    body_operation_ids,
+                    next_visiting,
+                )
+            ]
+        return []
+
+    for op in flat_operations:
         if not isinstance(op, WhileOperation) or len(op.operands) < 2:
             continue
         initial = op.operands[0]
@@ -858,25 +961,12 @@ def _reject_stale_while_condition_reads(
             for value in (op.operands[1], *op.results)
             if isinstance(value, ValueBase)
         }
-        canonical_updated_uuid = op.operands[1].uuid
-        seen_aliases: set[str] = set()
-        while (
-            canonical_updated_uuid in alias_sources
-            and canonical_updated_uuid not in seen_aliases
-        ):
-            seen_aliases.add(canonical_updated_uuid)
-            canonical_updated_uuid = alias_sources[canonical_updated_uuid]
-        producer = next(
-            (
-                operation
-                for operation in flatten_ops(op.operations)
-                if any(
-                    result.uuid == canonical_updated_uuid
-                    for result in operation.results
-                )
-            ),
-            None,
-        )
+        canonical_updated_uuid = canonical_alias_uuid(op.operands[1].uuid)
+        body_operations = flatten_ops(op.operations)
+        body_operation_ids = {id(operation) for operation in body_operations}
+        producer = producer_by_result.get(canonical_updated_uuid)
+        if producer is not None and id(producer) not in body_operation_ids:
+            producer = None
 
         def reads_stale_snapshot(
             uuid: str,
@@ -923,6 +1013,16 @@ def _reject_stale_while_condition_reads(
         live_after_update = set(external_liveness.get(id(op), ()))
         if producer is not None:
             live_after_update.update(operation_liveness.get(id(producer), ()))
+        source_producers = update_source_producers(
+            canonical_updated_uuid,
+            body_operation_ids,
+        )
+        seen_producers: set[int] = set()
+        for source_producer in source_producers:
+            if id(source_producer) in seen_producers:
+                continue
+            seen_producers.add(id(source_producer))
+            live_after_update.update(operation_liveness.get(id(source_producer), ()))
         if any(reads_stale_snapshot(uuid) for uuid in live_after_update):
             name = getattr(initial, "name", "") or "<condition>"
             raise ValidationError(
@@ -1069,24 +1169,17 @@ def _check_loop_carried_rebinds(
             isinstance(loop_op, WhileOperation)
             and len(loop_op.operands) >= 2
             and record.after.uuid == loop_op.operands[1].uuid
-            and (
-                record.before_synthesized
-                or record.before.uuid == loop_op.operands[0].uuid
-            )
+            and record.before.uuid == loop_op.operands[0].uuid
         ):
-            # The frontend may synthesize ``record.before`` when the
-            # Python initial condition is a plain bool, so its UUID need
-            # not equal operands[0].  This is still the condition-update
-            # record: defer it to ValidateWhileContractPass, which emits
-            # the precise diagnostic when that initial operand is not a
-            # measurement-backed Bit. The ``before`` requirement keeps
-            # the exemption to the condition variable itself: a SECOND
-            # variable rebound to the same in-body measurement
-            # (``saved = bit``) shares the ``after`` UUID but not the
-            # ``before``, and its post-loop read would observe the
-            # final measurement instead of its pre-loop snapshot on the
-            # always-live zero-trip path — it falls through to the
-            # Bit-family rejection below.
+            # Both ends must be the exact condition pair. A SECOND variable
+            # rebound to the same in-body measurement (``saved = bit``)
+            # shares the ``after`` UUID but not the ``before``; exempting it
+            # would make its post-loop read observe the condition clbit on the
+            # always-live zero-trip path instead of its Python initializer.
+            # Plain-Python initial conditions have a separately synthesized
+            # ``before`` UUID and therefore fall through to the targeted
+            # while-rebind diagnostic above; they are not valid
+            # measurement-backed conditions.
             continue
 
         canon_uuid = canonical(record.after.uuid)
@@ -1253,11 +1346,12 @@ def reject_loop_carried_classical_rebinds(
     pass will lower them.
 
     The one exempted rebind — the while loop-carried condition pair —
-    additionally requires that the condition's pre-loop value is not
-    read after the loop (see ``_reject_stale_while_condition_reads``):
-    the allocator aliases the whole condition series onto one classical
-    bit, so a post-loop read of the initial value would observe the
-    final in-loop measurement instead of the snapshot Python promises.
+    additionally requires that the condition's pre-loop snapshot is not
+    read after its shared clbit is updated, either later in the body or
+    after the loop (see ``_reject_stale_while_condition_reads``). The
+    allocator aliases the whole condition series onto one classical bit,
+    so such a read would observe the newer in-loop measurement instead of
+    the snapshot Python promises.
 
     Exposed at module scope because it must run from two passes:
     ``PartialEvaluationPass`` calls it before constant folding (folding

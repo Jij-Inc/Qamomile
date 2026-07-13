@@ -411,14 +411,43 @@ class CircuitAnalyzer:
             key_elements = (entry_key,)
 
         key_formals = op.key_var_values or ()
-        for index, (name, element) in enumerate(zip(op.key_vars, key_elements)):
-            formal = key_formals[index] if index < len(key_formals) else None
-            if isinstance(element, Value):
-                resolved = self._environment_value(element, param_values)
+        if (
+            op.key_is_vector
+            and len(key_formals) == 1
+            and isinstance(key_formals[0], ArrayValue)
+        ):
+            formal = key_formals[0]
+            resolved_elements: list[object] = []
+            for element in key_elements:
+                resolved = (
+                    self._environment_value(element, param_values)
+                    if isinstance(element, Value)
+                    else element
+                )
+                if resolved is _UNRESOLVED_ENV_VALUE:
+                    break
+                resolved_elements.append(resolved)
             else:
-                resolved = element
-            if resolved is not _UNRESOLVED_ENV_VALUE:
-                self._bind_loop_value(param_values, name, formal, resolved)
+                resolved_key = tuple(resolved_elements)
+                if op.key_vars:
+                    self._bind_loop_value(
+                        param_values,
+                        op.key_vars[0],
+                        formal,
+                        resolved_key,
+                    )
+                param_values[f"_array_data_{formal.logical_id}"] = resolved_key
+                if formal.shape:
+                    param_values[formal.shape[0].logical_id] = len(resolved_key)
+        else:
+            for index, (name, element) in enumerate(zip(op.key_vars, key_elements)):
+                formal = key_formals[index] if index < len(key_formals) else None
+                if isinstance(element, Value):
+                    resolved = self._environment_value(element, param_values)
+                else:
+                    resolved = element
+                if resolved is not _UNRESOLVED_ENV_VALUE:
+                    self._bind_loop_value(param_values, name, formal, resolved)
 
         if isinstance(entry_value, Value):
             resolved_value = self._environment_value(entry_value, param_values)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
+import struct
 from typing import Any
 
 import pytest
 
 import qamomile.circuit as qmc
-from qamomile.circuit.frontend.handle.primitives import Bit, UInt
+from qamomile.circuit.frontend.handle.primitives import Bit, Float, UInt
 from qamomile.circuit.frontend.operation.control_flow import emit_if
 from qamomile.circuit.frontend.tracer import Tracer, trace
 from qamomile.circuit.ir.operation.control_flow import ForItemsOperation
@@ -316,6 +318,65 @@ def test_equal_plain_scalars_pass_through_unpromoted() -> None:
     assert merged == 7
     assert isinstance(merged, int)
     assert not isinstance(merged, UInt)
+
+
+def test_equal_nan_payloads_pass_through_unpromoted() -> None:
+    """Two NaNs with the same bits are one exact scalar representation."""
+    nan_bits = bytes.fromhex("7ff8000000000001")
+    true_nan = struct.unpack("!d", nan_bits)[0]
+    false_nan = struct.unpack("!d", nan_bits)[0]
+    condition = Bit(value=Value(type=BitType(), name="condition"))
+    tracer = Tracer()
+
+    with trace(tracer):
+        merged = emit_if(
+            lambda: condition,
+            lambda: true_nan,
+            lambda: false_nan,
+            [],
+        )
+
+    assert isinstance(merged, float)
+    assert math.isnan(merged)
+    assert not isinstance(merged, Float)
+    assert tracer.operations[-1].results == []
+
+
+@pytest.mark.parametrize(
+    ("true_bits", "false_bits"),
+    [
+        ("0000000000000000", "8000000000000000"),
+        ("7ff8000000000001", "7ff8000000000002"),
+    ],
+    ids=["signed-zero", "nan-payload"],
+)
+def test_distinct_float_representations_are_promoted(
+    true_bits: str,
+    false_bits: str,
+) -> None:
+    """Signed zero and distinct NaN payloads retain a runtime merge."""
+    true_value = struct.unpack("!d", bytes.fromhex(true_bits))[0]
+    false_value = struct.unpack("!d", bytes.fromhex(false_bits))[0]
+    condition = Bit(value=Value(type=BitType(), name="condition"))
+    tracer = Tracer()
+
+    with trace(tracer):
+        merged = emit_if(
+            lambda: condition,
+            lambda: true_value,
+            lambda: false_value,
+            [],
+        )
+
+    assert isinstance(merged, Float)
+    branch = tracer.operations[-1]
+    assert len(branch.results) == 1
+    assert struct.pack("!d", branch.true_yields[0].get_const()) == bytes.fromhex(
+        true_bits
+    )
+    assert struct.pack("!d", branch.false_yields[0].get_const()) == bytes.fromhex(
+        false_bits
+    )
 
 
 def test_equal_value_different_type_scalars_still_promote() -> None:

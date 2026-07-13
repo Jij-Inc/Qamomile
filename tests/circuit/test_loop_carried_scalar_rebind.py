@@ -37,7 +37,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.types.primitives import UIntType
-from qamomile.circuit.ir.value import TupleValue, Value
+from qamomile.circuit.ir.value import DictValue, TupleValue, Value
 from qamomile.circuit.transpiler.errors import (
     QamomileCompileError,
     QubitRebindError,
@@ -1012,6 +1012,91 @@ class TestSupportedLoopCarriedScalars:
 
         assert _sample_single(kernel, bindings={"bound": n}) == 1
 
+    @pytest.mark.parametrize("bound", [0, 1, 3])
+    def test_identity_plain_uint_preserves_python_index(self, bound):
+        """An unchanged plain int stays usable for list indexing after a loop."""
+
+        @qmc.qkernel
+        def kernel(bound: qmc.UInt) -> qmc.Bit:
+            angles = [0.0, 3.141592653589793]
+            n = 1
+            for _i in qmc.range(bound):
+                n = n
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angles[n])
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"bound": bound}) == 1
+
+    @pytest.mark.parametrize(
+        "items",
+        [{}, {0: 0}, {0: 0, 1: 0}],
+        ids=["empty", "one-entry", "two-entry"],
+    )
+    def test_for_items_identity_plain_uint_preserves_python_index(self, items):
+        """ForItems uses the same identity fast path for plain Python values."""
+
+        @qmc.qkernel
+        def kernel(items: qmc.Dict[qmc.UInt, qmc.UInt]) -> qmc.Bit:
+            angles = [0.0, 3.141592653589793]
+            n = 1
+            for _key, _value in qmc.items(items):
+                n = n
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angles[n])
+            return qmc.measure(q)
+
+        assert _sample_single(kernel, bindings={"items": items}) == 1
+
+    def test_nested_identity_plain_uint_preserves_python_index(self):
+        """Nested identity substitution reaches a real inner recurrence."""
+
+        @qmc.qkernel
+        def kernel() -> tuple[qmc.Bit, qmc.UInt]:
+            angles = [0.0, 3.141592653589793]
+            base = 1
+            total = qmc.uint(0)
+            for _i in qmc.range(2):
+                for _j in qmc.range(2):
+                    total = total + base
+                base = base
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angles[base])
+            return qmc.measure(q), total
+
+        assert _sample_single(kernel) == (1, 4)
+
+    def test_identity_carry_restores_python_binding_but_recurrence_does_not(self):
+        """Frontend publishes plain identities without hiding their valid IR."""
+
+        @qmc.qkernel
+        def identity() -> qmc.UInt:
+            n = 1
+            for _i in qmc.range(2):
+                n = n
+            return n
+
+        @qmc.qkernel
+        def divergent() -> qmc.UInt:
+            n = qmc.uint(1)
+            for _i in qmc.range(2):
+                n = n + 1
+            return n
+
+        identity_block = identity.build()
+        [identity_loop] = _find_loops(identity_block.operations)
+        assert len(identity_loop.region_args) == 1
+        assert identity_loop.region_args[0].yielded.uuid == (
+            identity_loop.region_args[0].block_arg.uuid
+        )
+
+        divergent_block = divergent.build()
+        [divergent_loop] = _find_loops(divergent_block.operations)
+        assert len(divergent_loop.region_args) == 1
+        assert divergent_block.output_values[0].uuid == (
+            divergent_loop.region_args[0].result.uuid
+        )
+
     def test_emit_zero_trip_carried_loop_passthrough(self):
         """A carried loop whose bound resolves to zero AT EMIT passes through.
 
@@ -1195,6 +1280,111 @@ class TestRejectedRebinds:
                 run = qmc.measure(qmc.qubit("stop"))
                 if old_not:
                     out = qmc.x(out)
+            return qmc.measure(out)
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel)
+
+    def test_while_condition_snapshot_after_runtime_if_source_rejected(self):
+        """A branch-local remeasurement invalidates later nested snapshot reads."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            old = run
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            out = qmc.qubit("out")
+            while run:
+                if selector:
+                    run = qmc.measure(qmc.qubit("true_stop"))
+                    if old:
+                        out = qmc.x(out)
+                else:
+                    run = qmc.measure(qmc.qubit("false_stop"))
+            return qmc.measure(out)
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel)
+
+    def test_while_condition_snapshot_before_runtime_if_source_allowed(self):
+        """A branch snapshot read before its own remeasurement remains valid."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            old = run
+            selector = qmc.measure(qmc.qubit("selector"))
+            out = qmc.qubit("out")
+            while run:
+                if selector:
+                    run = qmc.measure(qmc.qubit("true_stop"))
+                else:
+                    if old:
+                        out = qmc.x(out)
+                    run = qmc.measure(qmc.qubit("false_stop"))
+            return qmc.measure(out)
+
+        assert _sample_single(kernel) == 1
+
+    def test_while_condition_snapshot_after_nested_merge_source_rejected(self):
+        """Nested runtime merges expose every branch-local update producer."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            old = run
+            outer_q = qmc.qubit("outer")
+            outer_q = qmc.x(outer_q)
+            outer = qmc.measure(outer_q)
+            inner_q = qmc.qubit("inner")
+            inner_q = qmc.x(inner_q)
+            inner = qmc.measure(inner_q)
+            out = qmc.qubit("out")
+            while run:
+                if outer:
+                    if inner:
+                        run = qmc.measure(qmc.qubit("inner_true_stop"))
+                        if old:
+                            out = qmc.x(out)
+                    else:
+                        run = qmc.measure(qmc.qubit("inner_false_stop"))
+                else:
+                    run = qmc.measure(qmc.qubit("outer_false_stop"))
+            return qmc.measure(out)
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel)
+
+    def test_while_condition_snapshot_between_measure_and_slice_rejected(self):
+        """A later slice producer cannot hide the earlier clbit measurement."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            old = run
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            out = qmc.qubit("out")
+            while run:
+                if selector:
+                    measured = qmc.measure(qmc.qubit_array(1, "true_stop"))
+                    if old:
+                        out = qmc.x(out)
+                    view = measured[:]
+                    run = view[0]
+                else:
+                    run = qmc.measure(qmc.qubit("false_stop"))
             return qmc.measure(out)
 
         with pytest.raises(ValidationError, match=LOOP_CARRIED):
@@ -1427,6 +1617,64 @@ class TestRejectedRebinds:
                 bindings={"left": {0: 1}, "right": {0: 2}},
                 parameters=["n"],
             )
+
+    def test_identity_scalar_with_dict_rebind_builds_then_rejects(self):
+        """Identity publication preserves unrelated container validation."""
+
+        @qmc.qkernel
+        def kernel(
+            bound: qmc.UInt,
+            left: qmc.Dict[qmc.UInt, qmc.UInt],
+            right: qmc.Dict[qmc.UInt, qmc.UInt],
+        ) -> qmc.UInt:
+            index = 1
+            selected = left
+            for _i in qmc.range(bound):
+                index = index
+                selected = right
+            return selected[index]
+
+        block = kernel.build()
+        [loop] = _find_loops(block.operations)
+        assert len(loop.region_args) == 1
+        assert len(loop.loop_carried_rebinds) == 1
+        record = loop.loop_carried_rebinds[0]
+        assert isinstance(record.before, DictValue)
+        assert isinstance(record.after, DictValue)
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(
+                kernel,
+                bindings={"left": {1: 1}, "right": {1: 2}},
+                parameters=["bound"],
+            )
+
+    def test_identity_scalar_used_by_residual_rebind_keeps_region_arg(self):
+        """A residual endpoint keeps the identity RegionArg that defines it."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            selector = qmc.measure(qmc.qubit("selector"))
+            base = 1
+            flag = qmc.bit(False)
+            for _i in qmc.range(2):
+                if selector:
+                    flag = base
+                else:
+                    flag = base
+                base = base
+            return flag
+
+        block = kernel.build()
+        [loop] = _find_loops(block.operations)
+        assert len(loop.region_args) == 1
+        assert len(loop.loop_carried_rebinds) == 1
+        assert loop.loop_carried_rebinds[0].after.uuid == (
+            loop.region_args[0].block_arg.uuid
+        )
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel)
 
     def test_tuple_rebind_record_is_captured_and_rejected(self):
         """Tuple handles participate in residual loop-rebind validation."""
@@ -2022,6 +2270,30 @@ class TestRejectedRebinds:
             while bit:
                 q2 = qmc.qubit("f")
                 bit = qmc.measure(q2)
+                saved = bit
+            return saved
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"dummy": 0})
+
+    def test_while_plain_snapshot_aliasing_condition_rejected(self):
+        """A plain-bool snapshot cannot alias the updated condition clbit.
+
+        The initial condition measures zero, so the while body never runs and
+        Python returns the ``True`` initializer. If ``before_synthesized`` is
+        mistaken for proof that this is the condition variable itself, emit
+        aliases ``saved`` to the measured-zero condition clbit and silently
+        returns false instead.
+        """
+
+        @qmc.qkernel
+        def kernel(dummy: qmc.UInt) -> qmc.Bit:
+            condition_q = qmc.qubit("condition")
+            bit = qmc.measure(condition_q)
+            saved = True
+            while bit:
+                update_q = qmc.qubit("update")
+                bit = qmc.measure(update_q)
                 saved = bit
             return saved
 

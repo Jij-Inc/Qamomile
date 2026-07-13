@@ -20,10 +20,23 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
+    RuntimeClassicalExpr,
+)
+from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
+from qamomile.circuit.ir.operation.classical_ops import DictGetItemOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     HasNestedOps,
+    IfOperation,
+    WhileOperation,
 )
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.value import Value
@@ -92,16 +105,16 @@ class LoopAnalyzer:
         operations: list[Operation],
         loop_var_uuid: str | None,
     ) -> bool:
-        """Return whether any loop-body input structurally depends on the index.
+        """Return whether a loop body needs a concrete Python index.
 
-        The generic ``Operation.all_input_values()`` protocol is the source of
-        truth so subclass-specific fields such as operation-owned controlled
-        body parameters, ``SymbolicControlledU`` powers, control counts, and
-        control indices cannot be omitted. Each value is then walked recursively
-        through array-element indices, slice bounds, slice parents, shapes,
-        tuples, and dictionaries. This covers operations such as
-        ``MeasureOperation`` without maintaining a fragile operation-type
-        whitelist.
+        Preserve native backend-loop parameters for ordinary gate angles and
+        direct boxed-call parameters, while forcing unrolling for structural
+        decisions: classical expression evaluation, runtime conditions,
+        dictionary lookup, operation-owned controlled/inverse bodies, and any
+        array/slice/container address derived from the induction value. The
+        generic ``all_input_values`` scan is retained for structural ancestry so
+        subclass-specific fields such as symbolic control indices cannot be
+        omitted.
 
         Args:
             operations (list[Operation]): Loop-body operations to scan.
@@ -112,10 +125,7 @@ class LoopAnalyzer:
             bool: True if any operation input depends on the loop variable.
         """
         for op in operations:
-            if any(
-                self._value_depends_on_loop_var(value, loop_var_uuid)
-                for value in op.all_input_values()
-            ):
+            if self._operation_requires_concrete_loop_var(op, loop_var_uuid):
                 return True
             if isinstance(op, HasNestedOps) and any(
                 self._has_loop_var_dependency(op_list, loop_var_uuid)
@@ -124,11 +134,81 @@ class LoopAnalyzer:
                 return True
         return False
 
+    def _operation_requires_concrete_loop_var(
+        self,
+        op: Operation,
+        loop_var_uuid: str | None,
+    ) -> bool:
+        """Return whether one operation cannot consume a backend loop value.
+
+        Args:
+            op (Operation): Loop-body operation to inspect.
+            loop_var_uuid (str | None): UUID of the enclosing loop variable.
+
+        Returns:
+            bool: True when ``op`` needs the induction value as a concrete
+                Python scalar during emission.
+        """
+        requires_direct = False
+        if isinstance(op, (BinOp, CompOp, CondOp, NotOp, RuntimeClassicalExpr)):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.all_input_values()
+            )
+        elif isinstance(op, IfOperation):
+            requires_direct = self._value_depends_on_loop_var(
+                op.condition, loop_var_uuid
+            )
+        elif isinstance(op, WhileOperation):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.operands
+            )
+        elif isinstance(op, DictGetItemOperation):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.operands[1:]
+            )
+        elif isinstance(op, ControlledUOperation):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.all_input_values()
+            )
+        elif isinstance(op, InverseBlockOperation):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.parameters
+            )
+        elif (
+            isinstance(op, InvokeOperation) and op.transform is CallTransform.CONTROLLED
+        ):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.parameters
+            )
+        if requires_direct:
+            return True
+
+        # Ordinary gate operands and direct boxed-call parameters may consume a
+        # backend-native loop parameter directly. Only structural descendants
+        # (array indices, slice bounds, shapes, tuple/dict members) force a
+        # concrete Python iteration value for these operations.
+        return any(
+            self._value_depends_on_loop_var(
+                value,
+                loop_var_uuid,
+                include_direct=False,
+            )
+            for value in op.all_input_values()
+        )
+
     def _value_depends_on_loop_var(
         self,
         value: object,
         loop_var_uuid: str | None,
         visiting: frozenset[int] = frozenset(),
+        *,
+        include_direct: bool = True,
     ) -> bool:
         """Return whether an IR value structurally reads the loop variable.
 
@@ -137,6 +217,10 @@ class LoopAnalyzer:
             loop_var_uuid (str | None): UUID of the enclosing loop variable.
             visiting (frozenset[int]): Object identities already visited on
                 the current recursive path. Defaults to an empty set.
+            include_direct (bool): Whether ``value`` itself matching the loop
+                variable counts. Defaults to True; callers pass False when a
+                backend may consume a direct loop parameter but not a value
+                nested inside an address/container structure.
 
         Returns:
             bool: True if ``value`` depends on the loop variable.
@@ -156,7 +240,11 @@ class LoopAnalyzer:
             return False
         next_visiting = visiting | {object_id}
 
-        if isinstance(value, Value) and _is_loop_var(value, loop_var_uuid):
+        if (
+            include_direct
+            and isinstance(value, Value)
+            and _is_loop_var(value, loop_var_uuid)
+        ):
             return True
 
         children: list[object] = []

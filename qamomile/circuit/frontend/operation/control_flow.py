@@ -558,10 +558,11 @@ def _same_plain_scalar(true_val: typing.Any, false_val: typing.Any) -> bool:
 
     Returns:
         bool: True when both values are plain scalars of the exact same
-            type comparing equal. Floats compare bit-exactly (matching
-            ``_same_exact_typed_constant`` on the analyze side): a NaN
-            float and a ``0.0`` / ``-0.0`` pair both still promote, so
-            no sign bit or payload is frozen to one branch's value.
+            type and representation. Floats compare bit-exactly (matching
+            ``_same_exact_typed_constant`` on the lowering side): NaNs with
+            the same payload pass through, while distinct NaN payloads and a
+            ``0.0`` / ``-0.0`` pair still promote so no payload or sign bit is
+            frozen to one branch's value.
     """
     if isinstance(true_val, (Handle, Value)) or isinstance(false_val, (Handle, Value)):
         return False
@@ -685,6 +686,9 @@ class _PendingRegionArg:
         entry_handle (Handle): The frontend handle wrapping
             ``block_arg`` that the AST-injected entry assignment bound
             into the loop body's frame.
+        original_binding (typing.Any): Exact pre-loop Python binding. Identity
+            carries restore this object so plain scalars stay available to
+            ordinary Python operations after the traced loop.
         yielded (Value | None): The body's final IR value for the
             variable, set by ``record_loop_rebinds``. ``None`` means the
             body produced no representable update (identity carry).
@@ -699,6 +703,7 @@ class _PendingRegionArg:
     init: Value
     block_arg: Value
     entry_handle: Handle
+    original_binding: typing.Any
     yielded: Value | None = None
     publish_result: bool = True
 
@@ -792,6 +797,7 @@ def loop_region_enter(
         init=init_value,
         block_arg=block_arg,
         entry_handle=entry_handle,
+        original_binding=resolved,
     )
     return entry_handle
 
@@ -826,11 +832,12 @@ def _close_region_entries(
     """Convert pending region entries into IR ``RegionArg`` records.
 
     Called by the ``for`` / ``for-items`` loop builders after the body
-    trace completes. For each pending entry, synthesizes the loop-result
-    ``Value``, builds the ``RegionArg``, and publishes the post-loop
-    result handle on ``parent_tracer.loop_region_results`` (replacing
-    any leftovers from a previously closed loop) for the AST-injected
-    ``loop_region_result`` assignments to consume.
+    trace completes. For every pending entry, synthesizes the loop-result
+    ``Value`` and builds the ``RegionArg``. Genuine recurrences publish that
+    result handle after the loop. Exact identity carries instead publish the
+    original Python binding so plain scalars stay usable by ordinary Python
+    code; their well-formed RegionArgs remain in the IR until compile-time
+    lowering removes them through the normal identity-carry path.
 
     Args:
         body_tracer (Tracer): The tracer that captured the loop body
@@ -860,11 +867,36 @@ def _close_region_entries(
         )
         results.append(result)
         if entry.publish_result:
-            result_handles[entry.var_name] = _region_scalar_handle(
-                result, entry.entry_handle
-            )
+            if _is_identity_region_entry(entry):
+                result_handles[entry.var_name] = entry.original_binding
+            else:
+                result_handles[entry.var_name] = _region_scalar_handle(
+                    result, entry.entry_handle
+                )
     parent_tracer.loop_region_results = result_handles
     return tuple(region_args), results
+
+
+def _is_identity_region_entry(entry: _PendingRegionArg) -> bool:
+    """Return whether a pending carry preserves its exact initializer.
+
+    Args:
+        entry (_PendingRegionArg): Pending frontend region argument.
+
+    Returns:
+        bool: True when the body yields its own block argument, or an exact
+            typed constant equal to the initializer.
+    """
+    if entry.yielded is None or entry.yielded.uuid in {
+        entry.block_arg.uuid,
+        entry.init.uuid,
+    }:
+        return True
+    if entry.init.type != entry.yielded.type:
+        return False
+    if not entry.init.is_constant() or not entry.yielded.is_constant():
+        return False
+    return _same_plain_scalar(entry.init.get_const(), entry.yielded.get_const())
 
 
 def loop_rebind_snapshot(
