@@ -26,7 +26,7 @@ from qamomile.circuit.ir.operation import (
     ControlledUOperation,
     ForItemsOperation,
     GateOperation,
-    GlobalPhaseBlockOperation,
+    GlobalPhaseOperation,
     InverseBlockOperation,
     InvokeOperation,
     MeasureOperation,
@@ -244,7 +244,14 @@ class _BlockPrinter:
 
 
 def _format_flat_op(op: Operation) -> str:
-    """Format a non-control-flow operation as a single line."""
+    """Format a non-control-flow operation as a single line.
+
+    Args:
+        op (Operation): Operation to render.
+
+    Returns:
+        str: Single-line textual representation of the operation.
+    """
     if isinstance(op, GateOperation):
         return _format_gate(op)
     if isinstance(op, ControlledUOperation):
@@ -253,8 +260,8 @@ def _format_flat_op(op: Operation) -> str:
         return _format_invoke(op)
     if isinstance(op, InverseBlockOperation):
         return _format_inverse_block(op)
-    if isinstance(op, GlobalPhaseBlockOperation):
-        return _format_global_phase_block(op)
+    if isinstance(op, GlobalPhaseOperation):
+        return _format_global_phase(op)
     if isinstance(op, MeasureOperation):
         return _format_measure(op, "measure")
     if isinstance(op, ProjectOperation):
@@ -364,18 +371,16 @@ def _format_inverse_block(op: InverseBlockOperation) -> str:
     return f"{_format_results(op.results)} = inverse {op.name}({args})"
 
 
-def _format_global_phase_block(op: GlobalPhaseBlockOperation) -> str:
-    """Format a global-phase block as ``res = global_phase[θ] name(args)``.
+def _format_global_phase(op: GlobalPhaseOperation) -> str:
+    """Format a zero-qubit global-phase operation.
 
     Args:
-        op (GlobalPhaseBlockOperation): Operation to format.
+        op (GlobalPhaseOperation): Operation to format.
 
     Returns:
-        str: Single-line textual representation including the phase Value.
+        str: ``global_phase(<phase>)`` textual representation.
     """
-    args = ", ".join(_format_value(v) for v in op.operands)
-    phase = _format_value(op.phase) if op.phase is not None else "0"
-    return f"{_format_results(op.results)} = global_phase[{phase}] {op.name}({args})"
+    return f"global_phase({_format_value(op.phase)})"
 
 
 def _format_measure(op: Operation, mnemonic: str) -> str:

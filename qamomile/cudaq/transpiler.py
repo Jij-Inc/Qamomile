@@ -20,6 +20,9 @@ from typing import TYPE_CHECKING, Any, Sequence
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
     RuntimeClassicalExpr,
 )
 from qamomile.circuit.ir.operation.callable import (
@@ -42,7 +45,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
-from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
@@ -64,16 +67,23 @@ from qamomile.circuit.transpiler.passes.emit_support import (
 )
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
+    evaluate_classical_predicate,
+)
+from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+    _bind_loop_var,
+    resolve_loop_bounds,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _bind_block_inputs,
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
-    _prepare_nested_block_for_emit,
     _quantum_input_operands,
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
     reject_duplicate_physical_indices,
+)
+from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
+    emit_controlled_global_phase_operation,
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
@@ -776,6 +786,7 @@ def _resolve_real_constant(hamiltonian: Any) -> float:
 def _validate_controlled_helper_unitary_ops(
     operations: Sequence[Operation],
     bindings: dict[str, Any],
+    emit_pass: Any,
 ) -> None:
     """Validate that a CUDA-Q controlled helper is unitary-only.
 
@@ -784,6 +795,7 @@ def _validate_controlled_helper_unitary_ops(
             or in a nested control-flow body.
         bindings (dict[str, Any]): Emit-time bindings used to decide
             whether ``if`` conditions are compile-time constants.
+        emit_pass (Any): CUDA-Q emit pass used to resolve classical values.
 
     Raises:
         EmitError: If the controlled target contains measurement,
@@ -804,6 +816,38 @@ def _validate_controlled_helper_unitary_ops(
                 f"found {type(op).__name__}.",
                 operation="ControlledUOperation",
             )
+        if isinstance(op, BinOp):
+            # Fold concretely only: this is a validation-only walk, so an
+            # unresolved parameter-keyed operand must NOT register a backend
+            # Parameter — that would leak body-internal names (e.g. a nested
+            # kernel's ``offset``) into the program ABI as spurious runtime
+            # parameters that execution can never bind.
+            evaluate_binop(emit_pass, op, bindings, create_parameters=False)
+            continue
+        if isinstance(op, (CompOp, CondOp, NotOp)):
+            evaluate_classical_predicate(emit_pass, op, bindings)
+            continue
+        if isinstance(op, ForOperation):
+            start, stop, step = resolve_loop_bounds(
+                emit_pass._resolver,
+                op,
+                bindings,
+            )
+            if start is None or stop is None or step is None:
+                raise EmitError(
+                    "CUDA-Q cudaq.control helper kernels require compile-time "
+                    "resolvable for-loop bounds.",
+                    operation="ControlledUOperation",
+                )
+            for i in range(start, stop, step):
+                loop_bindings = bindings.copy()
+                _bind_loop_var(loop_bindings, op, i)
+                _validate_controlled_helper_unitary_ops(
+                    op.operations,
+                    loop_bindings,
+                    emit_pass,
+                )
+            continue
         if isinstance(op, WhileOperation):
             raise EmitError(
                 "CUDA-Q cudaq.control helper kernels must be unitary-only; "
@@ -822,22 +866,27 @@ def _validate_controlled_helper_unitary_ops(
             selected_ops = (
                 op.true_operations if resolved_condition else op.false_operations
             )
-            _validate_controlled_helper_unitary_ops(selected_ops, bindings)
+            _validate_controlled_helper_unitary_ops(selected_ops, bindings, emit_pass)
             continue
         if isinstance(op, ControlledUOperation) and op.block is not None:
-            _validate_controlled_helper_unitary_ops(op.block.operations, bindings)
+            _validate_controlled_helper_unitary_ops(
+                op.block.operations, bindings, emit_pass
+            )
         if isinstance(op, InvokeOperation):
             body = op.effective_body()
             if body is not None:
-                _validate_controlled_helper_unitary_ops(body.operations, bindings)
+                _validate_controlled_helper_unitary_ops(
+                    body.operations, bindings, emit_pass
+                )
         if isinstance(op, HasNestedOps):
             for nested in op.nested_op_lists():
-                _validate_controlled_helper_unitary_ops(nested, bindings)
+                _validate_controlled_helper_unitary_ops(nested, bindings, emit_pass)
 
 
 def _validate_adjoint_helper_ops(
     operations: Sequence[Operation],
     bindings: dict[str, Any],
+    emit_pass: Any,
 ) -> None:
     """Validate that a CUDA-Q adjoint helper can be emitted safely.
 
@@ -846,13 +895,14 @@ def _validate_adjoint_helper_ops(
             or in a nested control-flow body.
         bindings (dict[str, Any]): Emit-time bindings used to decide
             whether ``if`` conditions are compile-time constants.
+        emit_pass (Any): CUDA-Q emit pass used for classical folding.
 
     Raises:
         EmitError: If the adjoint target contains non-unitary operations or
             nested controlled-kernel synthesis that CUDA-Q 0.14.x aborts on
             when wrapped in ``cudaq.adjoint``.
     """
-    _validate_controlled_helper_unitary_ops(operations, bindings)
+    _validate_controlled_helper_unitary_ops(operations, bindings, emit_pass)
     for op in operations:
         if isinstance(op, ControlledUOperation):
             raise EmitError(
@@ -871,7 +921,7 @@ def _validate_adjoint_helper_ops(
         if isinstance(op, InvokeOperation):
             body = op.effective_body()
             if body is not None:
-                _validate_adjoint_helper_ops(body.operations, bindings)
+                _validate_adjoint_helper_ops(body.operations, bindings, emit_pass)
             continue
         if isinstance(op, IfOperation):
             resolved_condition = resolve_if_condition(op.condition, bindings)
@@ -880,11 +930,11 @@ def _validate_adjoint_helper_ops(
             selected_ops = (
                 op.true_operations if resolved_condition else op.false_operations
             )
-            _validate_adjoint_helper_ops(selected_ops, bindings)
+            _validate_adjoint_helper_ops(selected_ops, bindings, emit_pass)
             continue
         if isinstance(op, HasNestedOps):
             for nested in op.nested_op_lists():
-                _validate_adjoint_helper_ops(nested, bindings)
+                _validate_adjoint_helper_ops(nested, bindings, emit_pass)
 
 
 def _build_helper_qubit_map(
@@ -1449,7 +1499,10 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 operation="InverseBlockOperation",
             )
 
-        _validate_adjoint_helper_ops(block_value.operations, bindings)
+        # Validate on a copy: the validation walk folds classical ops into its
+        # bindings (UUID-keyed scratch values) and must leave the real emission
+        # bindings untouched.
+        _validate_adjoint_helper_ops(block_value.operations, dict(bindings), self)
 
         local_bindings = _bind_block_inputs(
             self,
@@ -1554,7 +1607,11 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             "controlled gate (CUDA-Q fallback)", control_indices + target_indices
         )
 
-        _validate_controlled_helper_unitary_ops(block_value.operations, bindings)
+        # Validate on a copy — see the matching note at the adjoint-helper
+        # validation entry.
+        _validate_controlled_helper_unitary_ops(
+            block_value.operations, dict(bindings), self
+        )
 
         helper_targets = list(range(len(target_indices)))
         helper_qubit_map = _build_helper_qubit_map(
@@ -1866,6 +1923,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
             if isinstance(op, BinOp):
                 evaluate_binop(self, op, bindings)
                 continue
+            if isinstance(op, (CompOp, CondOp, NotOp)):
+                evaluate_classical_predicate(self, op, bindings)
+                continue
             if isinstance(op, GateOperation):
                 for operand in op.qubit_operands:
                     _seed_vector_element_uuid(
@@ -1912,17 +1972,9 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                     bindings,
                 )
                 continue
-            if isinstance(op, GlobalPhaseBlockOperation):
-                self._emit_cudaq_controlled_global_phase(
-                    circuit,
-                    op,
-                    num_controls,
-                    control_indices,
-                    target_indices,
-                    qubit_map,
-                    vector_slots,
-                    emitter,
-                    bindings,
+            if isinstance(op, GlobalPhaseOperation):
+                emit_controlled_global_phase_operation(
+                    self, circuit, op, control_indices, bindings
                 )
                 continue
             if isinstance(op, PauliEvolveOp):
@@ -1939,16 +1991,8 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 )
                 continue
             if isinstance(op, ForOperation):
-                from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-                    resolve_loop_bounds,
-                )
-
                 start, stop, step = resolve_loop_bounds(self._resolver, op, bindings)
                 if start is not None and stop is not None and step is not None:
-                    from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-                        _bind_loop_var,
-                    )
-
                     for i in range(start, stop, step):
                         loop_bindings = bindings.copy()
                         _bind_loop_var(loop_bindings, op, i)
@@ -1969,6 +2013,35 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                         "controlled block body.",
                         operation="ControlledUOperation",
                     )
+                continue
+            if isinstance(op, IfOperation):
+                resolved_condition = resolve_if_condition(op.condition, bindings)
+                if resolved_condition is None:
+                    raise EmitError(
+                        "CUDA-Q controlled fallback cannot resolve an if "
+                        "condition at compile time.",
+                        operation="ControlledUOperation",
+                    )
+                selected_ops = (
+                    op.true_operations if resolved_condition else op.false_operations
+                )
+                self._emit_cudaq_controlled_ops(
+                    circuit,
+                    selected_ops,
+                    num_controls,
+                    control_indices,
+                    target_indices,
+                    qubit_map,
+                    vector_slots,
+                    emitter,
+                    bindings,
+                )
+                self._remap_cudaq_static_merge_outputs(
+                    op,
+                    resolved_condition,
+                    qubit_map,
+                    vector_slots,
+                )
                 continue
             raise EmitError(
                 f"Unsupported operation {type(op).__name__} in "
@@ -2004,6 +2077,44 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
                 f"Missing qubit mapping for operand {operand.uuid} in controlled helper."
             )
             qubit_map[result.uuid] = qubit_map[operand.uuid]
+
+    def _remap_cudaq_static_merge_outputs(
+        self,
+        op: IfOperation,
+        condition_value: bool,
+        qubit_map: CudaqControlledQubitMap,
+        vector_slots: dict[str, list[int]],
+    ) -> None:
+        """Alias compile-time if-merge outputs to the selected branch values.
+
+        Args:
+            op (IfOperation): Compile-time-resolved if operation.
+            condition_value (bool): Selected branch condition.
+            qubit_map (CudaqControlledQubitMap): Scalar/address qubit map to
+                update.
+            vector_slots (dict[str, list[int]]): Vector slot map to update.
+        """
+        for merge in op.iter_merges():
+            result = merge.result
+            selected = merge.select(condition_value)
+            if isinstance(result, ArrayValue) and isinstance(selected, ArrayValue):
+                indices = vector_slots.get(selected.uuid)
+                if indices is None:
+                    continue
+                vector_slots[result.uuid] = list(indices)
+                for i, phys in enumerate(indices):
+                    qubit_map[QubitAddress(result.uuid, i)] = phys
+                if indices:
+                    qubit_map[result.uuid] = indices[0]
+                continue
+            if not result.type.is_quantum():
+                continue
+            phys = qubit_map.get(selected.uuid)
+            if phys is None:
+                phys = qubit_map.get(QubitAddress(selected.uuid))
+            if phys is not None:
+                qubit_map[result.uuid] = phys
+                qubit_map[QubitAddress(result.uuid)] = phys
 
     def _emit_cudaq_controlled_h(
         self,
@@ -2457,128 +2568,6 @@ class CudaqEmitPass(StandardEmitPass[CudaqKernelArtifact]):
         ):
             if indices:
                 qubit_map[result.uuid] = indices[0]
-
-        target_results = [
-            result
-            for result in op.results[op.num_control_qubits :]
-            if result.type.is_quantum()
-        ]
-        for result, indices in zip(target_results, target_groups, strict=False):
-            if isinstance(result, ArrayValue):
-                vector_slots[result.uuid] = list(indices)
-                for i, phys in enumerate(indices):
-                    qubit_map[QubitAddress(result.uuid, i)] = phys
-                if indices:
-                    qubit_map[result.uuid] = indices[0]
-            elif indices:
-                qubit_map[result.uuid] = indices[0]
-
-    def _emit_cudaq_controlled_global_phase(
-        self,
-        circuit: CudaqKernelArtifact,
-        op: GlobalPhaseBlockOperation,
-        num_controls: int,
-        control_indices: list[int],
-        target_indices: list[int],
-        qubit_map: CudaqControlledQubitMap,
-        vector_slots: dict[str, list[int]],
-        emitter: CudaqKernelEmitter,
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit a global-phase block under outer CUDA-Q controls.
-
-        Controls the wrapped block's body, then emits the relative phase the
-        controlled global phase produces as an ``r1`` (single control) or a
-        multi-controlled ``r1.ctrl`` on the control qubits.
-
-        Args:
-            circuit (CudaqKernelArtifact): Artifact being built.
-            op (GlobalPhaseBlockOperation): Global-phase op inside the
-                controlled block.
-            num_controls (int): Number of outer controls (unused; controls
-                are taken from ``control_indices``).
-            control_indices (list[int]): Physical outer controls.
-            target_indices (list[int]): Fallback target slots from the
-                controlled-U call site (unused; re-resolved from operands).
-            qubit_map (CudaqControlledQubitMap): UUID-to-physical-qubit map.
-            vector_slots (dict[str, list[int]]): Vector slot map.
-            emitter (CudaqKernelEmitter): CUDA-Q source emitter.
-            bindings (dict[str, Any]): Current controlled-body bindings.
-
-        Raises:
-            EmitError: If the global-phase op has no source block.
-        """
-        del num_controls, target_indices
-        if op.source_block is None:
-            raise EmitError(
-                "CUDA-Q controlled fallback cannot emit a global-phase block "
-                "without a source block.",
-                operation="GlobalPhaseBlockOperation",
-            )
-        source = _prepare_nested_block_for_emit(op.source_block, bindings)
-        target_groups = [
-            (
-                _resolve_cudaq_array_slots(
-                    operand,
-                    vector_slots,
-                    qubit_map,
-                    self,
-                    bindings,
-                    operation="GlobalPhaseBlockOperation",
-                )
-                if isinstance(operand, ArrayValue)
-                else [
-                    _resolve_cudaq_value_index(
-                        operand,
-                        vector_slots,
-                        qubit_map,
-                        self,
-                        bindings,
-                        operation="GlobalPhaseBlockOperation",
-                    )
-                ]
-            )
-            for operand in op.target_qubits
-        ]
-        gp_targets = [index for group in target_groups for index in group]
-        local_bindings = self._resolver.bind_block_params(
-            source,
-            op.parameters,
-            bindings,
-        )
-        _bind_quantum_input_shapes(
-            self,
-            source,
-            op.target_qubits,
-            bindings,
-            local_bindings,
-        )
-        local_qubit_map, local_vector_slots = _build_block_qubit_map(
-            source,
-            gp_targets,
-            self,
-            local_bindings,
-        )
-        effective_controls = list(control_indices)
-        self._emit_cudaq_controlled_ops(
-            circuit,
-            source.operations,
-            len(effective_controls),
-            effective_controls,
-            gp_targets,
-            local_qubit_map,
-            local_vector_slots,
-            emitter,
-            local_bindings,
-        )
-        if effective_controls:
-            angle = resolve_angle_value(self, op.phase, bindings)
-            emitter.emit_multi_controlled_p(
-                circuit,
-                effective_controls[1:],
-                effective_controls[0],
-                angle,
-            )
 
         target_results = [
             result

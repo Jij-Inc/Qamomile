@@ -94,6 +94,8 @@ def evaluate_binop(
     emit_pass: "StandardEmitPass",
     op: BinOp,
     bindings: dict[str, Any],
+    *,
+    create_parameters: bool = True,
 ) -> None:
     """Evaluate a BinOp and store the result in bindings.
 
@@ -104,6 +106,20 @@ def evaluate_binop(
     parameters — that's the path that lets ``rx(q, gamma * 2)`` produce
     a circuit with a single ``Parameter("gamma") * 2`` expression rather
     than baking in a placeholder.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass providing the
+            resolver and backend-parameter factory.
+        op (BinOp): Arithmetic operation to evaluate.
+        bindings (dict[str, Any]): Current bindings; mutated in place with
+            the UUID-keyed result on success.
+        create_parameters (bool): Whether an unresolved parameter-keyed
+            operand may register a backend ``Parameter`` (the symbolic
+            phase-2 path). Pass ``False`` from validation-only walks — a
+            pre-emission walk must fold concrete values without mutating
+            the emit pass's parameter manifest, otherwise body-internal
+            names leak into the program ABI as spurious runtime
+            parameters. Defaults to True.
     """
     parameters = emit_pass._resolver.parameters
 
@@ -139,6 +155,13 @@ def evaluate_binop(
         if _is_param_array_element(op.rhs, parameters)
         else emit_pass._resolver.resolve_classical_value(op.rhs, bindings)
     )
+
+    if not create_parameters:
+        # Validation-only walk: concrete folding failed, and registering a
+        # backend Parameter here would pollute the emit manifest. Leave the
+        # result unbound; the validator's own loud checks (loop bounds,
+        # if conditions) decide whether that is acceptable.
+        return
 
     lhs_param_key = emit_pass._resolver.get_parameter_key(op.lhs, bindings)
     rhs_param_key = emit_pass._resolver.get_parameter_key(op.rhs, bindings)

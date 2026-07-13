@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, cast
 
 from qamomile.circuit.frontend.func_to_block import is_array_type
@@ -117,6 +118,7 @@ def _select_call_operation(
     arguments: dict[str, Any],
     inputs_map: dict[str, Value],
     invoke_block_factory: Any | None = None,
+    selected_block: Block | None = None,
 ) -> tuple[Any, Block | None, dict[str, tuple[ArrayValue, Any]]]:
     """Build the invocation operation for a direct or self-recursive call.
 
@@ -127,6 +129,8 @@ def _select_call_operation(
         invoke_block_factory (Any | None): Optional callable used to create
             the invocation for a selected block. Defaults to a qkernel
             ``InvokeOperation`` factory.
+        selected_block (Block | None): Block already selected and validated
+            before affine inputs were consumed. Defaults to ``None``.
 
     Returns:
         tuple[Any, Block | None, dict[str, tuple[ArrayValue, Any]]]: Invocation
@@ -136,7 +140,11 @@ def _select_call_operation(
     if kernel._block_building:
         return emit_self_call_forward_ref(kernel, inputs_map), None, {}
 
-    block_ir = select_specialized_block(kernel, arguments)
+    block_ir = (
+        selected_block
+        if selected_block is not None
+        else select_specialized_block(kernel, arguments)
+    )
 
     formal_input_views: dict[str, tuple[ArrayValue, Any]] = {}
     for label, formal_input in zip(block_ir.label_args, block_ir.input_values):
@@ -309,18 +317,22 @@ def _wrap_call_results(
     return wrapped_results
 
 
-def invoke_qkernel_with_operation(
+def _invoke_qkernel(
     kernel: Any,
     invoke_block_factory: Any | None,
+    block_validator: Callable[[Block], None] | None,
     *args: Any,
     **kwargs: Any,
 ) -> Any:
-    """Invoke a ``QKernel`` using a custom operation factory.
+    """Invoke a ``QKernel`` with optional operation and validation hooks.
 
     Args:
         kernel (Any): ``QKernel`` instance.
         invoke_block_factory (Any | None): Optional callable that receives
             ``(block, inputs_map)`` and returns the invocation operation.
+        block_validator (Callable[[Block], None] | None): Optional validator
+            applied to the exact selected specialization before affine inputs
+            are consumed. Defaults to ``None``.
         *args (Any): Positional qkernel call arguments.
         **kwargs (Any): Keyword qkernel call arguments.
 
@@ -352,6 +364,16 @@ def invoke_qkernel_with_operation(
     )
     reject_aliased_quantum_args(kernel.name, bound_args.arguments)
 
+    selected_block: Block | None = None
+    if block_validator is not None:
+        if kernel._block_building:
+            raise TypeError(
+                f"Cannot validate the in-progress recursive body of "
+                f"qkernel {kernel.name!r}."
+            )
+        selected_block = select_specialized_block(kernel, bound_args.arguments)
+        block_validator(selected_block)
+
     inputs_map, provenance_map, input_view_metas = _prepare_call_inputs(
         kernel,
         bound_args.arguments,
@@ -362,6 +384,7 @@ def invoke_qkernel_with_operation(
         bound_args.arguments,
         inputs_map,
         invoke_block_factory,
+        selected_block,
     )
 
     tracer.add_operation(call_op)
@@ -384,6 +407,59 @@ def invoke_qkernel_with_operation(
     return tuple(wrapped_results)
 
 
+def invoke_qkernel_with_operation(
+    kernel: Any,
+    invoke_block_factory: Any | None,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Invoke a ``QKernel`` using a custom operation factory.
+
+    Args:
+        kernel (Any): ``QKernel`` instance.
+        invoke_block_factory (Any | None): Optional callable that receives
+            ``(block, inputs_map)`` and returns the invocation operation.
+        *args (Any): Positional qkernel call arguments.
+        **kwargs (Any): Keyword qkernel call arguments.
+
+    Returns:
+        Any: A single frontend handle or a tuple of frontend handles matching
+        the qkernel return annotation.
+
+    Raises:
+        TypeError: If an argument is not a frontend handle after literal
+            promotion.
+        RuntimeError: If the generated invocation result count does not match
+            the qkernel return annotation.
+    """
+    return _invoke_qkernel(kernel, invoke_block_factory, None, *args, **kwargs)
+
+
+def invoke_validated_qkernel(
+    kernel: Any,
+    block_validator: Callable[[Block], None],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Invoke a qkernel after validating its exact selected specialization.
+
+    Args:
+        kernel (Any): ``QKernel`` instance.
+        block_validator (Callable[[Block], None]): Validator for the selected
+            implementation block.
+        *args (Any): Positional qkernel call arguments.
+        **kwargs (Any): Keyword qkernel call arguments.
+
+    Returns:
+        Any: Frontend result matching the qkernel return annotation.
+
+    Raises:
+        TypeError: If validation fails or an argument has the wrong type.
+        RuntimeError: If invocation result wrapping fails.
+    """
+    return _invoke_qkernel(kernel, None, block_validator, *args, **kwargs)
+
+
 def invoke_qkernel(kernel: Any, *args: Any, **kwargs: Any) -> Any:
     """Invoke a ``QKernel`` inside a tracing context.
 
@@ -402,4 +478,4 @@ def invoke_qkernel(kernel: Any, *args: Any, **kwargs: Any) -> Any:
         RuntimeError: If the generated invocation result count does not match
             the qkernel return annotation.
     """
-    return invoke_qkernel_with_operation(kernel, None, *args, **kwargs)
+    return _invoke_qkernel(kernel, None, None, *args, **kwargs)

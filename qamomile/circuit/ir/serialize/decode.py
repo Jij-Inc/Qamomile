@@ -30,7 +30,7 @@ from qamomile.circuit.ir.operation import (
     ForItemsOperation,
     GateOperation,
     GateOperationType,
-    GlobalPhaseBlockOperation,
+    GlobalPhaseOperation,
     InverseBlockOperation,
     InvokeOperation,
     MeasureOperation,
@@ -1867,6 +1867,22 @@ def _decode_inverse_block(
     )
 
 
+def _decode_global_phase_operation(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> GlobalPhaseOperation:
+    """Decode a zero-qubit global-phase operation.
+
+    Args:
+        d (dict[str, Any]): Serialized operation dictionary.
+        ctx (_DecodeContext): Active decode context.
+
+    Returns:
+        GlobalPhaseOperation: Reconstructed operation.
+    """
+    operands, results = _operands_results(d, ctx)
+    return GlobalPhaseOperation(operands=operands, results=results)
+
+
 _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] = {
     "GateOperation": _decode_gate_operation,
     "MeasureOperation": _decode_measure,
@@ -1898,5 +1914,5 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "SymbolicControlledU": _decode_symbolic_controlled,
     "InvokeOperation": _decode_invoke_operation,
     "InverseBlockOperation": _decode_inverse_block,
-    "GlobalPhaseBlockOperation": _decode_global_phase_block,
+    "GlobalPhaseOperation": _decode_global_phase_operation,
 }

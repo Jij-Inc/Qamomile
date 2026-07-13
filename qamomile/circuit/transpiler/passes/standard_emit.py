@@ -54,7 +54,7 @@ from qamomile.circuit.ir.operation.gate import (
     ProjectOperation,
     ResetOperation,
 )
-from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
@@ -96,7 +96,7 @@ from qamomile.circuit.transpiler.passes.emit_support.counting_emitter import (
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import emit_gate
 from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
-    emit_global_phase_block,
+    emit_global_phase,
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     emit_inverse_block,
@@ -159,10 +159,13 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     module functions in ``emit_support/`` by default.
 
     Args:
-        gate_emitter: Backend-specific gate emitter
-        bindings: Parameter bindings for the circuit
-        parameters: List of parameter names to preserve as backend parameters
-        composite_emitters: Optional list of CompositeGateEmitter for native implementations
+        gate_emitter (GateEmitter[T]): Backend-specific gate emitter.
+        bindings (dict[str, Any] | None): Parameter bindings for the circuit.
+            Defaults to None.
+        parameters (list[str] | None): Parameter names to preserve as backend
+            parameters. Defaults to None.
+        composite_emitters (list[CompositeGateEmitter[T]] | None): Native
+            composite-gate emitters. Defaults to None.
     """
 
     def __init__(
@@ -361,7 +364,28 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         force_unroll: bool = False,
         emit_qinit_reset: bool = False,
     ) -> None:
-        """Emit operations to the circuit (dispatcher)."""
+        """Emit operations to the backend circuit.
+
+        Args:
+            circuit (T): Backend circuit being populated.
+            operations (list[Operation]): IR operations to emit in order.
+            qubit_map (QubitMap): Mapping from quantum IR values to physical
+                qubit indices.
+            clbit_map (ClbitMap): Mapping from classical bit IR values to
+                physical classical-bit indices.
+            bindings (dict[str, Any]): Active compile-time and runtime
+                parameter bindings.
+            force_unroll (bool): Whether to force compile-time loop
+                unrolling. Defaults to False.
+
+        Raises:
+            EmitError: If an operation cannot be emitted with the active
+                backend or bindings.
+            RuntimeError: If a slice operation reaches emission before the
+                required strip pass.
+            NotImplementedError: If an unsupported nested control-flow
+                operation reaches the dispatcher.
+        """
         for op in operations:
             if isinstance(op, QInitOperation):
                 if emit_qinit_reset:
@@ -410,8 +434,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 emit_invoke_operation(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, InverseBlockOperation):
                 self._emit_inverse_block(circuit, op, qubit_map, bindings)
-            elif isinstance(op, GlobalPhaseBlockOperation):
-                self._emit_global_phase_block(circuit, op, qubit_map, bindings)
+            elif isinstance(op, GlobalPhaseOperation):
+                self._emit_global_phase(circuit, op, bindings)
             elif isinstance(op, ControlledUOperation):
                 emit_controlled_u(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, PauliEvolveOp):
@@ -765,27 +789,27 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         """
         emit_inverse_block(self, circuit, op, qubit_map, bindings)
 
-    def _emit_global_phase_block(
+    def _emit_global_phase(
         self,
         circuit: T,
-        op: GlobalPhaseBlockOperation,
-        qubit_map: QubitMap,
+        op: GlobalPhaseOperation,
         bindings: dict[str, Any],
     ) -> None:
-        """Emit a first-class global-phase block operation.
+        """Emit a zero-qubit global-phase operation.
 
-        Emits the wrapped block's body and folds the scalar global phase
-        into the backend (Qiskit ``global_phase``; dropped elsewhere). The
-        body is emitted via ``_emit_operations`` so every backend reuses the
-        same implementation.
+        Qiskit folds the phase into its circuit-level accumulator. Backends
+        without a standalone global-phase hook correctly drop the
+        unobservable phase.
 
         Args:
             circuit (T): Backend circuit being built.
-            op (GlobalPhaseBlockOperation): Global-phase block op to emit.
-            qubit_map (QubitMap): Current quantum value to physical qubit map.
+            op (GlobalPhaseOperation): Global-phase operation to emit.
             bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If a preserving backend cannot resolve the phase angle.
         """
-        emit_global_phase_block(self, circuit, op, qubit_map, bindings)
+        emit_global_phase(self, circuit, op, bindings)
 
     def _emit_runtime_classical_expr(
         self,

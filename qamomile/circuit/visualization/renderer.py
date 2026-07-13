@@ -54,6 +54,10 @@ class MatplotlibRenderer:
 
     Takes pre-computed layout coordinates and draws the circuit
     using matplotlib primitives.
+
+    Args:
+        style (CircuitStyle): Visual style configuration used for all drawing
+            primitives.
     """
 
     def __init__(self, style: CircuitStyle):
@@ -909,7 +913,17 @@ class MatplotlibRenderer:
         block_width: float | None = None,
         layout_width: float | None = None,
     ) -> None:
-        """Draw a VGate node using pre-resolved fields."""
+        """Draw a gate node using its pre-resolved visual fields.
+
+        Args:
+            fig (Figure): Matplotlib figure containing the circuit axes.
+            node (VGate): Visual gate node to draw.
+            x_pos (float): Horizontal center of the node.
+            block_width (float | None): Width of a block-style gate, or None
+                to use the node's resolved width. Defaults to None.
+            layout_width (float | None): Width reserved by layout, or None to
+                use the node's estimated width. Defaults to None.
+        """
         ax = fig._qm_ax  # type: ignore[attr-defined]
         qubit_indices = self._visible_qubits(node.qubit_indices)
 
@@ -918,7 +932,16 @@ class MatplotlibRenderer:
 
         y_coords = [self.qubit_y[q] for q in qubit_indices]
 
-        if node.kind == VGateKind.GATE:
+        if node.kind == VGateKind.GLOBAL_PHASE:
+            self._draw_vglobal_phase(
+                ax,
+                node,
+                x_pos,
+                max(y_coords),
+                layout_width or node.estimated_width,
+            )
+
+        elif node.kind == VGateKind.GATE:
             width = layout_width or node.estimated_width
             if len(qubit_indices) == 1:
                 self._draw_vgate_single(ax, node, x_pos, y_coords[0], width)
@@ -944,6 +967,56 @@ class MatplotlibRenderer:
 
         elif node.kind == VGateKind.EXPVAL:
             self._draw_vexpval(ax, node, x_pos, block_width)
+
+    def _draw_vglobal_phase(
+        self,
+        ax: Axes,
+        node: VGate,
+        x: float,
+        top_wire_y: float,
+        width: float,
+    ) -> None:
+        """Draw a global-phase badge without interrupting a qubit wire.
+
+        The badge floats entirely above the top wire in the surrounding
+        quantum scope. Its horizontal position preserves source order, while
+        the absence of an on-wire gate glyph reflects the operation's
+        zero-qubit semantics.
+
+        Args:
+            ax (Axes): Matplotlib axes to draw on.
+            node (VGate): ``GLOBAL_PHASE`` visual node carrying the label.
+            x (float): Horizontal center of the phase annotation.
+            top_wire_y (float): Vertical coordinate of the scope's top wire.
+            width (float): Reserved annotation width.
+
+        """
+        height = self.style.gate_height / 3
+        y = top_wire_y + self.style.gate_height / 4
+        badge = mpatches.FancyBboxPatch(
+            (x - width / 2, y - height / 2),
+            width,
+            height,
+            boxstyle=mpatches.BoxStyle.Round(
+                pad=0, rounding_size=self.style.gate_corner_radius / 2
+            ),
+            facecolor=self.style.background_color,
+            edgecolor=self.style.block_border_color,
+            linewidth=1,
+            linestyle=":",
+            zorder=PORDER_GATE,
+        )
+        ax.add_patch(badge)
+        ax.text(
+            x,
+            y,
+            node.label,
+            ha="center",
+            va="center",
+            color=self.style.block_border_color,
+            fontsize=self.style.subfont_size,
+            zorder=PORDER_TEXT,
+        )
 
     def _draw_vgate_single(
         self, ax: Axes, node: VGate, x: float, y: float, width: float

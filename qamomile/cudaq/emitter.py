@@ -25,6 +25,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
 
 # Matches the ``thetas`` parameter identifier as a whole word (e.g. ``thetas[0]``
@@ -175,8 +176,9 @@ class CudaqKernelEmitter:
         parameter list.
 
     Args:
-        parametric: Initial hint for parametricity.  The emit pass
-            overrides this after emission based on ``_param_count``.
+        parametric (bool): Initial hint for parametricity. The emit pass
+            overrides this after emission based on ``_param_count``. Defaults
+            to False.
     """
 
     _kernel_counter = itertools.count()
@@ -657,6 +659,40 @@ class CudaqKernelEmitter:
     ) -> None:
         """Emit phase gate (R1)."""
         self._emit(f"r1({self._angle_expr(angle)}, {self._qref(qubit)})")
+
+    def emit_global_phase(
+        self,
+        circuit: CudaqKernelArtifact,
+        angle: float | Any,
+    ) -> None:
+        """Preserve a global phase only inside synthesized helper kernels.
+
+        CUDA-Q has no circuit-level global-phase attribute, so a top-level
+        phase is intentionally dropped. Inside a controlled or adjoint helper,
+        encode ``exp(i * angle) I`` on helper target zero as ``X P X P``. The
+        synthesis operation then controls or inverts these ordinary gates
+        naturally, without a second traversal of the source IR.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            angle (float | Any): Global phase angle or CUDA-Q expression.
+
+        Raises:
+            EmitError: If a helper containing a global phase has no target
+                qubit on which to anchor the scalar identity.
+        """
+        if not self._building_helper:
+            return
+        if 0 not in self._qubit_refs:
+            raise EmitError(
+                "CUDA-Q cannot preserve a global phase in a zero-target "
+                "synthesis helper; at least one helper target is required.",
+                operation="GlobalPhaseOperation",
+            )
+        self.emit_x(circuit, 0)
+        self.emit_p(circuit, 0, angle)
+        self.emit_x(circuit, 0)
+        self.emit_p(circuit, 0, angle)
 
     # ------------------------------------------------------------------
     # Two-qubit gates

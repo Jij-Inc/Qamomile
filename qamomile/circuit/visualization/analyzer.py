@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
+    HasNestedOps,
     IfOperation,
     WhileOperation,
 )
@@ -39,6 +40,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
     MeasureVectorOperation,
 )
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
@@ -813,7 +815,13 @@ class CircuitAnalyzer:
         top_param_values: dict = {}
         self._evaluate_loop_body_intermediates(graph.operations, top_param_values)
         children = self._build_visual_nodes(
-            graph.operations, qubit_map, {}, top_param_values, depth=0, scope_path=()
+            graph.operations,
+            qubit_map,
+            {},
+            top_param_values,
+            depth=0,
+            scope_path=(),
+            phase_scope_qubits=sorted(set(qubit_map.values())),
         )
         return VisualCircuit(
             children=children,
@@ -831,12 +839,34 @@ class CircuitAnalyzer:
         param_values: dict,
         depth: int,
         scope_path: tuple,
+        phase_scope_qubits: list[int] | None = None,
     ) -> list[VisualNode]:
         """Recursively build VisualNode list from IR operations.
 
         This is the core dispatch method that replaces both Layout's
         _measure_operations and Renderer's draw_ops dispatch.
+
+        Args:
+            ops (list[Operation]): Operations to convert.
+            qubit_map (dict[str, int]): Logical-value to display-wire map.
+            logical_id_remap (dict[str, str]): Formal-to-actual logical-value
+                mapping in the current scope.
+            param_values (dict): Resolved classical values in the scope.
+            depth (int): Current visual nesting depth.
+            scope_path (tuple): Stable parent keys for child node identities.
+            phase_scope_qubits (list[int] | None): Wires belonging to the
+                current quantum scope. Defaults to every mapped wire.
+
+        Returns:
+            list[VisualNode]: Visual nodes in operation order.
+
+        Raises:
+            NotImplementedError: If a while loop reaches visualization.
+            TypeError: If an unsupported inline operation is encountered.
+            ValueError: If a loop range has an invalid zero step.
         """
+        if phase_scope_qubits is None:
+            phase_scope_qubits = sorted(set(qubit_map.values()))
         result: list[VisualNode] = []
 
         for op in ops:
@@ -852,6 +882,18 @@ class CircuitAnalyzer:
 
             if isinstance(op, BinOp):
                 continue  # No visual representation
+
+            if isinstance(op, GlobalPhaseOperation):
+                result.append(
+                    self._build_vglobal_phase(
+                        op,
+                        node_key,
+                        phase_scope_qubits,
+                        param_values,
+                        ops,
+                    )
+                )
+                continue
 
             if isinstance(op, ExpvalOp):
                 node = self._build_vexpval(
@@ -876,6 +918,7 @@ class CircuitAnalyzer:
                     depth,
                     scope_path,
                     body_operations=ops,
+                    phase_scope_qubits=phase_scope_qubits,
                 )
                 result.append(node)
                 continue
@@ -889,6 +932,7 @@ class CircuitAnalyzer:
                     param_values,
                     depth,
                     scope_path,
+                    phase_scope_qubits,
                 )
                 result.append(node)
                 continue
@@ -902,6 +946,7 @@ class CircuitAnalyzer:
                     param_values,
                     depth,
                     scope_path,
+                    phase_scope_qubits,
                 )
                 result.append(node)
                 continue
@@ -973,6 +1018,48 @@ class CircuitAnalyzer:
                 result.append(node)
 
         return result
+
+    def _build_vglobal_phase(
+        self,
+        op: GlobalPhaseOperation,
+        node_key: tuple,
+        phase_scope_qubits: list[int],
+        param_values: dict,
+        body_operations: list[Operation],
+    ) -> VGate:
+        """Build a floating annotation for a zero-qubit global phase.
+
+        Args:
+            op (GlobalPhaseOperation): Phase operation to visualize.
+            node_key (tuple): Stable identity key for layout and rendering.
+            phase_scope_qubits (list[int]): Display wires in the surrounding
+                quantum scope.
+            param_values (dict): Resolved classical values in the scope.
+            body_operations (list[Operation]): Operations used to recover
+                symbolic phase expressions.
+
+        Returns:
+            VGate: Floating global-phase annotation node.
+        """
+        resolved_name = self._resolve_symbolic_array_name(op.phase, param_values)
+        if resolved_name is not None:
+            phase_text = self._format_symbolic_param(resolved_name)
+        else:
+            phase_text = self._format_param_for_expression(
+                op.phase,
+                set(),
+                param_values,
+                body_operations,
+            )
+        label = f"global phase: {phase_text or '?'}"
+        return VGate(
+            node_key=node_key,
+            label=label,
+            qubit_indices=list(dict.fromkeys(phase_scope_qubits)),
+            estimated_width=self._estimate_label_box_width(label),
+            kind=VGateKind.GLOBAL_PHASE,
+            has_param=True,
+        )
 
     @staticmethod
     def _node_key_in_if_branch(node_key: tuple) -> bool:
@@ -1427,6 +1514,7 @@ class CircuitAnalyzer:
             child_param_values,
             depth + 1,
             node_key,
+            affected_qubits,
         )
 
         # Update max_gate_width from children
@@ -1483,8 +1571,31 @@ class CircuitAnalyzer:
         param_values: dict,
         depth: int,
         scope_path: tuple,
+        phase_scope_qubits: list[int] | None = None,
     ) -> VFoldedBlock | VUnfoldedSequence | VSkip:
-        """Build a Visual IR node for a ForOperation."""
+        """Build a folded or unfolded visual node for a range loop.
+
+        Args:
+            op (ForOperation): Range-loop operation to visualize.
+            node_key (tuple): Stable identity key for layout and rendering.
+            qubit_map (dict[str, int]): Logical-value to display-wire map.
+            logical_id_remap (dict[str, str]): Formal-to-actual logical-value
+                mapping in the current scope.
+            param_values (dict): Resolved classical values in the scope.
+            depth (int): Current visual nesting depth.
+            scope_path (tuple): Stable parent keys for child node identities.
+            phase_scope_qubits (list[int] | None): Parent quantum scope for
+                zero-qubit phase operations. Defaults to every mapped wire.
+
+        Returns:
+            VFoldedBlock | VUnfoldedSequence | VSkip: Folded summary,
+            materialized iterations, or an empty-loop placeholder.
+
+        Raises:
+            ValueError: If the loop step is zero.
+        """
+        if phase_scope_qubits is None:
+            phase_scope_qubits = sorted(set(qubit_map.values()))
         start_val, stop_val_raw, step_val = self._evaluate_loop_range(op, param_values)
 
         if self._is_zero_iteration_loop(start_val, stop_val_raw, step_val):
@@ -1493,6 +1604,9 @@ class CircuitAnalyzer:
         affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
+        if not affected_qubits and self._contains_global_phase(op.operations):
+            affected_qubits = list(phase_scope_qubits)
+            affected_qubits_precise = True
 
         # Folded mode: fold_loops=True or symbolic stop
         if self.fold_loops or stop_val_raw is None:
@@ -1530,6 +1644,7 @@ class CircuitAnalyzer:
                 child_param_values,
                 depth + 1,
                 (*node_key, iteration),
+                affected_qubits or phase_scope_qubits,
             )
             iter_width = self._sum_visual_widths(children)
             iterations.append(children)
@@ -1601,6 +1716,7 @@ class CircuitAnalyzer:
         depth: int,
         scope_path: tuple,
         body_operations: list[Operation] | None = None,
+        phase_scope_qubits: list[int] | None = None,
     ) -> VFoldedBlock | VUnfoldedSequence:
         """Build a Visual IR node for an IfOperation.
 
@@ -1626,15 +1742,24 @@ class CircuitAnalyzer:
                 enclosing ``op``, used to spell the condition predicate (e.g.
                 ``flag == 1``). Defaults to None, which falls back to the
                 anonymous ``if cond:`` label.
+            phase_scope_qubits (list[int] | None): Parent quantum scope for
+                zero-qubit phase operations. Defaults to every mapped wire.
 
         Returns:
             VFoldedBlock | VUnfoldedSequence: A folded summary box when
                 ``fold_ifs`` is set, otherwise an unfolded sequence containing
                 the true branch and, when present, the false branch.
         """
+        if phase_scope_qubits is None:
+            phase_scope_qubits = sorted(set(qubit_map.values()))
         affected_qubits, affected_qubits_precise = self._collect_if_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
+        if not affected_qubits and self._contains_global_phase(
+            [*op.true_operations, *op.false_operations]
+        ):
+            affected_qubits = list(phase_scope_qubits)
+            affected_qubits_precise = True
 
         condition_expr = self._format_condition_expr(
             op.condition, body_operations, param_values
@@ -1704,6 +1829,7 @@ class CircuitAnalyzer:
             true_param_values,
             depth + 1,
             (*node_key, "true"),
+            affected_qubits or phase_scope_qubits,
         )
         true_width = self._sum_visual_widths(true_children)
 
@@ -1716,6 +1842,7 @@ class CircuitAnalyzer:
             false_param_values,
             depth + 1,
             (*node_key, "false"),
+            affected_qubits or phase_scope_qubits,
         )
         false_width = self._sum_visual_widths(false_children)
 
@@ -2144,11 +2271,34 @@ class CircuitAnalyzer:
         param_values: dict,
         depth: int,
         scope_path: tuple,
+        phase_scope_qubits: list[int] | None = None,
     ) -> VFoldedBlock | VUnfoldedSequence | VSkip:
-        """Build a Visual IR node for a ForItemsOperation."""
+        """Build a folded or unfolded visual node for dictionary iteration.
+
+        Args:
+            op (ForItemsOperation): Dictionary-loop operation to visualize.
+            node_key (tuple): Stable identity key for layout and rendering.
+            qubit_map (dict[str, int]): Logical-value to display-wire map.
+            logical_id_remap (dict[str, str]): Formal-to-actual logical-value
+                mapping in the current scope.
+            param_values (dict): Resolved classical values in the scope.
+            depth (int): Current visual nesting depth.
+            scope_path (tuple): Stable parent keys for child node identities.
+            phase_scope_qubits (list[int] | None): Parent quantum scope for
+                zero-qubit phase operations. Defaults to every mapped wire.
+
+        Returns:
+            VFoldedBlock | VUnfoldedSequence | VSkip: Folded summary,
+            materialized entries, or an empty-loop placeholder.
+        """
+        if phase_scope_qubits is None:
+            phase_scope_qubits = sorted(set(qubit_map.values()))
         affected_qubits, affected_qubits_precise = self._analyze_loop_affected_qubits(
             op, qubit_map, logical_id_remap, param_values
         )
+        if not affected_qubits and self._contains_global_phase(op.operations):
+            affected_qubits = list(phase_scope_qubits)
+            affected_qubits_precise = True
 
         # Build label
         key_str = ", ".join(op.key_vars) if op.key_vars else "k"
@@ -2238,6 +2388,7 @@ class CircuitAnalyzer:
                 child_param_values,
                 depth + 1,
                 (*node_key, len(iterations)),
+                affected_qubits or phase_scope_qubits,
             )
             iter_width = self._sum_visual_widths(children)
             iterations.append(children)
@@ -2381,13 +2532,14 @@ class CircuitAnalyzer:
         via recursion rather than operand resolution.
 
         Args:
-            op: IR operation to inspect.
+            op (Operation): IR operation to inspect.
 
         Returns:
-            A list of operand Values to resolve, or None when the op is
-            a control-flow construct (For/While/If/ForItems) that the
-            caller handles separately.
+            list[Value] | None: Operand values to resolve, or ``None`` when
+            the operation requires recursive control-flow handling.
         """
+        if isinstance(op, GlobalPhaseOperation):
+            return []
         if isinstance(op, (GateOperation, ControlledUOperation)):
             return list(op.operands)
         if isinstance(op, InvokeOperation):
@@ -2399,6 +2551,26 @@ class CircuitAnalyzer:
         if isinstance(op, (MeasureOperation, MeasureVectorOperation)):
             return list(op.operands[:1])
         return None
+
+    @staticmethod
+    def _contains_global_phase(operations: list[Operation]) -> bool:
+        """Return whether an operation tree contains a global phase.
+
+        Args:
+            operations (list[Operation]): Operations to inspect recursively.
+
+        Returns:
+            bool: Whether a global phase occurs in this operation tree.
+        """
+        for operation in operations:
+            if isinstance(operation, GlobalPhaseOperation):
+                return True
+            if isinstance(operation, HasNestedOps) and any(
+                CircuitAnalyzer._contains_global_phase(body)
+                for body in operation.nested_op_lists()
+            ):
+                return True
+        return False
 
     def _analyze_loop_affected_qubits(
         self,
@@ -4474,14 +4646,20 @@ class CircuitAnalyzer:
         """Convert an operation to expression format string.
 
         Args:
-            op: Operation to format.
-            loop_vars: Set of loop variable names in scope (e.g., {"i", "j"}).
-            indent: Indentation level (2 spaces per level).
-            max_depth: Maximum nesting depth for recursive formatting.
-            param_values: Parameter values for resolving symbolic expressions.
+            op (Operation): Operation to format.
+            loop_vars (set[str]): Loop variable names in scope.
+            indent (int): Indentation level, using two spaces per level.
+                Defaults to zero.
+            max_depth (int): Maximum recursive formatting depth. Defaults to
+                two.
+            param_values (dict | None): Values for resolving symbolic
+                expressions. Defaults to ``None``.
+            body_operations (list | None): Operations used to recover producer
+                expressions. Defaults to ``None``.
 
         Returns:
-            Expression string (e.g., "q[i],q[j] = cx(q[i],q[j])") or None.
+            str | None: Expression string, or ``None`` when the operation has
+            no folded representation.
         """
         prefix = "  " * indent
 
@@ -4525,6 +4703,15 @@ class CircuitAnalyzer:
             if params:
                 args_str += f", {params}"
             return f"{prefix}{result_str} = {gate_name}({args_str})"
+
+        elif isinstance(op, GlobalPhaseOperation):
+            phase = self._format_param_for_expression(
+                op.phase,
+                loop_vars,
+                param_values,
+                body_operations,
+            )
+            return f"{prefix}global_phase({phase or '?'})"
 
         elif isinstance(op, (MeasureOperation, MeasureVectorOperation)):
             if not op.operands:
@@ -4675,7 +4862,39 @@ class CircuitAnalyzer:
             return f"{prefix}while ...:"
 
         elif isinstance(op, IfOperation):
-            return f"{prefix}if ...:"
+            if max_depth <= 0:
+                return f"{prefix}..."
+            condition = self._format_condition_expr(
+                op.condition,
+                body_operations,
+                param_values,
+            )
+            lines = [f"{prefix}if {condition or '...'}:"]
+            for true_op in op.true_operations:
+                expr = self._format_operation_as_expression(
+                    true_op,
+                    loop_vars,
+                    indent + 1,
+                    max_depth - 1,
+                    param_values,
+                    body_operations=op.true_operations,
+                )
+                if expr:
+                    lines.append(expr)
+            if op.false_operations:
+                lines.append(f"{prefix}else:")
+                for false_op in op.false_operations:
+                    expr = self._format_operation_as_expression(
+                        false_op,
+                        loop_vars,
+                        indent + 1,
+                        max_depth - 1,
+                        param_values,
+                        body_operations=op.false_operations,
+                    )
+                    if expr:
+                        lines.append(expr)
+            return "\n".join(lines)
 
         elif isinstance(op, ForItemsOperation):
             key_str = ", ".join(op.key_vars) if op.key_vars else "k"

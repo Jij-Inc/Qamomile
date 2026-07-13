@@ -34,6 +34,7 @@ from qamomile.circuit.ir.operation.gate import (
     ProjectOperation,
     ResetOperation,
 )
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
@@ -1250,6 +1251,8 @@ class ResourceInterpreter:
                 return self.eval_for_items(operation, resolver, controls=controls)
             case InvokeOperation():
                 return self.eval_invoke(operation, resolver, controls=controls)
+            case GlobalPhaseOperation():
+                return self.eval_global_phase(operation, controls=controls)
             case ControlledUOperation():
                 return self.eval_controlled_u(operation, resolver, controls=controls)
             case InverseBlockOperation():
@@ -1314,6 +1317,43 @@ class ResourceInterpreter:
                 ),
             )
         return estimate
+
+    def eval_global_phase(
+        self,
+        operation: GlobalPhaseOperation,
+        *,
+        controls: ResourceExpr | int = 0,
+    ) -> ResourceEstimate:
+        """Evaluate a zero-qubit phase under its surrounding controls.
+
+        A standalone global phase has no physical resource cost. With one or
+        more controls it becomes a phase gate on one control, with the
+        remaining controls guarding that gate.
+
+        Args:
+            operation (GlobalPhaseOperation): Phase operation to estimate.
+            controls (ResourceExpr | int): Surrounding control count. Defaults
+                to zero.
+
+        Returns:
+            ResourceEstimate: Zero when uncontrolled, otherwise one logical
+            phase-gate contribution with the correct arity.
+        """
+        del operation
+        control_count = _expr(controls)
+        if control_count == _ZERO:
+            return ResourceEstimate.zero("global_phase")
+
+        phase_controls = control_count - _ONE
+        if self.config.basis is GateBasis.CLIFFORD_T:
+            gates = _classify_clifford_t_gate(
+                "p", phase_controls, self.config.precision
+            )
+        elif phase_controls == _ZERO:
+            gates = _classify_uncontrolled_gate("p")
+        else:
+            gates = _classify_controlled_gate("p", phase_controls)
+        return ResourceEstimate.primitive("controlled_global_phase", gates)
 
     def eval_qinit(
         self,

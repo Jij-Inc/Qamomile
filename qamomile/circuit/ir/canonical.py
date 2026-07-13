@@ -77,7 +77,6 @@ from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
-from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
 from qamomile.circuit.ir.types.primitives import ValueType
@@ -431,10 +430,6 @@ class _Canonicalizer:
             if new_op.implementation_block is not None:
                 sub = self.canonical_block(new_op.implementation_block)
                 new_op = dataclasses.replace(new_op, implementation_block=sub)
-        if isinstance(new_op, GlobalPhaseBlockOperation):
-            if new_op.source_block is not None:
-                sub = self.canonical_block(new_op.source_block)
-                new_op = dataclasses.replace(new_op, source_block=sub)
 
         # ControlledUOperation carries the unitary as a nested ``block``
         # field. Canonicalize it through the same canonicalizer so UUIDs
@@ -868,8 +863,6 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
             _collect_from_subblock(op.source_block, visit)
         if op.implementation_block is not None:
             _collect_from_subblock(op.implementation_block, visit)
-    if isinstance(op, GlobalPhaseBlockOperation) and op.source_block is not None:
-        _collect_from_subblock(op.source_block, visit)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _collect_from_subblock(op.block, visit)
 
@@ -1050,9 +1043,6 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
         if op.implementation_block is not None:
             out.append(f"{pad}{_INLINE_INDENT}implementation:")
             _emit_block(op.implementation_block, out, indent + 2)
-    if isinstance(op, GlobalPhaseBlockOperation) and op.source_block is not None:
-        out.append(f"{pad}{_INLINE_INDENT}source:")
-        _emit_block(op.source_block, out, indent + 2)
 
     if isinstance(op, ControlledUOperation) and op.block is not None:
         out.append(f"{pad}{_INLINE_INDENT}unitary_block:")

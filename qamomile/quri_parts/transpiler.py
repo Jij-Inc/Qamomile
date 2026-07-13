@@ -9,15 +9,20 @@ from __future__ import annotations
 from numbers import Real
 from typing import TYPE_CHECKING, Any, Sequence, cast
 
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
+)
 from qamomile.circuit.ir.operation.callable import InvokeOperation
-from qamomile.circuit.ir.operation.control_flow import ForOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
     GateOperationType,
 )
-from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
@@ -33,6 +38,16 @@ from qamomile.circuit.transpiler.passes.emit_support import (
 )
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
+    evaluate_classical_predicate,
+)
+from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
+    remap_static_merge_outputs,
+    resolve_if_condition,
+)
+from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+    _bind_loop_var,
+    register_classical_merge_aliases,
+    resolve_loop_bounds,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _bind_and_populate_block_inputs,
@@ -50,6 +65,9 @@ from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import 
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
     reject_duplicate_physical_indices,
+)
+from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
+    emit_controlled_global_phase_operation,
 )
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     _map_inverse_block_results,
@@ -578,73 +596,6 @@ def _emit_quri_nested_controlled_u(
     map_nested_controlled_u_results(op, resolved, qubit_map)
 
 
-def _emit_quri_global_phase_operation(
-    emit_pass: Any,
-    circuit: Any,
-    op: GlobalPhaseBlockOperation,
-    outer_control_indices: list[int],
-    qubit_map: QubitMap,
-    bindings: dict[str, Any],
-) -> None:
-    """Emit a global-phase block under accumulated QURI Parts controls.
-
-    Controls the wrapped block's body, then emits the relative phase that the
-    controlled global phase produces on the control qubits (a single-qubit
-    phase for one control, a controlled phase for two).
-
-    Args:
-        emit_pass (StandardEmitPass[Any]): QURI Parts emit pass.
-        circuit (Any): QURI Parts circuit being built.
-        op (GlobalPhaseBlockOperation): Global-phase op from the current
-            controlled block.
-        outer_control_indices (list[int]): Controls accumulated from
-            enclosing controlled-U operations.
-        qubit_map (QubitMap): Current block-local qubit map.
-        bindings (dict[str, Any]): Bindings visible inside the current block.
-
-    Raises:
-        EmitError: If the global-phase op has no source block, or if the
-            number of accumulated controls exceeds the two-control phase
-            primitives QURI Parts exposes.
-    """
-    if op.source_block is None:
-        raise EmitError(
-            "QURI Parts cannot emit a global-phase block without a source block.",
-            operation="GlobalPhaseBlockOperation",
-        )
-    source = _prepare_nested_block_for_emit(op.source_block, bindings)
-    target_index_groups = [
-        _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
-        for operand in op.target_qubits
-    ]
-    target_indices = [index for group in target_index_groups for index in group]
-    input_operands = [*op.target_qubits, *op.parameters]
-    effective_controls = list(outer_control_indices)
-
-    local_qubit_map, _local_clbit_map, local_bindings = (
-        emit_pass._prepare_local_block_maps(
-            source,
-            input_operands,
-            len(target_indices),
-            bindings,
-            parent_qubits=target_indices,
-        )
-    )
-    _emit_quri_controlled_operations(
-        emit_pass,
-        circuit,
-        source.operations,
-        effective_controls,
-        local_qubit_map,
-        local_bindings,
-    )
-
-    angle = resolve_angle_value(emit_pass, op.phase, bindings)
-    emit_controlled_global_phase(emit_pass, circuit, effective_controls, angle)
-
-    _map_global_phase_results(op, target_index_groups, qubit_map)
-
-
 def _emit_quri_controlled_operations(
     emit_pass: StandardEmitPass[Any],
     circuit: Any,
@@ -683,6 +634,9 @@ def _emit_quri_controlled_operations(
         if isinstance(op, BinOp):
             evaluate_binop(emit_pass, op, bindings)
             continue
+        if isinstance(op, (CompOp, CondOp, NotOp)):
+            evaluate_classical_predicate(emit_pass, op, bindings)
+            continue
         if isinstance(op, GateOperation):
             target_indices = _resolve_quri_gate_targets(
                 emit_pass, op, qubit_map, bindings
@@ -712,17 +666,12 @@ def _emit_quri_controlled_operations(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
             continue
-        if isinstance(op, GlobalPhaseBlockOperation):
-            _emit_quri_global_phase_operation(
-                emit_pass, circuit, op, control_indices, qubit_map, bindings
+        if isinstance(op, GlobalPhaseOperation):
+            emit_controlled_global_phase_operation(
+                emit_pass, circuit, op, control_indices, bindings
             )
             continue
         if isinstance(op, ForOperation):
-            from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-                _bind_loop_var,
-                resolve_loop_bounds,
-            )
-
             start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
             if start is None or stop is None or step is None:
                 raise EmitError(
@@ -752,13 +701,47 @@ def _emit_quri_controlled_operations(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
             continue
+        if isinstance(op, IfOperation):
+            resolved_condition = resolve_if_condition(op.condition, bindings)
+            if resolved_condition is None:
+                raise EmitError(
+                    "QURI Parts cannot control a measurement-dependent "
+                    "if-branch inside a controlled target.",
+                    operation="ControlledUOperation",
+                )
+            selected_ops = (
+                op.true_operations if resolved_condition else op.false_operations
+            )
+            _emit_quri_controlled_operations(
+                emit_pass,
+                circuit,
+                selected_ops,
+                control_indices,
+                qubit_map,
+                bindings,
+            )
+            remap_static_merge_outputs(
+                op,
+                resolved_condition,
+                qubit_map,
+                {},
+                bindings=bindings,
+                resolver=emit_pass._resolver,
+            )
+            register_classical_merge_aliases(
+                emit_pass,
+                op,
+                bindings,
+                resolved_condition,
+            )
+            continue
         raise EmitError(
             "QURI Parts recursive controlled fallback only supports "
             "primitive gates, nested ControlledUOperation values, "
             "InvokeOperation values, "
             "InverseBlockOperation values, "
-            "PauliEvolveOp values, "
-            "ReturnOperation, and statically resolved ForOperation bodies. "
+            "PauliEvolveOp values, ReturnOperation, compile-time-constant "
+            "IfOperation branches, and statically resolved ForOperation bodies. "
             f"Unsupported operation: {type(op).__name__}.",
             operation="ControlledUOperation",
         )

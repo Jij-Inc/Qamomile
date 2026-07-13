@@ -34,7 +34,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     SymbolicControlledU,
 )
-from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
@@ -45,6 +45,9 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
     reject_duplicate_physical_indices,
+)
+from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
+    emit_controlled_global_phase_operation,
 )
 from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
     map_array_result_group,
@@ -614,52 +617,13 @@ def emit_controlled_operations(
             _map_inverse_block_results(
                 op, inverse_control_groups, inverse_target_groups, qubit_map
             )
-        elif isinstance(op, GlobalPhaseBlockOperation):
-            global_phase_control_groups = [
-                _expand_quantum_operands_to_phys(
-                    emit_pass,
-                    operand,
-                    qubit_map,
-                    bindings,
-                    operation="GlobalPhaseBlockOperation",
-                )
-                for operand in op.control_qubits
-            ]
-            global_phase_target_groups = [
-                _expand_quantum_operands_to_phys(
-                    emit_pass,
-                    operand,
-                    qubit_map,
-                    bindings,
-                    operation="GlobalPhaseBlockOperation",
-                )
-                for operand in op.target_qubits
-            ]
-            global_phase_controls = [
-                i for group in global_phase_control_groups for i in group
-            ]
-            global_phase_targets = [
-                i for group in global_phase_target_groups for i in group
-            ]
-            # Imported lazily: global_phase_emission imports this module's
-            # shared helpers at module level, so a top-level import here
-            # would be circular.
-            from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (  # noqa: I001
-                emit_global_phase_block_at_indices,
-            )
-
-            emit_global_phase_block_at_indices(
+        elif isinstance(op, GlobalPhaseOperation):
+            emit_controlled_global_phase_operation(
                 emit_pass,
                 circuit,
                 op,
-                [*control_indices, *global_phase_controls],
-                global_phase_targets,
+                control_indices,
                 bindings,
-            )
-            _map_operand_result_groups(
-                [r for r in op.results if r.type.is_quantum()],
-                global_phase_control_groups + global_phase_target_groups,
-                qubit_map,
             )
         elif isinstance(op, PauliEvolveOp):
             emit_controlled_pauli_evolve(

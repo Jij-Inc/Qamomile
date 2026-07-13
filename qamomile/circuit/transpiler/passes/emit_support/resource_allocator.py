@@ -24,7 +24,6 @@ from qamomile.circuit.ir.operation.gate import (
     ResetOperation,
     SymbolicControlledU,
 )
-from qamomile.circuit.ir.operation.global_phase_block import GlobalPhaseBlockOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
