@@ -6,7 +6,9 @@ import math
 from typing import cast
 
 import qamomile.circuit as qmc
+from qamomile.circuit.frontend.composite_gate import configure_composite
 from qamomile.circuit.frontend.handle import Qubit, UInt, Vector
+from qamomile.circuit.ir.operation.callable import CallPolicy
 
 
 @qmc.qkernel
@@ -141,6 +143,13 @@ def ripple_carry_add(
         )
     left[0], right[0], carry = _unmajority_add(left[0], right[0], carry)
     return left, right, carry, overflow
+
+
+configure_composite(
+    ripple_carry_add,
+    namespace="qamomile.stdlib",
+    policy=CallPolicy.NATIVE_FIRST,
+)
 
 
 @qmc.composite_gate(name="ripple_carry_subtract")

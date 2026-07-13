@@ -44,36 +44,22 @@ C = TypeVar("C", contravariant=True)  # Circuit type for emitter
 
 @runtime_checkable
 class CompositeGateEmitter(Protocol[C]):
-    """Protocol for backend-specific boxed-call emitters.
+    """Protocol for preserving or lowering boxed callable operations.
 
-    Each backend can implement emitters for specific boxed callable types
-    (QPE, QFT, IQFT, etc.) using native backend libraries.
-
-    The emitter pattern allows:
-    1. Backends to use native implementations when available (e.g., Qiskit QFT)
-    2. Fallback to manual decomposition when native is unavailable
-    3. Easy addition of new backends without modifying core code
-
-    Example:
-        class QiskitQFTEmitter:
-            def can_emit(self, gate_type: CompositeGateType) -> bool:
-                return gate_type in (CompositeGateType.QFT, CompositeGateType.IQFT)
-
-            def emit(self, circuit, op, qubit_indices, bindings) -> bool:
-                from qiskit.circuit.library import QFTGate
-                qft_gate = QFTGate(len(qubit_indices))
-                circuit.append(qft_gate, qubit_indices)
-                return True
+    The concrete compiler installs a semantic emitter that boxes every
+    executable callable into circuit IR with its identity and fallback body.
+    Native SDK selection happens later, through target capabilities and
+    legalization; this traversal hook must not import or select a backend.
     """
 
     def can_emit(self, gate_type: CompositeGateType) -> bool:
-        """Check if this emitter can handle the given gate type.
+        """Check whether this emitter handles the given callable kind.
 
         Args:
-            gate_type: The CompositeGateType to check
+            gate_type (CompositeGateType): Callable kind to check.
 
         Returns:
-            True if this emitter supports native emission for the gate type
+            bool: True if this emitter handles the callable kind.
         """
         ...
 
@@ -84,16 +70,17 @@ class CompositeGateEmitter(Protocol[C]):
         qubit_indices: list[int],
         bindings: dict[str, Any],
     ) -> bool:
-        """Emit the boxed callable to the circuit.
+        """Preserve or lower the boxed callable into the output builder.
 
         Args:
-            circuit: The backend-specific circuit to emit to
-            op: The invocation to emit
-            qubit_indices: Physical qubit indices for the operation
-            bindings: Parameter bindings for the operation
+            circuit (C): Output builder receiving the callable representation.
+            op (InvokeOperation): Invocation to preserve or lower.
+            qubit_indices (list[int]): Physical qubit indices for the operation.
+            bindings (dict[str, Any]): Parameter bindings for the operation.
 
         Returns:
-            True if emission succeeded, False to fall back to manual decomposition
+            bool: True if handled, or False to use the generic fallback
+            decomposition.
         """
         ...
 

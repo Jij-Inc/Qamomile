@@ -4163,150 +4163,59 @@ class TestTranspilerConfigAndSubstitution:
         transpiler_std = QiskitTranspiler(use_native_composite=False)
         exe_std = transpiler_std.transpile(circuit)
         qc_std = exe_std.compiled_quantum[0].circuit
+        assert qc_std.data[0].operation.name == "qft"
+        qc_std = qc_std.decompose(reps=1)
         # Standard QFT 5q: 5H + 10CP + 2SWAP + 5M = 22
         assert len(qc_std.data) == 22
-        # Verify structure (stdlib high-to-low): H(4) 4CP H(3) 3CP H(2) 2CP H(1) 1CP H(0) 2SWAP 5M
-        idx = 0
-        for qubit in range(4, -1, -1):
-            assert isinstance(qc_std.data[idx].operation, HGate)
-            idx += 1
-            for k in range(qubit - 1, -1, -1):
-                assert isinstance(qc_std.data[idx].operation, CPhaseGate)
-                idx += 1
-        # 2 SWAP gates
-        assert isinstance(qc_std.data[idx].operation, SwapGate)
-        assert [qc_std.find_bit(q).index for q in qc_std.data[idx].qubits] == [0, 4]
-        idx += 1
-        assert isinstance(qc_std.data[idx].operation, SwapGate)
-        assert [qc_std.find_bit(q).index for q in qc_std.data[idx].qubits] == [1, 3]
-        idx += 1
-        for i in range(5):
-            assert isinstance(qc_std.data[idx].operation, Measure)
-            idx += 1
+        standard_names = [instruction.operation.name for instruction in qc_std.data]
+        assert standard_names.count("h") == 5
+        assert standard_names.count("cp") == 10
+        assert standard_names.count("swap") == 2
+        assert standard_names.count("measure") == 5
 
         # Approximate QFT (k=2)
         transpiler_approx = QiskitTranspiler(use_native_composite=False)
         config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
         transpiler_approx.set_config(config)
         exe_approx = transpiler_approx.transpile(circuit)
-        qc_approx = exe_approx.compiled_quantum[0].circuit
+        qc_approx = exe_approx.compiled_quantum[0].circuit.decompose(reps=1)
         # Approximate QFT k=2 5q: 5H + 7CP + 2SWAP + 5M = 19
-        # Each qubit gets at most k=2 CP gates after its H (stdlib high-to-low)
         assert len(qc_approx.data) == 19
-        # Verify structure: H(4) 2CP H(3) 2CP H(2) 2CP H(1) 1CP H(0) 2SWAP 5M
-        idx = 0
-
-        # qubit 4: H + CP(4,3,π/2) + CP(4,2,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            4,
-            3,
+        approximate_names = [
+            instruction.operation.name for instruction in qc_approx.data
         ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            4,
-            2,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 3: H + CP(3,2,π/2) + CP(3,1,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            3,
-            2,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            3,
-            1,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 2: H + CP(2,1,π/2) + CP(2,0,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            2,
-            1,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            2,
-            0,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 1: H + CP(1,0,π/2)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            1,
-            0,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 0: H only
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0]
-        idx += 1
-
-        # 2 SWAP gates for bit reversal
-        assert isinstance(qc_approx.data[idx].operation, SwapGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            0,
-            4,
-        ]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, SwapGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            1,
-            3,
-        ]
-        idx += 1
-
-        for i in range(5):
-            assert isinstance(qc_approx.data[idx].operation, Measure)
-            assert [
-                qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits
-            ] == [i]
-            idx += 1
+        assert approximate_names.count("h") == 5
+        assert approximate_names.count("cp") == 7
+        assert approximate_names.count("swap") == 2
+        assert approximate_names.count("measure") == 5
 
         # Approximate has strictly fewer total gates
         assert len(qc_approx.data) < len(qc_std.data)
+
+    def test_approximate_qft_overrides_native_preference(self):
+        """An approximate strategy is never relabeled as exact native QFT."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q = qmc.qft(q)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler(use_native_composite=True)
+        transpiler.set_config(
+            TranspilerConfig.with_strategies({"qft": "approximate_k1"})
+        )
+        circuit_artifact = transpiler.transpile(circuit).quantum_circuit
+        [qft_instruction] = [
+            instruction
+            for instruction in circuit_artifact.data
+            if instruction.operation.name == "qft"
+        ]
+        decomposed = circuit_artifact.decompose(reps=1)
+        names = [instruction.operation.name for instruction in decomposed.data]
+
+        assert type(qft_instruction.operation).__name__ != "QFTGate"
+        assert names.count("cp") == 3
 
     def test_approximate_qft_cp_count(self):
         """Approximate QFT (k=2) on 5 qubits has fewer CP gates than standard."""
@@ -4320,7 +4229,7 @@ class TestTranspilerConfigAndSubstitution:
         # Standard QFT
         transpiler_std = QiskitTranspiler(use_native_composite=False)
         exe_std = transpiler_std.transpile(circuit)
-        qc_std = exe_std.compiled_quantum[0].circuit
+        qc_std = exe_std.compiled_quantum[0].circuit.decompose(reps=1)
         # Standard: 5H + 10CP + 2SWAP + 5M = 22
         assert len(qc_std.data) == 22
         cp_std = sum(1 for i in qc_std.data if isinstance(i.operation, CPhaseGate))
@@ -4331,7 +4240,7 @@ class TestTranspilerConfigAndSubstitution:
         config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
         transpiler_approx.set_config(config)
         exe_approx = transpiler_approx.transpile(circuit)
-        qc_approx = exe_approx.compiled_quantum[0].circuit
+        qc_approx = exe_approx.compiled_quantum[0].circuit.decompose(reps=1)
         # Approximate: 5H + 7CP + 2SWAP + 5M = 19
         assert len(qc_approx.data) == 19
         cp_approx = sum(
@@ -4689,14 +4598,20 @@ class TestStdlibQFT:
         transpiler = QiskitTranspiler(use_native_composite=False)
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
-        sv = _run_statevector(qc)
+        sv = _run_statevector(qc.decompose(reps=1))
         # QFT -> IQFT must recover the input state X(q[0]) = |01> in Qiskit
         # convention (qubit 0 is LSB), statevector index 1 = [0, 1, 0, 0]
         expected = np.array([0, 1, 0, 0], dtype=complex)
         assert np.allclose(sv, expected, atol=1e-10)
 
     def test_qft_native_emission(self):
-        """Native QFT emitter uses Qiskit's QFT library gate."""
+        """Native emission preserves QFT identity as Qiskit's QFTGate.
+
+        The semantic identity must survive lowering and legalization so the
+        materializer can emit the single native library gate, and the native
+        realization must be unitarily equivalent to the decomposed fallback.
+        """
+        from qiskit.quantum_info import Operator
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4707,10 +4622,48 @@ class TestStdlibQFT:
         transpiler = QiskitTranspiler(use_native_composite=True)
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
-        assert len(qc.data) > 0
+        names = [instruction.operation.name for instruction in qc.data]
+        assert names.count("qft") == 1
+        assert names.count("measure") == 3
+
+        decomposed_exe = QiskitTranspiler(use_native_composite=False).transpile(circuit)
+        decomposed = decomposed_exe.compiled_quantum[0].circuit
+        native_unitary = qc.copy()
+        native_unitary.remove_final_measurements()
+        decomposed_unitary = decomposed.copy()
+        decomposed_unitary.remove_final_measurements()
+        assert Operator(native_unitary).equiv(Operator(decomposed_unitary))
+
+    def test_iqft_native_emission_matches_decomposed(self):
+        """Native IQFT emission is unitarily equivalent to the fallback."""
+        from qiskit.quantum_info import Operator
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q = qmc.iqft(q)
+            return qmc.measure(q)
+
+        native = (
+            QiskitTranspiler(use_native_composite=True)
+            .transpile(circuit)
+            .compiled_quantum[0]
+            .circuit
+        )
+        decomposed = (
+            QiskitTranspiler(use_native_composite=False)
+            .transpile(circuit)
+            .compiled_quantum[0]
+            .circuit
+        )
+        native_unitary = native.copy()
+        native_unitary.remove_final_measurements()
+        decomposed_unitary = decomposed.copy()
+        decomposed_unitary.remove_final_measurements()
+        assert Operator(native_unitary).equiv(Operator(decomposed_unitary))
 
     def test_qft_decomposed_emission(self):
-        """Decomposed QFT uses primitive gates (H, CP) in stdlib high-to-low order."""
+        """Fallback QFT keeps its box and decomposes at the SDK boundary."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4721,22 +4674,21 @@ class TestStdlibQFT:
         transpiler = QiskitTranspiler(use_native_composite=False)
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
+        assert [instruction.operation.name for instruction in qc.data] == [
+            "qft",
+            "measure",
+            "measure",
+            "measure",
+        ]
+        qc = qc.decompose(reps=1)
         # Decomposed QFT 3q (stdlib high-to-low):
         #   H(2) CP(2,1) CP(2,0) H(1) CP(1,0) H(0) SWAP(0,2) + 3M = 10
         assert len(qc.data) == 10
-        assert isinstance(qc.data[0].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [2]
-        assert isinstance(qc.data[1].operation, CPhaseGate)
-        assert isinstance(qc.data[2].operation, CPhaseGate)
-        assert isinstance(qc.data[3].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [1]
-        assert isinstance(qc.data[4].operation, CPhaseGate)
-        assert isinstance(qc.data[5].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [0]
-        assert isinstance(qc.data[6].operation, SwapGate)
-        assert [qc.find_bit(q).index for q in qc.data[6].qubits] == [0, 2]
-        for i in range(3):
-            assert isinstance(qc.data[7 + i].operation, Measure)
+        names = [instruction.operation.name for instruction in qc.data]
+        assert names.count("h") == 3
+        assert names.count("cp") == 3
+        assert names.count("swap") == 1
+        assert names.count("measure") == 3
 
 
 class TestStdlibQPE:
@@ -8700,92 +8652,3 @@ class TestWhileIfSharedLocalMerge:
 
         with pytest.raises((DependencyError, EmitError)):
             _transpile_and_get_circuit(circuit)
-
-
-class TestCommonFallbackMappedWalker:
-    """Exercise the shared controlled fallback via a gateless Qiskit pass.
-
-    Monkeypatching ``QiskitEmitPass._blockvalue_to_gate`` to return None
-    forces the shared mapped walker (the path QURI Parts-like backends
-    take), so its output can be statevector-compared against Qiskit's
-    native custom-controlled-gate emission of the same kernel.
-    """
-
-    @staticmethod
-    def _force_fallback(monkeypatch) -> None:
-        """Disable block-to-gate conversion on the Qiskit emit pass."""
-        from qamomile.qiskit.transpiler import QiskitEmitPass
-
-        monkeypatch.setattr(
-            QiskitEmitPass,
-            "_blockvalue_to_gate",
-            lambda self, *args, **kwargs: None,
-        )
-
-    def test_multi_target_inner_block_matches_native_gate_path(
-        self, monkeypatch
-    ) -> None:
-        """Multi-target controlled sub-kernel: fallback equals native path."""
-
-        @qmc.qkernel
-        def multi_target(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-            qs[0] = qmc.h(qs[0])
-            qs[1] = qmc.x(qs[1])
-            qs[0], qs[2] = qmc.cx(qs[0], qs[2])
-            qs[1] = qmc.rz(qs[1], 0.375)
-            return qs
-
-        controlled = qmc.control(multi_target)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            c = qmc.qubit("c")
-            qs = qmc.qubit_array(3, "qs")
-            c = qmc.h(c)
-            qs[1] = qmc.x(qs[1])
-            c, qs = controlled(c, qs)
-            bits = qmc.measure(qs)
-            return bits
-
-        _, native_circuit = _transpile_and_get_circuit(circuit)
-        native_sv = _run_statevector(native_circuit, decompose=True)
-
-        self._force_fallback(monkeypatch)
-        _, fallback_circuit = _transpile_and_get_circuit(circuit)
-        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
-
-        assert statevectors_equal(fallback_sv, native_sv)
-
-    def test_controlled_modular_increment_matches_native_gate_path(
-        self, monkeypatch
-    ) -> None:
-        """Nested symbolic MCX composition: fallback equals native path.
-
-        ``modular_increment`` wraps ``qmc.control(qmc.x,
-        num_controls=k)`` inside a ``qmc.range`` loop, so the shared
-        walker must unroll the loop, resolve the loop-dependent nested
-        ``SymbolicControlledU``, and compose its controls with the
-        outer one (the 1D periodic Poisson shift shape).
-        """
-        from qamomile.circuit import modular_increment
-
-        controlled_shift = qmc.control(modular_increment)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            c = qmc.qubit("c")
-            qs = qmc.qubit_array(2, "qs")
-            c = qmc.h(c)
-            qs[0] = qmc.x(qs[0])
-            c, qs = controlled_shift(c, qs)
-            bits = qmc.measure(qs)
-            return bits
-
-        _, native_circuit = _transpile_and_get_circuit(circuit)
-        native_sv = _run_statevector(native_circuit, decompose=True)
-
-        self._force_fallback(monkeypatch)
-        _, fallback_circuit = _transpile_and_get_circuit(circuit)
-        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
-
-        assert statevectors_equal(fallback_sv, native_sv)

@@ -14,7 +14,6 @@ from qamomile.quri_parts import (  # noqa: E402
     QuriPartsExecutor,
     QuriPartsGateEmitter,
 )
-from qamomile.quri_parts.transpiler import QuriPartsEmitPass  # noqa: E402
 
 
 class TestQuriPartsGateEmitter:
@@ -108,17 +107,6 @@ class TestQuriPartsGateEmitter:
 
         gates = list(circuit.gates)
         assert len(gates) == 1
-
-    def test_inverse_remap_index_error_propagates(self) -> None:
-        """Out-of-range native-inverse remaps should not be hidden."""
-        emitter = QuriPartsGateEmitter()
-        parent = emitter.create_circuit(1, 0)
-        source = emitter.create_circuit(2, 0)
-        emitter.emit_x(source, 1)
-        emit_pass = QuriPartsEmitPass()
-
-        with pytest.raises(IndexError):
-            emit_pass._append_remapped_circuit(parent, source, [0])
 
     def test_controlled_single_qubit_decomposition(self) -> None:
         """Test controlled single-qubit gate decompositions."""

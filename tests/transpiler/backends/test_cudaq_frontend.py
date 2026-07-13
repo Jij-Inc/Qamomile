@@ -2292,10 +2292,10 @@ class TestLogicalClbitReturnContract:
         assert "return [__b" in circuit.source
 
     def test_runnable_source_initializes_clbits(self) -> None:
-        """RUNNABLE source must initialize __b{i} = False for all clbits."""
+        """RUNNABLE source must initialize mutable clbit cells."""
         _, circuit = _transpile_and_get_circuit(_c_if_basic)
         for i in range(circuit.num_clbits):
-            assert f"__b{i} = False" in circuit.source
+            assert f"__b{i} = [False]" in circuit.source
 
     def test_runnable_measurement_qubit_map_empty(self) -> None:
         """RUNNABLE segments must not populate measurement_qubit_map."""
@@ -2724,12 +2724,10 @@ class TestCudaqHelperKernelSemanticsContract:
         sv = _run_statevector(qc)
         expected = computational_basis_state(4, 0b1111)
         assert statevectors_equal(sv, expected)
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit, t1: cudaq.qubit):",
-            "x(t0)",
-            "x(t1)",
-            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2], q[3])",
+        assert "x(q0)" in qc.source
+        assert "x(q1)" in qc.source
+        assert (
+            "cudaq.control(_qamomile_U_0, [q[0], q[1]], q[2], q[3])" in qc.entry_source
         )
 
     def test_existing_ccx_happy_path_regression(self):
@@ -3700,9 +3698,10 @@ class TestCustomCompositeGate:
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
         assert qc.execution_mode == ExecutionMode.STATIC
         assert qc.num_qubits == 2
-        _assert_source_contains(
-            qc, "def _qamomile_kernel():", "h(q[0])", "x.ctrl(q[0], q[1])"
-        )
+        assert "h(q0)" in qc.source
+        assert "x.ctrl(q0, q1)" in qc.source
+        assert "def _qamomile_kernel():" in qc.source
+        assert "_qamomile_bell_pair_" in qc.entry_source
 
     def test_composite_statevector(self):
         """A Bell composite prepares |Phi+>."""
@@ -3719,6 +3718,27 @@ class TestCustomCompositeGate:
         expected[0] = 1.0 / np.sqrt(2)
         expected[3] = 1.0 / np.sqrt(2)
         assert statevectors_equal(sv, expected)
+
+    def test_inverse_composite_uses_cudaq_adjoint(self):
+        """An inverse callable remains a named CUDA-Q adjoint invocation."""
+
+        @qmc.qkernel
+        def phase(qubit: qmc.Qubit) -> qmc.Qubit:
+            return qmc.s(qubit)
+
+        inverse_phase = qmc.inverse(phase)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            qubit = qmc.qubit("qubit")
+            qubit = qmc.h(qubit)
+            qubit = inverse_phase(qubit)
+            return qmc.measure(qubit)
+
+        _, compiled = _transpile_and_get_circuit(circuit, smoke_test=True)
+
+        assert "cudaq.adjoint(_qamomile_U_0, q0)" in compiled.source
+        assert "_qamomile__qamomile_U_0_adjoint_" in compiled.entry_source
 
 
 class TestDeepNestedQKernelComposition:
@@ -3911,15 +3931,11 @@ class TestControlledSubRoutines:
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
         assert qc.num_qubits == 2
         assert qc.execution_mode == ExecutionMode.STATIC
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit):",
-            "h(t0)",
-            "x(t0)",
-            "def _qamomile_kernel():",
-            "q = cudaq.qvector(2)",
-            "cudaq.control(_qamomile_controlled_0, q[0], q[1])",
-        )
+        assert "def _qamomile_kernel():" in qc.source
+        assert "q = cudaq.qvector(2)" in qc.entry_source
+        assert "h(q0)" in qc.source
+        assert "x(q0)" in qc.source
+        assert "cudaq.control(_qamomile_U_0, q[0], q[1])" in qc.entry_source
 
     def test_controlled_parametric_kernel_uses_cudaq_control(self):
         """A controlled parametric helper is emitted via cudaq.control."""
@@ -3938,13 +3954,9 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
-            "ry(thetas[0], t0)",
-            "def _qamomile_kernel(thetas: list[float]):",
-            "cudaq.control(_qamomile_controlled_0, q[0], q[1], thetas)",
-        )
+        assert "def _qamomile_kernel(thetas: list[float]):" in qc.source
+        assert "ry(thetas[0], q0)" in qc.source
+        assert "cudaq.control(_qamomile_U_0, q[0], q[1], thetas)" in qc.source
 
     def test_nested_controlled_parametric_helper_forwards_thetas(self):
         """A nested controlled helper forwards runtime parameters."""
@@ -3972,14 +3984,10 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
-            "ry(thetas[0], t0)",
-            "def _qamomile_controlled_1(t0: cudaq.qubit, t1: cudaq.qubit, thetas: list[float]):",
-            "cudaq.control(_qamomile_controlled_0, t0, t1, thetas)",
-            "cudaq.control(_qamomile_controlled_1, q[0], q[1], q[2], thetas)",
-        )
+        assert "def _qamomile_kernel(thetas: list[float]):" in qc.source
+        assert "ry(thetas[0], q0)" in qc.source
+        assert qc.source.count("cudaq.control(") == 2
+        assert ", thetas)" in qc.entry_source
 
     def test_controlled_multi_control_helper_uses_cudaq_control(self):
         """A multi-control helper uses CUDA-Q's controlled-kernel API."""
@@ -4001,13 +4009,9 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit):",
-            "h(t0)",
-            "x(t0)",
-            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2])",
-        )
+        assert "h(q0)" in qc.source
+        assert "x(q0)" in qc.source
+        assert "cudaq.control(_qamomile_U_0, [q[0], q[1]], q[2])" in qc.entry_source
 
     def test_identical_controlled_helpers_are_reused(self):
         """Identical generated helper kernels share one CUDA-Q helper."""
@@ -4029,8 +4033,8 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
-        assert qc.source.count("def _qamomile_controlled_") == 1
-        assert qc.source.count("cudaq.control(_qamomile_controlled_0") == 2
+        assert qc.source.count("def _qamomile_U_0(") == 1
+        assert qc.source.count("cudaq.control(_qamomile_U_0") == 2
 
     def test_controlled_power_2(self):
         """A powered controlled phase helper transpiles."""

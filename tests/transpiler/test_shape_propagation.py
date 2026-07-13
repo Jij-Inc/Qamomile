@@ -284,7 +284,10 @@ class TestNewArrayValueShapePropagation:
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
-        return QiskitTranspiler(use_native_composite=False)
+        return QiskitTranspiler(
+            use_native_composite=False,
+            use_native_pauli_evolution=False,
+        )
 
     def test_new_array_shape_propagates_through_inline(self, qiskit_transpiler):
         """A callee that creates a new ArrayValue and returns it should
@@ -333,7 +336,8 @@ class TestNewArrayValueShapePropagation:
         )
         qc = exe.compiled_quantum[0].circuit
 
-        # Count gates: should have RZ (from fallback evolve) + RX (from mixer)
+        # This fixture disables native composites, so evolution is legalized
+        # to RZ gadgets while the mixer emits RX.
         gate_names = [inst.operation.name for inst in qc.data]
         assert "rz" in gate_names, f"Expected RZ from evolve, got {gate_names}"
         assert "rx" in gate_names, f"Expected RX from mixer, got {gate_names}"

@@ -34,7 +34,11 @@ jobs:
         shell: bash
         run: |
           set -eux
-          uv sync --frozen --group dev
+          # HUGR is an optional runtime target, but its lowerer is part of the
+          # checked qamomile/ tree. Install that extra so Zuban resolves and
+          # checks the actual third-party API instead of treating imports as
+          # missing modules.
+          uv sync --frozen --group dev --extra hugr
 
       - name: Type check with zuban
         shell: bash

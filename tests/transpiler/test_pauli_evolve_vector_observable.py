@@ -101,8 +101,8 @@ class TestTrotterViaVectorObservable:
         circuit = exe.compiled_quantum[0].circuit
         gate_names = [inst.operation.name for inst in circuit.data]
         assert "for_loop" not in gate_names
-        # Each term is decomposed to an RZ (with basis change for X).
-        assert gate_names.count("rz") == 3
+        # Each term stays abstract until Qiskit's native materializer.
+        assert gate_names.count("PauliEvolution") == 3
 
     def test_commuting_trotter_matches_direct_sum(self):
         """For commuting terms, product of exponentials equals exp of sum."""
@@ -200,7 +200,7 @@ class TestTrotterBackendPortability:
         circuit = exe.compiled_quantum[0].circuit
         names = [inst.operation.name for inst in circuit.data]
         assert "for_loop" not in names
-        assert names.count("rz") == 3
+        assert names.count("PauliEvolution") == 3
 
     def test_quri_parts(self):
         pytest.importorskip("quri_parts")
@@ -217,8 +217,8 @@ class TestTrotterBackendPortability:
         circuit = exe.compiled_quantum[0].circuit
         # PauliRotation is QuriParts' native exp(-i*theta/2 * P_string),
         # which the default emitter lowers per term.
-        gate_names = [type(g).__name__ for g in getattr(circuit, "gates", ())]
-        assert gate_names, "QuriParts circuit should contain gates"
+        gate_names = [gate.name for gate in getattr(circuit, "gates", ())]
+        assert gate_names.count("PauliRotation") == 3
 
     @pytest.mark.cudaq
     def test_cudaq(self):

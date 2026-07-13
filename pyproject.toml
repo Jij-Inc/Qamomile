@@ -45,6 +45,11 @@ quri_parts = [
 qbraid = [
     "qbraid[qiskit]>=0.11.0",
 ]
+hugr = [
+    "hugr>=0.16,<0.17",
+    "selene-sim>=0.2,<0.3",
+    "tket-exts>=0.12,<0.13",
+]
 
 [dependency-groups]
 dev = [
@@ -72,7 +77,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not docs and not quri_parts and not cudaq'"
+addopts = "-m 'not docs and not quri_parts and not cudaq and not quration and not hugr'"
 # Qiskit's PauliEvolutionGate.to_matrix() triggers these harmless conversions
 # inside scipy.sparse.linalg.expm. Keep other SparseEfficiencyWarnings visible.
 filterwarnings = [
@@ -83,6 +88,8 @@ markers = [
     "docs: marks tests that run documentation examples",
     "quri_parts: marks tests that require quri-parts dependencies",
     "cudaq: marks tests that require CUDA-Q dependencies",
+    "quration: marks tests that require Quration/PyQret dependencies",
+    "hugr: marks tests that require HUGR and TKET extension dependencies",
 ]
 
 [tool.setuptools_scm]
