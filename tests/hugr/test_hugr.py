@@ -308,6 +308,102 @@ def _hugr_controlled_pauli_evolution(
     return qmc.measure(targets)
 
 
+@qmc.qkernel
+def _hugr_bit_comparisons() -> tuple[qmc.Bit, qmc.Bit]:
+    """Compare two measurement-derived bits.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit]: Equality and inequality results.
+    """
+    left = qmc.measure(qmc.qubit("left"))
+    right = qmc.measure(qmc.qubit("right"))
+    return left == right, left != right
+
+
+@qmc.qkernel
+def _hugr_bit_comparison_if() -> qmc.Bit:
+    """Use measurement-derived Bit equality as a conditional predicate.
+
+    Returns:
+        qmc.Bit: Measurement of the conditionally updated target qubit.
+    """
+    left = qmc.measure(qmc.qubit("left"))
+    right = qmc.measure(qmc.qubit("right"))
+    target = qmc.qubit("target")
+    if left == right:
+        target = qmc.x(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_uint_comparisons(
+    left: qmc.UInt,
+    right: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]:
+    """Compare two runtime UInt values with every supported relation.
+
+    Args:
+        left (qmc.UInt): Left comparison operand.
+        right (qmc.UInt): Right comparison operand.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]:
+            Equality, inequality, less-than, less-than-or-equal, greater-than,
+            and greater-than-or-equal results.
+    """
+    return (
+        left == right,
+        left != right,
+        left < right,
+        left <= right,
+        left > right,
+        left >= right,
+    )
+
+
+@qmc.qkernel
+def _hugr_mixed_numeric_comparisons(
+    integer: qmc.UInt,
+    real: qmc.Float,
+) -> tuple[
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+]:
+    """Compare runtime UInt and Float values in both operand orders.
+
+    Args:
+        integer (qmc.UInt): Unsigned-integer comparison operand.
+        real (qmc.Float): Floating-point comparison operand.
+
+    Returns:
+        tuple[qmc.Bit, ...]: All six comparison results in each operand order.
+    """
+    return (
+        integer == real,
+        integer != real,
+        integer < real,
+        integer <= real,
+        integer > real,
+        integer >= real,
+        real == integer,
+        real != integer,
+        real < integer,
+        real <= integer,
+        real > integer,
+        real >= integer,
+    )
+
+
 @pytest.mark.hugr
 def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
     """A bound quantum program produces a validator-clean HUGR package."""
@@ -319,6 +415,59 @@ def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
     assert isinstance(compiled.artifact, Package)
     assert compiled.metadata.target == "hugr"
     assert compiled.metadata.pipeline == "program_graph"
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_bit_comparisons() -> None:
+    """Measurement-derived Bit equality uses validator-clean Bool operations."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(_hugr_bit_comparisons)
+
+    transpiler.target.validate(package)
+    operations = "\n".join(str(data.op) for _, data in package.modules[0].nodes())
+    assert "name='eq'" in operations
+    assert "name='xor'" in operations
+
+    conditional_package = transpiler.to_hugr(_hugr_bit_comparison_if)
+    transpiler.target.validate(conditional_package)
+    conditional_operations = [
+        data.op for _, data in conditional_package.modules[0].nodes()
+    ]
+    assert any(
+        type(operation).__name__ == "Conditional"
+        for operation in conditional_operations
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_uint_comparisons() -> None:
+    """Runtime UInt relations use unsigned integer comparison operations."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_uint_comparisons,
+        parameters=["left", "right"],
+    )
+
+    transpiler.target.validate(package)
+    operations = "\n".join(str(data.op) for _, data in package.modules[0].nodes())
+    for name in ("ieq", "ine", "ilt_u", "ile_u", "igt_u", "ige_u"):
+        assert f"name='{name}'" in operations
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_mixed_numeric_comparisons() -> None:
+    """The HUGR target converts UInt wires immediately before Float comparison."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_mixed_numeric_comparisons,
+        parameters=["integer", "real"],
+    )
+
+    transpiler.target.validate(package)
+    operations = "\n".join(str(data.op) for _, data in package.modules[0].nodes())
+    assert operations.count("name='convert_u'") == 12
+    for name in ("feq", "fne", "flt", "fle", "fgt", "fge"):
+        assert operations.count(f"name='{name}'") == 2
 
 
 @pytest.mark.hugr
