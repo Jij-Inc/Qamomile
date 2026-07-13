@@ -1287,6 +1287,18 @@ def _quantum_origins(
         nested_operations: list[Operation],
         incoming: dict[str, _QuantumOrigin],
     ) -> dict[str, _QuantumOrigin]:
+        """Propagate captured quantum origins through one nested region.
+
+        Args:
+            nested_operations (list[Operation]): Region operations in execution
+                order.
+            incoming (dict[str, _QuantumOrigin]): Quantum origins visible at
+                the region entry.
+
+        Returns:
+            dict[str, _QuantumOrigin]: Quantum origins visible at the region
+                exit.
+        """
         current = dict(incoming)
         for operation in nested_operations:
             if isinstance(operation, IfOperation):
@@ -1631,6 +1643,11 @@ def _deduplicate_quantum_capture_ids(
     """
 
     def visit_value(value: ValueBase) -> None:
+        """Discard a captured element already represented by its root array.
+
+        Args:
+            value (ValueBase): Candidate quantum value to deduplicate.
+        """
         if not isinstance(value, Value) or not value.type.is_quantum():
             return
         root_uuid = _array_root_uuid(value)
@@ -1643,6 +1660,12 @@ def _deduplicate_quantum_capture_ids(
             captured.discard(value.uuid)
 
     def visit_operations(nested_operations: list[Operation]) -> None:
+        """Visit every input value in a nested operation tree.
+
+        Args:
+            nested_operations (list[Operation]): Operations to inspect
+                recursively.
+        """
         for operation in nested_operations:
             for value in operation.all_input_values():
                 visit_value(value)
