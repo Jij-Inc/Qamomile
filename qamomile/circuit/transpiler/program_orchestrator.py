@@ -5,6 +5,7 @@ This module is internal. Users interact with ExecutableProgram.sample()/run().
 
 from __future__ import annotations
 
+import numbers
 from typing import Any, Generic, TypeVar
 
 from qamomile.circuit.ir.value import (
@@ -13,7 +14,6 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueLike,
-    resolve_root_array_index,
 )
 from qamomile.circuit.transpiler.classical_executor import (
     ClassicalExecutor,
@@ -763,9 +763,18 @@ class ProgramOrchestrator(Generic[T]):
             Any | None: Tuple of resolved elements, or ``None`` when the array
                 cannot be reconstructed.
         """
-        direct = self._resolve_direct_output_value(value, context)
-        if direct is not None:
-            return direct
+        # A sliced view can inherit the root parameter's provenance. Resolving
+        # it directly by parameter name would return the whole root container,
+        # so only root arrays take the general direct-value path. A view may
+        # still have been materialized explicitly under its own UUID.
+        if value.slice_of is None:
+            direct = self._resolve_direct_output_value(value, context)
+            if direct is not None:
+                return direct
+        else:
+            materialized_view = self._resolve_context_value_uuid(value.uuid, context)
+            if materialized_view is not None:
+                return materialized_view
         if not value.shape:
             return None
         length = self._resolve_context_int_value(value.shape[0], context)
@@ -839,39 +848,33 @@ class ProgramOrchestrator(Generic[T]):
         if indices is None:
             return None
 
-        container = self._resolve_array_container_output(parent, context)
-        if container is not None:
-            if len(indices) == 1:
-                return container[indices[0]]
-            return container[indices]
-
-        if len(indices) != 1:
-            return None
-
-        resolved = resolve_root_array_index(parent, indices[0])
-        if resolved is not None:
-            root, root_idx = resolved
-            root_key = f"{root.uuid}_{root_idx}"
-            if context.has(root_key):
-                return context.get(root_key)
-
-        parent_key = f"{parent.uuid}_{indices[0]}"
-        if context.has(parent_key):
-            return context.get(parent_key)
-
-        if parent.name:
-            indexed_key = f"{parent.name}[{indices[0]}]"
-            if context.has(indexed_key):
-                return context.get(indexed_key)
-
         resolved_location = resolve_runtime_array_location(
             parent,
             indices,
             lambda v: self._resolve_context_int_value(v, context),
         )
-        if resolved_location is not None:
-            root, root_indices = resolved_location
-            return self._resolve_array_location_output(root, root_indices, context)
+        if resolved_location is None:
+            return None
+        root, root_indices = resolved_location
+
+        # Physical root coordinates are authoritative for both static and
+        # runtime-bound slice chains. This prevents ``values[1:][0]`` from
+        # accidentally indexing slot 0 of the root parameter payload.
+        resolved = self._resolve_array_location_output(root, root_indices, context)
+        if resolved is not None:
+            return resolved
+
+        # Some control-flow paths materialize a view under its own UUID.
+        # Preserve that explicit payload only after the physical lookup, and
+        # index it in the view's local coordinate space.
+        if parent.uuid != root.uuid and context.has(parent.uuid):
+            container = context.get(parent.uuid)
+            try:
+                if len(indices) == 1:
+                    return container[indices[0]]
+                return container[indices]
+            except (IndexError, KeyError, TypeError):
+                return None
         return None
 
     def _resolve_array_container_output(
@@ -947,17 +950,10 @@ class ProgramOrchestrator(Generic[T]):
         """
         indices: list[int] = []
         for index in value.element_indices:
-            if index.is_constant():
-                indices.append(int(index.get_const()))
-                continue
-            if context.has(index.uuid):
-                indices.append(int(context.get(index.uuid)))
-                continue
-            param_name = index.parameter_name()
-            if param_name and context.has(param_name):
-                indices.append(int(context.get(param_name)))
-                continue
-            return None
+            resolved = self._resolve_context_int_value(index, context)
+            if resolved is None or resolved < 0:
+                return None
+            indices.append(resolved)
         return tuple(indices)
 
     def _resolve_context_int_value(
@@ -975,13 +971,17 @@ class ProgramOrchestrator(Generic[T]):
         Returns:
             int | None: Integer value, or ``None`` when unresolved.
         """
+        raw: Any = None
         if value.is_constant():
-            return int(value.get_const())
-        if context.has(value.uuid):
-            return int(context.get(value.uuid))
-        if value.name and context.has(value.name):
-            return int(context.get(value.name))
-        param_name = value.parameter_name()
-        if param_name and context.has(param_name):
-            return int(context.get(param_name))
-        return None
+            raw = value.get_const()
+        elif context.has(value.uuid):
+            raw = context.get(value.uuid)
+        elif value.name and context.has(value.name):
+            raw = context.get(value.name)
+        else:
+            param_name = value.parameter_name()
+            if param_name and context.has(param_name):
+                raw = context.get(param_name)
+        if isinstance(raw, bool) or not isinstance(raw, numbers.Integral):
+            return None
+        return int(raw)

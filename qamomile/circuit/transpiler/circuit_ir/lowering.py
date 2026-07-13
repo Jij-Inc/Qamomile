@@ -17,7 +17,11 @@ from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
     InvokeOperation,
 )
-from qamomile.circuit.ir.operation.control_flow import IfOperation, WhileOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    IfOperation,
+    WhileOperation,
+    validate_region_args,
+)
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.circuit_ir.emitter import CircuitGateEmitter
@@ -37,6 +41,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     SemanticOpKey,
     UnaryExpr,
     UnaryOperator,
+    _contains_classical_bit,
 )
 from qamomile.circuit.transpiler.circuit_ir.verify import verify_circuit
 from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
@@ -44,10 +49,13 @@ from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.passes.emit_support import ClbitMap, QubitMap
 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+    join_runtime_condition_sources,
     register_classical_merge_aliases,
     register_merge_outputs,
     resolve_condition_address,
     resolve_if_condition,
+    restore_runtime_condition_sources,
+    snapshot_runtime_condition_sources,
 )
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import QubitAddress
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
@@ -313,6 +321,7 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             return
         condition = self._condition_expression(op.condition, clbit_map, bindings)
+        entry_overwrites = snapshot_runtime_condition_sources(self)
         context = circuit.begin_if(condition)
         self._emit_operations(
             circuit,
@@ -322,6 +331,8 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             bindings,
             emit_qinit_reset=True,
         )
+        true_overwrites = snapshot_runtime_condition_sources(self)
+        restore_runtime_condition_sources(self, entry_overwrites)
         if op.false_operations:
             circuit.begin_else(context)
             self._emit_operations(
@@ -332,7 +343,11 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 bindings,
                 emit_qinit_reset=True,
             )
+            false_overwrites = snapshot_runtime_condition_sources(self)
+        else:
+            false_overwrites = entry_overwrites
         circuit.end_if(context)
+        join_runtime_condition_sources(self, true_overwrites, false_overwrites)
         register_merge_outputs(self, op, qubit_map, clbit_map, bindings)
         register_classical_merge_aliases(self, op, bindings, None)
 
@@ -356,6 +371,18 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
         Raises:
             EmitError: If the loop has no condition operand.
         """
+        try:
+            region_args = validate_region_args(op)
+        except ValueError as error:
+            raise EmitError(str(error), operation="WhileOperation") from error
+        if region_args:
+            names = ", ".join(region_arg.var_name for region_arg in region_args)
+            raise EmitError(
+                "Loop-carried classical values in a while loop cannot be "
+                f"lowered to CircuitProgram ({names}): the runtime loop "
+                "cannot thread host-side scalar state between iterations.",
+                operation="WhileOperation",
+            )
         if not op.operands:
             raise EmitError("WhileOperation requires a condition operand")
         condition = op.operands[0]
@@ -410,8 +437,6 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 operation="PauliEvolveOp",
             )
         gamma = _resolve_gamma(self, op, bindings)
-        if gamma is None:
-            raise EmitError("Cannot resolve Pauli evolution time")
         for operators, coefficient in hamiltonian:
             if abs(coefficient.imag) > HERMITIAN_IMAG_ATOL:
                 raise EmitError(
@@ -606,26 +631,6 @@ _SCALAR_EXPR_TYPES = (
     BinaryExpr,
     UnaryExpr,
 )
-
-
-def _contains_classical_bit(expression: ScalarExpr) -> bool:
-    """Return whether an expression depends on a measured classical bit.
-
-    Args:
-        expression (ScalarExpr): Expression to inspect.
-
-    Returns:
-        bool: True when a :class:`ClassicalBitExpr` occurs recursively.
-    """
-    if isinstance(expression, ClassicalBitExpr):
-        return True
-    if isinstance(expression, BinaryExpr):
-        return _contains_classical_bit(expression.left) or _contains_classical_bit(
-            expression.right
-        )
-    if isinstance(expression, UnaryExpr):
-        return _contains_classical_bit(expression.operand)
-    return False
 
 
 def lower_circuit_plan(

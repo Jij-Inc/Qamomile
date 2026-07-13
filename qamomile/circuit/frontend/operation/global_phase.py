@@ -30,12 +30,18 @@ from qamomile.circuit.ir.value import ArrayValue, Value
 PhaseValue = float | int | Float
 
 
-def _phase_to_value(phase: PhaseValue) -> Value:
+def _phase_to_value(
+    phase: PhaseValue,
+    *,
+    caller: str = "global_phase()",
+) -> Value:
     """Coerce a user-supplied phase angle into a scalar IR value.
 
     Args:
         phase (float | int | Float): Phase angle in radians, as a Qamomile
             ``Float`` handle or a Python numeric literal.
+        caller (str): API context used in validation diagnostics. Defaults to
+            ``"global_phase()"``.
 
     Returns:
         Value: Scalar ``FloatType`` phase value.
@@ -48,18 +54,18 @@ def _phase_to_value(phase: PhaseValue) -> Value:
         return phase.value
     if isinstance(phase, Handle):
         raise TypeError(
-            "global_phase(): phase must be a Float handle or a number, got "
+            f"{caller}: phase must be a Float handle or a number, got "
             f"{type(phase).__name__}. Pass a qmc.Float (or a Python float)."
         )
     if isinstance(phase, bool):
         raise TypeError(
-            "global_phase(): phase must be a number, not bool. Pass a numeric "
+            f"{caller}: phase must be a number, not bool. Pass a numeric "
             "angle in radians (or a qmc.Float handle)."
         )
     if isinstance(phase, (int, float)):
         return Value(type=FloatType(), name="global_phase").with_const(float(phase))
     raise TypeError(
-        "global_phase(): phase must be a Float handle or a number, got "
+        f"{caller}: phase must be a Float handle or a number, got "
         f"{type(phase).__name__}."
     )
 

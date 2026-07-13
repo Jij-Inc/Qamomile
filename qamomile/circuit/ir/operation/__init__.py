@@ -68,6 +68,8 @@ from .control_flow import (
     ForItemsOperation,
     HasNestedOps,
     LoopCarriedRebind,
+    RegionArg,
+    validate_region_args,
 )
 from .expval import ExpvalOp
 from .gate import (
@@ -120,6 +122,8 @@ __all__ = [
     "ForItemsOperation",
     "HasNestedOps",
     "LoopCarriedRebind",
+    "RegionArg",
+    "validate_region_args",
     # Expectation value operation
     "ExpvalOp",
     # Slice operation

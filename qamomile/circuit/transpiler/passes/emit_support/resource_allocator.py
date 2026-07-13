@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import numbers
 from typing import TYPE_CHECKING, Any
 
@@ -9,9 +10,12 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
     HasNestedOps,
     IfOperation,
     WhileOperation,
+    genuine_input_values,
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -27,9 +31,18 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
+from qamomile.circuit.ir.types.primitives import BitType
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    ValueBase,
+    array_physical_region,
+    resolve_root_qubit_address,
+)
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
+    _is_unresolved_bit_element,
+    _merge_source_is_branch_local_measurement,
     map_merge_outputs,
     remap_static_merge_outputs,
     resolve_condition_address_detailed,
@@ -49,6 +62,8 @@ from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from qamomile.circuit.ir.value import Value
 
 
@@ -78,6 +93,531 @@ class ResourceAllocator:
         self._next_qubit_index: int = 0
         self._next_clbit_index: int = 0
         self._resolver = resolver or ValueResolver()
+        self._measurement_tainted: set[str] = set()
+        self._safe_mixed_bit_merge_outputs: frozenset[str] = frozenset()
+
+    @contextlib.contextmanager
+    def preserving_analysis_state(self) -> Iterator[None]:
+        """Preserve segment-level analysis state across a nested allocation.
+
+        ``allocate`` recomputes the measurement-taint set, the safe
+        mixed-merge allowlist, and the monotonic resource counters for
+        the operation list it receives. Nested sub-circuit emission
+        (controlled blocks, native inverses) reuses the SEGMENT
+        allocator on a different operation list mid-emission; without a
+        snapshot that leaves the sub-block's analysis state behind, and
+        later ``resolve_iteration_maps`` replays of the enclosing
+        segment consult the wrong taint/allowlist sets — silently
+        disarming the runtime-mux guards.
+
+        Yields:
+            None: The nested allocation and emission run inside the
+                snapshot; the segment state is restored on exit even
+                when the nested work raises.
+        """
+        saved_tainted = self._measurement_tainted
+        saved_safe = self._safe_mixed_bit_merge_outputs
+        saved_next_qubit = self._next_qubit_index
+        saved_next_clbit = self._next_clbit_index
+        try:
+            yield
+        finally:
+            self._measurement_tainted = saved_tainted
+            self._safe_mixed_bit_merge_outputs = saved_safe
+            self._next_qubit_index = saved_next_qubit
+            self._next_clbit_index = saved_next_clbit
+
+    @property
+    def safe_mixed_bit_merge_outputs(self) -> frozenset[str]:
+        """Return mixed-provenance Bit merges proven safe to alias.
+
+        Returns:
+            frozenset[str]: Merge-result UUIDs whose pre-existing clbit source
+                is dead after the merge on every enclosing path.
+        """
+        return self._safe_mixed_bit_merge_outputs
+
+    def _find_safe_mixed_bit_merge_outputs(
+        self,
+        operations: list[Operation],
+        bindings: dict[str, Any],
+        dependency_graph: dict[str, set[str]],
+        public_output_uuids: frozenset[str] | set[str] | None,
+    ) -> frozenset[str]:
+        """Find prior/fresh Bit merges whose prior clbit is provably dead.
+
+        Args:
+            operations (list[Operation]): Complete operation tree to inspect.
+            bindings (dict[str, Any]): Bindings used to resolve vector-element
+                clbit addresses.
+            dependency_graph (dict[str, set[str]]): Classical value dependency
+                graph used to trace lazy expressions to measured sources.
+            public_output_uuids (frozenset[str] | set[str] | None): Program
+                outputs live after this operation tree. ``None`` means a full
+                liveness proof is unavailable, so no mixed merge is approved.
+
+        Returns:
+            frozenset[str]: Merge-result UUIDs safe for clbit aliasing.
+        """
+        if public_output_uuids is None:
+            return frozenset()
+
+        merges: list[tuple[IfOperation, Value, Value, Value]] = []
+        reads_after_if: dict[int, set[str]] = {}
+        value_table: dict[str, ValueBase] = {}
+
+        def register_value(value: ValueBase) -> None:
+            """Register a value and all structural child Values.
+
+            Args:
+                value (ValueBase): Value to add to ``value_table``.
+            """
+            if value.uuid in value_table:
+                return
+            value_table[value.uuid] = value
+            for attr in ("parent_array", "slice_of", "slice_start", "slice_step"):
+                referenced = getattr(value, attr, None)
+                if isinstance(referenced, ValueBase):
+                    register_value(referenced)
+            for attr in ("element_indices", "shape", "elements"):
+                for referenced in getattr(value, attr, ()):
+                    if isinstance(referenced, ValueBase):
+                        register_value(referenced)
+            for key, item in getattr(value, "entries", ()):
+                if isinstance(key, ValueBase):
+                    register_value(key)
+                if isinstance(item, ValueBase):
+                    register_value(item)
+
+        def direct_references(value: ValueBase) -> set[str]:
+            """Collect direct dataflow references without parent widening.
+
+            Args:
+                value (ValueBase): Value read at one program point.
+
+            Returns:
+                set[str]: Its UUID plus index, shape, and container members.
+            """
+            references = {value.uuid}
+            for attr in ("element_indices", "shape", "elements"):
+                for referenced in getattr(value, attr, ()):
+                    if isinstance(referenced, ValueBase):
+                        references.update(direct_references(referenced))
+            for attr in ("slice_start", "slice_step"):
+                referenced = getattr(value, attr, None)
+                if isinstance(referenced, ValueBase):
+                    references.update(direct_references(referenced))
+            for key, item in getattr(value, "entries", ()):
+                if isinstance(key, ValueBase):
+                    references.update(direct_references(key))
+                if isinstance(item, ValueBase):
+                    references.update(direct_references(item))
+            return references
+
+        def operation_reads(operation: Operation) -> set[str]:
+            """Collect direct reads from an operation subtree.
+
+            Args:
+                operation (Operation): Operation tree to inspect.
+
+            Returns:
+                set[str]: UUIDs read by the operation or nested bodies.
+            """
+            references: set[str] = set()
+            for value in genuine_input_values(operation):
+                references.update(direct_references(value))
+            if isinstance(operation, HasNestedOps):
+                for body in operation.nested_op_lists():
+                    for nested in body:
+                        references.update(operation_reads(nested))
+            return references
+
+        def record_suffix_reads(
+            scope: list[Operation],
+            inherited: set[str],
+            *,
+            cyclic: bool = False,
+            cycle_prefix: set[str] | None = None,
+        ) -> None:
+            """Record path-aware values observed after each nested if.
+
+            A loop body is a cyclic scope.  Reads before an if in the next
+            iteration are therefore live after that if in the current
+            iteration: once a branch-local measurement overwrites an external
+            clbit, those prefix reads would observe the new value rather than
+            the snapshot captured before the loop.  The current if's own merge
+            sources are deliberately not part of its prefix; a while-condition
+            phi is expected to read its prior value at the update itself.
+
+            Args:
+                scope (list[Operation]): Sequential scope to walk backwards.
+                inherited (set[str]): Reads after the scope returns.
+                cyclic (bool): Whether control returns to the start of this
+                    scope after its end. Defaults to False.
+                cycle_prefix (set[str] | None): Reads executed before this
+                    nested scope on the next traversal of an enclosing cycle.
+                    Defaults to None.
+            """
+            prefix_reads: dict[int, set[str]] = {}
+            prefix = set(cycle_prefix or ())
+            if cyclic:
+                for operation in scope:
+                    prefix_reads[id(operation)] = set(prefix)
+                    prefix.update(operation_reads(operation))
+
+            suffix = set(inherited)
+            for operation in reversed(scope):
+                if isinstance(operation, IfOperation):
+                    reads_after_if[id(operation)] = set(suffix) | prefix_reads.get(
+                        id(operation), set()
+                    )
+                    result_uuids = {
+                        merge.result.uuid for merge in operation.iter_merges()
+                    }
+                    branch_suffix = suffix - result_uuids
+                    true_exit: set[str] = set()
+                    false_exit: set[str] = set()
+                    for merge in operation.iter_merges():
+                        true_exit.update(direct_references(merge.true_value))
+                        false_exit.update(direct_references(merge.false_value))
+                    nested_cycle_prefix = set(prefix_reads.get(id(operation), ()))
+                    if operation.operands and isinstance(
+                        operation.operands[0], ValueBase
+                    ):
+                        nested_cycle_prefix.update(
+                            direct_references(operation.operands[0])
+                        )
+                    record_suffix_reads(
+                        operation.true_operations,
+                        branch_suffix | true_exit,
+                        cyclic=cyclic,
+                        cycle_prefix=nested_cycle_prefix,
+                    )
+                    record_suffix_reads(
+                        operation.false_operations,
+                        branch_suffix | false_exit,
+                        cyclic=cyclic,
+                        cycle_prefix=nested_cycle_prefix,
+                    )
+                elif isinstance(
+                    operation, (ForOperation, ForItemsOperation, WhileOperation)
+                ):
+                    enclosing_cycle_prefix = prefix_reads.get(id(operation), set())
+                    for body in operation.nested_op_lists():
+                        record_suffix_reads(
+                            body,
+                            suffix,
+                            cyclic=True,
+                            cycle_prefix=enclosing_cycle_prefix,
+                        )
+                elif isinstance(operation, HasNestedOps):
+                    for body in operation.nested_op_lists():
+                        record_suffix_reads(
+                            body,
+                            suffix,
+                            cyclic=cyclic,
+                            cycle_prefix=prefix_reads.get(id(operation), set()),
+                        )
+                suffix.update(operation_reads(operation))
+
+        def walk(scope: list[Operation]) -> None:
+            """Collect merge records and the Values needed for lookup.
+
+            Args:
+                scope (list[Operation]): Current nested operation list.
+            """
+            for operation in scope:
+                for value in (*genuine_input_values(operation), *operation.results):
+                    register_value(value)
+                if isinstance(operation, IfOperation):
+                    for merge in operation.iter_merges():
+                        register_value(merge.true_value)
+                        register_value(merge.false_value)
+                        register_value(merge.result)
+                        merges.append(
+                            (
+                                operation,
+                                merge.true_value,
+                                merge.false_value,
+                                merge.result,
+                            )
+                        )
+                if isinstance(operation, HasNestedOps):
+                    for body in operation.nested_op_lists():
+                        walk(body)
+
+        walk(operations)
+        record_suffix_reads(operations, set(public_output_uuids))
+
+        def depends_on_address(
+            uuid: str,
+            target: QubitAddress,
+            barriers: frozenset[str],
+            visiting: frozenset[str] = frozenset(),
+        ) -> bool:
+            """Return whether a read reaches a pre-merge clbit address.
+
+            Args:
+                uuid (str): Read UUID to trace backwards.
+                target (QubitAddress): Pre-existing clbit address.
+                barriers (frozenset[str]): Current merge results representing
+                    updated phi values.
+                visiting (frozenset[str]): UUIDs on the recursion path.
+
+            Returns:
+                bool: Whether ``target`` is read without crossing a barrier.
+            """
+            if uuid in barriers or uuid in visiting:
+                return False
+            value = value_table.get(uuid)
+            if value is not None and isinstance(value.type, BitType):
+                if isinstance(value, ArrayValue):
+                    root = value
+                    while root.slice_of is not None:
+                        root = root.slice_of
+                    if root.uuid == target.uuid:
+                        region = array_physical_region(value)
+                        if region is None or target.element_index is None:
+                            return True
+                        return target.element_index in region[1]
+                elif isinstance(value, Value):
+                    address, resolved_as_element = resolve_condition_address_detailed(
+                        value, bindings, self._resolver
+                    )
+                    if not _is_unresolved_bit_element(value, resolved_as_element):
+                        if address == target:
+                            return True
+                        if resolved_as_element:
+                            return False
+            next_visiting = visiting | {uuid}
+            return any(
+                depends_on_address(dependency, target, barriers, next_visiting)
+                for dependency in dependency_graph.get(uuid, ())
+            )
+
+        allowed: set[str] = set()
+        for if_operation, true_source, false_source, result in merges:
+            if not isinstance(result.type, BitType):
+                continue
+            true_local = _merge_source_is_branch_local_measurement(
+                true_source, if_operation.true_operations
+            )
+            false_local = _merge_source_is_branch_local_measurement(
+                false_source, if_operation.false_operations
+            )
+            if true_local == false_local:
+                continue
+            external_source = false_source if true_local else true_source
+            external_addresses: tuple[QubitAddress, ...]
+            if isinstance(external_source, ArrayValue):
+                region = array_physical_region(external_source)
+                if region is None:
+                    continue
+                root = external_source
+                while root.slice_of is not None:
+                    root = root.slice_of
+                external_addresses = tuple(
+                    QubitAddress(root.uuid, root_index) for root_index in region[1]
+                )
+            else:
+                external_address, resolved_as_element = (
+                    resolve_condition_address_detailed(
+                        external_source, bindings, self._resolver
+                    )
+                )
+                if _is_unresolved_bit_element(external_source, resolved_as_element):
+                    continue
+                external_addresses = (external_address,)
+
+            # A pre-existing clbit cannot serve as the in-place update slot
+            # for one merge while another output of the same runtime branch
+            # still selects that old value.  The two merge results are
+            # simultaneous: treating every result as a liveness barrier would
+            # incorrectly approve crossed shapes such as
+            # ``(fresh, old)`` / ``(old, fresh)`` and collapse two independent
+            # outputs onto one clbit.  Fail closed whenever another merge
+            # source in this If reaches the candidate external address.
+            same_if_sources = tuple(
+                source
+                for other_if, other_true, other_false, other_result in merges
+                if other_if is if_operation and other_result.uuid != result.uuid
+                for source in (other_true, other_false)
+            )
+            if any(
+                depends_on_address(source.uuid, external_address, frozenset())
+                for external_address in external_addresses
+                for source in same_if_sources
+            ):
+                continue
+            barriers = frozenset(
+                merge.result.uuid for merge in if_operation.iter_merges()
+            )
+            if any(
+                depends_on_address(read, external_address, barriers)
+                for external_address in external_addresses
+                for read in reads_after_if.get(id(if_operation), ())
+            ):
+                continue
+            allowed.add(result.uuid)
+        return frozenset(allowed)
+
+    def _validate_while_condition_lineages(
+        self,
+        operations: list[Operation],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Reject while-condition updates that require copying an old clbit.
+
+        Qamomile implements a runtime while-condition update by making every
+        branch-local measurement write into the condition's existing physical
+        clbit.  That is a phi update, not a classical copy: a pre-measured Bit
+        from elsewhere cannot be assigned to the condition because its value
+        already lives in another clbit before the loop begins.  Aliasing that
+        foreign address would instead retarget the earlier measurement and can
+        change the loop's *initial* condition.
+
+        Args:
+            operations (list[Operation]): Complete operation tree to validate.
+            bindings (dict[str, Any]): Active bindings used to resolve measured
+                vector element addresses.
+
+        Raises:
+            EmitError: If a loop-carried while condition has a pre-existing
+                leaf that is neither the current condition nor a measurement
+                executed in the loop body branch that selects it.
+        """
+
+        def validate_while(operation: WhileOperation) -> None:
+            """Validate one while operation's updated-condition lineage.
+
+            Args:
+                operation (WhileOperation): While operation to validate.
+
+            Raises:
+                EmitError: If its updated condition contains a foreign
+                    pre-measured Bit leaf.
+            """
+            if len(operation.operands) != 2:
+                return
+            initial = operation.operands[0]
+            updated = operation.operands[1]
+
+            initial_address, initial_resolved = resolve_condition_address_detailed(
+                initial, bindings, self._resolver
+            )
+            initial_unresolved = _is_unresolved_bit_element(initial, initial_resolved)
+            merge_producers: dict[str, tuple[IfOperation, Value, Value]] = {}
+
+            def collect_merges(scope: list[Operation]) -> None:
+                """Collect if-merge producers in the while body.
+
+                Args:
+                    scope (list[Operation]): Nested operation list to scan.
+                """
+                for nested in scope:
+                    if isinstance(nested, IfOperation):
+                        for merge in nested.iter_merges():
+                            merge_producers[merge.result.uuid] = (
+                                nested,
+                                merge.true_value,
+                                merge.false_value,
+                            )
+                    if isinstance(nested, HasNestedOps):
+                        for body in nested.nested_op_lists():
+                            collect_merges(body)
+
+            collect_merges(operation.operations)
+
+            def is_current_condition(source: Value) -> bool:
+                """Return whether a source denotes the current condition slot.
+
+                Args:
+                    source (Value): Candidate pre-existing condition source.
+
+                Returns:
+                    bool: True for the same UUID or the same resolved vector
+                        element address as the initial condition.
+                """
+                if source.uuid == initial.uuid:
+                    return True
+                source_address, source_resolved = resolve_condition_address_detailed(
+                    source, bindings, self._resolver
+                )
+                if initial_unresolved or _is_unresolved_bit_element(
+                    source, source_resolved
+                ):
+                    return False
+                return source_address == initial_address
+
+            def validate_source(
+                source: Value,
+                scope: list[Operation],
+                visiting: frozenset[str] = frozenset(),
+            ) -> None:
+                """Validate one updated-condition source recursively.
+
+                Args:
+                    source (Value): Source selected for the next condition.
+                    scope (list[Operation]): Branch scope in which the source
+                        may have been freshly measured.
+                    visiting (frozenset[str]): Merge-result UUIDs on the current
+                        recursion path. Defaults to an empty set.
+
+                Raises:
+                    EmitError: If the source is a foreign pre-measured Bit or a
+                        cyclic/malformed merge lineage.
+                """
+                if is_current_condition(source):
+                    return
+                if _merge_source_is_branch_local_measurement(source, scope):
+                    return
+                if source.uuid in visiting:
+                    raise EmitError(
+                        "Runtime while-condition update has a cyclic Bit merge "
+                        "lineage that cannot be mapped to one condition clbit.",
+                        operation="WhileOperation",
+                    )
+                producer = merge_producers.get(source.uuid)
+                if producer is not None:
+                    if_operation, true_source, false_source = producer
+                    next_visiting = visiting | {source.uuid}
+                    validate_source(
+                        true_source,
+                        if_operation.true_operations,
+                        next_visiting,
+                    )
+                    validate_source(
+                        false_source,
+                        if_operation.false_operations,
+                        next_visiting,
+                    )
+                    return
+                raise EmitError(
+                    "Runtime while-condition update selects a pre-existing "
+                    "measured Bit that is not the current condition. Clbit "
+                    "aliasing can route a branch-local remeasurement into the "
+                    "condition slot, but it cannot copy a value already stored "
+                    "in another clbit. Remeasure the condition in that branch "
+                    "or restructure the loop.",
+                    operation="WhileOperation",
+                )
+
+            validate_source(updated, operation.operations)
+
+        def walk(scope: list[Operation]) -> None:
+            """Validate every while nested in an operation tree.
+
+            Args:
+                scope (list[Operation]): Operation list to scan recursively.
+            """
+            for operation in scope:
+                if isinstance(operation, WhileOperation):
+                    validate_while(operation)
+                if isinstance(operation, HasNestedOps):
+                    for body in operation.nested_op_lists():
+                        walk(body)
+
+        walk(operations)
 
     @staticmethod
     def _coerce_nonnegative_integral_size(value: Any) -> int | None:
@@ -100,12 +640,47 @@ class ResourceAllocator:
             return size if size >= 0 else None
         return None
 
+    def _compact_new_clbit_indices(
+        self,
+        clbit_map: ClbitMap,
+        first_new_index: int,
+    ) -> None:
+        """Remove holes among clbits allocated by the current call.
+
+        Runtime branch merging first allocates a clbit for each branch-local
+        measurement and then aliases the mutually exclusive writes onto one
+        physical slot.  Later measurements would otherwise retain the skipped
+        numeric indices, inflating the backend circuit's classical register.
+        Only indices at or above ``first_new_index`` are renumbered; every
+        caller-supplied ``initial_clbit_map`` entry therefore keeps its exact
+        physical index.
+
+        Args:
+            clbit_map (ClbitMap): Address map to compact in place.
+            first_new_index (int): First index available to this allocation
+                call, equal to one past the maximum initial-map index.
+        """
+        allocated = sorted(
+            {physical for physical in clbit_map.values() if physical >= first_new_index}
+        )
+        remapping = {
+            physical: first_new_index + offset
+            for offset, physical in enumerate(allocated)
+        }
+        if any(old != new for old, new in remapping.items()):
+            for address, physical in tuple(clbit_map.items()):
+                replacement = remapping.get(physical)
+                if replacement is not None:
+                    clbit_map[address] = replacement
+        self._next_clbit_index = first_new_index + len(allocated)
+
     def allocate(
         self,
         operations: list[Operation],
         bindings: dict[str, Any] | None = None,
         initial_qubit_map: QubitMap | None = None,
         initial_clbit_map: ClbitMap | None = None,
+        public_output_uuids: frozenset[str] | set[str] | None = None,
     ) -> tuple[QubitMap, ClbitMap]:
         """Allocate qubit and clbit indices for all operations.
 
@@ -131,6 +706,10 @@ class ResourceAllocator:
                 clbit address mapping. Same semantics as
                 ``initial_qubit_map`` but for classical bits. Defaults to
                 None.
+            public_output_uuids (frozenset[str] | set[str] | None): Program
+                outputs that must remain live after this operation tree.
+                Defaults to None, which disables dead-source approval for
+                mixed prior/fresh Bit merges.
 
         Returns:
             tuple[QubitMap, ClbitMap]: ``(qubit_map, clbit_map)`` where
@@ -140,10 +719,104 @@ class ResourceAllocator:
         """
         qubit_map: QubitMap = dict(initial_qubit_map) if initial_qubit_map else {}
         clbit_map: ClbitMap = dict(initial_clbit_map) if initial_clbit_map else {}
+        first_new_clbit_index = max(clbit_map.values(), default=-1) + 1
+        # Distinguish genuine runtime (measurement-derived) if conditions
+        # from loop-bound predicates that remain symbolic until unrolled at
+        # emit time. Only the former may need the pre-measured Bit mux guard.
+        from qamomile.circuit.transpiler.passes.analyze import (
+            build_dependency_graph,
+            find_measurement_derived_values,
+            find_measurement_results,
+        )
+
+        dependency_graph = build_dependency_graph(operations)
+        self._measurement_tainted = find_measurement_derived_values(
+            dependency_graph, find_measurement_results(operations)
+        )
+        resolved_bindings = bindings or {}
+        self._validate_while_condition_lineages(operations, resolved_bindings)
+        self._safe_mixed_bit_merge_outputs = self._find_safe_mixed_bit_merge_outputs(
+            operations,
+            resolved_bindings,
+            dependency_graph,
+            public_output_uuids,
+        )
         self._next_qubit_index = max(qubit_map.values(), default=-1) + 1
-        self._next_clbit_index = max(clbit_map.values(), default=-1) + 1
-        self._allocate_recursive(operations, qubit_map, clbit_map, bindings or {})
+        self._next_clbit_index = first_new_clbit_index
+        self._allocate_recursive(operations, qubit_map, clbit_map, resolved_bindings)
+        self._compact_new_clbit_indices(clbit_map, first_new_clbit_index)
         return qubit_map, clbit_map
+
+    def resolve_iteration_maps(
+        self,
+        operations: list[Operation],
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> tuple[QubitMap, ClbitMap]:
+        """Resolve resource aliases for one statically replayed iteration.
+
+        The initial allocation walks an unrolled loop body only once, before
+        its loop variable has a concrete value.  A nested runtime condition
+        such as ``while measured[index]:`` therefore cannot select its root
+        clbit during that first walk.  Replaying the allocator over copies of
+        the already-complete maps with the iteration binding present resolves
+        those aliases without allocating another physical resource.  The
+        caller uses the returned maps for that iteration only; the same body
+        UUIDs may legitimately alias different measured-vector elements in
+        later iterations.
+
+        Args:
+            operations (list[Operation]): Statically replayed loop body.
+            qubit_map (QubitMap): Complete enclosing qubit map.
+            clbit_map (ClbitMap): Complete enclosing clbit map.
+            bindings (dict[str, Any]): Iteration-local UUID bindings, including
+                the concrete range index or items-loop key/value identities.
+
+        Returns:
+            tuple[QubitMap, ClbitMap]: Per-iteration copies with conditional
+                aliases resolved for the supplied bindings.
+
+        Raises:
+            EmitError: If resolving the bound body exposes an invalid quantum
+                merge, classical-bit merge, array size, or while-condition
+                lineage — or if replay unexpectedly allocates a new physical
+                qubit or clbit instead of only adding or changing aliases.
+        """
+        iteration_qubit_map = dict(qubit_map)
+        iteration_clbit_map = dict(clbit_map)
+        next_qubit = self._next_qubit_index
+        next_clbit = self._next_clbit_index
+        existing_qubits = set(qubit_map.values())
+        existing_clbits = set(clbit_map.values())
+        try:
+            self._allocate_recursive(
+                operations,
+                iteration_qubit_map,
+                iteration_clbit_map,
+                bindings,
+            )
+        finally:
+            # This is an alias-resolution replay, not a second allocation.
+            # Restore the monotonic counters even if malformed IR fails.
+            self._next_qubit_index = next_qubit
+            self._next_clbit_index = next_clbit
+
+        if not set(iteration_qubit_map.values()) <= existing_qubits:
+            raise EmitError(
+                "[FOR DEVELOPER] Iteration resource replay allocated a new "
+                "physical qubit; the initial allocation must cover every "
+                "loop-body resource.",
+                operation="resolve_iteration_maps",
+            )
+        if not set(iteration_clbit_map.values()) <= existing_clbits:
+            raise EmitError(
+                "[FOR DEVELOPER] Iteration resource replay allocated a new "
+                "physical clbit; the initial allocation must cover every "
+                "loop-body resource.",
+                operation="resolve_iteration_maps",
+            )
+        return iteration_qubit_map, iteration_clbit_map
 
     def _allocate_recursive(
         self,
@@ -474,9 +1147,22 @@ class ResourceAllocator:
                 allocator's ``ValueResolver`` so a merge source that is a
                 loop-indexed measured ``Vector[Bit]`` element resolves to
                 its root clbit.
+
+        Raises:
+            EmitError: If a genuine runtime merge selects two distinct
+                pre-existing measured Bit/clbit regions, or if quantum merge
+                sources do not denote identical physical qubits.
         """
         map_merge_outputs(
-            op, qubit_map, clbit_map, bindings=bindings, resolver=self._resolver
+            op,
+            qubit_map,
+            clbit_map,
+            bindings=bindings,
+            resolver=self._resolver,
+            reject_runtime_bit_mux=(
+                bool(op.operands) and op.operands[0].uuid in self._measurement_tainted
+            ),
+            allowed_mixed_bit_outputs=self._safe_mixed_bit_merge_outputs,
         )
 
     def _remap_static_merge_outputs(
@@ -539,27 +1225,32 @@ class ResourceAllocator:
         if size_val.is_constant():
             return self._coerce_nonnegative_integral_size(size_val.get_const())
 
+        # UUID identity always wins over display labels. Inlined locals and
+        # nested-loop temporaries can legitimately share a human-readable name
+        # with an unrelated kernel binding.
+        if size_val.uuid in bindings:
+            bound = bindings[size_val.uuid]
+            if (size := self._coerce_nonnegative_integral_size(bound)) is not None:
+                return size
+
+        # Declared parameter provenance is the only scalar-name lookup with
+        # semantic meaning. A bare Value.name is display-only and must not
+        # capture an unrelated user binding.
+        if size_val.is_parameter():
+            parameter_name = size_val.parameter_name()
+            if parameter_name and parameter_name in bindings:
+                bound = bindings[parameter_name]
+                if (size := self._coerce_nonnegative_integral_size(bound)) is not None:
+                    return size
+
         # Array element (e.g., sizes[0]): delegate to the emit value resolver
         # so bound containers and VectorView slices follow the same lookup
-        # rules as other emit-time value resolution paths.  Resolver refusal
+        # rules as other emit-time value resolution paths. Resolver refusal
         # is final here; symbolic array-element sizes must stay unresolved.
         if size_val.parent_array is not None and size_val.element_indices:
             return self._coerce_nonnegative_integral_size(
                 self._resolver.resolve_bound_value(size_val, bindings)
             )
-
-        # Check by name, then uuid in bindings
-        if size_val.name and size_val.name in bindings:
-            bound = bindings[size_val.name]
-            if (size := self._coerce_nonnegative_integral_size(bound)) is not None:
-                return size
-            if hasattr(bound, "__len__"):
-                return len(bound)
-
-        if size_val.uuid in bindings:
-            bound = bindings[size_val.uuid]
-            if (size := self._coerce_nonnegative_integral_size(bound)) is not None:
-                return size
 
         # Dimension naming pattern (e.g., "hi_dim0" -> array "hi", dimension 0).
         # Handles cases where parent_array is None after inlining.

@@ -21,6 +21,7 @@ from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL, PAULI_TERM_ZERO_ATOL
 
+from .gate_emission import resolve_angle_value
 from .qubit_address import QubitAddress, QubitMap
 
 
@@ -28,41 +29,27 @@ def _resolve_gamma(
     emit_pass: "StandardEmitPass",
     op: PauliEvolveOp,
     bindings: dict[str, Any],
-) -> float | Any | None:
-    """Resolve a PauliEvolveOp gamma operand to a concrete float or backend Parameter.
+) -> Any:
+    """Resolve gamma with the canonical angle-resolution contract.
 
-    Resolution order:
-        1. **parameter array element fast path** — when ``gamma`` is
-           ``arr[idx]`` and ``arr`` is in ``parameters``, return a
-           backend Parameter. Takes priority over concrete bindings
-           because users often pass concrete arrays as a shape hint.
-        2. constant / concrete binding / scalar parameter → Python
-           float or backend Parameter as appropriate.
+    Pauli evolution accepts the same concrete, declared-parameter, and
+    emit-time symbolic expressions as rotation gates and global phase. In
+    particular, a loop-carried gamma may already be a backend expression and
+    must not be rejected merely because it is not a Python ``float``.
 
-    Returns ``None`` when none apply; the caller converts that into
-    an ``EmitError``.
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass providing angle
+            resolution and backend parameter construction.
+        op (PauliEvolveOp): Pauli evolution whose gamma is resolved.
+        bindings (dict[str, Any]): Active emit-time bindings.
+
+    Returns:
+        Any: Concrete float or backend symbolic angle expression.
+
+    Raises:
+        EmitError: If gamma cannot be represented as an angle.
     """
-    theta = op.gamma
-    parameters = emit_pass._resolver.parameters
-
-    # Fast path: ``arr[idx]`` where ``arr`` is a declared parameter.
-    if theta.parent_array is not None and theta.parent_array.name in parameters:
-        param_key = emit_pass._resolver.get_parameter_key(theta, bindings)
-        if param_key:
-            return emit_pass._get_or_create_parameter(param_key, theta.uuid)
-
-    # Scalar declared parameter.
-    if theta.name in parameters:
-        param_key = emit_pass._resolver.get_parameter_key(theta, bindings)
-        if param_key:
-            return emit_pass._get_or_create_parameter(param_key, theta.uuid)
-
-    # Constant / concrete binding.
-    concrete = emit_pass._resolver.resolve_classical_value(theta, bindings)
-    if concrete is not None and isinstance(concrete, (int, float)):
-        return float(concrete)
-
-    return None
+    return resolve_angle_value(emit_pass, op.gamma, bindings)
 
 
 def validate_hamiltonian_within_register(
@@ -134,13 +121,6 @@ def emit_pauli_evolve(
     # emitted as parametric expressions (`2 * coeff * backend_param`),
     # matching how ``ising_cost`` handles parametric gamma directly.
     gamma = _resolve_gamma(emit_pass, op, bindings)
-    if gamma is None:
-        raise EmitError(
-            "Cannot resolve gamma parameter for PauliEvolveOp. "
-            "gamma must be a concrete float binding or a declared "
-            "parameter (scalar or array element).",
-            operation="PauliEvolveOp",
-        )
 
     # Validate qubit count: logical array size vs Hamiltonian. A smaller
     # Hamiltonian is embedded by acting only on its declared qubits below.

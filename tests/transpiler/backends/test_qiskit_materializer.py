@@ -220,3 +220,32 @@ def test_qiskit_materializer_preserves_transformed_phase_only_calls(
         _projector_phase_matrix(controls, phase_factor * theta),
         atol=1e-10,
     )
+
+
+def test_qiskit_materializer_shares_parameters_through_nested_inverse_calls() -> None:
+    """Nested custom-gate definitions bind one shared parameter identity."""
+    theta = 0.37
+    controlled_phase = _phase_only_call(controls=1).freeze()
+    caller = CircuitBuilder(2, 0, name="nested-inverse")
+    caller.append_call(
+        ReusableCircuit(
+            controlled_phase,
+            "controlled-phase-wrapper",
+            inverse=True,
+        ),
+        (0, 1),
+    )
+
+    materialized = QiskitMaterializer().materialize(
+        caller.freeze(),
+        parameter_names=("theta",),
+    )
+    parameter = materialized.parameters["theta"]
+    bound = materialized.artifact.assign_parameters({parameter: theta})
+
+    assert not bound.parameters
+    assert np.allclose(
+        Operator(bound).data,
+        _projector_phase_matrix(1, -theta),
+        atol=1e-10,
+    )

@@ -192,7 +192,7 @@ class _BlockPrinter:
             f"{pad}for %{lv} in range({start}, {stop}, {step}){iter_args} {{"
         )
         self._emit_ops(op.operations, indent=indent + 1)
-        self.lines.append(f"{pad}}}")
+        self.lines.append(f"{pad}}}{_format_region_yields(op)}")
 
     def _emit_for_items(self, op: ForItemsOperation, *, indent: int, pad: str) -> None:
         keys = ", ".join(f"%{k}" for k in op.key_vars) if op.key_vars else "%k"
@@ -202,7 +202,7 @@ class _BlockPrinter:
         header = f"{pad}for ({keys}), {val} in items({iterable}){iter_args} {{"
         self.lines.append(header)
         self._emit_ops(op.operations, indent=indent + 1)
-        self.lines.append(f"{pad}}}")
+        self.lines.append(f"{pad}}}{_format_region_yields(op)}")
 
     def _emit_if(self, op: IfOperation, *, indent: int, pad: str) -> None:
         cond = _format_value(op.operands[0]) if op.operands else "<cond>"
@@ -226,7 +226,7 @@ class _BlockPrinter:
         iter_args = self._region_args_suffix(op)
         self.lines.append(f"{pad}while {cond}{max_iter}{iter_args} {{")
         self._emit_ops(op.operations, indent=indent + 1)
-        self.lines.append(f"{pad}}}")
+        self.lines.append(f"{pad}}}{_format_region_yields(op)}")
 
     def _emit_invoke(self, op: InvokeOperation, *, indent: int, pad: str) -> None:
         target = op.body
@@ -420,6 +420,26 @@ def _format_merge(if_op: IfOperation, merge: IfMerge) -> str:
     tv = _format_value(merge.true_value)
     fv = _format_value(merge.false_value)
     return f"{_format_results([merge.result])} = merge({cond} ? {tv} : {fv})"
+
+
+def _format_region_yields(
+    op: "ForOperation | ForItemsOperation | WhileOperation",
+) -> str:
+    """Format a loop's region arguments as a yield/result footer suffix.
+
+    Args:
+        op (ForOperation | ForItemsOperation | WhileOperation): The loop
+            whose region arguments are rendered.
+
+    Returns:
+        str: `` yield(%yielded, ...) -> (%result, ...)`` (leading space
+            included), or an empty string for a carry-free loop.
+    """
+    if not op.region_args:
+        return ""
+    yields = ", ".join(_format_value(arg.yielded) for arg in op.region_args)
+    results = ", ".join(_format_value(arg.result) for arg in op.region_args)
+    return f" yield({yields}) -> ({results})"
 
 
 def _format_binary(op: Operation, table: dict[Any, str]) -> str:

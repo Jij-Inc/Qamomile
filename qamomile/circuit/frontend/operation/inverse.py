@@ -30,6 +30,7 @@ from qamomile.circuit.frontend.qkernel_specialization import (
 from qamomile.circuit.frontend.qkernel_utils import promote_literal_to_handle
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
     CallableImplementation,
@@ -45,6 +46,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
@@ -185,6 +187,21 @@ class _InputBinding:
             bool: True when the active handle's IR value is quantum typed.
         """
         return self.active_handle.value.type.is_quantum()
+
+
+@dataclasses.dataclass(frozen=True)
+class _RegionAffineSummary:
+    """Describe one independently affine loop-carried scalar.
+
+    Args:
+        init (Value): Carry value before the first loop iteration.
+        carry_type (UIntType | FloatType): Scalar IR type of the carry.
+        delta (int | float): Constant change over one complete iteration.
+    """
+
+    init: Value
+    carry_type: UIntType | FloatType
+    delta: int | float
 
 
 def _substitute_value(value: ValueBase, value_map: dict[str, ValueBase]) -> ValueBase:
@@ -587,6 +604,8 @@ class _BlockInverter:
         for op in operations:
             if isinstance(op, ReturnOperation):
                 continue
+            if isinstance(op, ForOperation):
+                inverted.extend(self._prepare_region_results(op, value_map))
             if op.operation_kind is OperationKind.CLASSICAL:
                 inverted.append(self._clone_classical_operation(op, value_map))
 
@@ -597,6 +616,118 @@ class _BlockInverter:
                 continue
             inverted.extend(self._invert_operation(op, value_map))
         return inverted
+
+    def _prepare_region_results(
+        self,
+        operation: ForOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Materialize final values of static range-loop RegionArgs.
+
+        The inverse walk visits quantum operations after a loop before it
+        visits the loop itself. Publish each loop's final classical carry in
+        forward order first so post-loop gates and later loop bounds resolve
+        independently of that reversed quantum walk. Constant initial values
+        are folded eagerly to keep later static bounds trace-time resolvable.
+
+        Args:
+            operation (ForOperation): Static range loop to pre-analyze.
+            value_map (dict[str, ValueBase]): Active inverse substitutions to
+                update with each `RegionArg.result`.
+
+        Returns:
+            list[Operation]: Classical prefix operations needed for symbolic
+                UInt initial values.
+
+        Raises:
+            NotImplementedError: If a non-empty loop has an unsupported carry
+                or unresolved range bounds.
+        """
+        prefix: list[Operation] = []
+        if not operation.region_args:
+            return prefix
+        start, stop, step = self._resolve_range_constants(operation, value_map)
+        trip_count = self._range_trip_count(start, stop, step)
+        if trip_count == 0:
+            for region_arg in operation.region_args:
+                value_map[region_arg.result.uuid] = _substitute_value(
+                    region_arg.init,
+                    value_map,
+                )
+            return prefix
+
+        for region_arg in operation.region_args:
+            summary = self._analyze_region_arg(operation, region_arg, value_map)
+            if summary is None:
+                raise self._unsupported_region_arg_error(region_arg)
+            if isinstance(summary.carry_type, FloatType):
+                result = summary.init
+            else:
+                result = self._materialize_uint_offset(
+                    summary.init,
+                    cast(int, summary.delta) * trip_count,
+                    prefix,
+                    f"{region_arg.var_name}_inverse_final",
+                )
+            value_map[region_arg.result.uuid] = result
+        return prefix
+
+    def _materialize_uint_offset(
+        self,
+        base: Value,
+        offset: int,
+        operations: list[Operation],
+        label: str,
+    ) -> Value:
+        """Materialize an exact UInt base-plus-constant expression.
+
+        Args:
+            base (Value): Initial UInt value.
+            offset (int): Exact constant offset to add.
+            operations (list[Operation]): Destination for a required symbolic
+                arithmetic operation.
+            label (str): Diagnostic name for a newly created result.
+
+        Returns:
+            Value: Folded constant, unchanged base, or emitted arithmetic
+                result representing `base + offset`.
+        """
+        if offset == 0:
+            return base
+        constant = base.get_const()
+        if type(constant) is int:
+            return Value(type=UIntType(), name=label).with_const(constant + offset)
+        result = Value(type=UIntType(), name=label)
+        kind = BinOpKind.ADD if offset > 0 else BinOpKind.SUB
+        operations.append(
+            BinOp(
+                operands=[base, _const_uint(f"{label}_offset", abs(offset))],
+                results=[result],
+                kind=kind,
+            )
+        )
+        return result
+
+    def _unsupported_region_arg_error(
+        self,
+        region_arg: RegionArg,
+    ) -> NotImplementedError:
+        """Build the uniform unsupported-carry construction error.
+
+        Args:
+            region_arg (RegionArg): Carry that cannot be inverted safely.
+
+        Returns:
+            NotImplementedError: Error describing the supported carry forms.
+        """
+        return NotImplementedError(
+            "inverse() supports loop-carried UInt values only with a constant "
+            "additive recurrence, and Float values only with an identity "
+            "recurrence. Rewrite independent UInt carry "
+            f"{region_arg.var_name!r} as `carry = carry + constant`, leave a "
+            "Float carry unchanged, or remove it from the inverted quantum "
+            "loop. Coupled carries are not supported."
+        )
 
     def _clone_classical_operation(
         self,
@@ -692,11 +823,6 @@ class _BlockInverter:
             tuple[list[Operation], Value]: Extra classical operations and
                 the resulting negated angle value.
         """
-        from qamomile.circuit.ir.operation.arithmetic_operations import (
-            BinOp,
-            BinOpKind,
-        )
-
         mapped_rotation_angle = _as_value(
             _substitute_value(rotation_angle, value_map),
             "angle",
@@ -1327,8 +1453,46 @@ class _BlockInverter:
         body_map = dict(value_map)
         if op.loop_var_value is not None:
             body_map[op.loop_var_value.uuid] = loop_var
-        inverse_body = self._invert_operations(op.operations, body_map)
-        excluded_uuids = {op.loop_var_value.uuid} if op.loop_var_value else set()
+        carry_prefix: list[Operation] = []
+        reverse_region_args: list[RegionArg] = []
+        for region_arg in op.region_args:
+            summary = self._analyze_region_arg(op, region_arg, body_map)
+            if summary is None:
+                raise self._unsupported_region_arg_error(region_arg)
+            reverse_init = _as_value(
+                _substitute_value(region_arg.result, value_map),
+                "inverse RegionArg final value",
+            )
+            reverse_block_arg = Value(
+                type=summary.carry_type,
+                name=f"{region_arg.var_name}_inverse_carry",
+            )
+            prefix, entry_value = self._inverse_region_entry(
+                region_arg,
+                summary,
+                reverse_block_arg,
+            )
+            carry_prefix.extend(prefix)
+            body_map[region_arg.block_arg.uuid] = entry_value
+            reverse_region_args.append(
+                RegionArg(
+                    var_name=region_arg.var_name,
+                    init=reverse_init,
+                    block_arg=reverse_block_arg,
+                    yielded=entry_value,
+                    result=Value(
+                        type=summary.carry_type,
+                        name=f"{region_arg.var_name}_inverse_result",
+                    ),
+                )
+            )
+        inverse_body = [
+            *carry_prefix,
+            *self._invert_operations(op.operations, body_map),
+        ]
+        excluded_uuids = {region_arg.block_arg.uuid for region_arg in op.region_args}
+        if op.loop_var_value is not None:
+            excluded_uuids.add(op.loop_var_value.uuid)
         self._merge_loop_body_map(value_map, body_map, excluded_uuids)
         return [
             ForOperation(
@@ -1342,8 +1506,303 @@ class _BlockInverter:
                 loop_var=op.loop_var,
                 loop_var_value=loop_var,
                 operations=inverse_body,
+                results=[region_arg.result for region_arg in reverse_region_args],
+                region_args=tuple(reverse_region_args),
             )
         ]
+
+    def _inverse_region_entry(
+        self,
+        region_arg: RegionArg,
+        summary: _RegionAffineSummary,
+        reverse_block_arg: Value,
+    ) -> tuple[list[Operation], Value]:
+        """Build one original carry value from the reverse carried value.
+
+        A forward iteration receives ``x[t]`` and yields ``x[t + 1]``. The
+        reversed loop therefore carries ``x[t + 1]``, subtracts the exact
+        UInt delta at the start of the iteration, uses ``x[t]`` for the
+        inverted body, and yields ``x[t]`` to the next reverse iteration.
+        Identity UInt/Float carries pass through without arithmetic.
+
+        Args:
+            region_arg (RegionArg): Forward carry being inverted.
+            summary (_RegionAffineSummary): Exact independent recurrence.
+            reverse_block_arg (Value): Reverse loop's current ``x[t + 1]``.
+
+        Returns:
+            tuple[list[Operation], Value]: Prefix arithmetic and the recovered
+                original iteration entry ``x[t]``.
+        """
+        if isinstance(summary.carry_type, FloatType):
+            return [], reverse_block_arg
+        delta = summary.delta
+        assert type(delta) is int
+        if delta == 0:
+            return [], reverse_block_arg
+        prefix: list[Operation] = []
+        entry = self._materialize_uint_offset(
+            reverse_block_arg,
+            -delta,
+            prefix,
+            f"{region_arg.var_name}_inverse_entry",
+        )
+        return prefix, entry
+
+    def _analyze_region_arg(
+        self,
+        op: ForOperation,
+        region_arg: RegionArg,
+        value_map: dict[str, ValueBase],
+    ) -> _RegionAffineSummary | None:
+        """Analyze one carry under the inverse fallback's exact contract.
+
+        UInt carries must be independently constant-additive. Float carries
+        may have unrelated derived values, but every offset on the backward
+        def-use slice of the actual yield must be exact zero; an algebraically
+        cancelling nonzero update is rejected because IEEE-754 iteration
+        cannot be reassociated safely.
+
+        Args:
+            op (ForOperation): Loop that owns `region_arg`.
+            region_arg (RegionArg): Candidate loop-carried scalar.
+            value_map (dict[str, ValueBase]): Active inverse substitutions.
+
+        Returns:
+            _RegionAffineSummary | None: Exact affine summary, or None when
+                the carry is unsupported or depends on a sibling carry.
+        """
+        init = _substitute_value(region_arg.init, value_map)
+        carry_type = region_arg.block_arg.type
+        if not isinstance(init, Value) or not isinstance(
+            carry_type,
+            (UIntType, FloatType),
+        ):
+            return None
+        if (
+            isinstance(carry_type, FloatType)
+            and region_arg.yielded.uuid == region_arg.block_arg.uuid
+        ):
+            return _RegionAffineSummary(
+                init=init,
+                carry_type=carry_type,
+                delta=0.0,
+            )
+        offsets, predecessors = self._constant_region_analysis(
+            op,
+            region_arg,
+            value_map,
+        )
+        delta = offsets.get(region_arg.yielded.uuid)
+        if delta is None:
+            return None
+        if isinstance(carry_type, UIntType):
+            if type(delta) is not int:
+                return None
+        else:
+            yield_slice = self._backward_region_slice(
+                region_arg.yielded.uuid,
+                predecessors,
+            )
+            if any(offsets.get(uuid, 0) for uuid in yield_slice):
+                return None
+        return _RegionAffineSummary(
+            init=init,
+            carry_type=carry_type,
+            delta=delta,
+        )
+
+    def _constant_region_analysis(
+        self,
+        op: ForOperation,
+        region_arg: RegionArg,
+        value_map: dict[str, ValueBase],
+    ) -> tuple[dict[str, int | float], dict[str, set[str]]]:
+        """Track exact offsets and def-use edges for one RegionArg.
+
+        Args:
+            op (ForOperation): Loop that owns `region_arg`.
+            region_arg (RegionArg): Carry whose derived offsets are tracked.
+            value_map (dict[str, ValueBase]): Active inverse substitutions for
+                external constants and static nested bounds.
+
+        Returns:
+            tuple[dict[str, int | float], dict[str, set[str]]]: UUID-keyed
+                offsets from the carry's block argument and backward def-use
+                edges for the tracked values. Missing yielded values denote
+                unsupported forms.
+        """
+        offsets: dict[str, int | float] = {region_arg.block_arg.uuid: 0}
+        predecessors: dict[str, set[str]] = {}
+        sibling_uuids = {
+            sibling.block_arg.uuid
+            for sibling in op.region_args
+            if sibling.block_arg.uuid != region_arg.block_arg.uuid
+        }
+        for operation in op.operations:
+            if isinstance(operation, BinOp):
+                if len(operation.operands) != 2:
+                    continue
+                left, right = operation.operands
+                left_offset = offsets.get(left.uuid)
+                right_offset = offsets.get(right.uuid)
+                if left_offset is not None and right_offset is None:
+                    constant = self._constant_numeric_value(
+                        right,
+                        value_map,
+                        sibling_uuids,
+                    )
+                    if constant is None:
+                        continue
+                    if operation.kind is BinOpKind.ADD:
+                        result_offset = left_offset + constant
+                    elif operation.kind is BinOpKind.SUB:
+                        result_offset = left_offset - constant
+                    else:
+                        continue
+                elif (
+                    right_offset is not None
+                    and left_offset is None
+                    and operation.kind is BinOpKind.ADD
+                ):
+                    constant = self._constant_numeric_value(
+                        left,
+                        value_map,
+                        sibling_uuids,
+                    )
+                    if constant is None:
+                        continue
+                    result_offset = constant + right_offset
+                else:
+                    continue
+                for result in operation.results:
+                    offsets[result.uuid] = result_offset
+                    predecessors[result.uuid] = {
+                        left.uuid if left_offset is not None else right.uuid
+                    }
+                continue
+
+            if not isinstance(operation, ForOperation):
+                continue
+            if any(operand.uuid in sibling_uuids for operand in operation.operands):
+                continue
+            try:
+                nested_start, nested_stop, nested_step = self._resolve_range_constants(
+                    operation,
+                    value_map,
+                )
+            except NotImplementedError:
+                continue
+            nested_trip_count = self._range_trip_count(
+                nested_start,
+                nested_stop,
+                nested_step,
+            )
+            for nested_arg in operation.region_args:
+                init_offset = offsets.get(nested_arg.init.uuid)
+                if init_offset is None:
+                    continue
+                if nested_trip_count == 0:
+                    offsets[nested_arg.result.uuid] = init_offset
+                    predecessors[nested_arg.result.uuid] = {nested_arg.init.uuid}
+                    continue
+                nested_offsets, nested_predecessors = self._constant_region_analysis(
+                    operation,
+                    nested_arg,
+                    value_map,
+                )
+                nested_delta = nested_offsets.get(nested_arg.yielded.uuid)
+                if nested_delta is None:
+                    continue
+                for uuid, nested_offset in nested_offsets.items():
+                    offsets[uuid] = init_offset + nested_offset
+                predecessors.update(nested_predecessors)
+                predecessors[nested_arg.block_arg.uuid] = {nested_arg.init.uuid}
+                predecessors[nested_arg.result.uuid] = {nested_arg.yielded.uuid}
+                offsets[nested_arg.result.uuid] = (
+                    init_offset + nested_delta * nested_trip_count
+                )
+        return offsets, predecessors
+
+    def _backward_region_slice(
+        self,
+        yielded_uuid: str,
+        predecessors: dict[str, set[str]],
+    ) -> set[str]:
+        """Collect values on the backward def-use slice of one yield.
+
+        Args:
+            yielded_uuid (str): UUID of the recurrence yield to start from.
+            predecessors (dict[str, set[str]]): UUID-keyed predecessor edges
+                recorded by additive carry analysis.
+
+        Returns:
+            set[str]: Yield UUID and every transitively contributing value.
+        """
+        visited: set[str] = set()
+        pending = [yielded_uuid]
+        while pending:
+            uuid = pending.pop()
+            if uuid in visited:
+                continue
+            visited.add(uuid)
+            pending.extend(predecessors.get(uuid, ()))
+        return visited
+
+    def _constant_numeric_value(
+        self,
+        value: Value,
+        value_map: dict[str, ValueBase],
+        forbidden_uuids: set[str],
+    ) -> int | float | None:
+        """Resolve an exact integer or floating constant for carry analysis.
+
+        Args:
+            value (Value): Candidate scalar operand.
+            value_map (dict[str, ValueBase]): Active inverse substitutions.
+            forbidden_uuids (set[str]): Sibling carry UUIDs that must remain
+                unsupported even if another analysis mapped them to constants.
+
+        Returns:
+            int | float | None: Exact numeric constant, excluding bool, or
+                None when the operand remains symbolic.
+        """
+        if value.uuid in forbidden_uuids:
+            return None
+        resolved = _substitute_value(value, value_map)
+        if not isinstance(resolved, Value):
+            return None
+        constant = resolved.get_const()
+        if type(constant) is int:
+            return constant
+        if type(constant) is float:
+            return constant
+        return None
+
+    def _range_trip_count(self, start: int, stop: int, step: int) -> int:
+        """Return a Python range's trip count without ``Py_ssize_t`` overflow.
+
+        Args:
+            start (int): Inclusive range start.
+            stop (int): Exclusive range stop.
+            step (int): Non-zero range step.
+
+        Returns:
+            int: Exact non-negative number of range iterations.
+
+        Raises:
+            ValueError: If ``step`` is zero.
+        """
+        if step == 0:
+            raise ValueError("range step cannot be zero.")
+        if step > 0:
+            if start >= stop:
+                return 0
+            return (stop - start + step - 1) // step
+        if start <= stop:
+            return 0
+        positive_step = -step
+        return (start - stop + positive_step - 1) // positive_step
 
     def _merge_loop_body_map(
         self,
@@ -1924,7 +2383,11 @@ def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
         NotImplementedError: If an inverted kernel uses unsupported
             operations such as `if`/`while`/`for items` control flow,
             `QInit`, or a `ForOperation` whose bounds are not compile-time
-            constants when the inverse wrapper is traced.
+            constants when the inverse wrapper is traced. Loop-carried
+            classical values are supported for UInt carries with a constant
+            additive recurrence and for unchanged Float carries. Nonzero Float
+            recurrences, non-additive recurrences, and coupled carries are
+            rejected uniformly before backend emission.
 
     Example:
         >>> import qamomile.circuit as qmc

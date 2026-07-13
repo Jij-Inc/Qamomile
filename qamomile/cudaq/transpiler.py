@@ -107,8 +107,12 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         - ``RUNNABLE``: uses ``cudaq.run()`` on the runnable kernel.
 
         Both paths return bitstrings in big-endian format (highest qubit
-        index = leftmost bit).
+        index = leftmost bit). An artifact without quantum or classical bits
+        returns ``{"": shots}`` without calling the CUDA-Q runtime.
         """
+        if circuit.num_qubits == 0 and circuit.num_clbits == 0:
+            return {"": shots}
+
         mode = getattr(circuit, "execution_mode", ExecutionMode.STATIC)
         if mode == ExecutionMode.RUNNABLE:
             return self._execute_runtime(circuit, shots)

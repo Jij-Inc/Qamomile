@@ -235,6 +235,7 @@ class QiskitMaterializer:
         self,
         program: CircuitProgram,
         preserve_control_flow: bool,
+        parameters: dict[str, Any] | None = None,
     ) -> Any:
         """Build a Qiskit circuit with native or unrolled loop regions.
 
@@ -243,6 +244,10 @@ class QiskitMaterializer:
             preserve_control_flow (bool): Whether concrete loops remain native.
                 Reusable gate bodies disable this because Qiskit gates cannot
                 contain control-flow instructions.
+            parameters (dict[str, Any] | None): Parameter cache shared with an
+                enclosing reusable circuit. Reusing the same Qiskit Parameter
+                identities through every nested definition keeps recursive
+                ``assign_parameters`` reliable. Defaults to a fresh cache.
 
         Returns:
             Any: Materialized ``QuantumCircuit``.
@@ -258,19 +263,19 @@ class QiskitMaterializer:
             wire: circuit.qubits[index]
             for index, wire in enumerate(program.input_wires)
         }
-        parameters: dict[str, Any] = {}
+        parameter_cache = {} if parameters is None else parameters
         _emit_region(
             program.operations,
             circuit,
             wires,
-            parameters,
+            parameter_cache,
             {},
             preserve_control_flow,
         )
         circuit.global_phase += _materialize_scalar(
             program.global_phase,
             circuit,
-            parameters,
+            parameter_cache,
             {},
         )
         return circuit
@@ -743,14 +748,8 @@ def _emit_call(
     nested = QiskitMaterializer()._materialize(
         callee.body,
         preserve_control_flow=False,
+        parameters=parameters,
     )
-    replacements: dict[Any, Any] = {}
-    for parameter in nested.parameters:
-        shared = parameters.setdefault(parameter.name, parameter)
-        if shared is not parameter:
-            replacements[parameter] = shared
-    if replacements:
-        nested = nested.assign_parameters(replacements)
     from qiskit.exceptions import QiskitError
 
     try:

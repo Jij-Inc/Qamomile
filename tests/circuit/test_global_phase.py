@@ -233,6 +233,64 @@ def _for_items_phase_body(
     return q
 
 
+@qkernel
+def _loop_carried_phase_body(
+    q: qmc.Qubit,
+    step: qmc.Float,
+) -> qmc.Qubit:
+    """Accumulate a phase through a loop-carried scalar.
+
+    Args:
+        q (qmc.Qubit): Qubit passed through the phase-only loop.
+        step (qmc.Float): Per-iteration increment of the carried phase.
+
+    Returns:
+        qmc.Qubit: Unchanged qubit with phase ``step + 2*step + 3*step``.
+    """
+    phase = 0.0
+    for _index in qmc.range(3):
+        phase = phase + step
+        q = qmc.global_phase(_ident, phase)(q)
+    return q
+
+
+@qkernel
+def _loop_carried_pauli_phase_body(
+    q: qmc.Vector[qmc.Qubit],
+    hamiltonian: qmc.Observable,
+    step: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Accumulate identity-Pauli phase through a loop-carried scalar.
+
+    Args:
+        q (qmc.Vector[qmc.Qubit]): One-qubit target register.
+        hamiltonian (qmc.Observable): Identity Hamiltonian used for phase.
+        step (qmc.Float): Per-iteration evolution-time increment.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Register with total phase ``-6*step``.
+    """
+    evolution_time = 0.0
+    for _index in qmc.range(3):
+        evolution_time = evolution_time + step
+        q = qmc.pauli_evolve(q, hamiltonian, evolution_time)
+    return q
+
+
+@qkernel
+def _phase_call_from_loop_index(q: qmc.Qubit, index: qmc.UInt) -> qmc.Qubit:
+    """Apply a phase whose angle is supplied by a caller loop index.
+
+    Args:
+        q (qmc.Qubit): Target qubit.
+        index (qmc.UInt): Caller-owned loop index.
+
+    Returns:
+        qmc.Qubit: Unchanged qubit with phase ``0.2 * index``.
+    """
+    return qmc.global_phase(_ident, 0.2 * index)(q)
+
+
 # --------------------------------------------------------------------------- #
 # Standalone: phase appears in the unitary (Qiskit) but is unobservable
 # --------------------------------------------------------------------------- #
@@ -305,6 +363,24 @@ class TestGlobalPhaseStandalone:
             qiskit_transpiler.transpile(circ, bindings={}).compiled_quantum[0].circuit
         )
         assert np.allclose(u, np.exp(1j * theta) * np.eye(2), atol=1e-9)
+
+    def test_direct_phase_call_from_loop_index_is_unrolled(self, qiskit_transpiler):
+        """A boxed phase call cannot retain a caller-owned loop expression."""
+
+        @qkernel
+        def circ() -> qmc.Bit:
+            """Apply indexed direct calls whose phases sum to 0.6 radians."""
+            q = qmc.qubit("q")
+            for index in qmc.range(3):
+                q = _phase_call_from_loop_index(q, index)
+            return qmc.measure(q)
+
+        circuit = qiskit_transpiler.transpile(circ).compiled_quantum[0].circuit
+        assert np.allclose(
+            _unitary(circuit),
+            np.exp(0.6j) * np.eye(2),
+            atol=1e-9,
+        )
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_sample_unaffected_by_phase(self, sdk_transpiler, seed):
@@ -506,6 +582,297 @@ class TestGlobalPhaseControlled:
         assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.03), (
             f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
         )
+
+    @pytest.mark.parametrize("power", [1, 3])
+    @pytest.mark.parametrize("seed", [0, 1])
+    def test_control_call_global_phase_keyword_kickback(
+        self,
+        sdk_transpiler,
+        power,
+        seed,
+    ):
+        """The control-call modifier means ``C((exp(iθ) U) ** power)``."""
+        theta = float(np.random.default_rng(seed).uniform(0.3, 0.8))
+
+        @qkernel
+        def htest(angle: qmc.Float) -> qmc.Bit:
+            """Observe a call-site target phase through one coherent control.
+
+            Args:
+                angle (qmc.Float): Target-global phase in radians.
+
+            Returns:
+                qmc.Bit: Hadamard-test control measurement.
+            """
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control = qmc.h(control)
+            control, target = qmc.control(_ident)(
+                control,
+                target,
+                power=power,
+                global_phase=angle,
+            )
+            control = qmc.h(control)
+            return qmc.measure(control)
+
+        executable = sdk_transpiler.transpiler.transpile(
+            htest,
+            parameters=["angle"],
+        )
+        shots = 12000
+        counts = _counts(
+            executable.sample(
+                _executor(sdk_transpiler, seed),
+                shots=shots,
+                bindings={"angle": theta},
+            ).result()
+        )
+        probability_zero = counts.get(0, 0) / shots
+        expected = np.cos(power * theta / 2) ** 2
+        assert np.isclose(probability_zero, expected, atol=0.035), (
+            f"{sdk_transpiler.backend_name} power={power}: "
+            f"P(0)={probability_zero} vs {expected}"
+        )
+
+    @pytest.mark.parametrize("seed", [0, 1])
+    def test_control_call_global_phase_inverse_cancels(
+        self,
+        sdk_transpiler,
+        seed,
+    ):
+        """Inverse negates a call-site phase together with the target unitary."""
+        theta = float(np.random.default_rng(seed).uniform(0.3, 1.2))
+
+        @qkernel
+        def phased_control(
+            control: qmc.Qubit,
+            target: qmc.Qubit,
+            angle: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            """Apply identity with a phase on the active control branch.
+
+            Args:
+                control (qmc.Qubit): Coherent control qubit.
+                target (qmc.Qubit): Identity target qubit.
+                angle (qmc.Float): Target-global phase in radians.
+
+            Returns:
+                tuple[qmc.Qubit, qmc.Qubit]: Updated control and target.
+            """
+            return qmc.control(_ident)(
+                control,
+                target,
+                global_phase=angle,
+            )
+
+        @qkernel
+        def circuit(angle: qmc.Float) -> qmc.Bit:
+            """Apply the phased call and its inverse before interference.
+
+            Args:
+                angle (qmc.Float): Target-global phase in radians.
+
+            Returns:
+                qmc.Bit: Control measurement, deterministically zero.
+            """
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control = qmc.h(control)
+            control, target = phased_control(control, target, angle)
+            control, target = qmc.inverse(phased_control)(control, target, angle)
+            control = qmc.h(control)
+            return qmc.measure(control)
+
+        executable = sdk_transpiler.transpiler.transpile(
+            circuit,
+            parameters=["angle"],
+        )
+        counts = _counts(
+            executable.sample(
+                _executor(sdk_transpiler, seed),
+                shots=512,
+                bindings={"angle": theta},
+            ).result()
+        )
+        assert set(counts) == {0}, f"{sdk_transpiler.backend_name}: {counts}"
+
+    @pytest.mark.parametrize("seed", [0, 1])
+    def test_nested_control_call_global_phase_kickback(
+        self,
+        sdk_transpiler,
+        seed,
+    ):
+        """A call-site phase survives an additional coherent control layer."""
+        theta = float(np.random.default_rng(seed).uniform(0.3, 1.2))
+
+        @qkernel
+        def inner_control(
+            control: qmc.Qubit,
+            target: qmc.Qubit,
+            angle: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            """Apply a relative phase when the inner control is active.
+
+            Args:
+                control (qmc.Qubit): Inner control qubit.
+                target (qmc.Qubit): Identity target qubit.
+                angle (qmc.Float): Target-global phase in radians.
+
+            Returns:
+                tuple[qmc.Qubit, qmc.Qubit]: Updated control and target.
+            """
+            return qmc.control(_ident)(
+                control,
+                target,
+                global_phase=angle,
+            )
+
+        @qkernel
+        def circuit(angle: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]:
+            """Interfere two controls around the nested phased call.
+
+            Args:
+                angle (qmc.Float): Target-global phase in radians.
+
+            Returns:
+                tuple[qmc.Bit, qmc.Bit]: Outer and inner control measurements.
+            """
+            outer = qmc.qubit("outer")
+            inner = qmc.qubit("inner")
+            target = qmc.qubit("target")
+            outer = qmc.h(outer)
+            inner = qmc.h(inner)
+            outer, inner, target = qmc.control(inner_control)(
+                outer,
+                inner,
+                target,
+                angle,
+            )
+            outer = qmc.h(outer)
+            inner = qmc.h(inner)
+            return qmc.measure(outer), qmc.measure(inner)
+
+        executable = sdk_transpiler.transpiler.transpile(
+            circuit,
+            parameters=["angle"],
+        )
+        shots = 16000
+        counts = _counts(
+            executable.sample(
+                _executor(sdk_transpiler, seed),
+                shots=shots,
+                bindings={"angle": theta},
+            ).result()
+        )
+        probability_zero_zero = counts.get((0, 0), 0) / shots
+        expected = (5 + 3 * np.cos(theta)) / 8
+        assert np.isclose(probability_zero_zero, expected, atol=0.035), (
+            f"{sdk_transpiler.backend_name}: "
+            f"P(00)={probability_zero_zero} vs {expected}"
+        )
+
+    def test_control_call_global_phase_binds_after_target_parameters(
+        self,
+        qiskit_transpiler,
+    ):
+        """The private phase formal follows existing target formals exactly."""
+        angle = 0.41
+        phase = -0.73
+
+        @qkernel
+        def circuit(theta: qmc.Float, phi: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]:
+            """Apply a phase-augmented controlled RX with two runtime scalars."""
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control, target = qmc.control(qmc.rx)(
+                control,
+                target,
+                angle=theta,
+                global_phase=phi,
+            )
+            return qmc.measure(control), qmc.measure(target)
+
+        transpiled = qiskit_transpiler.transpile(
+            circuit,
+            bindings={"theta": angle, "phi": phase},
+        )
+        actual = _unitary(transpiled.compiled_quantum[0].circuit)
+
+        cosine = np.cos(angle / 2)
+        sine = np.sin(angle / 2)
+        target_unitary = np.array(
+            [[cosine, -1j * sine], [-1j * sine, cosine]],
+            dtype=complex,
+        )
+        expected = np.eye(4, dtype=complex)
+        expected[np.ix_([1, 3], [1, 3])] = np.exp(1j * phase) * target_unitary
+        assert np.allclose(actual, expected, atol=1e-10)
+
+    def test_control_call_global_phase_survives_runtime_if(
+        self,
+        qiskit_transpiler,
+    ):
+        """A measured branch keeps the controlled call's coherent phase."""
+        pytest.importorskip("qiskit_aer")
+
+        @qkernel
+        def circuit() -> qmc.Bit:
+            """Take one measured branch containing a controlled pi phase."""
+            predicate = qmc.x(qmc.qubit("predicate"))
+            take_branch = qmc.measure(predicate)
+            control = qmc.h(qmc.qubit("control"))
+            target = qmc.qubit("target")
+            if take_branch:
+                control, target = qmc.control(_ident)(
+                    control,
+                    target,
+                    global_phase=np.pi,
+                )
+            control = qmc.h(control)
+            return qmc.measure(control)
+
+        executable = qiskit_transpiler.transpile(circuit)
+        counts = _counts(
+            executable.sample(
+                qiskit_transpiler.executor(),
+                shots=64,
+            ).result()
+        )
+        assert set(counts) == {1}
+
+    def test_control_call_global_phase_survives_runtime_while(
+        self,
+        qiskit_transpiler,
+    ):
+        """One measured loop iteration keeps the controlled relative phase."""
+        pytest.importorskip("qiskit_aer")
+
+        @qkernel
+        def circuit() -> qmc.Bit:
+            """Run exactly one while iteration containing a controlled pi phase."""
+            predicate = qmc.x(qmc.qubit("predicate"))
+            run = qmc.measure(predicate)
+            control = qmc.h(qmc.qubit("control"))
+            target = qmc.qubit("target")
+            while run:
+                control, target = qmc.control(_ident)(
+                    control,
+                    target,
+                    global_phase=np.pi,
+                )
+                run = qmc.measure(qmc.qubit("stopper"))
+            control = qmc.h(control)
+            return qmc.measure(control)
+
+        executable = qiskit_transpiler.transpile(circuit)
+        counts = _counts(
+            executable.sample(
+                qiskit_transpiler.executor(),
+                shots=64,
+            ).result()
+        )
+        assert set(counts) == {1}
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     @pytest.mark.parametrize(
@@ -815,6 +1182,40 @@ class TestGlobalPhaseSerialize:
         restored = load_json(dump_json(block))
         assert [type(o).__name__ for o in block.operations] == [
             type(o).__name__ for o in restored.operations
+        ]
+        assert content_hash(block) == content_hash(restored)
+
+    def test_control_call_phase_roundtrip_and_content_hash(self, qiskit_transpiler):
+        """A call-site phase formal and actual survive semantic IR round-trip."""
+        from qamomile.circuit.ir.canonical import content_hash
+        from qamomile.circuit.ir.serialize import dump_json, load_json
+
+        @qkernel
+        def circ(angle: qmc.Float) -> qmc.Bit:
+            """Build a directly phase-augmented controlled identity.
+
+            Args:
+                angle (qmc.Float): Target-global phase in radians.
+
+            Returns:
+                qmc.Bit: Control measurement.
+            """
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control, target = qmc.control(_ident)(
+                control,
+                target,
+                global_phase=angle,
+            )
+            return qmc.measure(control)
+
+        block = qiskit_transpiler.inline(
+            qiskit_transpiler.to_block(circ, {}, ["angle"])
+        )
+        restored = load_json(dump_json(block))
+
+        assert [type(operation).__name__ for operation in block.operations] == [
+            type(operation).__name__ for operation in restored.operations
         ]
         assert content_hash(block) == content_hash(restored)
 
@@ -1355,17 +1756,17 @@ class TestGlobalPhaseSpecialCases:
         idx = int(rng.integers(0, 3))
 
         @qkernel
-        def phased_ident(q: qmc.Qubit, ph: qmc.Vector[qmc.Float]) -> qmc.Qubit:
+        def phased_ident(q: qmc.Qubit, angles: qmc.Vector[qmc.Float]) -> qmc.Qubit:
             """Apply a global phase to an identity body.
 
             Args:
                 q (qmc.Qubit): Target qubit.
-                ph (qmc.Vector[qmc.Float]): Phase-angle vector.
+                angles (qmc.Vector[qmc.Float]): Phase-angle vector.
 
             Returns:
                 qmc.Qubit: Updated target qubit.
             """
-            return qmc.global_phase(_ident, ph[idx])(q)
+            return qmc.global_phase(_ident, angles[idx])(q)
 
         @qkernel
         def htest(ph: qmc.Vector[qmc.Float]) -> qmc.Bit:
@@ -1618,6 +2019,141 @@ class TestGlobalPhaseControlledCompositions:
             exe.sample(_executor(sdk_transpiler, seed), shots=512).result()
         )
         assert set(counts) == {0}, f"{sdk_transpiler.backend_name}: {counts}"
+
+    @pytest.mark.parametrize("seed", [0, 1])
+    def test_control_call_phase_from_loop_element_kickback(
+        self,
+        sdk_transpiler,
+        seed,
+    ):
+        """A loop-indexed call-site phase unrolls and adds coherently."""
+        angles = np.random.default_rng(seed).uniform(0.2, 0.7, size=2)
+
+        @qkernel
+        def circuit(phases: qmc.Vector[qmc.Float]) -> qmc.Bit:
+            """Apply two indexed phases directly at controlled call sites.
+
+            Args:
+                phases (qmc.Vector[qmc.Float]): Two phase angles.
+
+            Returns:
+                qmc.Bit: Hadamard-test control measurement.
+            """
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control = qmc.h(control)
+            for index in qmc.range(2):
+                control, target = qmc.control(_ident)(
+                    control,
+                    target,
+                    global_phase=phases[index],
+                )
+            control = qmc.h(control)
+            return qmc.measure(control)
+
+        executable = sdk_transpiler.transpiler.transpile(
+            circuit,
+            bindings={"phases": angles},
+        )
+        shots = 12000
+        counts = _counts(
+            executable.sample(
+                _executor(sdk_transpiler, seed),
+                shots=shots,
+            ).result()
+        )
+        probability_zero = counts.get(0, 0) / shots
+        expected = np.cos(float(np.sum(angles)) / 2) ** 2
+        assert np.isclose(probability_zero, expected, atol=0.035), (
+            f"{sdk_transpiler.backend_name}: P(0)={probability_zero} vs {expected}"
+        )
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 42])
+    def test_controlled_loop_carried_phase_kickback(self, sdk_transpiler, seed):
+        """A carried scalar contributes each iteration's coherent phase.
+
+        The three iterations apply ``step``, ``2*step``, and ``3*step``.
+        Controlling that body therefore kicks back total phase ``6*step`` and
+        the Hadamard test measures ``P(0) = cos²(3*step)``.
+        """
+        step = float(np.random.default_rng(seed).uniform(0.2, 0.8))
+
+        @qkernel
+        def htest(angle: qmc.Float) -> qmc.Bit:
+            """Expose the carried phase as interference on one control.
+
+            Args:
+                angle (qmc.Float): Per-iteration phase increment.
+
+            Returns:
+                qmc.Bit: Hadamard-test measurement of the control.
+            """
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control = qmc.h(control)
+            control, target = qmc.control(_loop_carried_phase_body)(
+                control,
+                target,
+                angle,
+            )
+            control = qmc.h(control)
+            return qmc.measure(control)
+
+        executable = sdk_transpiler.transpiler.transpile(
+            htest,
+            parameters=["angle"],
+        )
+        shots = 20000
+        counts = _counts(
+            executable.sample(
+                _executor(sdk_transpiler, seed),
+                shots=shots,
+                bindings={"angle": step},
+            ).result()
+        )
+        probability_zero = counts.get(0, 0) / shots
+        assert np.isclose(probability_zero, np.cos(3.0 * step) ** 2, atol=0.03), (
+            f"{sdk_transpiler.backend_name} step={step}: P(0)={probability_zero}"
+        )
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 42])
+    def test_controlled_loop_carried_pauli_identity_phase(self, sdk_transpiler, seed):
+        """A carried Pauli time preserves the identity term as kickback."""
+        import qamomile.observable as qm_o
+
+        step = float(np.random.default_rng(seed).uniform(0.2, 0.8))
+
+        @qkernel
+        def htest(hamiltonian: qmc.Observable, angle: qmc.Float) -> qmc.Bit:
+            """Expose the carried identity-evolution phase on one control."""
+            control = qmc.h(qmc.qubit("control"))
+            target = qmc.qubit_array(1, "target")
+            control, target = qmc.control(_loop_carried_pauli_phase_body)(
+                control,
+                target,
+                hamiltonian,
+                angle,
+            )
+            control = qmc.h(control)
+            return qmc.measure(control)
+
+        executable = sdk_transpiler.transpiler.transpile(
+            htest,
+            bindings={"hamiltonian": qm_o.Hamiltonian.identity(1.0)},
+            parameters=["angle"],
+        )
+        shots = 12000
+        counts = _counts(
+            executable.sample(
+                _executor(sdk_transpiler, seed),
+                shots=shots,
+                bindings={"angle": step},
+            ).result()
+        )
+        probability_zero = counts.get(0, 0) / shots
+        assert np.isclose(probability_zero, np.cos(3.0 * step) ** 2, atol=0.04), (
+            f"{sdk_transpiler.backend_name} step={step}: P(0)={probability_zero}"
+        )
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_controlled_phase_expectation_value(self, sdk_transpiler, seed):

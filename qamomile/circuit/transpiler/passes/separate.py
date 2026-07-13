@@ -15,6 +15,8 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     HasNestedOps,
     IfOperation,
+    WhileOperation,
+    genuine_input_values,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
@@ -26,9 +28,13 @@ from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.ir.value import (
     ArrayValue,
+    DictValue,
+    TupleValue,
     Value,
     ValueBase,
     ValueLike,
+    array_physical_region,
+    arrays_share_physical_region,
     collect_value_like_uuids,
 )
 from qamomile.circuit.transpiler.errors import SeparationError
@@ -56,6 +62,7 @@ from qamomile.circuit.transpiler.segments import (
     QuantumStep,
     Segment,
 )
+from qamomile.circuit.transpiler.value_resolver import ValueResolver
 
 # =========================================================================
 # Pre-segmentation transformations (called by SegmentationPass.run)
@@ -72,6 +79,28 @@ def materialize_return(block: Block) -> Block:
         if isinstance(op, ReturnOperation):
             return dataclasses.replace(block, output_values=list(op.operands))
     return block
+
+
+def _collect_compile_time_outputs(output_values: list[Value]) -> dict[str, object]:
+    """Resolve outputs already materialized in IR metadata.
+
+    Args:
+        output_values (list[Value]): Block outputs in public return order.
+
+    Returns:
+        dict[str, object]: Output UUIDs mapped to constant scalar or array
+            values. Structural array elements resolve through their parent
+            array's compile-time contents.
+    """
+    resolver = ValueResolver()
+    resolved_outputs: dict[str, object] = {}
+    for value in output_values:
+        resolved = resolver.resolve(value)
+        if resolved is None and isinstance(value, ArrayValue):
+            resolved = value.get_const_array()
+        if resolved is not None:
+            resolved_outputs[value.uuid] = resolved
+    return resolved_outputs
 
 
 def lower_measure_qfixed(
@@ -254,7 +283,19 @@ class SegmentationStrategy(ABC):
         block: Block,
         boundaries: list[HybridBoundary],
     ) -> ProgramPlan:
-        """Build a ProgramPlan from segmented operations."""
+        """Build a program plan from segmented operations.
+
+        Args:
+            segments (list[Segment]): Ordered execution segments.
+            block (Block): Lowered source block carrying the public ABI.
+            boundaries (list[HybridBoundary]): Quantum/classical boundaries.
+
+        Returns:
+            ProgramPlan: Strategy-specific executable plan.
+
+        Raises:
+            NotImplementedError: Always; subclasses must implement planning.
+        """
         raise NotImplementedError
 
 
@@ -267,6 +308,23 @@ class NisqSegmentationStrategy(SegmentationStrategy):
         block: Block,
         boundaries: list[HybridBoundary],
     ) -> ProgramPlan:
+        """Build the current single-quantum-segment NISQ plan.
+
+        Args:
+            segments (list[Segment]): Ordered classical, quantum, and expval
+                segments.
+            block (Block): Lowered block providing parameters and outputs.
+            boundaries (list[HybridBoundary]): Recorded hybrid transitions.
+
+        Returns:
+            ProgramPlan: Plan with one quantum step and surrounding classical
+                or expectation-value steps.
+
+        Raises:
+            SeparationError: If no quantum segment exists.
+            MultipleQuantumSegmentsError: If more than one quantum segment
+                would require unsupported JIT-style execution.
+        """
         quantum_segs = [s for s in segments if isinstance(s, QuantumSegment)]
         if len(quantum_segs) == 0:
             from qamomile.circuit.transpiler.errors import SeparationError
@@ -338,14 +396,40 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         return "segment"
 
     def run(self, input: Block) -> ProgramPlan:
-        """Segment the block into a ProgramPlan."""
+        """Lower and segment a block into a program plan.
+
+        Args:
+            input (Block): Block whose while contract and hybrid operations
+                should be lowered before segmentation.
+
+        Returns:
+            ProgramPlan: Strategy-produced execution plan.
+
+        Raises:
+            ValidationError: If a runtime while violates its contract.
+            SeparationError: If the strategy finds no quantum segment.
+            MultipleQuantumSegmentsError: If the strategy finds multiple
+                quantum segments.
+        """
         input = ValidateWhileContractPass().run(input)
         block = materialize_return(input)
         block = lower_operations(block)
         return self._segment(block)
 
     def _segment(self, block: Block) -> ProgramPlan:
-        """Build a ProgramPlan from a lowered block."""
+        """Build a plan from an already-lowered block.
+
+        Args:
+            block (Block): Lowered block to split into segments.
+
+        Returns:
+            ProgramPlan: Strategy-produced execution plan.
+
+        Raises:
+            SeparationError: If the strategy finds no quantum segment.
+            MultipleQuantumSegmentsError: If the strategy finds multiple
+                quantum segments.
+        """
         segments = self._build_segments_list(block)
         return self._strategy.create_plan(segments, block, self._boundaries)
 
@@ -353,6 +437,16 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Build list of segments from block operations.
 
         Extracted from _separate_segments to allow reuse.
+
+        Args:
+            block (Block): Lowered block whose operations are segmented.
+
+        Returns:
+            list[Segment]: Ordered execution segments.
+
+        Raises:
+            SeparationError: If an operation cannot be assigned to a valid
+                segment shape.
         """
         segments: list[Segment] = []
         self._boundaries: list[HybridBoundary] = []
@@ -366,6 +460,8 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # classical segment) or a parameter / structural expression that
         # merely feeds a quantum gate (can stay in the quantum segment).
         dependency_graph = build_dependency_graph(block.operations)
+        self._dependency_graph = dependency_graph
+        self._quantum_value_uuids = self._collect_quantum_value_uuids(block.operations)
         measurement_uuids = find_measurement_results(block.operations)
         self._measurement_tainted = find_measurement_derived_values(
             dependency_graph, measurement_uuids
@@ -395,6 +491,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         self._block_output_uuids = set()
         for value in block.output_values:
             self._block_output_uuids.update(collect_value_like_uuids(value))
+        self._block_output_values = tuple(block.output_values)
 
         # While-condition chain UUIDs: merges carrying a while condition
         # stay on their IfOperation (the clbit-aliasing machinery owns them), so the
@@ -648,15 +745,398 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             segments.append(segment)
 
         # Deferred runtime expressions with no classical op after them in
-        # the stream (e.g. ``s = b0 & b1; return s``) still must run
-        # host-side: close the plan with a classical segment holding them.
+        # the stream still must run host-side.
         if pending_post:
             segments.append(ClassicalSegment(operations=pending_post))
 
+        # A pure runtime expression can be nested in quantum control flow yet
+        # still produce a public output. Circuit lowering evaluates it for the
+        # in-circuit consumer; schedule the same semantic op once host-side so
+        # the typed output ABI receives the final clbit-backed value after the
+        # quantum segment. Expressions already reachable from a classical
+        # segment remain nested there and must not be duplicated.
+        scheduled_host_expr_ids = {
+            id(classical_op)
+            for segment in segments
+            if isinstance(segment, ClassicalSegment)
+            for classical_op in self._collect_classical_ops(segment.operations)
+            if isinstance(classical_op, RuntimeClassicalExpr)
+        }
+        nested_host_exprs: list[Operation] = [
+            classical_op
+            for classical_op in self._collect_classical_ops(block.operations)
+            if isinstance(classical_op, RuntimeClassicalExpr)
+            and id(classical_op) in self._host_evaluated_expr_ids
+            and id(classical_op) not in scheduled_host_expr_ids
+        ]
+        if nested_host_exprs:
+            segments.append(ClassicalSegment(operations=nested_host_exprs))
+
         # Compute input/output refs for each segment
         self._compute_segment_io(segments, block)
+        self._reject_quantum_segment_carry_escapes(segments)
 
         return segments
+
+    def _collect_carry_results(
+        self,
+        op: Operation,
+        collected: dict[str, str],
+    ) -> None:
+        """Collect loop-carry result UUIDs from an op tree.
+
+        Args:
+            op (Operation): Operation to inspect (control-flow bodies
+                are walked recursively).
+            collected (dict[str, str]): Mutable map from carry-result
+                UUID to the carried variable's display name, updated in
+                place.
+        """
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            for region_arg in op.region_args:
+                collected[region_arg.result.uuid] = region_arg.var_name
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                for nested in body:
+                    self._collect_carry_results(nested, collected)
+
+    def _segment_read_uuids(self, operations: list[Operation]) -> set[str]:
+        """Collect every genuine input-value UUID a segment's op tree reads.
+
+        Cloning/substitution metadata exposed by ``all_input_values`` is not a
+        data read. In particular, loop RegionArg formals/results and rebind
+        records must not make an overwritten or otherwise unused value appear
+        live and trigger an escape/divergent-array rejection.
+
+        Args:
+            operations (list[Operation]): Segment operations (control-flow
+                bodies are walked recursively).
+
+        Returns:
+            set[str]: UUIDs of all referenced input values.
+        """
+        reads: set[str] = set()
+        for op in operations:
+            for value in genuine_input_values(op):
+                if isinstance(value, ValueBase):
+                    reads |= self._value_reference_uuids(value)
+            if isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    reads |= self._segment_read_uuids(body)
+        return reads
+
+    def _value_reference_uuids(self, value: ValueBase) -> set[str]:
+        """Collect a value UUID and UUIDs embedded in its addressing metadata.
+
+        Array elements and views carry dataflow in structural fields rather
+        than ordinary operation operands.  In particular, ``values[index]``
+        stores ``index`` in ``element_indices``; looking only at the element's
+        own UUID would therefore miss an emit-time loop carry used as the
+        index of a block output or expectation-value operand.
+
+        Args:
+            value (ValueBase): Value whose structural references to walk.
+
+        Returns:
+            set[str]: The value's UUID plus every recursively referenced
+                parent array, element index, shape, slice-bound, tuple-element,
+                and dictionary key/value UUID.
+        """
+        assert isinstance(value, (Value, ArrayValue, TupleValue, DictValue))
+        references = collect_value_like_uuids(value)
+
+        def discard_embedded_constants(current: ValueLike) -> None:
+            """Remove scalar constants that need no segment producer."""
+            if (
+                isinstance(current, Value)
+                and current.type.is_classical()
+                and current.is_constant()
+            ):
+                references.discard(current.uuid)
+            if isinstance(current, TupleValue):
+                for element in current.elements:
+                    discard_embedded_constants(element)
+            elif isinstance(current, DictValue):
+                for key, entry_value in current.entries:
+                    discard_embedded_constants(key)
+                    discard_embedded_constants(entry_value)
+            elif isinstance(current, ArrayValue):
+                for dimension in current.shape:
+                    discard_embedded_constants(dimension)
+                if current.slice_of is not None:
+                    discard_embedded_constants(current.slice_of)
+                if current.slice_start is not None:
+                    discard_embedded_constants(current.slice_start)
+                if current.slice_step is not None:
+                    discard_embedded_constants(current.slice_step)
+            elif current.parent_array is not None:
+                discard_embedded_constants(current.parent_array)
+                for index in current.element_indices:
+                    discard_embedded_constants(index)
+
+        discard_embedded_constants(value)
+        return references
+
+    def _collect_classical_merge_results(
+        self,
+        op: Operation,
+        collected: dict[str, str],
+    ) -> None:
+        """Collect non-Bit classical merges embedded in a quantum op tree.
+
+        Measurement-backed ``Bit`` merges have a physical clbit and are
+        handled by backend aliasing.  Other classical merge results created by
+        a runtime ``if`` inside a quantum segment exist only while emitting the
+        circuit; the classical executor cannot later surface them.
+
+        Args:
+            op (Operation): Operation tree to inspect.
+            collected (dict[str, str]): Mutable result-UUID to display-name map,
+                updated in place.
+        """
+        if isinstance(op, IfOperation):
+            condition = op.operands[0] if op.operands else None
+            condition_uuid = (
+                condition.uuid if isinstance(condition, ValueBase) else None
+            )
+            merges = (
+                op.iter_merges() if condition_uuid in self._measurement_tainted else ()
+            )
+            for merge in merges:
+                if not merge.result.type.is_quantum() and not isinstance(
+                    merge.result.type, BitType
+                ):
+                    collected[merge.result.uuid] = merge.result.name or "<anonymous>"
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                for nested in body:
+                    self._collect_classical_merge_results(nested, collected)
+
+    def _collect_divergent_quantum_array_merges(
+        self,
+        op: Operation,
+        collected: dict[str, str],
+    ) -> None:
+        """Collect runtime array merges with statically different regions.
+
+        Args:
+            op (Operation): Operation tree to inspect recursively.
+            collected (dict[str, str]): Mutable result-UUID to display-name
+                map, updated in place.
+        """
+        if isinstance(op, IfOperation):
+            condition = op.operands[0] if op.operands else None
+            condition_uuid = (
+                condition.uuid if isinstance(condition, ValueBase) else None
+            )
+            merges = (
+                op.iter_merges() if condition_uuid in self._measurement_tainted else ()
+            )
+            for merge in merges:
+                result = merge.result
+                true_value = merge.true_value
+                false_value = merge.false_value
+                if not (
+                    isinstance(result, ArrayValue)
+                    and result.type.is_quantum()
+                    and isinstance(true_value, ArrayValue)
+                    and isinstance(false_value, ArrayValue)
+                ):
+                    continue
+                true_region = array_physical_region(true_value)
+                false_region = array_physical_region(false_value)
+                # Symbolic coverage may become concrete at emit time, where
+                # the physical map remains the source of truth. Reject here
+                # only when both regions are known and demonstrably differ.
+                if (
+                    true_region is not None
+                    and false_region is not None
+                    and not arrays_share_physical_region(true_value, false_value)
+                ):
+                    collected[result.uuid] = result.name or "<anonymous>"
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                for nested in body:
+                    self._collect_divergent_quantum_array_merges(nested, collected)
+
+    def _collect_quantum_value_uuids(
+        self,
+        operations: list[Operation],
+    ) -> set[str]:
+        """Collect quantum result UUIDs from an operation tree.
+
+        Args:
+            operations (list[Operation]): Operations to inspect recursively.
+
+        Returns:
+            set[str]: UUIDs of quantum scalar and array results.
+        """
+        quantum_uuids: set[str] = set()
+        for op in operations:
+            quantum_uuids.update(
+                result.uuid for result in op.results if result.type.is_quantum()
+            )
+            if isinstance(op, HasNestedOps):
+                for body in op.nested_op_lists():
+                    quantum_uuids.update(self._collect_quantum_value_uuids(body))
+        return quantum_uuids
+
+    def _propagate_escape_origins(
+        self,
+        seeds: dict[str, str],
+    ) -> dict[str, set[str]]:
+        """Propagate emit-only value origins through the dependency graph.
+
+        Args:
+            seeds (dict[str, str]): Seed UUIDs mapped to user-facing variable
+                names.
+
+        Returns:
+            dict[str, set[str]]: Every transitively dependent UUID mapped to
+                the seed names from which it derives.
+        """
+        dependents: dict[str, set[str]] = {}
+        for result_uuid, dependencies in self._dependency_graph.items():
+            for dependency_uuid in dependencies:
+                dependents.setdefault(dependency_uuid, set()).add(result_uuid)
+
+        origins = {uuid: {name} for uuid, name in seeds.items()}
+        pending = list(seeds)
+        while pending:
+            current = pending.pop()
+            current_origins = origins[current]
+            for dependent in dependents.get(current, ()):
+                # A classical value that affects a gate has a dependency path
+                # through the gate's quantum result and eventually its final
+                # measurement. That is an ordinary emit-time use, not a value
+                # escaping to the classical executor. Stop propagation at the
+                # quantum SSA boundary while retaining purely classical paths
+                # such as a carried value flowing through a runtime-if merge.
+                if dependent in self._quantum_value_uuids:
+                    continue
+                merged_origins = origins.setdefault(dependent, set())
+                previous_size = len(merged_origins)
+                merged_origins.update(current_origins)
+                if len(merged_origins) != previous_size:
+                    pending.append(dependent)
+        return origins
+
+    def _reject_quantum_segment_carry_escapes(
+        self,
+        segments: list[Segment],
+    ) -> None:
+        """Reject quantum-segment carry results that escape the segment.
+
+        A loop placed in the quantum segment has its carried classical
+        values computed at EMIT time (per-iteration unrolling) — the
+        runtime executor never runs the loop, so a carry result read by
+        a classical segment or returned as a block output has no
+        runtime representation and would silently surface as ``None``.
+
+        Args:
+            segments (list[Segment]): The segments just built.
+
+        Raises:
+            MultipleQuantumSegmentsError: If a quantum-segment loop's
+                carried result is a block output or is read by a
+                non-quantum segment.
+        """
+        quantum_carry_results: dict[str, str] = {}
+        quantum_classical_merges: dict[str, str] = {}
+        divergent_quantum_array_merges: dict[str, str] = {}
+        for segment in segments:
+            if not isinstance(segment, QuantumSegment):
+                continue
+            for op in segment.operations:
+                self._collect_carry_results(op, quantum_carry_results)
+                self._collect_classical_merge_results(op, quantum_classical_merges)
+                self._collect_divergent_quantum_array_merges(
+                    op, divergent_quantum_array_merges
+                )
+        if (
+            not quantum_carry_results
+            and not quantum_classical_merges
+            and not divergent_quantum_array_merges
+        ):
+            return
+
+        quantum_reads: set[str] = set()
+        for segment in segments:
+            if isinstance(segment, QuantumSegment):
+                quantum_reads |= self._segment_read_uuids(segment.operations)
+
+        outside_reads: set[str] = set()
+        for segment in segments:
+            if isinstance(segment, QuantumSegment):
+                continue
+            outside_reads |= self._segment_read_uuids(segment.operations)
+
+        block_output_reads: set[str] = set()
+        for output in self._block_output_values:
+            if isinstance(output, ValueBase):
+                block_output_reads |= self._value_reference_uuids(output)
+        escaped_reads = outside_reads | block_output_reads
+
+        divergent_origins = self._propagate_escape_origins(
+            divergent_quantum_array_merges
+        )
+        used_divergent_merges = sorted(
+            {
+                var_name
+                for uuid in quantum_reads | escaped_reads
+                for var_name in divergent_origins.get(uuid, ())
+            }
+        )
+        if used_divergent_merges:
+            raise MultipleQuantumSegmentsError(
+                "A runtime if inside the quantum segment merges arrays from "
+                "different physical qubit regions "
+                f"({', '.join(used_divergent_merges)}). A single merged "
+                "quantum value cannot dynamically select one physical "
+                "register or slice at runtime. Use the selected view only "
+                "inside each branch, or make the condition compile-time."
+            )
+
+        carry_origins = self._propagate_escape_origins(quantum_carry_results)
+
+        escaped_names = sorted(
+            {
+                var_name
+                for uuid in escaped_reads
+                for var_name in carry_origins.get(uuid, ())
+            }
+        )
+        if escaped_names:
+            raise MultipleQuantumSegmentsError(
+                "A loop inside the quantum segment carries classical "
+                f"values ({', '.join(escaped_names)}) that are read "
+                "outside it (by classical post-processing or as block "
+                "outputs). Emit-time unrolling computes carried values "
+                "while building the circuit, so they have no runtime "
+                "representation the classical executor could surface. "
+                "Compute the reduction in a classical-only loop (before "
+                "or after the quantum operations), or drop it from the "
+                "outputs."
+            )
+
+        merge_origins = self._propagate_escape_origins(quantum_classical_merges)
+        escaped_merges = sorted(
+            {
+                var_name
+                for uuid in escaped_reads
+                for var_name in merge_origins.get(uuid, ())
+            }
+        )
+        if escaped_merges:
+            raise MultipleQuantumSegmentsError(
+                "A runtime if inside the quantum segment has classical merges "
+                f"({', '.join(escaped_merges)}) that are read outside it "
+                "(by classical post-processing or as block outputs). These "
+                "values exist only while emitting the circuit and have no "
+                "runtime representation the classical executor could surface. "
+                "Keep the merged value inside backend-supported quantum "
+                "control flow, or compute it in a classical-only segment."
+            )
 
     def _compute_quantum_needed(
         self,
@@ -693,6 +1173,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
             def visit_operation(self, op: Operation) -> None:
                 """Record the input-value UUIDs of a quantum / hybrid op.
+
+                Control-flow ops whose bodies contain quantum work count
+                too: their structural inputs (loop bounds, loop-carried
+                ``iter_args``) must be resolvable at emit time, so a
+                classical op computing them feeds the quantum segment
+                exactly like a gate-angle expression.
 
                 Args:
                     op (Operation): The operation being visited.
@@ -935,15 +1421,11 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         classical merge of a runtime ``IfOperation`` to a ``SELECT``
         expression, and loop-invariant expressions float past their loop,
         so the normal runtime-expression routing surfaces them host-side.
-        Three shapes remain unrepresentable and would otherwise silently
+        Two shapes remain unrepresentable and would otherwise silently
         resolve to ``None``:
 
         - a scalar classical merge that remains on the if because a branch
           producer cannot be moved safely outside the branch, and
-        - a host-needed runtime expression stranded inside a
-          quantum-effective loop body (a loop-varying value — e.g. a
-          ``SELECT`` whose sources are measured per iteration), which no
-          classical segment will ever execute, and
         - a measurement-derived ``RegionArg`` carry, which the current
           emit-time loop lowering cannot feed from one iteration to the next.
 
@@ -956,15 +1438,15 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             op (Operation): Quantum-segment operation to scan. The
                 top-level call receives the routed quantum op; recursion
                 sets ``nested``.
-            nested (bool): Whether ``op`` sits inside a control-flow body
-                (only nested expressions are stranded — the routing loop
-                places top-level ones). Defaults to False.
+            nested (bool): Whether ``op`` sits inside a control-flow body.
+                Retained for recursive diagnostics. Defaults to False.
 
         Raises:
-            SeparationError: If a scalar classical merge or nested runtime
-                expression cannot be represented safely.
+            SeparationError: If a scalar classical merge or measurement-
+                derived RegionArg cannot be represented safely.
         """
         if isinstance(op, (ForOperation, ForItemsOperation)):
+            self._reject_host_exprs_with_loop_local_inputs(op)
             for region_arg in op.region_args:
                 if {
                     region_arg.yielded.uuid,
@@ -972,29 +1454,13 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 } & self._measurement_tainted:
                     raise SeparationError(
                         f"The loop-carried value '{region_arg.var_name}' is "
-                        "derived from a measurement, but the current backend "
+                        "derived from a measurement, but the current circuit "
                         "loop emission cannot carry runtime classical values "
                         "between iterations. Return the underlying "
                         "measurements and post-process outside the kernel, or "
                         "move the measurement-dependent computation outside "
                         "the loop."
                     )
-        if (
-            nested
-            and isinstance(op, RuntimeClassicalExpr)
-            and id(op) in self._host_evaluated_expr_ids
-        ):
-            output_name = op.results[0].name if op.results else "<unnamed>"
-            raise SeparationError(
-                f"The measurement-derived classical value '{output_name}' is "
-                f"returned or used by host-side classical work, but it is "
-                f"computed inside a quantum loop body and varies across "
-                f"iterations, so no classical segment can recompute it "
-                f"with the current execution model. Compute it from values "
-                f"measured outside the "
-                f"loop, or return the underlying measurements and "
-                f"post-process outside the kernel."
-            )
         if (
             isinstance(op, IfOperation)
             and op.condition.uuid in self._measurement_tainted
@@ -1021,6 +1487,143 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             for body in op.nested_op_lists():
                 for nested_op in body:
                     self._reject_unrepresentable_runtime_values(nested_op, nested=True)
+
+    def _reject_host_exprs_with_loop_local_inputs(
+        self,
+        loop_op: ForOperation | ForItemsOperation,
+    ) -> None:
+        """Reject host-evaluated expressions that retain loop-local inputs.
+
+        Runtime expressions nested in a quantum loop can execute in-circuit,
+        but an expression needed as a public output is also copied to the
+        post-quantum classical segment. That executor has no binding for a
+        loop variable or region block argument. In particular, an array
+        element such as ``bits[index]`` carries the loop variable only in its
+        structural metadata, so scheduling it host-side would fail after a
+        successful compilation.
+
+        Args:
+            loop_op (ForOperation | ForItemsOperation): Quantum loop whose
+                nested runtime expressions should be checked.
+
+        Raises:
+            SeparationError: If a host-evaluated nested expression references
+                a value defined by the loop.
+        """
+        loop_locals: dict[str, str] = {
+            region_arg.block_arg.uuid: region_arg.var_name
+            for region_arg in loop_op.region_args
+        }
+        if isinstance(loop_op, ForOperation):
+            if loop_op.loop_var_value is not None:
+                loop_locals[loop_op.loop_var_value.uuid] = loop_op.loop_var_value.name
+        else:
+            for key_value in loop_op.key_var_values or ():
+                loop_locals[key_value.uuid] = key_value.name
+            if loop_op.value_var_value is not None:
+                loop_locals[loop_op.value_var_value.uuid] = loop_op.value_var_value.name
+        if not loop_locals:
+            return
+        dependency_origins = self._loop_local_dependency_origins(
+            loop_op,
+            loop_locals,
+        )
+
+        nested_operations = [
+            operation
+            for body in loop_op.nested_op_lists()
+            for operation in self._collect_classical_ops(body)
+        ]
+        for expression in nested_operations:
+            if (
+                not isinstance(expression, RuntimeClassicalExpr)
+                or id(expression) not in self._host_evaluated_expr_ids
+            ):
+                continue
+            references: set[str] = set()
+            for operand in expression.operands:
+                if isinstance(operand, ValueBase):
+                    references |= self._value_reference_uuids(operand)
+            escaped = references & dependency_origins.keys()
+            if not escaped:
+                continue
+            names = ", ".join(
+                sorted({name for uuid in escaped for name in dependency_origins[uuid]})
+            )
+            output = expression.results[0] if expression.results else None
+            output_name = getattr(output, "name", "runtime expression")
+            raise SeparationError(
+                "The measurement-dependent expression producing "
+                f"'{output_name}' cannot be lowered safely: it is needed "
+                "after a quantum loop but references loop-local values "
+                f"({names}) that the post-quantum executor cannot "
+                "reconstruct. Return the underlying measurements and "
+                "post-process outside the qkernel, or avoid using a loop "
+                "variable in the escaping expression."
+            )
+
+    def _loop_local_dependency_origins(
+        self,
+        loop_op: ForOperation | ForItemsOperation,
+        loop_locals: dict[str, str],
+    ) -> dict[str, set[str]]:
+        """Trace classical body values back to loop-local definitions.
+
+        A structural operand can hide a derived loop dependency, for example
+        ``bits[index + 0]``. Propagate each loop-local display name through
+        body producers so the escaping-expression check sees that transitive
+        dependency. Hybrid results deliberately start a new runtime boundary:
+        measurements are materialized in the post-quantum context and do not
+        require the host executor to reconstruct their quantum input index.
+
+        Args:
+            loop_op (ForOperation | ForItemsOperation): Loop whose body should
+                be analyzed.
+            loop_locals (dict[str, str]): Seed UUID-to-display-name mapping.
+
+        Returns:
+            dict[str, set[str]]: Every loop-dependent UUID mapped to the
+                originating loop-local display names.
+        """
+        operations: list[Operation] = []
+
+        def collect(body: list[Operation]) -> None:
+            """Append a control-flow body and all nested operations.
+
+            Args:
+                body (list[Operation]): Operations to collect recursively.
+            """
+            for operation in body:
+                operations.append(operation)
+                if isinstance(operation, HasNestedOps):
+                    for nested in operation.nested_op_lists():
+                        collect(nested)
+
+        for body in loop_op.nested_op_lists():
+            collect(body)
+
+        origins = {uuid: {name} for uuid, name in loop_locals.items()}
+        changed = True
+        while changed:
+            changed = False
+            for operation in operations:
+                if operation.operation_kind is OperationKind.HYBRID:
+                    continue
+                input_origins: set[str] = set()
+                for value in genuine_input_values(operation):
+                    if not isinstance(value, ValueBase):
+                        continue
+                    for uuid in self._value_reference_uuids(value):
+                        input_origins.update(origins.get(uuid, ()))
+                if not input_origins:
+                    continue
+                for result in operation.results:
+                    previous = origins.setdefault(result.uuid, set())
+                    previous_size = len(previous)
+                    previous.update(input_origins)
+                    if len(previous) != previous_size:
+                        changed = True
+        return origins
 
     def _classify_runtime_exprs(
         self,
@@ -1203,6 +1806,16 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         for op in operations:
             if op.operation_kind == OperationKind.CLASSICAL:
                 result.append(op)
+            elif (
+                isinstance(op, (ForOperation, ForItemsOperation))
+                and self._effective_kind(op) == OperationKind.CLASSICAL
+            ):
+                # A classical-body loop is one classical computation from
+                # the segmentation's point of view — with loop-carried
+                # value slots it can produce a gate parameter (e.g. an
+                # accumulated angle) exactly like a BinOp chain, and emit
+                # evaluates it inside the quantum segment the same way.
+                result.append(op)
             if isinstance(op, HasNestedOps):
                 for body in op.nested_op_lists():
                     result.extend(self._collect_classical_ops(body))
@@ -1257,7 +1870,15 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
     def _effective_kind(self, op: Operation) -> OperationKind:
         """Determine the effective kind of an operation.
 
-        For control flow, examine the inner operations.
+        Control flow inherits the kinds of its nested operations. An
+        operation-empty loop with hidden quantum ownership/carry records stays
+        quantum so it cannot create a spurious quantum-classical boundary.
+
+        Args:
+            op (Operation): Operation or nested control-flow node to classify.
+
+        Returns:
+            OperationKind: Effective segmentation kind for ``op``.
         """
         kind = op.operation_kind
 
@@ -1277,7 +1898,26 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         inner_kinds.discard(OperationKind.CONTROL)
 
         if len(inner_kinds) == 0:
-            return OperationKind.CLASSICAL  # Empty control flow
+            # A marker-only loop may become operation-empty after
+            # ``StripSliceArrayOpsPass`` while still carrying quantum
+            # ownership records for ``AnalyzePass``.  Those records do not
+            # represent host-side classical work and must not split one
+            # quantum stream into Q -> C -> Q segments merely because the
+            # loop body is empty.  Classical carries (including a measured
+            # Bit selected by the final loop index) intentionally remain
+            # classical so the post-quantum executor evaluates them.
+            if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+                if any(
+                    record.before.type.is_quantum() or record.after.type.is_quantum()
+                    for record in op.loop_carried_rebinds
+                ) or any(
+                    region_arg.init.type.is_quantum()
+                    or region_arg.block_arg.type.is_quantum()
+                    or region_arg.result.type.is_quantum()
+                    for region_arg in op.region_args
+                ):
+                    return OperationKind.QUANTUM
+            return OperationKind.CLASSICAL  # Empty classical control flow
         elif len(inner_kinds) == 1:
             return inner_kinds.pop()
         else:
@@ -1312,6 +1952,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
 
         A segment reads values defined outside it (inputs)
         and writes values used outside it or returned (outputs).
+
+        Args:
+            segments (list[Segment]): Ordered segments whose boundary refs are
+                populated in place.
+            block (Block): Lowered block whose public outputs seed final
+                liveness.
         """
         # Track which segment defines each value
         value_definitions: dict[str, int] = {}  # uuid -> segment index
@@ -1336,8 +1982,20 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 segment_outputs,
             )
 
-            segment.input_refs = list(segment_inputs)
-            segment.output_refs = list(segment_outputs)
+            segment.input_refs = sorted(segment_inputs)
+            segment.output_refs = sorted(segment_outputs)
+
+        block_output_refs: set[str] = set()
+        for output in block.output_values:
+            block_output_refs.update(self._value_reference_uuids(output))
+
+        live_after = set(block_output_refs)
+        for segment in reversed(segments):
+            definitions = segment.output_refs
+            segment.output_refs = [
+                reference for reference in definitions if reference in live_after
+            ]
+            live_after.update(segment.input_refs)
 
     def _collect_segment_io(
         self,
@@ -1347,7 +2005,19 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         segment_inputs: set[str],
         segment_outputs: set[str],
     ) -> None:
-        """Recursively collect input/output refs from operations."""
+        """Recursively collect definitions and external structural reads.
+
+        Args:
+            operations (list[Operation]): Segment operation tree to inspect.
+            segment_index (int): Index of the segment owning local definitions.
+            value_definitions (dict[str, int]): Mutable UUID-to-defining-segment
+                map, including ``-1`` entries for external block inputs.
+            segment_inputs (set[str]): Mutable set receiving external reads.
+            segment_outputs (set[str]): Mutable set receiving local
+                definitions before reverse liveness filtering.
+        """
+
+        value_reference_uuids = self._value_reference_uuids
 
         class SegmentIOCollector(ControlFlowVisitor):
             def visit_operation(self, op: Operation) -> None:
@@ -1356,8 +2026,33 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 Args:
                     op (Operation): The visited operation.
                 """
-                # Operands not defined in this segment are inputs
-                for operand in op.operands:
+                # Loop iteration identities and RegionArg block arguments are
+                # definitions owned by the enclosing control-flow op, not
+                # boundary inputs. Register them before walking the body so a
+                # body read cannot be misclassified as an external segment
+                # dependency. Keeping these definitions also lets a structural
+                # public output retain a final loop key/index UUID when needed.
+                if isinstance(op, ForOperation) and op.loop_var_value is not None:
+                    self._record_definition(op.loop_var_value)
+                if isinstance(op, ForItemsOperation):
+                    for key_value in op.key_var_values or ():
+                        self._record_definition(key_value)
+                    if op.value_var_value is not None:
+                        self._record_definition(op.value_var_value)
+                if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+                    for region_arg in op.region_args:
+                        self._record_definition(region_arg.block_arg)
+
+                # Inputs not defined in this segment are boundary reads.
+                # If yields are deferred until after visiting both branches,
+                # when branch-local definitions are known; recording them here
+                # would misclassify local measurements as segment inputs.
+                inputs = (
+                    list(op.operands)
+                    if isinstance(op, IfOperation)
+                    else genuine_input_values(op)
+                )
+                for operand in inputs:
                     self._record_read(operand)
 
                 # Results are defined by this segment
@@ -1396,18 +2091,19 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                         is a ``ValueBase``.
                 """
                 if isinstance(operand, ValueBase):
-                    if (
-                        operand.uuid not in value_definitions
-                        or value_definitions[operand.uuid] != segment_index
-                    ):
-                        segment_inputs.add(operand.uuid)
+                    for reference in value_reference_uuids(operand):
+                        if (
+                            reference not in value_definitions
+                            or value_definitions[reference] != segment_index
+                        ):
+                            segment_inputs.add(reference)
 
             @staticmethod
-            def _record_definition(result: Value) -> None:
+            def _record_definition(result: ValueBase) -> None:
                 """Mark a value as defined by (and output of) this segment.
 
                 Args:
-                    result (Value): The defined result value.
+                    result (ValueBase): The defined result value.
                 """
                 value_definitions[result.uuid] = segment_index
                 segment_outputs.add(result.uuid)

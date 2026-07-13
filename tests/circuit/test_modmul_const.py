@@ -107,9 +107,10 @@ def test_modmul_const_symbolic_body_estimate() -> None:
         return reg
 
     estimate = mul.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
-    assert sp.Poly(estimate.gates.total, n).degree() == 2
-    assert sp.Poly(estimate.gates.toffoli, n).degree() == 2
+    n = estimate.parameters["n"]
+    positive_n = sp.Symbol("positive_n", integer=True, positive=True)
+    assert sp.Poly(estimate.gates.total.subs(n, positive_n), positive_n).degree() == 2
+    assert sp.Poly(estimate.gates.toffoli.subs(n, positive_n), positive_n).degree() == 2
 
     concrete = mul.estimate_resources(inputs={"n": 2048})
     assert concrete.gates.total == estimate.gates.total.subs(n, 2048)

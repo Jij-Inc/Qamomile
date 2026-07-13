@@ -2,9 +2,10 @@
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, TupleValue, Value
+from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.qiskit import QiskitTranspiler
 
@@ -82,3 +83,37 @@ def test_nested_structural_output_keeps_folded_store():
 
     assert len(folded.operations) == 1
     assert isinstance(folded.operations[0], StoreArrayElementOperation)
+    [output] = folded.output_values
+    assert isinstance(output, TupleValue)
+    [folded_result] = output.elements
+    assert isinstance(folded_result, ArrayValue)
+    assert folded_result.get_const_array() == (1.0, 2.0)
+
+
+def test_constant_fold_rewrites_value_inside_dict_output():
+    """A folded scalar remains reachable through a structural DictValue."""
+    left = Value(type=UIntType(), name="left").with_const(1)
+    right = Value(type=UIntType(), name="right").with_const(2)
+    result = Value(type=UIntType(), name="sum")
+    operation = BinOp(
+        kind=BinOpKind.ADD,
+        operands=[left, right],
+        results=[result],
+    )
+    key = Value(type=UIntType(), name="key").with_const(7)
+    output = DictValue(name="output", entries=((key, result),))
+    block = Block(
+        name="dict_output",
+        operations=[operation],
+        output_values=[output],
+        kind=BlockKind.AFFINE,
+    )
+
+    folded = ConstantFoldingPass().run(block)
+
+    assert folded.operations == []
+    [folded_output] = folded.output_values
+    assert isinstance(folded_output, DictValue)
+    [(folded_key, folded_value)] = folded_output.entries
+    assert folded_key is key
+    assert folded_value.get_const() == 3

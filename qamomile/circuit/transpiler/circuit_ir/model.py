@@ -469,6 +469,26 @@ def _contains_any_loop_variable(expression: ScalarExpr) -> bool:
     return False
 
 
+def _contains_classical_bit(expression: ScalarExpr) -> bool:
+    """Return whether a scalar expression depends on a measurement result.
+
+    Args:
+        expression (ScalarExpr): Expression to inspect.
+
+    Returns:
+        bool: Whether a classical-bit reference occurs recursively.
+    """
+    if isinstance(expression, ClassicalBitExpr):
+        return True
+    if isinstance(expression, BinaryExpr):
+        return _contains_classical_bit(expression.left) or _contains_classical_bit(
+            expression.right
+        )
+    if isinstance(expression, UnaryExpr):
+        return _contains_classical_bit(expression.operand)
+    return False
+
+
 @dataclasses.dataclass(frozen=True)
 class GateInstruction:
     """Apply one primitive gate to versioned virtual wires.
@@ -1180,10 +1200,18 @@ class CircuitBuilder:
         Args:
             phase (ScalarExpr | bool | int | float): Phase contribution.
         """
+        expression = as_scalar_expr(phase)
+        # Measurement outcomes label incoherent Kraus branches. A scalar phase
+        # selected by such an outcome is therefore a branch gauge, even when a
+        # classical SELECT has hoisted the expression outside its lexical
+        # If/While region. Discard it just like branch-local phases; coherent
+        # quantum controls never appear as ClassicalBitExpr and remain intact.
+        if _contains_classical_bit(expression):
+            return
         region = self._regions[-1]
         region.global_phase = _add_phase_expression(
             region.global_phase,
-            as_scalar_expr(phase),
+            expression,
         )
 
     def begin_for(self, indexset: range) -> LoopVariableExpr:

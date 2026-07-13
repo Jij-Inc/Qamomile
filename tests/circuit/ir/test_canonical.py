@@ -132,6 +132,15 @@ def _carried_sum_twin(n: qmc.UInt) -> qmc.UInt:
 
 
 @qmc.qkernel
+def _carried_sum_renamed(n: qmc.UInt) -> qmc.UInt:
+    """Structurally match ``_carried_sum`` using different local labels."""
+    accumulator = qmc.uint(0)
+    for j in qmc.range(n):
+        accumulator = accumulator + j
+    return accumulator
+
+
+@qmc.qkernel
 def _measure_after_h(q: qmc.Qubit) -> qmc.Bit:
     """Kernel that exercises a measurement-derived classical bit."""
     q = qmc.h(q)
@@ -312,6 +321,14 @@ class TestCanonicalizeDeterminism:
         assert a.operations[-1].region_args, "fixture must carry region args"
         assert to_canonical_bytes(a) == to_canonical_bytes(b)
         assert content_hash(a) == content_hash(b)
+
+    def test_region_arg_display_names_do_not_affect_hash(self):
+        """Loop-variable and carry labels are excluded from content identity."""
+        original = _to_affine(_carried_sum)
+        renamed = _to_affine(_carried_sum_renamed)
+
+        assert to_canonical_bytes(original) == to_canonical_bytes(renamed)
+        assert content_hash(original) == content_hash(renamed)
 
     def test_controlled_u_twins_same_canonical_bytes(self):
         """Cross-build determinism through ``ControlledUOperation.block``.

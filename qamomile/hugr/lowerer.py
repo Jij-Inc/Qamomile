@@ -6,7 +6,7 @@ import dataclasses
 import math
 import re
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 from qamomile._utils import is_close_zero
 from qamomile.circuit.ir.block import Block
@@ -20,13 +20,16 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.callable import (
     CallableRef,
+    CallPolicy,
     CallTransform,
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfOperation,
+    LoopCarriedRebind,
     WhileOperation,
+    validate_region_args,
 )
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
@@ -55,7 +58,9 @@ from qamomile.circuit.ir.value import (
     DictValue,
     TupleValue,
     Value,
+    ValueBase,
     ValueLike,
+    array_physical_region,
     resolve_root_array_index,
     resolve_root_qubit_address,
 )
@@ -68,7 +73,17 @@ from qamomile.circuit.transpiler.errors import (
     CallableDefinitionConflictError,
     EmitError,
 )
+from qamomile.circuit.transpiler.passes.analyze import (
+    reject_control_flow_quantum_discard,
+)
+from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.passes.validate_while import (
+    ValidateWhileContractPass,
+)
 from qamomile.circuit.transpiler.prepared import PreparedModule
+
+_QuantumOrigin: TypeAlias = tuple[str, int | None]
+_QuantumFootprint: TypeAlias = frozenset[_QuantumOrigin]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -108,6 +123,7 @@ class HugrTarget:
             CallableDefinitionConflictError: If one source callable produced
                 multiple specialized bodies that cannot share one HUGR symbol.
         """
+        _validate_direct_semantics(program)
         for ref, variants in program.definition_variants.items():
             if len(variants) > 1:
                 symbol = f"{ref.namespace}.{ref.name}@{ref.version}"
@@ -165,6 +181,42 @@ class HugrTarget:
                 "HUGR support requires the optional 'hugr' and 'tket-exts' packages."
             ) from error
         validate(artifact.to_bytes())
+
+
+def _validate_direct_semantics(program: PreparedModule) -> None:
+    """Validate target-neutral invariants skipped by direct HUGR lowering.
+
+    Circuit-family planning runs these checks as part of partial evaluation,
+    analysis, and segmentation. HUGR intentionally preserves the prepared
+    program graph, so it invokes only the non-destructive semantic checks
+    here instead of importing the circuit segmentation pipeline. INLINE
+    callables are expanded only in this validation view so formal values are
+    checked with their call-site provenance; emitted HUGR remains hierarchical.
+
+    Args:
+        program (PreparedModule): Prepared entrypoint and callable bodies.
+
+    Raises:
+        ValidationError: If a while condition is not measurement-backed.
+        AffineTypeError: If control flow discards a quantum value.
+    """
+    inline = InlinePass()
+    blocks: list[tuple[Block, Mapping[str, Any]]] = [
+        (inline.run(program.entrypoint), program.bindings)
+    ]
+    blocks.extend(
+        (inline.run(definition.body), {})
+        for definition in program.definitions.values()
+        if definition.body is not None
+        and definition.default_policy is not CallPolicy.INLINE
+    )
+    visited: set[int] = set()
+    for block, bindings in blocks:
+        if id(block) in visited:
+            continue
+        visited.add(id(block))
+        ValidateWhileContractPass().run(block)
+        reject_control_flow_quantum_discard(block.operations, dict(bindings))
 
 
 def _require_hugr() -> tuple[Any, Any, Any, Any, Any]:
@@ -551,6 +603,30 @@ def _lower_for(
     Raises:
         EmitError: If runtime bounds or the step cannot be represented.
     """
+    try:
+        validate_region_args(operation)
+    except ValueError as error:
+        raise EmitError(str(error), operation="ForOperation") from error
+    quantum_rebinds = _unsupported_quantum_rebinds(operation)
+    if quantum_rebinds:
+        names = ", ".join(rebind.var_name for rebind in quantum_rebinds)
+        raise EmitError(
+            "HUGR cannot lower loop-carried quantum resource rebinding "
+            f"without explicit linear region slots ({names}).",
+            operation="ForOperation",
+        )
+    residual_rebinds = [
+        rebind
+        for rebind in operation.loop_carried_rebinds
+        if not rebind.before.type.is_quantum()
+    ]
+    if residual_rebinds:
+        names = ", ".join(rebind.var_name for rebind in residual_rebinds)
+        raise EmitError(
+            "HUGR cannot lower loop-carried classical values without explicit "
+            f"region arguments ({names}).",
+            operation="ForOperation",
+        )
     if len(operation.operands) < 3:
         raise EmitError("HUGR for-loop requires start, stop, and step operands")
     if not all(value.is_constant() for value in operation.operands[:3]):
@@ -565,11 +641,17 @@ def _lower_for(
     start, stop, step = (int(value.get_const()) for value in operation.operands[:3])
     if step == 0:
         raise EmitError("HUGR for-loop step cannot be zero")
+    captured_ids = _for_capture_ids(operation, environment)
     carried = {
-        region.block_arg.uuid: environment[region.init.uuid]
+        region.block_arg.uuid: _resolve_classical_argument(
+            region.init,
+            builder,
+            environment,
+        )
         for region in operation.region_args
     }
     for index in range(start, stop, step):
+        incoming_keys = set(live_qubits)
         if operation.loop_var_value is not None:
             from hugr.std.int import IntVal
 
@@ -586,11 +668,24 @@ def _lower_for(
                 functions,
             )
         carried = {
-            region.block_arg.uuid: environment[region.yielded.uuid]
+            region.block_arg.uuid: _resolve_classical_argument(
+                region.yielded,
+                builder,
+                environment,
+            )
             for region in operation.region_args
         }
+        _free_region_local_qubits(
+            builder,
+            live_qubits,
+            incoming_keys,
+            [
+                *_flatten_environment_values(captured_ids, environment),
+                *carried.values(),
+            ],
+        )
     for region in operation.region_args:
-        wire = carried.get(region.block_arg.uuid, environment[region.init.uuid])
+        wire = carried[region.block_arg.uuid]
         environment[region.result.uuid] = wire
         if region.result.type.is_quantum():
             live_qubits.pop(region.init.uuid, None)
@@ -626,27 +721,49 @@ def _lower_runtime_for(
     start_wire = _integer_value_wire(start, builder, environment)
     stop_wire = _integer_value_wire(stop, builder, environment)
     captured_ids = _for_capture_ids(operation, environment)
-    captured_wires = [environment[uuid] for uuid in captured_ids]
-    loop = builder.add_tail_loop([], [start_wire, stop_wire, *captured_wires])
+    captured_wires = _flatten_environment_values(captured_ids, environment)
+    captured_width = len(captured_wires)
+    region_init_wires = [
+        _resolve_classical_argument(region.init, builder, environment)
+        for region in operation.region_args
+    ]
+    loop = builder.add_tail_loop(
+        [],
+        [start_wire, stop_wire, *captured_wires, *region_init_wires],
+    )
     loop_inputs = loop.inputs()
-    index_wire, current_stop, *current_captured = loop_inputs
+    index_wire, current_stop = loop_inputs[:2]
 
     from hugr import ops, tys
     from hugr.std.int import INT_OPS_EXTENSION, INT_T, IntVal
 
-    comparison_name = "ilt_s" if step_value > 0 else "igt_s"
+    comparison_name = "ilt_u" if step_value > 0 else "igt_u"
     comparison = INT_OPS_EXTENSION.get_op(comparison_name).instantiate(
         [tys.BoundedNatArg(5)],
         concrete_signature=tys.FunctionType([INT_T, INT_T], [tys.Bool]),
     )
     [condition] = loop.add_op(comparison, index_wire, current_stop)
     branch = loop.add_if(condition, *loop_inputs)
-    branch_index, branch_stop, *branch_captured = branch.inputs()
+    branch_index, branch_stop, *branch_state = branch.inputs()
+    branch_captured = branch_state[:captured_width]
+    branch_region_args = branch_state[captured_width:]
     branch_environment = dict(environment)
-    branch_environment.update(zip(captured_ids, branch_captured, strict=True))
+    _bind_region_inputs(
+        captured_ids,
+        list(branch_captured),
+        branch_environment,
+    )
+    branch_environment.update(
+        zip(
+            (region.block_arg.uuid for region in operation.region_args),
+            branch_region_args,
+            strict=True,
+        )
+    )
     if operation.loop_var_value is not None:
         branch_environment[operation.loop_var_value.uuid] = branch_index
     branch_live = dict(live_qubits)
+    branch_incoming_keys = set(branch_live)
     for nested in operation.operations:
         _lower_operation(
             nested,
@@ -656,11 +773,6 @@ def _lower_runtime_for(
             functions,
         )
 
-    latest = _latest_quantum_wires(
-        operation.operations,
-        captured_ids,
-        branch_environment,
-    )
     [step_wire] = branch.load(IntVal(step_value))
     addition = INT_OPS_EXTENSION.get_op("iadd").instantiate(
         [tys.BoundedNatArg(5)],
@@ -669,41 +781,50 @@ def _lower_runtime_for(
     [next_index] = branch.add_op(addition, branch_index, step_wire)
     control_type = tys.Sum([[], []])
     [continue_wire] = branch.add_op(ops.Tag(0, control_type))
+    next_region_args = [
+        _resolve_classical_argument(region.yielded, branch, branch_environment)
+        for region in operation.region_args
+    ]
+    next_captured = _flatten_environment_values(captured_ids, branch_environment)
+    _free_region_local_qubits(
+        branch,
+        branch_live,
+        branch_incoming_keys,
+        [*next_captured, *next_region_args],
+    )
     branch.set_outputs(
         continue_wire,
         next_index,
         branch_stop,
-        *(latest.get(uuid, branch_environment[uuid]) for uuid in captured_ids),
+        *next_captured,
+        *next_region_args,
     )
 
     false_branch = branch.add_else()
     [break_wire] = false_branch.add_op(ops.Tag(1, control_type))
     false_branch.set_outputs(break_wire, *false_branch.inputs())
     conditional_outputs = [
-        branch.conditional_node.out(index) for index in range(3 + len(captured_ids))
+        branch.conditional_node.out(index)
+        for index in range(3 + captured_width + len(operation.region_args))
     ]
     loop.set_loop_outputs(*conditional_outputs)
 
     loop_outputs = [
-        loop.parent_node.out(index) for index in range(2 + len(captured_ids))
+        loop.parent_node.out(index)
+        for index in range(2 + captured_width + len(operation.region_args))
     ]
     origins = _quantum_origins(operation.operations, captured_ids)
-    for uuid, wire in zip(captured_ids, loop_outputs[2:], strict=True):
-        previous_wire = environment[uuid]
-        for alias, candidate in list(environment.items()):
-            if candidate == previous_wire:
-                environment[alias] = wire
-        environment[uuid] = wire
-        result_ids = [
-            result_uuid
-            for result_uuid, origin_uuid in origins.items()
-            if origin_uuid == uuid
-        ]
-        for result_uuid in result_ids:
-            environment[result_uuid] = wire
-        if uuid in live_qubits:
-            live_qubits.pop(uuid)
-            live_qubits[result_ids[-1] if result_ids else uuid] = wire
+    capture_outputs = loop_outputs[2 : 2 + captured_width]
+    _publish_captured_outputs(
+        captured_ids,
+        capture_outputs,
+        environment,
+        live_qubits,
+        origins,
+    )
+    region_outputs = loop_outputs[2 + captured_width :]
+    for region, wire in zip(operation.region_args, region_outputs, strict=True):
+        environment[region.result.uuid] = wire
 
 
 def _integer_value_wire(
@@ -748,10 +869,13 @@ def _for_capture_ids(
     Returns:
         list[str]: Stable UUID order for captured values.
     """
-    captured: set[str] = set()
-    for nested in operation.operations:
-        captured.update(_captured_operand_ids(nested, environment))
-    return [uuid for uuid in environment if uuid in captured]
+    # A loop-invariant overwrite can yield an outer value without any body
+    # operation reading it. It still crosses the TailLoop boundary.
+    return _region_capture_ids(
+        operation.operations,
+        environment,
+        extra_values=[region.yielded for region in operation.region_args],
+    )
 
 
 def _lower_if(
@@ -773,8 +897,15 @@ def _lower_if(
     Raises:
         EmitError: If a branch yield is unresolved.
     """
-    condition = environment[operation.condition.uuid]
+    condition = _resolve_wire(operation.condition, environment)
     captured_ids = _branch_capture_ids(operation, environment)
+    true_origins = _quantum_origins(operation.true_operations, captured_ids)
+    false_origins = _quantum_origins(operation.false_operations, captured_ids)
+    _validate_conditional_quantum_outputs(
+        operation,
+        true_origins,
+        false_origins,
+    )
     captured = _flatten_environment_values(captured_ids, environment)
     true_builder = builder.add_if(condition, *captured)
     true_environment = dict(environment)
@@ -784,6 +915,13 @@ def _lower_if(
         true_environment,
     )
     true_live = dict(live_qubits)
+    _rebind_captured_live_wires(
+        captured_ids,
+        environment,
+        true_environment,
+        true_live,
+    )
+    true_incoming_keys = set(true_live)
     for nested in operation.true_operations:
         _lower_operation(
             nested,
@@ -795,6 +933,18 @@ def _lower_if(
     true_outputs = _flatten_region_yields(
         operation.true_yields, true_environment, "true"
     )
+    _validate_live_quantum_yields(
+        operation.true_yields,
+        true_environment,
+        true_live,
+        "true",
+    )
+    _free_region_local_qubits(
+        true_builder,
+        true_live,
+        true_incoming_keys,
+        true_outputs,
+    )
     true_builder.set_outputs(*true_outputs)
 
     false_builder = true_builder.add_else()
@@ -805,6 +955,13 @@ def _lower_if(
         false_environment,
     )
     false_live = dict(live_qubits)
+    _rebind_captured_live_wires(
+        captured_ids,
+        environment,
+        false_environment,
+        false_live,
+    )
+    false_incoming_keys = set(false_live)
     for nested in operation.false_operations:
         _lower_operation(
             nested,
@@ -816,10 +973,19 @@ def _lower_if(
     false_outputs = _flatten_region_yields(
         operation.false_yields, false_environment, "false"
     )
+    _validate_live_quantum_yields(
+        operation.false_yields,
+        false_environment,
+        false_live,
+        "false",
+    )
+    _free_region_local_qubits(
+        false_builder,
+        false_live,
+        false_incoming_keys,
+        false_outputs,
+    )
     false_builder.set_outputs(*false_outputs)
-
-    true_origins = _quantum_origins(operation.true_operations, captured_ids)
-    false_origins = _quantum_origins(operation.false_operations, captured_ids)
 
     output_count = sum(
         _array_size(result) if isinstance(result, ArrayValue) else 1
@@ -836,14 +1002,32 @@ def _lower_if(
         result_wires = outputs[output_index : output_index + width]
         output_index += width
         if isinstance(merge.result, ArrayValue):
+            common_origin = _common_quantum_origin(
+                merge.true_value,
+                merge.false_value,
+                true_origins,
+                false_origins,
+            )
+            if common_origin is not None:
+                previous = _quantum_origin_value(common_origin, environment)
+                _replace_environment_aliases(environment, previous, result_wires)
+                _set_quantum_origin_value(common_origin, result_wires, environment)
             environment[merge.result.uuid] = result_wires
             for value in (merge.true_value, merge.false_value):
                 if isinstance(value, ArrayValue):
                     environment[value.uuid] = result_wires
+            if merge.result.type.is_quantum():
+                consumed_ids = {
+                    merge.true_value.uuid,
+                    merge.false_value.uuid,
+                }
+                if common_origin is not None:
+                    consumed_ids.add(common_origin[0])
+                for uuid in consumed_ids:
                     for index in range(width):
-                        live_qubits.pop(f"{value.uuid}:{index}", None)
-            for index, wire in enumerate(result_wires):
-                live_qubits[f"{merge.result.uuid}:{index}"] = wire
+                        live_qubits.pop(f"{uuid}:{index}", None)
+                for index, wire in enumerate(result_wires):
+                    live_qubits[f"{merge.result.uuid}:{index}"] = wire
             continue
         [wire] = result_wires
         if merge.true_value.type.is_quantum():
@@ -853,24 +1037,247 @@ def _lower_if(
         environment[merge.result.uuid] = wire
         if merge.result.type.is_quantum():
             live_qubits[merge.result.uuid] = wire
-            true_origin = true_origins.get(merge.true_value.uuid)
-            false_origin = false_origins.get(merge.false_value.uuid)
-            if true_origin is not None and true_origin == false_origin:
-                previous_wire = environment[true_origin]
+            common_origin = _common_quantum_origin(
+                merge.true_value,
+                merge.false_value,
+                true_origins,
+                false_origins,
+            )
+            if common_origin is not None:
+                previous_wire = _quantum_origin_value(common_origin, environment)
                 for uuid, candidate in list(environment.items()):
                     if not isinstance(candidate, list) and candidate == previous_wire:
                         environment[uuid] = wire
-                environment[true_origin] = wire
+                _set_quantum_origin_value(common_origin, wire, environment)
                 address = _array_address(merge.result, environment)
                 if address is not None:
                     root_uuid, index = address
                     environment[root_uuid][index] = wire
 
 
+def _common_quantum_origin(
+    true_value: Value,
+    false_value: Value,
+    true_origins: dict[str, _QuantumOrigin],
+    false_origins: dict[str, _QuantumOrigin],
+) -> _QuantumOrigin | None:
+    """Return the captured origin shared by two quantum branch yields.
+
+    Args:
+        true_value (Value): Value yielded by the true branch.
+        false_value (Value): Value yielded by the false branch.
+        true_origins (dict[str, _QuantumOrigin]): True-region provenance.
+        false_origins (dict[str, _QuantumOrigin]): False-region provenance.
+
+    Returns:
+        _QuantumOrigin | None: Shared captured resource and optional array
+            element index, or ``None`` when the branches diverge.
+    """
+    if not true_value.type.is_quantum() or not false_value.type.is_quantum():
+        return None
+    true_origin = _value_quantum_origin(true_value, true_origins)
+    false_origin = _value_quantum_origin(false_value, false_origins)
+    if true_origin is None or true_origin != false_origin:
+        return None
+    return true_origin
+
+
+def _quantum_footprint(
+    value: Value,
+    origins: dict[str, _QuantumOrigin],
+) -> _QuantumFootprint | None:
+    """Resolve a quantum value to the captured physical slots it denotes.
+
+    Args:
+        value (Value): Quantum scalar, array, slice, or array element.
+        origins (dict[str, _QuantumOrigin]): Value provenance for one region.
+
+    Returns:
+        _QuantumFootprint | None: Captured physical slots, or ``None`` when
+            the value is body-local or its array region is dynamic.
+    """
+    origin = _value_quantum_origin(value, origins)
+    if origin is None:
+        return None
+    root_uuid, index = origin
+    if index is not None:
+        return frozenset({origin})
+    if not isinstance(value, ArrayValue):
+        return frozenset({origin})
+    region = array_physical_region(value)
+    if region is None:
+        return None
+    return frozenset((root_uuid, element_index) for element_index in region[1])
+
+
+def _intrinsic_quantum_footprint(value: Value) -> _QuantumFootprint:
+    """Return a branch-local physical footprint without capture provenance.
+
+    Args:
+        value (Value): Quantum scalar, array, slice, or array element.
+
+    Returns:
+        _QuantumFootprint: Best-effort branch-local physical slots. Dynamic
+            shapes and indices conservatively fall back to logical identity.
+    """
+    if isinstance(value, ArrayValue):
+        region = array_physical_region(value)
+        if region is not None:
+            root_logical_id, indices = region
+            return frozenset(
+                (root_logical_id, element_index) for element_index in indices
+            )
+    elif value.parent_array is not None:
+        address = resolve_root_qubit_address(value)
+        if address is not None:
+            array = value.parent_array
+            while array.slice_of is not None:
+                array = array.slice_of
+            return frozenset({(array.logical_id, address[1])})
+    return frozenset({(value.logical_id, None)})
+
+
+def _validate_conditional_quantum_outputs(
+    operation: IfOperation,
+    true_origins: dict[str, _QuantumOrigin],
+    false_origins: dict[str, _QuantumOrigin],
+) -> None:
+    """Reject conditional quantum output layouts this lowering cannot linearize.
+
+    HUGR conditional ports must carry each physical qubit exactly once. Qamomile
+    can express semantic aliases that either select a different resource per
+    branch or expose one resource through multiple merge results. Supporting
+    those shapes requires coalescing physical ports separately from semantic
+    merge values; reject them until that remapping exists instead of emitting
+    an invalid graph.
+
+    Args:
+        operation (IfOperation): Conditional whose merge outputs are checked.
+        true_origins (dict[str, _QuantumOrigin]): True-region provenance.
+        false_origins (dict[str, _QuantumOrigin]): False-region provenance.
+
+    Raises:
+        EmitError: If resource selection diverges across branches or one branch
+            yields an overlapping linear footprint more than once.
+    """
+    seen_true: set[_QuantumOrigin] = set()
+    seen_false: set[_QuantumOrigin] = set()
+    known_true: set[_QuantumOrigin] = set()
+    known_false: set[_QuantumOrigin] = set()
+    for merge in operation.iter_merges():
+        if not merge.result.type.is_quantum():
+            continue
+        true_footprint = _quantum_footprint(merge.true_value, true_origins)
+        false_footprint = _quantum_footprint(merge.false_value, false_origins)
+        if true_footprint is not None:
+            known_true.update(true_footprint)
+        if false_footprint is not None:
+            known_false.update(false_footprint)
+        for value, footprint, seen in (
+            (merge.true_value, true_footprint, seen_true),
+            (merge.false_value, false_footprint, seen_false),
+        ):
+            branch_footprint = footprint or _intrinsic_quantum_footprint(value)
+            if not branch_footprint.isdisjoint(seen):
+                raise EmitError(
+                    "HUGR conditional yields the same linear quantum "
+                    "resource through multiple merge outputs",
+                    operation="IfOperation",
+                )
+            seen.update(branch_footprint)
+    if (known_true or known_false) and known_true != known_false:
+        raise EmitError(
+            "HUGR cannot lower data-dependent quantum resource selection "
+            "without explicit linear merge ports",
+            operation="IfOperation",
+        )
+
+
+def _value_quantum_origin(
+    value: Value,
+    origins: dict[str, _QuantumOrigin],
+) -> _QuantumOrigin | None:
+    """Resolve a quantum value's captured origin, including array elements.
+
+    Args:
+        value (Value): Quantum scalar, array, or array element.
+        origins (dict[str, _QuantumOrigin]): Known value provenance.
+
+    Returns:
+        _QuantumOrigin | None: Captured UUID and optional element index.
+    """
+    origin = origins.get(value.uuid)
+    if origin is not None:
+        return origin
+    if isinstance(value, ArrayValue):
+        root_uuid = _array_root_uuid(value)
+        return origins.get(root_uuid) if root_uuid is not None else None
+    address = resolve_root_qubit_address(value)
+    if address is None:
+        return None
+    root_uuid, index = address
+    root_origin = origins.get(root_uuid)
+    if root_origin is None or root_origin[1] is not None:
+        return None
+    return root_origin[0], index
+
+
+def _quantum_origin_value(
+    origin: _QuantumOrigin,
+    environment: dict[str, Any],
+) -> Any:
+    """Resolve a whole captured value or one captured array element.
+
+    Args:
+        origin (_QuantumOrigin): Captured UUID and optional element index.
+        environment (dict[str, Any]): Active HUGR value environment.
+
+    Returns:
+        Any: Whole scalar/array value or selected element wire.
+
+    Raises:
+        EmitError: If the recorded origin does not match its environment shape.
+    """
+    uuid, index = origin
+    resolved = environment[uuid]
+    if index is None:
+        return resolved
+    if not isinstance(resolved, list) or index >= len(resolved):
+        raise EmitError("HUGR quantum provenance has an invalid array element")
+    return resolved[index]
+
+
+def _set_quantum_origin_value(
+    origin: _QuantumOrigin,
+    replacement: Any,
+    environment: dict[str, Any],
+) -> None:
+    """Advance a whole captured value or one captured array element.
+
+    Args:
+        origin (_QuantumOrigin): Captured UUID and optional element index.
+        replacement (Any): Replacement wire or flattened array.
+        environment (dict[str, Any]): Active HUGR value environment.
+
+    Raises:
+        EmitError: If the recorded origin does not match its environment shape.
+    """
+    uuid, index = origin
+    if index is None:
+        environment[uuid] = replacement
+        return
+    resolved = environment[uuid]
+    if isinstance(replacement, list) or not isinstance(resolved, list):
+        raise EmitError("HUGR quantum provenance changed an array element shape")
+    if index >= len(resolved):
+        raise EmitError("HUGR quantum provenance has an invalid array element")
+    resolved[index] = replacement
+
+
 def _quantum_origins(
     operations: list[Operation],
     input_ids: list[str],
-) -> dict[str, str]:
+) -> dict[str, _QuantumOrigin]:
     """Trace quantum result values back to captured region inputs.
 
     Args:
@@ -878,48 +1285,120 @@ def _quantum_origins(
         input_ids (list[str]): UUIDs of values captured from the parent region.
 
     Returns:
-        dict[str, str]: Quantum value UUID to captured input UUID provenance.
+        dict[str, _QuantumOrigin]: Quantum value UUID to captured resource and
+            optional array-element index.
     """
-    origins = {uuid: uuid for uuid in input_ids}
-    for operation in operations:
-        quantum_operands = [
-            value for value in operation.operands if value.type.is_quantum()
-        ]
-        quantum_results = [
-            value for value in operation.results if value.type.is_quantum()
-        ]
-        for operand, result in zip(quantum_operands, quantum_results, strict=False):
-            origin = origins.get(operand.uuid)
-            if origin is not None:
-                origins[result.uuid] = origin
-    return origins
+
+    def trace_region(
+        nested_operations: list[Operation],
+        incoming: dict[str, _QuantumOrigin],
+    ) -> dict[str, _QuantumOrigin]:
+        """Propagate captured quantum origins through one nested region.
+
+        Args:
+            nested_operations (list[Operation]): Region operations in execution
+                order.
+            incoming (dict[str, _QuantumOrigin]): Quantum origins visible at
+                the region entry.
+
+        Returns:
+            dict[str, _QuantumOrigin]: Quantum origins visible at the region
+                exit.
+        """
+        current = dict(incoming)
+        for operation in nested_operations:
+            if isinstance(operation, IfOperation):
+                true_origins = trace_region(operation.true_operations, current)
+                false_origins = trace_region(operation.false_operations, current)
+                for merge in operation.iter_merges():
+                    common_origin = _common_quantum_origin(
+                        merge.true_value,
+                        merge.false_value,
+                        true_origins,
+                        false_origins,
+                    )
+                    if common_origin is not None:
+                        current[merge.result.uuid] = common_origin
+                continue
+            if isinstance(operation, (ForOperation, WhileOperation)):
+                # Frontend loop bodies are traced once. Their final quantum
+                # handles can therefore escape as post-loop references even
+                # when the loop operation has no explicit quantum result.
+                current.update(trace_region(operation.operations, current))
+                for region in operation.region_args:
+                    init_origin = _value_quantum_origin(region.init, current)
+                    yielded_origin = _value_quantum_origin(region.yielded, current)
+                    if init_origin is not None and init_origin == yielded_origin:
+                        current[region.result.uuid] = init_origin
+                continue
+            quantum_operands = [
+                value for value in operation.operands if value.type.is_quantum()
+            ]
+            quantum_results = [
+                value for value in operation.results if value.type.is_quantum()
+            ]
+            for index, result in enumerate(quantum_results):
+                operand = next(
+                    (
+                        candidate
+                        for candidate in quantum_operands
+                        if candidate.logical_id == result.logical_id
+                    ),
+                    None,
+                )
+                if (
+                    operand is None
+                    and not isinstance(operation, InvokeOperation)
+                    and index < len(quantum_operands)
+                ):
+                    operand = quantum_operands[index]
+                if operand is None:
+                    continue
+                origin = _value_quantum_origin(operand, current)
+                if origin is not None:
+                    current[result.uuid] = origin
+        return current
+
+    return trace_region(operations, {uuid: (uuid, None) for uuid in input_ids})
 
 
-def _latest_quantum_wires(
-    operations: list[Operation],
-    input_ids: list[str],
-    environment: dict[str, Any],
-) -> dict[str, Any]:
-    """Resolve the final wire produced for each captured quantum input.
+def _unsupported_quantum_rebinds(
+    operation: ForOperation | WhileOperation,
+) -> list[LoopCarriedRebind]:
+    """Find loop rebinds that change the underlying quantum resource.
+
+    Quantum SSA UUIDs and logical IDs can both change across gates, calls, and
+    structured merges. Trace each body result back to the physical value that
+    entered the loop instead of treating either identifier as resource
+    identity.
 
     Args:
-        operations (list[Operation]): Region operations in execution order.
-        input_ids (list[str]): Captured input UUIDs to track.
-        environment (dict[str, Any]): Lowered region environment.
+        operation (ForOperation | WhileOperation): Loop whose trace-time
+            rebind records should be classified.
 
     Returns:
-        dict[str, Any]: Captured input UUID to its final linear wire.
+        list[LoopCarriedRebind]: Quantum rebinds whose outgoing value cannot be
+            proven to have the same captured origin as the incoming value.
     """
-    origins = _quantum_origins(operations, input_ids)
-    latest = {
-        input_id: environment[input_id]
-        for input_id in input_ids
-        if input_id in environment
-    }
-    for value_uuid, input_id in origins.items():
-        if value_uuid in environment:
-            latest[input_id] = environment[value_uuid]
-    return latest
+    rebinds = [
+        rebind
+        for rebind in operation.loop_carried_rebinds
+        if rebind.before.type.is_quantum()
+    ]
+    input_ids: list[str] = []
+    for rebind in rebinds:
+        before = cast(Value, rebind.before)
+        input_id = _array_root_uuid(before) or before.uuid
+        if input_id not in input_ids:
+            input_ids.append(input_id)
+    origins = _quantum_origins(operation.operations, input_ids)
+    unsupported: list[LoopCarriedRebind] = []
+    for rebind in rebinds:
+        before = _quantum_footprint(cast(Value, rebind.before), origins)
+        after = _quantum_footprint(cast(Value, rebind.after), origins)
+        if before is None or before != after:
+            unsupported.append(rebind)
+    return unsupported
 
 
 def _lower_while(
@@ -941,42 +1420,82 @@ def _lower_while(
     Raises:
         EmitError: If the condition or a captured body value is unresolved.
     """
+    try:
+        validate_region_args(operation)
+    except ValueError as error:
+        raise EmitError(str(error), operation="WhileOperation") from error
+    quantum_rebinds = _unsupported_quantum_rebinds(operation)
+    unsupported_rebinds = []
+    for rebind in operation.loop_carried_rebinds:
+        if rebind.before.type.is_quantum():
+            continue
+        if (
+            len(operation.operands) >= 2
+            and rebind.before.uuid == operation.operands[0].uuid
+            and rebind.after.uuid == operation.operands[1].uuid
+        ):
+            continue
+        unsupported_rebinds.append(rebind)
+    if quantum_rebinds:
+        names = ", ".join(rebind.var_name for rebind in quantum_rebinds)
+        raise EmitError(
+            "HUGR cannot lower loop-carried quantum resource rebinding in a "
+            f"while loop without explicit linear region slots ({names}).",
+            operation="WhileOperation",
+        )
+    if operation.region_args or unsupported_rebinds:
+        names = [region.var_name for region in operation.region_args]
+        names.extend(rebind.var_name for rebind in unsupported_rebinds)
+        raise EmitError(
+            "HUGR cannot lower loop-carried classical values in a while loop "
+            f"without explicit region arguments ({', '.join(names)}).",
+            operation="WhileOperation",
+        )
     if not operation.operands:
         raise EmitError("HUGR while loop requires a condition operand")
     condition = operation.operands[0]
-    if condition.uuid not in environment:
-        raise EmitError("HUGR while-loop condition is unresolved")
+    condition_wire = _resolve_wire(condition, environment)
 
     captured_ids = _loop_capture_ids(operation, environment)
-    rest_wires = [environment[uuid] for uuid in captured_ids]
-    loop = builder.add_tail_loop([], rest_wires)
+    captured_wires = _flatten_environment_values(captured_ids, environment)
+    captured_width = len(captured_wires)
+    loop = builder.add_tail_loop([], [condition_wire, *captured_wires])
     loop_inputs = loop.inputs()
+    current_condition, *current_captured = loop_inputs
     loop_environment = dict(environment)
-    loop_environment.update(zip(captured_ids, loop_inputs, strict=True))
+    loop_environment[condition.uuid] = current_condition
+    _bind_region_inputs(captured_ids, current_captured, loop_environment)
 
-    condition_wire = loop_environment[condition.uuid]
-    branch = loop.add_if(condition_wire, *loop_inputs)
+    branch = loop.add_if(current_condition, *loop_inputs)
+    branch_condition, *branch_captured = branch.inputs()
     true_environment = dict(loop_environment)
-    true_environment.update(zip(captured_ids, branch.inputs(), strict=True))
+    true_environment[condition.uuid] = branch_condition
+    _bind_region_inputs(captured_ids, branch_captured, true_environment)
     true_live = dict(live_qubits)
+    true_incoming_keys = set(true_live)
     for nested in operation.operations:
         _lower_operation(nested, branch, true_environment, true_live, functions)
 
-    next_wires = dict(
-        _latest_quantum_wires(operation.operations, captured_ids, true_environment)
-    )
     if len(operation.operands) > 1:
         updated_condition = operation.operands[1]
-        next_wires[condition.uuid] = _require_wire(
-            updated_condition, true_environment, "while"
-        )
+        next_condition = _resolve_wire(updated_condition, true_environment)
+    else:
+        next_condition = branch_condition
     from hugr import ops, tys
 
     control_type = tys.Sum([[], []])
     [continue_wire] = branch.add_op(ops.Tag(0, control_type))
+    next_captured = _flatten_environment_values(captured_ids, true_environment)
+    _free_region_local_qubits(
+        branch,
+        true_live,
+        true_incoming_keys,
+        next_captured,
+    )
     branch.set_outputs(
         continue_wire,
-        *(next_wires.get(uuid, true_environment[uuid]) for uuid in captured_ids),
+        next_condition,
+        *next_captured,
     )
 
     false_branch = branch.add_else()
@@ -984,16 +1503,21 @@ def _lower_while(
     false_branch.set_outputs(break_wire, *false_branch.inputs())
 
     conditional_outputs = [
-        branch.conditional_node.out(index) for index in range(1 + len(captured_ids))
+        branch.conditional_node.out(index) for index in range(2 + captured_width)
     ]
     loop.set_loop_outputs(*conditional_outputs)
-    loop_outputs = [loop.parent_node.out(index) for index in range(len(captured_ids))]
-    for uuid, wire in zip(captured_ids, loop_outputs, strict=True):
-        environment[uuid] = wire
-        if uuid in live_qubits:
-            live_qubits[uuid] = wire
+    loop_outputs = [loop.parent_node.out(index) for index in range(1 + captured_width)]
+    final_condition, *capture_outputs = loop_outputs
+    origins = _quantum_origins(operation.operations, captured_ids)
+    _publish_captured_outputs(
+        captured_ids,
+        capture_outputs,
+        environment,
+        live_qubits,
+        origins,
+    )
     if len(operation.operands) > 1:
-        environment[operation.operands[1].uuid] = environment[condition.uuid]
+        environment[operation.operands[1].uuid] = final_condition
 
 
 def _loop_capture_ids(
@@ -1009,10 +1533,11 @@ def _loop_capture_ids(
     Returns:
         list[str]: Stable UUID order for TailLoop carried values.
     """
-    captured = {operation.operands[0].uuid}
-    for nested in operation.operations:
-        captured.update(_captured_operand_ids(nested, environment))
-    return [uuid for uuid in environment if uuid in captured]
+    return _region_capture_ids(
+        operation.operations,
+        environment,
+        excluded={operation.operands[0].uuid},
+    )
 
 
 def _branch_capture_ids(
@@ -1028,15 +1553,52 @@ def _branch_capture_ids(
     Returns:
         list[str]: Stable UUID order for HUGR conditional inputs.
     """
-    captured: set[str] = set()
-    for nested in [*operation.true_operations, *operation.false_operations]:
-        captured.update(_captured_operand_ids(nested, environment))
-    captured.update(
-        value.uuid
-        for value in [*operation.true_yields, *operation.false_yields]
-        if value.uuid in environment
+    operations = [*operation.true_operations, *operation.false_operations]
+    yields = [*operation.true_yields, *operation.false_yields]
+    return _region_capture_ids(
+        operations,
+        environment,
+        extra_values=yields,
+        excluded={operation.condition.uuid},
     )
-    captured.discard(operation.condition.uuid)
+
+
+def _region_capture_ids(
+    operations: list[Operation],
+    environment: dict[str, Any],
+    extra_values: list[Value] | None = None,
+    excluded: set[str] | None = None,
+) -> list[str]:
+    """Collect stable, deduplicated captures for one nested HUGR region.
+
+    Args:
+        operations (list[Operation]): Region operations to inspect recursively.
+        environment (dict[str, Any]): Available parent-region wires.
+        extra_values (list[Value] | None): Region yields that cross the
+            boundary without an operation read. Defaults to ``None``.
+        excluded (set[str] | None): UUIDs carried by dedicated region state
+            rather than generic captures. Defaults to ``None``.
+
+    Returns:
+        list[str]: Captured UUIDs in parent-environment order.
+    """
+    captured: set[str] = set()
+    for nested in operations:
+        captured.update(_captured_operand_ids(nested, environment))
+    extras = extra_values or []
+    for value in extras:
+        if value.uuid in environment:
+            captured.add(value.uuid)
+            continue
+        root_uuid = _array_root_uuid(value)
+        if root_uuid is not None and root_uuid in environment:
+            captured.add(root_uuid)
+    _deduplicate_quantum_capture_ids(
+        operations,
+        captured,
+        extras,
+    )
+    captured.difference_update(excluded or ())
     return [uuid for uuid in environment if uuid in captured]
 
 
@@ -1054,15 +1616,14 @@ def _captured_operand_ids(
         set[str]: UUIDs captured from the parent environment.
     """
     captured: set[str] = set()
-    for value in operation.operands:
+    for value in operation.all_input_values():
         if value.uuid in environment:
             captured.add(value.uuid)
             continue
-        address = _array_address(value, environment)
-        if address is None:
+        if not isinstance(value, Value):
             continue
-        root_uuid, _ = address
-        if root_uuid in environment:
+        root_uuid = _array_root_uuid(value)
+        if root_uuid is not None and root_uuid in environment:
             captured.add(root_uuid)
     nested_lists = getattr(operation, "nested_op_lists", None)
     if callable(nested_lists):
@@ -1070,6 +1631,58 @@ def _captured_operand_ids(
             for nested in nested_operations:
                 captured.update(_captured_operand_ids(nested, environment))
     return captured
+
+
+def _deduplicate_quantum_capture_ids(
+    operations: list[Operation],
+    captured: set[str],
+    extra_values: list[Value] | None = None,
+) -> None:
+    """Drop scalar element captures already covered by a captured root array.
+
+    Args:
+        operations (list[Operation]): Region operations whose values identify
+            array-element aliases.
+        captured (set[str]): Mutable set of captured environment UUIDs.
+        extra_values (list[Value] | None): Structural region yields not owned
+            by an operation. Defaults to ``None``.
+    """
+
+    def visit_value(value: ValueBase) -> None:
+        """Discard a captured element already represented by its root array.
+
+        Args:
+            value (ValueBase): Candidate quantum value to deduplicate.
+        """
+        if not isinstance(value, Value) or not value.type.is_quantum():
+            return
+        root_uuid = _array_root_uuid(value)
+        if (
+            root_uuid is not None
+            and root_uuid != value.uuid
+            and root_uuid in captured
+            and value.uuid in captured
+        ):
+            captured.discard(value.uuid)
+
+    def visit_operations(nested_operations: list[Operation]) -> None:
+        """Visit every input value in a nested operation tree.
+
+        Args:
+            nested_operations (list[Operation]): Operations to inspect
+                recursively.
+        """
+        for operation in nested_operations:
+            for value in operation.all_input_values():
+                visit_value(value)
+            nested_lists = getattr(operation, "nested_op_lists", None)
+            if callable(nested_lists):
+                for body in nested_lists():
+                    visit_operations(body)
+
+    visit_operations(operations)
+    for value in extra_values or ():
+        visit_value(value)
 
 
 def _flatten_environment_values(
@@ -1090,6 +1703,36 @@ def _flatten_environment_values(
         value = environment[uuid]
         wires.extend(value if isinstance(value, list) else [value])
     return wires
+
+
+def _free_region_local_qubits(
+    builder: Any,
+    live_qubits: dict[str, Any],
+    incoming_keys: set[str],
+    output_wires: list[Any],
+) -> None:
+    """Free live quantum wires created in a nested region but not yielded.
+
+    Args:
+        builder (Any): HUGR region builder receiving ``qFree`` operations.
+        live_qubits (dict[str, Any]): Region-local live-resource mapping.
+        incoming_keys (set[str]): Live-resource keys inherited from the parent
+            before lowering the region body.
+        output_wires (list[Any]): Region outputs that must remain live.
+    """
+    from tket_exts import quantum
+
+    protected = list(output_wires)
+    protected.extend(wire for key, wire in live_qubits.items() if key in incoming_keys)
+    freed: list[Any] = []
+    for key, wire in list(live_qubits.items()):
+        if key in incoming_keys or any(wire == output for output in protected):
+            continue
+        live_qubits.pop(key)
+        if any(wire == previous for previous in freed):
+            continue
+        builder.add_op(quantum.qFree, wire)
+        freed.append(wire)
 
 
 def _bind_region_inputs(
@@ -1114,12 +1757,184 @@ def _bind_region_inputs(
         replacement = inputs[offset : offset + width]
         if len(replacement) != width:
             raise EmitError("HUGR region input arity mismatch")
-        environment[uuid] = (
-            replacement if isinstance(previous, list) else replacement[0]
-        )
+        resolved = replacement if isinstance(previous, list) else replacement[0]
+        _replace_environment_aliases(environment, previous, resolved)
+        environment[uuid] = resolved
         offset += width
     if offset != len(inputs):
         raise EmitError("HUGR region input arity mismatch")
+
+
+def _rebind_captured_live_wires(
+    value_ids: list[str],
+    parent_environment: dict[str, Any],
+    region_environment: dict[str, Any],
+    live_qubits: dict[str, Any],
+) -> None:
+    """Point region live-resource entries at their conditional input wires.
+
+    ``live_qubits`` is copied from the parent so its keys retain semantic
+    resource identity, while a HUGR region receives fresh wire handles for the
+    captured values. Keeping the parent handles would make a destructive
+    branch operation appear live through the old wire and hide invalid quantum
+    yields.
+
+    Args:
+        value_ids (list[str]): Captured values in region-port order.
+        parent_environment (dict[str, Any]): Parent UUID-to-wire mapping.
+        region_environment (dict[str, Any]): Region mapping after input binding.
+        live_qubits (dict[str, Any]): Mutable region live-resource mapping.
+    """
+    parent_wires = _flatten_environment_values(value_ids, parent_environment)
+    region_wires = _flatten_environment_values(value_ids, region_environment)
+    for key, candidate in list(live_qubits.items()):
+        for parent_wire, region_wire in zip(
+            parent_wires,
+            region_wires,
+            strict=True,
+        ):
+            if candidate == parent_wire:
+                live_qubits[key] = region_wire
+                break
+
+
+def _validate_live_quantum_yields(
+    values: list[Value],
+    environment: dict[str, Any],
+    live_qubits: dict[str, Any],
+    branch: str,
+) -> None:
+    """Reject branch yields that reuse a destructively consumed qubit.
+
+    Frontend branch bookkeeping may retain a whole-array identity merge even
+    when one of its elements was measured in the branch. HUGR linear wires
+    cannot be both consumed by ``measure`` and yielded from the Conditional;
+    detecting the stale yield here produces a target-level diagnostic instead
+    of leaking a native validator error.
+
+    Args:
+        values (list[Value]): Semantic values yielded by one branch.
+        environment (dict[str, Any]): Region UUID-to-wire mapping.
+        live_qubits (dict[str, Any]): Live quantum wires after branch lowering.
+        branch (str): Branch name used in the diagnostic.
+
+    Raises:
+        EmitError: If a quantum yield no longer denotes a live branch wire.
+    """
+    live_wires = list(live_qubits.values())
+    quantum_values = [value for value in values if value.type.is_quantum()]
+    yielded_wires = _flatten_region_yields(quantum_values, environment, branch)
+    if all(
+        any(wire == live_wire for live_wire in live_wires) for wire in yielded_wires
+    ):
+        return
+    raise EmitError(
+        "HUGR conditional cannot yield a quantum resource after it was "
+        f"destructively consumed in the {branch} branch; partial-array "
+        "quantum merges require liveness-aware lowering",
+        operation="IfOperation",
+    )
+
+
+def _publish_captured_outputs(
+    value_ids: list[str],
+    outputs: list[Any],
+    environment: dict[str, Any],
+    live_qubits: dict[str, Any],
+    origins: dict[str, _QuantumOrigin] | None = None,
+) -> None:
+    """Publish flattened loop outputs back into the parent environment.
+
+    Args:
+        value_ids (list[str]): Captured parent UUIDs in stable order.
+        outputs (list[Any]): Flattened TailLoop output wires.
+        environment (dict[str, Any]): Parent environment to update.
+        live_qubits (dict[str, Any]): Parent linear-qubit mapping to update.
+        origins (dict[str, _QuantumOrigin] | None): Body quantum result UUID
+            to captured resource and optional element index. Defaults to no
+            result aliases.
+
+    Raises:
+        EmitError: If output arity disagrees with the captured value shapes.
+    """
+    replacements = {uuid: environment[uuid] for uuid in value_ids}
+    _bind_region_inputs(value_ids, outputs, replacements)
+    result_origins = origins or {}
+    for uuid in value_ids:
+        previous = environment[uuid]
+        replacement = replacements[uuid]
+        _replace_environment_aliases(environment, previous, replacement)
+        environment[uuid] = replacement
+        result_origins_for_capture = [
+            (result_uuid, index)
+            for result_uuid, (origin_uuid, index) in result_origins.items()
+            if origin_uuid == uuid
+        ]
+        for result_uuid, index in result_origins_for_capture:
+            if index is None:
+                environment[result_uuid] = replacement
+            elif isinstance(replacement, list) and index < len(replacement):
+                environment[result_uuid] = replacement[index]
+            else:
+                raise EmitError("HUGR loop result has invalid array provenance")
+        whole_result_ids = [
+            result_uuid
+            for result_uuid, index in result_origins_for_capture
+            if index is None
+        ]
+        live_result = whole_result_ids[-1] if whole_result_ids else uuid
+        if isinstance(replacement, list):
+            was_live = any(
+                f"{uuid}:{index}" in live_qubits for index in range(len(replacement))
+            )
+            for index in range(len(replacement)):
+                live_qubits.pop(f"{uuid}:{index}", None)
+            if was_live:
+                live_qubits.update(
+                    {
+                        f"{live_result}:{index}": wire
+                        for index, wire in enumerate(replacement)
+                    }
+                )
+        elif uuid in live_qubits:
+            live_qubits.pop(uuid)
+            live_qubits[live_result] = replacement
+
+
+def _replace_environment_aliases(
+    environment: dict[str, Any],
+    previous: Any,
+    replacement: Any,
+) -> None:
+    """Advance aliases that point at one captured loop value.
+
+    Args:
+        environment (dict[str, Any]): UUID and stable-name environment.
+        previous (Any): Scalar wire or flattened array before the loop.
+        replacement (Any): Matching scalar wire or flattened array after it.
+
+    Raises:
+        EmitError: If array replacement widths differ.
+    """
+    if isinstance(previous, list):
+        if not isinstance(replacement, list) or len(previous) != len(replacement):
+            raise EmitError("HUGR loop capture changed array width")
+        for alias, candidate in list(environment.items()):
+            if candidate is previous:
+                environment[alias] = replacement
+                continue
+            if isinstance(candidate, list):
+                continue
+            for old_wire, new_wire in zip(previous, replacement, strict=True):
+                if candidate == old_wire:
+                    environment[alias] = new_wire
+                    break
+        return
+    if isinstance(replacement, list):
+        raise EmitError("HUGR loop capture changed scalar width")
+    for alias, candidate in list(environment.items()):
+        if not isinstance(candidate, list) and candidate == previous:
+            environment[alias] = replacement
 
 
 def _flatten_region_yields(
@@ -1166,8 +1981,8 @@ def _require_wire(
         EmitError: If the yield is unresolved.
     """
     try:
-        return environment[value.uuid]
-    except KeyError as error:
+        return _resolve_wire(value, environment)
+    except EmitError as error:
         raise EmitError(
             f"HUGR {branch} branch yield {value.name!r} is unresolved"
         ) from error
@@ -1284,6 +2099,11 @@ def _resolve_wire(value: Value, environment: dict[str, Any]) -> Any:
             return environment[root_uuid][index]
         except (KeyError, IndexError) as error:
             raise EmitError(f"Unresolved HUGR array element {value.name!r}") from error
+    if value.type.is_quantum() and value.parent_array is not None:
+        raise EmitError(
+            "HUGR cannot lower dynamic quantum array indexing without an "
+            "explicit linear array operation"
+        )
     raise EmitError(f"Unresolved HUGR value {value.name!r}")
 
 
@@ -1310,6 +2130,15 @@ def _resolve_classical_argument(
     """
     if value.uuid in environment:
         return environment[value.uuid]
+    address = _array_address(value, environment)
+    if address is not None:
+        root_uuid, index = address
+        try:
+            return environment[root_uuid][index]
+        except (KeyError, IndexError) as error:
+            raise EmitError(
+                f"Unresolved HUGR classical array element {value.name!r}"
+            ) from error
     parameter_name = value.parameter_name()
     if parameter_name is not None:
         alias = f"__parameter__:{parameter_name}"
@@ -1348,6 +2177,27 @@ def _array_address(
         return None
     root, index = resolved
     return root.uuid, index
+
+
+def _array_root_uuid(value: Value) -> str | None:
+    """Return an array value or element's root UUID without resolving indices.
+
+    Capture analysis only needs to know which parent-region array crosses a
+    nested region boundary. Unlike physical element lookup, it must also work
+    while a nested loop index is not bound yet.
+
+    Args:
+        value (Value): Potential array or array-element value.
+
+    Returns:
+        str | None: Root array UUID, or ``None`` for a scalar value.
+    """
+    array = value if isinstance(value, ArrayValue) else value.parent_array
+    if array is None:
+        return None
+    while array.slice_of is not None:
+        array = array.slice_of
+    return array.uuid
 
 
 def _quantum_key(value: Value, environment: dict[str, Any]) -> str:
@@ -1856,9 +2706,7 @@ def _lower_call(
     for key, live_wire in list(live_qubits.items()):
         if any(live_wire == consumed for consumed in consumed_wires):
             live_qubits.pop(key)
-    quantum_sources = iter(
-        value for value in operation.operands if value.type.is_quantum()
-    )
+    quantum_sources = [value for value in operation.operands if value.type.is_quantum()]
     for result, wire in zip(operation.results, outputs, strict=True):
         if isinstance(result, ArrayValue):
             from hugr import ops
@@ -1868,15 +2716,34 @@ def _lower_call(
             ]
             elements = list(builder.add_op(ops.UnpackTuple(element_types), wire))
             if result.type.is_quantum():
-                next(quantum_sources)
-                environment[result.uuid] = elements
-                for index, element in enumerate(elements):
-                    live_qubits[f"{result.uuid}:{index}"] = element
+                source = next(
+                    (
+                        value
+                        for value in quantum_sources
+                        if value.logical_id == result.logical_id
+                    ),
+                    None,
+                )
+                _publish_transformed_result(
+                    source,
+                    result,
+                    elements,
+                    environment,
+                    live_qubits,
+                )
             else:
                 environment[result.uuid] = elements
         elif result.type.is_quantum():
+            source = next(
+                (
+                    value
+                    for value in quantum_sources
+                    if value.logical_id == result.logical_id
+                ),
+                None,
+            )
             _publish_transformed_result(
-                next(quantum_sources),
+                source,
                 result,
                 wire,
                 environment,
@@ -2132,7 +2999,7 @@ def _operations_contain_global_phase(
 
 
 def _publish_transformed_result(
-    source: Value,
+    source: Value | None,
     result: Value,
     wire: Any,
     environment: dict[str, Any],
@@ -2141,7 +3008,8 @@ def _publish_transformed_result(
     """Publish a transformed-call result and its containing array version.
 
     Args:
-        source (Value): Quantum value consumed by the transformed call.
+        source (Value | None): Same-resource quantum value consumed by the
+            call, or ``None`` when the result has no input lineage.
         result (Value): Quantum SSA value produced by the transformed call.
         wire (Any): Resulting linear HUGR wire.
         environment (dict[str, Any]): UUID-to-wire mapping to update.
@@ -2155,10 +3023,13 @@ def _publish_transformed_result(
             raise EmitError(
                 f"HUGR array result {result.name!r} did not produce linear elements"
             )
-        environment[result.uuid] = wire
         source_wires: list[Any] = (
-            environment.get(source.uuid, []) if isinstance(source, ArrayValue) else []
+            _resolve_wire(source, environment) if isinstance(source, ArrayValue) else []
         )
+        if source is not None:
+            _replace_environment_aliases(environment, source_wires, wire)
+            environment[source.uuid] = wire
+        environment[result.uuid] = wire
         for key, live_wire in list(live_qubits.items()):
             if any(live_wire == source_wire for source_wire in source_wires):
                 live_qubits.pop(key)
@@ -2166,12 +3037,23 @@ def _publish_transformed_result(
             live_qubits[f"{result.uuid}:{index}"] = element
         return
 
+    previous = _resolve_wire(source, environment) if source is not None else None
+    if source is not None:
+        _replace_environment_aliases(environment, previous, wire)
+        environment[source.uuid] = wire
+        source_address = _array_address(source, environment)
+        if source_address is not None:
+            source_root, source_index = source_address
+            environment[source_root][source_index] = wire
+        live_qubits.pop(_quantum_key(source, environment), None)
     environment[result.uuid] = wire
     address = _array_address(result, environment)
     if address is not None:
         root_uuid, index = address
         if root_uuid not in environment:
-            source_address = _array_address(source, environment)
+            source_address = (
+                _array_address(source, environment) if source is not None else None
+            )
             if source_address is None or source_address[0] not in environment:
                 raise EmitError(f"Cannot reconstruct HUGR array result {result.name!r}")
             environment[root_uuid] = list(environment[source_address[0]])
@@ -2395,7 +3277,8 @@ def _lower_binop(
     if operation.kind is None:
         raise EmitError("HUGR arithmetic operation has no operation kind")
     if all(isinstance(value.type, FloatType) for value in operation.operands):
-        from hugr.std.float import FLOAT_OPS_EXTENSION
+        from hugr import tys
+        from hugr.std.float import FLOAT_OPS_EXTENSION, FLOAT_T
 
         names = {
             BinOpKind.ADD: "fadd",
@@ -2407,8 +3290,13 @@ def _lower_binop(
         }
         extension = FLOAT_OPS_EXTENSION
         arguments = None
+        concrete_signature = tys.FunctionType(
+            [FLOAT_T, FLOAT_T],
+            [FLOAT_T],
+        )
     elif all(isinstance(value.type, UIntType) for value in operation.operands):
-        from hugr.std.int import IntVal
+        from hugr import tys
+        from hugr.std.int import INT_OPS_EXTENSION, INT_T, IntVal
 
         concrete = []
         for value in operation.operands:
@@ -2438,13 +3326,27 @@ def _lower_binop(
             environment[result.uuid] = wire
             environment[f"__index__:{result.uuid}"] = value
             return
-        raise EmitError("HUGR UInt arithmetic requires statically known operands")
+        names = {
+            BinOpKind.ADD: "iadd",
+            BinOpKind.SUB: "isub",
+            BinOpKind.MUL: "imul",
+            BinOpKind.POW: "ipow",
+        }
+        extension = INT_OPS_EXTENSION
+        arguments = [tys.BoundedNatArg(5)]
+        concrete_signature = tys.FunctionType(
+            [INT_T, INT_T],
+            [INT_T],
+        )
     else:
         raise EmitError("HUGR arithmetic operands must share Float or UInt type")
     name = names.get(operation.kind)
     if name is None:
         raise EmitError(f"Unsupported HUGR arithmetic operation: {operation.kind}")
-    op = extension.get_op(name).instantiate(arguments)
+    op = extension.get_op(name).instantiate(
+        arguments,
+        concrete_signature=concrete_signature,
+    )
     [wire] = builder.add_op(
         op,
         _resolve_classical_argument(operation.operands[0], builder, environment),
@@ -2459,7 +3361,7 @@ def _lower_compop(
     builder: Any,
     environment: dict[str, Any],
 ) -> None:
-    """Lower supported floating-point comparisons to HUGR extensions.
+    """Lower Float and UInt comparisons to matching HUGR extensions.
 
     Args:
         operation (CompOp): Qamomile comparison operation.
@@ -2469,27 +3371,49 @@ def _lower_compop(
     Raises:
         EmitError: If operand types or comparison kind are unsupported.
     """
-    from hugr.std.float import FLOAT_OPS_EXTENSION
-
-    if not all(isinstance(value.type, FloatType) for value in operation.operands):
-        raise EmitError("Only Float HUGR comparisons are implemented initially")
-    names = {
-        CompOpKind.EQ: "feq",
-        CompOpKind.NEQ: "fne",
-        CompOpKind.LT: "flt",
-        CompOpKind.LE: "fle",
-        CompOpKind.GT: "fgt",
-        CompOpKind.GE: "fge",
-    }
     if operation.kind is None:
         raise EmitError("HUGR comparison has no comparison kind")
+    if all(isinstance(value.type, FloatType) for value in operation.operands):
+        from hugr.std.float import FLOAT_OPS_EXTENSION
+
+        names = {
+            CompOpKind.EQ: "feq",
+            CompOpKind.NEQ: "fne",
+            CompOpKind.LT: "flt",
+            CompOpKind.LE: "fle",
+            CompOpKind.GT: "fgt",
+            CompOpKind.GE: "fge",
+        }
+        extension = FLOAT_OPS_EXTENSION
+        arguments: list[Any] = []
+        concrete_signature = None
+    elif all(isinstance(value.type, UIntType) for value in operation.operands):
+        from hugr import tys
+        from hugr.std.int import INT_OPS_EXTENSION, INT_T
+
+        names = {
+            CompOpKind.EQ: "ieq",
+            CompOpKind.NEQ: "ine",
+            CompOpKind.LT: "ilt_u",
+            CompOpKind.LE: "ile_u",
+            CompOpKind.GT: "igt_u",
+            CompOpKind.GE: "ige_u",
+        }
+        extension = INT_OPS_EXTENSION
+        arguments = [tys.BoundedNatArg(5)]
+        concrete_signature = tys.FunctionType([INT_T, INT_T], [tys.Bool])
+    else:
+        raise EmitError("HUGR comparison operands must share Float or UInt type")
     name = names.get(operation.kind)
     if name is None:
         raise EmitError(f"Unsupported HUGR comparison: {operation.kind}")
-    op = FLOAT_OPS_EXTENSION.get_op(name).instantiate()
+    op = extension.get_op(name).instantiate(
+        arguments,
+        concrete_signature=concrete_signature,
+    )
     [wire] = builder.add_op(
         op,
-        environment[operation.operands[0].uuid],
-        environment[operation.operands[1].uuid],
+        _resolve_classical_argument(operation.operands[0], builder, environment),
+        _resolve_classical_argument(operation.operands[1], builder, environment),
     )
     environment[operation.results[0].uuid] = wire

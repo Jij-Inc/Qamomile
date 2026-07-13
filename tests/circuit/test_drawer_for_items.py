@@ -196,6 +196,33 @@ class TestForItemsValueVarSubstitutesIntoBinOpLabels:
         )
 
 
+def test_vector_key_elements_rebind_for_each_unfolded_entry() -> None:
+    """Each bound Vector key supplies its own concrete element values."""
+
+    @qmc.qkernel
+    def circuit(
+        data: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    ) -> qmc.Bit:
+        """Scale each entry value by the second element of its Vector key."""
+        q = qmc.qubit("q")
+        for key, value in qmc.items(data):
+            q = qmc.rx(q, value * key[1])
+        return qmc.measure(q)
+
+    vc = _build_visual_circuit(
+        circuit,
+        fold_loops=False,
+        data={(2, 3): 0.5, (4, 5): 0.5},
+    )
+    labels = [
+        node.label
+        for node in _walk_visual_nodes(vc.children)
+        if isinstance(node, VGate)
+    ]
+
+    assert labels == ["$R_x$(1.50)", "$R_x$(2.50)", "M"]
+
+
 class TestForLoopVariableSubstitutesIntoArrayIndices:
     """ForOperation loop indices into parameter arrays must substitute.
 
