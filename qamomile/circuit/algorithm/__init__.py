@@ -31,6 +31,7 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
+from .reciprocal_rotation import reciprocal_rotation
 from .state_preparation import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
@@ -66,6 +67,8 @@ __all__ = [
     "cost_layer",
     "fqaoa_layers",
     "fqaoa_state",
+    # HHL
+    "reciprocal_rotation",
     # State preparation
     "computational_basis_state",
     "amplitude_encoding",
