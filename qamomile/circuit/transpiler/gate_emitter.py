@@ -253,16 +253,12 @@ class GateEmitter(Protocol[T]):
         """Emit Phase gate (P(θ) = diag(1, e^(iθ)))."""
         ...
 
-    # Note: ``emit_global_phase(circuit, angle)`` is an OPTIONAL hook, not a
-    # required protocol method. ``GlobalPhaseOperation`` emission calls
-    # it via ``getattr`` only when the backend provides it: a backend with a
-    # native circuit-level global phase (Qiskit) implements it to fold the
-    # phase in. CUDA-Q implements the hook conditionally: top-level phase is
-    # dropped, while controlled/adjoint helper generation synthesizes it as
-    # ordinary gates. A backend without either need (such as QURI Parts) omits
-    # the hook, correctly dropping the physically unobservable standalone
-    # phase. Keeping it off the protocol means a new backend needs no
-    # global-phase code to stay correct.
+    # ``emit_global_phase(circuit, angle)`` is an optional lowering hook rather
+    # than a required primitive. CircuitGateEmitter implements it to collect a
+    # region phase in CircuitProgram; adapters that omit it discard an
+    # unconditional phase projectively. Target-specific preservation and
+    # controlled-call correction belong to CircuitCapabilities and the
+    # materializer, after this semantic lowering boundary.
 
     # Two-qubit gates
     @abstractmethod

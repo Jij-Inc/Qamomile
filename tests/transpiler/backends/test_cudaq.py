@@ -11,15 +11,17 @@ from typing import Any
 import numpy as np
 import pytest
 
-from qamomile.circuit.ir.operation.control_flow import ForOperation
-from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
-from qamomile.circuit.ir.types.primitives import QubitType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value
-
 pytestmark = pytest.mark.cudaq
 
 cudaq = pytest.importorskip("cudaq")
 
+from qamomile.circuit.transpiler.circuit_ir import (  # noqa: E402
+    CircuitBuilder,
+    CircuitProgram,
+    ParameterExpr,
+    ReusableCircuit,
+)
+from qamomile.cudaq.materializer import CudaqMaterializer  # noqa: E402
 from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     TracingCudaqKernelEmitter,
     ValidatingCudaqTranspiler as CudaqTranspiler,
@@ -28,114 +30,130 @@ from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
 from tests.transpiler.base_test import TranspilerTestSuite  # noqa: E402
 
 
-def _uint(name: str, const: int | None = None) -> Value:
-    """Create a UInt value for CUDA-Q controlled fallback tests.
-
-    Args:
-        name (str): Display name assigned to the IR value.
-        const (int | None): Optional constant payload for the value.
-
-    Returns:
-        Value: UInt IR value, constant when ``const`` is provided.
-    """
-    value = Value(type=UIntType(), name=name)
-    return value.with_const(const) if const is not None else value
-
-
-def _qubit_array(name: str, size: int) -> ArrayValue:
-    """Create a Vector[Qubit] IR value with a constant length.
-
-    Args:
-        name (str): Display name assigned to the vector.
-        size (int): Constant vector length.
-
-    Returns:
-        ArrayValue: Vector[Qubit] IR value with one constant shape dimension.
-    """
-    return ArrayValue(type=QubitType(), name=name, shape=(_uint(f"{name}_dim0", size),))
-
-
-def _qubit_element(parent: ArrayValue, index: Value | int, name: str) -> Value:
-    """Create a Vector[Qubit] element IR value.
-
-    Args:
-        parent (ArrayValue): Parent vector or slice view.
-        index (Value | int): Element index as an IR value or Python integer.
-        name (str): Display name assigned to the element.
-
-    Returns:
-        Value: Qubit element value referencing ``parent[index]``.
-    """
-    index_value = _uint(f"{name}_idx", index) if isinstance(index, int) else index
-    return Value(
-        type=QubitType(),
-        name=name,
-        parent_array=parent,
-        element_indices=(index_value,),
+def _phase_only_program(
+    *,
+    controls: int = 0,
+    inverse: bool = False,
+    power: int = 1,
+) -> CircuitProgram:
+    """Build a call whose reusable body consists only of global phase."""
+    body = CircuitBuilder(1, 0, "phase_only")
+    body.add_global_phase(ParameterExpr("theta"))
+    caller = CircuitBuilder(1 + controls, 0, "phase_caller")
+    caller.append_call(
+        ReusableCircuit(
+            body.freeze(),
+            "phase_only",
+            controls=controls,
+            inverse=inverse,
+            power=power,
+        ),
+        tuple(range(1 + controls)),
     )
+    return caller.freeze()
 
 
-def _x_gate_on(qubit: Value) -> GateOperation:
-    """Create an X gate on one IR qubit value.
+class TestCudaqGlobalPhaseMaterialization:
+    """Test CUDA-Q global-phase handling at the circuit-IR boundary."""
 
-    Args:
-        qubit (Value): Qubit operand for the gate.
+    def test_standalone_phase_is_discarded_without_dropping_abi(self) -> None:
+        """A discarded root phase still retains its runtime parameter ABI."""
+        builder = CircuitBuilder(1, 0)
+        theta = ParameterExpr("theta")
+        builder.add_global_phase(theta * theta)
 
-    Returns:
-        GateOperation: Fixed X gate with a next-version qubit result.
-    """
-    return GateOperation.fixed(
-        gate_type=GateOperationType.X,
-        qubits=[qubit],
-        results=[qubit.next_version()],
-    )
+        materialized = CudaqMaterializer().materialize(
+            builder.freeze(),
+            ("theta",),
+        )
 
+        assert materialized.parameter_order == ("theta",)
+        assert tuple(materialized.parameters) == ("theta",)
+        assert materialized.artifact.param_count == 1
+        assert "def _qamomile_kernel(thetas: list[float]):" in (
+            materialized.artifact.entry_source
+        )
+        assert "r1(" not in materialized.artifact.entry_source
 
-def _emit_controlled_ops_and_record_targets(
-    transpiler: Any,
-    operations: list[Any],
-    vector_slots: dict[str, list[int]],
-) -> list[list[int]]:
-    """Run CUDA-Q controlled fallback emission and record gate targets.
+    def test_controlled_phase_only_call_emits_relative_phase_correction(self) -> None:
+        """A controlled phase-only helper emits its observable correction."""
+        artifact = (
+            CudaqMaterializer()
+            .materialize(
+                _phase_only_program(controls=1),
+                ("theta",),
+            )
+            .artifact
+        )
 
-    Args:
-        transpiler (Any): CUDA-Q transpiler used to create an emit pass.
-        operations (list[Any]): Controlled block operations to emit.
-        vector_slots (dict[str, list[int]]): Initial vector UUID to physical
-            qubit slots map.
+        assert "cudaq.control(_qamomile_phase_only_0, q[0], q[1], thetas)" in (
+            artifact.entry_source
+        )
+        [correction] = [
+            line.strip()
+            for line in artifact.entry_source.splitlines()
+            if line.strip().startswith("r1(")
+        ]
+        assert "thetas[0]" in correction
+        assert correction.endswith(", q[0])")
+        assert not correction.startswith("r1(-")
+        assert "pass" in artifact.source
 
-    Returns:
-        list[list[int]]: Gate target indices selected for each emitted gate.
-    """
-    emit_pass = transpiler._create_emit_pass()
-    qubit_map: dict[Any, int] = {}
-    calls: list[list[int]] = []
+    def test_tiny_controlled_phase_is_not_optimized_away(self) -> None:
+        """Every exact nonzero helper phase emits a relative correction."""
+        body = CircuitBuilder(1, 0, "tiny_phase")
+        body.add_global_phase(1e-16)
+        caller = CircuitBuilder(2, 0)
+        caller.append_call(
+            ReusableCircuit(body.freeze(), "tiny_phase", controls=1),
+            (0, 1),
+        )
 
-    def record_gate(
-        circuit: Any,
-        op: GateOperation,
-        emitter: Any,
-        control_indices: list[int],
-        gate_target_indices: list[int],
-        bindings: dict[str, Any],
-    ) -> None:
-        """Record the target indices selected by the controlled fallback."""
-        del circuit, op, emitter, control_indices, bindings
-        calls.append(list(gate_target_indices))
+        artifact = CudaqMaterializer().materialize(caller.freeze()).artifact
 
-    emit_pass._emit_cudaq_multi_controlled_gate = record_gate
-    emit_pass._emit_cudaq_controlled_ops(
-        object(),
-        operations,
-        num_controls=1,
-        control_indices=[0],
-        target_indices=[10, 11, 12, 13],
-        qubit_map=qubit_map,
-        vector_slots=vector_slots,
-        emitter=object(),
-        bindings={},
-    )
-    return calls
+        assert "r1(1e-16, q[0])" in artifact.entry_source
+
+    def test_inverse_controlled_phase_negates_relative_correction(self) -> None:
+        """Inverse transforms negate the phase correction exactly once."""
+        artifact = (
+            CudaqMaterializer()
+            .materialize(
+                _phase_only_program(controls=1, inverse=True),
+                ("theta",),
+            )
+            .artifact
+        )
+
+        assert "cudaq.adjoint(_qamomile_phase_only_0" in artifact.source
+        [correction] = [
+            line.strip()
+            for line in artifact.entry_source.splitlines()
+            if line.strip().startswith("r1(")
+        ]
+        assert correction.startswith("r1(-")
+        assert "thetas[0]" in correction
+        assert correction.endswith(", q[0])")
+
+    def test_power_repeats_call_and_phase_correction_together(self) -> None:
+        """Integral power repeats both the helper and its relative phase."""
+        artifact = (
+            CudaqMaterializer()
+            .materialize(
+                _phase_only_program(controls=1, power=3),
+                ("theta",),
+            )
+            .artifact
+        )
+
+        assert artifact.entry_source.count("cudaq.control(") == 3
+        corrections = [
+            line.strip()
+            for line in artifact.entry_source.splitlines()
+            if line.strip().startswith("r1(")
+        ]
+        assert len(corrections) == 3
+        assert all("thetas[0]" in correction for correction in corrections)
+        assert all(correction.endswith(", q[0])") for correction in corrections)
 
 
 class TestCudaqTranspiler(TranspilerTestSuite):
@@ -258,84 +276,6 @@ class TestCudaqRuntimeControlFlow:
         exe = transpiler.transpile(circuit_with_while)
         circuit = exe.compiled_quantum[0].circuit
         assert circuit.execution_mode == ExecutionMode.RUNNABLE
-
-
-class TestCudaqControlledSliceElementFallback:
-    """Regression tests for CUDA-Q controlled fallback element resolution."""
-
-    def test_controlled_fallback_resolves_fixed_slice_element(self) -> None:
-        """Controlled fallback should resolve scalar elements of slice views."""
-        root = _qubit_array("q", 4)
-        view = ArrayValue(
-            type=QubitType(),
-            name="q_view",
-            shape=(_uint("q_view_dim0", 2),),
-            slice_of=root,
-            slice_start=_uint("slice_start", 1),
-            slice_step=_uint("slice_step", 2),
-        )
-        element = _qubit_element(view, 1, "q_view[1]")
-        transpiler = CudaqTranspiler()
-
-        calls = _emit_controlled_ops_and_record_targets(
-            transpiler,
-            [_x_gate_on(element)],
-            {root.uuid: [10, 11, 12, 13]},
-        )
-
-        assert calls == [[13]]
-
-    def test_controlled_fallback_recomputes_loop_dependent_slice_slots(
-        self,
-    ) -> None:
-        """Loop-dependent slice bounds should not reuse stale slice slots."""
-        root = _qubit_array("q", 4)
-        loop_var = _uint("i")
-        view = ArrayValue(
-            type=QubitType(),
-            name="q_view",
-            shape=(_uint("q_view_dim0", 2),),
-            slice_of=root,
-            slice_start=loop_var,
-            slice_step=_uint("slice_step", 2),
-        )
-        element = _qubit_element(view, 0, "q_view[0]")
-        loop = ForOperation(
-            operands=[_uint("start", 0), _uint("stop", 2), _uint("step", 1)],
-            loop_var="i",
-            loop_var_value=loop_var,
-            operations=[_x_gate_on(element)],
-        )
-        transpiler = CudaqTranspiler()
-
-        calls = _emit_controlled_ops_and_record_targets(
-            transpiler,
-            [loop],
-            {root.uuid: [10, 11, 12, 13]},
-        )
-
-        assert calls == [[10], [11]]
-
-    def test_controlled_fallback_reseeds_symbolic_vector_element(self) -> None:
-        """Loop-indexed root-vector elements should reseed on each iteration."""
-        root = _qubit_array("q", 4)
-        loop_var = _uint("i")
-        element = _qubit_element(root, loop_var, "q[i]")
-        loop = ForOperation(
-            operands=[_uint("start", 0), _uint("stop", 2), _uint("step", 1)],
-            loop_var="i",
-            loop_var_value=loop_var,
-            operations=[_x_gate_on(element)],
-        )
-        transpiler = CudaqTranspiler()
-
-        calls = _emit_controlled_ops_and_record_targets(
-            transpiler,
-            [loop],
-            {root.uuid: [10, 11, 12, 13]},
-        )
-
-        assert calls == [[10], [11]]
 
 
 class TestCudaqSourceInspectRegression:

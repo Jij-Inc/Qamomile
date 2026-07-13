@@ -20,16 +20,16 @@ def emit_global_phase(
     op: GlobalPhaseOperation,
     bindings: dict[str, Any],
 ) -> None:
-    """Emit a standalone zero-qubit global phase when the backend preserves it.
+    """Emit a standalone phase when the lowering adapter collects it.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Circuit representation being emitted into.
         op (GlobalPhaseOperation): Global-phase operation to emit.
         bindings (dict[str, Any]): Active emit bindings.
 
     Raises:
-        EmitError: If a preserving backend cannot resolve the phase angle.
+        EmitError: If a preserving adapter cannot resolve the phase angle.
     """
     emit_hook = getattr(emit_pass._emitter, "emit_global_phase", None)
     if callable(emit_hook):
@@ -47,13 +47,13 @@ def emit_controlled_global_phase_operation(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Circuit representation being emitted into.
         op (GlobalPhaseOperation): Global-phase operation to control.
         control_indices (list[int]): Accumulated physical control qubits.
         bindings (dict[str, Any]): Active emit bindings.
 
     Raises:
-        EmitError: If the phase cannot be resolved or the backend cannot emit
+        EmitError: If the phase cannot be resolved or the adapter cannot emit
             the accumulated control arity.
     """
     angle = resolve_angle_value(emit_pass, op.phase, bindings)
@@ -104,8 +104,8 @@ def emit_controlled_global_phase(
         return
     # Treat one of the phase controls as the P-gate target. The remaining
     # controls then form an ordinary multi-controlled P operation, allowing
-    # backends such as QURI Parts to use StandardEmitPass's shared clean-
-    # ancilla Toffoli cascade introduced by the multi-control decomposition.
+    # representations with clean-ancilla support to use StandardEmitPass's
+    # shared Toffoli cascade for multi-control decomposition.
     emit_pass._emit_irreducible_multi_controlled_gate(
         circuit,
         GateOperationType.P,

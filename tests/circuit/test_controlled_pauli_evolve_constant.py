@@ -6,9 +6,9 @@ applied uncontrolled, so every backend drops it.  Under ``qmc.control``
 that phase becomes an *observable* relative phase between the control-on
 and control-off branches.
 
-CUDA-Q lowers a controlled sub-kernel by wrapping the *uncontrolled*
-gadget in ``cudaq.control``, which discards that global phase; the
-transpiler must re-apply ``P(-gamma * c)`` on the controls.  These tests
+CUDA-Q lowers a controlled reusable body by wrapping the *uncontrolled*
+helper in ``cudaq.control``, which omits that global phase; the CircuitProgram
+materializer must re-apply ``P(-gamma * c)`` on the controls.  These tests
 pin the CUDA-Q statevector to the Qiskit reference, which handles the
 constant correctly -- before the fix they diverge by a few to tens of
 percent (a 0.7 offset already shifts the relative phase visibly).
@@ -80,8 +80,8 @@ def _gp_wrapped_evolve(
 
     The wrapping ``global_phase(..., 0.0)`` leaves the unitary unchanged but
     composes an ordinary nested qkernel call with a zero-qubit phase operation.
-    Inlining must leave the ``pauli_evolve`` visible to CUDA-Q's controlled
-    constant-phase recovery so the Hamiltonian's identity term is preserved.
+    Circuit lowering canonicalizes the Hamiltonian identity term into the
+    reusable body's phase before target-specific call materialization.
 
     Args:
         q (qmc.Vector[qmc.Qubit]): Target register.
@@ -275,6 +275,24 @@ def _fidelity_error(kernel: Any, ham: Any, gamma: float) -> float:
 class TestControlledPauliEvolveConstant:
     """CUDA-Q controlled ``pauli_evolve`` agrees with Qiskit on constant offsets."""
 
+    def test_preserves_native_control_and_pauli_evolution(self) -> None:
+        """Phase repair does not flatten CUDA-Q's high-level operations."""
+        from qamomile.cudaq import CudaqTranspiler
+
+        artifact = (
+            CudaqTranspiler()
+            .transpile(
+                _single_control_kernel(_evolve),
+                bindings={"ham": qm_o.X(0) + 0.7, "gamma": 0.5},
+            )
+            .compiled_quantum[0]
+            .circuit
+        )
+
+        assert 'exp_pauli(-0.5, [q0], "X")' in artifact.source
+        assert "cudaq.control(_qamomile_U_0, q[0], q[1])" in artifact.entry_source
+        assert "r1(-0.35, q[0])" in artifact.entry_source
+
     @pytest.mark.parametrize(
         "ham, gamma",
         [
@@ -316,9 +334,8 @@ class TestControlledPauliEvolveConstant:
     def test_global_phase_wrapped_body_matches_qiskit(self, ham, gamma) -> None:
         """A pauli_evolve nested in a global_phase body keeps its constant phase.
 
-        The flat phase representation keeps the wrapped body as ordinary IR,
-        so CUDA-Q's controlled constant-phase walk must still see and recover
-        the identity term exactly once.
+        The canonical circuit representation combines the explicit phase and
+        the Hamiltonian identity term before target materialization.
         """
         err = _fidelity_error(_single_control_kernel(_gp_wrapped_evolve), ham, gamma)
         assert err < 1e-9
@@ -340,12 +357,12 @@ class TestControlledPauliEvolveConstant:
     def test_global_phase_wrapped_renamed_params_matches_qiskit(
         self, ham, gamma
     ) -> None:
-        """The constant phase is recovered even when the body renames its params.
+        """The constant phase is preserved when the body renames its params.
 
         The wrapped body now follows ordinary call/inlining semantics, so its
         formal ``obs`` / ``t`` params must resolve to the caller's ``ham`` /
-        ``gamma`` operands before CUDA-Q's controlled constant-term recovery
-        inspects the inlined Pauli evolution.
+        ``gamma`` operands before the canonical phase is attached to the
+        reusable body.
         """
         err = _fidelity_error(
             _single_control_kernel(_gp_wrapped_evolve_renamed), ham, gamma

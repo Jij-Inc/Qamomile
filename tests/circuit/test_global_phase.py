@@ -1461,12 +1461,11 @@ class TestGlobalPhaseControlledCompositions:
     def test_controlled_inverse_phase_kickback(self, sdk_transpiler, seed):
         """``control(inverse(global_phase(ident, θ)))`` kicks back ``-θ``.
 
-        Regression for CUDA-Q: the native helper used to drop the scalar phase,
-        while the old compensating walk did not descend into the inverse
-        implementation. The helper-local ``X P X P`` encoding now lets
-        ``cudaq.adjoint`` invert the phase naturally. `cos^2` is even, so the
-        kickback magnitude is `cos^2(θ/2)` either sign; the sign itself is pinned
-        by ``test_controlled_phase_cancellation``.
+        CUDA-Q's helper omits an abstract whole-circuit phase, so its
+        CircuitProgram materializer must negate the explicit control-phase
+        correction. `cos^2` is even, so the kickback magnitude is
+        `cos^2(θ/2)` either sign; ``test_controlled_phase_cancellation`` pins
+        the sign itself.
         """
         theta = float(np.random.default_rng(seed).uniform(0.3, np.pi - 0.3))
 
@@ -2201,14 +2200,10 @@ class TestGlobalPhaseRound3Coverage:
 class TestGlobalPhaseRound5Coverage:
     """Round-5 regression: a controlled global phase nested in a compile-time ``if``.
 
-    ``partial_eval`` resolves compile-time ``if`` statements at the top level
-    but does not descend into ``ControlledUOperation.block``, so an
-    ``IfOperation`` survives into the controlled body and each backend's
-    controlled-emission must lower it. CUDA-Q's old parallel phase-recovery walk
-    skipped the ``IfOperation`` (silently dropping the kicked-back phase ->
-    ``P(0) == 1``), and the QURI Parts recursive controlled fallback rejected it
-    outright. Both now resolve the condition; CUDA-Q emits the phase encoding at
-    the selected helper-body location. Qiskit always handled it.
+    The compile-time branch must be selected before CircuitProgram phase
+    normalization, including when it is nested in a controlled callable. The
+    selected phase becomes relative under the outer control; the dead branch
+    must contribute neither gates nor phase.
     """
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
@@ -2572,10 +2567,9 @@ class TestGlobalPhaseDeepControlRegressions:
         """An outer control correctly controls an inner controlled phase once.
 
         The inner control is fixed to ``|1>``. The nested controlled-U therefore
-        contributes one ``theta`` kickback to the outer control. CUDA-Q's native
-        helper materializes the inner phase as ordinary gates. An additional
-        parallel recovery traversal would double it, while rejecting the nested
-        node would fail compilation outright.
+        contributes one ``theta`` kickback to the outer control. Recursive call
+        materialization must propagate both controls while accounting for the
+        nested body phase exactly once.
         """
         import qamomile.observable as qm_o
 
@@ -3148,6 +3142,43 @@ class TestGlobalPhaseArgumentValidation:
         with pytest.raises(TypeError, match=forbidden_type.__name__):
             _validate_unitary_block(block, "nested_control_flow")
 
+    def test_measurement_conditioned_while_is_rejected_even_with_unitary_body(
+        self,
+    ) -> None:
+        """A WhileOperation is non-unitary even when its body contains only H."""
+        from qamomile.circuit.frontend.operation.global_phase import (
+            _validate_unitary_block,
+        )
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.gate import (
+            GateOperation,
+            GateOperationType,
+        )
+        from qamomile.circuit.ir.types.primitives import BitType, QubitType
+        from qamomile.circuit.ir.value import Value
+
+        qubit = Value(type=QubitType(), name="qubit")
+        condition = Value(type=BitType(), name="condition").with_const(True)
+        loop = WhileOperation(
+            operands=[condition],
+            results=[],
+            operations=[
+                GateOperation.fixed(
+                    GateOperationType.H,
+                    [qubit],
+                    [qubit.next_version()],
+                )
+            ],
+        )
+        block = Block(
+            input_values=[qubit],
+            output_values=[qubit],
+            operations=[loop],
+        )
+
+        with pytest.raises(TypeError, match="measurement-conditioned WhileOperation"):
+            _validate_unitary_block(block, "while_body")
+
     @pytest.mark.parametrize("seed", [0, 42])
     def test_classical_only_helper_inside_quantum_body_executes(
         self, sdk_transpiler, seed
@@ -3648,60 +3679,3 @@ class TestGlobalPhaseOperandVisibility:
         phase = Value(type=FloatType(), name="phase")
         op = GlobalPhaseOperation(operands=[phase], results=[])
         assert op.all_input_values() == [phase]
-
-
-@pytest.mark.cudaq
-class TestCudaqGlobalPhaseHelperEncoding:
-    """CUDA-Q anchors phases in synthesis helpers and drops them at top level."""
-
-    def test_top_level_global_phase_hook_is_noop(self):
-        """A top-level CUDA-Q global phase emits no physical gates."""
-        pytest.importorskip("cudaq")
-        from qamomile.cudaq.emitter import CudaqKernelEmitter, ExecutionMode
-
-        emitter = CudaqKernelEmitter()
-        artifact = emitter.create_circuit(1, 0)
-        emitter.emit_global_phase(artifact, 0.4)
-        artifact = emitter.finalize(artifact, ExecutionMode.STATIC)
-
-        assert "r1(" not in artifact.entry_source
-        assert "x(" not in artifact.entry_source
-
-    def test_helper_global_phase_is_encoded_as_xpxp(self):
-        """A synthesis helper represents ``exp(i*theta) I`` as ``X P X P``."""
-        pytest.importorskip("cudaq")
-        from qamomile.cudaq.emitter import CudaqKernelEmitter, ExecutionMode
-
-        emitter = CudaqKernelEmitter()
-        artifact = emitter.create_circuit(2, 0)
-        helper_name, uses_thetas = emitter.build_controlled_helper(
-            1,
-            lambda: emitter.emit_global_phase(artifact, 0.4),
-        )
-        emitter.emit_controlled_kernel_call(
-            artifact,
-            helper_name,
-            [0],
-            [1],
-            uses_thetas,
-        )
-        artifact = emitter.finalize(artifact, ExecutionMode.STATIC)
-
-        assert not uses_thetas
-        assert artifact.source.count("    x(t0)") == 2
-        assert artifact.source.count("    r1(0.4, t0)") == 2
-
-    def test_zero_target_helper_global_phase_raises(self):
-        """A helper with no target cannot anchor its scalar identity phase."""
-        pytest.importorskip("cudaq")
-        from qamomile.circuit.transpiler.errors import EmitError
-        from qamomile.cudaq.emitter import CudaqKernelEmitter
-
-        emitter = CudaqKernelEmitter()
-        artifact = emitter.create_circuit(1, 0)
-
-        with pytest.raises(EmitError, match="zero-target"):
-            emitter.build_controlled_helper(
-                0,
-                lambda: emitter.emit_global_phase(artifact, 0.4),
-            )

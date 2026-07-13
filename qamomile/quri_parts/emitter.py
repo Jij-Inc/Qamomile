@@ -10,7 +10,6 @@ circuits. Angles are specified as dictionaries: {param: coeff, CONST: offset}.
 from __future__ import annotations
 
 import math
-import warnings
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
@@ -448,6 +447,34 @@ class QuriPartsGateEmitter:
                 [qubit1, qubit2], [3, 3], angle_dict
             )
 
+    def emit_pauli_rotation(
+        self,
+        circuit: "LinearMappedUnboundParametricQuantumCircuit",
+        qubits: list[int],
+        pauli_ids: list[int],
+        angle: float | Any,
+    ) -> None:
+        """Emit one native QURI Parts Pauli-string rotation.
+
+        Args:
+            circuit (LinearMappedUnboundParametricQuantumCircuit): Destination
+                QURI Parts circuit.
+            qubits (list[int]): Target qubit indices in Pauli-word order.
+            pauli_ids (list[int]): QURI Pauli identifiers aligned with
+                ``qubits``.
+            angle (float | Any): Rotation angle for
+                ``exp(-i * angle / 2 * P)``.
+        """
+        angle_mapping = self._make_angle_dict(angle)
+        if isinstance(angle_mapping, (int, float)):
+            circuit.add_PauliRotation_gate(qubits, pauli_ids, angle_mapping)
+        else:
+            circuit.add_ParametricPauliRotation_gate(
+                qubits,
+                pauli_ids,
+                angle_mapping,
+            )
+
     # Three-qubit gates
     def emit_toffoli(
         self,
@@ -641,15 +668,7 @@ class QuriPartsGateEmitter:
         QURI Parts native gates which can be extended into the circuit.
         """
         if gate is not None:
-            try:
-                circuit.extend(gate)
-            except Exception as e:
-                warnings.warn(
-                    f"Failed to append gate to QURI Parts circuit: {e}. "
-                    f"Falling back to manual decomposition.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+            circuit.extend(gate)
 
     def gate_power(self, gate: Any, power: int) -> Any:
         """Create gate raised to a power.

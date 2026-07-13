@@ -18,7 +18,7 @@ from qamomile.circuit.ir.operation import (
     InvokeOperation,
     Operation,
 )
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps, WhileOperation
 from qamomile.circuit.ir.operation.gate import ControlledUOperation, ResetOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
@@ -182,6 +182,11 @@ def _validate_unitary_operations(
                     kernel_name,
                     visited_blocks,
                 )
+        if isinstance(op, WhileOperation):
+            raise TypeError(
+                f"global_phase(): kernel {kernel_name!r} must be unitary; "
+                "measurement-conditioned WhileOperation cannot be wrapped."
+            )
 
 
 def _validate_unitary_block(

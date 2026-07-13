@@ -1154,7 +1154,7 @@ class TestControlledAcceptsBuiltinGate:
 
         assert len(controlled_ops) == 1
         op = controlled_ops[0]
-        assert op.target.namespace == "user.composite"
+        assert op.target.namespace.startswith("user.composite.")
         assert op.target.name == "boxed_h"
         assert op.transform is CallTransform.CONTROLLED
         assert op.attrs["kind"] == "composite"

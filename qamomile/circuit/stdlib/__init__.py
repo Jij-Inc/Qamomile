@@ -1,11 +1,12 @@
 """Expose standard-library quantum callables.
 
 The reader-facing API is function-oriented: use :func:`qft`, :func:`iqft`,
-and :func:`qpe` inside qkernels. Internally these functions emit named
-callables with Qamomile bodies and optional backend-native implementations.
+:func:`qpe`, state-preparation helpers, arithmetic helpers, and :func:`mcx`
+inside qkernels. Internally these functions emit named callables with Qamomile
+bodies and optional backend-native implementations.
 
-QFT and IQFT use the same ``composite_gate`` mechanism as user callables; there
-is no separate class-based gate hierarchy.
+Standard composites use the same ``composite_gate`` mechanism as user
+callables; there is no separate class-based gate hierarchy.
 
 Example:
     ```python
@@ -25,15 +26,26 @@ from .arithmetic import (
     ripple_carry_add,
 )
 from .grover import grover_iteration_count, grover_search
+from .multi_controlled_x import mcx, multi_controlled_x
 from .qft import iqft, qft
 from .qpe import qpe
 from .shor import shor_order_finding
+from .state_preparation import (
+    amplitude_encoding,
+    amplitude_encoding_from_angles,
+    computational_basis_state,
+)
 
 __all__ = [
     "qft",
     "iqft",
     "qpe",
-    # Arithmetic and algorithms
+    "mcx",
+    "multi_controlled_x",
+    "computational_basis_state",
+    "amplitude_encoding",
+    "amplitude_encoding_from_angles",
+    # Arithmetic
     "ripple_carry_add",
     "modular_add",
     "controlled_modular_add",

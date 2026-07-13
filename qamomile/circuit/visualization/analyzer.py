@@ -45,7 +45,10 @@ from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase, ValueLike
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    align_formal_operands,
+)
 
 from .geometry import compute_border_padding
 from .style import CircuitStyle
@@ -422,6 +425,53 @@ class CircuitAnalyzer:
                     qubit_map[result.logical_id] = next_idx
                     next_idx += 1
 
+        def map_callable_outputs(
+            body_outputs: Sequence[ValueLike],
+            call_results: Sequence[ValueLike],
+            logical_id_remap: dict[str, str],
+        ) -> None:
+            """Alias caller-local invocation results to callee output wires.
+
+            Caller-local result values have fresh logical IDs, including for
+            quantum arrays allocated inside the callee. Map those results to
+            the wires registered while walking the callee body so later nested
+            calls do not allocate phantom wires for the fresh result IDs.
+
+            Args:
+                body_outputs (Sequence[ValueLike]): Callee outputs in signature
+                    order.
+                call_results (Sequence[ValueLike]): Caller-local invocation
+                    results in the same order.
+                logical_id_remap (dict[str, str]): Formal-to-actual logical-ID
+                    remapping active inside the callee.
+
+            Raises:
+                ValueError: If the callee output count differs from the call
+                    result count.
+            """
+            for body_output, call_result in zip(
+                body_outputs,
+                call_results,
+                strict=True,
+            ):
+                if not isinstance(call_result.type, QubitType):
+                    continue
+                source_lid = logical_id_remap.get(
+                    body_output.logical_id,
+                    body_output.logical_id,
+                )
+                if source_lid in qubit_map:
+                    qubit_map[call_result.logical_id] = qubit_map[source_lid]
+                if isinstance(body_output, ArrayValue) and isinstance(
+                    call_result, ArrayValue
+                ):
+                    source_prefix = f"{source_lid}_["
+                    prefix_length = len(source_prefix)
+                    for key, wire in list(qubit_map.items()):
+                        if key.startswith(source_prefix) and key.endswith("]"):
+                            suffix = key[prefix_length:]
+                            qubit_map[f"{call_result.logical_id}_[{suffix}"] = wire
+
         def build_chains(
             ops: list[Operation],
             logical_id_remap: dict[str, str] | None = None,
@@ -532,6 +582,11 @@ class CircuitAnalyzer:
                             new_remap,
                             depth + 1,
                             child_param_values,
+                        )
+                        map_callable_outputs(
+                            block_value.output_values,
+                            op.results,
+                            new_remap,
                         )
                         qubit_operands = self._invoke_qubit_operands(op)
                         qubit_results = [
@@ -4041,21 +4096,11 @@ class CircuitAnalyzer:
                 behaviour for an unaligned actual list that was
                 already too short.
         """
-        q_iter = iter(quantum_actuals)
-        c_iter = iter(classical_actuals)
-        aligned: list[ValueBase] = []
-        for formal in formals:
-            pool = q_iter if isinstance(formal.type, QubitType) else c_iter  # type: ignore[attr-defined]
-            try:
-                aligned.append(next(pool))
-            except StopIteration:
-                # Out of actuals for this kind -- stop early so the
-                # downstream ``zip`` sees a truncated list.  Surplus
-                # entries in the other pool are intentionally
-                # dropped: appending them would silently mis-pair
-                # them with later formals.
-                return aligned
-        return aligned
+        return align_formal_operands(
+            formals,
+            quantum_actuals,
+            classical_actuals,
+        )
 
     def _build_block_value_mappings(
         self,

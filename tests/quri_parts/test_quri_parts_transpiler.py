@@ -2,6 +2,7 @@
 
 import math
 
+import numpy as np
 import pytest
 
 pytestmark = pytest.mark.quri_parts
@@ -10,11 +11,64 @@ pytestmark = pytest.mark.quri_parts
 pytest.importorskip("quri_parts.circuit")
 
 import qamomile.circuit as qmc  # noqa: E402
+from qamomile.circuit.transpiler.circuit_ir import (  # noqa: E402
+    CircuitBuilder,
+    ParameterExpr,
+    ReusableCircuit,
+)
+from qamomile.circuit.transpiler.gate_emitter import GateKind  # noqa: E402
 from qamomile.quri_parts import (  # noqa: E402
     QuriPartsExecutor,
     QuriPartsGateEmitter,
 )
-from qamomile.quri_parts.transpiler import QuriPartsEmitPass  # noqa: E402
+from qamomile.quri_parts.materializer import QuriPartsMaterializer  # noqa: E402
+
+
+def _phase_only_call(
+    *,
+    controls: int,
+    inverse: bool = False,
+    power: int = 1,
+) -> CircuitBuilder:
+    """Build a controlled reusable identity with a symbolic global phase."""
+    body = CircuitBuilder(1, 0, name="phase-only")
+    body.add_global_phase(ParameterExpr("theta"))
+    caller = CircuitBuilder(controls + 1, 0, name="phase-caller")
+    for control in range(controls):
+        caller.append_gate(GateKind.H, (control,))
+    caller.append_call(
+        ReusableCircuit(
+            body.freeze(),
+            "phase-only",
+            controls=controls,
+            inverse=inverse,
+            power=power,
+        ),
+        tuple(range(controls + 1)),
+    )
+    return caller
+
+
+def _run_statevector(circuit, parameter_values: list[float]) -> np.ndarray:
+    """Evaluate a possibly parametric QURI Parts circuit with Qulacs."""
+    pytest.importorskip("quri_parts.qulacs")
+    from quri_parts.core.state import GeneralCircuitQuantumState
+    from quri_parts.qulacs.simulator import evaluate_state_to_vector
+
+    bound = circuit.bind_parameters(parameter_values)
+    state = GeneralCircuitQuantumState(bound.qubit_count, bound)
+    return np.asarray(evaluate_state_to_vector(state).vector)
+
+
+def _expected_phase_kickback(
+    controls: int,
+    phase: float,
+) -> np.ndarray:
+    """Return the phase-kickback state on controls with an idle target."""
+    state = np.zeros(2 ** (controls + 1), dtype=np.complex128)
+    state[: 2**controls] = 1.0 / np.sqrt(2**controls)
+    state[(1 << controls) - 1] *= np.exp(1j * phase)
+    return state
 
 
 class TestQuriPartsGateEmitter:
@@ -108,17 +162,6 @@ class TestQuriPartsGateEmitter:
 
         gates = list(circuit.gates)
         assert len(gates) == 1
-
-    def test_inverse_remap_index_error_propagates(self) -> None:
-        """Out-of-range native-inverse remaps should not be hidden."""
-        emitter = QuriPartsGateEmitter()
-        parent = emitter.create_circuit(1, 0)
-        source = emitter.create_circuit(2, 0)
-        emitter.emit_x(source, 1)
-        emit_pass = QuriPartsEmitPass()
-
-        with pytest.raises(IndexError):
-            emit_pass._append_remapped_circuit(parent, source, [0])
 
     def test_controlled_single_qubit_decomposition(self) -> None:
         """Test controlled single-qubit gate decompositions."""
@@ -215,6 +258,76 @@ class TestQuriPartsTranspiler:
         # Custom sampler can be passed to executor
         executor = transpiler.executor(sampler=None, estimator=None)
         assert executor is not None
+
+    def test_standalone_phase_only_parameter_remains_in_abi(self) -> None:
+        """Discarding standalone phase keeps its runtime parameter position."""
+        builder = CircuitBuilder(1, 0, name="standalone-phase")
+        theta = ParameterExpr("theta")
+        builder.add_global_phase(theta * theta)
+
+        materialized = QuriPartsMaterializer().materialize(
+            builder.freeze(),
+            parameter_names=("theta",),
+        )
+
+        assert tuple(materialized.parameters) == ("theta",)
+        assert materialized.parameter_order == ("theta",)
+        assert materialized.artifact.parameter_count == 1
+        assert list(materialized.artifact.gates) == []
+
+    @pytest.mark.parametrize(
+        ("controls", "inverse", "power", "phase_factor"),
+        [
+            (1, False, 1, 1),
+            (2, True, 1, -1),
+            (3, False, 2, 2),
+        ],
+    )
+    def test_transformed_phase_only_call_preserves_relative_phase(
+        self,
+        controls: int,
+        inverse: bool,
+        power: int,
+        phase_factor: int,
+    ) -> None:
+        """Phase-only calls retain transforms and uncompute phase ancillas."""
+        theta = 0.41
+        materialized = QuriPartsMaterializer().materialize(
+            _phase_only_call(
+                controls=controls,
+                inverse=inverse,
+                power=power,
+            ).freeze(),
+            parameter_names=("theta",),
+        )
+        circuit = materialized.artifact
+        data_qubits = controls + 1
+        expected_ancillas = max(0, controls - 2)
+
+        assert circuit.qubit_count == data_qubits + expected_ancillas
+        assert tuple(materialized.parameters) == ("theta",)
+        state = _run_statevector(circuit, [theta])
+        assert np.allclose(state[2**data_qubits :], 0.0, atol=1e-10)
+        data_state = state[: 2**data_qubits]
+        expected = _expected_phase_kickback(
+            controls,
+            phase_factor * theta,
+        )
+        assert abs(np.vdot(expected, data_state)) == pytest.approx(1.0, abs=1e-10)
+
+    def test_tiny_controlled_phase_is_not_optimized_away(self) -> None:
+        """Every exact nonzero controlled phase emits a relative-phase gate."""
+        body = CircuitBuilder(1, 0, name="tiny-phase")
+        body.add_global_phase(1e-16)
+        caller = CircuitBuilder(2, 0)
+        caller.append_call(
+            ReusableCircuit(body.freeze(), "tiny-phase", controls=1),
+            (0, 1),
+        )
+
+        circuit = QuriPartsMaterializer().materialize(caller.freeze()).artifact
+
+        assert len(circuit.gates) == 1
 
     def test_controlled_cp_with_runtime_parameter_transpiles(self) -> None:
         """Controlled CP fallback preserves a symbolic QURI Parts angle."""

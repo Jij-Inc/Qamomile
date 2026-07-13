@@ -15,7 +15,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.state_preparation import computational_basis_state
+from qamomile.circuit.stdlib.state_preparation import computational_basis_state
 
 
 @qmc.qkernel

@@ -63,6 +63,18 @@ def _obsvec_target(q: qmc.Qubit, obs: qmc.Vector[qmc.Observable]) -> qmc.Float:
     return qmc.expval(q, obs[0])
 
 
+@qmc.qkernel
+def _tuple_target(pair: qmc.Tuple[qmc.UInt, qmc.Float]) -> qmc.Float:
+    """Declare a heterogeneous Tuple parameter."""
+    return pair[1]
+
+
+@qmc.qkernel
+def _dict_target(values: qmc.Dict[qmc.UInt, qmc.Float]) -> qmc.Float:
+    """Declare a scalar-keyed Dict parameter."""
+    return values[0]
+
+
 _c_vec = qmc.control(_vec_target, num_controls=1)
 _c_scalar = qmc.control(_scalar_target, num_controls=1)
 _c_rx = qmc.control(_rx_target, num_controls=1)
@@ -144,6 +156,22 @@ def _err_normal_qubit_into_obsvec() -> qmc.Float:
 
 
 @qmc.qkernel
+def _err_normal_tuple_element_type(
+    pair: qmc.Tuple[qmc.UInt, qmc.UInt],
+) -> qmc.Float:
+    """A Tuple element type differs from the callee declaration."""
+    return _tuple_target(pair)
+
+
+@qmc.qkernel
+def _err_normal_dict_value_type(
+    values: qmc.Dict[qmc.UInt, qmc.UInt],
+) -> qmc.Float:
+    """A Dict value type differs from the callee declaration."""
+    return _dict_target(values)
+
+
+@qmc.qkernel
 def _err_control_scalar_into_vec() -> qmc.Bit:
     """P1 (control): scalar ``Qubit`` target into a ``Vector[Qubit]`` sub-kernel."""
     c = qmc.qubit("c")
@@ -219,6 +247,18 @@ def _ok_normal_obsvec(obs: qmc.Vector[qmc.Observable]) -> qmc.Float:
     """Plain call: a ``Vector[Observable]`` forwarded to a ``Vector[Observable]`` parameter."""
     q = qmc.qubit("q")
     return _obsvec_target(q, obs)
+
+
+@qmc.qkernel
+def _ok_normal_tuple(pair: qmc.Tuple[qmc.UInt, qmc.Float]) -> qmc.Float:
+    """A matching Tuple forwards to a structural sub-kernel parameter."""
+    return _tuple_target(pair)
+
+
+@qmc.qkernel
+def _ok_normal_dict(values: qmc.Dict[qmc.UInt, qmc.Float]) -> qmc.Float:
+    """A matching Dict forwards to a structural sub-kernel parameter."""
+    return _dict_target(values)
 
 
 @qmc.qkernel
@@ -392,6 +432,22 @@ def test_qubit_into_float_does_not_silently_emit_rx_zero():
         QiskitTranspiler().transpile(_err_normal_qubit_into_float)
 
 
+@pytest.mark.parametrize(
+    "kernel",
+    [_err_normal_tuple_element_type, _err_normal_dict_value_type],
+)
+def test_structural_arg_type_mismatch_raises_on_build(kernel):
+    """Tuple and Dict type mismatches fail at the qkernel call boundary."""
+    with pytest.raises(TypeError, match="parameter"):
+        kernel.build(parameters=None)
+
+
+@pytest.mark.parametrize("kernel", [_ok_normal_tuple, _ok_normal_dict])
+def test_structural_arg_type_match_builds(kernel):
+    """Matching Tuple and Dict arguments retain their nested type contract."""
+    assert kernel.build(parameters=None) is not None
+
+
 def test_control_broadcast_emits_one_application_per_target_qubit():
     """A scalar-target controlled gate broadcast over a 2-qubit register.
 
@@ -402,8 +458,8 @@ def test_control_broadcast_emits_one_application_per_target_qubit():
     executable = QiskitTranspiler().transpile(_ok_control_broadcast_wholevec)
     circuit = executable.get_first_circuit()
     controlled_op_count = sum(
-        count
-        for name, count in circuit.count_ops().items()
-        if name.startswith("ccircuit")
+        instruction.operation.num_ctrl_qubits == 1
+        for instruction in circuit.data
+        if hasattr(instruction.operation, "num_ctrl_qubits")
     )
     assert controlled_op_count == 2

@@ -151,7 +151,7 @@ def emit_measure_vector(
     )
     is_view = root_av is not qubits_array
 
-    emitted = 0
+    resolved_measurements: list[tuple[int, int]] = []
     for i in range(size):
         if not is_view and element_uuids and i < len(element_uuids):
             # Non-view fast path: preserve the composite-key lookup so
@@ -165,10 +165,22 @@ def emit_measure_vector(
         if qubit_addr in qubit_map and clbit_addr in clbit_map:
             q_idx = qubit_map[qubit_addr]
             c_idx = clbit_map[clbit_addr]
-            emit_pass._emitter.emit_measure(circuit, q_idx, c_idx)
-            if emit_pass._emitter.measurement_mode == MeasurementMode.STATIC:
-                emit_pass._measurement_qubit_map[c_idx] = q_idx
-            emitted += 1
+            resolved_measurements.append((q_idx, c_idx))
+
+    vector_emitter = getattr(emit_pass._emitter, "emit_measure_vector", None)
+    if resolved_measurements and callable(vector_emitter):
+        vector_emitter(
+            circuit,
+            tuple(qubit for qubit, _ in resolved_measurements),
+            tuple(clbit for _, clbit in resolved_measurements),
+        )
+    else:
+        for qubit, clbit in resolved_measurements:
+            emit_pass._emitter.emit_measure(circuit, qubit, clbit)
+
+    if emit_pass._emitter.measurement_mode == MeasurementMode.STATIC:
+        for qubit, clbit in resolved_measurements:
+            emit_pass._measurement_qubit_map[clbit] = qubit
 
     # Raise on the specific "view produced zero measurements" case that
     # previously silently returned ``[(None, shots)]`` — a data-integrity
@@ -177,7 +189,7 @@ def emit_measure_vector(
     # other paths (pauli_evolve result, qfixed, sub-kernel returns) and
     # raising here would regress established tests without catching new
     # bugs.
-    if is_view and emitted == 0 and size > 0:
+    if is_view and not resolved_measurements and size > 0:
         raise EmitError(
             f"MeasureVectorOperation on view '{qubits_array.name}' emitted "
             f"no measurements: none of the {size} element(s) resolved to a "

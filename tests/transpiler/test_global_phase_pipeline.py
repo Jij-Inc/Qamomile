@@ -167,7 +167,7 @@ def test_segmentation_exposes_runtime_phase_in_segment_and_abi() -> None:
     assert angle.uuid in quantum_step.segment.input_refs
     assert quantum_step.segment.output_refs == []
     assert plan.abi.public_inputs["angle"].uuid == angle.uuid
-    assert plan.abi.output_refs == []
+    assert plan.abi.output_values == []
     assert quantum_step.segment.operations[0].phase.uuid == angle.uuid
     assert quantum_step.segment.operations[0].results == []
 

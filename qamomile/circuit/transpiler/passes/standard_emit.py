@@ -1,12 +1,13 @@
-"""Standard emit pass using GateEmitter protocol.
+"""Shared semantic-to-circuit lowering engine.
 
-This module provides StandardEmitPass, a reusable emit pass implementation
-that uses the GateEmitter protocol for backend-specific gate emission.
+This module provides the legacy-named ``StandardEmitPass`` used internally
+by ``CircuitLoweringPass`` to walk Qamomile semantic IR and construct the
+backend-neutral circuit-family IR.
 
 The actual emission logic is decomposed into focused modules under
 ``emit_support/``. This class serves as the orchestrator with thin
-wrappers that delegate to those module functions while preserving
-subclass override points (used by QiskitEmitPass, CudaqEmitPass).
+wrappers that delegate to those module functions. SDK backends do not
+subclass this engine; they consume the resulting immutable circuit program.
 """
 
 from __future__ import annotations
@@ -151,21 +152,19 @@ def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
 class StandardEmitPass(EmitPass[T], Generic[T]):
     """Standard emit pass implementation using GateEmitter protocol.
 
-    This class provides the orchestration logic for circuit emission
-    while delegating backend-specific operations to a GateEmitter.
-
-    Subclasses (QiskitEmitPass, CudaqEmitPass) override specific methods
-    to provide native backend support. The thin wrappers here delegate to
-    module functions in ``emit_support/`` by default.
+    This class provides orchestration for semantic IR traversal while
+    delegating circuit instruction construction to a GateEmitter. The
+    concrete compiler use is ``CircuitLoweringPass``; SDK targets materialize
+    its immutable result instead of subclassing this class.
 
     Args:
-        gate_emitter (GateEmitter[T]): Backend-specific gate emitter.
-        bindings (dict[str, Any] | None): Parameter bindings for the circuit.
-            Defaults to None.
-        parameters (list[str] | None): Parameter names to preserve as backend
-            parameters. Defaults to None.
-        composite_emitters (list[CompositeGateEmitter[T]] | None): Native
-            composite-gate emitters. Defaults to None.
+        gate_emitter (GateEmitter[T]): Instruction builder used during the
+            semantic traversal.
+        bindings (dict[str, Any] | None): Compile-time parameter bindings.
+        parameters (list[str] | None): Parameter names preserved at runtime.
+        composite_emitters (list[CompositeGateEmitter[T]] | None): Optional
+            callable-preservation or lowering hooks.
+        backend_name (str | None): Diagnostic name for the traversal target.
     """
 
     def __init__(
@@ -364,10 +363,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         force_unroll: bool = False,
         emit_qinit_reset: bool = False,
     ) -> None:
-        """Emit operations to the backend circuit.
+        """Emit operations to the selected circuit representation.
 
         Args:
-            circuit (T): Backend circuit being populated.
+            circuit (T): Circuit representation being populated.
             operations (list[Operation]): IR operations to emit in order.
             qubit_map (QubitMap): Mapping from quantum IR values to physical
                 qubit indices.
@@ -377,10 +376,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 parameter bindings.
             force_unroll (bool): Whether to force compile-time loop
                 unrolling. Defaults to False.
+            emit_qinit_reset (bool): Whether to materialize qinit reset
+                operations. Defaults to False.
 
         Raises:
             EmitError: If an operation cannot be emitted with the active
-                backend or bindings.
+                representation or bindings.
             RuntimeError: If a slice operation reaches emission before the
                 required strip pass.
             NotImplementedError: If an unsupported nested control-flow
@@ -710,8 +711,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             ) from e
 
     # ------------------------------------------------------------------
-    # Methods overridden by backend subclasses (QiskitEmitPass, CudaqEmitPass).
-    # Only methods with actual overrides are kept as instance methods.
+    # Structured lowering extension points used by CircuitLoweringPass.
     # ------------------------------------------------------------------
 
     def _emit_for(
@@ -797,17 +797,17 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     ) -> None:
         """Emit a zero-qubit global-phase operation.
 
-        Qiskit folds the phase into its circuit-level accumulator. Backends
-        without a standalone global-phase hook correctly drop the
-        unobservable phase.
+        CircuitProgram lowering collects this in the current lexical region.
+        Adapters without the optional hook discard the unconditional phase
+        projectively; observable controlled phases use ordinary gates.
 
         Args:
-            circuit (T): Backend circuit being built.
+            circuit (T): Circuit representation being built.
             op (GlobalPhaseOperation): Global-phase operation to emit.
             bindings (dict[str, Any]): Active emit bindings.
 
         Raises:
-            EmitError: If a preserving backend cannot resolve the phase angle.
+            EmitError: If a preserving adapter cannot resolve the phase angle.
         """
         emit_global_phase(self, circuit, op, bindings)
 

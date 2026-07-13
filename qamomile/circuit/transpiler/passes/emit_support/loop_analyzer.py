@@ -21,8 +21,12 @@ from typing import TYPE_CHECKING
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
     RuntimeClassicalExpr,
 )
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.classical_ops import DictGetItemOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
@@ -30,6 +34,10 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.value import Value
@@ -67,12 +75,129 @@ class LoopAnalyzer:
             return True
         if self._has_array_element_access(op.operations, loop_uuid):
             return True
-        if self._has_loop_var_binop(op.operations, loop_uuid):
+        if self._has_loop_var_classical_op(op.operations, loop_uuid):
+            return True
+        if self._has_loop_var_structural_body_parameter(op.operations, loop_uuid):
             return True
         if self._has_loop_var_condition(op.operations, loop_uuid):
             return True
         if self._has_loop_var_dict_getitem(op.operations, loop_uuid):
             return True
+        if self._has_loop_var_global_phase(op.operations, loop_uuid):
+            return True
+        if self._has_loop_var_pauli_time(op.operations, loop_uuid):
+            return True
+        return False
+
+    def _has_loop_var_pauli_time(
+        self,
+        operations: list[Operation],
+        loop_var_uuid: str | None,
+    ) -> bool:
+        """Check whether Pauli evolution directly reads the induction value.
+
+        Circuit lowering extracts a Hamiltonian identity term into the
+        enclosing region's global phase. A direct induction-time operand must
+        therefore be specialized per iteration before lexical phase
+        aggregation, even when the bound Hamiltonian later has no identity
+        term.
+
+        Args:
+            operations (list[Operation]): Loop-body operations to inspect.
+            loop_var_uuid (str | None): UUID of the surrounding induction value.
+
+        Returns:
+            bool: Whether the loop must be unrolled for phase normalization.
+        """
+        for operation in operations:
+            if isinstance(operation, PauliEvolveOp) and self._value_depends_on_loop_var(
+                operation.gamma,
+                loop_var_uuid,
+            ):
+                return True
+            if isinstance(operation, HasNestedOps) and any(
+                self._has_loop_var_pauli_time(nested, loop_var_uuid)
+                for nested in operation.nested_op_lists()
+            ):
+                return True
+        return False
+
+    def _has_loop_var_global_phase(
+        self,
+        operations: list[Operation],
+        loop_var_uuid: str | None,
+    ) -> bool:
+        """Check whether a phase directly reads the surrounding induction value.
+
+        Computed dependencies are already caught at their arithmetic producer,
+        and array-indexed dependencies are caught by the generic input scan.
+        This check covers the remaining direct ``global_phase(..., loop_var)``
+        form so a loop-local expression never escapes into program scope.
+
+        Args:
+            operations (list[Operation]): Loop-body operations to inspect.
+            loop_var_uuid (str | None): UUID of the surrounding induction value.
+
+        Returns:
+            bool: Whether the loop must be unrolled for phase correctness.
+        """
+        for operation in operations:
+            if isinstance(operation, GlobalPhaseOperation) and any(
+                self._value_depends_on_loop_var(operand, loop_var_uuid)
+                for operand in operation.operands
+            ):
+                return True
+            if isinstance(operation, HasNestedOps) and any(
+                self._has_loop_var_global_phase(nested, loop_var_uuid)
+                for nested in operation.nested_op_lists()
+            ):
+                return True
+        return False
+
+    def _has_loop_var_structural_body_parameter(
+        self,
+        operations: list[Operation],
+        loop_var_uuid: str | None,
+    ) -> bool:
+        """Check whether a structural owned body receives the loop variable.
+
+        A native target loop represents its induction value as a loop-local
+        parameter. Every operation-owned body has a separate scalar namespace;
+        passing the induction value into one would otherwise leave a captured
+        ``LoopVariableExpr`` with no stable owner during materialization.
+        Specialize such calls once per concrete iteration instead.
+
+        Args:
+            operations (list[Operation]): Enclosing loop-body operations.
+            loop_var_uuid (str | None): UUID of the enclosing loop variable,
+                or ``None`` for legacy IR.
+
+        Returns:
+            bool: ``True`` when a controlled/inverse operation-owned body
+            receives the enclosing loop variable as a parameter operand.
+        """
+        for operation in operations:
+            parameter_operands: list["Value"] = []
+            if isinstance(operation, ControlledUOperation):
+                parameter_operands = operation.param_operands
+            elif isinstance(operation, InvokeOperation):
+                parameter_operands = operation.parameters
+            elif isinstance(operation, InverseBlockOperation):
+                parameter_operands = operation.parameters
+
+            if any(
+                self._value_depends_on_loop_var(operand, loop_var_uuid)
+                for operand in parameter_operands
+            ):
+                return True
+            if isinstance(operation, HasNestedOps) and any(
+                self._has_loop_var_structural_body_parameter(
+                    nested,
+                    loop_var_uuid,
+                )
+                for nested in operation.nested_op_lists()
+            ):
+                return True
         return False
 
     def _has_loop_var_dict_getitem(
@@ -201,23 +326,38 @@ class LoopAnalyzer:
             parent = parent.slice_of
         return False
 
-    def _has_loop_var_binop(
+    def _has_loop_var_classical_op(
         self,
         operations: list[Operation],
         loop_var_uuid: str | None,
     ) -> bool:
-        from qamomile.circuit.ir.value import Value
+        """Check whether a classical expression directly reads the loop value.
+
+        Any expression chain derived from the loop variable starts with at
+        least one arithmetic or predicate operation that directly reads it.
+        Unrolling at that producer keeps later structural uses of its result
+        concrete, including passing a comparison result into a controlled
+        operation-owned block.
+
+        Args:
+            operations (list[Operation]): Loop-body operations to scan.
+            loop_var_uuid (str | None): UUID of the enclosing loop variable,
+                or ``None`` for legacy IR.
+
+        Returns:
+            bool: ``True`` when an arithmetic or predicate operation directly
+            depends on the enclosing loop variable.
+        """
 
         for op in operations:
-            if isinstance(op, BinOp):
-                for operand in op.operands:
-                    if isinstance(operand, Value) and _is_loop_var(
-                        operand, loop_var_uuid
-                    ):
-                        return True
+            if isinstance(op, (BinOp, CompOp, CondOp, NotOp)) and any(
+                self._value_depends_on_loop_var(operand, loop_var_uuid)
+                for operand in op.operands
+            ):
+                return True
             if isinstance(op, HasNestedOps):
                 if any(
-                    self._has_loop_var_binop(op_list, loop_var_uuid)
+                    self._has_loop_var_classical_op(op_list, loop_var_uuid)
                     for op_list in op.nested_op_lists()
                 ):
                     return True

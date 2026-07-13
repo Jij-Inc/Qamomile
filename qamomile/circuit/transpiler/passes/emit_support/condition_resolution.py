@@ -7,6 +7,7 @@ from typing import Any
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import EmitError
 
 from .physical_index_map import (
     array_element_mapping,
@@ -363,8 +364,6 @@ def map_merge_outputs(
                             or false_idx is None
                             or true_idx != false_idx
                         ):
-                            from qamomile.circuit.transpiler.errors import EmitError
-
                             raise EmitError(
                                 "Quantum if-merge requires identical physical "
                                 "resources across branches",
@@ -390,8 +389,6 @@ def map_merge_outputs(
 
                 if true_phys is not None and false_phys is not None:
                     if true_phys != false_phys:
-                        from qamomile.circuit.transpiler.errors import EmitError
-
                         raise EmitError(
                             "Quantum if-merge requires identical physical "
                             "resources across branches",
@@ -399,8 +396,6 @@ def map_merge_outputs(
                         )
                     qubit_map[QubitAddress(output.uuid)] = true_phys
                 elif true_phys is not None or false_phys is not None:
-                    from qamomile.circuit.transpiler.errors import EmitError
-
                     raise EmitError(
                         "Quantum if-merge requires identical physical "
                         "resources across branches",
@@ -498,8 +493,6 @@ def map_merge_outputs(
                     and false_clbit is not None
                     and true_clbit != false_clbit
                 ):
-                    from qamomile.circuit.transpiler.errors import EmitError
-
                     raise EmitError(
                         "Runtime if-merge of a measured Bit selects between "
                         f"two distinct pre-existing clbits (true={true_clbit}, "

@@ -26,9 +26,12 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
+    CompOp,
+    CompOpKind,
 )
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -37,6 +40,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
     GateOperation,
     GateOperationType,
     MeasureOperation,
@@ -45,6 +49,8 @@ from qamomile.circuit.ir.operation.gate import (
     ResetOperation,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
@@ -714,7 +720,7 @@ class TestIfMergeAllocation:
 
 
 # ===========================================================================
-# LoopAnalyzer._has_loop_var_binop
+# LoopAnalyzer classical-expression dependency detection
 # ===========================================================================
 
 
@@ -743,6 +749,100 @@ class TestLoopAnalyzerBinOp:
             loop_var="i",
             loop_var_value=loop_var_val,
             operations=[binop, gate],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_direct_pauli_time_dependency_triggers_unroll(self) -> None:
+        """Pauli identity phase extraction needs a concrete loop time."""
+        loop_var = _uint_val("i")
+        qubits = _make_array_value(
+            "qubits",
+            (_uint_val("size", const=1),),
+        )
+        evolution = PauliEvolveOp(
+            operands=[
+                qubits,
+                Value(type=ObservableType(), name="hamiltonian"),
+                loop_var,
+            ],
+            results=[
+                _make_array_value(
+                    "evolved",
+                    (_uint_val("result_size", const=1),),
+                )
+            ],
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=3),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[evolution],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_controlled_body_parameter_from_loop_var_triggers_unroll(self) -> None:
+        """A controlled fresh scope receives a concrete iteration value."""
+        loop_var = _uint_val("i")
+        control = _qubit("control")
+        target = _qubit("target")
+        inner_target = _qubit("inner_target")
+        inner_selector = _uint_val("inner_selector")
+        controlled = ConcreteControlledU(
+            operands=[control, target, loop_var],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=Block(input_values=[inner_target, inner_selector]),
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[controlled],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_controlled_predicate_from_loop_var_triggers_unroll(self) -> None:
+        """A loop-derived predicate passed into a fresh body forces unrolling."""
+        loop_var = _uint_val("i")
+        predicate = Value(type=BitType(), name="predicate")
+        comparison = CompOp(
+            operands=[loop_var, _uint_val("zero", const=0)],
+            results=[predicate],
+            kind=CompOpKind.EQ,
+        )
+        control = _qubit("control")
+        target = _qubit("target")
+        controlled = ConcreteControlledU(
+            operands=[control, target, predicate],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=Block(
+                input_values=[
+                    _qubit("inner_target"),
+                    Value(type=BitType(), name="inner_predicate"),
+                ]
+            ),
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[comparison, controlled],
         )
 
         assert self.analyzer.should_unroll(for_op, {}) is True
@@ -1211,6 +1311,32 @@ def frontend_target_vars_leak_example() -> qmc.Bit:
 
 
 @qmc.qkernel
+def runtime_bit_merge_selects_external_source_example() -> qmc.Bit:
+    """A runtime Bit merge should select a pre-existing measured bit."""
+    q = qmc.qubit_array(4, "q")
+    q[2] = qmc.x(q[2])
+
+    selector = qmc.measure(q[0])  # 0
+    a = qmc.measure(q[1])  # 0
+    b = qmc.measure(q[2])  # 1
+
+    out = a
+    if selector:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = a
+    else:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = b
+
+    if out:
+        q[3] = qmc.x(q[3])
+
+    return qmc.measure(q[3])
+
+
+@qmc.qkernel
 def binop_floordiv_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     """Apply RX(theta) to first n // 2 qubits of a 4-qubit register."""
     q = qmc.qubit_array(4, "q")
@@ -1366,6 +1492,19 @@ class TestMergeAliasRegression:
         assert bitstring == 1, (
             f"Expected 1 but got {bitstring}; before the fix this was 0 due to stale b"
         )
+        assert count == 200
+
+    def test_runtime_bit_merge_selects_external_source(self) -> None:
+        """A runtime Bit merge must select between existing measured bits."""
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(runtime_bit_merge_selects_external_source_example)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200, bindings={})
+        results = job.result().results
+        # selector = 0 chooses b = 1, so q[3] is flipped.
+        assert len(results) == 1
+        bitstring, count = results[0]
+        assert bitstring == 1
         assert count == 200
 
 
