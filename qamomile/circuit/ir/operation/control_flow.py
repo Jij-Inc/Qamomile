@@ -629,9 +629,9 @@ def validate_region_args(
     A loop owns several definition namespaces: its iteration variables,
     every ``RegionArg.block_arg``, and every ``RegionArg.result``.  Those
     identities must be pairwise disjoint.  Otherwise different stages can
-    assign incompatible meanings to one UUID (for example, emit-time
-    unrolling binds a colliding range variable after the carried value while
-    constant replay binds them in the opposite order).
+    assign incompatible meanings to one UUID: a UUID-keyed environment has
+    only one slot, so binding either the iteration variable or the carried
+    value overwrites the other and makes both reads observe the same value.
 
     Args:
         op (ForOperation | ForItemsOperation | WhileOperation): Loop

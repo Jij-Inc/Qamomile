@@ -1313,8 +1313,10 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
         complete = True
         for loop_index in indexset:
-            if op.loop_var_value is not None:
-                concrete_values[op.loop_var_value.uuid] = loop_index
+            # Match emit/executor replay by installing carried block
+            # arguments before the iteration formal. Their UUIDs are
+            # validated as disjoint, so this is a readability invariant, not
+            # a semantic dependency on dictionary insertion order.
             for carry in carries:
                 if carry.block_arg.uuid in carried_values:
                     concrete_values[carry.block_arg.uuid] = carried_values[
@@ -1322,6 +1324,8 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     ]
                 else:
                     concrete_values.pop(carry.block_arg.uuid, None)
+            if op.loop_var_value is not None:
+                concrete_values[op.loop_var_value.uuid] = loop_index
             body_supported, body_complete = self._replay_static_operations(
                 op.operations,
                 concrete_values,
@@ -1476,13 +1480,17 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
         complete = True
         for key, item_value in entries:
+            iteration_bindings: dict[str, Any] = {}
             if not self._seed_static_items_key(
                 op,
                 key,
                 item_value,
-                concrete_values,
+                iteration_bindings,
             ):
                 return False, False
+            # Keep the same carried-before-iteration-formals order used by
+            # range replay and emit. Build item bindings separately so a
+            # malformed key shape cannot partially mutate concrete_values.
             for carry in carries:
                 if carry.block_arg.uuid in carried_values:
                     concrete_values[carry.block_arg.uuid] = carried_values[
@@ -1490,6 +1498,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     ]
                 else:
                     concrete_values.pop(carry.block_arg.uuid, None)
+            concrete_values.update(iteration_bindings)
             body_supported, body_complete = self._replay_static_operations(
                 op.operations,
                 concrete_values,

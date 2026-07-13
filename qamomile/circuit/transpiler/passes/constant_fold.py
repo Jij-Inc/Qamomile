@@ -513,9 +513,14 @@ class ConstantFoldingPass(Pass[Block, Block]):
             carried[arg.block_arg.uuid] = init
 
         for trip_value in trips:
-            _bind_const(op.loop_var_value, trip_value)
+            # Match emit/executor replay: install carried block arguments
+            # before the iteration formal. Validation keeps their UUIDs
+            # disjoint, so this order is not semantic; keeping one canonical
+            # order makes every evaluation path construct its environment the
+            # same way.
             for arg in op.region_args:
                 _bind_const(arg.block_arg, carried[arg.block_arg.uuid])
+            _bind_const(op.loop_var_value, trip_value)
             if not self._eval_region_body(op.operations, _resolve, _bind_const):
                 return None
             for arg in op.region_args:
