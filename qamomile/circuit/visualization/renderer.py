@@ -22,6 +22,7 @@ from .types import (
     PORDER_TEXT,
     PORDER_WIRE,
     ControlFlowLayout,
+    ExpvalLayout,
     FoldedBlockLayout,
     InlineBlockLayout,
     LayoutResult,
@@ -92,6 +93,7 @@ class MatplotlibRenderer:
         fig = self._create_figure(vc.num_qubits)
         self._draw_wires(fig, vc.num_qubits)
         self._draw_operations(fig, vc)
+        self._draw_global_phase(fig)
         self._add_jupyter_display_support(fig)
         return fig
 
@@ -257,6 +259,7 @@ class MatplotlibRenderer:
                     self.layout.positions[node.node_key],
                     self.layout.gate_box_rects.get(node.node_key),
                     self.layout.powered_gate_layouts.get(node.node_key),
+                    self.layout.expval_layouts.get(node.node_key),
                 )
                 continue
 
@@ -495,6 +498,7 @@ class MatplotlibRenderer:
         x_pos: float,
         box_rect: Rect | None = None,
         powered_layout: PoweredGateLayout | None = None,
+        expval_layout: ExpvalLayout | None = None,
     ) -> None:
         """Draw a gate-like node using pre-resolved fields and placement.
 
@@ -506,6 +510,8 @@ class MatplotlibRenderer:
                 None for nodes rendered as native symbols.
             powered_layout (PoweredGateLayout | None): Target and wrapper
                 rectangles for a powered controlled gate. Defaults to None.
+            expval_layout (ExpvalLayout | None): Exact boxes and connectors
+                for an expectation-value node. Defaults to None.
 
         Raises:
             ValueError: If layout omitted geometry required by the gate's
@@ -569,7 +575,7 @@ class MatplotlibRenderer:
             )
 
         elif node.kind == VGateKind.EXPVAL:
-            self._draw_vexpval(ax, node, x_pos, box_rect)
+            self._draw_vexpval(ax, node, expval_layout)
 
     def _draw_vgate_single(
         self,
@@ -709,29 +715,59 @@ class MatplotlibRenderer:
                 zorder=PORDER_TEXT,
             )
 
-            # Semicircle connection dots
-            dot_radius = 0.05
-            for y in y_coords:
-                left_dot = mpatches.Wedge(
-                    (bounds.left + dot_radius, y),
-                    dot_radius,
-                    theta1=90,
-                    theta2=270,
-                    facecolor=self.style.gate_text_color,
-                    edgecolor=self.style.gate_text_color,
-                    zorder=PORDER_GATE + 1,
-                )
-                ax.add_patch(left_dot)
-                right_dot = mpatches.Wedge(
-                    (bounds.right - dot_radius, y),
-                    dot_radius,
-                    theta1=270,
-                    theta2=90,
-                    facecolor=self.style.gate_text_color,
-                    edgecolor=self.style.gate_text_color,
-                    zorder=PORDER_GATE + 1,
-                )
-                ax.add_patch(right_dot)
+            self._draw_box_ports(
+                ax,
+                bounds,
+                y_coords,
+                self.style.gate_text_color,
+            )
+
+    def _draw_box_ports(
+        self,
+        ax: Axes,
+        bounds: Rect,
+        y_coords: list[float],
+        color: str,
+    ) -> None:
+        """Mark the exact active wires of a vertically spanning box.
+
+        Args:
+            ax (Axes): Axes receiving the port markers.
+            bounds (Rect): Layout-owned box rectangle.
+            y_coords (list[float]): Exact active-wire coordinates.
+            color (str): Marker fill and edge color.
+
+        Returns:
+            None: Semicircle markers are added to ``ax`` in place.
+        """
+        radius = min(
+            self.style.box_port_radius,
+            bounds.width / 2,
+            bounds.height / 2,
+        )
+        if radius <= 0:
+            return
+        for y in dict.fromkeys(y_coords):
+            left_dot = mpatches.Wedge(
+                (bounds.left + radius, y),
+                radius,
+                theta1=90,
+                theta2=270,
+                facecolor=color,
+                edgecolor=color,
+                zorder=PORDER_GATE + 1,
+            )
+            ax.add_patch(left_dot)
+            right_dot = mpatches.Wedge(
+                (bounds.right - radius, y),
+                radius,
+                theta1=270,
+                theta2=90,
+                facecolor=color,
+                edgecolor=color,
+                zorder=PORDER_GATE + 1,
+            )
+            ax.add_patch(right_dot)
 
     def _draw_vblock_box(
         self,
@@ -800,6 +836,13 @@ class MatplotlibRenderer:
             fontweight="normal",
             zorder=PORDER_TEXT,
         )
+        if len(qubit_indices) > 1:
+            self._draw_box_ports(
+                ax,
+                bounds,
+                [self.qubit_y[qubit] for qubit in qubit_indices],
+                text_color,
+            )
 
     def _draw_vcontrolled_u_box(
         self,
@@ -854,10 +897,6 @@ class MatplotlibRenderer:
         ):
             return
 
-        # Draw control dots
-        for y in control_y:
-            self._draw_control_dot(ax, x_pos, y)
-
         # Draw target box
         if target_y:
             if box_rect is not None:
@@ -870,7 +909,11 @@ class MatplotlibRenderer:
                     box_rect,
                     geometry_name="controlled target box",
                 )
-            y_center = target_bounds.center_y
+            label_y = self._controlled_target_label_y(
+                target_bounds,
+                target_y,
+                control_y,
+            )
 
             rect = mpatches.FancyBboxPatch(
                 (target_bounds.left, target_bounds.bottom),
@@ -888,7 +931,7 @@ class MatplotlibRenderer:
 
             ax.text(
                 x_pos,
-                y_center,
+                label_y,
                 node.label,
                 ha="center",
                 va="center",
@@ -951,6 +994,77 @@ class MatplotlibRenderer:
                     zorder=PORDER_TEXT,
                 )
 
+            if len(target_y) > 1:
+                self._draw_box_ports(
+                    ax,
+                    target_bounds,
+                    target_y,
+                    self.style.gate_text_color,
+                )
+
+        # Draw generic controls after every opaque target/wrapper patch and
+        # its label. A control wire may be interleaved between target wires,
+        # placing its dot inside the target rectangle's vertical span.
+        for y in control_y:
+            self._draw_control_dot(ax, x_pos, y, zorder=PORDER_TEXT + 1)
+
+    def _controlled_target_label_y(
+        self,
+        target_bounds: Rect,
+        target_y: list[float],
+        control_y: list[float],
+    ) -> float:
+        """Place a generic target label away from interleaved controls.
+
+        Args:
+            target_bounds (Rect): Layout-owned target rectangle.
+            target_y (list[float]): Target-wire coordinates.
+            control_y (list[float]): Control-wire coordinates.
+
+        Returns:
+            float: Vertical coordinate that keeps the label readable.
+        """
+        center = target_bounds.center_y
+        if not target_y or not control_y:
+            return center
+        if all(
+            abs(center - control) > self.style.gate_height / 2 for control in control_y
+        ):
+            return center
+        return max(
+            target_y,
+            key=lambda candidate: (
+                min(abs(candidate - control) for control in control_y),
+                -abs(candidate - center),
+            ),
+        )
+
+    def _draw_global_phase(self, fig: Figure) -> None:
+        """Draw the layout-owned circuit-wide phase annotation.
+
+        Args:
+            fig (Figure): Target matplotlib figure carrying ``_qm_ax``.
+
+        Returns:
+            None: The annotation is added to the figure in place when present.
+        """
+        assert self.layout is not None
+        phase = self.layout.global_phase_layout
+        if phase is None:
+            return
+        ax = fig._qm_ax  # type: ignore[attr-defined]
+        ax.text(
+            phase.rect.left,
+            phase.rect.bottom,
+            phase.label,
+            ha="left",
+            va="bottom",
+            color=self.style.gate_text_color,
+            fontsize=self.style.subfont_size,
+            fontweight="normal",
+            zorder=PORDER_TEXT,
+        )
+
     def _draw_vcontrolled_u_special_gate(
         self,
         ax: Axes,
@@ -1006,56 +1120,60 @@ class MatplotlibRenderer:
         self,
         ax: Axes,
         node: VGate,
-        x_pos: float,
-        box_rect: Rect | None,
+        placement: ExpvalLayout | None,
     ) -> None:
         """Draw an expectation-value box over its operand wires.
 
         Args:
             ax (Axes): Axes to draw on.
             node (VGate): Expectation-value visual node.
-            x_pos (float): Box center x-coordinate.
-            box_rect (Rect | None): Layout-owned box bounds.
+            placement (ExpvalLayout | None): Layout-owned boxes and
+                connectors.
 
         Raises:
-            ValueError: If layout omitted the required expectation-box
-                rectangle.
+            ValueError: If layout omitted expectation-value geometry.
         """
         qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
-        bounds = self._require_box_rect(
-            node,
-            box_rect,
-            geometry_name="expectation box",
-        )
+        if placement is None or not placement.boxes:
+            raise ValueError(
+                f"Missing expectation-value geometry for visual node {node.node_key!r}"
+            )
 
-        rect = mpatches.FancyBboxPatch(
-            (bounds.left, bounds.bottom),
-            bounds.width,
-            bounds.height,
-            boxstyle=mpatches.BoxStyle.Round(
-                pad=0, rounding_size=self.style.gate_corner_radius
-            ),
-            facecolor=self.style.expval_face_color,
-            edgecolor=self.style.expval_edge_color,
+        self._draw_connector_segments(
+            ax,
+            placement.connector_segments,
+            color=self.style.expval_edge_color,
             linewidth=1.5,
-            zorder=PORDER_GATE,
+            zorder=PORDER_LINE,
         )
-        ax.add_patch(rect)
-
-        ax.text(
-            x_pos,
-            bounds.center_y,
-            node.label,
-            ha="center",
-            va="center",
-            color=self.style.expval_text_color,
-            fontsize=self.style.font_size,
-            fontweight="normal",
-            zorder=PORDER_TEXT,
-        )
+        for bounds in placement.boxes:
+            rect = mpatches.FancyBboxPatch(
+                (bounds.left, bounds.bottom),
+                bounds.width,
+                bounds.height,
+                boxstyle=mpatches.BoxStyle.Round(
+                    pad=0, rounding_size=self.style.gate_corner_radius
+                ),
+                facecolor=self.style.expval_face_color,
+                edgecolor=self.style.expval_edge_color,
+                linewidth=1.5,
+                zorder=PORDER_GATE,
+            )
+            ax.add_patch(rect)
+            ax.text(
+                bounds.center_x,
+                bounds.center_y,
+                node.label,
+                ha="center",
+                va="center",
+                color=self.style.expval_text_color,
+                fontsize=self.style.font_size,
+                fontweight="normal",
+                zorder=PORDER_TEXT,
+            )
 
     def _draw_vfolded_block(
         self,
@@ -1244,22 +1362,6 @@ class MatplotlibRenderer:
         Returns:
             Figure: Configured matplotlib figure.
         """
-        if num_qubits == 0:
-            fig = Figure(figsize=(4, 2))
-            FigureCanvasAgg(fig)
-            ax = fig.add_subplot(111)
-            ax.text(
-                0.5,
-                0.5,
-                "Empty circuit",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
-            ax.axis("off")
-            fig._qm_ax = ax  # type: ignore[attr-defined]
-            return fig
-
         assert self.layout is not None
         viewport = self.layout.viewport
 
@@ -1282,6 +1384,16 @@ class MatplotlibRenderer:
         ax.set_ylim(viewport.bottom, viewport.top)
         ax.axis("off")
         ax.set_aspect("equal", adjustable="box")
+
+        if num_qubits == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "Empty circuit",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
 
         # Store ax in figure for later access
         fig._qm_ax = ax  # type: ignore[attr-defined]
@@ -1334,20 +1446,31 @@ class MatplotlibRenderer:
         # Output labels on the right side are intentionally not drawn
         # to keep the circuit diagram cleaner
 
-    def _draw_control_dot(self, ax: Axes, x: float, y: float) -> None:
+    def _draw_control_dot(
+        self,
+        ax: Axes,
+        x: float,
+        y: float,
+        *,
+        zorder: float = PORDER_GATE,
+    ) -> None:
         """Draw a control dot for controlled gates.
 
         Args:
             ax (Axes): Axes to draw on.
             x (float): X coordinate of the dot center.
             y (float): Y coordinate of the dot center.
+            zorder (float): Artist layer. Defaults to the normal gate layer.
+
+        Returns:
+            None: The dot is added to ``ax`` in place.
         """
         circle = mpatches.Circle(
             (x, y),
             radius=0.1,
             facecolor=self.style.wire_color,
             edgecolor=self.style.wire_color,
-            zorder=PORDER_GATE,
+            zorder=zorder,
         )
         ax.add_patch(circle)
 

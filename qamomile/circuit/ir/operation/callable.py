@@ -38,6 +38,84 @@ class CallPolicy(enum.Enum):
     NATIVE_FIRST = "native_first"
 
 
+class InlineRegionBoundary(enum.Enum):
+    """Classify a drawing-only inlined-source boundary marker."""
+
+    START = "start"
+    END = "end"
+
+
+@dataclasses.dataclass
+class InlineRegionBoundaryOperation(Operation):
+    """Mark an erased inline qkernel boundary for drawing provenance.
+
+    This no-result operation is generated only by ``InlinePass``'s explicit
+    drawing mode.  Normal compilation never creates it, and circuit lowering
+    emits no executable instruction for it.
+
+    Args:
+        operands (list[Value]): Always empty so provenance never creates a
+            semantic dependency edge.
+        results (list[Value]): Always empty.
+        boundary (InlineRegionBoundary): Start or end marker.
+        region_id (int): Deterministic inliner-local nesting identity.
+        label (str): Source callable display name.
+        argument_names (tuple[str, ...]): Formal names aligned with start
+            marker argument values.
+        argument_values (tuple[Value, ...]): Classical scalar actual arguments
+            retained as non-semantic drawing metadata.
+        quantum_values (tuple[ValueBase, ...]): Exact source-call quantum
+            inputs on a start marker or outputs on an end marker.
+    """
+
+    boundary: InlineRegionBoundary = InlineRegionBoundary.START
+    region_id: int = 0
+    label: str = ""
+    argument_names: tuple[str, ...] = ()
+    argument_values: tuple[Value, ...] = ()
+    quantum_values: tuple[ValueBase, ...] = ()
+
+    def replace_values(self, mapping: dict[str, ValueBase]) -> Operation:
+        """Substitute classical operands and retained quantum interface values.
+
+        Args:
+            mapping (dict[str, ValueBase]): UUID-keyed replacement values.
+
+        Returns:
+            Operation: Rebuilt boundary marker with substituted metadata.
+        """
+        replaced = super().replace_values(mapping)
+        assert isinstance(replaced, InlineRegionBoundaryOperation)
+        return dataclasses.replace(
+            replaced,
+            argument_values=tuple(
+                cast(Value, mapping.get(value.uuid, value))
+                for value in self.argument_values
+            ),
+            quantum_values=tuple(
+                mapping.get(value.uuid, value) for value in self.quantum_values
+            ),
+        )
+
+    @property
+    def signature(self) -> Signature:
+        """Return a metadata-only marker signature.
+
+        Returns:
+            Signature: No semantic inputs or results.
+        """
+        return Signature(operands=[], results=[])
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        """Keep the marker beside its enclosed quantum segment.
+
+        Returns:
+            OperationKind: Always quantum; emission itself remains a no-op.
+        """
+        return OperationKind.QUANTUM
+
+
 def _policy_from_attrs(attrs: dict[str, Any]) -> CallPolicy:
     """Infer a default policy from serialized callable attributes.
 

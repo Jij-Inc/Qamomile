@@ -1,5 +1,7 @@
 """Regression tests for dedicated rendering of controlled built-in gates."""
 
+import math
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -12,9 +14,23 @@ import pytest
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.gate import GateOperationType
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+from qamomile.circuit.visualization.circuit_adapter import (
+    circuit_program_to_visual_ir,
+)
 from qamomile.circuit.visualization.drawer import MatplotlibDrawer
+from qamomile.circuit.visualization.drawing_compiler import (
+    compile_qkernel_for_drawing,
+)
+from qamomile.circuit.visualization.geometry import compute_border_padding
+from qamomile.circuit.visualization.layout import CircuitLayoutEngine
+from qamomile.circuit.visualization.renderer import MatplotlibRenderer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
-from qamomile.circuit.visualization.visual_ir import VGate, VGateKind, VInlineBlock
+from qamomile.circuit.visualization.visual_ir import (
+    VGate,
+    VGateKind,
+    VInlineBlock,
+    VisualCircuit,
+)
 
 
 @qmc.qkernel
@@ -247,6 +263,44 @@ def test_controlled_swap_draws_symbols_instead_of_target_box():
     assert len(control_dots) == 1
 
 
+def test_interleaved_generic_control_dot_renders_above_target_box() -> None:
+    """An interleaved generic control remains visible over its target box."""
+    gate = VGate(
+        node_key=("interleaved-control",),
+        label="U",
+        qubit_indices=[1, 0, 2],
+        estimated_width=DEFAULT_STYLE.gate_width,
+        kind=VGateKind.CONTROLLED_U_BOX,
+        control_count=1,
+    )
+    visual_circuit = VisualCircuit(
+        children=[gate],
+        qubit_map={f"q{index}": index for index in range(3)},
+        qubit_names={index: f"q{index}" for index in range(3)},
+        num_qubits=3,
+    )
+    layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(visual_circuit)
+    target_box = layout.gate_box_rects[gate.node_key]
+    control_y = layout.qubit_y[1]
+    assert target_box.bottom < control_y < target_box.top
+
+    figure = MatplotlibRenderer(DEFAULT_STYLE).render(visual_circuit, layout)
+    axes = figure.axes[0]
+    [control_dot] = [
+        patch
+        for patch in axes.patches
+        if isinstance(patch, mpatches.Circle)
+        and math.isclose(patch.center[1], control_y)
+    ]
+    [rendered_target_box] = [
+        patch for patch in axes.patches if isinstance(patch, mpatches.FancyBboxPatch)
+    ]
+    [rendered_label] = [text for text in axes.texts if text.get_text() == "U"]
+
+    assert control_dot.get_zorder() > rendered_target_box.get_zorder()
+    assert not math.isclose(control_dot.center[1], rendered_label.get_position()[1])
+
+
 class TestInlineControlledLineLayering:
     """The vertical connection line drawn for an inline-expanded
     ``ControlledUOperation`` must stop at the target box's outer border.
@@ -285,38 +339,30 @@ class TestInlineControlledLineLayering:
     def test_inline_controlled_u_line_zorder_below_gate_patches(self):
         """The control vertical line is drawn under every gate patch.
 
-        Renders the user's multi-arg controlled-X ladder with
+        Renders three statically addressed controlled-X gates with
         ``inline=True`` and inspects each ``Line2D`` Matplotlib added.
         Every line whose zorder lies in the connection-line band must
         be strictly below the minimum zorder of any drawn gate patch.
         """
 
         @qmc.qkernel
-        def _shift_helper(
-            q: qmc.Vector[qmc.Qubit], control_index: qmc.UInt
-        ) -> qmc.Vector[qmc.Qubit]:
-            for target_index in qmc.range(3):
-                mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-                (
-                    q[control_index : control_index + 1],
-                    q[0:target_index],
-                    q[target_index],
-                ) = mcx(
-                    q[control_index : control_index + 1],
-                    q[0:target_index],
-                    q[target_index],
-                )
-            return q
+        def _static_mcx_main() -> qmc.Vector[qmc.Bit]:
+            """Build three valid controlled-X columns for z-order testing.
 
-        @qmc.qkernel
-        def _shift_main() -> qmc.Vector[qmc.Bit]:
+            Returns:
+                qmc.Vector[qmc.Bit]: Measurements of the five-qubit register.
+            """
             q = qmc.qubit_array(5, "q")
-            q = _shift_helper(q, control_index=4)
+            cx = qmc.control(qmc.x)
+            ccx = qmc.control(qmc.x, num_controls=2)
+            q[4], q[0] = cx(q[4], q[0])
+            q[4], q[0], q[1] = ccx(q[4], q[0], q[1])
+            q[4], q[1], q[2] = ccx(q[4], q[1], q[2])
             return qmc.measure(q)
 
         from qamomile.circuit.visualization.types import PORDER_GATE
 
-        fig = _shift_main.draw(fold_loops=False, inline=True)
+        fig = _static_mcx_main.draw(fold_loops=False, inline=True)
         ax = fig.axes[0]
 
         # Every gate patch (FancyBboxPatch for boxed gates, Circle for
@@ -341,6 +387,7 @@ class TestInlineControlledLineLayering:
             if (
                 len(line.get_xdata()) == 2
                 and float(line.get_xdata()[0]) == float(line.get_xdata()[1])
+                and line.get_zorder() < PORDER_GATE
             )
         ]
         # At least three vertical lines (one per MCX iteration) must
@@ -354,9 +401,9 @@ class TestInlineControlledLineLayering:
     def test_target_box_sandwiched_between_controls_emits_two_segments(self):
         """A target box with controls on both sides splits the line in two.
 
-        Iteration 2 of the helper kernel has ``mcx(q[3:4], q[0:1], q[1])``:
-        controls live at q[0] (above the target) and q[3] (below it),
-        and the target box sits at q[1].  The renderer must emit two
+        A static controlled custom gate has controls at q[0] (above the
+        target) and q[3] (below it), while its target box sits at q[1].
+        The renderer must emit two
         vertical line segments -- one from the upper control down to
         the box's top edge, one from the box's bottom edge down to the
         lower control -- instead of a single segment that crosses the
@@ -365,30 +412,41 @@ class TestInlineControlledLineLayering:
         gap matching the target box's height.
         """
 
-        @qmc.qkernel
-        def _shift_helper(
-            q: qmc.Vector[qmc.Qubit], control_index: qmc.UInt
-        ) -> qmc.Vector[qmc.Qubit]:
-            for target_index in qmc.range(3):
-                mcx = qmc.control(qmc.x, num_controls=target_index + 1)
-                (
-                    q[control_index : control_index + 1],
-                    q[0:target_index],
-                    q[target_index],
-                ) = mcx(
-                    q[control_index : control_index + 1],
-                    q[0:target_index],
-                    q[target_index],
+        target_width = DEFAULT_STYLE.gate_width
+        border_padding = compute_border_padding(DEFAULT_STYLE, depth=0)
+        visual_circuit = VisualCircuit(
+            children=[
+                VInlineBlock(
+                    node_key=("sandwiched-control",),
+                    label="U",
+                    children=[
+                        VGate(
+                            node_key=("sandwiched-control", "target"),
+                            label=r"$R_y$(0.25)",
+                            qubit_indices=[1],
+                            estimated_width=target_width,
+                            kind=VGateKind.GATE,
+                            gate_type=GateOperationType.RY,
+                            has_param=True,
+                        )
+                    ],
+                    affected_qubits=[0, 1, 3],
+                    control_qubit_indices=[0, 3],
+                    power=1,
+                    depth=0,
+                    border_padding=border_padding,
+                    max_gate_width=target_width,
+                    label_width=target_width,
+                    content_width=target_width,
+                    final_width=target_width + 2 * border_padding,
                 )
-            return q
-
-        @qmc.qkernel
-        def _shift_main() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit_array(5, "q")
-            q = _shift_helper(q, control_index=3)
-            return qmc.measure(q)
-
-        fig = _shift_main.draw(fold_loops=False, inline=True)
+            ],
+            qubit_map={},
+            qubit_names={index: f"q{index}" for index in range(4)},
+            num_qubits=4,
+        )
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(visual_circuit)
+        fig = MatplotlibRenderer(DEFAULT_STYLE).render(visual_circuit, layout)
         ax = fig.axes[0]
 
         # Collect (x, y_lo, y_hi) for every vertical Line2D.
@@ -400,9 +458,8 @@ class TestInlineControlledLineLayering:
                 continue
             verticals.append((float(xs[0]), float(min(ys)), float(max(ys))))
 
-        # Group verticals by approximate x and find one column with
-        # two segments separated by a gap.  Iteration 2 is the
-        # crossing case (target at q[1], controls at q[0] and q[3]).
+        # Group verticals by approximate x and find the controlled block's
+        # column with two segments separated by its target box.
         from collections import defaultdict
 
         by_x: dict[float, list[tuple[float, float]]] = defaultdict(list)
@@ -424,7 +481,7 @@ class TestInlineControlledLineLayering:
             if found_split:
                 break
         assert found_split, (
-            "expected at least one inline-MCX column to draw the control "
+            "expected the inline controlled column to draw the control "
             "line as two separated segments around the target box"
         )
 
@@ -628,40 +685,22 @@ def test_controlled_slice_calls_alias_existing_root_wires(
     expected_block_wires: list[set[int]],
 ) -> None:
     """Controlled slice actuals neither allocate nor target phantom wires."""
-    graph = kernel._build_graph_for_visualization(**bindings)
-    analyzer = CircuitAnalyzer(
-        graph,
-        DEFAULT_STYLE,
-        inline=True,
-        fold_loops=False,
-    )
-    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
-    visual_circuit = analyzer.build_visual_ir(
-        graph,
-        qubit_map,
-        qubit_names,
-        num_qubits,
-    )
+    drawing = compile_qkernel_for_drawing(kernel, bindings)
+    visual_circuit = circuit_program_to_visual_ir(drawing.circuit)
 
     total_qubits = bindings["total_qubits"]
-    assert num_qubits == total_qubits
-    assert qubit_names == {index: f"q[{index}]" for index in range(total_qubits)}
-    assert all(0 <= wire < total_qubits for wire in qubit_map.values())
-
-    [outer_block] = [
-        node
-        for node in visual_circuit.children
-        if isinstance(node, VInlineBlock) and "controlled_slice_shifts" in node.label
-    ]
-    assert set(outer_block.affected_qubits) == set(range(total_qubits))
+    assert drawing.circuit.num_qubits == total_qubits
+    assert drawing.qubit_names == {
+        index: f"q[{index}]" for index in range(total_qubits)
+    }
     shift_blocks = [
         node
-        for node in outer_block.children
-        if isinstance(node, VInlineBlock) and "modular_" in node.label
+        for node in visual_circuit.children
+        if isinstance(node, VGate)
+        and node.kind is VGateKind.CONTROLLED_U_BOX
+        and "modular_" in node.label
     ]
-    assert [set(node.affected_qubits) for node in shift_blocks] == (
-        expected_block_wires
-    )
+    assert [set(node.qubit_indices) for node in shift_blocks] == expected_block_wires
 
 
 class TestPostInlineVectorAliasing:

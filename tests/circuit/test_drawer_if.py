@@ -4,13 +4,14 @@ Covers the three behaviors that make if/else drawable:
 
 - compile-time resolvable conditions (bindings or traced constants) are lowered
   to the selected branch, so no if box is drawn;
-- surviving conditions (measurement-backed runtime ``if``, symbolic classical
-  ``if``) render as side-by-side if/else branch boxes by default, or as a
-  folded summary box under ``fold_ifs=True``;
+- surviving measurement-backed runtime conditions render as side-by-side
+  if/else branch boxes by default, or as a folded summary box under
+  ``fold_ifs=True``; non-measurement classical conditions require bindings;
 - nested ifs render recursively.
 """
 
 import matplotlib
+import pytest
 
 matplotlib.use("Agg")
 
@@ -34,10 +35,16 @@ from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.gate import GateOperationType
 from qamomile.circuit.ir.types.primitives import BitType, UIntType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.visualization import CircuitDrawingError
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+from qamomile.circuit.visualization.circuit_adapter import (
+    circuit_program_to_visual_ir,
+)
 from qamomile.circuit.visualization.drawer import (
-    MatplotlibDrawer,
     _prepare_graph_for_visualization,
+)
+from qamomile.circuit.visualization.drawing_compiler import (
+    compile_qkernel_for_drawing,
 )
 from qamomile.circuit.visualization.geometry import compute_border_padding
 from qamomile.circuit.visualization.layout import CircuitLayoutEngine
@@ -968,7 +975,8 @@ class TestOperationAfterIf:
 
     def test_measure_after_if_keeps_merged_qubit_wire(self):
         """The trailing measure of a branch-merged qubit draws on its wire."""
-        vc = _visual_circuit(measure_after_if)
+        drawing = compile_qkernel_for_drawing(measure_after_if)
+        vc = circuit_program_to_visual_ir(drawing.circuit)
         measures = [n for n in self._top_level_gates(vc) if n.kind == VGateKind.MEASURE]
         # q0's measurement feeds the if (wire 0); q1's trailing measurement
         # reads the phi-merged qubit and must resolve to wire 1, not [].
@@ -976,12 +984,14 @@ class TestOperationAfterIf:
 
     def test_no_top_level_gate_loses_its_wire(self):
         """Every top-level gate keeps a non-empty wire list after the if."""
-        vc = _visual_circuit(gate_and_measure_after_if)
+        drawing = compile_qkernel_for_drawing(gate_and_measure_after_if)
+        vc = circuit_program_to_visual_ir(drawing.circuit)
         assert all(gate.qubit_indices for gate in self._top_level_gates(vc))
 
     def test_gate_and_measure_after_if_land_on_merged_wire(self):
         """Both the post-if gate and measurement land on the merged qubit's wire."""
-        vc = _visual_circuit(gate_and_measure_after_if)
+        drawing = compile_qkernel_for_drawing(gate_and_measure_after_if)
+        vc = circuit_program_to_visual_ir(drawing.circuit)
         # After the if, both the H gate and the measurement read the merged
         # q1, so both resolve to wire 1.
         post_if_wires = [
@@ -1000,7 +1010,11 @@ class TestOperationAfterIf:
         # an empty wire list and never reached the figure.
         measure_gates = [
             n
-            for n in self._top_level_gates(_visual_circuit(measure_after_if))
+            for n in self._top_level_gates(
+                circuit_program_to_visual_ir(
+                    compile_qkernel_for_drawing(measure_after_if).circuit
+                )
+            )
             if n.kind == VGateKind.MEASURE
         ]
         assert len(measure_gates) == 2
@@ -1008,7 +1022,7 @@ class TestOperationAfterIf:
 
 
 class TestDrawEndToEnd:
-    """``QKernel.draw`` returns a Figure for every if flavor without raising."""
+    """Exercise exact public drawing behavior for each conditional flavor."""
 
     def test_runtime_if_draws(self):
         """Measurement-backed if draws in unfolded and folded-if modes."""
@@ -1028,14 +1042,21 @@ class TestDrawEndToEnd:
         """A vector-measurement element condition draws one connector."""
         assert len(_if_connector_lines(vector_measure_element_if.draw())) == 1
 
-    def test_symbolic_vector_measurement_element_skips_connector(self):
-        """Ambiguous vector-measurement elements do not draw a connector."""
-        assert len(_if_connector_lines(symbolic_vector_measure_element_if.draw())) == 0
+    def test_symbolic_vector_measurement_element_requires_index_binding(self):
+        """An unresolved measurement index fails instead of guessing a wire."""
+        with pytest.raises(
+            CircuitDrawingError,
+            match=r"provide concrete values to draw\(\.\.\.\).*index",
+        ):
+            symbolic_vector_measure_element_if.draw()
 
-    def test_symbolic_classical_if_draws(self):
-        """Unbound classical if draws in unfolded and folded-if modes."""
-        assert isinstance(classical_if.draw(), Figure)
-        assert isinstance(classical_if.draw(fold_ifs=True), Figure)
+    def test_symbolic_classical_if_requires_binding(self):
+        """An unbound non-measurement condition fails exact circuit lowering."""
+        with pytest.raises(
+            CircuitDrawingError,
+            match=r"non-measurement parameters.*bindings",
+        ):
+            classical_if.draw()
 
     def test_bound_classical_if_draws(self):
         """Bound classical if (compile-time resolved) draws without an if box."""
@@ -1054,35 +1075,40 @@ class TestDrawEndToEnd:
         assert any(label.startswith("if ") for label in labels)
         assert "else:" in labels
 
-    def test_empty_single_branch_draws_if_label(self):
-        """The renderer keeps an empty single-branch IF visible."""
+    def test_empty_single_branch_is_optimized_away(self):
+        """A measurement-backed no-op branch does not create an IF drawing."""
         for fig in (
             empty_single_branch_if.draw(fold_loops=False),
             empty_single_branch_if.draw(fold_loops=False, fold_ifs=True),
         ):
             ax = fig._qm_ax  # type: ignore[attr-defined]
             labels = [text.get_text() for text in ax.texts]
-            assert any(label.startswith("if ") for label in labels)
-            assert len(_if_connector_lines(fig)) == 1
+            assert not any(label.startswith("if ") for label in labels)
+            assert not _if_connector_lines(fig)
 
     def test_empty_single_branch_uses_layout_reserved_span(self):
         """Empty IF branch boxes prefer the layout-reserved x-span."""
         style = replace(DEFAULT_STYLE, gate_gap=0.1)
-        fig = MatplotlibDrawer(
-            empty_single_branch_if._build_graph_for_visualization(), style
-        ).draw(fold_loops=False)
+        circuit = _visual_circuit(
+            empty_single_branch_if,
+            style=style,
+            fold_loops=False,
+        )
+        layout = CircuitLayoutEngine(style).compute_layout(circuit)
+        fig = MatplotlibRenderer(style).render(circuit, layout)
         connector = _if_connector_lines(fig)[0]
         measure_right = float(list(cast(Iterable[float], connector.get_xdata()))[0])
         expected_left = measure_right + compute_border_padding(style, depth=0)
         branch_box = _if_branch_boxes(fig)[0]
         assert math.isclose(branch_box.get_x(), expected_left)
 
-    def test_symbolic_empty_single_branch_draws_if_label(self):
-        """The renderer keeps an empty symbolic single-branch IF visible."""
+    def test_symbolic_empty_single_branch_is_optimized_away(self):
+        """A symbolic no-op branch vanishes before condition lowering."""
         for fig in (
             symbolic_empty_single_branch_if.draw(fold_loops=False),
             symbolic_empty_single_branch_if.draw(fold_loops=False, fold_ifs=True),
         ):
             ax = fig._qm_ax  # type: ignore[attr-defined]
             labels = [text.get_text() for text in ax.texts]
-            assert any(label.startswith("if ") for label in labels)
+            assert not any(label.startswith("if ") for label in labels)
+            assert not _if_connector_lines(fig)

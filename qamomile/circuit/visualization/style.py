@@ -29,6 +29,7 @@ class CircuitStyle:
         block_box_edge_color: Edge color for block mode boxes.
         font_size: Font size for gate labels.
         subfont_size: Font size for subscripts and smaller text.
+        box_port_radius: Radius of active-wire markers inside spanning boxes.
         folded_marker_radius: Radius of folded-block participation markers.
         margin: Margins around the circuit (left, right, top, bottom).
     """
@@ -159,6 +160,7 @@ class CircuitStyle:
 
     # Folded box vertical padding for text
     folded_box_text_v_padding: float = 0.15
+    box_port_radius: float = 0.05
     folded_marker_radius: float = 0.05
 
     # Max characters for folded loop body text (truncated with ellipsis)

@@ -17,7 +17,13 @@ import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.ir.operation.gate import GateOperationType
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
+from qamomile.circuit.visualization.circuit_adapter import (
+    circuit_program_to_visual_ir,
+)
 from qamomile.circuit.visualization.drawer import _prepare_graph_for_visualization
+from qamomile.circuit.visualization.drawing_compiler import (
+    compile_qkernel_for_drawing,
+)
 from qamomile.circuit.visualization.layout import CircuitLayoutEngine
 from qamomile.circuit.visualization.renderer import MatplotlibRenderer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
@@ -356,21 +362,22 @@ def _visual_circuit(
         fold_whiles (bool): Whether to fold WHILE nodes. Defaults to False.
 
     Returns:
-        VisualCircuit: Analyzed visual circuit without renderer involvement.
+        VisualCircuit: Exact compiler-backed circuit without renderer involvement.
     """
-    block = _prepare_graph_for_visualization(kernel._build_graph_for_visualization())
-    analyzer = CircuitAnalyzer(
-        block,
-        DEFAULT_STYLE,
-        inline=inline,
+    drawing = compile_qkernel_for_drawing(kernel)
+    return circuit_program_to_visual_ir(
+        drawing.circuit,
+        trace=drawing.trace,
+        style=DEFAULT_STYLE,
+        qubit_names=drawing.qubit_names,
+        output_names=drawing.output_names,
+        expectation_value_qubits=drawing.expectation_value_qubits,
+        expand_calls=inline,
         fold_loops=fold_loops,
         fold_ifs=fold_ifs,
         fold_whiles=fold_whiles,
-        expand_composite=False,
         inline_depth=None,
     )
-    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(block)
-    return analyzer.build_visual_ir(block, qubit_map, qubit_names, num_qubits)
 
 
 def _compute_layout(
@@ -402,6 +409,29 @@ def _compute_layout(
     )
     layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(visual_circuit)
     return visual_circuit, layout
+
+
+def _legacy_symbolic_condition_layout(
+    kernel: Any,
+) -> tuple[VisualCircuit, LayoutResult]:
+    """Build synthetic non-measurement IF geometry for layout-only tests.
+
+    Exact circuit lowering intentionally rejects runtime quantum conditions
+    that do not originate from a measurement. These two geometry tests need a
+    symbolic header only, so they use the compatibility analyzer as a fixture
+    factory without exercising the public drawing path.
+
+    Args:
+        kernel (Any): Synthetic qkernel with an unbound classical IF condition.
+
+    Returns:
+        tuple[VisualCircuit, LayoutResult]: Fixture Visual IR and pure layout.
+    """
+    block = _prepare_graph_for_visualization(kernel._build_graph_for_visualization())
+    analyzer = CircuitAnalyzer(block, DEFAULT_STYLE, fold_ifs=False)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(block)
+    visual = analyzer.build_visual_ir(block, qubit_map, qubit_names, num_qubits)
+    return visual, CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(visual)
 
 
 def _assert_contains_with_margin(outer: Rect, inner: Rect) -> None:
@@ -639,7 +669,7 @@ class TestContainerBarrierGeometry:
 
     def test_symbolic_nested_if_does_not_cover_neighbor_wire_gates(self):
         """A nested symbolic IF starts after H and ends before Z on q0."""
-        vc, layout = _compute_layout(symbolic_nested_if_geometry)
+        vc, layout = _legacy_symbolic_condition_layout(symbolic_nested_if_geometry)
         outer_if = next(
             node
             for node in vc.children
@@ -820,6 +850,49 @@ class TestContainerBarrierGeometry:
             >= intermediate_rect.right + DEFAULT_STYLE.gate_gap - _GEOMETRY_TOLERANCE
         )
 
+    def test_vector_measurement_connector_keeps_every_source_wire(self) -> None:
+        """A multi-bit condition routes from every exact vector source."""
+        measurement = VGate(
+            node_key=("vector-measure",),
+            label="M",
+            qubit_indices=[0, 1],
+            estimated_width=DEFAULT_STYLE.gate_width,
+            kind=VGateKind.MEASURE_VECTOR,
+        )
+        child = VGate(
+            node_key=("if", "child"),
+            label="X",
+            qubit_indices=[2],
+            estimated_width=DEFAULT_STYLE.gate_width,
+            kind=VGateKind.GATE,
+            gate_type=GateOperationType.X,
+        )
+        if_node = VUnfoldedSequence(
+            node_key=("if",),
+            iterations=[[child]],
+            affected_qubits=[2],
+            kind=VUnfoldedKind.IF,
+            condition_label="if c[0] and c[1]:",
+            condition_label_width=2.5,
+            branch_label_widths=[2.5],
+            condition_measure_node_key=measurement.node_key,
+            condition_measure_qubit_indices=[0, 1],
+        )
+        circuit = VisualCircuit(
+            children=[measurement, if_node],
+            qubit_map={f"q{qubit}": qubit for qubit in range(3)},
+            qubit_names={qubit: f"q{qubit}" for qubit in range(3)},
+            num_qubits=3,
+        )
+
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(circuit)
+        segments = layout.control_flow_layouts[if_node.node_key].connector_segments
+        source_x = layout.node_spans[measurement.node_key].right
+        source_points = {(segment.start_x, segment.start_y) for segment in segments}
+
+        assert (source_x, layout.qubit_y[0]) in source_points
+        assert (source_x, layout.qubit_y[1]) in source_points
+
 
 class TestExactPrimitiveGeometry:
     """Layout includes wrapper, marker, and rounded-connector extents."""
@@ -974,7 +1047,7 @@ class TestRenderedTextGeometry:
 
     def test_wide_symbolic_if_header_stays_inside_branch_box(self):
         """A long W-heavy symbolic condition remains inside its IF header."""
-        vc, layout = _compute_layout(long_if_header_geometry)
+        vc, layout = _legacy_symbolic_condition_layout(long_if_header_geometry)
         if_node = next(
             node
             for node in vc.children
@@ -1264,6 +1337,87 @@ class TestGeometryPrimitiveValidation:
             measure_text("label", font_size=13, fallback_char_width=-0.1)
 
 
+class TestGlobalPhaseGeometry:
+    """Global phase annotations participate in authoritative geometry."""
+
+    @staticmethod
+    def _visual_circuit() -> VisualCircuit:
+        """Build a one-gate circuit carrying a symbolic global phase.
+
+        Returns:
+            VisualCircuit: Circuit with a nonzero phase annotation.
+        """
+        gate = VGate(
+            node_key=("global-phase-gate",),
+            label="H",
+            qubit_indices=[0],
+            estimated_width=DEFAULT_STYLE.gate_width,
+            kind=VGateKind.GATE,
+            gate_type=GateOperationType.H,
+        )
+        return VisualCircuit(
+            children=[gate],
+            qubit_map={"q0": 0},
+            qubit_names={0: "q0"},
+            num_qubits=1,
+            global_phase="phi / 2",
+        )
+
+    def test_global_phase_layout_is_outside_content_and_inside_viewport(self) -> None:
+        """The phase label owns bounds above all circuit geometry."""
+        visual_circuit = self._visual_circuit()
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(visual_circuit)
+
+        assert layout.global_phase_layout is not None
+        phase = layout.global_phase_layout
+        assert phase.label == "global phase: phi / 2"
+        assert phase.rect.bottom > max(rect.top for rect in layout.node_rects.values())
+        assert layout.viewport.left <= phase.rect.left
+        assert layout.viewport.right >= phase.rect.right
+        assert layout.viewport.top >= phase.rect.top
+
+    def test_renderer_draws_global_phase_with_layout_owned_bounds(self) -> None:
+        """The rendered phase text stays inside its authoritative rectangle."""
+        visual_circuit = self._visual_circuit()
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(visual_circuit)
+        figure = MatplotlibRenderer(DEFAULT_STYLE).render(visual_circuit, layout)
+
+        assert layout.global_phase_layout is not None
+        phase = layout.global_phase_layout
+        rendered_bounds = _rendered_text_bounds(figure, phase.label)
+        assert phase.rect.left - _GEOMETRY_TOLERANCE <= rendered_bounds.left
+        assert phase.rect.right + _GEOMETRY_TOLERANCE >= rendered_bounds.right
+        assert phase.rect.bottom - _GEOMETRY_TOLERANCE <= rendered_bounds.bottom
+        assert phase.rect.top + _GEOMETRY_TOLERANCE >= rendered_bounds.top
+
+    def test_zero_qubit_global_phase_is_rendered_with_empty_circuit_label(self) -> None:
+        """A phase-only circuit keeps both its phase and empty-state label."""
+        visual_circuit = VisualCircuit(
+            children=[],
+            qubit_map={},
+            qubit_names={},
+            num_qubits=0,
+            global_phase="pi / 4",
+        )
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(visual_circuit)
+        figure = MatplotlibRenderer(DEFAULT_STYLE).render(visual_circuit, layout)
+
+        assert layout.global_phase_layout is not None
+        phase = layout.global_phase_layout
+        assert phase.label == "global phase: pi / 4"
+        assert layout.viewport.left <= phase.rect.left
+        assert layout.viewport.right >= phase.rect.right
+        assert layout.viewport.top >= phase.rect.top
+        assert {text.get_text() for text in figure.axes[0].texts} == {
+            "Empty circuit",
+            phase.label,
+        }
+        assert figure.axes[0].get_xlim() == (
+            layout.viewport.left,
+            layout.viewport.right,
+        )
+
+
 class TestOutOfRangeIndexGeometry:
     """Layout and renderer agree on visibility-filtered gate classification.
 
@@ -1343,3 +1497,36 @@ class TestOutOfRangeIndexGeometry:
         assert ("g3",) in layout.gate_box_rects
         box = layout.gate_box_rects[("g3",)]
         assert box.bottom <= layout.qubit_y[0] <= box.top
+
+
+def test_sparse_collapsed_call_marks_only_exact_operand_wires() -> None:
+    """A spanning call box exposes ports only on its sparse operands."""
+    gate = VGate(
+        node_key=("sparse-call",),
+        label="PAIR",
+        qubit_indices=[0, 2],
+        estimated_width=DEFAULT_STYLE.gate_width,
+        kind=VGateKind.COMPOSITE_BOX,
+    )
+    visual = VisualCircuit(
+        children=[gate],
+        qubit_map={f"q{index}": index for index in range(3)},
+        qubit_names={index: f"q{index}" for index in range(3)},
+        num_qubits=3,
+    )
+    layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(visual)
+    figure = MatplotlibRenderer(DEFAULT_STYLE).render(visual, layout)
+    axis = figure._qm_ax  # type: ignore[attr-defined]
+    ports = [patch for patch in axis.patches if isinstance(patch, mpatches.Wedge)]
+
+    assert len(ports) == 4
+    port_y = [port.center[1] for port in ports]
+    assert port_y.count(layout.qubit_y[0]) == 2
+    assert port_y.count(layout.qubit_y[2]) == 2
+    assert layout.qubit_y[1] not in port_y
+    box = layout.gate_box_rects[gate.node_key]
+    assert all(
+        box.left <= port.center[0] <= box.right
+        and box.bottom <= port.center[1] <= box.top
+        for port in ports
+    )

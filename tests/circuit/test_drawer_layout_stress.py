@@ -12,8 +12,12 @@ import pytest
 from matplotlib.figure import Figure
 
 import qamomile.circuit as qmc
-from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
-from qamomile.circuit.visualization.drawer import _prepare_graph_for_visualization
+from qamomile.circuit.visualization.circuit_adapter import (
+    circuit_program_to_visual_ir,
+)
+from qamomile.circuit.visualization.drawing_compiler import (
+    compile_qkernel_for_drawing,
+)
 from qamomile.circuit.visualization.layout import CircuitLayoutEngine
 from qamomile.circuit.visualization.renderer import MatplotlibRenderer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
@@ -240,7 +244,7 @@ def _build_visual_circuit(
     fold_loops: bool,
     **bindings: Any,
 ) -> VisualCircuit:
-    """Analyze one qkernel into the Visual IR used by layout.
+    """Compile one qkernel into the exact Visual IR used by layout.
 
     Args:
         kernel (Any): QKernel-like object to trace.
@@ -251,21 +255,20 @@ def _build_visual_circuit(
     Returns:
         VisualCircuit: Visual tree ready for layout and rendering.
     """
-    block = _prepare_graph_for_visualization(
-        kernel._build_graph_for_visualization(**bindings)
-    )
-    analyzer = CircuitAnalyzer(
-        block,
-        DEFAULT_STYLE,
-        inline=inline,
+    drawing = compile_qkernel_for_drawing(kernel, bindings)
+    return circuit_program_to_visual_ir(
+        drawing.circuit,
+        trace=drawing.trace,
+        qubit_names=drawing.qubit_names,
+        output_names=drawing.output_names,
+        expectation_value_qubits=drawing.expectation_value_qubits,
+        style=DEFAULT_STYLE,
+        expand_calls=inline,
         fold_loops=fold_loops,
         fold_ifs=False,
         fold_whiles=False,
-        expand_composite=False,
         inline_depth=None,
     )
-    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(block)
-    return analyzer.build_visual_ir(block, qubit_map, qubit_names, num_qubits)
 
 
 def _rect_contains(outer: Rect, inner: Rect) -> bool:
@@ -569,6 +572,41 @@ def _assert_layout_render_invariants(
 class TestMixedNestedLayoutStress:
     """Exercise representative mixed nesting found by seeded stress analysis."""
 
+    def test_public_draw_resolves_loop_indexed_branch_wires(self):
+        """Exact planning keeps mixed loop branches on their root wires."""
+        bindings = {"coeffs": {0: 0.1, 3: 0.2}}
+        drawing = compile_qkernel_for_drawing(_stress_mixed_root, bindings)
+        visual = circuit_program_to_visual_ir(
+            drawing.circuit,
+            trace=drawing.trace,
+            qubit_names=drawing.qubit_names,
+            expand_calls=True,
+            fold_loops=False,
+            fold_ifs=False,
+            fold_whiles=False,
+        )
+        figure = _stress_mixed_root.draw(
+            **bindings,
+            inline=True,
+            fold_loops=False,
+            fold_ifs=False,
+            fold_whiles=False,
+        )
+        sequence_kinds = {
+            node.kind
+            for node in _walk(visual.children)
+            if isinstance(node, VUnfoldedSequence)
+        }
+
+        assert isinstance(figure, Figure)
+        assert drawing.circuit.num_qubits == 8
+        assert {
+            VUnfoldedKind.FOR,
+            VUnfoldedKind.IF,
+            VUnfoldedKind.WHILE,
+        } <= sequence_kinds
+        _assert_layout_render_invariants(visual)
+
     def test_unfolded_inline_for_items_if_while_and_fresh_wires(self):
         """Deep mixed expansion preserves all geometry invariants."""
         vc = _build_visual_circuit(
@@ -608,7 +646,7 @@ class TestMixedNestedLayoutStress:
 
     @pytest.mark.parametrize("inline", [False, True])
     def test_sparse_powered_controlled_block_between_neighbor_gates(self, inline):
-        """Powered controlled geometry clears crossed wires in both views."""
+        """Powered transforms stay boxed and clear crossed neighbor wires."""
         vc = _build_visual_circuit(
             _stress_powered_controlled_root,
             inline=inline,
@@ -616,17 +654,11 @@ class TestMixedNestedLayoutStress:
         )
         nodes = list(_walk(vc.children))
 
-        assert any(getattr(node, "power", 1) == 3 for node in nodes)
+        powered = next(
+            node for node in nodes if isinstance(node, VGate) and node.power == 3
+        )
         layout, _ = _assert_layout_render_invariants(vc)
-        if inline:
-            powered_inline = next(
-                node
-                for node in nodes
-                if isinstance(node, VInlineBlock) and node.power == 3
-            )
-            placement = layout.inline_block_layouts[powered_inline.node_key]
-            assert placement.outer_rect.width > placement.inner_rect.width
-            assert placement.outer_rect.height > placement.inner_rect.height
+        assert powered.node_key in layout.powered_gate_layouts
 
     def test_condition_connector_avoids_same_wire_and_intermediate_obstacles(self):
         """Orthogonal connector lanes never cross intervening gate interiors."""

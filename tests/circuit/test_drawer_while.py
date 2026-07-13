@@ -25,8 +25,12 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import FancyBboxPatch
 
 import qamomile.circuit as qmc
-from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
-from qamomile.circuit.visualization.drawer import _prepare_graph_for_visualization
+from qamomile.circuit.visualization.circuit_adapter import (
+    circuit_program_to_visual_ir,
+)
+from qamomile.circuit.visualization.drawing_compiler import (
+    compile_qkernel_for_drawing,
+)
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
 from qamomile.circuit.visualization.visual_ir import (
     VFoldedBlock,
@@ -122,7 +126,7 @@ def _visual_circuit(
     fold_whiles: bool = False,
     **bindings: Any,
 ) -> VisualCircuit:
-    """Trace ``kernel`` and run the visualization analyzer in isolation.
+    """Compile ``kernel`` into exact renderer-ready Visual IR.
 
     Args:
         kernel (Any): QKernel-like object to trace.
@@ -133,23 +137,22 @@ def _visual_circuit(
         **bindings (Any): Concrete draw-time bindings for kernel parameters.
 
     Returns:
-        VisualCircuit: Visual IR produced by ``CircuitAnalyzer``.
+        VisualCircuit: Exact compiler-backed Visual IR.
     """
-    block = _prepare_graph_for_visualization(
-        kernel._build_graph_for_visualization(**bindings)
-    )
-    analyzer = CircuitAnalyzer(
-        block,
-        DEFAULT_STYLE,
-        inline=False,
+    drawing = compile_qkernel_for_drawing(kernel, bindings)
+    return circuit_program_to_visual_ir(
+        drawing.circuit,
+        trace=drawing.trace,
+        style=DEFAULT_STYLE,
+        qubit_names=drawing.qubit_names,
+        output_names=drawing.output_names,
+        expectation_value_qubits=drawing.expectation_value_qubits,
         fold_loops=fold_loops,
         fold_ifs=False,
         fold_whiles=fold_whiles,
-        expand_composite=False,
+        expand_calls=False,
         inline_depth=None,
     )
-    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(block)
-    return analyzer.build_visual_ir(block, qubit_map, qubit_names, num_qubits)
 
 
 def _folded_whiles(vc: VisualCircuit) -> list[VFoldedBlock]:
@@ -234,12 +237,10 @@ class TestUnfoldedWhile:
         assert not _folded_whiles(vc)
 
     def test_unfolded_while_condition_label_spells_bit(self):
-        """The unfolded box header names the measured condition bit."""
+        """The unfolded box header names the exact classical condition bit."""
         vc = _visual_circuit(measurement_while)
         seq = _unfolded_whiles(vc)[0]
-        assert seq.condition_label is not None
-        assert seq.condition_label.startswith("while ")
-        assert "measured" in seq.condition_label
+        assert seq.condition_label == "while c[0]:"
 
     def test_unfolded_while_body_carries_its_gates(self):
         """The single iteration holds the loop body's H and measurement."""
@@ -279,13 +280,14 @@ class TestUnfoldedWhile:
         ]
         assert body_measures
         assert all(not m.terminates_wire for m in body_measures)
-        # The top-level condition measurement still terminates normally.
+        # The top-level measurement's qubit remains loop-carried by the
+        # compiler, so its wire must continue through the while region too.
         top_measures = [
             n
             for n in vc.children
             if isinstance(n, VGate) and n.kind == VGateKind.MEASURE
         ]
-        assert all(m.terminates_wire for m in top_measures)
+        assert all(not m.terminates_wire for m in top_measures)
 
 
 class TestFoldedWhile:
@@ -299,18 +301,17 @@ class TestFoldedWhile:
         assert not _unfolded_whiles(vc)
 
     def test_folded_while_header_spells_condition(self):
-        """The folded box header names the measured condition bit."""
+        """The folded box header names the exact classical condition bit."""
         vc = _visual_circuit(measurement_while, fold_whiles=True)
         folded = _folded_whiles(vc)[0]
-        assert folded.header_label.startswith("while ")
-        assert "measured" in folded.header_label
+        assert folded.header_label == "while c[0]:"
 
     def test_folded_while_body_summarizes_operations(self):
         """The folded box body lists the loop-body operations."""
         vc = _visual_circuit(measurement_while, fold_whiles=True)
         folded = _folded_whiles(vc)[0]
-        assert any("h(" in line for line in folded.body_lines)
-        assert any("measure(" in line for line in folded.body_lines)
+        assert "$H$" in folded.body_lines
+        assert "M" in folded.body_lines
 
     def test_folded_while_carries_measurement_connector_metadata(self):
         """The folded box records which measurement feeds its condition."""

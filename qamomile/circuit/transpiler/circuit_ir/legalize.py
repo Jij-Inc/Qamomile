@@ -553,6 +553,16 @@ def _verify_legal_region(
                 # executed by this target's native realization. Structural
                 # verification already recursed into it via verify_circuit().
                 continue
+            if operation.callee.opaque:
+                symbol = (
+                    identity.symbol if identity is not None else operation.callee.name
+                )
+                raise TargetCapabilityError(
+                    f"Opaque semantic call {symbol!r} has no target-native "
+                    f"realization for target '{name}'",
+                    target=name,
+                    operation=symbol or "opaque call",
+                )
             _verify_call(operation, capabilities)
             _verify_legal_program(operation.callee.body, capabilities)
         elif isinstance(operation, IfInstruction):

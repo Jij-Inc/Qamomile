@@ -11,11 +11,14 @@ from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.callable import (
     CallPolicy,
     CallTransform,
+    InlineRegionBoundary,
+    InlineRegionBoundaryOperation,
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -59,6 +62,25 @@ def _invoke_inline_body(op: InvokeOperation) -> Block | None:
     if isinstance(body, Block):
         return body
     return None
+
+
+def _contains_quantum_semantics(operations: list[Operation]) -> bool:
+    """Return whether an operation list contributes quantum instructions.
+
+    Args:
+        operations (list[Operation]): Inlined source operations to inspect.
+
+    Returns:
+        bool: True when a quantum or hybrid operation occurs recursively.
+    """
+    for operation in operations:
+        if operation.operation_kind in (OperationKind.QUANTUM, OperationKind.HYBRID):
+            return True
+        if isinstance(operation, HasNestedOps) and any(
+            _contains_quantum_semantics(body) for body in operation.nested_op_lists()
+        ):
+            return True
+    return False
 
 
 def _map_value_structure(
@@ -297,7 +319,24 @@ class InlinePass(Pass[Block, Block]):
 
     Input: Block with BlockKind.HIERARCHICAL (may contain callable calls)
     Output: Block with BlockKind.AFFINE (no inline callable calls)
+
+    Args:
+        preserve_regions (bool): Whether quantum source-call boundaries are
+            retained as drawing-only no-op markers. Defaults to ``False``.
     """
+
+    _preserve_regions = False
+    _next_region_id = 0
+
+    def __init__(self, *, preserve_regions: bool = False) -> None:
+        """Initialize callable inlining.
+
+        Args:
+            preserve_regions (bool): Whether to retain drawing-only source
+                call markers. Defaults to ``False``.
+        """
+        self._preserve_regions = preserve_regions
+        self._next_region_id = 0
 
     @property
     def name(self) -> str:
@@ -352,7 +391,18 @@ class InlinePass(Pass[Block, Block]):
         value_map: dict[str, ValueBase],
         visiting_blocks: set[int],
     ) -> list[Operation]:
-        """Recursively serialize a list of operations."""
+        """Inline callable bodies while preserving exact value substitution.
+
+        Args:
+            operations (list[Operation]): Source operations to serialize.
+            value_map (dict[str, ValueBase]): Caller-local UUID substitutions.
+            visiting_blocks (set[int]): Block identities active in recursive
+                expansion.
+
+        Returns:
+            list[Operation]: Serialized operations with inline-policy calls
+                expanded and optional drawing markers retained.
+        """
         result: list[Operation] = []
 
         for op in operations:
@@ -369,8 +419,46 @@ class InlinePass(Pass[Block, Block]):
                     substituted = self._substitute_values(op, value_map)
                     result.append(substituted)
                 else:
+                    marker_arguments = self._inline_marker_arguments(
+                        op,
+                        body,
+                        value_map,
+                    )
                     inlined = self._inline_invoke(op, body, value_map, visiting_blocks)
-                    result.extend(inlined)
+                    argument_names, argument_values, quantum_inputs = marker_arguments
+                    quantum_outputs = self._inline_marker_quantum_outputs(
+                        op,
+                        value_map,
+                    )
+                    if self._preserve_regions and (
+                        quantum_inputs
+                        or quantum_outputs
+                        or _contains_quantum_semantics(inlined)
+                    ):
+                        region_id = self._next_region_id
+                        self._next_region_id += 1
+                        label = body.name or op.target.name
+                        result.append(
+                            InlineRegionBoundaryOperation(
+                                boundary=InlineRegionBoundary.START,
+                                region_id=region_id,
+                                label=label,
+                                argument_names=argument_names,
+                                argument_values=tuple(argument_values),
+                                quantum_values=quantum_inputs,
+                            )
+                        )
+                        result.extend(inlined)
+                        result.append(
+                            InlineRegionBoundaryOperation(
+                                boundary=InlineRegionBoundary.END,
+                                region_id=region_id,
+                                label=label,
+                                quantum_values=quantum_outputs,
+                            )
+                        )
+                    else:
+                        result.extend(inlined)
 
             elif isinstance(op, HasNestedOps):
                 # Generic recursion for For/ForItems/While: recurse into
@@ -425,6 +513,71 @@ class InlinePass(Pass[Block, Block]):
                 result.append(substituted)
 
         return result
+
+    @staticmethod
+    def _inline_marker_arguments(
+        operation: InvokeOperation,
+        body: Block,
+        value_map: dict[str, ValueBase],
+    ) -> tuple[tuple[str, ...], list[Value], tuple[ValueBase, ...]]:
+        """Resolve scalar classical actuals retained by a source-call marker.
+
+        Args:
+            operation (InvokeOperation): Source callable invocation.
+            body (Block): Inlined callable body exposing formal inputs.
+            value_map (dict[str, ValueBase]): Active caller substitutions.
+
+        Returns:
+            tuple[tuple[str, ...], list[Value], tuple[ValueBase, ...]]: Formal
+                display names, substituted scalar actual values, and exact
+                quantum actual inputs in declaration order.
+        """
+        substitutor = ValueSubstitutor(value_map, transitive=True)
+        names: list[str] = []
+        values: list[Value] = []
+        quantum_values: list[ValueBase] = []
+        for formal, actual in zip(
+            body.input_values,
+            operation.operands,
+            strict=True,
+        ):
+            resolved = substitutor.substitute_value(actual)
+            if formal.type.is_quantum():
+                if isinstance(resolved, ValueBase):
+                    quantum_values.append(resolved)
+                continue
+            if isinstance(formal, ArrayValue) or not formal.type.is_classical():
+                continue
+            if not isinstance(resolved, Value) or not resolved.type.is_classical():
+                continue
+            names.append(formal.name or "?")
+            values.append(resolved)
+        return tuple(names), values, tuple(quantum_values)
+
+    @staticmethod
+    def _inline_marker_quantum_outputs(
+        operation: InvokeOperation,
+        value_map: dict[str, ValueBase],
+    ) -> tuple[ValueBase, ...]:
+        """Resolve exact quantum call results after inline result mapping.
+
+        Args:
+            operation (InvokeOperation): Source callable invocation.
+            value_map (dict[str, ValueBase]): Updated caller substitutions.
+
+        Returns:
+            tuple[ValueBase, ...]: Substituted quantum results in declaration
+                order.
+        """
+        substitutor = ValueSubstitutor(value_map, transitive=True)
+        outputs: list[ValueBase] = []
+        for result in operation.results:
+            if not result.type.is_quantum():
+                continue
+            resolved = substitutor.substitute_value(result)
+            if isinstance(resolved, ValueBase):
+                outputs.append(resolved)
+        return tuple(outputs)
 
     def _inline_block_call(
         self,

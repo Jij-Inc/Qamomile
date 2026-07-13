@@ -23,9 +23,12 @@ from matplotlib.figure import Figure
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import GateOperationType
-from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
-from qamomile.circuit.visualization.drawer import _prepare_graph_for_visualization
-from qamomile.circuit.visualization.style import DEFAULT_STYLE
+from qamomile.circuit.visualization.circuit_adapter import (
+    circuit_program_to_visual_ir,
+)
+from qamomile.circuit.visualization.drawing_compiler import (
+    compile_qkernel_for_drawing,
+)
 from qamomile.circuit.visualization.visual_ir import (
     VGate,
     VGateKind,
@@ -208,23 +211,21 @@ def _visual_circuit(
         **bindings (Any): Concrete visualization bindings.
 
     Returns:
-        VisualCircuit: Analyzed visual tree for assertions.
+        VisualCircuit: Exact compiler-backed visual tree for assertions.
     """
-    graph = _prepare_graph_for_visualization(
-        kernel._build_graph_for_visualization(**bindings)
-    )
-    analyzer = CircuitAnalyzer(
-        graph,
-        DEFAULT_STYLE,
-        inline=inline,
+    drawing = compile_qkernel_for_drawing(kernel, bindings)
+    return circuit_program_to_visual_ir(
+        drawing.circuit,
+        trace=drawing.trace,
+        qubit_names=drawing.qubit_names,
+        output_names=drawing.output_names,
+        expectation_value_qubits=drawing.expectation_value_qubits,
+        expand_calls=inline or expand_composite,
         fold_loops=fold_loops,
-        expand_composite=expand_composite,
         inline_depth=inline_depth,
         fold_ifs=False,
         fold_whiles=False,
     )
-    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
-    return analyzer.build_visual_ir(graph, qubit_map, qubit_names, num_qubits)
 
 
 def _walk(nodes: Iterable[VisualNode]) -> Iterator[VisualNode]:
@@ -265,7 +266,7 @@ def test_inline_qkernel_invoke_switches_between_box_and_body() -> None:
         for node in boxed.children
         if isinstance(node, VGate) and node.kind is VGateKind.BLOCK_BOX
     ]
-    assert [node.label for node in boxed_calls] == ["_INLINE_PHASE"]
+    assert [node.label for node in boxed_calls] == ["_inline_phase"]
 
     expanded = _visual_circuit(_use_inline_phase, inline=True)
     [inline_call] = [
@@ -281,15 +282,15 @@ def test_inline_qkernel_invoke_switches_between_box_and_body() -> None:
     _assert_draws(_use_inline_phase, inline=True)
 
 
-def test_preserve_box_composite_expands_only_with_expand_composite() -> None:
-    """A named composite keeps its box until expand_composite is requested."""
-    boxed = _visual_circuit(_use_named_phase, inline=True)
+def test_preserve_box_composite_expands_with_either_public_alias() -> None:
+    """A named composite stays boxed by default and expands on request."""
+    boxed = _visual_circuit(_use_named_phase)
     composite_boxes = [
         node
         for node in boxed.children
         if isinstance(node, VGate) and node.kind is VGateKind.COMPOSITE_BOX
     ]
-    assert [node.label for node in composite_boxes] == ["NAMED_PHASE"]
+    assert [node.label for node in composite_boxes] == ["named_phase"]
 
     expanded = _visual_circuit(_use_named_phase, expand_composite=True)
     [inline_call] = [
@@ -301,6 +302,12 @@ def test_preserve_box_composite_expands_only_with_expand_composite() -> None:
         for node in _walk(inline_call.children)
         if isinstance(node, VGate)
     ] == [GateOperationType.X, GateOperationType.RY]
+    [inline_alias] = [
+        node
+        for node in _visual_circuit(_use_named_phase, inline=True).children
+        if isinstance(node, VInlineBlock)
+    ]
+    assert inline_alias.label == "named_phase"
     _assert_draws(_use_named_phase, inline=True)
     _assert_draws(_use_named_phase, expand_composite=True)
 
@@ -317,7 +324,7 @@ def test_composite_expansion_honors_inline_depth() -> None:
         node.label
         for node in outer.children
         if isinstance(node, VGate) and node.kind is VGateKind.COMPOSITE_BOX
-    ] == ["NAMED_PHASE"]
+    ] == ["named_phase"]
 
     unlimited = _visual_circuit(
         _use_nested_named_phase,
@@ -367,22 +374,24 @@ def test_controlled_composite_keeps_control_outside_fallback_body() -> None:
     _assert_draws(_use_controlled_named_phase, expand_composite=True)
 
 
-def test_bodyless_oracle_remains_boxed_under_all_expansion_options() -> None:
-    """A bodyless oracle remains a box even when every expansion flag is set."""
+def test_bodyless_oracle_remains_an_opaque_box() -> None:
+    """Drawing preserves a bodyless oracle without inventing a fallback."""
     circuit = _visual_circuit(
         _use_opaque_phase,
         inline=True,
         expand_composite=True,
         fold_loops=False,
     )
-    assert not any(isinstance(node, VInlineBlock) for node in circuit.children)
-    oracle_boxes = [
-        node
-        for node in circuit.children
-        if isinstance(node, VGate) and node.kind is VGateKind.COMPOSITE_BOX
-    ]
-    assert [node.label for node in oracle_boxes] == ["OPAQUE_PHASE"]
-    _assert_draws(_use_opaque_phase, inline=True, expand_composite=True)
+
+    [opaque] = circuit.children
+    assert isinstance(opaque, VGate)
+    assert opaque.kind is VGateKind.COMPOSITE_BOX
+    assert opaque.label == "opaque_phase"
+    assert opaque.qubit_indices == [0]
+    assert isinstance(
+        _use_opaque_phase.draw(inline=True, expand_composite=True),
+        Figure,
+    )
 
 
 def test_expanded_invoke_recursively_draws_if_and_while_regions() -> None:
@@ -426,5 +435,5 @@ def test_unfolded_loop_substitutes_region_arg_for_each_rotation() -> None:
         for node in _walk(iteration)
         if isinstance(node, VGate) and node.gate_type is GateOperationType.RX
     ]
-    assert labels == ["$R_x$(0.25)", "$R_x$(0.50)", "$R_x$(0.75)"]
+    assert labels == ["$R_x$(0.25)", "$R_x$(0.5)", "$R_x$(0.75)"]
     _assert_draws(_carried_rotation, fold_loops=False)

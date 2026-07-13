@@ -7,6 +7,7 @@ import uuid as uuid_module
 from typing import Any, cast
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.callable import InlineRegionBoundaryOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.value import (
@@ -89,6 +90,10 @@ class UUIDRemapper:
         for v in op.operands:
             if isinstance(v, ValueBase):
                 sub_map[v.uuid] = self.clone_value(v)
+        if isinstance(op, InlineRegionBoundaryOperation):
+            for value in (*op.argument_values, *op.quantum_values):
+                if value.uuid not in sub_map:
+                    sub_map[value.uuid] = self.clone_value(value)
 
         # Clone nested bodies BEFORE subclass-extra values and results.
         # IfOperation yields and merge outputs carry metadata that may

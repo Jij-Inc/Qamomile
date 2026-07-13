@@ -17,7 +17,9 @@ from .text_metrics import measure_text, measure_text_width
 from .types import (
     ControlFlowBoxLayout,
     ControlFlowLayout,
+    ExpvalLayout,
     FoldedBlockLayout,
+    GlobalPhaseLayout,
     HorizontalSpan,
     InlineBlockLayout,
     LayoutResult,
@@ -51,6 +53,8 @@ class _FinalizationState:
         node_rects (dict[tuple, Rect]): Final rectangle for each drawing node.
         gate_box_rects (dict[tuple, Rect]): Exact bounds of text-bearing gate
             boxes.
+        expval_layouts (dict[tuple, ExpvalLayout]): Exact disjoint
+            expectation-value geometry.
         control_flow_layouts (dict[tuple, ControlFlowLayout]): Final unfolded
             IF and WHILE geometry.
         folded_block_layouts (dict[tuple, FoldedBlockLayout]): Final folded
@@ -63,6 +67,7 @@ class _FinalizationState:
 
     node_rects: dict[tuple, Rect] = field(default_factory=dict)
     gate_box_rects: dict[tuple, Rect] = field(default_factory=dict)
+    expval_layouts: dict[tuple, ExpvalLayout] = field(default_factory=dict)
     control_flow_layouts: dict[tuple, ControlFlowLayout] = field(default_factory=dict)
     folded_block_layouts: dict[tuple, FoldedBlockLayout] = field(default_factory=dict)
     inline_block_layouts: dict[tuple, InlineBlockLayout] = field(default_factory=dict)
@@ -1017,43 +1022,49 @@ class CircuitLayoutEngine:
         measure_key = node.condition_measure_node_key
         if measure_key is None or measure_key not in state.node_spans:
             return ()
-        if len(node.condition_measure_qubit_indices) != 1:
+        source_qubits = node.condition_measure_qubit_indices
+        if not source_qubits:
             return ()
-        qubit = node.condition_measure_qubit_indices[0]
-        if qubit < 0 or qubit >= len(qubit_y):
+        if any(qubit < 0 or qubit >= len(qubit_y) for qubit in source_qubits):
             return ()
         start_x = state.node_spans[measure_key].right
         if target.left <= start_x:
             return ()
-        source_y = qubit_y[qubit]
         corner_radius = min(
             self.style.gate_corner_radius,
             target.width / 2,
             target.height / 2,
         )
-        target_y = min(
-            max(source_y, target.bottom + corner_radius),
-            target.top - corner_radius,
-        )
-
-        relevant_obstacles = [
-            rect
-            for obstacle_key, rect in obstacles.items()
-            if obstacle_key != measure_key
-            and rect.width > _GEOMETRY_TOLERANCE
-            and rect.height > _GEOMETRY_TOLERANCE
-            and rect.right + self.style.qubit_clearance > start_x + _GEOMETRY_TOLERANCE
-            and rect.left - self.style.qubit_clearance
-            < target.left - _GEOMETRY_TOLERANCE
-            and not (
-                rect.left < start_x < rect.right and rect.bottom < source_y < rect.top
+        connector_segments: list[LineSegment] = []
+        for qubit in source_qubits:
+            source_y = qubit_y[qubit]
+            target_y = min(
+                max(source_y, target.bottom + corner_radius),
+                target.top - corner_radius,
             )
-        ]
-        return self._route_condition_connector(
-            (start_x, source_y),
-            (target.left, target_y),
-            relevant_obstacles,
-        )
+            relevant_obstacles = [
+                rect
+                for obstacle_key, rect in obstacles.items()
+                if obstacle_key != measure_key
+                and rect.width > _GEOMETRY_TOLERANCE
+                and rect.height > _GEOMETRY_TOLERANCE
+                and rect.right + self.style.qubit_clearance
+                > start_x + _GEOMETRY_TOLERANCE
+                and rect.left - self.style.qubit_clearance
+                < target.left - _GEOMETRY_TOLERANCE
+                and not (
+                    rect.left < start_x < rect.right
+                    and rect.bottom < source_y < rect.top
+                )
+            ]
+            connector_segments.extend(
+                self._route_condition_connector(
+                    (start_x, source_y),
+                    (target.left, target_y),
+                    relevant_obstacles,
+                )
+            )
+        return tuple(connector_segments)
 
     def _finalize_vgate(
         self,
@@ -1106,6 +1117,40 @@ class CircuitLayoutEngine:
                     max(box_y) + half_height,
                 )
                 finalization.gate_box_rects[node.node_key] = box_rect
+
+                if node.kind is VGateKind.EXPVAL:
+                    sorted_qubits = sorted(set(box_qubits))
+                    runs: list[list[int]] = []
+                    for qubit in sorted_qubits:
+                        if not runs or qubit != runs[-1][-1] + 1:
+                            runs.append([qubit])
+                        else:
+                            runs[-1].append(qubit)
+                    boxes = tuple(
+                        Rect(
+                            box_rect.left,
+                            min(qubit_y[q] for q in run) - half_height,
+                            box_rect.right,
+                            max(qubit_y[q] for q in run) + half_height,
+                        )
+                        for run in runs
+                    )
+                    connectors = (
+                        (
+                            LineSegment(
+                                span.center,
+                                min(qubit_y[q] for q in sorted_qubits),
+                                span.center,
+                                max(qubit_y[q] for q in sorted_qubits),
+                            ),
+                        )
+                        if len(boxes) > 1
+                        else ()
+                    )
+                    finalization.expval_layouts[node.node_key] = ExpvalLayout(
+                        boxes=boxes,
+                        connector_segments=connectors,
+                    )
 
         if node.kind == VGateKind.CONTROLLED_U_BOX and node.power > 1:
             target_qubits = [
@@ -1509,13 +1554,51 @@ class CircuitLayoutEngine:
         )
         return wire_spans, wire_bounds
 
+    def _global_phase_layout(
+        self,
+        phase: str | None,
+        *,
+        anchor_left: float,
+        content_top: float,
+    ) -> GlobalPhaseLayout | None:
+        """Measure and position a circuit-wide phase annotation.
+
+        Args:
+            phase (str | None): Formatted phase value, or ``None`` when
+                omitted.
+            anchor_left (float): Left edge of the annotation in layout units.
+            content_top (float): Highest existing content coordinate.
+
+        Returns:
+            GlobalPhaseLayout | None: Layout above ``content_top``, or
+                ``None`` when no phase should be displayed.
+        """
+        if phase is None:
+            return None
+        label = f"global phase: {phase}"
+        metrics = measure_text(
+            label,
+            font_size=self.style.subfont_size,
+            fallback_char_width=self.style.char_width_gate,
+        )
+        bottom = content_top + self.style.label_padding
+        return GlobalPhaseLayout(
+            label=label,
+            rect=Rect(
+                anchor_left,
+                bottom,
+                anchor_left + metrics.width,
+                bottom + metrics.height,
+            ),
+        )
+
     def _compute_viewport(
         self,
         vc: VisualCircuit,
         wire_bounds: Rect,
         qubit_y: list[float],
         finalization: _FinalizationState,
-    ) -> Rect:
+    ) -> tuple[Rect, GlobalPhaseLayout | None]:
         """Compute a viewport containing every layout-owned primitive.
 
         Args:
@@ -1525,10 +1608,29 @@ class CircuitLayoutEngine:
             finalization (_FinalizationState): Shared typed output maps.
 
         Returns:
-            Rect: Padded viewport containing all geometry and qubit labels.
+            tuple[Rect, GlobalPhaseLayout | None]: Padded viewport containing
+                all geometry and qubit labels, plus optional phase geometry.
         """
         if vc.num_qubits == 0:
-            return Rect(0.0, 0.0, 4.0, 2.0)
+            empty_bounds = Rect(0.0, 0.0, 4.0, 2.0)
+            global_phase_layout = self._global_phase_layout(
+                vc.global_phase,
+                anchor_left=empty_bounds.left + self.style.margin[0],
+                content_top=empty_bounds.top,
+            )
+            if global_phase_layout is None:
+                return empty_bounds, None
+            geometry = empty_bounds.union(global_phase_layout.rect)
+            left_margin, right_margin, top_margin, bottom_margin = self.style.margin
+            return (
+                Rect(
+                    geometry.left - left_margin,
+                    geometry.bottom - bottom_margin,
+                    geometry.right + right_margin,
+                    geometry.top + top_margin,
+                ),
+                global_phase_layout,
+            )
         geometry = wire_bounds
         for rect in finalization.node_rects.values():
             geometry = geometry.union(rect)
@@ -1573,12 +1675,22 @@ class CircuitLayoutEngine:
                     label_y + metrics.height / 2,
                 )
             )
+        global_phase_layout = self._global_phase_layout(
+            vc.global_phase,
+            anchor_left=wire_bounds.left,
+            content_top=geometry.top,
+        )
+        if global_phase_layout is not None:
+            geometry = geometry.union(global_phase_layout.rect)
         left_margin, right_margin, top_margin, bottom_margin = self.style.margin
-        return Rect(
-            geometry.left - left_margin,
-            geometry.bottom - bottom_margin,
-            geometry.right + right_margin,
-            geometry.top + top_margin,
+        return (
+            Rect(
+                geometry.left - left_margin,
+                geometry.bottom - bottom_margin,
+                geometry.right + right_margin,
+                geometry.top + top_margin,
+            ),
+            global_phase_layout,
         )
 
     def compute_layout(self, vc: VisualCircuit) -> LayoutResult:
@@ -1605,7 +1717,7 @@ class CircuitLayoutEngine:
             vc, state
         )
         wire_spans, wire_bounds = self._wire_geometry(vc, state, qubit_y)
-        viewport = self._compute_viewport(
+        viewport, global_phase_layout = self._compute_viewport(
             vc,
             wire_bounds,
             qubit_y,
@@ -1635,10 +1747,12 @@ class CircuitLayoutEngine:
             node_spans=state.node_spans,
             node_rects=finalization.node_rects,
             gate_box_rects=finalization.gate_box_rects,
+            expval_layouts=finalization.expval_layouts,
             control_flow_layouts=finalization.control_flow_layouts,
             folded_block_layouts=finalization.folded_block_layouts,
             inline_block_layouts=finalization.inline_block_layouts,
             powered_gate_layouts=finalization.powered_gate_layouts,
+            global_phase_layout=global_phase_layout,
             viewport=viewport,
             wire_bounds=wire_bounds,
             wire_spans=wire_spans,

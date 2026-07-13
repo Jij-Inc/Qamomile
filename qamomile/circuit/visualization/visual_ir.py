@@ -238,6 +238,8 @@ class VisualCircuit:
         num_qubits (int): Total number of wire rows.
         output_names (list[str]): Optional output labels retained for clients.
             Defaults to an empty list.
+        global_phase (str | None): Formatted nonzero circuit-wide phase, or
+            ``None`` when the phase is provably zero. Defaults to ``None``.
     """
 
     children: list[VisualNode]
@@ -245,3 +247,4 @@ class VisualCircuit:
     qubit_names: dict[int, str]
     num_qubits: int
     output_names: list[str] = field(default_factory=list)
+    global_phase: str | None = None

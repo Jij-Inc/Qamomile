@@ -79,6 +79,17 @@ def emit_composite_gate(
     ``EmitError`` if any operand cannot be resolved, rather than
     silently dropping it (previously ``qft(view)`` emitted zero gates).
 
+    Args:
+        emit_pass (StandardEmitPass): Active semantic emit pass.
+        circuit (Any): Destination target circuit or circuit builder.
+        op (InvokeOperation): Composite or oracle invocation to emit.
+        qubit_map (QubitMap): Current semantic-to-physical qubit mapping.
+        bindings (dict[str, Any]): Active compile-time and loop bindings.
+
+    Returns:
+        None: Emits the invocation directly into ``circuit`` and updates
+            result aliases in ``qubit_map``.
+
     Raises:
         EmitError: If any control or target qubit operand fails to
             resolve to a physical qubit index.
@@ -111,6 +122,22 @@ def emit_composite_gate(
     ):
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
+
+    allow_opaque = bool(getattr(emit_pass, "_allow_opaque_semantic_calls", False))
+    if (
+        allow_opaque
+        and op.effective_body(backend=getattr(emit_pass, "backend_name", None)) is None
+        and op.transform in {CallTransform.CONTROLLED, CallTransform.INVERSE}
+    ):
+        for emitter in emit_pass._composite_emitters:
+            if emitter.can_emit(op.gate_type) and emitter.emit(
+                circuit,
+                op,
+                qubit_indices,
+                bindings,
+            ):
+                update_composite_result_mapping(op, qubit_groups, qubit_map)
+                return
 
     if op.transform is CallTransform.CONTROLLED:
         from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
@@ -186,7 +213,13 @@ def emit_invoke_operation(
     body = op.effective_body(backend=backend_name)
     impl = op.implementation_for(backend=backend_name)
     has_native_emitter = impl is not None and impl.emitter is not None
-    if body is None and op.attrs.get("kind") == "oracle" and not has_native_emitter:
+    allow_opaque = bool(getattr(emit_pass, "_allow_opaque_semantic_calls", False))
+    if (
+        body is None
+        and op.attrs.get("kind") == "oracle"
+        and not has_native_emitter
+        and not allow_opaque
+    ):
         raise EmitError(
             f"Oracle '{op.target.name}' has no implementation for execution.",
             operation=f"InvokeOperation[{op.target.name}]",
@@ -201,6 +234,7 @@ def emit_invoke_operation(
         and not has_native_emitter
         and op.gate_type is CompositeGateType.CUSTOM
         and opaque_cost is not None
+        and not allow_opaque
     ):
         raise EmitError(
             f"Composite '{op.target.name}' has an opaque cost for estimation "

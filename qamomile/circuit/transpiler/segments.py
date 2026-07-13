@@ -42,12 +42,23 @@ class Segment(ABC):
 class QuantumSegment(Segment):
     """A segment of pure quantum operations.
 
-    Contains quantum gates and qubit allocations.
-    Will be emitted to a quantum circuit.
+    ``qubit_values`` stores quantum entrypoint values that enter this segment
+    from outside the semantic block. Scalar inputs and aggregate values such
+    as ``Vector[Qubit]`` remain in source order so resource allocation can seed
+    exact external-wire slots before processing internal ``QInitOperation``s.
+
+    Args:
+        operations (list[Operation]): Quantum operations in execution order.
+        input_refs (list[str]): Global-state references read by the segment.
+        output_refs (list[str]): Global-state references written by the
+            segment.
+        qubit_values (list[ValueLike]): External quantum values whose source
+            order defines the initial exact wire allocation.
+        num_qubits (int): Total physical width required by the segment.
     """
 
-    # Qubit values used in this segment
-    qubit_values: list[Value] = dataclasses.field(default_factory=list)
+    # External quantum input values used by this segment.
+    qubit_values: list[ValueLike] = dataclasses.field(default_factory=list)
 
     # Number of qubits needed
     num_qubits: int = 0

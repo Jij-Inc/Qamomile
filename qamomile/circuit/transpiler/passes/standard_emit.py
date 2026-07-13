@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 if TYPE_CHECKING:
-    from qamomile.circuit.ir.value import Value
+    from qamomile.circuit.ir.value import Value, ValueLike
 
 from qamomile.circuit.ir.operation import (
     Operation,
@@ -32,7 +32,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
 )
-from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.callable import (
+    InlineRegionBoundaryOperation,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DictGetItemOperation,
@@ -106,6 +109,7 @@ from qamomile.circuit.transpiler.passes.emit_support.measurement_emission import
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     emit_pauli_evolve,
 )
+from qamomile.circuit.transpiler.segments import QuantumSegment
 
 T = TypeVar("T")  # Backend circuit type
 
@@ -242,13 +246,81 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             self._parameter_sources.setdefault(name, source_ref)
         return self._parameter_map[name]
 
+    def _emit_segment(
+        self,
+        segment: QuantumSegment,
+        bindings: dict[str, Any],
+    ) -> tuple[T, QubitMap, ClbitMap]:
+        """Generate a circuit from one semantic quantum segment.
+
+        Args:
+            segment (QuantumSegment): Quantum operations and external input
+                values to lower.
+            bindings (dict[str, Any]): Compile-time and emit-time bindings.
+
+        Returns:
+            tuple[T, QubitMap, ClbitMap]: Circuit builder and resource maps.
+
+        Raises:
+            EmitError: If exact resource allocation or operation emission
+                fails.
+        """
+        if not segment.qubit_values:
+            return self._emit_quantum_segment(segment.operations, bindings)
+        return self._emit_quantum_operations(
+            segment.operations,
+            bindings,
+            input_qubit_values=segment.qubit_values,
+        )
+
     def _emit_quantum_segment(
         self,
         operations: list[Operation],
         bindings: dict[str, Any],
     ) -> tuple[T, QubitMap, ClbitMap]:
-        """Generate backend circuit from operations."""
-        qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
+        """Generate a circuit through the legacy operation-list hook.
+
+        Args:
+            operations (list[Operation]): Quantum operations to emit.
+            bindings (dict[str, Any]): Compile-time and emit-time bindings.
+
+        Returns:
+            tuple[T, QubitMap, ClbitMap]: Circuit builder and resource maps.
+
+        Raises:
+            EmitError: If exact resource allocation or operation emission
+                fails.
+        """
+        return self._emit_quantum_operations(operations, bindings)
+
+    def _emit_quantum_operations(
+        self,
+        operations: list[Operation],
+        bindings: dict[str, Any],
+        *,
+        input_qubit_values: list[ValueLike] | None = None,
+    ) -> tuple[T, QubitMap, ClbitMap]:
+        """Generate a circuit with optional external-wire allocation seeds.
+
+        Args:
+            operations (list[Operation]): Quantum operations to emit.
+            bindings (dict[str, Any]): Compile-time and emit-time bindings.
+            input_qubit_values (list[ValueLike] | None): External quantum
+                values to allocate before walking ``operations``. Defaults to
+                ``None``.
+
+        Returns:
+            tuple[T, QubitMap, ClbitMap]: Circuit builder and resource maps.
+
+        Raises:
+            EmitError: If exact resource allocation or operation emission
+                fails.
+        """
+        qubit_map, clbit_map = self._allocator.allocate(
+            operations,
+            bindings,
+            input_qubit_values=input_qubit_values,
+        )
 
         qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
         clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
@@ -359,7 +431,28 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         force_unroll: bool = False,
         emit_qinit_reset: bool = False,
     ) -> None:
-        """Emit operations to the circuit (dispatcher)."""
+        """Dispatch semantic operations into one target circuit builder.
+
+        Args:
+            circuit (T): Destination target circuit.
+            operations (list[Operation]): Semantic operations in source order.
+            qubit_map (QubitMap): Current quantum address map.
+            clbit_map (ClbitMap): Current classical-result map.
+            bindings (dict[str, Any]): Active emit-time bindings.
+            force_unroll (bool): Whether native loops must be specialized.
+                Defaults to ``False``.
+            emit_qinit_reset (bool): Whether allocation markers emit physical
+                resets. Defaults to ``False``.
+
+        Returns:
+            None: Mutates ``circuit`` and the supplied maps in place.
+
+        Raises:
+            EmitError: If an operation cannot be represented exactly.
+            RuntimeError: If an internal-only operation reaches emission.
+            NotImplementedError: If an unsupported operation variant is
+                encountered.
+        """
         for op in operations:
             if isinstance(op, QInitOperation):
                 if emit_qinit_reset:
@@ -404,6 +497,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_if(circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, WhileOperation):
                 self._emit_while(circuit, op, qubit_map, clbit_map, bindings)
+            elif isinstance(op, InlineRegionBoundaryOperation):
+                self._emit_inline_region_boundary(circuit, op, qubit_map, bindings)
             elif isinstance(op, InvokeOperation):
                 emit_invoke_operation(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, InverseBlockOperation):
@@ -684,6 +779,84 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     # ------------------------------------------------------------------
     # Structured lowering extension points used by CircuitLoweringPass.
     # ------------------------------------------------------------------
+
+    def _begin_specialized_loop_trace(
+        self,
+        circuit: T,
+        kind: str,
+        origin: Any,
+    ) -> Any:
+        """Open an optional drawing-only specialized-loop trace.
+
+        Args:
+            circuit (T): Circuit currently being emitted.
+            kind (str): Stable loop category name.
+            origin (Any): Concrete source loop metadata.
+
+        Returns:
+            Any: Optional backend-specific trace context. Standard emission
+                returns ``None``.
+        """
+        del circuit, kind, origin
+        return None
+
+    def _begin_specialized_iteration_trace(
+        self,
+        circuit: T,
+        context: Any,
+        value_label: str,
+    ) -> None:
+        """Open one optional drawing-only specialized iteration.
+
+        Args:
+            circuit (T): Circuit currently being emitted.
+            context (Any): Context returned by the loop-start hook.
+            value_label (str): Deterministic concrete-value label.
+        """
+        del circuit, context, value_label
+
+    def _end_specialized_iteration_trace(
+        self,
+        circuit: T,
+        context: Any,
+    ) -> None:
+        """Close one optional drawing-only specialized iteration.
+
+        Args:
+            circuit (T): Circuit currently being emitted.
+            context (Any): Context returned by the loop-start hook.
+        """
+        del circuit, context
+
+    def _end_specialized_loop_trace(
+        self,
+        circuit: T,
+        context: Any,
+    ) -> None:
+        """Close an optional drawing-only specialized-loop trace.
+
+        Args:
+            circuit (T): Circuit currently being emitted.
+            context (Any): Context returned by the loop-start hook.
+        """
+        del circuit, context
+
+    def _emit_inline_region_boundary(
+        self,
+        circuit: T,
+        operation: InlineRegionBoundaryOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Consume a drawing-only source-call boundary as an executable no-op.
+
+        Args:
+            circuit (T): Circuit currently being emitted.
+            operation (InlineRegionBoundaryOperation): Source boundary marker.
+            qubit_map (QubitMap): Current semantic-to-physical qubit map.
+            bindings (dict[str, Any]): Active emit-time bindings.
+        """
+        del circuit, operation, qubit_map, bindings
 
     def _emit_for(
         self,

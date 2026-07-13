@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 __all__ = [
     "ControlFlowBoxLayout",
     "ControlFlowLayout",
+    "ExpvalLayout",
     "FoldedBlockLayout",
+    "GlobalPhaseLayout",
     "HorizontalSpan",
     "InlineBlockLayout",
     "LineSegment",
@@ -347,6 +349,19 @@ class FoldedBlockLayout:
 
 
 @dataclass(frozen=True)
+class GlobalPhaseLayout:
+    """Describe the circuit-wide global phase annotation.
+
+    Args:
+        label (str): Complete user-facing phase label.
+        rect (Rect): Conservative rendered-text bounds in layout coordinates.
+    """
+
+    label: str
+    rect: Rect
+
+
+@dataclass(frozen=True)
 class PoweredGateLayout:
     """Describe target and wrapper geometry for a powered controlled gate.
 
@@ -357,6 +372,24 @@ class PoweredGateLayout:
 
     target_rect: Rect
     wrapper_rect: Rect
+
+
+@dataclass(frozen=True)
+class ExpvalLayout:
+    """Describe exact geometry for one expectation-value operation.
+
+    Disjoint operand runs receive separate boxes so an intervening wire is
+    never visually claimed by the observable. Connector segments show that
+    those boxes belong to one joint terminal operation.
+
+    Args:
+        boxes (tuple[Rect, ...]): One box per contiguous operand-wire run.
+        connector_segments (tuple[LineSegment, ...]): Segments joining
+            disjoint boxes. Empty for one contiguous run.
+    """
+
+    boxes: tuple[Rect, ...]
+    connector_segments: tuple[LineSegment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -462,6 +495,8 @@ class LayoutResult:
             that draw concrete geometry.
         gate_box_rects (dict[tuple, Rect]): Exact text-bearing gate box bounds,
             excluding controls and optional power wrappers.
+        expval_layouts (dict[tuple, ExpvalLayout]): Exact disjoint
+            expectation-value box and connector geometry.
         control_flow_layouts (dict[tuple, ControlFlowLayout]): Final unfolded
             IF and WHILE box geometry.
         folded_block_layouts (dict[tuple, FoldedBlockLayout]): Final folded
@@ -470,6 +505,8 @@ class LayoutResult:
             block geometry.
         powered_gate_layouts (dict[tuple, PoweredGateLayout]): Final target and
             wrapper geometry for powered controlled gates.
+        global_phase_layout (GlobalPhaseLayout | None): Circuit-wide phase
+            annotation geometry, or None when no phase is displayed.
         viewport (Rect): Final axes viewport containing every layout primitive.
         wire_bounds (Rect): Smallest rectangle containing all wire segments.
         wire_spans (dict[int, HorizontalSpan]): Horizontal span of every wire.
@@ -493,10 +530,12 @@ class LayoutResult:
     node_spans: dict[tuple, HorizontalSpan] = field(default_factory=dict)
     node_rects: dict[tuple, Rect] = field(default_factory=dict)
     gate_box_rects: dict[tuple, Rect] = field(default_factory=dict)
+    expval_layouts: dict[tuple, ExpvalLayout] = field(default_factory=dict)
     control_flow_layouts: dict[tuple, ControlFlowLayout] = field(default_factory=dict)
     folded_block_layouts: dict[tuple, FoldedBlockLayout] = field(default_factory=dict)
     inline_block_layouts: dict[tuple, InlineBlockLayout] = field(default_factory=dict)
     powered_gate_layouts: dict[tuple, PoweredGateLayout] = field(default_factory=dict)
+    global_phase_layout: GlobalPhaseLayout | None = None
     viewport: Rect = field(default_factory=lambda: Rect(0.0, 0.0, 1.0, 1.0))
     wire_bounds: Rect = field(default_factory=lambda: Rect(0.0, 0.0, 1.0, 0.0))
     wire_spans: dict[int, HorizontalSpan] = field(default_factory=dict)

@@ -39,6 +39,7 @@ from qamomile.circuit.transpiler.segments import (
 )
 
 T = TypeVar("T")  # Backend circuit type
+ArtifactT = TypeVar("ArtifactT")
 C = TypeVar("C", contravariant=True)  # Circuit type for emitter
 
 
@@ -182,9 +183,17 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         self,
         segment: QuantumSegment,
     ) -> CompiledQuantumSegment[T]:
-        """Compile a quantum segment to backend circuit."""
-        circuit, qubit_map, clbit_map = self._emit_quantum_segment(
-            segment.operations,
+        """Compile a quantum segment to a target circuit.
+
+        Args:
+            segment (QuantumSegment): Semantic quantum segment, including
+                external quantum input values.
+
+        Returns:
+            CompiledQuantumSegment[T]: Compiled circuit and resource maps.
+        """
+        circuit, qubit_map, clbit_map = self._emit_segment(
+            segment,
             self.bindings,
         )
 
@@ -302,7 +311,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         self,
         qubits_value: Value | None,
         quantum_segment_index: int,
-        compiled_quantum: list[CompiledQuantumSegment[T]],
+        compiled_quantum: list[CompiledQuantumSegment[ArtifactT]],
     ) -> dict[int, int]:
         """Build mapping from Pauli index to physical qubit index.
 
@@ -460,21 +469,42 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
 
         return qubit_map
 
+    def _emit_segment(
+        self,
+        segment: QuantumSegment,
+        bindings: dict[str, Any],
+    ) -> tuple[T, QubitMap, ClbitMap]:
+        """Emit one quantum segment through the legacy operation-list hook.
+
+        Segment-aware emitters can override this method to consume metadata
+        such as external quantum input values. The default preserves the
+        established :meth:`_emit_quantum_segment` subclass contract.
+
+        Args:
+            segment (QuantumSegment): Semantic quantum segment to emit.
+            bindings (dict[str, Any]): Compile-time and emit-time bindings.
+
+        Returns:
+            tuple[T, QubitMap, ClbitMap]: Emitted circuit and resource maps.
+        """
+        return self._emit_quantum_segment(segment.operations, bindings)
+
     @abstractmethod
     def _emit_quantum_segment(
         self,
         operations: list[Operation],
         bindings: dict[str, Any],
     ) -> tuple[T, QubitMap, ClbitMap]:
-        """Generate backend-specific quantum circuit.
+        """Generate a target circuit from semantic operations.
 
         Args:
-            operations: List of quantum operations to emit
-            bindings: Parameter bindings
+            operations (list[Operation]): Quantum operations to emit.
+            bindings (dict[str, Any]): Parameter bindings.
 
         Returns:
-            Tuple of (circuit, qubit_map, clbit_map) where:
-            - circuit: Backend-specific circuit object
+            tuple[T, QubitMap, ClbitMap]: Tuple of
+                ``(circuit, qubit_map, clbit_map)`` where:
+            - circuit: Target circuit object
             - qubit_map: Value UUID -> physical qubit index
             - clbit_map: Value UUID -> physical clbit index
         """

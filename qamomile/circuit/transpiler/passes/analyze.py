@@ -2527,6 +2527,12 @@ def reject_control_flow_quantum_discard(
 class AnalyzePass(Pass[Block, Block]):
     """Analyze and validate an affine block.
 
+    Args:
+        validate_classical_io (bool): Whether to enforce the executable
+            program's classical-only top-level ABI. Circuit fragments disable
+            this check while retaining every dependency and affine-safety
+            validation. Defaults to ``True``.
+
     This pass:
     1. Builds a dependency graph between values (used locally for validation)
     2. Validates that quantum ops don't depend on non-parameter classical results
@@ -2536,17 +2542,40 @@ class AnalyzePass(Pass[Block, Block]):
     Output: Block with BlockKind.ANALYZED
     """
 
+    _validate_classical_io = True
+
+    def __init__(self, *, validate_classical_io: bool = True) -> None:
+        """Initialize the analysis policy.
+
+        Args:
+            validate_classical_io (bool): Whether block inputs and outputs
+                must be classical. Defaults to ``True``.
+        """
+        self._validate_classical_io = validate_classical_io
+
     @property
     def name(self) -> str:
         return "analyze"
 
     def run(self, input: Block) -> Block:
-        """Analyze the block and validate dependencies."""
+        """Analyze the block and validate dependencies.
+
+        Args:
+            input (Block): Affine block to analyze.
+
+        Returns:
+            Block: Analyzed block with identical semantics and
+            :attr:`BlockKind.ANALYZED` kind.
+
+        Raises:
+            ValidationError: If ``input`` is not affine or violates an
+                enabled validation rule.
+        """
         if input.kind != BlockKind.AFFINE:
             raise ValidationError(f"AnalyzePass expects AFFINE block, got {input.kind}")
 
-        # Check inputs/outputs are classical
-        self._validate_io_classical(input)
+        if self._validate_classical_io:
+            self._validate_io_classical(input)
 
         # Reject classical element stores inside runtime if/else branches
         self._reject_stores_in_if_branches(input.operations)
