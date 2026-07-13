@@ -78,7 +78,7 @@ def test_helper_qkernel_call_is_inline_policy_invoke():
 
     assert len(invokes) == 1
     assert invokes[0].attrs["kind"] == "qkernel"
-    assert invokes[0].target.namespace == "user.qkernel"
+    assert invokes[0].target.namespace.startswith("user.qkernel.")
 
     inlined = QiskitTranspiler().inline(block)
     assert not any(isinstance(op, InvokeOperation) for op in inlined.operations)

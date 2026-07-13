@@ -50,6 +50,7 @@ def qkernel_callable_attrs(kernel: Any) -> dict[str, Any]:
     attrs: dict[str, Any] = {
         "kind": kind,
         "default_policy": policy.name,
+        "origin_qualified": getattr(kernel, "_callable_namespace", None) is None,
     }
     if kind == "composite":
         gate_type = getattr(kernel, "_callable_gate_type", None)
@@ -62,6 +63,9 @@ def qkernel_callable_attrs(kernel: Any) -> dict[str, Any]:
                 "strategy_name": None,
             }
         )
+        semantic_arguments = getattr(kernel, "_callable_semantic_arguments", {})
+        if semantic_arguments:
+            attrs["semantic_arguments"] = dict(semantic_arguments)
     return attrs
 
 
@@ -76,9 +80,15 @@ def qkernel_callable_ref(kernel: Any) -> CallableRef:
     """
     kind = getattr(kernel, "_callable_kind", "qkernel")
     name = _qkernel_callable_name(kernel)
-    namespace = "user.composite" if kind == "composite" else "user.qkernel"
-    if getattr(kernel, "_callable_namespace", None) is not None:
-        namespace = kernel._callable_namespace
+    namespace = getattr(kernel, "_callable_namespace", None)
+    if namespace is None:
+        raw_func = getattr(kernel, "raw_func", None)
+        module = getattr(raw_func, "__module__", type(kernel).__module__)
+        qualname = getattr(raw_func, "__qualname__", name)
+        code = getattr(raw_func, "__code__", None)
+        first_line = getattr(code, "co_firstlineno", 0)
+        family = "composite" if kind == "composite" else "qkernel"
+        namespace = f"user.{family}.{module}.{qualname}:{first_line}"
     return CallableRef(namespace=namespace, name=name)
 
 

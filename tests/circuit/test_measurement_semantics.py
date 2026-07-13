@@ -135,14 +135,16 @@ class TestResetBackendUnsupported:
     def test_reset_on_unsupported_backend_raises_emit_error(self, monkeypatch):
         """qmc.reset on a reset-less emitter raises EmitError with guidance."""
         pytest.importorskip("qiskit")
+        from qiskit import QuantumCircuit
+
         from qamomile.circuit.transpiler.errors import EmitError
         from qamomile.qiskit import QiskitTranspiler
-        from qamomile.qiskit.emitter import QiskitGateEmitter
 
-        def _no_reset(self, circuit, qubit):
+        def _no_reset(self, qubit):
+            del self, qubit
             raise NotImplementedError("This backend does not support reset.")
 
-        monkeypatch.setattr(QiskitGateEmitter, "emit_reset", _no_reset)
+        monkeypatch.setattr(QuantumCircuit, "reset", _no_reset)
 
         @qmc.qkernel
         def kernel() -> qmc.Bit:
@@ -155,9 +157,14 @@ class TestResetBackendUnsupported:
             QiskitTranspiler().transpile(kernel)
 
     def test_quri_parts_reset_raises_emit_error(self):
-        """The real QURI Parts backend surfaces reset as EmitError."""
+        """The QURI Parts backend rejects reset at its capability boundary.
+
+        The declaration-driven target verification now diagnoses reset
+        before materialization, so the error is the ``EmitError``-compatible
+        ``TargetCapabilityError`` naming the ``quri_parts`` target.
+        """
         pytest.importorskip("quri_parts")
-        from qamomile.circuit.transpiler.errors import EmitError
+        from qamomile.circuit.transpiler.errors import TargetCapabilityError
         from qamomile.quri_parts import QuriPartsTranspiler
 
         @qmc.qkernel
@@ -167,5 +174,9 @@ class TestResetBackendUnsupported:
             q = qmc.reset(q)
             return qmc.measure(q)
 
-        with pytest.raises(EmitError, match="cannot emit a qubit reset"):
+        with pytest.raises(
+            TargetCapabilityError,
+            match="cannot represent a mid-circuit reset",
+        ) as excinfo:
             QuriPartsTranspiler().transpile(kernel)
+        assert excinfo.value.target == "quri_parts"

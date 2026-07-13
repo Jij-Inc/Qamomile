@@ -66,7 +66,7 @@ Pipeline
    per-level interleaved product
    ``(U_z^(0) U_y^(0)) ... (U_z^(n-1) U_y^(n-1))`` as unitaries — this
    is a structural identity verified by
-   :class:`tests.circuit.algorithm.state_preparation.test_mottonen_amplitude_encoding.TestRyRzOrdering`
+   :class:`tests.circuit.stdlib.state_preparation.test_mottonen_amplitude_encoding.TestRyRzOrdering`
    with arbitrary (non-disentangling) per-level angles.  Within each
    level the order RY-before-RZ is preserved in both schemes.
 
@@ -82,11 +82,12 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from qamomile.circuit.frontend.composite_gate import composite_gate
+from qamomile.circuit.frontend.composite_gate import composite_gate, configure_composite
 from qamomile.circuit.frontend.handle import Float, Qubit, Vector
 from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.qubit_gates import cx, ry, rz
 from qamomile.circuit.frontend.qkernel import QKernel
+from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.linalg.mottonen import (
     compute_all_ry_angles_per_level,
     compute_disentangling_angles_per_level,
@@ -331,6 +332,15 @@ class _MottonenAngles:
         """
         return self._num_qubits
 
+    @property
+    def normalized_amplitudes(self) -> np.ndarray:
+        """Return a defensive copy of the normalized target amplitudes.
+
+        Returns:
+            np.ndarray: One-dimensional normalized amplitude vector.
+        """
+        return self._normalized.copy()
+
     def _decompose(
         self,
         qubits: Vector[Qubit] | tuple[Qubit, ...],
@@ -385,7 +395,7 @@ def _mottonen_composite(
     """
     angles = _MottonenAngles(amplitudes)
 
-    @composite_gate(name="mottonen_amplitude_encoding")
+    @composite_gate(name="state_preparation")
     def kernel(qubits: Vector[Qubit]) -> Vector[Qubit]:
         """Apply the concrete Möttönen primitive decomposition.
 
@@ -397,6 +407,20 @@ def _mottonen_composite(
         """
         angles._decompose(qubits)
         return qubits
+
+    normalized = np.asarray(angles.normalized_amplitudes, dtype=np.complex128)
+    configure_composite(
+        kernel,
+        name="state_preparation",
+        namespace="qamomile.stdlib",
+        policy=CallPolicy.NATIVE_FIRST,
+        semantic_arguments={
+            "amplitudes": [
+                [float(amplitude.real), float(amplitude.imag)]
+                for amplitude in normalized
+            ],
+        },
+    )
 
     return kernel, angles.num_target_qubits
 

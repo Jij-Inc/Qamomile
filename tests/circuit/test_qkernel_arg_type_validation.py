@@ -458,8 +458,8 @@ def test_control_broadcast_emits_one_application_per_target_qubit():
     executable = QiskitTranspiler().transpile(_ok_control_broadcast_wholevec)
     circuit = executable.get_first_circuit()
     controlled_op_count = sum(
-        count
-        for name, count in circuit.count_ops().items()
-        if name.startswith("ccircuit")
+        instruction.operation.num_ctrl_qubits == 1
+        for instruction in circuit.data
+        if hasattr(instruction.operation, "num_ctrl_qubits")
     )
     assert controlled_op_count == 2
