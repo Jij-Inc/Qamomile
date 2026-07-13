@@ -144,54 +144,90 @@ class UInt(ArithmeticMixin, Handle):
             )
         return other
 
-    def __lt__(self, other) -> "Bit":
+    def _coerce_comparison(self, other) -> "UInt | Float | None":
+        """Coerce a comparison operand, promoting ``UInt`` ↔ ``Float``.
+
+        Mirrors :meth:`_coerce` but is dedicated to the comparison
+        operators, where a ``Float`` counterpart must survive as a
+        ``Float`` (type promotion) rather than being rejected. A Python
+        ``float`` becomes a constant ``Float`` and a ``Float`` handle is
+        passed through unchanged, so ``uint <op> float`` emits a
+        ``CompOp`` across the promoted pair. Without it the mixed-type
+        comparison either collapsed to a Python ``bool`` (``==`` / ``!=``,
+        via the ``NotImplemented`` identity fallback) or raised
+        ``AttributeError`` on the un-coerced ``float`` (ordering
+        operators) — the FE-5 bug family.
+
+        Args:
+            other (int | float | bool | UInt | Float): The comparison
+                right-hand operand. ``bool`` and ``int`` become constant
+                ``UInt`` operands; ``float`` becomes a constant ``Float``;
+                ``UInt`` / ``Float`` handles pass through unchanged.
+
+        Returns:
+            UInt | Float | None: The coerced handle, or ``None`` when
+                ``other`` is a type this handle cannot be compared with
+                (so the caller returns ``NotImplemented``).
+        """
+        if isinstance(other, bool):
+            return self._make_uint(int(other))
         if isinstance(other, int):
-            other = self._make_uint(other)
+            return self._make_uint(other)
+        if isinstance(other, float):
+            return Float(
+                value=Value(type=FloatType(), name="").with_const(other),
+                init_value=other,
+            )
+        if isinstance(other, (UInt, Float)):
+            return other
+        return None
+
+    def __lt__(self, other) -> "Bit":
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.LT)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.LT)
         return result
 
     def __gt__(self, other) -> "Bit":
-        if isinstance(other, int):
-            other = self._make_uint(other)
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.GT)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.GT)
         return result
 
     def __le__(self, other) -> "Bit":
-        if isinstance(other, int):
-            other = self._make_uint(other)
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.LE)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.LE)
         return result
 
     def __ge__(self, other) -> "Bit":
-        if isinstance(other, int):
-            other = self._make_uint(other)
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.GE)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.GE)
         return result
 
     def __eq__(self, other) -> "Bit":  # type: ignore[override]
-        if isinstance(other, bool):
-            other = self._make_uint(int(other))
-        elif isinstance(other, int):
-            other = self._make_uint(other)
-        elif not isinstance(other, UInt):
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
             return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.EQ)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.EQ)
         return result
 
     def __ne__(self, other) -> "Bit":  # type: ignore[override]
-        if isinstance(other, bool):
-            other = self._make_uint(int(other))
-        elif isinstance(other, int):
-            other = self._make_uint(other)
-        elif not isinstance(other, UInt):
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
             return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.NEQ)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.NEQ)
         return result
 
     # Override __eq__ above returns Bit (for DSL semantics), so we have to
@@ -542,46 +578,77 @@ class Float(ArithmeticMixin, Handle):
         """Create a Bit result for a comparison."""
         return Bit(value=Value(type=BitType(), name=""))
 
+    def _coerce_comparison(self, other) -> "Float | UInt | None":
+        """Coerce a comparison operand, promoting ``UInt`` ↔ ``Float``.
+
+        Comparison counterpart to :meth:`_coerce`: a ``UInt`` handle
+        survives unchanged so ``float <op> uint`` emits a ``CompOp``
+        across the mixed pair rather than falling back to identity
+        comparison and silently collapsing to a Python ``bool`` (the FE-5
+        bug family). Python ``int`` / ``float`` (including ``bool``)
+        become constant ``Float`` operands.
+
+        Args:
+            other (int | float | bool | Float | UInt): The comparison
+                right-hand operand.
+
+        Returns:
+            Float | UInt | None: The coerced handle, or ``None`` when
+                ``other`` is a type this handle cannot be compared with
+                (so the caller returns ``NotImplemented``).
+        """
+        if isinstance(other, (int, float)) and not isinstance(other, Float):
+            return self._make_float(float(other))
+        if isinstance(other, (Float, UInt)):
+            return other
+        return None
+
     def __lt__(self, other) -> "Bit":
-        other = self._coerce(other)
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.LT)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.LT)
         return result
 
     def __gt__(self, other) -> "Bit":
-        other = self._coerce(other)
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.GT)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.GT)
         return result
 
     def __le__(self, other) -> "Bit":
-        other = self._coerce(other)
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.LE)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.LE)
         return result
 
     def __ge__(self, other) -> "Bit":
-        other = self._coerce(other)
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.GE)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.GE)
         return result
 
     def __eq__(self, other) -> "Bit":  # type: ignore[override]
-        if isinstance(other, (int, float)) and not isinstance(other, Float):
-            other = self._make_float(float(other))
-        elif not isinstance(other, Float):
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
             return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.EQ)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.EQ)
         return result
 
     def __ne__(self, other) -> "Bit":  # type: ignore[override]
-        if isinstance(other, (int, float)) and not isinstance(other, Float):
-            other = self._make_float(float(other))
-        elif not isinstance(other, Float):
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
             return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
-        _emit_compop(self.value, other.value, result.value, CompOpKind.NEQ)
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.NEQ)
         return result
 
     __hash__ = object.__hash__  # type: ignore[assignment]
@@ -666,3 +733,87 @@ class Bit(Handle):
         result = self._make_bit()
         _emit_notop(self.value, result.value)
         return result
+
+    def _coerce_comparison(self, other: "bool | int | Bit") -> "Bit | None":
+        """Coerce an ``==`` / ``!=`` operand to a Bit, or ``None``.
+
+        Comparison counterpart to :meth:`_coerce`: it returns ``None``
+        (so the operator returns ``NotImplemented``) for operands a Bit
+        cannot be compared with, instead of raising ``TypeError``.
+        Returning ``NotImplemented`` for unsupported operand types mirrors
+        how ``UInt`` / ``Float`` handle theirs, letting Python fall back
+        to its default handling rather than propagating a hard error out
+        of a bare ``==``.
+
+        Args:
+            other (bool | int | Bit): A Bit, a Python ``bool``, or the
+                integer ``0`` / ``1``.
+
+        Returns:
+            Bit | None: A Bit handle (constants folded into the Value), or
+                ``None`` when ``other`` is not a Bit / bool / 0 / 1.
+        """
+        if isinstance(other, Bit):
+            return other
+        if isinstance(other, bool):
+            return Bit(
+                value=Value(type=BitType(), name="").with_const(other),
+                init_value=other,
+            )
+        if isinstance(other, int) and other in (0, 1):
+            return Bit(
+                value=Value(type=BitType(), name="").with_const(bool(other)),
+                init_value=bool(other),
+            )
+        return None
+
+    def __eq__(self, other) -> "Bit":  # type: ignore[override]
+        """Emit an equality (XNOR) comparison as a ``CompOp``.
+
+        Without this overload the dataclass-generated ``__eq__`` reduces
+        ``if m0 == m1:`` (two measured Bit handles) to a Python ``bool``
+        at trace time, so a runtime branch silently becomes a compile-time
+        constant (the P1-3 bug family). Emitting a ``CompOp(EQ)`` keeps the
+        comparison in the IR, where it lowers to a runtime classical
+        expression (or folds when both operands are compile-time
+        constants).
+
+        Args:
+            other (bool | int | Bit): The right-hand operand (Bit, bool,
+                or ``0`` / ``1``).
+
+        Returns:
+            Bit: A fresh Bit handle holding the comparison result.
+        """
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
+        result = self._make_bit()
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.EQ)
+        return result
+
+    def __ne__(self, other) -> "Bit":  # type: ignore[override]
+        """Emit an inequality (XOR) comparison as a ``CompOp``.
+
+        The ``!=`` counterpart to :meth:`__eq__`; see it for why the
+        dataclass default is unsafe for Bit handles.
+
+        Args:
+            other (bool | int | Bit): The right-hand operand (Bit, bool,
+                or ``0`` / ``1``).
+
+        Returns:
+            Bit: A fresh Bit handle holding the comparison result.
+        """
+        coerced = self._coerce_comparison(other)
+        if coerced is None:
+            return NotImplemented  # type: ignore[return-value]
+        result = self._make_bit()
+        _emit_compop(self.value, coerced.value, result.value, CompOpKind.NEQ)
+        return result
+
+    # ``__eq__`` above returns a Bit (DSL semantics) rather than a Python
+    # bool, so — exactly as for ``UInt`` / ``Float`` — restore identity
+    # hashing that the dataclass otherwise drops to ``None`` once ``__eq__``
+    # is defined. This keeps Bit handles usable as dict / set members.
+    __hash__ = object.__hash__  # type: ignore[assignment]
