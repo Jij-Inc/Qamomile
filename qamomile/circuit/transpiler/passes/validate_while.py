@@ -349,6 +349,13 @@ class ValidateWhileContractPass(Pass[Block, Block]):
             result = id(producer) in body_operation_ids
             visiting.discard(value.uuid)
             return result
+        if (
+            isinstance(producer, ProjectOperation)
+            and producer.results[1].uuid == value.uuid
+        ):
+            result = id(producer) in body_operation_ids
+            visiting.discard(value.uuid)
+            return result
 
         parent = value.parent_array
         while parent is not None:

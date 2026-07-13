@@ -9,7 +9,7 @@ import numpy as np
 
 import qamomile.circuit as qm
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import Operation, SliceArrayOperation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -38,6 +38,7 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
     GateOperationType,
+    MeasureOperation,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType, UIntType
@@ -653,7 +654,7 @@ class TestControlledBlockIfLowering:
         loop = ForOperation(
             operands=[
                 _uint_val("start", const=0),
-                _uint_val("stop", const=1),
+                _uint_val("stop", const=2),
                 _uint_val("step", const=1),
             ],
             loop_var="i",
@@ -1233,6 +1234,148 @@ class TestMergeSubstitutionOutputs:
 
 class TestDeadOpElimination:
     """Condition producers are removed after the if is lowered."""
+
+    def test_unreferenced_classical_expression_chain_is_eliminated(self):
+        """Pure condition arithmetic is removed when nothing else reads it."""
+        one = _uint_val("one", const=1)
+        two = _uint_val("two", const=2)
+        total = _uint_val("total")
+        condition = _bit_val("condition")
+        add_op = BinOp(operands=[one, one], results=[total], kind=BinOpKind.ADD)
+        comp_op = CompOp(
+            operands=[total, two],
+            results=[condition],
+            kind=CompOpKind.EQ,
+        )
+        if_op = IfOperation(
+            operands=[condition],
+            true_operations=[],
+            false_operations=[],
+        )
+        block = Block(
+            name="test",
+            operations=[add_op, comp_op, if_op],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        assert lowered.operations == []
+
+    def test_output_element_index_keeps_classical_producer_alive(self):
+        """A producer read only by an output element index remains live."""
+        one = _uint_val("one", const=1)
+        two = _uint_val("two", const=2)
+        index = _uint_val("index")
+        condition = _bit_val("condition")
+        add_op = BinOp(operands=[one, one], results=[index], kind=BinOpKind.ADD)
+        comp_op = CompOp(
+            operands=[index, two],
+            results=[condition],
+            kind=CompOpKind.EQ,
+        )
+        if_op = IfOperation(
+            operands=[condition],
+            true_operations=[],
+            false_operations=[],
+        )
+        length = _uint_val("length", const=4)
+        array = ArrayValue(type=UIntType(), name="array", shape=(length,))
+        output = Value(
+            type=UIntType(),
+            name="array[index]",
+            parent_array=array,
+            element_indices=(index,),
+        )
+        block = Block(
+            name="test",
+            input_values=[array],
+            operations=[add_op, comp_op, if_op],
+            output_values=[output],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        assert _find_ops(lowered.operations, BinOp) == [add_op]
+        assert not _find_ops(lowered.operations, CompOp)
+        assert not _find_ops(lowered.operations, IfOperation)
+
+    def test_output_view_shape_and_slice_bound_keep_producer_alive(self):
+        """Output view metadata keeps its shared dimension producer live."""
+        one = _uint_val("one", const=1)
+        two = _uint_val("two", const=2)
+        dimension = _uint_val("dimension")
+        condition = _bit_val("condition")
+        add_op = BinOp(
+            operands=[one, one],
+            results=[dimension],
+            kind=BinOpKind.ADD,
+        )
+        comp_op = CompOp(
+            operands=[dimension, two],
+            results=[condition],
+            kind=CompOpKind.EQ,
+        )
+        if_op = IfOperation(
+            operands=[condition],
+            true_operations=[],
+            false_operations=[],
+        )
+        root_length = _uint_val("root_length", const=8)
+        root = ArrayValue(type=UIntType(), name="root", shape=(root_length,))
+        step = _uint_val("step", const=1)
+        view = ArrayValue(
+            type=UIntType(),
+            name="view",
+            shape=(dimension,),
+            slice_of=root,
+            slice_start=dimension,
+            slice_step=step,
+        )
+        block = Block(
+            name="test",
+            input_values=[root],
+            operations=[add_op, comp_op, if_op],
+            output_values=[view],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        assert _find_ops(lowered.operations, BinOp) == [add_op]
+        assert not _find_ops(lowered.operations, CompOp)
+        assert not _find_ops(lowered.operations, IfOperation)
+
+    def test_losing_external_measurement_source_is_preserved(self):
+        """A dead merge source never erases its destructive measurement."""
+        q = _qubit_val()
+        measured = _bit_val("measured")
+        measure = MeasureOperation(operands=[q], results=[measured])
+
+        condition = _bit_val("condition").with_const(True)
+        selected = _bit_val("selected").with_const(False)
+        merged = _bit_val("merged")
+        if_op = IfOperation(
+            operands=[condition],
+            true_operations=[],
+            false_operations=[],
+        )
+        if_op.add_merge(selected, measured, merged)
+
+        block = Block(
+            name="test",
+            input_values=[q],
+            operations=[measure, if_op],
+            output_values=[merged],
+            kind=BlockKind.AFFINE,
+        )
+        lowered = _run_pass(block)
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        assert _find_ops(lowered.operations, MeasureOperation) == [measure]
+        assert lowered.output_values == [selected]
 
     def test_comp_op_eliminated(self):
         """CompOp producing the if condition should be eliminated."""
@@ -2015,6 +2158,65 @@ class TestCombinedArrayAndIndexSubstitution:
         )
 
 
+class TestNestedSliceMetadataSubstitution:
+    """Lowered merge indices must reach nested slice-result metadata."""
+
+    def test_slice_result_and_output_drop_nested_merge_index(self):
+        """A slice bound ``bounds[phi]`` rewrites phi everywhere."""
+        selected_index = _uint_val("selected", const=0)
+        losing_index = _uint_val("losing", const=1)
+        merge_index = _uint_val("merge_index")
+        condition = _uint_val("condition", const=1)
+        if_op = IfOperation(operands=[condition])
+        if_op.add_merge(selected_index, losing_index, merge_index)
+
+        two = _uint_val("two", const=2)
+        four = _uint_val("four", const=4)
+        bounds = ArrayValue(type=UIntType(), name="bounds", shape=(two,))
+        start = Value(
+            type=UIntType(),
+            name="bounds[merge_index]",
+            parent_array=bounds,
+            element_indices=(merge_index,),
+        )
+        step = _uint_val("step", const=1)
+        root = ArrayValue(type=QubitType(), name="q", shape=(four,))
+        view = ArrayValue(
+            type=QubitType(),
+            name="view",
+            shape=(two,),
+            slice_of=root,
+            slice_start=start,
+            slice_step=step,
+        )
+        slice_op = SliceArrayOperation(
+            operands=[root, start, step],
+            results=[view],
+        )
+        block = Block(
+            name="test",
+            input_values=[root, bounds],
+            operations=[if_op, slice_op],
+            output_values=[view],
+            kind=BlockKind.AFFINE,
+        )
+
+        lowered = _run_pass(block)
+
+        assert not _find_ops(lowered.operations, IfOperation)
+        [lowered_slice] = _find_ops(lowered.operations, SliceArrayOperation)
+        operand_start = lowered_slice.operands[1]
+        result_view = lowered_slice.results[0]
+        output_view = lowered.output_values[0]
+        assert operand_start.element_indices[0] is selected_index
+        assert isinstance(result_view, ArrayValue)
+        assert result_view.slice_start is not None
+        assert result_view.slice_start.element_indices[0] is selected_index
+        assert isinstance(output_view, ArrayValue)
+        assert output_view.slice_start is not None
+        assert output_view.slice_start.element_indices[0] is selected_index
+
+
 # ---------------------------------------------------------------------------
 # CC3: SymbolicControlledU field substitution (num_controls + control_indices)
 # ---------------------------------------------------------------------------
@@ -2118,6 +2320,48 @@ class TestSymbolicControlledUFieldSubstitution:
 
 class TestForItemsOperationBodySubstitution:
     """Merge output used in ForItemsOperation body must resolve after lowering."""
+
+    def test_shape_less_vector_key_keeps_one_entry_loop_boxed(self):
+        """A vector key without a dimension identity is never flattened."""
+        from qamomile.circuit.ir.operation.control_flow import ForItemsOperation
+        from qamomile.circuit.ir.value import DictValue
+
+        key = ArrayValue(type=UIntType(), name="key", shape=())
+        item_value = _float_val("value")
+        q = _qubit_val()
+        q_after = q.next_version()
+        body_gate = GateOperation(
+            operands=[q],
+            results=[q_after],
+            gate_type=GateOperationType.X,
+        )
+        iterable = DictValue(name="data").with_dict_runtime_metadata({(1, 2): 0.5})
+        for_items = ForItemsOperation(
+            operands=[iterable],
+            results=[],
+            key_vars=["key"],
+            key_is_vector=True,
+            key_var_values=(key,),
+            value_var="value",
+            value_var_value=item_value,
+            operations=[body_gate],
+        )
+        block = Block(
+            name="test",
+            input_values=[q],
+            operations=[for_items],
+            output_values=[q_after],
+            kind=BlockKind.AFFINE,
+        )
+
+        first = _run_pass(block)
+        second = _run_pass(block)
+
+        assert len(first.operations) == 1
+        assert isinstance(first.operations[0], ForItemsOperation)
+        assert first.operations[0].key_var_values == (key,)
+        assert first.operations[0].operations == [body_gate]
+        assert first == second
 
     def test_body_operand_substituted(self):
         """Body operand UUID equals terminal value UUID after lowering."""
@@ -2879,9 +3123,9 @@ class TestEvaluateClassicalPredicate:
             def __init__(self):
                 self._resolver = EmitResolver(parameters=set())
 
-        bindings = {op.operands[0].name: 5}
+        bindings = {op.operands[0].uuid: 5}
         if len(op.operands) > 1 and hasattr(op.operands[1], "name"):
-            bindings[op.operands[1].name] = 3
+            bindings[op.operands[1].uuid] = 3
         evaluate_classical_predicate(_StubEmitPass(), op, bindings)
         return bindings
 
@@ -3024,7 +3268,7 @@ class TestNoNameCollisionInTmpWrites:
             def __init__(self):
                 self._resolver = EmitResolver(parameters=set())
 
-        bindings = {"lhs": 5, "rhs": 3}
+        bindings = {lhs.uuid: 5, rhs.uuid: 3}
         evaluate_binop(_StubEmitPass(), op, bindings)
         assert bindings[out.uuid] == 8
         # The tmp name "uint_tmp" must NOT have been written — that would
@@ -3049,7 +3293,7 @@ class TestNoNameCollisionInTmpWrites:
             def __init__(self):
                 self._resolver = EmitResolver(parameters=set())
 
-        bindings = {"lhs": 5, "rhs": 3}
+        bindings = {lhs.uuid: 5, rhs.uuid: 3}
         evaluate_classical_predicate(_StubEmitPass(), op, bindings)
         assert bindings[out.uuid] is False
         assert out.name not in bindings

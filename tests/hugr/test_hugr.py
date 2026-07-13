@@ -15,6 +15,7 @@ pytest.importorskip("tket_exts")
 
 from hugr.package import Package
 
+from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.hugr import HugrTranspiler
 
 
@@ -43,6 +44,41 @@ def _hugr_helper_entrypoint() -> qmc.Bit:
 
 
 @qmc.qkernel
+def _hugr_inline_feedback_helper(
+    qubit: qmc.Qubit,
+    trigger: qmc.Bit,
+) -> tuple[qmc.Qubit, qmc.Bit]:
+    """Update a callable while condition from a fresh measurement."""
+    while trigger:
+        qubit = qmc.reset(qubit)
+        qubit, trigger = qmc.project_z(qubit)
+    return qubit, trigger
+
+
+@qmc.qkernel
+def _hugr_measured_inline_feedback_call() -> qmc.Bit:
+    """Pass a measurement-backed condition into an inline-policy helper."""
+    qubit = qmc.x(qmc.qubit("qubit"))
+    qubit, trigger = qmc.project_z(qubit)
+    qubit, _ = _hugr_inline_feedback_helper(qubit, trigger)
+    return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _hugr_constant_inline_feedback_call() -> qmc.Bit:
+    """Pass an invalid constant condition into an inline-policy helper."""
+    qubit = qmc.qubit("qubit")
+    qubit, _ = _hugr_inline_feedback_helper(qubit, True)
+    return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _hugr_array_helper(qubits: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply a reusable broadcast Hadamard operation."""
+    return qmc.h(qubits)
+
+
+@qmc.qkernel
 def _hugr_static_for() -> qmc.Bit:
     """Exercise a statically bounded loop with a carried qubit."""
     qubit = qmc.qubit("qubit")
@@ -61,6 +97,19 @@ def _hugr_measurement_if() -> qmc.Bit:
     else:
         qubit = qmc.h(qubit)
     return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _hugr_destructive_branch_array_merge() -> qmc.Bit:
+    """Measure different elements of one captured array across branches."""
+    qubits = qmc.qubit_array(3, "qubits")
+    condition = qmc.measure(qubits[0])
+    qubits[2] = qmc.x(qubits[2])
+    if condition:
+        result = qmc.measure(qubits[1])
+    else:
+        result = qmc.measure(qubits[2])
+    return result
 
 
 @qmc.qkernel
@@ -217,6 +266,302 @@ def _hugr_runtime_bounded_for(repetitions: qmc.UInt) -> qmc.Bit:
     for _ in qmc.range(repetitions):
         qubit = qmc.h(qubit)
     return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _hugr_runtime_scalar_carry(repetitions: qmc.UInt) -> qmc.Bit:
+    """Thread a scalar RegionArg through a runtime loop and nested if."""
+    selector = qmc.measure(qmc.qubit("selector"))
+    total = 0.0
+    for _ in qmc.range(repetitions):
+        if selector:
+            total = total + math.pi
+        else:
+            total = total + 2.0 * math.pi
+    target = qmc.qubit("target")
+    target = qmc.rx(target, total)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_runtime_uint_carry(repetitions: qmc.UInt) -> qmc.UInt:
+    """Accumulate a UInt RegionArg using the runtime loop index."""
+    total = qmc.uint(0)
+    for index in qmc.range(repetitions):
+        total = total + index
+    return total
+
+
+@qmc.qkernel
+def _hugr_runtime_uint_conditional_carry(repetitions: qmc.UInt) -> qmc.UInt:
+    """Use a UInt loop comparison to guard a carried update."""
+    total = qmc.uint(0)
+    for index in qmc.range(repetitions):
+        if index > 0:
+            total = total + index
+        else:
+            total = total + 0
+    return total
+
+
+@qmc.qkernel
+def _hugr_runtime_uint_descending(
+    start: qmc.UInt,
+    stop: qmc.UInt,
+) -> qmc.UInt:
+    """Use an unsigned descending runtime range comparison."""
+    total = qmc.uint(0)
+    for index in qmc.range(start, stop, -1):
+        total = total + index
+    return total
+
+
+@qmc.qkernel
+def _hugr_runtime_array_carry(repetitions: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Carry a qubit array through a runtime loop and nested conditional."""
+    selector = qmc.measure(qmc.qubit("selector"))
+    qubits = qmc.qubit_array(2, "qubits")
+    for _ in qmc.range(repetitions):
+        if selector:
+            qubits = qmc.h(qubits)
+        else:
+            qubits = qmc.x(qubits)
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_runtime_array_broadcast(repetitions: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Carry a broadcast-updated qubit array through a runtime loop."""
+    qubits = qmc.qubit_array(2, "qubits")
+    for _ in qmc.range(repetitions):
+        qubits = qmc.h(qubits)
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_runtime_array_element(repetitions: qmc.UInt) -> qmc.Bit:
+    """Carry one array element through a runtime loop."""
+    qubits = qmc.qubit_array(2, "qubits")
+    target = qubits[0]
+    for _ in qmc.range(repetitions):
+        target = qmc.h(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_runtime_scalar_call(repetitions: qmc.UInt) -> qmc.Bit:
+    """Carry a scalar qubit returned by a direct call through a runtime loop."""
+    target = qmc.qubit("target")
+    for _ in qmc.range(repetitions):
+        target = _hugr_helper(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_runtime_array_call(repetitions: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Carry a qubit array returned by a direct call through a runtime loop."""
+    qubits = qmc.qubit_array(2, "qubits")
+    for _ in qmc.range(repetitions):
+        qubits = _hugr_array_helper(qubits)
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_runtime_quantum_swap(
+    repetitions: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Expose quantum handle rebinding that needs explicit linear slots."""
+    left = qmc.x(qmc.qubit("left"))
+    right = qmc.qubit("right")
+    for _ in qmc.range(repetitions):
+        left, right = right, left
+    return qmc.measure(left), qmc.measure(right)
+
+
+@qmc.qkernel
+def _hugr_runtime_if_qubit(repetitions: qmc.UInt) -> qmc.Bit:
+    """Carry a scalar qubit through a runtime loop and nested conditional."""
+    selector = qmc.measure(qmc.qubit("selector"))
+    target = qmc.qubit("target")
+    for _ in qmc.range(repetitions):
+        if selector:
+            target = qmc.x(target)
+        else:
+            target = qmc.h(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_while_array_broadcast() -> qmc.Vector[qmc.Bit]:
+    """Carry a broadcast-updated qubit array through a measurement while."""
+    control = qmc.x(qmc.qubit("control"))
+    control, trigger = qmc.project_z(control)
+    qubits = qmc.qubit_array(2, "qubits")
+    while trigger:
+        qubits = qmc.h(qubits)
+        control = qmc.reset(control)
+        control, trigger = qmc.project_z(control)
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_vector_element_if() -> qmc.Bit:
+    """Use a measured vector element as a native conditional predicate."""
+    bits = qmc.measure(qmc.qubit_array(2, "condition"))
+    target = qmc.qubit("target")
+    if bits[0]:
+        target = qmc.x(target)
+    else:
+        target = qmc.h(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_vector_element_merge() -> qmc.Bit:
+    """Select between two measured array elements in a native conditional."""
+    data = qmc.measure(qmc.qubit_array(2, "data"))
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        result = data[0]
+    else:
+        result = data[1]
+    return result
+
+
+@qmc.qkernel
+def _hugr_runtime_quantum_index(
+    repetitions: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Expose dynamic indexing of a flattened linear quantum array."""
+    qubits = qmc.qubit_array(2, "qubits")
+    for index in qmc.range(repetitions):
+        qubits[index] = qmc.x(qubits[index])
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_quantum_element_merge() -> qmc.Bit:
+    """Expose data-dependent selection between different linear qubits."""
+    qubits = qmc.qubit_array(2, "qubits")
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        target = qubits[0]
+    else:
+        target = qubits[1]
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_duplicate_quantum_footprint() -> qmc.Bit:
+    """Expose whole-array and element aliases as duplicate merge outputs."""
+    qubits = qmc.qubit_array(2, "qubits")
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        qubits[0] = qmc.x(qubits[0])
+        target = qubits[0]
+    else:
+        qubits[0] = qmc.h(qubits[0])
+        target = qubits[0]
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_local_duplicate_quantum_footprint() -> tuple[qmc.Bit, qmc.Bit]:
+    """Expose duplicate aliases of branch-local quantum resources."""
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        qubits = qmc.qubit_array(2, "true_qubits")
+        qubits[0] = qmc.x(qubits[0])
+        target = qubits[0]
+    else:
+        qubits = qmc.qubit_array(2, "false_qubits")
+        qubits[0] = qmc.h(qubits[0])
+        target = qubits[0]
+    return qmc.measure(target), qmc.measure(qubits[1])
+
+
+@qmc.qkernel
+def _hugr_conditional_quantum_swap() -> tuple[qmc.Bit, qmc.Bit]:
+    """Permute two complete linear resources through a conditional."""
+    left = qmc.x(qmc.qubit("left"))
+    right = qmc.qubit("right")
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        left, right = right, left
+    return qmc.measure(left), qmc.measure(right)
+
+
+@qmc.qkernel
+def _hugr_branch_local_unused_qubit() -> qmc.Bit:
+    """Allocate an unused companion qubit inside each conditional branch."""
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        qubits = qmc.qubit_array(2, "true_qubits")
+        target = qubits[0]
+    else:
+        qubits = qmc.qubit_array(2, "false_qubits")
+        target = qubits[0]
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_loop_local_unused_qubit(repetitions: qmc.UInt) -> qmc.Bit:
+    """Allocate a loop-local scratch qubit that does not escape the body."""
+    for _ in qmc.range(repetitions):
+        qmc.qubit("scratch")
+    return qmc.measure(qmc.qubit("output"))
+
+
+@qmc.qkernel
+def _hugr_disjoint_array_alias_if() -> tuple[qmc.Bit, qmc.Bit]:
+    """Carry an element alias and a disjoint sibling through an if."""
+    qubits = qmc.qubit_array(2, "qubits")
+    target = qmc.h(qubits[0])
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        target = qmc.x(target)
+        qubits[1] = qmc.h(qubits[1])
+    else:
+        target = qmc.z(target)
+        qubits[1] = qmc.x(qubits[1])
+    return qmc.measure(target), qmc.measure(qubits[1])
+
+
+@qmc.qkernel
+def _hugr_single_array_element_alias_if() -> tuple[qmc.Bit, qmc.Bit]:
+    """Carry one element alias while its sibling stays outside the if."""
+    qubits = qmc.qubit_array(2, "qubits")
+    target = qmc.h(qubits[0])
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        target = qmc.x(target)
+    else:
+        target = qmc.z(target)
+    return qmc.measure(target), qmc.measure(qubits[1])
+
+
+@qmc.qkernel
+def _hugr_disjoint_array_alias_for(
+    repetitions: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Carry an element alias and a disjoint sibling through a loop."""
+    qubits = qmc.qubit_array(2, "qubits")
+    target = qmc.h(qubits[0])
+    for _ in qmc.range(repetitions):
+        target = qmc.x(target)
+        qubits[1] = qmc.h(qubits[1])
+    return qmc.measure(target), qmc.measure(qubits[1])
+
+
+@qmc.qkernel
+def _hugr_while_scalar_carry() -> qmc.UInt:
+    """Expose the unsupported non-condition scalar carry in a while loop."""
+    trigger = qmc.measure(qmc.qubit("trigger"))
+    total = qmc.uint(0)
+    while trigger:
+        total = total + 1
+        trigger = qmc.measure(qmc.qubit("next_trigger"))
+    return total
 
 
 @qmc.qkernel
@@ -494,6 +839,23 @@ def test_hugr_preserves_body_backed_helper_as_function_call() -> None:
 
 
 @pytest.mark.hugr
+def test_hugr_validates_inline_callable_while_at_its_call_site() -> None:
+    """Contextual while validation keeps hierarchical HUGR call emission."""
+    package = HugrTranspiler().to_hugr(_hugr_measured_inline_feedback_call)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert any(type(op).__name__ == "Call" for op in operations)
+    assert any(type(op).__name__ == "TailLoop" for op in operations)
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_nonmeasurement_inline_callable_while_call() -> None:
+    """Inlining for validation still rejects a constant while condition."""
+    with pytest.raises(ValidationError, match="measurement result"):
+        HugrTranspiler().to_hugr(_hugr_constant_inline_feedback_call)
+
+
+@pytest.mark.hugr
 def test_hugr_distinguishes_callables_with_the_same_display_name() -> None:
     """Origin-qualified symbols prevent same-name callable miscompilation."""
     package = HugrTranspiler().to_hugr(_hugr_same_name_program)
@@ -694,6 +1056,261 @@ def test_hugr_preserves_runtime_bounded_for_as_tail_loop() -> None:
 
     assert sum(type(op).__name__ == "TailLoop" for op in operations) == 1
     assert sum("name='H'" in str(op) for op in operations) == 1
+
+
+@pytest.mark.hugr
+def test_hugr_threads_region_args_through_runtime_for() -> None:
+    """Runtime TailLoop state includes scalar RegionArgs and nested merges."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_runtime_scalar_carry,
+        parameters=["repetitions"],
+    )
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert sum(type(op).__name__ == "TailLoop" for op in operations) == 1
+    assert sum(type(op).__name__ == "Conditional" for op in operations) == 2
+
+
+@pytest.mark.hugr
+def test_hugr_threads_uint_region_arg_through_runtime_for() -> None:
+    """Runtime UInt arithmetic accepts RegionArg and loop-index wires."""
+    HugrTranspiler().to_hugr(
+        _hugr_runtime_uint_carry,
+        parameters=["repetitions"],
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_uint_comparison_inside_runtime_for() -> None:
+    """UInt comparisons compose with RegionArgs and nested conditionals."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_runtime_uint_conditional_carry,
+        parameters=["repetitions"],
+    )
+
+    HugrTranspiler().target.validate(package)
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("kernel", "parameters", "comparison_name"),
+    [
+        (_hugr_runtime_uint_carry, ["repetitions"], "ilt_u"),
+        (_hugr_runtime_uint_descending, ["start", "stop"], "igt_u"),
+    ],
+)
+def test_hugr_runtime_uint_ranges_use_unsigned_comparisons(
+    kernel,
+    parameters: list[str],
+    comparison_name: str,
+) -> None:
+    """Runtime UInt bounds retain high-bit unsigned ordering semantics."""
+    package = HugrTranspiler().to_hugr(kernel, parameters=parameters)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert any(comparison_name in str(operation) for operation in operations)
+
+
+@pytest.mark.hugr
+def test_hugr_flattens_array_captures_through_nested_runtime_control() -> None:
+    """Runtime TailLoops flatten arrays and advance nested branch merges."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_runtime_array_carry,
+        parameters=["repetitions"],
+    )
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert sum(type(op).__name__ == "TailLoop" for op in operations) == 1
+    assert sum(type(op).__name__ == "Conditional" for op in operations) == 2
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    "kernel",
+    [
+        _hugr_runtime_array_broadcast,
+        _hugr_runtime_array_element,
+        _hugr_runtime_array_call,
+    ],
+)
+def test_hugr_preserves_array_capture_shapes_through_runtime_for(kernel) -> None:
+    """Runtime TailLoops preserve whole-array and array-element carriers."""
+    package = HugrTranspiler().to_hugr(kernel, parameters=["repetitions"])
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert sum(type(op).__name__ == "TailLoop" for op in operations) == 1
+
+
+@pytest.mark.hugr
+def test_hugr_advances_direct_call_result_through_runtime_for() -> None:
+    """A same-resource direct call advances the captured scalar wire."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_runtime_scalar_call,
+        parameters=["repetitions"],
+    )
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert sum(type(op).__name__ == "TailLoop" for op in operations) == 1
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_quantum_resource_rebinding_in_runtime_for() -> None:
+    """Quantum handle swaps fail before producing an invalid TailLoop."""
+    with pytest.raises(EmitError, match="quantum resource rebinding"):
+        HugrTranspiler().to_hugr(
+            _hugr_runtime_quantum_swap,
+            parameters=["repetitions"],
+        )
+
+
+@pytest.mark.hugr
+def test_hugr_publishes_nested_scalar_quantum_merge_after_runtime_for() -> None:
+    """A nested scalar quantum merge remains visible after a runtime loop."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_runtime_if_qubit,
+        parameters=["repetitions"],
+    )
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert sum(type(op).__name__ == "TailLoop" for op in operations) == 1
+    assert sum(type(op).__name__ == "Conditional" for op in operations) == 2
+
+
+@pytest.mark.hugr
+def test_hugr_preserves_array_capture_shape_through_while() -> None:
+    """A measurement while carries every wire of a broadcast array."""
+    package = HugrTranspiler().to_hugr(_hugr_while_array_broadcast)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert sum(type(op).__name__ == "TailLoop" for op in operations) == 1
+
+
+@pytest.mark.hugr
+def test_hugr_resolves_measured_vector_element_if_condition() -> None:
+    """Structural measured elements resolve as native HUGR predicates."""
+    package = HugrTranspiler().to_hugr(_hugr_vector_element_if)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert sum(type(op).__name__ == "Conditional" for op in operations) == 1
+
+
+@pytest.mark.hugr
+def test_hugr_resolves_classical_array_element_branch_yields() -> None:
+    """Copyable array elements can cross native conditional outputs."""
+    package = HugrTranspiler().to_hugr(_hugr_vector_element_merge)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+
+    assert sum(type(op).__name__ == "Conditional" for op in operations) == 1
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_dynamic_quantum_array_index_with_targeted_error() -> None:
+    """Dynamic tuple indexing fails at the explicit HUGR support boundary."""
+    with pytest.raises(EmitError, match="dynamic quantum array indexing"):
+        HugrTranspiler().to_hugr(
+            _hugr_runtime_quantum_index,
+            parameters=["repetitions"],
+        )
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_data_dependent_quantum_element_selection() -> None:
+    """Different captured qubits cannot share one semantic merge port."""
+    with pytest.raises(EmitError, match="quantum resource selection"):
+        HugrTranspiler().to_hugr(_hugr_quantum_element_merge)
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_duplicate_quantum_merge_footprints() -> None:
+    """Overlapping semantic aliases fail before native HUGR validation."""
+    with pytest.raises(EmitError, match="same linear quantum resource"):
+        HugrTranspiler().to_hugr(_hugr_duplicate_quantum_footprint)
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_duplicate_branch_local_quantum_footprints() -> None:
+    """Branch-local root and element aliases cannot duplicate one wire."""
+    with pytest.raises(EmitError, match="same linear quantum resource"):
+        HugrTranspiler().to_hugr(_hugr_local_duplicate_quantum_footprint)
+
+
+@pytest.mark.hugr
+def test_hugr_allows_complete_conditional_quantum_permutations() -> None:
+    """A conditional may permute a complete set of linear merge ports."""
+    package = HugrTranspiler().to_hugr(_hugr_conditional_quantum_swap)
+
+    HugrTranspiler().target.validate(package)
+
+
+@pytest.mark.hugr
+def test_hugr_frees_unyielded_branch_local_qubits() -> None:
+    """Conditional regions free local linear resources that do not escape."""
+    package = HugrTranspiler().to_hugr(_hugr_branch_local_unused_qubit)
+
+    HugrTranspiler().target.validate(package)
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_consumed_qubit_in_implicit_array_merge() -> None:
+    """A stale implicit root merge fails before native HUGR validation."""
+    with pytest.raises(EmitError, match="destructively consumed"):
+        HugrTranspiler().to_hugr(_hugr_destructive_branch_array_merge)
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize("runtime", [False, True])
+def test_hugr_frees_unyielded_loop_local_qubits(runtime: bool) -> None:
+    """Static and runtime loop bodies clean up local linear allocations."""
+    kwargs = (
+        {"parameters": ["repetitions"]} if runtime else {"bindings": {"repetitions": 2}}
+    )
+    package = HugrTranspiler().to_hugr(
+        _hugr_loop_local_unused_qubit,
+        **kwargs,
+    )
+
+    HugrTranspiler().target.validate(package)
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_overlapping_array_alias_merges_through_if() -> None:
+    """Whole-array and element aliases fail before duplicating a HUGR port."""
+    with pytest.raises(EmitError, match="same linear quantum resource"):
+        HugrTranspiler().to_hugr(_hugr_disjoint_array_alias_if)
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_element_alias_with_implicit_whole_array_merge() -> None:
+    """An element alias cannot duplicate its implicit whole-array merge."""
+    with pytest.raises(EmitError, match="same linear quantum resource"):
+        HugrTranspiler().to_hugr(_hugr_single_array_element_alias_if)
+
+
+@pytest.mark.hugr
+def test_hugr_captures_disjoint_array_aliases_once_through_runtime_for() -> None:
+    """A TailLoop carries one root tuple instead of duplicating an element."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_disjoint_array_alias_for,
+        parameters=["repetitions"],
+    )
+
+    HugrTranspiler().target.validate(package)
+
+
+@pytest.mark.hugr
+def test_hugr_static_zero_trip_publishes_region_arg_initializer() -> None:
+    """A zero-trip loop publishes its constant RegionArg initializer."""
+    HugrTranspiler().to_hugr(
+        _hugr_runtime_scalar_carry,
+        bindings={"repetitions": 0},
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_while_scalar_carry_before_lowering() -> None:
+    """Residual while scalar carries fail with a targeted diagnostic."""
+    with pytest.raises(EmitError, match="loop-carried classical values.*while"):
+        HugrTranspiler().to_hugr(_hugr_while_scalar_carry)
 
 
 @pytest.mark.hugr

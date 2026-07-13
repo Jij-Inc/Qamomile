@@ -169,8 +169,12 @@ class QuriPartsExecutor(
             shots: Number of measurement shots.
 
         Returns:
-            Counts keyed by zero-padded bitstrings.
+            Counts keyed by zero-padded bitstrings. A zero-qubit circuit
+            returns ``{"": shots}`` without invoking the sampler.
         """
+        if circuit.qubit_count == 0:
+            return {"": shots}
+
         counter = self.sampler(circuit, shots)
         return {
             format(value, f"0{circuit.qubit_count}b"): count

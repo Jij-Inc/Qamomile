@@ -259,11 +259,15 @@ def _execute_expval(
 def test_ripple_carry_resources_are_derived_symbolically() -> None:
     """The executable adder body yields its exact symbolic gate polynomial."""
     estimate = _symbolic_add.estimate_resources()
-    size = sp.Symbol("size", integer=True, positive=True)
+    size = estimate.parameters["size"]
+    positive_size = sp.Symbol("positive_size", integer=True, positive=True)
+    total = estimate.gates.total.subs(size, positive_size)
+    toffoli = estimate.gates.toffoli.subs(size, positive_size)
+    two_qubit = estimate.gates.two_qubit.subs(size, positive_size)
 
-    assert sp.simplify(estimate.gates.total - (6 * size + 1)) == 0
-    assert sp.simplify(estimate.gates.toffoli - 2 * size) == 0
-    assert sp.simplify(estimate.gates.two_qubit - (4 * size + 1)) == 0
+    assert sp.simplify(total - (6 * positive_size + 1)) == 0
+    assert sp.simplify(toffoli - 2 * positive_size) == 0
+    assert sp.simplify(two_qubit - (4 * positive_size + 1)) == 0
     assert estimate.qubits == 2 * size + 2
     assert _symbolic_add.estimate_resources(inputs={"size": 2048}).gates.total == (
         6 * 2048 + 1
@@ -273,10 +277,19 @@ def test_ripple_carry_resources_are_derived_symbolically() -> None:
 def test_modular_add_resources_are_derived_symbolically() -> None:
     """Modular-add resources remain a body-derived linear expression."""
     estimate = _symbolic_modular_add.estimate_resources()
-    size = sp.Symbol("size", integer=True, positive=True)
+    size = estimate.parameters["size"]
+    positive_size = sp.Symbol("positive_size", integer=True, positive=True)
 
-    assert sp.Poly(estimate.gates.total, size).degree() == 1
-    assert sp.Poly(estimate.gates.toffoli, size).degree() == 1
+    assert (
+        sp.Poly(estimate.gates.total.subs(size, positive_size), positive_size).degree()
+        == 1
+    )
+    assert (
+        sp.Poly(
+            estimate.gates.toffoli.subs(size, positive_size), positive_size
+        ).degree()
+        == 1
+    )
     assert estimate.qubits == 3 * size + 3
     concrete = _symbolic_modular_add.estimate_resources(inputs={"size": 2048})
     assert concrete.gates.total == estimate.gates.total.subs(size, 2048)

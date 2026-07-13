@@ -60,7 +60,7 @@ def test_qft_resource_formula(n_value: int) -> None:
         return qmc.qft(qmc.qubit_array(n, "q"))
 
     symbolic = circuit.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
+    n = symbolic.parameters["n"]
     expected = n * (n + 1) / 2 + sp.floor(n / 2)
     assert sp.simplify(symbolic.gates.total - expected) == 0
 
