@@ -340,7 +340,22 @@ def emit_for_unrolled(
     clbit_map: ClbitMap,
     bindings: dict[str, Any],
 ) -> None:
-    """Emit for loop by unrolling."""
+    """Emit a concrete range loop one specialized iteration at a time.
+
+    Args:
+        emit_pass (StandardEmitPass): Active semantic emit pass.
+        circuit (Any): Destination circuit builder.
+        op (ForOperation): Concrete source loop to unroll.
+        qubit_map (QubitMap): Current quantum address map.
+        clbit_map (ClbitMap): Current classical-result map.
+        bindings (dict[str, Any]): Active compile-time bindings.
+
+    Returns:
+        None: Emits directly into ``circuit`` and updates carried mappings.
+
+    Raises:
+        ValueError: If loop bounds cannot be resolved at compile time.
+    """
     start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
 
     if start is None or stop is None or step is None:
@@ -365,26 +380,104 @@ def emit_for_unrolled(
         )
 
     carried = _seed_region_args(emit_pass, op, bindings)
-    for i in range(start, stop, step):
-        loop_bindings = bindings.copy()
-        for uuid, value in carried.items():
-            _set_emit_value(loop_bindings, uuid, value)
-        _bind_loop_var(loop_bindings, op, i)
-        emit_pass._emit_operations(
-            circuit,
-            op.operations,
-            qubit_map,
-            clbit_map,
-            loop_bindings,
-            emit_qinit_reset=True,
-        )
-        _advance_region_args(emit_pass, op, carried, loop_bindings)
+    indexset = range(start, stop, step)
+    trace_context = emit_pass._begin_specialized_loop_trace(
+        circuit,
+        "range",
+        (op.loop_var or "i", indexset),
+    )
+    try:
+        for i in indexset:
+            loop_bindings = bindings.copy()
+            for uuid, value in carried.items():
+                _set_emit_value(loop_bindings, uuid, value)
+            _bind_loop_var(loop_bindings, op, i)
+            emit_pass._begin_specialized_iteration_trace(
+                circuit,
+                trace_context,
+                f"{op.loop_var or 'i'}={i}",
+            )
+            try:
+                emit_pass._emit_operations(
+                    circuit,
+                    op.operations,
+                    qubit_map,
+                    clbit_map,
+                    loop_bindings,
+                    emit_qinit_reset=True,
+                )
+            finally:
+                emit_pass._end_specialized_iteration_trace(circuit, trace_context)
+            _advance_region_args(emit_pass, op, carried, loop_bindings)
+    finally:
+        emit_pass._end_specialized_loop_trace(circuit, trace_context)
     _publish_region_results(op, carried, bindings)
 
 
 # ---------------------------------------------------------------------------
 # For-items loop
 # ---------------------------------------------------------------------------
+
+
+def _bind_for_items_iteration(
+    bindings: dict[str, Any],
+    op: ForItemsOperation,
+    key: Any,
+    value: Any,
+) -> None:
+    """Bind one concrete for-items key/value pair into a child context.
+
+    Args:
+        bindings (dict[str, Any]): Per-iteration binding context to update.
+        op (ForItemsOperation): Loop whose key/value identities are bound.
+        key (Any): Concrete dictionary key for this iteration.
+        value (Any): Concrete dictionary value for this iteration.
+
+    Returns:
+        None: ``bindings`` is updated in place.
+    """
+    push = getattr(bindings, "push_loop_var", None)
+
+    def bind(uuid: str | None, display_name: str, bound_value: Any) -> None:
+        """Bind one UUID and its compatibility display name.
+
+        Args:
+            uuid (str | None): Canonical value UUID when available.
+            display_name (str): Legacy name used by container lookups.
+            bound_value (Any): Concrete iteration value.
+
+        Returns:
+            None: ``bindings`` is updated in place.
+        """
+        if callable(push) and uuid is not None:
+            push(uuid, bound_value, display_name=display_name or None)
+        elif uuid is not None:
+            bindings[uuid] = bound_value
+        if display_name:
+            bindings[display_name] = bound_value
+
+    key_var_values = op.key_var_values
+    if len(op.key_vars) > 1:
+        for index, key_name in enumerate(op.key_vars):
+            key_uuid = (
+                key_var_values[index].uuid
+                if key_var_values is not None and index < len(key_var_values)
+                else None
+            )
+            component = key[index] if hasattr(key, "__getitem__") else key
+            bind(key_uuid, key_name, component)
+    elif len(op.key_vars) == 1:
+        key_uuid = (
+            key_var_values[0].uuid
+            if key_var_values is not None and len(key_var_values) >= 1
+            else None
+        )
+        bind(key_uuid, op.key_vars[0], key)
+        if op.key_is_vector:
+            bind(None, f"{op.key_vars[0]}_dim0", len(key))
+
+    value_uuid = op.value_var_value.uuid if op.value_var_value is not None else None
+    bind(value_uuid, op.value_var, value)
 
 
 def emit_for_items(
@@ -420,7 +513,7 @@ def emit_for_items(
         return
 
     dict_value = op.operands[0]
-    entries = resolve_dict_entries(emit_pass, dict_value, bindings)
+    entries = emit_pass._resolver.resolve_dict_entries(dict_value, bindings)
 
     if entries is None:
         dict_name = getattr(dict_value, "name", None)
@@ -437,153 +530,43 @@ def emit_for_items(
             f"Dict value: {dict_value.name if hasattr(dict_value, 'name') else dict_value}"
         )
 
-    key_var_values = op.key_var_values
-    value_var_value = op.value_var_value
-
     carried = _seed_region_args(emit_pass, op, bindings)
-    for key, value in entries:
-        loop_bindings = bindings.copy()
-        for carried_uuid, carried_value in carried.items():
-            _set_emit_value(loop_bindings, carried_uuid, carried_value)
-        push = getattr(loop_bindings, "push_loop_var", None)
-
-        def _bind(
-            uuid: str | None,
-            display_name: str,
-            v: Any,
-            _push=push,
-            _ctx=loop_bindings,
-        ) -> None:
-            """Bind a for-items key/value variable.
-
-            For-items key variables and dim0-shape entries are read by
-            name from ``_index_into_array`` (the container lookup is
-            ``bindings.get(parent.name)``), so the name-keyed write
-            stays here even though scalar ``for`` loop variables no
-            longer write by name. UUID-keyed writes happen alongside
-            for canonical identity tracking.
-            """
-            if callable(_push) and uuid is not None:
-                _push(uuid, v, display_name=display_name or None)
-            else:
-                if uuid is not None:
-                    _ctx[uuid] = v
-            if display_name:
-                _ctx[display_name] = v
-
-        # Bind key variables (tuple unpacking)
-        if len(op.key_vars) > 1:
-            for i, kv_name in enumerate(op.key_vars):
-                kv_uuid = (
-                    key_var_values[i].uuid
-                    if key_var_values is not None and i < len(key_var_values)
-                    else None
-                )
-                _bind(
-                    kv_uuid,
-                    kv_name,
-                    key[i] if hasattr(key, "__getitem__") else key,
-                )
-        elif len(op.key_vars) == 1:
-            kv_uuid = (
-                key_var_values[0].uuid
-                if key_var_values is not None and len(key_var_values) >= 1
-                else None
+    trace_context = emit_pass._begin_specialized_loop_trace(
+        circuit,
+        "items",
+        (tuple(op.key_vars), op.value_var),
+    )
+    try:
+        for key, value in entries:
+            loop_bindings = bindings.copy()
+            for carried_uuid, carried_value in carried.items():
+                _set_emit_value(loop_bindings, carried_uuid, carried_value)
+            _bind_for_items_iteration(loop_bindings, op, key, value)
+            key_label = ", ".join(op.key_vars) or "key"
+            value_label = op.value_var or "value"
+            emit_pass._begin_specialized_iteration_trace(
+                circuit,
+                trace_context,
+                f"{key_label}={key!r}, {value_label}={value!r}",
             )
-            _bind(kv_uuid, op.key_vars[0], key)
-            if op.key_is_vector:
-                # The dim0 Value is a child of the ArrayValue stored in
-                # key_var_values[0]; for now bind the legacy name only
-                # (Vector key dim is rarely accessed by the loop body).
-                _bind(None, f"{op.key_vars[0]}_dim0", len(key))
-
-        value_uuid = value_var_value.uuid if value_var_value is not None else None
-        _bind(value_uuid, op.value_var, value)
-
-        # ``emit_qinit_reset=True`` mirrors ``emit_for_unrolled`` and the
-        # native ``for`` / ``if`` / ``while`` branches. Like those paths,
-        # for-items re-emits the *same* ``op.operations`` once per dict entry
-        # without UUID remapping — the ``ResourceAllocator`` registers each
-        # body ``QInitOperation`` exactly once — so a fresh ``qmc.qubit(...)``
-        # allocated in the body maps to one shared physical qubit reused
-        # across entries. Without an explicit reset the second and later
-        # entries would silently reuse it in its post-measurement state.
-        emit_pass._emit_operations(
-            circuit,
-            op.operations,
-            qubit_map,
-            clbit_map,
-            loop_bindings,
-            emit_qinit_reset=True,
-        )
-        _advance_region_args(emit_pass, op, carried, loop_bindings)
+            try:
+                # ``emit_qinit_reset=True`` mirrors ``emit_for_unrolled`` and
+                # the native ``for`` / ``if`` / ``while`` branches. Like those
+                # paths, for-items re-emits the same body per concrete entry.
+                emit_pass._emit_operations(
+                    circuit,
+                    op.operations,
+                    qubit_map,
+                    clbit_map,
+                    loop_bindings,
+                    emit_qinit_reset=True,
+                )
+            finally:
+                emit_pass._end_specialized_iteration_trace(circuit, trace_context)
+            _advance_region_args(emit_pass, op, carried, loop_bindings)
+    finally:
+        emit_pass._end_specialized_loop_trace(circuit, trace_context)
     _publish_region_results(op, carried, bindings)
-
-
-# ---------------------------------------------------------------------------
-# Dict entry resolution (helper for emit_for_items)
-# ---------------------------------------------------------------------------
-
-
-def resolve_dict_entries(
-    emit_pass: "StandardEmitPass",
-    dict_value: Any,
-    bindings: dict[str, Any],
-) -> list[tuple[Any, Any]] | None:
-    """Resolve DictValue to concrete (key, value) pairs.
-
-    Args:
-        emit_pass: The StandardEmitPass instance (for resolver access)
-        dict_value: The DictValue IR node being iterated
-        bindings: Current parameter bindings
-
-    Returns:
-        List of (key, value) tuples, or None if cannot be resolved
-    """
-    # A dict carrying dict_runtime metadata is compile-time-bound and
-    # authoritative even when its data is empty: presence of the metadata
-    # (not non-emptiness of the data) is what marks it bound, mirroring
-    # Dict.__getitem__ / __len__. Returning its (possibly empty) items lets
-    # an empty bound dict — e.g. a Python signature default of ``{}`` —
-    # unroll to a zero-iteration loop instead of falling through to the
-    # "entries could not be resolved" error path below.
-    metadata = getattr(dict_value, "metadata", None)
-    if getattr(metadata, "dict_runtime", None) is not None:
-        return list(dict_value.get_bound_data_items())
-
-    # Check if dict_value is a parameter that should be bound
-    if hasattr(dict_value, "is_parameter") and dict_value.is_parameter():
-        param_name = dict_value.parameter_name()
-        if param_name and param_name in bindings:
-            bound = bindings[param_name]
-            if isinstance(bound, dict):
-                return list(bound.items())
-            elif hasattr(bound, "items"):
-                return list(bound.items())
-            return bound
-
-    # Check by name in bindings
-    if hasattr(dict_value, "name") and dict_value.name and dict_value.name in bindings:
-        bound = bindings[dict_value.name]
-        if isinstance(bound, dict):
-            return list(bound.items())
-        elif hasattr(bound, "items"):
-            return list(bound.items())
-        return bound
-
-    # Check if dict_value has entries directly (from IR)
-    if hasattr(dict_value, "entries") and dict_value.entries:
-        # Resolve each entry
-        resolved_entries = []
-        for key_val, value_val in dict_value.entries:
-            key = emit_pass._resolver.resolve_classical_value(key_val, bindings)
-            value = emit_pass._resolver.resolve_classical_value(value_val, bindings)
-            if key is not None and value is not None:
-                resolved_entries.append((key, value))
-        if resolved_entries:
-            return resolved_entries
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -646,7 +629,7 @@ def evaluate_dict_getitem(
         _set_emit_value(bindings, op.results[0].uuid, param)
         return
 
-    entries = resolve_dict_entries(emit_pass, dict_value, bindings)
+    entries = emit_pass._resolver.resolve_dict_entries(dict_value, bindings)
     if entries is None:
         raise EmitError(
             f"Dict '{getattr(dict_value, 'name', '?')}' entries could not "

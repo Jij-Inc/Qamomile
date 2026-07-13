@@ -542,6 +542,59 @@ class ValueResolver:
         coerced = self._resolve_numeric_value(raw)
         return coerced if coerced is not None else raw
 
+    def resolve_dict_entries(
+        self,
+        dict_value: Any,
+        bindings: dict[str, Any],
+    ) -> list[tuple[Any, Any]] | None:
+        """Resolve a dictionary IR value to concrete entry pairs.
+
+        Bound runtime metadata is authoritative even when it contains no
+        entries. This distinction lets callers preserve zero-trip
+        ``for-items`` semantics instead of mistaking an empty dictionary for
+        an unresolved one.
+
+        Args:
+            dict_value (Any): Dictionary-like IR value being iterated.
+            bindings (dict[str, Any]): Active compile-time bindings.
+
+        Returns:
+            list[tuple[Any, Any]] | None: Concrete key/value pairs, including
+            an empty list for a known-empty dictionary, or ``None`` when the
+            entries remain unresolved.
+        """
+        metadata = getattr(dict_value, "metadata", None)
+        if getattr(metadata, "dict_runtime", None) is not None:
+            return list(dict_value.get_bound_data_items())
+
+        if hasattr(dict_value, "is_parameter") and dict_value.is_parameter():
+            param_name = dict_value.parameter_name()
+            if param_name and param_name in bindings:
+                bound = bindings[param_name]
+                if hasattr(bound, "items"):
+                    return list(bound.items())
+                return bound
+
+        name = getattr(dict_value, "name", None)
+        if name and name in bindings:
+            bound = bindings[name]
+            if hasattr(bound, "items"):
+                return list(bound.items())
+            return bound
+
+        entries = getattr(dict_value, "entries", ())
+        if entries:
+            resolved_entries: list[tuple[Any, Any]] = []
+            for key_value, entry_value in entries:
+                key = self.resolve_classical_value(key_value, bindings)
+                value = self.resolve_classical_value(entry_value, bindings)
+                if key is not None and value is not None:
+                    resolved_entries.append((key, value))
+            if resolved_entries:
+                return resolved_entries
+
+        return None
+
     def _index_into_array(
         self,
         v: "Value",

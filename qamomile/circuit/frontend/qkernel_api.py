@@ -163,21 +163,34 @@ class QKernelVisualizationMixin:
         expand_composite: bool = False,
         inline_depth: int | None = None,
         fold_ifs: bool = False,
+        fold_whiles: bool = False,
         **kwargs: Any,
     ) -> Any:
         """Visualize the circuit using Matplotlib.
 
+        Drawing uses the same verified target-neutral ``CircuitProgram``
+        lowering as transpilation. Scalar ``Qubit`` and sized
+        ``Vector[Qubit]`` inputs remain external wires, and quantum outputs are
+        preserved. Structural quantum indices, slice bounds, register sizes,
+        and loop ranges must be concrete rather than approximated.
+
         Args:
-            inline (bool): If ``True``, expand inline callable contents. If
-                ``False``, show them as boxes. Defaults to ``False``.
+            inline (bool): If ``True``, expand retained source qkernel regions
+                and safe direct reusable-circuit calls. If ``False``, show
+                those boundaries as boxes. Defaults to ``False``.
             fold_loops (bool): If ``True``, display ``ForOperation`` as folded
                 blocks instead of unrolling. Defaults to ``True``.
-            expand_composite (bool): If ``True``, expand boxed
-                ``InvokeOperation`` bodies. Defaults to ``False``.
-            inline_depth (int | None): Maximum nesting depth for inline
-                expansion. ``None`` means unlimited. Defaults to ``None``.
+            expand_composite (bool): Compatibility alias for ``inline``.
+                Transformed or opaque calls remain boxed. Defaults to
+                ``False``.
+            inline_depth (int | None): Maximum nested source/reusable-call
+                expansion depth. ``None`` means unlimited. Defaults to
+                ``None``.
             fold_ifs (bool): If ``True``, display ``IfOperation`` as folded
                 summary blocks. Defaults to ``False``.
+            fold_whiles (bool): If ``True``, display ``WhileOperation`` as a
+                folded summary block. If ``False``, show its body inside a
+                ``while <condition>:`` region. Defaults to ``False``.
             **kwargs (Any): Concrete values for arguments. Arguments not
                 provided here and without defaults are shown as symbolic
                 parameters.
@@ -186,17 +199,20 @@ class QKernelVisualizationMixin:
             Any: Matplotlib figure object.
 
         Raises:
+            CircuitDrawingError: If the qkernel cannot lower to one exact,
+                verified ``CircuitProgram``.
             ImportError: If matplotlib is not installed.
+            TypeError: If a draw-time binding has an invalid frontend type.
             ValueError: If a ``Vector[Qubit]`` parameter requires a concrete
-                size for visualization and no size is provided.
-            ValidationError: If visualization-time compile-time if lowering
-                rejects the traced graph.
+                size for visualization and no size is provided, or if another
+                structural value cannot be resolved to an exact circuit.
         """
         return draw_qkernel(
             self,
             inline=inline,
             fold_loops=fold_loops,
             fold_ifs=fold_ifs,
+            fold_whiles=fold_whiles,
             expand_composite=expand_composite,
             inline_depth=inline_depth,
             **kwargs,

@@ -25,10 +25,12 @@ Shared preparation
        ├─ hierarchical semantic entrypoint
        ├─ reachable callable definitions
        ├─ call graph
-       └─ public classical ABI
+       └─ mode-specific public ABI
 
 ``PreparedModule`` deliberately preserves structured control flow and callable
-boundaries. It is the last representation shared by every target family.
+boundaries. ``PROGRAM`` mode retains the classical-only public ABI, while
+``CIRCUIT_FRAGMENT`` mode permits external quantum inputs and outputs. It is
+the last representation shared by every target family.
 
 Target families
 ---------------
@@ -105,18 +107,29 @@ from qamomile.circuit.transpiler.artifact import (
     CompiledProgram,
     DiagnosticSeverity,
 )
+from qamomile.circuit.transpiler.circuit_planner import (
+    CircuitPlanningHooks,
+    CircuitPlanningPipeline,
+)
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.config import CompilerConfig, TranspilerConfig
-from qamomile.circuit.transpiler.prepared import PreparedModule, prepare_module
+from qamomile.circuit.transpiler.prepared import (
+    EntrypointMode,
+    PreparedModule,
+    prepare_module,
+)
 from qamomile.circuit.transpiler.target import CompilationTarget
 
 __all__ = [
     "CompilationDiagnostic",
     "CompilationMetadata",
     "CompilationTarget",
+    "CircuitPlanningHooks",
+    "CircuitPlanningPipeline",
     "CompiledProgram",
     "CompilerConfig",
     "DiagnosticSeverity",
+    "EntrypointMode",
     "PreparedModule",
     "QamomileCompiler",
     "TranspilerConfig",

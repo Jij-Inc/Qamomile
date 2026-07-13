@@ -13,6 +13,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ClassicalBitExpr,
     GateInstruction,
     IfInstruction,
+    LiteralExpr,
     MaterializedCircuit,
     MeasureVectorInstruction,
     ParameterExpr,
@@ -242,6 +243,59 @@ def test_verifier_rejects_invalid_reusable_call_transforms(
 
     with pytest.raises(ValueError, match=message):
         verify_circuit(dataclasses.replace(program, operations=(malformed_call,)))
+
+
+@pytest.mark.parametrize(
+    ("call_arguments", "message"),
+    [
+        ((("", LiteralExpr(0.5)),), "names must be non-empty"),
+        (
+            (("theta", LiteralExpr(0.5)), ("theta", LiteralExpr(1.0))),
+            "names must be unique",
+        ),
+        ((("theta", object()),), "Unsupported scalar expression"),
+    ],
+)
+def test_verifier_rejects_malformed_reusable_call_arguments(
+    call_arguments: tuple[tuple[str, object], ...],
+    message: str,
+) -> None:
+    """Call-site metadata must contain valid, uniquely named scalar values.
+
+    Args:
+        call_arguments (tuple[tuple[str, object], ...]): Malformed metadata.
+        message (str): Expected verifier diagnosis.
+    """
+    body = CircuitBuilder(1, 0, name="body").freeze()
+    caller = CircuitBuilder(1, 0)
+    caller.append_call(
+        ReusableCircuit(
+            body,
+            "body",
+            call_arguments=call_arguments,  # type: ignore[arg-type]
+        ),
+        (0,),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        verify_circuit(caller.freeze())
+
+
+def test_verifier_checks_call_argument_classical_bit_bounds() -> None:
+    """Call arguments cannot reference an unallocated classical bit."""
+    body = CircuitBuilder(1, 0, name="body").freeze()
+    caller = CircuitBuilder(1, 1)
+    caller.append_call(
+        ReusableCircuit(
+            body,
+            "body",
+            call_arguments=(("flag", ClassicalBitExpr(1)),),
+        ),
+        (0,),
+    )
+
+    with pytest.raises(ValueError, match="out of range"):
+        verify_circuit(caller.freeze())
 
 
 def test_materialization_rejects_positional_parameter_order_drift() -> None:

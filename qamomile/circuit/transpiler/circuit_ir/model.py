@@ -655,6 +655,11 @@ class ReusableCircuit:
             quantum operand before backend lowering. A vector contributes its
             element count and a scalar qubit contributes one. An empty tuple
             means the source boundary did not expose operand grouping.
+        call_arguments (tuple[tuple[str, ScalarExpr], ...]): Ordered scalar
+            arguments bound at this call site. Defaults to an empty tuple.
+        opaque (bool): Whether ``body`` is an arity-only placeholder for a
+            semantic callable with no fallback implementation. Defaults to
+            ``False``.
     """
 
     body: CircuitProgram
@@ -665,6 +670,8 @@ class ReusableCircuit:
     identity: CallableIdentity | None = None
     native_realization: str | None = None
     operand_widths: tuple[int, ...] = ()
+    call_arguments: tuple[tuple[str, ScalarExpr], ...] = ()
+    opaque: bool = False
 
     @property
     def num_qubits(self) -> int:

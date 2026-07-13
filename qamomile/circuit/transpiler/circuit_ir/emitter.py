@@ -31,7 +31,23 @@ _BINARY_OPERATORS = {
 
 
 class CircuitGateEmitter:
-    """Emit primitive operations into backend-neutral circuit IR."""
+    """Emit primitive operations into backend-neutral circuit IR.
+
+    Args:
+        capture_draw_trace (bool): Whether created builders retain drawing-only
+            source provenance. Defaults to ``False``.
+    """
+
+    _capture_draw_trace = False
+
+    def __init__(self, *, capture_draw_trace: bool = False) -> None:
+        """Initialize target-neutral circuit emission.
+
+        Args:
+            capture_draw_trace (bool): Whether builders capture drawing-only
+                provenance. Defaults to ``False``.
+        """
+        self._capture_draw_trace = capture_draw_trace
 
     @property
     def measurement_mode(self) -> MeasurementMode:
@@ -52,6 +68,12 @@ class CircuitGateEmitter:
         Returns:
             CircuitBuilder: Empty backend-neutral builder.
         """
+        if self._capture_draw_trace:
+            from qamomile.circuit.transpiler.circuit_ir.trace import (
+                TracingCircuitBuilder,
+            )
+
+            return TracingCircuitBuilder(num_qubits, num_clbits)
         return CircuitBuilder(num_qubits, num_clbits)
 
     def create_parameter(self, name: str) -> ParameterExpr:

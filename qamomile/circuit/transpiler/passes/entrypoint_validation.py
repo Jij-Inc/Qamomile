@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.transpiler.errors import (
-    EntrypointValidationError,
-    ValidationError,
-)
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.transpiler.errors import EntrypointValidationError
 from qamomile.circuit.transpiler.passes import Pass
 
 
@@ -18,11 +15,17 @@ class EntrypointValidationPass(Pass[Block, Block]):
         return "validate_entrypoint"
 
     def run(self, input: Block) -> Block:
-        if input.kind not in (BlockKind.HIERARCHICAL, BlockKind.TRACED):
-            raise ValidationError(
-                f"EntrypointValidationPass expects HIERARCHICAL or TRACED block, "
-                f"got {input.kind}",
-            )
+        """Validate that an executable entrypoint has classical-only I/O.
+
+        Args:
+            input (Block): Entrypoint at any semantic compiler stage.
+
+        Returns:
+            Block: The unchanged valid entrypoint.
+
+        Raises:
+            EntrypointValidationError: If an input or output is quantum.
+        """
 
         quantum_inputs = [
             v.name

@@ -157,6 +157,17 @@ def test_compiler_gives_each_target_an_owned_semantic_snapshot() -> None:
     assert len(_prepared_bell.block.operations) == original_body_count
 
 
+def test_compile_prepared_gives_target_an_owned_semantic_snapshot() -> None:
+    """Prepared compilation snapshots semantics before target mutation."""
+    compiler = QamomileCompiler()
+    prepared = compiler.prepare(_prepared_entrypoint)
+    original_operation_count = len(prepared.entrypoint.operations)
+
+    compiler.compile_prepared(prepared, _MutatingTarget())
+
+    assert len(prepared.entrypoint.operations) == original_operation_count
+
+
 def test_prepare_collects_edges_for_shared_body_under_each_owner() -> None:
     """Call-graph collection keys body visits by symbol as well as identity."""
     leaf_ref = CallableRef("test", "leaf")

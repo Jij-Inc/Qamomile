@@ -8,6 +8,10 @@ from abc import ABC, abstractmethod
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
+from qamomile.circuit.ir.operation.callable import (
+    InlineRegionBoundary,
+    InlineRegionBoundaryOperation,
+)
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -234,7 +238,7 @@ def _is_public_runtime_input(value: ValueLike) -> bool:
     Returns:
         bool: ``True`` for classical or classical structural values that can
             be bound by users at runtime; ``False`` for quantum values, which
-            are allocated and consumed by the quantum segment.
+            are carried as external circuit wires by the quantum segment.
     """
     return not value.type.is_quantum()
 
@@ -267,8 +271,36 @@ class NisqSegmentationStrategy(SegmentationStrategy):
         block: Block,
         boundaries: list[HybridBoundary],
     ) -> ProgramPlan:
+        """Build one single-quantum-segment execution plan.
+
+        Args:
+            segments (list[Segment]): Segments classified from ``block``.
+            block (Block): Analyzed semantic entrypoint.
+            boundaries (list[HybridBoundary]): Quantum/classical boundaries.
+
+        Returns:
+            ProgramPlan: Host-orchestrated execution plan.
+
+        Raises:
+            SeparationError: If no quantum work or quantum interface exists.
+            MultipleQuantumSegmentsError: If more than one quantum segment is
+                required.
+        """
+        quantum_inputs = [
+            value for value in block.input_values if value.type.is_quantum()
+        ]
+        quantum_outputs = [
+            value for value in block.output_values if value.type.is_quantum()
+        ]
         quantum_segs = [s for s in segments if isinstance(s, QuantumSegment)]
-        if len(quantum_segs) == 0:
+        if not quantum_segs and (quantum_inputs or quantum_outputs):
+            # An identity fragment still denotes a real quantum interface.
+            # Preserve it as an empty segment so CircuitBuilder can produce
+            # input/output wires without inventing a gate or initialization.
+            identity_segment = QuantumSegment()
+            segments.append(identity_segment)
+            quantum_segs.append(identity_segment)
+        if not quantum_segs:
             from qamomile.circuit.transpiler.errors import SeparationError
 
             raise SeparationError("No quantum segment found")
@@ -281,6 +313,7 @@ class NisqSegmentationStrategy(SegmentationStrategy):
             )
 
         quantum = quantum_segs[0]
+        quantum.qubit_values = list(quantum_inputs)
         quantum_idx = segments.index(quantum)
 
         steps: list[ClassicalStep | QuantumStep | ExpvalStep] = []
@@ -353,6 +386,18 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Build list of segments from block operations.
 
         Extracted from _separate_segments to allow reuse.
+
+        Args:
+            block (Block): Lowered analyzed block to segment.
+
+        Returns:
+            list[Segment]: Ordered classical, quantum, and expectation-value
+                segments.
+
+        Raises:
+            MultipleQuantumSegmentsError: If classical dataflow would require
+                an unsupported second quantum execution.
+            SeparationError: If drawing-only source markers are malformed.
         """
         segments: list[Segment] = []
         self._boundaries: list[HybridBoundary] = []
@@ -443,10 +488,57 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # between measurements never splits the quantum segment and never
         # gets stranded inside it.
         pending_post: list[Operation] = []
+        # Drawing-only inline provenance must ride inside the quantum segment
+        # it annotates without acting like an executable quantum operation at
+        # the C/Q segmentation boundary. Keep every not-yet-placed marker in
+        # source order, including completed nested identity regions, until a
+        # real quantum/hybrid operation selects the target segment. Open
+        # regions whose start was already placed retain that exact list so a
+        # classical postlude cannot strand the matching end marker.
+        pending_inline_markers: list[InlineRegionBoundaryOperation] = []
+        inline_region_stack: list[tuple[int, list[Operation] | None]] = []
+        last_quantum_ops: list[Operation] | None = None
 
         for op in block.operations:
             # Skip ReturnOperation - it's a terminal operation handled separately
             if isinstance(op, ReturnOperation):
+                continue
+
+            if isinstance(op, InlineRegionBoundaryOperation):
+                if op.boundary is InlineRegionBoundary.START:
+                    if any(
+                        region_id == op.region_id
+                        for region_id, _ in inline_region_stack
+                    ):
+                        raise SeparationError(
+                            "Inline drawing region started more than once"
+                        )
+                    inherited_target = (
+                        inline_region_stack[-1][1] if inline_region_stack else None
+                    )
+                    if inherited_target is not None:
+                        inherited_target.append(op)
+                        target = inherited_target
+                    elif current_kind == OperationKind.QUANTUM:
+                        current_ops.append(op)
+                        target = current_ops
+                    else:
+                        pending_inline_markers.append(op)
+                        target = None
+                    inline_region_stack.append((op.region_id, target))
+                else:
+                    if (
+                        not inline_region_stack
+                        or inline_region_stack[-1][0] != op.region_id
+                    ):
+                        raise SeparationError(
+                            "Inline drawing region markers are not properly nested"
+                        )
+                    _, target = inline_region_stack.pop()
+                    if target is None:
+                        pending_inline_markers.append(op)
+                    else:
+                        target.append(op)
                 continue
 
             op_kind = self._effective_kind(op)
@@ -492,6 +584,14 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 # Note: we stay in QUANTUM mode to accumulate consecutive measurements
                 if current_kind != OperationKind.QUANTUM:
                     current_kind = OperationKind.QUANTUM
+                last_quantum_ops = current_ops
+                if pending_inline_markers:
+                    current_ops.extend(pending_inline_markers)
+                    pending_inline_markers = []
+                    inline_region_stack = [
+                        (region_id, current_ops if target is None else target)
+                        for region_id, target in inline_region_stack
+                    ]
                 if pending_absorbable:
                     current_ops.extend(pending_absorbable)
                     pending_absorbable = []
@@ -614,8 +714,26 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             # parameter-expression ops so they are computed inside the quantum
             # circuit, ahead of the gate that consumes them.
             if current_kind == OperationKind.QUANTUM and pending_absorbable:
+                last_quantum_ops = current_ops
+                if pending_inline_markers:
+                    current_ops.extend(pending_inline_markers)
+                    pending_inline_markers = []
+                    inline_region_stack = [
+                        (region_id, current_ops if target is None else target)
+                        for region_id, target in inline_region_stack
+                    ]
                 current_ops.extend(pending_absorbable)
                 pending_absorbable = []
+
+            if current_kind == OperationKind.QUANTUM:
+                last_quantum_ops = current_ops
+                if pending_inline_markers:
+                    current_ops.extend(pending_inline_markers)
+                    pending_inline_markers = []
+                    inline_region_stack = [
+                        (region_id, current_ops if target is None else target)
+                        for region_id, target in inline_region_stack
+                    ]
 
             # Entering (or continuing) a post-quantum classical segment:
             # flush deferred runtime expressions first so ops that consume
@@ -641,6 +759,24 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 current_kind = OperationKind.QUANTUM
             current_ops.extend(pending_absorbable)
             pending_absorbable = []
+
+        if inline_region_stack:
+            raise SeparationError("Inline drawing region markers are unbalanced")
+
+        # Closed identity regions have no executable instruction that could
+        # select a segment. If real quantum work exists, attach them to its
+        # operation list without introducing another C/Q boundary. Otherwise
+        # create the sole marker-only quantum segment used by drawing lowering.
+        if pending_inline_markers:
+            if last_quantum_ops is not None:
+                last_quantum_ops.extend(pending_inline_markers)
+            else:
+                if current_ops:
+                    segments.append(self._create_segment(current_kind, current_ops))
+                current_kind = OperationKind.QUANTUM
+                current_ops = []
+                current_ops.extend(pending_inline_markers)
+            pending_inline_markers = []
 
         # Flush final segment
         if current_ops:

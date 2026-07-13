@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from qamomile._utils import is_close_zero
 from qamomile.circuit.transpiler.circuit_ir.model import (
     BarrierInstruction,
     BinaryExpr,
@@ -12,8 +13,11 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     ForInstruction,
     GateInstruction,
     IfInstruction,
+    LiteralExpr,
+    LoopVariableExpr,
     MeasureInstruction,
     MeasureVectorInstruction,
+    ParameterExpr,
     PauliEvolutionInstruction,
     ResetInstruction,
     ScalarExpr,
@@ -65,7 +69,7 @@ def _verify_expression(expression: ScalarExpr, num_clbits: int) -> None:
 
     Raises:
         ValueError: If a classical-bit reference is outside the allocated
-            circuit range.
+            circuit range or ``expression`` is not a supported scalar node.
     """
     if isinstance(expression, ClassicalBitExpr):
         if expression.index < 0 or expression.index >= num_clbits:
@@ -77,6 +81,8 @@ def _verify_expression(expression: ScalarExpr, num_clbits: int) -> None:
         _verify_expression(expression.right, num_clbits)
     elif isinstance(expression, UnaryExpr):
         _verify_expression(expression.operand, num_clbits)
+    elif not isinstance(expression, (LiteralExpr, ParameterExpr, LoopVariableExpr)):
+        raise ValueError(f"Unsupported scalar expression: {type(expression).__name__}")
 
 
 def _define_wires(wires: tuple[WireId, ...], definitions: set[WireId]) -> None:
@@ -245,6 +251,33 @@ def _verify_region(
                 raise ValueError(
                     "Reusable call operand widths must cover the fallback body"
                 )
+            argument_names: set[str] = set()
+            for name, expression in operation.callee.call_arguments:
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError(
+                        "Reusable call argument names must be non-empty strings"
+                    )
+                if name in argument_names:
+                    raise ValueError("Reusable call argument names must be unique")
+                argument_names.add(name)
+                _verify_expression(expression, num_clbits)
+            if operation.callee.opaque:
+                if operation.callee.identity is None:
+                    raise ValueError("Opaque reusable call requires semantic identity")
+                if (
+                    operation.callee.body.operations
+                    or operation.callee.body.num_clbits != 0
+                    or not isinstance(
+                        operation.callee.body.global_phase,
+                        LiteralExpr,
+                    )
+                    or not is_close_zero(
+                        float(operation.callee.body.global_phase.value)
+                    )
+                ):
+                    raise ValueError(
+                        "Opaque reusable call body must be an empty arity placeholder"
+                    )
             verify_circuit(operation.callee.body)
             if len(operation.inputs) != operation.callee.num_qubits:
                 raise ValueError("Reusable call input arity does not match its callee")

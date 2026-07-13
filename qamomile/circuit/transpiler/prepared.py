@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import enum
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
@@ -19,6 +20,40 @@ from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.transpiler.segments import ProgramABI
 
 
+class EntrypointMode(enum.StrEnum):
+    """Classify the public contract expected from a prepared entrypoint.
+
+    ``PROGRAM`` represents an executable host-orchestrated program and keeps
+    the existing classical-only top-level ABI. ``CIRCUIT_FRAGMENT`` represents
+    a circuit fragment whose quantum inputs and outputs are external wires.
+    """
+
+    PROGRAM = "program"
+    CIRCUIT_FRAGMENT = "circuit_fragment"
+
+
+def _normalize_entrypoint_mode(mode: EntrypointMode | str) -> EntrypointMode:
+    """Normalize a public entrypoint-mode argument.
+
+    Args:
+        mode (EntrypointMode | str): Entrypoint contract enum or its string
+            value.
+
+    Returns:
+        EntrypointMode: Normalized entrypoint contract.
+
+    Raises:
+        ValueError: If ``mode`` is not one of the supported values.
+    """
+    try:
+        return EntrypointMode(mode)
+    except (TypeError, ValueError) as error:
+        choices = ", ".join(member.value for member in EntrypointMode)
+        raise ValueError(
+            f"Unknown entrypoint mode {mode!r}. Valid modes: {choices}."
+        ) from error
+
+
 @dataclasses.dataclass(frozen=True)
 class PreparedModule:
     """Hold a prepared entrypoint and its reachable callable definitions.
@@ -26,7 +61,8 @@ class PreparedModule:
     Args:
         entrypoint_ref (CallableRef): Stable symbol assigned to the program
             entrypoint.
-        entrypoint (Block): Hierarchical semantic block for the entrypoint.
+        entrypoint (Block): Semantic entrypoint at the hierarchical, affine,
+            or analyzed compiler stage.
         definitions (Mapping[CallableRef, CallableDef]): Reachable callable
             definitions keyed by their stable symbols.
         definition_variants (Mapping[CallableRef, tuple[CallableDef, ...]]):
@@ -35,10 +71,14 @@ class PreparedModule:
             handled or rejected by targets that emit one function per symbol.
         call_graph (Mapping[CallableRef, frozenset[CallableRef]]): Directed
             caller-to-callee relation, including the entrypoint symbol.
-        abi (ProgramABI): Classical public input and output contract.
+        abi (ProgramABI): Public input and output contract. ``PROGRAM`` mode
+            requires classical values, while ``CIRCUIT_FRAGMENT`` mode may
+            retain external quantum values.
         bindings (Mapping[str, Any]): Compile-time values retained for direct
             program-graph targets. Circuit-family targets receive the same
             values through their emit pass.
+        mode (EntrypointMode): Public entrypoint contract. Defaults are chosen
+            by :class:`QamomileCompiler`; direct preparation uses ``PROGRAM``.
     """
 
     entrypoint_ref: CallableRef
@@ -48,6 +88,7 @@ class PreparedModule:
     call_graph: Mapping[CallableRef, frozenset[CallableRef]]
     abi: ProgramABI
     bindings: Mapping[str, Any]
+    mode: EntrypointMode = EntrypointMode.PROGRAM
 
     def owned_snapshot(self) -> PreparedModule:
         """Create a deep, target-owned snapshot of prepared semantics.
@@ -81,6 +122,7 @@ class PreparedModule:
             call_graph=MappingProxyType(call_graph),
             abi=abi,
             bindings=MappingProxyType(bindings),
+            mode=self.mode,
         )
 
     def body(self, ref: CallableRef) -> Block:
@@ -90,7 +132,7 @@ class PreparedModule:
             ref (CallableRef): Entrypoint or callable symbol to resolve.
 
         Returns:
-            Block: Hierarchical semantic body for ``ref``.
+            Block: Semantic body for ``ref`` at its retained compiler stage.
 
         Raises:
             KeyError: If ``ref`` is neither the entrypoint nor a reachable
@@ -107,25 +149,33 @@ class PreparedModule:
 def prepare_module(
     entrypoint: Block,
     bindings: Mapping[str, Any] | None = None,
+    *,
+    mode: EntrypointMode | str = EntrypointMode.PROGRAM,
 ) -> PreparedModule:
-    """Collect a hierarchical block into an immutable program-level view.
+    """Collect a semantic block into an immutable program-level view.
 
     The collector follows calls in nested control-flow regions and in every
     body carried by a callable definition. Definitions remain Qamomile
     semantic IR; this function does not inline, clone, or lower operations.
 
     Args:
-        entrypoint (Block): Hierarchical entrypoint after target-independent
-            frontend preparation.
+        entrypoint (Block): Entrypoint at the hierarchical, affine, or
+            analyzed stage. The collector preserves the supplied stage.
         bindings (Mapping[str, Any] | None): Compile-time values that cannot
             be embedded in scalar value metadata, such as Hamiltonians.
             Defaults to ``None``.
+        mode (EntrypointMode | str): Public entrypoint contract. Defaults to
+            :attr:`EntrypointMode.PROGRAM`. String enum values are accepted.
 
     Returns:
         PreparedModule: Entrypoint, reachable definitions, call graph, and
             public ABI. :class:`QamomileCompiler` creates a deep target-owned
             snapshot before invoking a target pipeline.
+
+    Raises:
+        ValueError: If ``mode`` is not a supported entrypoint mode.
     """
+    normalized_mode = _normalize_entrypoint_mode(mode)
     entrypoint_ref = CallableRef(
         namespace="qamomile.entrypoint",
         name=entrypoint.name or "main",
@@ -200,4 +250,5 @@ def prepare_module(
         call_graph=MappingProxyType(frozen_graph),
         abi=abi,
         bindings=MappingProxyType(dict(bindings or {})),
+        mode=normalized_mode,
     )

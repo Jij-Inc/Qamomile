@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -14,12 +15,18 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeOpKind,
 )
 from qamomile.circuit.ir.operation.callable import (
+    CallTransform,
     CompositeGateType,
+    InlineRegionBoundary,
+    InlineRegionBoundaryOperation,
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import IfOperation, WhileOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    pair_block_parameter_operands,
+)
 from qamomile.circuit.transpiler.circuit_ir.emitter import CircuitGateEmitter
 from qamomile.circuit.transpiler.circuit_ir.model import (
     BinaryExpr,
@@ -37,6 +44,14 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     SemanticOpKey,
     UnaryExpr,
     UnaryOperator,
+    as_scalar_expr,
+)
+from qamomile.circuit.transpiler.circuit_ir.trace import (
+    CircuitProgramTrace,
+    ItemsLoopOrigin,
+    RangeLoopOrigin,
+    SpecializedLoopKind,
+    TracingCircuitBuilder,
 )
 from qamomile.circuit.transpiler.circuit_ir.verify import verify_circuit
 from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
@@ -80,12 +95,22 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             Defaults to ``None``.
         parameters (list[str] | None): Runtime parameter names. Defaults to
             ``None``.
+        preserve_semantic_call_names (bool): Whether reusable calls retain
+            source block names for structural consumers. Defaults to ``False``.
+        capture_draw_trace (bool): Whether lowering retains drawing-only
+            source regions beside the flat program. Defaults to ``False``.
+        allow_opaque_semantic_calls (bool): Whether bodyless semantic calls
+            may be retained as explicit opaque boxes. Defaults to ``False``.
     """
 
     def __init__(
         self,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
+        *,
+        preserve_semantic_call_names: bool = False,
+        capture_draw_trace: bool = False,
+        allow_opaque_semantic_calls: bool = False,
     ) -> None:
         """Initialize circuit-IR lowering.
 
@@ -94,14 +119,360 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 Defaults to ``None``.
             parameters (list[str] | None): Runtime parameter names. Defaults
                 to ``None``.
+            preserve_semantic_call_names (bool): Whether reusable calls retain
+                source block names. Defaults to ``False`` so SDK materializer
+                output remains unchanged.
+            capture_draw_trace (bool): Whether builders retain drawing-only
+                source provenance. Defaults to ``False``.
+            allow_opaque_semantic_calls (bool): Whether bodyless semantic
+                calls may remain as explicit non-executable boxes. Defaults
+                to ``False``.
         """
         super().__init__(
-            CircuitGateEmitter(),
+            CircuitGateEmitter(capture_draw_trace=capture_draw_trace),
             bindings=bindings,
             parameters=parameters,
             backend_name="circuit_ir",
         )
+        self._preserve_semantic_call_names = preserve_semantic_call_names
+        self._capture_draw_trace = capture_draw_trace
+        self._allow_opaque_semantic_calls = allow_opaque_semantic_calls
         self._composite_emitters.append(_SemanticCompositeEmitter(self))
+
+    def _begin_specialized_loop_trace(
+        self,
+        circuit: CircuitBuilder,
+        kind: str,
+        origin: Any,
+    ) -> Any:
+        """Open a specialized-loop trace on a drawing builder.
+
+        Args:
+            circuit (CircuitBuilder): Circuit currently being emitted.
+            kind (str): Stable loop category name.
+            origin (Any): Concrete source loop metadata.
+
+        Returns:
+            Any: Opaque trace context, or ``None`` outside drawing lowering.
+
+        Raises:
+            ValueError: If drawing lowering receives malformed loop metadata.
+        """
+        if not isinstance(circuit, TracingCircuitBuilder):
+            return None
+        if kind == SpecializedLoopKind.RANGE.value:
+            if (
+                not isinstance(origin, tuple)
+                or len(origin) != 2
+                or not isinstance(origin[0], str)
+                or not isinstance(origin[1], range)
+            ):
+                raise ValueError("Malformed specialized range-loop metadata")
+            trace_kind = SpecializedLoopKind.RANGE
+            trace_origin = RangeLoopOrigin(origin[0], origin[1])
+        elif kind == SpecializedLoopKind.ITEMS.value:
+            if (
+                not isinstance(origin, tuple)
+                or len(origin) != 2
+                or not isinstance(origin[0], tuple)
+                or not isinstance(origin[1], str)
+            ):
+                raise ValueError("Malformed specialized items-loop metadata")
+            trace_kind = SpecializedLoopKind.ITEMS
+            trace_origin = ItemsLoopOrigin(origin[0], origin[1])
+        else:
+            raise ValueError(f"Unknown specialized-loop trace kind: {kind!r}")
+        return circuit.begin_specialized_loop(trace_kind, trace_origin)
+
+    def _begin_specialized_iteration_trace(
+        self,
+        circuit: CircuitBuilder,
+        context: Any,
+        value_label: str,
+    ) -> None:
+        """Open one exact specialized iteration on a drawing builder.
+
+        Args:
+            circuit (CircuitBuilder): Circuit currently being emitted.
+            context (Any): Opaque specialized-loop context.
+            value_label (str): Deterministic iteration-value label.
+        """
+        if isinstance(circuit, TracingCircuitBuilder):
+            circuit.begin_specialized_iteration(context, value_label)
+
+    def _end_specialized_iteration_trace(
+        self,
+        circuit: CircuitBuilder,
+        context: Any,
+    ) -> None:
+        """Close one exact specialized iteration on a drawing builder.
+
+        Args:
+            circuit (CircuitBuilder): Circuit currently being emitted.
+            context (Any): Opaque specialized-loop context.
+        """
+        if isinstance(circuit, TracingCircuitBuilder):
+            circuit.end_specialized_iteration(context)
+
+    def _end_specialized_loop_trace(
+        self,
+        circuit: CircuitBuilder,
+        context: Any,
+    ) -> None:
+        """Close one specialized-loop trace on a drawing builder.
+
+        Args:
+            circuit (CircuitBuilder): Circuit currently being emitted.
+            context (Any): Opaque specialized-loop context.
+        """
+        if isinstance(circuit, TracingCircuitBuilder):
+            circuit.end_specialized_loop(context)
+
+    def _emit_inline_region_boundary(
+        self,
+        circuit: CircuitBuilder,
+        operation: InlineRegionBoundaryOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Capture a drawing-only inlined qkernel boundary as provenance.
+
+        Args:
+            circuit (CircuitBuilder): Circuit currently being emitted.
+            operation (InlineRegionBoundaryOperation): Source boundary marker.
+            qubit_map (QubitMap): Current semantic-to-physical qubit map.
+            bindings (dict[str, Any]): Active emit-time bindings.
+
+        Raises:
+            EmitError: If a retained scalar call argument cannot be represented
+                by target-neutral circuit scalar IR.
+        """
+        if not isinstance(circuit, TracingCircuitBuilder):
+            return
+        quantum_slots = self._resolve_inline_quantum_slots(
+            operation,
+            qubit_map,
+            bindings,
+        )
+        if operation.boundary is InlineRegionBoundary.START:
+            arguments = self._resolve_inline_call_arguments(operation, bindings)
+            circuit.begin_inline_region(
+                operation.label,
+                operation.region_id,
+                arguments,
+                quantum_slots,
+            )
+            return
+        circuit.end_inline_region(
+            operation.label,
+            operation.region_id,
+            quantum_slots,
+        )
+
+    def _resolve_inline_quantum_slots(
+        self,
+        operation: InlineRegionBoundaryOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> tuple[int, ...]:
+        """Resolve a source boundary's exact scalar/vector quantum interface.
+
+        Args:
+            operation (InlineRegionBoundaryOperation): Boundary marker carrying
+                substituted source-call inputs or outputs.
+            qubit_map (QubitMap): Current semantic-to-physical qubit map.
+            bindings (dict[str, Any]): Active emit-time bindings.
+
+        Returns:
+            tuple[int, ...]: Exact physical slots in source operand order.
+
+        Raises:
+            EmitError: If any retained scalar, array, slice, or indexed value
+                cannot be resolved without guessing.
+        """
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            _expand_quantum_operands_to_phys,
+        )
+
+        slots: list[int] = []
+        for value in operation.quantum_values:
+            slots.extend(
+                _expand_quantum_operands_to_phys(
+                    self,
+                    value,
+                    qubit_map,
+                    bindings,
+                    operation="InlineRegionBoundaryOperation",
+                )
+            )
+        return tuple(slots)
+
+    def _resolve_inline_call_arguments(
+        self,
+        operation: InlineRegionBoundaryOperation,
+        bindings: dict[str, Any],
+    ) -> tuple[tuple[str, ScalarExpr], ...]:
+        """Resolve source marker scalar actuals using the emit-time resolver.
+
+        Args:
+            operation (InlineRegionBoundaryOperation): Start marker whose names
+                and operands are positionally aligned.
+            bindings (dict[str, Any]): Active emit-time bindings.
+
+        Returns:
+            tuple[tuple[str, ScalarExpr], ...]: Ordered formal-name and scalar
+                expression pairs.
+
+        Raises:
+            EmitError: If a retained operand has no scalar representation.
+        """
+        if len(operation.argument_names) != len(operation.argument_values):
+            raise EmitError("Inline source-call argument metadata is malformed")
+        result: list[tuple[str, ScalarExpr]] = []
+        for name, actual in zip(
+            operation.argument_names,
+            operation.argument_values,
+            strict=True,
+        ):
+            resolved = self._resolver.resolve_operand_for_binding(actual, bindings)
+            if resolved is None:
+                parameter_name = (
+                    actual.parameter_name() if actual.is_parameter() else actual.name
+                )
+                if parameter_name:
+                    resolved = ParameterExpr(parameter_name)
+            if resolved is None:
+                raise EmitError(f"Cannot resolve inline source-call argument {name!r}")
+            try:
+                expression = as_scalar_expr(resolved)
+            except TypeError as error:
+                raise EmitError(
+                    f"Inline source-call argument {name!r} is not scalar"
+                ) from error
+            result.append((name, expression))
+        return tuple(result)
+
+    def _blockvalue_to_gate(
+        self,
+        block_value: Any,
+        num_qubits: int,
+        bindings: dict[str, Any],
+        input_operands: list[Any] | None = None,
+        operation_name: str = "ControlledUOperation",
+    ) -> Any:
+        """Preserve a nested block name in target-neutral reusable calls.
+
+        Target emitters keep their established helper naming, while the
+        target-neutral circuit model retains the semantic name needed by
+        visualization and other structural consumers.
+
+        Args:
+            block_value (Any): Block-like object converted to a reusable call.
+            num_qubits (int): Number of qubits in the nested circuit.
+            bindings (dict[str, Any]): Active emit bindings.
+            input_operands (list[Any] | None): Optional call-site operands.
+                Defaults to ``None``.
+            operation_name (str): Operation name used in diagnostics. Defaults
+                to ``"ControlledUOperation"``.
+
+        Returns:
+            Any: Reusable circuit with a semantic name when one is available.
+        """
+        if input_operands is not None or operation_name != "ControlledUOperation":
+            gate = super()._blockvalue_to_gate(
+                block_value,
+                num_qubits,
+                bindings,
+                input_operands=input_operands,
+                operation_name=operation_name,
+            )
+        else:
+            # Preserve the historical hook contract for the default
+            # ControlledU path.
+            # Third-party subclasses and tests may override this method with
+            # the original three-positional-argument signature. Invoke and
+            # inverse calls still use the extended arguments because their
+            # nested classical parameters must be bound at the call site.
+            gate = super()._blockvalue_to_gate(
+                block_value,
+                num_qubits,
+                bindings,
+            )
+        if not self._preserve_semantic_call_names or not isinstance(
+            gate, ReusableCircuit
+        ):
+            return gate
+        semantic_name = getattr(block_value, "name", None)
+        updates: dict[str, Any] = {
+            "call_arguments": self._call_arguments(
+                block_value,
+                input_operands,
+                bindings,
+            )
+        }
+        if isinstance(semantic_name, str) and semantic_name:
+            updates["name"] = semantic_name
+        return dataclasses.replace(gate, **updates)
+
+    def _call_arguments(
+        self,
+        block_value: Any,
+        input_operands: list[Any] | None,
+        bindings: dict[str, Any],
+    ) -> tuple[tuple[str, ScalarExpr], ...]:
+        """Resolve ordered scalar call arguments for structural consumers.
+
+        Args:
+            block_value (Any): Nested callable body exposing formal inputs.
+            input_operands (list[Any] | None): Call-site actual arguments.
+            bindings (dict[str, Any]): Active emit-time bindings.
+
+        Returns:
+            tuple[tuple[str, ScalarExpr], ...]: Ordered formal-name and
+            target-neutral scalar-expression pairs. Unsupported object and
+            container parameters are omitted.
+        """
+        if not hasattr(block_value, "input_values"):
+            return ()
+        parameter_inputs = [
+            formal
+            for formal in block_value.input_values
+            if formal.type.is_classical() or formal.type.is_object()
+        ]
+        if input_operands is None:
+            pairs = [(formal, formal) for formal in parameter_inputs]
+        else:
+            parameter_operands = [
+                operand
+                for operand in input_operands
+                if hasattr(operand, "type")
+                and (operand.type.is_classical() or operand.type.is_object())
+            ]
+            pairs = pair_block_parameter_operands(
+                block_value,
+                parameter_operands,
+            )
+        result: list[tuple[str, ScalarExpr]] = []
+        for formal, actual in pairs:
+            if not formal.type.is_classical() or isinstance(formal, ArrayValue):
+                continue
+            resolved = self._resolver.resolve_operand_for_binding(actual, bindings)
+            if resolved is None and isinstance(actual, Value):
+                parameter_name = (
+                    actual.parameter_name() if actual.is_parameter() else actual.name
+                )
+                if parameter_name:
+                    resolved = ParameterExpr(parameter_name)
+            if resolved is None:
+                continue
+            try:
+                expression = as_scalar_expr(resolved)
+            except TypeError:
+                continue
+            if not isinstance(expression, _SCALAR_EXPR_TYPES):
+                continue
+            result.append((formal.name or "?", expression))
+        return tuple(result)
 
     def _runtime_operand(
         self,
@@ -532,25 +903,44 @@ class _SemanticCompositeEmitter:
 
         if not qubit_indices:
             return False
-        if op.gate_type is CompositeGateType.CUSTOM and op.effective_body() is None:
+        effective_body = op.effective_body()
+        opaque = op.gate_type is CompositeGateType.CUSTOM and effective_body is None
+        if opaque and not self._pass._allow_opaque_semantic_calls:
             return False
+        if opaque:
+            control_width, operand_widths = _opaque_call_shape(
+                op,
+                len(qubit_indices),
+            )
+        else:
+            control_width = 0
+            operand_widths = _semantic_operand_widths(op, len(qubit_indices))
+        call_arguments = self._pass._call_arguments(
+            effective_body,
+            op.parameters,
+            bindings,
+        )
         body_builder = CircuitBuilder(
-            len(qubit_indices),
+            len(qubit_indices) - control_width,
             0,
             name=op.target.name,
         )
-        emit_composite_fallback(
-            self._pass,
-            body_builder,
-            op,
-            list(range(len(qubit_indices))),
-            bindings,
-        )
+        if not opaque:
+            emit_composite_fallback(
+                self._pass,
+                body_builder,
+                op,
+                list(range(len(qubit_indices))),
+                bindings,
+            )
         circuit.append_call(
             ReusableCircuit(
                 body=body_builder.freeze(),
                 name=op.custom_name,
-                operand_widths=_semantic_operand_widths(op, len(qubit_indices)),
+                controls=control_width,
+                inverse=opaque and op.transform is CallTransform.INVERSE,
+                operand_widths=operand_widths,
+                call_arguments=call_arguments,
                 identity=CallableIdentity(
                     key=SemanticOpKey(
                         namespace=op.target.namespace,
@@ -563,6 +953,7 @@ class _SemanticCompositeEmitter:
                         op.attrs.get("semantic_arguments")
                     ),
                 ),
+                opaque=opaque,
             ),
             tuple(qubit_indices),
         )
@@ -598,6 +989,43 @@ def _semantic_operand_widths(
     return tuple(widths) if sum(widths) == flattened_width else ()
 
 
+def _opaque_call_shape(
+    operation: InvokeOperation,
+    flattened_width: int,
+) -> tuple[int, tuple[int, ...]]:
+    """Recover an opaque call's control width and target operand grouping.
+
+    Args:
+        operation (InvokeOperation): Bodyless semantic invocation.
+        flattened_width (int): Total resolved physical width.
+
+    Returns:
+        tuple[int, tuple[int, ...]]: Flattened leading control count and exact
+            target operand widths when statically recoverable.
+
+    Raises:
+        EmitError: If a dynamic aggregate control prevents an exact split
+            between control and target slots.
+    """
+    all_widths = _semantic_operand_widths(operation, flattened_width)
+    control_operands = operation.control_qubits
+    if all_widths:
+        control_count = len(control_operands)
+        return sum(all_widths[:control_count]), all_widths[control_count:]
+    if any(isinstance(operand, ArrayValue) for operand in control_operands):
+        raise EmitError(
+            "Opaque callable control width cannot be resolved exactly",
+            operation=f"InvokeOperation[{operation.target.name}]",
+        )
+    control_width = len(control_operands)
+    if control_width > flattened_width:
+        raise EmitError(
+            "Opaque callable control width exceeds its resolved arity",
+            operation=f"InvokeOperation[{operation.target.name}]",
+        )
+    return control_width, ()
+
+
 _SCALAR_EXPR_TYPES = (
     LiteralExpr,
     ParameterExpr,
@@ -606,6 +1034,72 @@ _SCALAR_EXPR_TYPES = (
     BinaryExpr,
     UnaryExpr,
 )
+
+
+def resolve_expval_qubit_slots(
+    qubits_value: Value | None,
+    quantum_segment_index: int,
+    compiled_quantum: list[CompiledQuantumSegment[CircuitProgram]],
+    bindings: dict[str, Any] | None = None,
+    parameters: list[str] | None = None,
+) -> tuple[int, ...]:
+    """Resolve an expectation-value operand to exact physical slots.
+
+    This exposes the same slice/root-address logic used by normal backend
+    emission without requiring a concrete Hamiltonian. Structural consumers
+    such as circuit drawing can therefore retain a symbolic ``<H>`` terminal
+    operation while still rejecting incomplete qubit mappings.
+
+    Args:
+        qubits_value (Value | None): Scalar or aggregate quantum operand.
+        quantum_segment_index (int): Compiled quantum segment providing the
+            state.
+        compiled_quantum (list[CompiledQuantumSegment[CircuitProgram]]):
+            Verified target-neutral quantum segments.
+        bindings (dict[str, Any] | None): Compile-time structural bindings.
+            Defaults to ``None``.
+        parameters (list[str] | None): Runtime parameter names. Defaults to
+            ``None``.
+
+    Returns:
+        tuple[int, ...]: Physical slots in observable operand order.
+
+    Raises:
+        EmitError: If the operand width or any physical slot cannot be
+            resolved exactly.
+        ValueError: If bindings and runtime parameters overlap.
+    """
+    if qubits_value is None:
+        raise EmitError(
+            "Expectation-value drawing has no quantum operand.",
+            operation="ExpvalSegment",
+        )
+
+    lowering_pass = CircuitLoweringPass(bindings, parameters)
+    mapping = lowering_pass._build_qubit_map(
+        qubits_value,
+        quantum_segment_index,
+        compiled_quantum,
+    )
+    if isinstance(qubits_value, ArrayValue):
+        width = len(qubits_value.get_element_uuids())
+        if not width and qubits_value.shape:
+            resolved = lowering_pass._resolver.resolve_int_value(
+                qubits_value.shape[0],
+                lowering_pass.bindings,
+            )
+            width = resolved if resolved is not None else 0
+    else:
+        width = 1
+    expected_indices = list(range(width))
+    if width <= 0 or sorted(mapping) != expected_indices:
+        raise EmitError(
+            "Expectation-value qubits could not be mapped to exact physical "
+            f"slots (expected logical indices {expected_indices}, resolved "
+            f"{sorted(mapping)}).",
+            operation="ExpvalSegment",
+        )
+    return tuple(mapping[index] for index in expected_indices)
 
 
 def _contains_classical_bit(expression: ScalarExpr) -> bool:
@@ -632,6 +1126,8 @@ def lower_circuit_plan(
     plan: ProgramPlan,
     bindings: dict[str, Any] | None = None,
     parameters: list[str] | None = None,
+    *,
+    preserve_semantic_call_names: bool = False,
 ) -> ExecutableProgram[CircuitProgram]:
     """Lower every quantum segment in a plan to immutable circuit IR.
 
@@ -645,6 +1141,8 @@ def lower_circuit_plan(
             Defaults to ``None``.
         parameters (list[str] | None): Runtime parameter names. Defaults to
             ``None``.
+        preserve_semantic_call_names (bool): Whether reusable calls retain
+            source block names for structural consumers. Defaults to ``False``.
 
     Returns:
         ExecutableProgram[CircuitProgram]: Execution structure containing
@@ -655,7 +1153,11 @@ def lower_circuit_plan(
             circuit-family instruction set.
         ValueError: If structural verification rejects a lowered circuit.
     """
-    lowered = CircuitLoweringPass(bindings, parameters).run(plan)
+    lowered = CircuitLoweringPass(
+        bindings,
+        parameters,
+        preserve_semantic_call_names=preserve_semantic_call_names,
+    ).run(plan)
     quantum_segments: list[CompiledQuantumSegment[CircuitProgram]] = []
     for segment in lowered.compiled_quantum:
         program = segment.circuit.freeze()
@@ -677,3 +1179,74 @@ def lower_circuit_plan(
         compiled_expval=lowered.compiled_expval,
         output_values=list(lowered.output_values),
     )
+
+
+def lower_circuit_plan_with_trace(
+    plan: ProgramPlan,
+    bindings: dict[str, Any] | None = None,
+    parameters: list[str] | None = None,
+    *,
+    preserve_semantic_call_names: bool = False,
+) -> tuple[
+    ExecutableProgram[CircuitProgram],
+    tuple[CircuitProgramTrace, ...],
+]:
+    """Lower a plan and retain lossless drawing-only source provenance.
+
+    This entry point is intentionally separate from :func:`lower_circuit_plan`:
+    SDK compilation keeps its existing builders, programs, and materializers,
+    while structural consumers opt into the immutable sidecar explicitly.
+
+    Args:
+        plan (ProgramPlan): Circuit-family execution plan.
+        bindings (dict[str, Any] | None): Compile-time parameter bindings.
+            Defaults to ``None``.
+        parameters (list[str] | None): Runtime parameter names. Defaults to
+            ``None``.
+        preserve_semantic_call_names (bool): Whether reusable calls retain
+            source names. Defaults to ``False``.
+
+    Returns:
+        tuple[ExecutableProgram[CircuitProgram], tuple[CircuitProgramTrace, ...]]:
+            Verified flat executable and one aligned immutable trace per
+            quantum segment.
+
+    Raises:
+        EmitError: If semantic operations cannot be lowered exactly.
+        RuntimeError: If trace region construction remains unbalanced.
+        ValueError: If circuit or trace structural verification fails.
+    """
+    lowered = CircuitLoweringPass(
+        bindings,
+        parameters,
+        preserve_semantic_call_names=preserve_semantic_call_names,
+        capture_draw_trace=True,
+        allow_opaque_semantic_calls=True,
+    ).run(plan)
+    quantum_segments: list[CompiledQuantumSegment[CircuitProgram]] = []
+    traces: list[CircuitProgramTrace] = []
+    for segment in lowered.compiled_quantum:
+        if not isinstance(segment.circuit, TracingCircuitBuilder):
+            raise RuntimeError("Drawing lowering did not create a tracing builder")
+        program = segment.circuit.freeze()
+        verify_circuit(program)
+        trace = segment.circuit.freeze_trace(program)
+        quantum_segments.append(
+            CompiledQuantumSegment(
+                segment=segment.segment,
+                circuit=program,
+                qubit_map=segment.qubit_map,
+                clbit_map=segment.clbit_map,
+                measurement_qubit_map=segment.measurement_qubit_map,
+                parameter_metadata=segment.parameter_metadata,
+            )
+        )
+        traces.append(trace)
+    executable = ExecutableProgram(
+        plan=lowered.plan,
+        compiled_quantum=quantum_segments,
+        compiled_classical=lowered.compiled_classical,
+        compiled_expval=lowered.compiled_expval,
+        output_values=list(lowered.output_values),
+    )
+    return executable, tuple(traces)

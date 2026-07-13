@@ -6,9 +6,12 @@ import numbers
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
     HasNestedOps,
     IfOperation,
     WhileOperation,
@@ -27,7 +30,13 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    TupleValue,
+    Value,
+    ValueLike,
+    resolve_root_qubit_address,
+)
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     map_merge_outputs,
@@ -35,6 +44,10 @@ from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import
     resolve_condition_address_detailed,
     resolve_if_condition,
 )
+from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+    _bind_for_items_iteration,
+)
+from qamomile.circuit.transpiler.passes.emit_support.loop_analyzer import LoopAnalyzer
 from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
     copy_array_element_aliases,
 )
@@ -46,6 +59,10 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
 from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
     ValueResolver,
     resolve_qubit_key,
+)
+from qamomile.circuit.transpiler.passes.eval_utils import (
+    FoldPolicy,
+    fold_classical_op,
 )
 
 if TYPE_CHECKING:
@@ -78,6 +95,7 @@ class ResourceAllocator:
         self._next_qubit_index: int = 0
         self._next_clbit_index: int = 0
         self._resolver = resolver or ValueResolver()
+        self._loop_analyzer = LoopAnalyzer()
 
     @staticmethod
     def _coerce_nonnegative_integral_size(value: Any) -> int | None:
@@ -106,6 +124,7 @@ class ResourceAllocator:
         bindings: dict[str, Any] | None = None,
         initial_qubit_map: QubitMap | None = None,
         initial_clbit_map: ClbitMap | None = None,
+        input_qubit_values: list[ValueLike] | None = None,
     ) -> tuple[QubitMap, ClbitMap]:
         """Allocate qubit and clbit indices for all operations.
 
@@ -131,19 +150,102 @@ class ResourceAllocator:
                 clbit address mapping. Same semantics as
                 ``initial_qubit_map`` but for classical bits. Defaults to
                 None.
+            input_qubit_values (list[ValueLike] | None): External quantum
+                entrypoint values to allocate before walking operations.
+                Aggregate values retain their element order. Defaults to
+                ``None``.
 
         Returns:
             tuple[QubitMap, ClbitMap]: ``(qubit_map, clbit_map)`` where
                 each maps ``QubitAddress`` to a physical index. If an
                 initial map was supplied, its entries are preserved
                 verbatim in the returned map.
+
+        Raises:
+            EmitError: If an external quantum aggregate or an operation's
+                resource requirements cannot be resolved exactly.
         """
         qubit_map: QubitMap = dict(initial_qubit_map) if initial_qubit_map else {}
         clbit_map: ClbitMap = dict(initial_clbit_map) if initial_clbit_map else {}
         self._next_qubit_index = max(qubit_map.values(), default=-1) + 1
         self._next_clbit_index = max(clbit_map.values(), default=-1) + 1
-        self._allocate_recursive(operations, qubit_map, clbit_map, bindings or {})
+        resolved_bindings = bindings or {}
+        self._allocate_input_qubit_values(
+            input_qubit_values or [],
+            qubit_map,
+            resolved_bindings,
+        )
+        self._allocate_recursive(
+            operations,
+            qubit_map,
+            clbit_map,
+            resolved_bindings,
+        )
         return qubit_map, clbit_map
+
+    def _allocate_input_qubit_values(
+        self,
+        values: list[ValueLike],
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Seed physical slots for quantum values entering a circuit fragment.
+
+        Args:
+            values (list[ValueLike]): External entrypoint values in source
+                order.
+            qubit_map (QubitMap): Mutable address-to-slot mapping.
+            bindings (dict[str, Any]): Compile-time values used to resolve
+                array widths.
+
+        Returns:
+            None: ``qubit_map`` and the allocator counter are updated in place.
+
+        Raises:
+            EmitError: If an external quantum aggregate is unsupported or its
+                width cannot be resolved exactly.
+        """
+        for value in values:
+            if isinstance(value, TupleValue):
+                self._allocate_input_qubit_values(
+                    list(value.elements),
+                    qubit_map,
+                    bindings,
+                )
+                continue
+            if not value.type.is_quantum():
+                continue
+            if isinstance(value, ArrayValue):
+                rank = len(value.shape)
+                if rank != 1:
+                    raise EmitError(
+                        f"Cannot allocate external rank-{rank} quantum register "
+                        f"{value.name!r}: circuit-fragment quantum inputs must "
+                        "be one-dimensional."
+                    )
+                size = self._resolve_size(value.shape[0], bindings)
+                if size is None:
+                    raise EmitError(
+                        f"Cannot resolve the size of external quantum register "
+                        f"{value.name!r}. Provide its concrete size before "
+                        "circuit-fragment lowering."
+                    )
+                for index in range(size):
+                    address = QubitAddress(value.uuid, index)
+                    if address not in qubit_map:
+                        qubit_map[address] = self._next_qubit_index
+                        self._next_qubit_index += 1
+                continue
+            if isinstance(value, Value):
+                address = QubitAddress(value.uuid)
+                if address not in qubit_map:
+                    qubit_map[address] = self._next_qubit_index
+                    self._next_qubit_index += 1
+                continue
+            raise EmitError(
+                f"Unsupported external quantum input {value.name!r} of type "
+                f"{type(value).__name__}."
+            )
 
     def _allocate_recursive(
         self,
@@ -173,7 +275,25 @@ class ResourceAllocator:
                 covers hand-built or deserialized IR.
         """
         for op in operations:
-            if isinstance(op, QInitOperation):
+            if isinstance(op, BinOp):
+                folded = fold_classical_op(
+                    op,
+                    lambda value: self._resolver.resolve_classical_value(
+                        value,
+                        bindings,
+                    ),
+                    self._resolver.parameters,
+                    FoldPolicy.EMIT_RESPECT_PARAMS,
+                )
+                if folded is not None and op.results:
+                    result_uuid = op.results[0].uuid
+                    set_value = getattr(bindings, "set_value", None)
+                    if callable(set_value):
+                        set_value(result_uuid, folded)
+                    else:
+                        bindings[result_uuid] = folded
+
+            elif isinstance(op, QInitOperation):
                 result = op.results[0]
                 if isinstance(result, ArrayValue):
                     # ``len()`` is read into a variable so zuban does not
@@ -259,7 +379,13 @@ class ResourceAllocator:
                         self._next_clbit_index += 1
 
             elif isinstance(op, GateOperation):
-                self._allocate_gate(op, qubit_map)
+                self._allocate_gate(op, qubit_map, bindings)
+
+            elif isinstance(op, ForItemsOperation):
+                self._allocate_for_items(op, qubit_map, clbit_map, bindings)
+
+            elif isinstance(op, ForOperation):
+                self._allocate_for(op, qubit_map, clbit_map, bindings)
 
             elif isinstance(op, IfOperation):
                 resolved = resolve_if_condition(op.condition, bindings)
@@ -479,6 +605,135 @@ class ResourceAllocator:
             op, qubit_map, clbit_map, bindings=bindings, resolver=self._resolver
         )
 
+    def _allocate_for(
+        self,
+        op: ForOperation,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Allocate a finite loop with the same concrete indices as emission.
+
+        A loop body may address ``q[i]`` or a classical expression such as
+        ``q[i + 1]``. Walking an unrolled body once without binding ``i`` loses
+        the root-wire alias and can allocate a phantom scalar wire for a later
+        gate result. Allocation therefore mirrors the emission strategy: loops
+        that require unrolling are visited at their concrete indices, while a
+        backend-native loop is visited once. Repeated operation UUIDs are
+        aliases, so fresh qubits in an unrolled body remain one reusable
+        physical allocation rather than multiplying by the iteration count.
+
+        Args:
+            op (ForOperation): Finite loop to inspect.
+            qubit_map (QubitMap): Mutable qubit address mapping.
+            clbit_map (ClbitMap): Mutable classical-bit address mapping.
+            bindings (dict[str, Any]): Active compile-time bindings.
+
+        Returns:
+            None: Resource maps are updated in place.
+
+        Raises:
+            ValueError: If a resolved loop step is zero.
+        """
+        operands = op.operands
+        start = (
+            self._resolver.resolve_int_value(operands[0], bindings)
+            if len(operands) > 0
+            else 0
+        )
+        stop = (
+            self._resolver.resolve_int_value(operands[1], bindings)
+            if len(operands) > 1
+            else 1
+        )
+        step = (
+            self._resolver.resolve_int_value(operands[2], bindings)
+            if len(operands) > 2
+            else 1
+        )
+        indices: range | None = None
+        if start is not None and stop is not None and step is not None:
+            indices = range(start, stop, step)
+            if len(indices) == 0:
+                return
+
+        if not self._loop_analyzer.should_unroll(op, bindings):
+            self._allocate_recursive(
+                op.operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+            )
+            return
+
+        if indices is None or op.loop_var_value is None:
+            self._allocate_recursive(
+                op.operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+            )
+            return
+
+        for index in indices:
+            loop_bindings = bindings.copy()
+            push_loop_var = getattr(loop_bindings, "push_loop_var", None)
+            if callable(push_loop_var):
+                push_loop_var(
+                    op.loop_var_value.uuid,
+                    index,
+                    display_name=op.loop_var or None,
+                )
+            else:
+                loop_bindings[op.loop_var_value.uuid] = index
+            self._allocate_recursive(
+                op.operations,
+                qubit_map,
+                clbit_map,
+                loop_bindings,
+            )
+
+    def _allocate_for_items(
+        self,
+        op: ForItemsOperation,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Allocate only concrete iterations of a for-items operation.
+
+        Args:
+            op (ForItemsOperation): Dictionary iteration to inspect.
+            qubit_map (QubitMap): Mutable qubit address mapping.
+            clbit_map (ClbitMap): Mutable classical-bit address mapping.
+            bindings (dict[str, Any]): Active compile-time bindings.
+
+        Returns:
+            None: Resource maps are updated in place.
+        """
+        if not op.operands:
+            return
+
+        entries = self._resolver.resolve_dict_entries(op.operands[0], bindings)
+        if entries is None:
+            self._allocate_recursive(
+                op.operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+            )
+            return
+
+        for key, value in entries:
+            loop_bindings = bindings.copy()
+            _bind_for_items_iteration(loop_bindings, op, key, value)
+            self._allocate_recursive(
+                op.operations,
+                qubit_map,
+                clbit_map,
+                loop_bindings,
+            )
+
     def _remap_static_merge_outputs(
         self,
         op: IfOperation,
@@ -582,8 +837,19 @@ class ResourceAllocator:
         self,
         op: GateOperation,
         qubit_map: QubitMap,
+        bindings: dict[str, Any],
     ) -> None:
-        """Allocate resources for a GateOperation."""
+        """Alias every gate input and result to its physical resource.
+
+        Args:
+            op (GateOperation): Unitary operation whose qubits are preserved.
+            qubit_map (QubitMap): Mutable qubit address mapping.
+            bindings (dict[str, Any]): Active bindings, including concrete
+                loop-variable and intermediate-expression values.
+
+        Returns:
+            None: ``qubit_map`` is updated in place.
+        """
         # GateOperation represents a unitary gate: qubit count is preserved.
         qubit_ops = op.qubit_operands
         assert len(op.results) == len(qubit_ops), (
@@ -602,7 +868,21 @@ class ResourceAllocator:
         # physical qubit for ``q[1]``.
         for operand in qubit_ops:
             operand_addr = QubitAddress(operand.uuid)
-            if operand_addr not in qubit_map:
+            dynamic_index = operand.parent_array is not None and bool(
+                operand.element_indices
+            )
+            resolved_index = (
+                self._resolver.resolve_qubit_index(
+                    operand,
+                    qubit_map,
+                    bindings,
+                )
+                if dynamic_index
+                else None
+            )
+            if resolved_index is not None:
+                qubit_map[operand_addr] = resolved_index
+            elif operand_addr not in qubit_map:
                 chain_addr = self._resolve_root_qubit_address(operand)
                 if chain_addr is not None:
                     assert chain_addr in qubit_map, (
@@ -626,11 +906,10 @@ class ResourceAllocator:
         # Phase 2: Map each result to its corresponding qubit operand (1:1)
         for i, result in enumerate(op.results):
             result_addr = QubitAddress(result.uuid)
-            if result_addr not in qubit_map:
-                operand = qubit_ops[i]
-                operand_addr = QubitAddress(operand.uuid)
-                if operand_addr in qubit_map:
-                    qubit_map[result_addr] = qubit_map[operand_addr]
+            operand = qubit_ops[i]
+            operand_addr = QubitAddress(operand.uuid)
+            if operand_addr in qubit_map:
+                qubit_map[result_addr] = qubit_map[operand_addr]
 
     def _allocate_qubit_list(
         self,

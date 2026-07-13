@@ -11,6 +11,10 @@ from qamomile.circuit.frontend.param_validation import (
 )
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.transpiler.circuit_planner import (
+    CircuitPlanningHooks,
+    CircuitPlanningPipeline,
+)
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.config import TranspilerConfig
 from qamomile.circuit.transpiler.errors import (
@@ -545,16 +549,23 @@ class Transpiler(ABC, Generic[T]):
             QamomileCompileError: If validation, partial evaluation, or
                 segmentation rejects the program.
         """
-        affine = self.inline(prepared.entrypoint)
-        affine = self.unroll_recursion(affine, bindings)
-        validated = self.affine_validate(affine)
-        partially_evaluated = self.partial_eval(validated, bindings)
-        partially_evaluated = self.slice_borrow_check(partially_evaluated)
-        partially_evaluated = self.strip_slice_ops(partially_evaluated)
-        analyzed = self.analyze(partially_evaluated)
-        analyzed = self.classical_lowering(analyzed)
-        analyzed = self.validate_symbolic_shapes(analyzed)
-        return self.plan(analyzed)
+        stage_hooks = CircuitPlanningHooks(
+            inline=self.inline,
+            unroll_recursion=self.unroll_recursion,
+            affine_validate=self.affine_validate,
+            partial_eval=self.partial_eval,
+            slice_borrow_check=self.slice_borrow_check,
+            strip_slice_ops=self.strip_slice_ops,
+            analyze=self.analyze,
+            classical_lowering=self.classical_lowering,
+            validate_symbolic_shapes=self.validate_symbolic_shapes,
+            plan=self.plan,
+        )
+        pipeline = CircuitPlanningPipeline(
+            stage_hooks=stage_hooks,
+            max_unroll_depth=self.MAX_UNROLL_DEPTH,
+        )
+        return pipeline.run(prepared, bindings)
 
     # === Convenience Methods ===
 

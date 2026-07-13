@@ -1,7 +1,7 @@
 """Matplotlib-based circuit visualization.
 
-This module provides the MatplotlibDrawer facade that orchestrates
-circuit analysis, layout computation, and rendering.
+This module provides the MatplotlibDrawer facade that orchestrates exact
+circuit lowering, layout computation, and rendering.
 """
 
 from __future__ import annotations
@@ -12,14 +12,22 @@ from matplotlib.figure import Figure
 
 from qamomile.circuit.ir.block import Block, BlockKind
 
-from .analyzer import CircuitAnalyzer
+from .circuit_adapter import circuit_program_to_visual_ir
+from .drawing_compiler import (
+    compile_block_for_drawing,
+    compile_qkernel_for_drawing,
+)
 from .layout import CircuitLayoutEngine
 from .renderer import MatplotlibRenderer
 from .style import DEFAULT_STYLE, CircuitStyle
+from .visual_ir import VisualCircuit
 
 
 def _prepare_graph_for_visualization(graph: Block) -> Block:
-    """Apply visualization-only IR preparation before analysis.
+    """Apply visualization-only IR preparation before legacy analysis.
+
+    This compatibility helper remains for direct ``CircuitAnalyzer`` tests.
+    Public drawing uses the verified circuit-planning pipeline instead.
 
     Args:
         graph (Block): Freshly traced block to visualize.
@@ -27,10 +35,7 @@ def _prepare_graph_for_visualization(graph: Block) -> Block:
     Returns:
         Block: For ``TRACED``, ``AFFINE``, and ``HIERARCHICAL`` graphs, a graph
             with compile-time resolvable ``IfOperation`` nodes lowered to their
-            selected branch while runtime/symbolic conditions remain available
-            for branch-box rendering. ``ANALYZED`` graphs are returned
-            unchanged because compile-time lowering must run before dependency
-            analysis.
+            selected branch. ``ANALYZED`` graphs are returned unchanged.
 
     Raises:
         ValidationError: If compile-time if lowering rejects the input graph.
@@ -47,28 +52,43 @@ def _prepare_graph_for_visualization(graph: Block) -> Block:
     raise ValueError(f"Unknown block kind for visualization: {graph.kind}")
 
 
-class MatplotlibDrawer:
-    """Matplotlib-based circuit drawer with Qiskit-style layout.
+def _render_visual_circuit(
+    circuit: VisualCircuit,
+    style: CircuitStyle,
+) -> Figure:
+    """Lay out and render a completed visual circuit.
 
-    This drawer produces static matplotlib figures showing quantum circuits.
-    It supports two modes:
-    - Block mode (inline=False): Shows callable invocations as boxes
-    - Inline mode (inline=True): Expands inline callable contents
+    Args:
+        circuit (VisualCircuit): Renderer-ready visual representation.
+        style (CircuitStyle): Drawing geometry and color configuration.
+
+    Returns:
+        Figure: Rendered Matplotlib figure.
+    """
+    engine = CircuitLayoutEngine(style)
+    layout = engine.compute_layout(circuit)
+    renderer = MatplotlibRenderer(style)
+    return renderer.render(circuit, layout)
+
+
+class MatplotlibDrawer:
+    """Matplotlib drawer backed by exact target-neutral circuit lowering.
+
+    Both direct ``Block`` input and :meth:`draw_kernel` pass through the same
+    verified ``CircuitProgram`` boundary. Source qkernel regions and callable
+    invocations are boxed by default; safe bodies can be expanded with
+    ``inline=True``.
     """
 
-    def __init__(self, graph: Block, style: CircuitStyle | None = None):
+    def __init__(self, graph: Block, style: CircuitStyle | None = None) -> None:
         """Initialize the drawer.
 
         Args:
             graph (Block): Computation graph to visualize.
             style (CircuitStyle | None): Visual style configuration. Uses
                 DEFAULT_STYLE if None.
-
-        Raises:
-            ValidationError: If compile-time if lowering rejects ``graph``.
-            ValueError: If ``graph`` has an unknown ``BlockKind``.
         """
-        self.graph = _prepare_graph_for_visualization(graph)
+        self.graph = graph
         self.style = style or DEFAULT_STYLE
 
     def draw(
@@ -78,44 +98,47 @@ class MatplotlibDrawer:
         expand_composite: bool = False,
         inline_depth: int | None = None,
         fold_ifs: bool = False,
+        fold_whiles: bool = False,
     ) -> Figure:
         """Generate a matplotlib Figure of the circuit.
 
         Args:
-            inline (bool): If True, expand inline callable contents. If False,
-                show calls as boxes.
-            fold_loops (bool): If True (default), display ForOperation as
-                blocks instead of unrolling. If False, expand loops and show
-                all iterations.
-            expand_composite (bool): If True, expand boxed InvokeOperation
-                bodies. If False (default), show them as boxes.
-            inline_depth (int | None): Maximum nesting depth for inline
-                expansion. None means unlimited. Affects inline calls,
-                ControlledU, and boxed InvokeOperation nodes.
-            fold_ifs (bool): If True, display IfOperation as folded summary
-                blocks. If False (default), show if/else branches side by side.
+            inline (bool): Whether retained source qkernel regions and safe
+                direct reusable-circuit calls should be expanded. Defaults to
+                ``False``.
+            fold_loops (bool): Whether concrete for loops should be folded.
+                Defaults to ``True``.
+            expand_composite (bool): Compatibility alias for ``inline``.
+                Defaults to ``False``.
+            inline_depth (int | None): Maximum nested source/reusable-call
+                expansion depth. ``None`` permits arbitrary finite nesting.
+            fold_ifs (bool): Whether runtime if regions should be folded.
+                Defaults to ``False``.
+            fold_whiles (bool): Whether runtime while regions should be
+                folded. Defaults to ``False``.
 
         Returns:
             Figure: Matplotlib figure object.
+
+        Raises:
+            CircuitDrawingError: If structural quantum addressing cannot be
+                resolved to one exact verified circuit.
         """
-        analyzer = CircuitAnalyzer(
-            self.graph,
-            self.style,
-            inline=inline,
-            fold_loops=fold_loops,
-            expand_composite=expand_composite,
+        drawing = compile_block_for_drawing(self.graph)
+        visual_circuit = circuit_program_to_visual_ir(
+            drawing.circuit,
+            trace=drawing.trace,
+            style=self.style,
+            qubit_names=drawing.qubit_names,
+            output_names=drawing.output_names,
+            expectation_value_qubits=drawing.expectation_value_qubits,
+            expand_calls=inline or expand_composite,
             inline_depth=inline_depth,
+            fold_loops=fold_loops,
             fold_ifs=fold_ifs,
+            fold_whiles=fold_whiles,
         )
-        qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(self.graph)
-
-        vc = analyzer.build_visual_ir(self.graph, qubit_map, qubit_names, num_qubits)
-
-        engine = CircuitLayoutEngine(self.style)
-        layout = engine.compute_layout(vc)
-
-        renderer = MatplotlibRenderer(self.style)
-        return renderer.render(vc, layout)
+        return _render_visual_circuit(visual_circuit, self.style)
 
     @classmethod
     def draw_kernel(
@@ -125,40 +148,59 @@ class MatplotlibDrawer:
         inline: bool = False,
         fold_loops: bool = True,
         fold_ifs: bool = False,
+        fold_whiles: bool = False,
         expand_composite: bool = False,
         inline_depth: int | None = None,
         style: CircuitStyle | None = None,
         **kwargs: Any,
     ) -> Figure:
-        """Draw a QKernel, handling Vector[Qubit] params with integer sizes.
+        """Draw a qkernel through verified target-neutral circuit lowering.
 
-        For kernels with ``Vector[Qubit]`` parameters, pass an integer to
-        specify the array size (e.g., ``inputs=3`` for a 3-qubit vector).
+        Scalar and vector quantum inputs remain external circuit wires. For a
+        ``Vector[Qubit]`` parameter, pass an integer size (for example,
+        ``inputs=3`` for a three-qubit vector).
 
         Args:
-            kernel (Any): A QKernel instance to visualize.
-            inline (bool): If True, expand inline callable contents.
-            fold_loops (bool): If True (default), display ForOperation as
-                blocks.
-            fold_ifs (bool): If True, display IfOperation as folded summary
-                blocks. If False (default), show if/else branches side by side.
-            expand_composite (bool): If True, expand boxed InvokeOperation
-                bodies.
-            inline_depth (int | None): Maximum nesting depth for inline
-                expansion.
+            kernel (Any): qkernel object to visualize.
+            inline (bool): Whether retained source qkernel regions and safe
+                direct reusable-circuit calls should be expanded. Defaults to
+                ``False``.
+            fold_loops (bool): Whether concrete for loops should be folded.
+                Defaults to ``True``.
+            fold_ifs (bool): Whether runtime if regions should be folded.
+                Defaults to ``False``.
+            fold_whiles (bool): Whether runtime while regions should be
+                folded. Defaults to ``False``.
+            expand_composite (bool): Compatibility alias for ``inline``.
+            inline_depth (int | None): Maximum nested source/reusable-call
+                expansion depth.
             style (CircuitStyle | None): Visual style configuration.
-            **kwargs (Any): Concrete values for kernel arguments. For
+            **kwargs (Any): Concrete values for qkernel arguments. For
                 Vector[Qubit] parameters, pass an integer size.
 
         Returns:
             Figure: Matplotlib figure object.
+
+        Raises:
+            CircuitDrawingError: If structural quantum addressing cannot be
+                resolved to one exact verified circuit.
+            TypeError: If a draw-time binding has an invalid frontend type.
+            ValueError: If a required quantum-register size or classical
+                structural binding is missing or invalid.
         """
-        graph = kernel._build_graph_for_visualization(**kwargs)
-        drawer = cls(graph, style)
-        return drawer.draw(
-            inline=inline,
+        drawing = compile_qkernel_for_drawing(kernel, kwargs)
+        resolved_style = style or DEFAULT_STYLE
+        visual_circuit = circuit_program_to_visual_ir(
+            drawing.circuit,
+            trace=drawing.trace,
+            style=resolved_style,
+            qubit_names=drawing.qubit_names,
+            output_names=drawing.output_names,
+            expectation_value_qubits=drawing.expectation_value_qubits,
+            expand_calls=inline or expand_composite,
+            inline_depth=inline_depth,
             fold_loops=fold_loops,
             fold_ifs=fold_ifs,
-            expand_composite=expand_composite,
-            inline_depth=inline_depth,
+            fold_whiles=fold_whiles,
         )
+        return _render_visual_circuit(visual_circuit, resolved_style)
