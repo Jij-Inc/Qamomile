@@ -367,8 +367,10 @@ class ControlledGate:
             global_phase,
             caller="control(): global_phase",
         )
-        if phase.is_constant() and phase.get_const() == 0.0:
-            return None
+        if phase.is_constant():
+            concrete = phase.get_const()
+            if concrete is not None and not float(concrete):
+                return None
         return phase
 
     @staticmethod

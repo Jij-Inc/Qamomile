@@ -594,6 +594,14 @@ def _verify_program_phase(
             )
         if capabilities.global_phase.standalone_mode is StandalonePhaseMode.DISCARD:
             return
+        if program.num_qubits < capabilities.global_phase.min_qubits:
+            raise TargetCapabilityError(
+                f"Target '{capabilities.name}' requires at least "
+                f"{capabilities.global_phase.min_qubits} qubit to preserve a "
+                "nonzero standalone global phase",
+                target=capabilities.name,
+                operation="global phase",
+            )
         scalar_capabilities = capabilities.global_phase.scalars
         context = "global phase"
     _check_scalar(

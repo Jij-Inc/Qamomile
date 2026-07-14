@@ -727,7 +727,7 @@ class TestTargetLegalityVerification:
 
         assert capabilities.global_phase is not None
         assert capabilities.global_phase.standalone_mode is StandalonePhaseMode.PRESERVE
-        with pytest.raises(TargetCapabilityError, match="non-linear runtime"):
+        with pytest.raises(TargetCapabilityError, match="non-linear in runtime"):
             verify_target_legal(legalized, capabilities)
 
     def test_preserved_phase_can_require_a_physical_carrier_qubit(self):

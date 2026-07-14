@@ -135,7 +135,8 @@ class CudaqMaterializer:
             pauli_time=numeric,
             global_phase=GlobalPhaseCapabilities(
                 scalars=numeric,
-                standalone_mode=StandalonePhaseMode.DISCARD,
+                standalone_mode=StandalonePhaseMode.PRESERVE,
+                min_qubits=1,
             ),
             generic_calls=CallTransformCapabilities(
                 supports_power=True,
@@ -189,6 +190,14 @@ class CudaqMaterializer:
         wires = {wire: index for index, wire in enumerate(program.input_wires)}
         parameters = {name: emitter.create_parameter(name) for name in parameter_names}
         measurements: dict[int, int] = {}
+        phase = _program_global_phase(program, parameters, {}, emitter)
+        if not _is_materialized_zero(phase):
+            if program.num_qubits < 1:
+                raise EmitError(
+                    "CUDA-Q requires at least 1 qubit to preserve a nonzero "
+                    "standalone global phase"
+                )
+            emitter.emit_global_phase(artifact, 0, phase)
         _emit_region(
             program.operations,
             artifact,
@@ -198,9 +207,6 @@ class CudaqMaterializer:
             {},
             emitter,
         )
-        # CUDA-Q helpers cannot carry an abstract circuit-global phase. Public
-        # parameters were registered from the manifest above, so discard the
-        # standalone expression without evaluating it.
         emitter.set_parametric(bool(parameters))
         artifact = emitter.finalize(artifact, mode)
         return MaterializedCircuit(

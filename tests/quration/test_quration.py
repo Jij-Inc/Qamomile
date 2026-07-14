@@ -6,6 +6,7 @@ import importlib.util
 import math
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -201,6 +202,9 @@ def test_quration_gate_decompositions_preserve_global_factors(
     calls: list[tuple[object, float, float]] = []
 
     class _Intrinsic:
+        def __getattr__(self, name: str) -> Any:
+            return lambda *args: None
+
         @staticmethod
         def global_phase(builder: object, angle: float, precision: float) -> None:
             calls.append((builder, angle, precision))

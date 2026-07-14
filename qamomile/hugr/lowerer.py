@@ -288,7 +288,12 @@ def _lower_module(program: PreparedModule, plan: HugrCompilationPlan) -> Any:
         bindings=program.bindings,
     )
 
-    extensions = [tket_exts.quantum(), tket_exts.rotation(), tket_exts.bool()]
+    extensions = [
+        tket_exts.quantum(),
+        tket_exts.rotation(),
+        tket_exts.bool(),
+        tket_exts.global_phase(),
+    ]
     return Package([module.hugr], extensions)
 
 
@@ -541,10 +546,7 @@ def _lower_operation(
         case GateOperation():
             _lower_gate(operation, builder, environment, live_qubits)
         case GlobalPhaseOperation():
-            # HUGR has no artifact-level U(1) value. At an entrypoint this is
-            # deliberately a projective no-op; transformed uses are rejected
-            # before their body is traversed below.
-            return
+            _lower_global_phase(operation.phase, builder, environment)
         case ControlledUOperation() | InverseBlockOperation():
             _lower_transformed_call(
                 operation, builder, environment, live_qubits, functions
@@ -915,13 +917,14 @@ def _lower_if(
         true_environment,
     )
     true_live = dict(live_qubits)
-    _rebind_captured_live_wires(
+    true_parent_keys = set(true_live)
+    true_region_keys = _rebind_captured_live_wires(
         captured_ids,
         environment,
         true_environment,
         true_live,
     )
-    true_incoming_keys = set(true_live)
+    true_protected_keys = true_parent_keys - true_region_keys
     for nested in operation.true_operations:
         _lower_operation(
             nested,
@@ -942,7 +945,7 @@ def _lower_if(
     _free_region_local_qubits(
         true_builder,
         true_live,
-        true_incoming_keys,
+        true_protected_keys,
         true_outputs,
     )
     true_builder.set_outputs(*true_outputs)
@@ -955,13 +958,14 @@ def _lower_if(
         false_environment,
     )
     false_live = dict(live_qubits)
-    _rebind_captured_live_wires(
+    false_parent_keys = set(false_live)
+    false_region_keys = _rebind_captured_live_wires(
         captured_ids,
         environment,
         false_environment,
         false_live,
     )
-    false_incoming_keys = set(false_live)
+    false_protected_keys = false_parent_keys - false_region_keys
     for nested in operation.false_operations:
         _lower_operation(
             nested,
@@ -982,7 +986,7 @@ def _lower_if(
     _free_region_local_qubits(
         false_builder,
         false_live,
-        false_incoming_keys,
+        false_protected_keys,
         false_outputs,
     )
     false_builder.set_outputs(*false_outputs)
@@ -994,8 +998,9 @@ def _lower_if(
     outputs = [
         true_builder.conditional_node.out(index) for index in range(output_count)
     ]
-    for uuid in captured_ids:
-        live_qubits.pop(uuid, None)
+    for key, wire in list(live_qubits.items()):
+        if any(wire == captured_wire for captured_wire in captured):
+            live_qubits.pop(key)
     output_index = 0
     for merge in operation.iter_merges():
         width = _array_size(merge.result) if isinstance(merge.result, ArrayValue) else 1
@@ -1708,7 +1713,7 @@ def _flatten_environment_values(
 def _free_region_local_qubits(
     builder: Any,
     live_qubits: dict[str, Any],
-    incoming_keys: set[str],
+    protected_parent_keys: set[str],
     output_wires: list[Any],
 ) -> None:
     """Free live quantum wires created in a nested region but not yielded.
@@ -1716,17 +1721,19 @@ def _free_region_local_qubits(
     Args:
         builder (Any): HUGR region builder receiving ``qFree`` operations.
         live_qubits (dict[str, Any]): Region-local live-resource mapping.
-        incoming_keys (set[str]): Live-resource keys inherited from the parent
-            before lowering the region body.
+        protected_parent_keys (set[str]): Parent-owned live-resource keys that
+            did not cross into this region and therefore cannot be freed here.
         output_wires (list[Any]): Region outputs that must remain live.
     """
     from tket_exts import quantum
 
     protected = list(output_wires)
-    protected.extend(wire for key, wire in live_qubits.items() if key in incoming_keys)
+    protected.extend(
+        wire for key, wire in live_qubits.items() if key in protected_parent_keys
+    )
     freed: list[Any] = []
     for key, wire in list(live_qubits.items()):
-        if key in incoming_keys or any(wire == output for output in protected):
+        if key in protected_parent_keys or any(wire == output for output in protected):
             continue
         live_qubits.pop(key)
         if any(wire == previous for previous in freed):
@@ -1770,7 +1777,7 @@ def _rebind_captured_live_wires(
     parent_environment: dict[str, Any],
     region_environment: dict[str, Any],
     live_qubits: dict[str, Any],
-) -> None:
+) -> set[str]:
     """Point region live-resource entries at their conditional input wires.
 
     ``live_qubits`` is copied from the parent so its keys retain semantic
@@ -1784,9 +1791,13 @@ def _rebind_captured_live_wires(
         parent_environment (dict[str, Any]): Parent UUID-to-wire mapping.
         region_environment (dict[str, Any]): Region mapping after input binding.
         live_qubits (dict[str, Any]): Mutable region live-resource mapping.
+
+    Returns:
+        set[str]: Live-resource keys rebound to region-owned input wires.
     """
     parent_wires = _flatten_environment_values(value_ids, parent_environment)
     region_wires = _flatten_environment_values(value_ids, region_environment)
+    rebound_keys: set[str] = set()
     for key, candidate in list(live_qubits.items()):
         for parent_wire, region_wire in zip(
             parent_wires,
@@ -1795,7 +1806,9 @@ def _rebind_captured_live_wires(
         ):
             if candidate == parent_wire:
                 live_qubits[key] = region_wire
+                rebound_keys.add(key)
                 break
+    return rebound_keys
 
 
 def _validate_live_quantum_yields(
@@ -2349,7 +2362,6 @@ def _lower_gate(
         GateOperationType.RX,
         GateOperationType.RY,
         GateOperationType.RZ,
-        GateOperationType.P,
     }:
         assert operation.theta is not None
         rotation = _rotation_wire(
@@ -2362,9 +2374,17 @@ def _lower_gate(
             GateOperationType.RX: quantum.Rx,
             GateOperationType.RY: quantum.Ry,
             GateOperationType.RZ: quantum.Rz,
-            GateOperationType.P: quantum.Rz,
         }[gate_type]
         outputs = list(builder.add_op(rotation_op, qubits[0], rotation))
+    elif gate_type is GateOperationType.P:
+        assert operation.theta is not None
+        outputs = _lower_phase_on_controls(
+            operation.theta,
+            builder,
+            environment,
+            qubits,
+            direction=-1.0 if inverse else 1.0,
+        )
     elif gate_type is GateOperationType.SWAP:
         left, right = qubits
         left, right = builder.add_op(quantum.CX, left, right)
@@ -2385,23 +2405,13 @@ def _lower_gate(
         outputs = [left, right]
     elif gate_type is GateOperationType.CP:
         assert operation.theta is not None
-        control, target = qubits
-        direction = -1.0 if inverse else 1.0
-        half = _rotation_wire(
-            builder,
+        outputs = _lower_phase_on_controls(
             operation.theta,
-            environment,
-            scale=0.5 * direction,
-        )
-        [control] = builder.add_op(quantum.Rz, control, half)
-        full = _rotation_wire(
             builder,
-            operation.theta,
             environment,
-            scale=direction,
+            qubits,
+            direction=-1.0 if inverse else 1.0,
         )
-        control, target = builder.add_op(quantum.CRz, control, target, full)
-        outputs = [control, target]
     else:
         raise EmitError(f"Unsupported HUGR gate: {gate_type}")
     _replace_quantum_results(
@@ -2456,6 +2466,102 @@ def _rotation_wire(
     return result
 
 
+def _lower_global_phase(
+    phase: Value,
+    builder: Any,
+    environment: dict[str, Any],
+    scale: float = 1.0,
+) -> None:
+    """Emit a native zero-qubit TKET global-phase operation.
+
+    Args:
+        phase (Value): Radian-valued phase angle.
+        builder (Any): HUGR dataflow builder.
+        environment (dict[str, Any]): UUID-to-wire mapping.
+        scale (float): Numeric factor applied before emission. Defaults to
+            one.
+    """
+    import tket_exts
+
+    rotation = _rotation_wire(builder, phase, environment, scale=scale)
+    operation = tket_exts.global_phase().get_op("global_phase").instantiate()
+    builder.add_op(operation, rotation)
+
+
+def _lower_phase_on_controls(
+    phase: Value,
+    builder: Any,
+    environment: dict[str, Any],
+    controls: list[Any],
+    direction: float = 1.0,
+) -> list[Any]:
+    """Emit an exact phase conditioned on one or two control wires.
+
+    A one-wire projector phase is ``P(θ) = exp(iθ/2) Rz(θ)``. With two
+    wires, ``CP(θ) = exp(iθ/4) Rz(θ/2) CRz(θ)``. Keeping both decompositions
+    here prevents the zero-qubit factor from diverging between primitive and
+    transformed-call lowering.
+
+    Args:
+        phase (Value): Radian-valued phase angle.
+        builder (Any): HUGR dataflow builder.
+        environment (dict[str, Any]): UUID-to-wire mapping.
+        controls (list[Any]): One or two existing control wires.
+        direction (float): Positive for the phase and negative for its
+            inverse. Defaults to one.
+
+    Returns:
+        list[Any]: Updated linear control wires.
+
+    Raises:
+        EmitError: If the current HUGR lowering profile cannot synthesize the
+            requested control width.
+    """
+    from tket_exts import quantum
+
+    if len(controls) == 1:
+        _lower_global_phase(
+            phase,
+            builder,
+            environment,
+            scale=0.5 * direction,
+        )
+        rotation = _rotation_wire(
+            builder,
+            phase,
+            environment,
+            scale=direction,
+        )
+        [control] = builder.add_op(quantum.Rz, controls[0], rotation)
+        return [control]
+    if len(controls) == 2:
+        _lower_global_phase(
+            phase,
+            builder,
+            environment,
+            scale=0.25 * direction,
+        )
+        half = _rotation_wire(
+            builder,
+            phase,
+            environment,
+            scale=0.5 * direction,
+        )
+        [left] = builder.add_op(quantum.Rz, controls[0], half)
+        full = _rotation_wire(
+            builder,
+            phase,
+            environment,
+            scale=direction,
+        )
+        left, right = builder.add_op(quantum.CRz, left, controls[1], full)
+        return [left, right]
+    raise EmitError(
+        "HUGR phase synthesis supports exactly one or two coherent controls",
+        operation="GlobalPhaseOperation",
+    )
+
+
 def _lower_pauli_evolution(
     operation: PauliEvolveOp,
     builder: Any,
@@ -2500,6 +2606,14 @@ def _lower_pauli_evolution(
     _validate_pauli_evolution_hamiltonian(hamiltonian)
 
     qubits = list(environment[qubit_operand.uuid])
+    constant_value = float(hamiltonian.constant.real)
+    if constant_value:
+        _lower_global_phase(
+            operation.gamma,
+            builder,
+            environment,
+            scale=-constant_value,
+        )
     for operators, coefficient in hamiltonian:
         if not operators or is_close_zero(abs(coefficient)):
             continue
@@ -2806,12 +2920,8 @@ def _lower_transformed_call(
         display_name = operation.target.name
     if body is None:
         raise EmitError(f"Transformed HUGR callable {display_name!r} is opaque")
-    if (controls or inverse) and _block_contains_global_phase(body):
-        raise EmitError(
-            "HUGR does not yet support global phase inside controlled or "
-            "inverse reusable calls",
-            operation="GlobalPhaseOperation",
-        )
+    body = InlinePass().run(body)
+    power = _resolve_transformed_power(operation, environment)
     local = dict(environment)
     body_quantum_inputs = [
         value for value in body.input_values if value.type.is_quantum()
@@ -2858,50 +2968,70 @@ def _lower_transformed_call(
     for value in controls:
         resolved = _resolve_wire(value, environment)
         control_wires.extend(resolved if isinstance(resolved, list) else [resolved])
-    sequence = reversed(body.operations) if inverse else body.operations
-    for nested in sequence:
-        if isinstance(nested, ReturnOperation):
-            continue
-        if isinstance(nested, CInitOperation):
-            _lower_cinit(nested, builder, local)
-            continue
-        if isinstance(nested, PauliEvolveOp):
-            if len(control_wires) != 1:
-                raise EmitError(
-                    "HUGR transformed Pauli evolution supports exactly one control"
-                )
-            control_wires[0] = _lower_controlled_pauli_evolution(
-                nested,
-                builder,
-                local,
-                control_wires[0],
-                inverse,
-            )
-            continue
-        if not isinstance(nested, GateOperation):
-            raise EmitError(
-                "HUGR transformed calls currently require primitive unitary bodies"
-            )
-        if controls:
-            control_wires = _lower_controlled_gate(
-                nested,
-                builder,
-                local,
-                control_wires,
-                inverse,
-            )
-        else:
-            lowered_gate = nested
-            if inverse:
-                lowered_gate = dataclasses.replace(
+    for _ in range(power):
+        sequence = reversed(body.operations) if inverse else body.operations
+        for nested in sequence:
+            if isinstance(nested, ReturnOperation):
+                continue
+            if isinstance(nested, CInitOperation):
+                _lower_cinit(nested, builder, local)
+                continue
+            if isinstance(nested, GlobalPhaseOperation):
+                direction = -1.0 if inverse else 1.0
+                if control_wires:
+                    control_wires = _lower_phase_on_controls(
+                        nested.phase,
+                        builder,
+                        local,
+                        control_wires,
+                        direction,
+                    )
+                else:
+                    _lower_global_phase(
+                        nested.phase,
+                        builder,
+                        local,
+                        scale=direction,
+                    )
+                continue
+            if isinstance(nested, PauliEvolveOp):
+                if len(control_wires) != 1:
+                    raise EmitError(
+                        "HUGR transformed Pauli evolution supports exactly one control"
+                    )
+                control_wires[0] = _lower_controlled_pauli_evolution(
                     nested,
-                    operands=[
-                        *nested.results,
-                        *([nested.theta] if nested.theta is not None else []),
-                    ],
-                    results=list(nested.qubit_operands),
+                    builder,
+                    local,
+                    control_wires[0],
+                    inverse,
                 )
-            _lower_gate(lowered_gate, builder, local, {}, inverse=inverse)
+                continue
+            if not isinstance(nested, GateOperation):
+                raise EmitError(
+                    "HUGR transformed calls currently require primitive unitary "
+                    f"bodies; found {type(nested).__name__}"
+                )
+            if controls:
+                control_wires = _lower_controlled_gate(
+                    nested,
+                    builder,
+                    local,
+                    control_wires,
+                    inverse,
+                )
+            else:
+                lowered_gate = nested
+                if inverse:
+                    lowered_gate = dataclasses.replace(
+                        nested,
+                        operands=[
+                            *nested.results,
+                            *([nested.theta] if nested.theta is not None else []),
+                        ],
+                        results=list(nested.qubit_operands),
+                    )
+                _lower_gate(lowered_gate, builder, local, {}, inverse=inverse)
 
     quantum_exit = body_quantum_inputs if inverse else body_quantum_outputs
     result_quantum = [value for value in operation.results if value.type.is_quantum()]
@@ -2923,79 +3053,41 @@ def _lower_transformed_call(
         _publish_transformed_result(source, result, wire, environment, live_qubits)
 
 
-def _block_contains_global_phase(
-    block: Block,
-    seen: set[int] | None = None,
-) -> bool:
-    """Return whether a semantic block reaches a global-phase operation.
+def _resolve_transformed_power(
+    operation: InvokeOperation | ControlledUOperation | InverseBlockOperation,
+    environment: dict[str, Any],
+) -> int:
+    """Resolve a transformed call's statically known positive power.
 
     Args:
-        block (Block): Callable body to inspect.
-        seen (set[int] | None): Visited block identities used to terminate
-            recursive call graphs. Defaults to a new set.
+        operation (InvokeOperation | ControlledUOperation |
+            InverseBlockOperation): Transformed call being lowered.
+        environment (dict[str, Any]): UUID-to-wire and compile-time value
+            mapping.
 
     Returns:
-        bool: Whether a phase occurs directly, in control flow, or in a
-        reachable body-backed call.
+        int: Positive number of complete body applications.
+
+    Raises:
+        EmitError: If a controlled-call power is dynamic or invalid.
     """
-    visited = set() if seen is None else seen
-    identity = id(block)
-    if identity in visited:
-        return False
-    visited.add(identity)
-    return _operations_contain_global_phase(block.operations, visited)
-
-
-def _operations_contain_global_phase(
-    operations: list[Operation],
-    visited: set[int],
-) -> bool:
-    """Search an operation region and every reachable nested region.
-
-    Args:
-        operations (list[Operation]): Semantic operations to inspect.
-        visited (set[int]): Callable block identities already traversed.
-
-    Returns:
-        bool: Whether a global phase is reachable from this region.
-    """
-    for operation in operations:
-        if isinstance(operation, GlobalPhaseOperation):
-            return True
-        if isinstance(operation, InvokeOperation):
-            nested_body = operation.effective_body()
-            if nested_body is not None and _block_contains_global_phase(
-                nested_body, visited
-            ):
-                return True
-        if (
-            isinstance(operation, ControlledUOperation)
-            and operation.block is not None
-            and _block_contains_global_phase(operation.block, visited)
-        ):
-            return True
-        if isinstance(operation, InverseBlockOperation):
-            inverse_body = operation.source_block or operation.implementation_block
-            if inverse_body is not None and _block_contains_global_phase(
-                inverse_body, visited
-            ):
-                return True
-        nested_regions: tuple[list[Operation], ...] = ()
-        if isinstance(operation, ForOperation):
-            nested_regions = (operation.operations,)
-        elif isinstance(operation, IfOperation):
-            nested_regions = (
-                operation.true_operations,
-                operation.false_operations,
-            )
-        elif isinstance(operation, WhileOperation):
-            nested_regions = (operation.operations,)
-        if any(
-            _operations_contain_global_phase(region, visited)
-            for region in nested_regions
-        ):
-            return True
-    return False
+    if not isinstance(operation, ControlledUOperation):
+        return 1
+    power = operation.power
+    if isinstance(power, bool):
+        resolved: Any = None
+    elif isinstance(power, int):
+        resolved = power
+    elif power.is_constant():
+        resolved = power.get_const()
+    else:
+        resolved = environment.get(f"__index__:{power.uuid}")
+    if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved <= 0:
+        raise EmitError(
+            "HUGR transformed call power must be a compile-time positive integer",
+            operation="ControlledUOperation",
+        )
+    return resolved
 
 
 def _publish_transformed_result(
@@ -3114,6 +3206,12 @@ def _lower_controlled_pauli_evolution(
     direction = -1.0 if inverse else 1.0
     constant_value = float(hamiltonian.constant.real)
     if constant_value:
+        _lower_global_phase(
+            operation.gamma,
+            builder,
+            environment,
+            scale=-0.5 * direction * constant_value,
+        )
         rotation = _rotation_wire(
             builder,
             operation.gamma,
@@ -3252,6 +3350,17 @@ def _lower_controlled_gate(
             scale=-1.0 if inverse else 1.0,
         )
         controls[0], target = builder.add_op(quantum.CRz, controls[0], target, rotation)
+    elif operation.gate_type is GateOperationType.P:
+        assert operation.theta is not None
+        projector_wires = _lower_phase_on_controls(
+            operation.theta,
+            builder,
+            environment,
+            [*controls, target],
+            direction=-1.0 if inverse else 1.0,
+        )
+        controls = projector_wires[:-1]
+        target = projector_wires[-1]
     else:
         raise EmitError(f"Unsupported controlled HUGR gate: {operation.gate_type}")
     environment[operation.results[0].uuid] = target

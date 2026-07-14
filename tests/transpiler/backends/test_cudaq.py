@@ -78,9 +78,7 @@ class TestCudaqGlobalPhaseMaterialization:
         assert "rz(" in materialized.artifact.entry_source
 
         angle = 0.41
-        state = np.array(
-            cudaq.get_state(materialized.artifact.kernel_func, [angle])
-        )
+        state = np.array(cudaq.get_state(materialized.artifact.kernel_func, [angle]))
         assert np.allclose(
             state,
             np.array([np.exp(1j * angle**2), 0.0], dtype=np.complex128),

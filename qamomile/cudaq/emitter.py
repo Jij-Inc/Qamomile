@@ -738,6 +738,22 @@ class CudaqKernelEmitter:
         """Emit phase gate (R1)."""
         self._emit(f"r1({self._angle_expr(angle)}, {self._qref(qubit)})")
 
+    def emit_global_phase(
+        self,
+        circuit: CudaqKernelArtifact,
+        carrier: int,
+        angle: float | Any,
+    ) -> None:
+        """Synthesize ``exp(i * angle) I`` on an existing CUDA-Q qubit.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            carrier (int): Existing qubit used by the identity sequence.
+            angle (float | Any): Concrete or source-level phase in radians.
+        """
+        self.emit_p(circuit, carrier, 2.0 * angle)
+        self.emit_rz(circuit, carrier, -2.0 * angle)
+
     # ------------------------------------------------------------------
     # Two-qubit gates
     # ------------------------------------------------------------------
@@ -765,24 +781,9 @@ class CudaqKernelEmitter:
         target: int,
         angle: float | Any,
     ) -> None:
-        """Emit controlled-Phase via decomposition.
-
-        Follows the shared CP_DECOMPOSITION recipe from
-        ``qamomile.circuit.transpiler.decompositions``.
-        Inlined here because CudaqExpr angles require string-based codegen.
-        """
+        """Emit controlled phase through CUDA-Q's exact controlled R1."""
         a = self._angle_expr(angle)
-        if isinstance(angle, (int, float)):
-            half = repr(angle / 2.0)
-            neg_half = repr(-angle / 2.0)
-        else:
-            half = f"({a}) * 0.5"
-            neg_half = f"({a}) * (-0.5)"
-        self._emit(f"rz({half}, {self._qref(target)})")
-        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
-        self._emit(f"rz({neg_half}, {self._qref(target)})")
-        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
-        self._emit(f"rz({half}, {self._qref(control)})")
+        self._emit(f"r1.ctrl({a}, {self._qref(control)}, {self._qref(target)})")
 
     def emit_rzz(
         self,

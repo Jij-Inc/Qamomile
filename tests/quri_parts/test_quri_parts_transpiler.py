@@ -140,10 +140,10 @@ class TestQuriPartsGateEmitter:
 
         emitter.emit_cp(circuit, 0, 1, math.pi / 2)
 
-        # Five relative rotations plus one identity Pauli rotation preserve
-        # the decomposition's otherwise missing global factor.
+        # The final native U1 combines RZ(control, theta / 2) with the
+        # decomposition's otherwise missing exp(i * theta / 4) factor.
         gates = list(circuit.gates)
-        assert len(gates) == 6
+        assert len(gates) == 5
 
         state = _run_statevector(circuit, [])
         assert np.allclose(
@@ -154,8 +154,8 @@ class TestQuriPartsGateEmitter:
 
     def test_parametric_phase_gate_preserves_its_global_factor(self) -> None:
         """Parametric P remains exact when QURI lowers it through RZ."""
-        emitter = QuriPartsGateEmitter()
-        circuit = emitter.create_circuit(1, 0)
+        emitter = QuriPartsGateEmitter(phase_carrier=1)
+        circuit = emitter.create_circuit(2, 0)
         theta = emitter.create_parameter("theta")
 
         emitter.emit_p(circuit, 0, theta)
@@ -164,9 +164,17 @@ class TestQuriPartsGateEmitter:
         state = _run_statevector(circuit, [angle])
         assert np.allclose(
             state,
-            np.array([1.0, 0.0], dtype=np.complex128),
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128),
             atol=1e-10,
         )
+
+    def test_global_phase_without_configured_carrier_fails(self) -> None:
+        """Scalar phase emission fails closed without a clean carrier."""
+        emitter = QuriPartsGateEmitter()
+        circuit = emitter.create_circuit(1, 0)
+
+        with pytest.raises(EmitError, match="phase-carrier"):
+            emitter.emit_global_phase(circuit, 0.25)
 
     def test_rzz_gate(self) -> None:
         """Test RZZ gate emission."""
@@ -298,23 +306,72 @@ class TestQuriPartsTranspiler:
         assert tuple(materialized.parameters) == ("theta",)
         assert materialized.parameter_order == ("theta",)
         assert materialized.artifact.parameter_count == 1
-        assert materialized.artifact.qubit_count == 1
+        assert materialized.artifact.qubit_count == 2
+        assert materialized.implicit_output_qubit_indices == (0,)
 
         angle = 0.41
         state = _run_statevector(materialized.artifact, [angle])
         assert np.allclose(
             state,
-            np.array([np.exp(1j * angle), 0.0], dtype=np.complex128),
+            np.array(
+                [np.exp(1j * angle), 0.0, 0.0, 0.0],
+                dtype=np.complex128,
+            ),
             atol=1e-10,
         )
 
-    def test_zero_qubit_standalone_phase_is_rejected_explicitly(self) -> None:
-        """QURI never hides a carrier qubit that would change the public ABI."""
+    def test_zero_qubit_standalone_phase_uses_only_an_internal_carrier(self) -> None:
+        """A zero-qubit phase remains exact while its logical ABI stays empty."""
         builder = CircuitBuilder(0, 0, name="zero-qubit-phase")
         builder.add_global_phase(0.25)
 
-        with pytest.raises(EmitError, match="at least 1 qubit"):
-            QuriPartsMaterializer().materialize(builder.freeze())
+        materialized = QuriPartsMaterializer().materialize(builder.freeze())
+
+        assert materialized.artifact.qubit_count == 1
+        assert materialized.implicit_output_qubit_indices == ()
+        state = _run_statevector(materialized.artifact, [])
+        assert np.allclose(
+            state,
+            np.array([np.exp(0.25j), 0.0], dtype=np.complex128),
+            atol=1e-10,
+        )
+
+    def test_standalone_phase_uses_a_dedicated_clean_carrier(self) -> None:
+        """The exact scalar gate is isolated from the logical data qubit."""
+        builder = CircuitBuilder(1, 0, name="canonical-identity-phase")
+        builder.add_global_phase(0.25)
+
+        circuit = QuriPartsMaterializer().materialize(builder.freeze()).artifact
+
+        [gate] = circuit.gates
+        assert circuit.qubit_count == 2
+        assert gate.target_indices == (1,)
+
+    def test_phase_carrier_is_hidden_from_implicit_execution_outputs(self) -> None:
+        """QURI sampling and run expose only logical qubits, not the carrier."""
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> None:
+            """Apply a symbolic phase gate without an explicit return value."""
+            q = qmc.qubit("q")
+            q = qmc.p(q, theta)
+
+        transpiler = QuriPartsTranspiler()
+        executable = transpiler.transpile(circuit, parameters=["theta"])
+        executor = transpiler.executor(seed=123)
+
+        assert executable.compiled_quantum[0].implicit_output_qubit_indices == (0,)
+        assert executable.compiled_quantum[0].circuit.qubit_count == 2
+        assert executable.sample(
+            executor,
+            shots=8,
+            bindings={"theta": 0.37},
+        ).result().results == [((0,), 8)]
+        assert executable.run(
+            executor,
+            bindings={"theta": 0.37},
+        ).result() == (0,)
 
     @pytest.mark.parametrize(
         ("controls", "inverse", "power", "phase_factor"),
@@ -343,9 +400,10 @@ class TestQuriPartsTranspiler:
         )
         circuit = materialized.artifact
         data_qubits = controls + 1
-        expected_ancillas = max(0, controls - 2)
+        expected_ancillas = max(0, controls - 2) + 1
 
         assert circuit.qubit_count == data_qubits + expected_ancillas
+        assert materialized.implicit_output_qubit_indices == tuple(range(data_qubits))
         assert tuple(materialized.parameters) == ("theta",)
         state = _run_statevector(circuit, [theta])
         assert np.allclose(state[2**data_qubits :], 0.0, atol=1e-10)

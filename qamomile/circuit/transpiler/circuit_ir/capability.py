@@ -116,10 +116,15 @@ class GlobalPhaseCapabilities:
         scalars (ScalarCapabilities): Scalar language accepted for the phase.
         standalone_mode (StandalonePhaseMode): Whether the final artifact
             preserves the phase or deliberately discards it projectively.
+        min_qubits (int): Minimum program width required to preserve a
+            nonzero standalone phase. Targets with a native zero-qubit phase
+            operation use the default zero; targets that synthesize phase on
+            an existing carrier qubit declare one.
     """
 
     scalars: ScalarCapabilities
     standalone_mode: StandalonePhaseMode
+    min_qubits: int = 0
 
 
 @dataclasses.dataclass(frozen=True)

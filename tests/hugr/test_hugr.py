@@ -13,10 +13,35 @@ from qamomile.circuit.stdlib import amplitude_encoding
 pytest.importorskip("hugr")
 pytest.importorskip("tket_exts")
 
+from hugr import ops
 from hugr.package import Package
+from hugr.std.float import FloatVal
 
 from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.hugr import HugrTranspiler
+
+
+def _hugr_operation_names(package: Package) -> list[str]:
+    """Return canonical names for operations that expose one."""
+    names: list[str] = []
+    for _, data in package.modules[0].nodes():
+        name = getattr(data.op, "name", None)
+        if callable(name):
+            names.append(str(name()))
+    return names
+
+
+def _hugr_float_constants(package: Package) -> list[float]:
+    """Return concrete floating-point constants in graph order.
+
+    Returns:
+        list[float]: Literal floating-point values loaded into the graph.
+    """
+    return [
+        data.op.val.v
+        for _, data in package.modules[0].nodes()
+        if isinstance(data.op, ops.Const) and isinstance(data.op.val, FloatVal)
+    ]
 
 
 @qmc.qkernel
@@ -42,6 +67,14 @@ def _hugr_identity(qubit: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _hugr_identity_vector(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Return a quantum vector unchanged for region-liveness tests."""
+    return qubits
+
+
+@qmc.qkernel
 def _hugr_standalone_global_phase(theta: qmc.Float) -> qmc.Bit:
     """Apply an unobservable entrypoint global phase."""
     qubit = qmc.qubit("qubit")
@@ -53,6 +86,12 @@ def _hugr_standalone_global_phase(theta: qmc.Float) -> qmc.Bit:
 def _hugr_phased_helper(qubit: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
     """Apply a parameterized global phase inside a reusable helper."""
     return qmc.global_phase(_hugr_identity, theta)(qubit)
+
+
+@qmc.qkernel
+def _hugr_p_helper(qubit: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Apply a phase gate whose scalar factor matters under control."""
+    return qmc.p(qubit, theta)
 
 
 @qmc.qkernel
@@ -78,11 +117,134 @@ def _hugr_control_call_global_phase(theta: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]
 
 
 @qmc.qkernel
+def _hugr_powered_control_call_global_phase(
+    theta: qmc.Float,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Apply a call-site phase together with a static controlled power."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_identity)(
+        control,
+        target,
+        power=3,
+        global_phase=theta,
+    )
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_two_control_call_global_phase(
+    theta: qmc.Float,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Apply a call-site phase on a two-control active subspace."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(_hugr_identity, num_controls=2)(
+        controls,
+        target,
+        global_phase=theta,
+    )
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_dynamic_power_control_call_global_phase(
+    theta: qmc.Float,
+    power: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Expose a runtime controlled power outside the current HUGR profile."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_identity)(
+        control,
+        target,
+        power=power,
+        global_phase=theta,
+    )
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
 def _hugr_inverse_global_phase(theta: qmc.Float) -> qmc.Bit:
     """Invert a reusable helper containing global phase."""
     qubit = qmc.qubit("qubit")
     qubit = qmc.inverse(_hugr_phased_helper)(qubit, theta)
     return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _hugr_controlled_p(theta: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]:
+    """Control a reusable P body without dropping its scalar factor."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_p_helper)(control, target, theta)
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_controlled_phase_in_if_with_dead_target() -> qmc.Bit:
+    """Drop an unchanged phase-only target after a runtime conditional."""
+    predicate = qmc.x(qmc.qubit("predicate"))
+    take_branch = qmc.measure(predicate)
+    control = qmc.h(qmc.qubit("control"))
+    target = qmc.qubit("target")
+    if take_branch:
+        control, target = qmc.control(_hugr_identity)(
+            control,
+            target,
+            global_phase=math.pi,
+        )
+    control = qmc.h(control)
+    return qmc.measure(control)
+
+
+@qmc.qkernel
+def _hugr_controlled_phase_in_if_with_dead_vector() -> qmc.Bit:
+    """Drop an unchanged phase-only vector after a runtime conditional."""
+    predicate = qmc.x(qmc.qubit("predicate"))
+    take_branch = qmc.measure(predicate)
+    control = qmc.h(qmc.qubit("control"))
+    targets = qmc.qubit_array(2, "targets")
+    if take_branch:
+        control, targets = qmc.control(_hugr_identity_vector)(
+            control,
+            targets,
+            global_phase=math.pi,
+        )
+    control = qmc.h(control)
+    return qmc.measure(control)
+
+
+@qmc.qkernel
+def _hugr_controlled_phase_in_static_for(theta: qmc.Float) -> qmc.Bit:
+    """Repeat a controlled phase call inside a statically bounded loop."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    for _ in qmc.range(2):
+        control, target = qmc.control(_hugr_identity)(
+            control,
+            target,
+            global_phase=theta,
+        )
+    return qmc.measure(control)
+
+
+@qmc.qkernel
+def _hugr_controlled_phase_in_while() -> qmc.Bit:
+    """Carry a controlled phase call through measurement feedback."""
+    loop_qubit = qmc.x(qmc.qubit("loop"))
+    loop_qubit, run = qmc.project_z(loop_qubit)
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    while run:
+        control, target = qmc.control(_hugr_identity)(
+            control,
+            target,
+            global_phase=math.pi,
+        )
+        loop_qubit = qmc.reset(loop_qubit)
+        loop_qubit, run = qmc.project_z(loop_qubit)
+    return qmc.measure(control)
 
 
 @qmc.qkernel
@@ -642,6 +804,7 @@ def _hugr_gate_coverage() -> tuple[qmc.Bit, qmc.Bit]:
     right = qmc.qubit("right")
     left, right = qmc.swap(left, right)
     left, right = qmc.rzz(left, right, 0.25)
+    left = qmc.p(left, 0.125)
     left, right = qmc.cp(left, right, -0.5)
     left = qmc.reset(left)
     return qmc.measure(left), qmc.measure(right)
@@ -739,24 +902,135 @@ def test_hugr_preserves_standalone_phase_without_dropping_abi() -> None:
 
     assert len(main.inputs) == 1
     assert "float64" in str(main.inputs[0])
-    assert any("global_phase" in str(operation).lower() for operation in operations)
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
 
 
 @pytest.mark.hugr
 @pytest.mark.parametrize(
-    "kernel",
+    ("kernel", "expected_scales"),
     [
-        _hugr_controlled_global_phase,
-        _hugr_control_call_global_phase,
-        _hugr_inverse_global_phase,
+        (_hugr_controlled_global_phase, [0.5 / math.pi, 1.0 / math.pi]),
+        (_hugr_control_call_global_phase, [0.5 / math.pi, 1.0 / math.pi]),
+        (_hugr_inverse_global_phase, [-1.0 / math.pi]),
     ],
 )
-def test_hugr_preserves_transformed_global_phase(kernel: qmc.QKernel) -> None:
+def test_hugr_preserves_transformed_global_phase(
+    kernel: qmc.QKernel,
+    expected_scales: list[float],
+) -> None:
     """HUGR emits transformed phase semantics instead of dropping them."""
     package = HugrTranspiler().to_hugr(kernel, parameters=["theta"])
+
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
+    assert _hugr_float_constants(package) == pytest.approx(
+        expected_scales,
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_repeats_phase_and_body_for_static_controlled_power() -> None:
+    """Static power repeats the complete exact phase realization."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_powered_control_call_global_phase,
+        parameters=["theta"],
+    )
+    names = _hugr_operation_names(package)
+
+    assert names.count("tket.global_phase.global_phase") == 3
+    assert names.count("tket.quantum.Rz") == 3
+
+
+@pytest.mark.hugr
+def test_hugr_preserves_two_control_phase_exactly() -> None:
+    """Two controls use the exact CP decomposition including its factor."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_two_control_call_global_phase,
+        parameters=["theta"],
+    )
+    names = _hugr_operation_names(package)
+
+    assert names.count("tket.global_phase.global_phase") == 1
+    assert names.count("tket.quantum.Rz") == 1
+    assert names.count("tket.quantum.CRz") == 1
+    assert _hugr_float_constants(package) == pytest.approx(
+        [0.25 / math.pi, 0.5 / math.pi, 1.0 / math.pi],
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_controls_phase_gate_with_its_exact_scalar_factor() -> None:
+    """A reusable P body becomes exact CP rather than projective CRz only."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_controlled_p,
+        parameters=["theta"],
+    )
+    names = _hugr_operation_names(package)
+
+    assert names.count("tket.global_phase.global_phase") == 1
+    assert names.count("tket.quantum.Rz") == 1
+    assert names.count("tket.quantum.CRz") == 1
+
+
+@pytest.mark.hugr
+def test_hugr_frees_dead_phase_target_in_runtime_if() -> None:
+    """A captured identity target is consumed when neither branch yields it."""
+    package = HugrTranspiler().to_hugr(_hugr_controlled_phase_in_if_with_dead_target)
+
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
+
+
+@pytest.mark.hugr
+def test_hugr_frees_dead_phase_vector_in_runtime_if() -> None:
+    """Captured vector elements are consumed once when no branch yields them."""
+    package = HugrTranspiler().to_hugr(_hugr_controlled_phase_in_if_with_dead_vector)
+
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
+
+
+@pytest.mark.hugr
+def test_hugr_preserves_controlled_phase_inside_static_for() -> None:
+    """Static loop unrolling repeats the complete relative-phase realization."""
+    package = HugrTranspiler().to_hugr(
+        _hugr_controlled_phase_in_static_for,
+        parameters=["theta"],
+    )
+
+    assert _hugr_operation_names(package).count("tket.global_phase.global_phase") == 2
+    expected = [0.5 / math.pi, 1.0 / math.pi] * 2
+    assert _hugr_float_constants(package) == pytest.approx(
+        expected,
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_preserves_controlled_phase_inside_runtime_while() -> None:
+    """A TailLoop branch keeps its controlled phase and linear carriers valid."""
+    package = HugrTranspiler().to_hugr(_hugr_controlled_phase_in_while)
     operations = [data.op for _, data in package.modules[0].nodes()]
 
-    assert any("global_phase" in str(operation).lower() for operation in operations)
+    assert any(type(operation).__name__ == "TailLoop" for operation in operations)
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_runtime_controlled_power_explicitly() -> None:
+    """A dynamic body power never degrades to one silent application."""
+    with pytest.raises(
+        EmitError,
+        match="compile-time positive integer",
+    ) as error:
+        HugrTranspiler().to_hugr(
+            _hugr_dynamic_power_control_call_global_phase,
+            parameters=["theta", "power"],
+        )
+
+    assert error.value.operation == "ControlledUOperation"
 
 
 @pytest.mark.hugr
@@ -857,13 +1131,14 @@ def test_hugr_keeps_independent_loop_carriers_distinct() -> None:
 
 @pytest.mark.hugr
 def test_hugr_validates_composite_gate_and_reset_lowering() -> None:
-    """SWAP, RZZ, CP, and reset produce native-validator-clean HUGR."""
+    """P, CP, and other extended gates produce exact validator-clean HUGR."""
     transpiler = HugrTranspiler()
     package = transpiler.to_hugr(_hugr_gate_coverage)
 
     transpiler.target.validate(package)
     operations = [data.op for _, data in package.modules[0].nodes()]
     assert any("name='Reset'" in str(op) for op in operations)
+    assert _hugr_operation_names(package).count("tket.global_phase.global_phase") == 2
 
 
 @pytest.mark.hugr
@@ -893,7 +1168,7 @@ def test_hugr_validates_semantic_composite_fallbacks(kernel: qmc.QKernel) -> Non
 @pytest.mark.hugr
 def test_hugr_lowers_pauli_evolution_only_at_target_boundary() -> None:
     """A semantic Hamiltonian evolution becomes validator-clean TKET ops."""
-    hamiltonian = 0.25 * qm_o.X(0) + 0.5 * qm_o.Y(0) * qm_o.Z(1)
+    hamiltonian = 0.25 * qm_o.X(0) + 0.5 * qm_o.Y(0) * qm_o.Z(1) + 0.75
     transpiler = HugrTranspiler()
     package = transpiler.to_hugr(
         _hugr_pauli_evolution,
@@ -905,6 +1180,7 @@ def test_hugr_lowers_pauli_evolution_only_at_target_boundary() -> None:
     operations = [data.op for _, data in package.modules[0].nodes()]
     assert sum("name='Rz'" in str(op) for op in operations) == 2
     assert any("name='CX'" in str(op) for op in operations)
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
 
 
 @pytest.mark.hugr
@@ -921,6 +1197,7 @@ def test_hugr_lowers_controlled_pauli_evolution_at_target_boundary() -> None:
     operations = [data.op for _, data in package.modules[0].nodes()]
     assert sum("name='CRz'" in str(op) for op in operations) == 2
     assert sum("name='Rz'" in str(op) for op in operations) == 1
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
 
 
 @pytest.mark.hugr
@@ -937,6 +1214,7 @@ def test_hugr_preserves_tiny_controlled_identity_phase() -> None:
     operations = [data.op for _, data in package.modules[0].nodes()]
     assert sum("name='Rz'" in str(op) for op in operations) == 1
     assert not any("name='CRz'" in str(op) for op in operations)
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
 
 
 @pytest.mark.hugr

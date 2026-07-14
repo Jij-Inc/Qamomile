@@ -571,7 +571,14 @@ def _emit_region(
     for operation in operations:
         if isinstance(operation, GateInstruction):
             qubits = tuple(environment[wire] for wire in operation.inputs)
-            _emit_gate(operation, qubits, intrinsic, precision, loop_values)
+            _emit_gate(
+                operation,
+                qubits,
+                intrinsic,
+                precision,
+                loop_values,
+                context.builder,
+            )
             for output, qubit in zip(operation.outputs, qubits, strict=True):
                 environment[output] = qubit
         elif isinstance(operation, MeasureInstruction):
@@ -738,6 +745,7 @@ def _emit_gate(
     intrinsic: Any,
     precision: float,
     loop_values: dict[str, int],
+    builder: Any,
 ) -> None:
     """Emit or decompose one primitive circuit gate for PyQret.
 
@@ -747,6 +755,8 @@ def _emit_gate(
         intrinsic (Any): PyQret intrinsic gate module.
         precision (float): Rotation synthesis precision.
         loop_values (dict[str, int]): Active loop-variable bindings.
+        builder (Any): PyQret circuit builder that owns zero-qubit phase
+            operations.
 
     Raises:
         EmitError: If the gate kind has no Quration materialization rule.
@@ -772,7 +782,10 @@ def _emit_gate(
         intrinsic.rx(qubits[0], angles[0], precision)
     elif kind is GateKind.RY:
         intrinsic.ry(qubits[0], angles[0], precision)
-    elif kind in (GateKind.RZ, GateKind.P):
+    elif kind is GateKind.RZ:
+        intrinsic.rz(qubits[0], angles[0], precision)
+    elif kind is GateKind.P:
+        intrinsic.global_phase(builder, angles[0] / 2.0, precision)
         intrinsic.rz(qubits[0], angles[0], precision)
     elif kind is GateKind.CX:
         intrinsic.cx(qubits[1], qubits[0])
@@ -792,6 +805,7 @@ def _emit_gate(
         intrinsic.cx(qubits[1], qubits[0])
     elif kind is GateKind.CP:
         half = angles[0] / 2
+        intrinsic.global_phase(builder, angles[0] / 4.0, precision)
         intrinsic.rz(qubits[0], half, precision)
         intrinsic.cx(qubits[1], qubits[0])
         intrinsic.rz(qubits[1], -half, precision)
