@@ -4080,6 +4080,55 @@ class TestGlobalPhaseArgumentValidation:
 
         assert outer.block is not None
 
+    def test_invoked_runtime_if_preserving_resource_is_accepted(self):
+        """Provenance follows a conditional unitary through an ordinary call."""
+
+        @qkernel
+        def conditional_helper(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
+            """Apply a conditional X while preserving the input resource.
+
+            Args:
+                q (qmc.Qubit): Target qubit.
+                flag (qmc.Bit): Classical branch selector.
+
+            Returns:
+                qmc.Qubit: The same resource after the optional gate.
+            """
+            if flag:
+                q = qmc.x(q)
+            return q
+
+        @qkernel
+        def nested_body(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
+            """Delegate the conditional operation to a helper qkernel.
+
+            Args:
+                q (qmc.Qubit): Target qubit.
+                flag (qmc.Bit): Classical branch selector.
+
+            Returns:
+                qmc.Qubit: Conditional helper output.
+            """
+            return conditional_helper(q, flag)
+
+        @qkernel
+        def outer(
+            q: qmc.Qubit,
+            flag: qmc.Bit,
+        ) -> qmc.Qubit:
+            """Wrap the delegated conditional unitary in a global phase.
+
+            Args:
+                q (qmc.Qubit): Target qubit.
+                flag (qmc.Bit): Classical branch selector.
+
+            Returns:
+                qmc.Qubit: Phased nested-body output.
+            """
+            return qmc.global_phase(nested_body, 0.3)(q, flag)
+
+        assert outer.block is not None
+
     def test_concrete_full_reslice_body_preserves_register(self, sdk_transpiler):
         """Treat ``qs[:]`` as the same ordered register on every backend."""
 
