@@ -1830,6 +1830,10 @@ class _InverseComposite:
 def _inverse_known_qft_target(target: Any) -> Any | None:
     """Return the direct QFT/IQFT function counterpart for known targets.
 
+    Stable composite metadata is used in addition to object identity so a
+    serialized and reconstructed QFT-family qkernel retains the same inverse
+    behavior as the original stdlib object.
+
     Args:
         target (Any): Object supplied to `inverse`.
 
@@ -1839,9 +1843,10 @@ def _inverse_known_qft_target(target: Any) -> Any | None:
     """
     from qamomile.circuit.stdlib.qft import iqft, qft
 
-    if target is qft:
+    gate_type = getattr(target, "_callable_gate_type", None)
+    if target is qft or gate_type is CompositeGateType.QFT:
         return iqft
-    if target is iqft:
+    if target is iqft or gate_type is CompositeGateType.IQFT:
         return qft
     return None
 

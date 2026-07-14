@@ -26,7 +26,6 @@ from qamomile.circuit.ir.operation import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
-from qamomile.circuit.ir.serialize import dump_json, load_json
 from qamomile.circuit.ir.types.primitives import (
     FloatType,
     QubitType,
@@ -1007,42 +1006,6 @@ class TestParamSlotsPreservation:
         block = _to_affine(_h_then_rx)
         canon, _, _ = canonicalize_and_remap(block)
         assert canon.param_slots == block.param_slots
-
-    def test_canonicalize_then_serialize_keeps_manifest(self):
-        """canonicalize → dump_json/load_json keeps every slot field.
-
-        Covers the documented flow "canonicalize first for
-        build-independent identity, then serialize", including a
-        ``COMPILE_TIME_BOUND`` slot with a numpy ``bound_value``.
-        """
-        affine = _to_affine(_h_then_rx)
-        bound = np.array([0.1, 0.2, 0.3], dtype=np.float64)
-        block = dataclasses.replace(
-            affine,
-            param_slots=(
-                *affine.param_slots,
-                ParamSlot(
-                    name="weights",
-                    type=FloatType(),
-                    kind=ParamKind.COMPILE_TIME_BOUND,
-                    ndim=1,
-                    bound_value=bound,
-                ),
-            ),
-        )
-        canon = canonicalize(block)
-        restored = load_json(dump_json(canon))
-        assert len(restored.param_slots) == len(canon.param_slots) == 2
-        for original, restored_slot in zip(canon.param_slots, restored.param_slots):
-            assert restored_slot.name == original.name
-            assert restored_slot.kind == original.kind
-            assert restored_slot.ndim == original.ndim
-            assert isinstance(restored_slot.type, type(original.type))
-            assert restored_slot.default == original.default
-            assert restored_slot.differentiable == original.differentiable
-        restored_bound = restored.param_slots[-1].bound_value
-        assert isinstance(restored_bound, np.ndarray)
-        assert np.array_equal(restored_bound, bound)
 
 
 class TestParamSlotsHashParticipation:
