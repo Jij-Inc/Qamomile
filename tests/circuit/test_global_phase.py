@@ -4021,7 +4021,7 @@ class TestGlobalPhaseArgumentValidation:
                 q = qmc.x(q)
             else:
                 q = qmc.h(q)
-            return q
+            return qmc.z(q)
 
         @qkernel
         def outer(
@@ -4109,7 +4109,8 @@ class TestGlobalPhaseArgumentValidation:
             Returns:
                 qmc.Qubit: Conditional helper output.
             """
-            return conditional_helper(q, flag)
+            q = conditional_helper(q, flag)
+            return qmc.z(q)
 
         @qkernel
         def outer(
@@ -4128,6 +4129,214 @@ class TestGlobalPhaseArgumentValidation:
             return qmc.global_phase(nested_body, 0.3)(q, flag)
 
         assert outer.block is not None
+
+    def test_runtime_if_full_reslice_preserving_resource_is_accepted(self):
+        """A full view after a conditional register merge preserves its source."""
+
+        @qkernel
+        def conditional_body(
+            qs: qmc.Vector[qmc.Qubit],
+            flag: qmc.Bit,
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Apply one conditional register gate and return a full view.
+
+            Args:
+                qs (qmc.Vector[qmc.Qubit]): Target register.
+                flag (qmc.Bit): Classical branch selector.
+
+            Returns:
+                qmc.Vector[qmc.Qubit]: Full view of the original register.
+            """
+            if flag:
+                qs = qmc.x(qs)
+            else:
+                qs = qmc.h(qs)
+            return qs[:]
+
+        @qkernel
+        def outer(
+            qs: qmc.Vector[qmc.Qubit],
+            flag: qmc.Bit,
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Wrap the conditional register body in a global phase.
+
+            Args:
+                qs (qmc.Vector[qmc.Qubit]): Target register.
+                flag (qmc.Bit): Classical branch selector.
+
+            Returns:
+                qmc.Vector[qmc.Qubit]: Phased full-register view.
+            """
+            return qmc.global_phase(conditional_body, 0.4)(qs, flag)
+
+        assert outer.block is not None
+
+    def test_runtime_if_resource_permutation_is_rejected(self):
+        """An unresolved branch may not select different output resources."""
+        from qamomile.circuit.frontend.operation.global_phase import (
+            _validate_unitary_block,
+        )
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.types.primitives import BitType, QubitType
+        from qamomile.circuit.ir.value import Value
+
+        first = Value(type=QubitType(), name="first")
+        second = Value(type=QubitType(), name="second")
+        condition = Value(type=BitType(), name="condition")
+        first_result = Value(type=QubitType(), name="first_result")
+        second_result = Value(type=QubitType(), name="second_result")
+        branch = IfOperation(operands=[condition])
+        branch.add_merge(first, second, first_result)
+        branch.add_merge(second, first, second_result)
+        block = Block(
+            input_values=[first, second, condition],
+            output_values=[first_result, second_result],
+            operations=[branch],
+        )
+
+        with pytest.raises(TypeError, match="reordered qubits"):
+            _validate_unitary_block(block, "conditional_swap")
+
+    @pytest.mark.parametrize("loop_kind", ["range", "items"])
+    def test_empty_loop_uses_region_initializer(self, loop_kind: str):
+        """A loop that cannot execute returns each RegionArg initializer."""
+        from qamomile.circuit.frontend.operation.global_phase import (
+            _validate_unitary_block,
+        )
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.control_flow import RegionArg
+        from qamomile.circuit.ir.types.primitives import (
+            FloatType,
+            QubitType,
+            UIntType,
+        )
+        from qamomile.circuit.ir.value import DictValue, Value
+
+        first = Value(type=QubitType(), name="first")
+        second = Value(type=QubitType(), name="second")
+        first_arg = Value(type=QubitType(), name="first_arg")
+        second_arg = Value(type=QubitType(), name="second_arg")
+        first_result = Value(type=QubitType(), name="first_result")
+        second_result = Value(type=QubitType(), name="second_result")
+        region_args = (
+            RegionArg("first", first, first_arg, second_arg, first_result),
+            RegionArg("second", second, second_arg, first_arg, second_result),
+        )
+
+        if loop_kind == "range":
+            zero = Value(type=UIntType(), name="zero").with_const(0)
+            one = Value(type=UIntType(), name="one").with_const(1)
+            loop = ForOperation(
+                operands=[zero, zero, one],
+                results=[first_result, second_result],
+                loop_var="index",
+                loop_var_value=Value(type=UIntType(), name="index"),
+                operations=[],
+                region_args=region_args,
+            )
+        else:
+            iterable = DictValue(name="items").with_dict_runtime_metadata({})
+            loop = ForItemsOperation(
+                operands=[iterable],
+                results=[first_result, second_result],
+                key_vars=["index"],
+                value_var="angle",
+                key_var_values=(Value(type=UIntType(), name="index"),),
+                value_var_value=Value(type=FloatType(), name="angle"),
+                operations=[],
+                region_args=region_args,
+            )
+
+        block = Block(
+            input_values=[first, second],
+            output_values=[first_result, second_result],
+            operations=[loop],
+        )
+        _validate_unitary_block(block, f"empty_{loop_kind}")
+
+    def test_non_bit_if_condition_is_rejected(self):
+        """Provenance must not treat a numeric constant as a Bit condition."""
+        from qamomile.circuit.frontend.operation.global_phase import (
+            _validate_unitary_block,
+        )
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.types.primitives import FloatType, QubitType
+        from qamomile.circuit.ir.value import Value
+
+        first = Value(type=QubitType(), name="first")
+        second = Value(type=QubitType(), name="second")
+        condition = Value(type=FloatType(), name="condition").with_const(1.0)
+        first_result = Value(type=QubitType(), name="first_result")
+        second_result = Value(type=QubitType(), name="second_result")
+        branch = IfOperation(operands=[condition])
+        branch.add_merge(first, second, first_result)
+        branch.add_merge(second, first, second_result)
+        block = Block(
+            input_values=[first, second],
+            output_values=[first_result, second_result],
+            operations=[branch],
+        )
+
+        with pytest.raises(TypeError, match="Bit"):
+            _validate_unitary_block(block, "numeric_condition")
+
+    def test_invoke_scalar_vector_mismatch_is_rejected(self):
+        """A malformed Invoke may not transfer scalar provenance to a vector."""
+        from qamomile.circuit.frontend.operation.global_phase import (
+            _validate_unitary_block,
+        )
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import ArrayValue, Value
+
+        formal = Value(type=QubitType(), name="formal")
+        callee = Block(
+            name="scalar_identity",
+            label_args=["q"],
+            input_values=[formal],
+            output_values=[formal],
+        )
+        actual = ArrayValue(
+            type=QubitType(),
+            name="actual",
+            shape=(Value(type=UIntType(), name="size").with_const(2),),
+        )
+        invoke = callee.call(q=actual)
+        caller = Block(
+            input_values=[actual],
+            output_values=list(invoke.results),
+            operations=[invoke],
+        )
+
+        with pytest.raises(TypeError, match="qubit-preserving unitary"):
+            _validate_unitary_block(caller, "mismatched_invoke")
+
+    def test_deep_identity_merge_chain_is_accepted(self):
+        """A deep shared merge graph resolves iteratively in linear work."""
+        from qamomile.circuit.frontend.operation.global_phase import (
+            _validate_unitary_block,
+        )
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.types.primitives import BitType, QubitType
+        from qamomile.circuit.ir.value import Value
+
+        qubit = Value(type=QubitType(), name="qubit")
+        condition = Value(type=BitType(), name="condition")
+        current = qubit
+        operations = []
+        for index in range(1200):
+            result = Value(type=QubitType(), name=f"merge_{index}")
+            branch = IfOperation(operands=[condition])
+            branch.add_merge(current, current, result)
+            operations.append(branch)
+            current = result
+        block = Block(
+            input_values=[qubit, condition],
+            output_values=[current],
+            operations=operations,
+        )
+
+        _validate_unitary_block(block, "deep_identity_merges")
 
     def test_concrete_full_reslice_body_preserves_register(self, sdk_transpiler):
         """Treat ``qs[:]`` as the same ordered register on every backend."""
