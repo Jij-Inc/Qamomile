@@ -330,8 +330,9 @@ power_demo_concrete.draw()
 # With both modifiers, the precise call-site meaning is
 # `control((exp(1j * phi) * U) ** power)`. Therefore `power=k` repeats the
 # phase `k` times, while an inverse negates the phase together with inverting
-# `U`. `global_phase` is a reserved call-site keyword; a target callable with
-# a same-named ordinary parameter must receive it positionally.
+# `U`. `global_phase` is a reserved call-site keyword; if the target callable
+# also has an ordinary parameter named `global_phase`, pass that parameter
+# positionally.
 
 
 # %%
@@ -369,7 +370,7 @@ assert phase_counts == {1: 256}
 # Qamomile keeps one target-neutral phase meaning, then verifies the selected
 # quantum SDK/Engine/representation before materialization. Qiskit uses
 # `QuantumCircuit.global_phase`, Quration/PyQret uses its native
-# `global_phase` intrinsic, and HUGR uses `tket.global_phase`. CUDA-Q has no
+# `global_phase` intrinsic, and HUGR uses `tket_exts.global_phase()`. CUDA-Q has no
 # circuit-level phase API, so Qamomile emits the exact identity
 # `R1(2 phi) RZ(-2 phi)` on an existing qubit. QURI Parts likewise has no
 # circuit-level phase API. Qamomile reserves a dedicated internal qubit in

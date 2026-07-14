@@ -319,7 +319,7 @@ assert phase_counts == {1: 256}
 # Qamomileは量子SDK/Engine/representationに依存しない1つの位相の意味を保ち、
 # materialize前に選択先のcapabilityを検証します。Qiskitは
 # `QuantumCircuit.global_phase`、Quration/PyQretはnativeの`global_phase`
-# intrinsic、HUGRは`tket.global_phase`を使います。CUDA-Qには回路全体の
+# intrinsic、HUGRは`tket_exts.global_phase()`を使います。CUDA-Qには回路全体の
 # phase APIがないため、既存量子ビット上に厳密な恒等演算
 # `R1(2 phi) RZ(-2 phi)`を出力します。QURI Partsにも回路全体のphase APIが
 # ないため、`|0>`に固定した専用の内部量子ビットへ`RZ(-2 phi)`を適用し、
