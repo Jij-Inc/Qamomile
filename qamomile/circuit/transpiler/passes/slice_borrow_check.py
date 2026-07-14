@@ -13,7 +13,7 @@ bindings were applied:
    :class:`QubitBorrowConflictError` from
    :meth:`_register_slice_bulk_borrow_if_new`).
 2. A view whose newly-concrete coverage hits a slot that was
-   consumed by a destructive view operation earlier in the block
+   consumed by a destructive operation earlier in the block
    (raised as :class:`QubitConsumedError` while registering the view
    in :meth:`_register_slice_bulk_borrow_if_new` or inspecting its
    operands in :meth:`_process_operand_borrows`).
@@ -545,7 +545,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             QubitBorrowConflictError: If an operand's resolved slot is owned
                 by a view that does not contain the operand.
             QubitConsumedError: If an operand's resolved slot has already
-                been destroyed by a destructive view operation.
+                been destroyed by a destructive operation.
         """
         # Mark whole-ArrayValue operands as "used" for drain tracking.
         # A whole-view operand (``measure(view)``, ``qft(view)``,
@@ -575,8 +575,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                             raise QubitConsumedError(
                                 f"Whole-array operand '{v.name}' (slot {idx}) "
                                 f"is accessed after it was consumed by a "
-                                f"destructive view operation "
-                                f"(e.g. measure / cast on a view); the "
+                                f"destructive operation; the "
                                 f"physical qubit is no longer available."
                             )
 
@@ -607,7 +606,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 raise QubitConsumedError(
                     f"Operand '{v.name}' accesses slot "
                     f"{_slot_descriptor(key)} after it was "
-                    f"consumed by a destructive view operation; the physical "
+                    f"consumed by a destructive operation; the physical "
                     f"qubit is no longer available."
                 )
 
@@ -966,7 +965,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             QubitBorrowConflictError: If any covered slot is already held by
                 another live owner.
             QubitConsumedError: If any covered slot was destroyed by a
-                previous destructive view operation or a stale slice version
+                previous destructive operation or a stale slice version
                 attempts to replace its live successor.
             ValidationError: If registering the view would mutate ownership
                 across an unsupported control-flow boundary.
@@ -1009,7 +1008,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 raise QubitConsumedError(
                     f"Slice view '{av.name}' covers slot {idx} on "
                     f"'{root.name}', but that physical qubit was destroyed "
-                    f"by a prior destructive view operation."
+                    f"by a prior destructive operation."
                 )
             if isinstance(existing, ArrayValue):
                 if existing.uuid == av.uuid:
@@ -1184,7 +1183,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             QubitBorrowConflictError: If a symbolic descriptor is already
                 owned by a different live slice lineage.
             QubitConsumedError: If the symbolic view may cover a slot already
-                destroyed by a destructive view operation or a stale version
+                destroyed by a destructive operation or a stale version
                 attempts to replace the current owner.
             ValidationError: If refreshing the descriptor would rewrite an
                 unsafe control-flow snapshot.
@@ -1226,7 +1225,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             raise QubitConsumedError(
                 f"Symbolic slice view '{av.name}' on '{root.name}' reuses a "
                 f"slice descriptor whose physical qubits were destroyed by "
-                f"a prior destructive view operation."
+                f"a prior destructive operation."
             )
         if existing.uuid == av.uuid:
             return
@@ -1670,7 +1669,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             QubitBorrowConflictError: If the same root has a live concrete
                 view whose overlap with ``av`` cannot be disproved.
             QubitConsumedError: If the symbolic view may cover a slot already
-                destroyed by a destructive view operation.
+                destroyed by a destructive operation.
         """
         for key, owner in state.items():
             if key[0] != root.logical_id or key[1].startswith("sym:"):
@@ -1680,7 +1679,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                     f"Slice view '{av.name}' has symbolic coverage on "
                     f"'{root.name}', but concrete slot "
                     f"'{_slot_descriptor(key)}' was destroyed by a prior "
-                    f"destructive view operation."
+                    f"destructive operation."
                 )
             if isinstance(owner, ArrayValue) and owner.uuid != av.uuid:
                 raise QubitBorrowConflictError(
