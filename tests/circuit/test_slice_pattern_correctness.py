@@ -1119,7 +1119,7 @@ class TestControlFlowBodyViolations:
 
     def test_release_of_outer_view_in_body_raises(self):
         """Slice-assign that releases an outer view from inside a for body."""
-        from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
+        from qamomile.circuit.transpiler.errors import ValidationError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -1130,7 +1130,7 @@ class TestControlFlowBodyViolations:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises(SliceBorrowViolationError):
+        with pytest.raises(ValidationError):
             transpiler.transpile(kern)
 
 

@@ -3450,10 +3450,12 @@ def _prepare_nested_block_for_emit(
     Raises:
         EmitError: If the marker-bearing block is already past the stages
             that can be safely checked.
-        ValidationError: If ``SliceBorrowCheckPass`` rejects the block
-            stage.
-        SliceBorrowViolationError: If nested slice borrows violate the
-            same linearity rules enforced for top-level blocks.
+        ValidationError: If ``SliceBorrowCheckPass`` rejects the block stage
+            or cannot represent nested ownership across control flow.
+        QubitBorrowConflictError: If nested slice views have overlapping live
+            ownership.
+        QubitConsumedError: If the nested block accesses a qubit slot after a
+            destructive operation consumed it.
     """
     if not isinstance(block_value, Block):
         return block_value
