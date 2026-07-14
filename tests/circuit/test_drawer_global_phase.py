@@ -1,6 +1,7 @@
 """Regression tests for zero-qubit global-phase visualization."""
 
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any
 
 import matplotlib
@@ -12,6 +13,8 @@ from qamomile.circuit.visualization.drawer import (
     MatplotlibDrawer,
     _prepare_graph_for_visualization,
 )
+from qamomile.circuit.visualization.layout import CircuitLayoutEngine
+from qamomile.circuit.visualization.renderer import MatplotlibRenderer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
 from qamomile.circuit.visualization.visual_ir import (
     VFoldedBlock,
@@ -235,6 +238,74 @@ class TestGlobalPhaseRendering:
         axes = figure.axes[0]
 
         assert "global phase: 0.50" in [text.get_text() for text in axes.texts]
+        badges = [
+            patch
+            for patch in axes.patches
+            if isinstance(patch, mpatches.FancyBboxPatch)
+            and patch.get_linestyle() == ":"
+        ]
+        assert len(badges) == 1
+        assert badges[0].get_bbox().ymin > 0.0
+
+    def test_zero_qubit_phase_is_not_reported_as_an_empty_circuit(self):
+        """A standalone phase remains visible when no wire exists."""
+        phase = VGate(
+            node_key=("phase",),
+            label="global phase: 0.50",
+            qubit_indices=[],
+            estimated_width=2.5,
+            kind=VGateKind.GLOBAL_PHASE,
+            has_param=True,
+        )
+        circuit = VisualCircuit(
+            children=[phase],
+            qubit_map={},
+            qubit_names={},
+            num_qubits=0,
+        )
+        style = replace(DEFAULT_STYLE, gate_height=3.0)
+        layout = CircuitLayoutEngine(style).compute_layout(circuit)
+
+        figure = MatplotlibRenderer(style).render(circuit, layout)
+        axes = figure.axes[0]
+
+        assert [text.get_text() for text in axes.texts] == ["global phase: 0.50"]
+        badges = [
+            patch
+            for patch in axes.patches
+            if isinstance(patch, mpatches.FancyBboxPatch)
+            and patch.get_linestyle() == ":"
+        ]
+        assert len(badges) == 1
+        x_min, x_max = axes.get_xlim()
+        assert x_min < badges[0].get_bbox().xmin
+        assert badges[0].get_bbox().xmax < x_max
+        y_min, y_max = axes.get_ylim()
+        assert y_min < badges[0].get_bbox().ymin
+        assert badges[0].get_bbox().ymax < y_max
+
+    def test_phase_with_filtered_scope_falls_back_to_the_top_visible_wire(self):
+        """A phase badge survives when none of its scope indices are visible."""
+        phase = VGate(
+            node_key=("phase",),
+            label="global phase: 0.25",
+            qubit_indices=[7],
+            estimated_width=2.5,
+            kind=VGateKind.GLOBAL_PHASE,
+            has_param=True,
+        )
+        circuit = VisualCircuit(
+            children=[phase],
+            qubit_map={"q": 0},
+            qubit_names={0: "q"},
+            num_qubits=1,
+        )
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(circuit)
+
+        figure = MatplotlibRenderer(DEFAULT_STYLE).render(circuit, layout)
+        axes = figure.axes[0]
+
+        assert "global phase: 0.25" in [text.get_text() for text in axes.texts]
         badges = [
             patch
             for patch in axes.patches

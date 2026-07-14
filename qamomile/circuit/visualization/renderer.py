@@ -927,21 +927,27 @@ class MatplotlibRenderer:
         ax = fig._qm_ax  # type: ignore[attr-defined]
         qubit_indices = self._visible_qubits(node.qubit_indices)
 
+        if node.kind == VGateKind.GLOBAL_PHASE:
+            top_wire_y = (
+                max(self.qubit_y[q] for q in qubit_indices)
+                if qubit_indices
+                else max(self.qubit_y, default=0.0)
+            )
+            self._draw_vglobal_phase(
+                ax,
+                node,
+                x_pos,
+                top_wire_y,
+                layout_width or node.estimated_width,
+            )
+            return
+
         if not qubit_indices:
             return
 
         y_coords = [self.qubit_y[q] for q in qubit_indices]
 
-        if node.kind == VGateKind.GLOBAL_PHASE:
-            self._draw_vglobal_phase(
-                ax,
-                node,
-                x_pos,
-                max(y_coords),
-                layout_width or node.estimated_width,
-            )
-
-        elif node.kind == VGateKind.GATE:
+        if node.kind == VGateKind.GATE:
             width = layout_width or node.estimated_width
             if len(qubit_indices) == 1:
                 self._draw_vgate_single(ax, node, x_pos, y_coords[0], width)
@@ -1706,14 +1712,38 @@ class MatplotlibRenderer:
             fig = Figure(figsize=(4, 2))
             FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
-            ax.text(
-                0.5,
-                0.5,
-                "Empty circuit",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
+            assert self.layout is not None
+            if self.layout.gate_widths:
+                wire_ext = self.style.wire_extension
+                x_left = (
+                    self.layout.first_gate_x
+                    - self.layout.first_gate_half_width
+                    - wire_ext
+                    - 0.7
+                )
+                x_right = max(
+                    self.layout.width + 0.5,
+                    self.layout.actual_width + wire_ext + 0.2,
+                )
+                phase_height = self.style.gate_height / 3
+                phase_y = self.style.gate_height / 4
+                y_bottom = -0.6
+                y_top = max(0.8, phase_y + phase_height / 2 + 0.3)
+                ax.set_xlim(x_left, x_right)
+                ax.set_ylim(y_bottom, y_top)
+                fig.set_size_inches(
+                    max(4, x_right - x_left),
+                    max(2, (y_top - y_bottom) * 0.8),
+                )
+            else:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "Empty circuit",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
             ax.axis("off")
             fig._qm_ax = ax  # type: ignore[attr-defined]
             return fig
