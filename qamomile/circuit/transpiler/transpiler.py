@@ -390,10 +390,12 @@ class Transpiler(ABC, Generic[T]):
         3. Slice ownership changes that cannot be represented safely across
            control-flow boundaries.
 
-        Direct element borrows (``q[i]``) emit no IR operation, so the
-        IR-level pass cannot observe them; the trace-time validation
-        in :func:`func_to_block._validate_returned_arrays` covers that
-        path.
+        Creating a direct element borrow (``q[i]``) emits no IR operation,
+        so this pass cannot observe the borrow site itself. Later uses of
+        that element do appear as operation operands and are checked for
+        conflicts with live slice views. Trace-time validation in
+        :func:`func_to_block._validate_returned_arrays` covers unreturned
+        direct-element borrows that have no observable operand use.
 
         The pass is a pass-through for the IR — it only raises on
         violations and leaves the block unchanged on success.

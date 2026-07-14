@@ -16,6 +16,10 @@ bindings were applied:
    consumed by a destructive view operation earlier in the block
    (raised as :class:`QubitConsumedError` from
    :meth:`_process_operand_borrows`).
+3. A slice ownership release, drain, or refresh that crosses a
+   control-flow boundary the current state merge cannot represent
+   safely (raised as :class:`ValidationError` from the corresponding
+   snapshot guard).
 
 Slice views are otherwise treated as **affine** at the kernel
 boundary: a view that goes out of scope without being slice-
@@ -38,12 +42,14 @@ unmeasured) compile cleanly.  The genuine hazards stay covered:
 * Overlapping live views and use-after-destroy are caught at
   registration time (see the two error sites above).
 
-Direct element borrows (``q[i]``) are intentionally **not** observed
-here.  Element access emits no IR operation, so the IR layer has
-nothing to track; the frontend trace-time validator
+The creation of a direct element borrow (``q[i]``) is intentionally
+**not** observed here because element access emits no IR operation.
+Later uses of that element do appear as operation operands, however,
+so :meth:`_process_operand_borrows` can reject a use that collides
+with a live slice view.  The frontend trace-time validator
 (``func_to_block._validate_returned_arrays`` and
-``ArrayBase.validate_all_returned``) is the source of truth for
-direct-element-borrow violations.
+``ArrayBase.validate_all_returned``) remains the source of truth for
+unreturned direct-element borrows that have no observable operand use.
 
 State shape: a single dict keyed by a 2-tuple
 ``(root_logical_id, slot_descriptor)`` where
