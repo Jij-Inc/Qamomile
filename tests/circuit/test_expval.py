@@ -220,10 +220,7 @@ class TestExpvalOverConsumedSlots:
         violation.
         """
         pytest.importorskip("qiskit")
-        from qamomile.circuit.transpiler.errors import (
-            QubitConsumedError,
-            SliceBorrowViolationError,
-        )
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
 
         @qmc.qkernel
         def kern(obs: qmc.Observable) -> qmc.Float:
@@ -236,5 +233,5 @@ class TestExpvalOverConsumedSlots:
             q[1] = qmc.x(q[1])  # direct access after measure(q[1::2]) — consumed
             return qmc.expval(q[0::2], obs)
 
-        with pytest.raises((QubitConsumedError, SliceBorrowViolationError)):
+        with pytest.raises(QubitConsumedError):
             kern.block
