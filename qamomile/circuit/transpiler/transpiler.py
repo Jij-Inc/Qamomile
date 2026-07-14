@@ -387,9 +387,8 @@ class Transpiler(ABC, Generic[T]):
         2. A view whose newly-concrete coverage hits a slot that was
            consumed by a destructive view operation earlier in the
            block.
-        3. A view that reaches the end of the block while still
-           recorded as the owner of the parent's slots (i.e. it was
-           never used or never released).
+        3. Slice ownership changes that cannot be represented safely across
+           control-flow boundaries.
 
         Direct element borrows (``q[i]``) emit no IR operation, so the
         IR-level pass cannot observe them; the trace-time validation
@@ -398,6 +397,20 @@ class Transpiler(ABC, Generic[T]):
 
         The pass is a pass-through for the IR — it only raises on
         violations and leaves the block unchanged on success.
+
+        Args:
+            block (Block): Post-fold affine or hierarchical block to validate.
+
+        Returns:
+            Block: The input block unchanged after successful validation.
+
+        Raises:
+            QubitBorrowConflictError: If live slice ownership conflicts with
+                another view or direct access.
+            QubitConsumedError: If a slice or operand accesses a slot already
+                destroyed by a destructive view operation.
+            ValidationError: If the block kind is invalid or ownership cannot
+                be propagated safely through control flow.
         """
         return SliceBorrowCheckPass().run(block)
 
