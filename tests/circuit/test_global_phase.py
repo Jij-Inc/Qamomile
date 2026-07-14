@@ -4003,6 +4003,83 @@ class TestGlobalPhaseArgumentValidation:
 
         assert outer.block is not None
 
+    def test_runtime_if_preserving_resource_is_accepted(self):
+        """A Bit-parameterized unitary family preserves its quantum resource."""
+
+        @qkernel
+        def conditional_body(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
+            """Apply one of two unitary gates selected by a classical input.
+
+            Args:
+                q (qmc.Qubit): Target qubit.
+                flag (qmc.Bit): Classical branch selector.
+
+            Returns:
+                qmc.Qubit: The same quantum resource after either branch.
+            """
+            if flag:
+                q = qmc.x(q)
+            else:
+                q = qmc.h(q)
+            return q
+
+        @qkernel
+        def outer(
+            q: qmc.Qubit,
+            flag: qmc.Bit,
+        ) -> qmc.Qubit:
+            """Wrap the conditional unitary family in a global phase.
+
+            Args:
+                q (qmc.Qubit): Target qubit.
+                flag (qmc.Bit): Classical branch selector.
+
+            Returns:
+                qmc.Qubit: Phased conditional-body output.
+            """
+            return qmc.global_phase(conditional_body, 0.1)(q, flag)
+
+        assert outer.block is not None
+
+    def test_nested_for_if_preserving_resource_is_accepted(self):
+        """Nested static loops and runtime branches preserve one resource."""
+
+        @qkernel
+        def nested_body(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
+            """Apply a conditional gate in each static-loop iteration.
+
+            Args:
+                q (qmc.Qubit): Target qubit.
+                flag (qmc.Bit): Classical branch selector.
+
+            Returns:
+                qmc.Qubit: The original resource after all iterations.
+            """
+            for _index in qmc.range(2):
+                if flag:
+                    q = qmc.x(q)
+                else:
+                    q = qmc.z(q)
+            return q
+
+        @qkernel
+        def outer(
+            q: qmc.Qubit,
+            flag: qmc.Bit,
+        ) -> qmc.Qubit:
+            """Wrap nested control flow in a global phase.
+
+            Args:
+                q (qmc.Qubit): Target qubit.
+                flag (qmc.Bit): Classical branch selector.
+
+            Returns:
+                qmc.Qubit: Phased nested-body output.
+            """
+            return qmc.global_phase(nested_body, 0.2)(q, flag)
+
+        assert outer.block is not None
+
     def test_concrete_full_reslice_body_preserves_register(self, sdk_transpiler):
         """Treat ``qs[:]`` as the same ordered register on every backend."""
 
