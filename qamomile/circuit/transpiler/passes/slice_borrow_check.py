@@ -14,8 +14,9 @@ bindings were applied:
    :meth:`_register_slice_bulk_borrow_if_new`).
 2. A view whose newly-concrete coverage hits a slot that was
    consumed by a destructive view operation earlier in the block
-   (raised as :class:`QubitConsumedError` from
-   :meth:`_process_operand_borrows`).
+   (raised as :class:`QubitConsumedError` while registering the view
+   in :meth:`_register_slice_bulk_borrow_if_new` or inspecting its
+   operands in :meth:`_process_operand_borrows`).
 3. A slice ownership release, drain, or refresh that crosses a
    control-flow boundary the current state merge cannot represent
    safely (raised as :class:`ValidationError` from the corresponding
