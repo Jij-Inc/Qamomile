@@ -711,8 +711,8 @@ class TestTargetLegalityVerification:
         with pytest.raises(TargetCapabilityError, match="supplied through bindings"):
             verify_target_legal(legalized, capabilities)
 
-    def test_accepts_projectively_discarded_program_global_phase(self):
-        """Discarded standalone phases impose no target scalar constraints."""
+    def test_quri_preserves_standalone_phase_and_checks_scalar_form(self):
+        """A preserved QURI phase obeys its linear-expression capability."""
         from qamomile.quri_parts.materializer import QuriPartsMaterializer
 
         builder = CircuitBuilder(1, 0)
@@ -726,8 +726,22 @@ class TestTargetLegalityVerification:
         )
 
         assert capabilities.global_phase is not None
-        assert capabilities.global_phase.standalone_mode is StandalonePhaseMode.DISCARD
-        verify_target_legal(legalized, capabilities)
+        assert capabilities.global_phase.standalone_mode is StandalonePhaseMode.PRESERVE
+        with pytest.raises(TargetCapabilityError, match="non-linear runtime"):
+            verify_target_legal(legalized, capabilities)
+
+    def test_preserved_phase_can_require_a_physical_carrier_qubit(self):
+        """A target rejects a phase when its exact synthesis lacks a carrier."""
+        builder = CircuitBuilder(0, 0)
+        builder.add_global_phase(0.25)
+        base = _capabilities()
+        assert base.global_phase is not None
+        capabilities = _capabilities(
+            global_phase=dataclasses.replace(base.global_phase, min_qubits=1)
+        )
+
+        with pytest.raises(TargetCapabilityError, match="at least 1 qubit"):
+            verify_target_legal(builder.freeze(), capabilities)
 
     def test_pauli_realization_is_selected_by_policy(self):
         """Legalization fixes native versus gadget Pauli realization."""

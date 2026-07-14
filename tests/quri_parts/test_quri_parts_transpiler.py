@@ -16,6 +16,7 @@ from qamomile.circuit.transpiler.circuit_ir import (  # noqa: E402
     ParameterExpr,
     ReusableCircuit,
 )
+from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 from qamomile.circuit.transpiler.gate_emitter import GateKind  # noqa: E402
 from qamomile.quri_parts import (  # noqa: E402
     QuriPartsExecutor,
@@ -133,15 +134,39 @@ class TestQuriPartsGateEmitter:
         assert len(gates) == 3
 
     def test_controlled_phase_decomposition(self) -> None:
-        """Test CP gate decomposition."""
+        """Test the exact CP decomposition, including its global factor."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(2, 0)
 
         emitter.emit_cp(circuit, 0, 1, math.pi / 2)
 
-        # CP decomposes into 5 gates: RZ, CNOT, RZ, CNOT, RZ
+        # Five relative rotations plus one identity Pauli rotation preserve
+        # the decomposition's otherwise missing global factor.
         gates = list(circuit.gates)
-        assert len(gates) == 5
+        assert len(gates) == 6
+
+        state = _run_statevector(circuit, [])
+        assert np.allclose(
+            state,
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128),
+            atol=1e-10,
+        )
+
+    def test_parametric_phase_gate_preserves_its_global_factor(self) -> None:
+        """Parametric P remains exact when QURI lowers it through RZ."""
+        emitter = QuriPartsGateEmitter()
+        circuit = emitter.create_circuit(1, 0)
+        theta = emitter.create_parameter("theta")
+
+        emitter.emit_p(circuit, 0, theta)
+
+        angle = 0.37
+        state = _run_statevector(circuit, [angle])
+        assert np.allclose(
+            state,
+            np.array([1.0, 0.0], dtype=np.complex128),
+            atol=1e-10,
+        )
 
     def test_rzz_gate(self) -> None:
         """Test RZZ gate emission."""
@@ -259,11 +284,11 @@ class TestQuriPartsTranspiler:
         executor = transpiler.executor(sampler=None, estimator=None)
         assert executor is not None
 
-    def test_standalone_phase_only_parameter_remains_in_abi(self) -> None:
-        """Discarding standalone phase keeps its runtime parameter position."""
+    def test_standalone_phase_is_preserved_without_changing_the_abi(self) -> None:
+        """A root phase reaches QURI exactly and keeps its parameter ABI."""
         builder = CircuitBuilder(1, 0, name="standalone-phase")
         theta = ParameterExpr("theta")
-        builder.add_global_phase(theta * theta)
+        builder.add_global_phase(theta)
 
         materialized = QuriPartsMaterializer().materialize(
             builder.freeze(),
@@ -273,7 +298,23 @@ class TestQuriPartsTranspiler:
         assert tuple(materialized.parameters) == ("theta",)
         assert materialized.parameter_order == ("theta",)
         assert materialized.artifact.parameter_count == 1
-        assert list(materialized.artifact.gates) == []
+        assert materialized.artifact.qubit_count == 1
+
+        angle = 0.41
+        state = _run_statevector(materialized.artifact, [angle])
+        assert np.allclose(
+            state,
+            np.array([np.exp(1j * angle), 0.0], dtype=np.complex128),
+            atol=1e-10,
+        )
+
+    def test_zero_qubit_standalone_phase_is_rejected_explicitly(self) -> None:
+        """QURI never hides a carrier qubit that would change the public ABI."""
+        builder = CircuitBuilder(0, 0, name="zero-qubit-phase")
+        builder.add_global_phase(0.25)
+
+        with pytest.raises(EmitError, match="at least 1 qubit"):
+            QuriPartsMaterializer().materialize(builder.freeze())
 
     @pytest.mark.parametrize(
         ("controls", "inverse", "power", "phase_factor"),

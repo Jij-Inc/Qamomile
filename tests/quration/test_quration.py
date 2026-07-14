@@ -17,6 +17,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     BinaryExpr,
     BinaryOperator,
     CircuitBuilder,
+    GateInstruction,
     LiteralExpr,
     LoopVariableExpr,
     ParameterExpr,
@@ -25,9 +26,11 @@ from qamomile.circuit.transpiler.circuit_ir import (
     verify_target_legal,
 )
 from qamomile.circuit.transpiler.errors import EmitError, TargetCapabilityError
+from qamomile.circuit.transpiler.gate_emitter import GateKind
 from qamomile.quration import QurationTranspiler
 from qamomile.quration.materializer import (
     PyQretMaterializer,
+    _emit_gate,
     _emit_global_phase,
     evaluate_scalar,
 )
@@ -180,6 +183,54 @@ def test_quration_does_not_drop_tiny_preserved_phase() -> None:
     _emit_global_phase(builder.freeze(), context)
 
     assert calls == [(builder_token, 1e-16, 1e-9)]
+
+
+@pytest.mark.parametrize(
+    ("kind", "qubits", "phase"),
+    [
+        (GateKind.P, ("target",), 0.2),
+        (GateKind.CP, ("control", "target"), 0.1),
+    ],
+)
+def test_quration_gate_decompositions_preserve_global_factors(
+    kind: GateKind,
+    qubits: tuple[str, ...],
+    phase: float,
+) -> None:
+    """P and CP decompositions emit the exact missing global factor."""
+    calls: list[tuple[object, float, float]] = []
+
+    class _Intrinsic:
+        @staticmethod
+        def global_phase(builder: object, angle: float, precision: float) -> None:
+            calls.append((builder, angle, precision))
+
+        @staticmethod
+        def rz(qubit: object, angle: float, precision: float) -> None:
+            pass
+
+        @staticmethod
+        def cx(control: object, target: object) -> None:
+            pass
+
+    builder_token = object()
+    operation = GateInstruction(
+        kind=kind,
+        inputs=(),
+        outputs=(),
+        parameters=(LiteralExpr(0.4),),
+    )
+
+    _emit_gate(
+        operation,
+        qubits,
+        _Intrinsic(),
+        1e-9,
+        {},
+        builder_token,
+    )
+
+    assert calls == [(builder_token, phase, 1e-9)]
 
 
 @pytest.mark.parametrize(

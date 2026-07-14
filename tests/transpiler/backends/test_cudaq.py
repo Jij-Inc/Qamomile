@@ -21,6 +21,7 @@ from qamomile.circuit.transpiler.circuit_ir import (  # noqa: E402
     ParameterExpr,
     ReusableCircuit,
 )
+from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 from qamomile.cudaq.materializer import CudaqMaterializer  # noqa: E402
 from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     TracingCudaqKernelEmitter,
@@ -56,8 +57,8 @@ def _phase_only_program(
 class TestCudaqGlobalPhaseMaterialization:
     """Test CUDA-Q global-phase handling at the circuit-IR boundary."""
 
-    def test_standalone_phase_is_discarded_without_dropping_abi(self) -> None:
-        """A discarded root phase still retains its runtime parameter ABI."""
+    def test_standalone_phase_is_preserved_without_changing_the_abi(self) -> None:
+        """A root phase reaches CUDA-Q exactly and keeps its parameter ABI."""
         builder = CircuitBuilder(1, 0)
         theta = ParameterExpr("theta")
         builder.add_global_phase(theta * theta)
@@ -73,7 +74,42 @@ class TestCudaqGlobalPhaseMaterialization:
         assert "def _qamomile_kernel(thetas: list[float]):" in (
             materialized.artifact.entry_source
         )
-        assert "r1(" not in materialized.artifact.entry_source
+        assert "r1(" in materialized.artifact.entry_source
+        assert "rz(" in materialized.artifact.entry_source
+
+        angle = 0.41
+        state = np.array(
+            cudaq.get_state(materialized.artifact.kernel_func, [angle])
+        )
+        assert np.allclose(
+            state,
+            np.array([np.exp(1j * angle**2), 0.0], dtype=np.complex128),
+            atol=1e-10,
+        )
+
+    def test_zero_qubit_standalone_phase_is_rejected_explicitly(self) -> None:
+        """CUDA-Q never hides a carrier qubit that would change the ABI."""
+        builder = CircuitBuilder(0, 0)
+        builder.add_global_phase(0.25)
+
+        with pytest.raises(EmitError, match="at least 1 qubit"):
+            CudaqMaterializer().materialize(builder.freeze())
+
+    def test_controlled_phase_gate_preserves_the_exact_unitary(self) -> None:
+        """CUDA-Q CP emission retains the global factor of its matrix."""
+        from qamomile.cudaq.emitter import CudaqKernelEmitter, ExecutionMode
+
+        emitter = CudaqKernelEmitter()
+        artifact = emitter.create_circuit(2, 0)
+        emitter.emit_cp(artifact, 0, 1, 0.73)
+        artifact = emitter.finalize(artifact, ExecutionMode.STATIC)
+
+        state = np.array(cudaq.get_state(artifact.kernel_func))
+        assert np.allclose(
+            state,
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128),
+            atol=1e-10,
+        )
 
     def test_controlled_phase_only_call_emits_relative_phase_correction(self) -> None:
         """A controlled phase-only helper emits its observable correction."""
@@ -162,7 +198,7 @@ class TestCudaqTranspiler(TranspilerTestSuite):
     CUDA-Q supports most standard gates but has some limitations:
     - Measurements are no-op in STATIC mode (auto-measured by sample)
     - Runtime control flow uses RUNNABLE mode + cudaq.run()
-    - CP and RZZ are decomposed (no native gates)
+    - RZZ is decomposed; CP uses CUDA-Q's controlled R1
     - CH and CY are decomposed
     """
 

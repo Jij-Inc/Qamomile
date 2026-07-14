@@ -728,8 +728,8 @@ def test_hugr_preserves_runtime_parameter_as_public_input() -> None:
 
 
 @pytest.mark.hugr
-def test_hugr_discards_standalone_phase_without_dropping_abi() -> None:
-    """A standalone phase is a no-op but its runtime input remains public."""
+def test_hugr_preserves_standalone_phase_without_dropping_abi() -> None:
+    """A standalone phase uses TKET's intrinsic and remains a public input."""
     package = HugrTranspiler().to_hugr(
         _hugr_standalone_global_phase,
         parameters=["theta"],
@@ -739,7 +739,7 @@ def test_hugr_discards_standalone_phase_without_dropping_abi() -> None:
 
     assert len(main.inputs) == 1
     assert "float64" in str(main.inputs[0])
-    assert not any("GlobalPhase" in str(operation) for operation in operations)
+    assert any("global_phase" in str(operation).lower() for operation in operations)
 
 
 @pytest.mark.hugr
@@ -751,15 +751,12 @@ def test_hugr_discards_standalone_phase_without_dropping_abi() -> None:
         _hugr_inverse_global_phase,
     ],
 )
-def test_hugr_rejects_transformed_global_phase(kernel: qmc.QKernel) -> None:
-    """HUGR rejects phase semantics it cannot preserve under transforms."""
-    with pytest.raises(
-        EmitError,
-        match="global phase inside controlled or inverse reusable calls",
-    ) as error:
-        HugrTranspiler().to_hugr(kernel, parameters=["theta"])
+def test_hugr_preserves_transformed_global_phase(kernel: qmc.QKernel) -> None:
+    """HUGR emits transformed phase semantics instead of dropping them."""
+    package = HugrTranspiler().to_hugr(kernel, parameters=["theta"])
+    operations = [data.op for _, data in package.modules[0].nodes()]
 
-    assert error.value.operation == "GlobalPhaseOperation"
+    assert any("global_phase" in str(operation).lower() for operation in operations)
 
 
 @pytest.mark.hugr
