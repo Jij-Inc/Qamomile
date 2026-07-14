@@ -1009,7 +1009,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 raise QubitConsumedError(
                     f"Slice view '{av.name}' covers slot {idx} on "
                     f"'{root.name}', but that physical qubit was destroyed "
-                    f"by a prior destructive view operation (measure / cast)."
+                    f"by a prior destructive view operation."
                 )
             if isinstance(existing, ArrayValue):
                 if existing.uuid == av.uuid:
