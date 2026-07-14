@@ -453,10 +453,12 @@ print(executable.quantum_circuit)
 #   construction time, but views whose bounds were symbolic at trace time
 #   (`q[lo:hi]` for a `UInt lo` / `hi`) can only be checked once `bindings`
 #   make the bounds concrete. This pass walks the block after
-#   `partial_eval` and raises `SliceBorrowViolationError` on overlapping
-#   live views or use-after-destroy (a view's covered slot accessed after
-#   it was destroyed by an earlier `measure` / `cast` / `expval`). Slice
-#   views are treated as **affine** at the kernel boundary: a view left
+#   `partial_eval`. It raises `QubitBorrowConflictError` for overlapping live
+#   views and `QubitConsumedError` for use-after-destroy (a view's covered
+#   slot accessed after it was destroyed by an earlier `measure` / `cast` /
+#   `expval`). These are the same semantic errors raised by the frontend for
+#   concrete slice bounds. Slice views are treated as **affine** at the kernel
+#   boundary: a view left
 #   live at block end without being slice-assigned back is *not* flagged
 #   here — natural ancilla / scratch-register patterns (Deutsch-Jozsa's
 #   `ancilla = qs[n]`, Simon's `qs2 = qs[n:2*n]`) compile cleanly. The
