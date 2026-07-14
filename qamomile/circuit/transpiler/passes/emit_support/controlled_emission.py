@@ -3438,7 +3438,7 @@ def _prepare_nested_block_for_emit(
         QubitBorrowConflictError: If nested slice views have overlapping live
             ownership.
         QubitConsumedError: If the nested block accesses a qubit slot after a
-            destructive view operation consumed it.
+            destructive operation consumed it.
     """
     if not isinstance(block_value, Block):
         return block_value

@@ -385,7 +385,7 @@ class Transpiler(ABC, Generic[T]):
         1. A view whose newly-concrete coverage overlaps another live
            view of the same root parent.
         2. A view whose newly-concrete coverage hits a slot that was
-           consumed by a destructive view operation earlier in the
+           consumed by a destructive operation earlier in the
            block.
         3. Slice ownership changes that cannot be represented safely across
            control-flow boundaries.
@@ -411,7 +411,7 @@ class Transpiler(ABC, Generic[T]):
             QubitBorrowConflictError: If live slice ownership conflicts with
                 another view or direct access.
             QubitConsumedError: If a slice or operand accesses a slot already
-                destroyed by a destructive view operation.
+                destroyed by a destructive operation.
             ValidationError: If the block kind is invalid or ownership cannot
                 be propagated safely through control flow.
         """

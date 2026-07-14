@@ -76,7 +76,7 @@ def _normalize_inverse_block_op(
         QubitBorrowConflictError: If nested slice views have overlapping live
             ownership.
         QubitConsumedError: If a nested block accesses a qubit slot after a
-            destructive view operation consumed it.
+            destructive operation consumed it.
         ValidationError: If nested slice ownership cannot be represented
             safely across a control-flow boundary.
     """
@@ -179,7 +179,7 @@ def emit_inverse_block_at_indices(
         QubitBorrowConflictError: If nested slice views have overlapping live
             ownership.
         QubitConsumedError: If a nested block accesses a qubit slot after a
-            destructive view operation consumed it.
+            destructive operation consumed it.
         ValidationError: If nested slice ownership cannot be represented
             safely across a control-flow boundary.
     """
