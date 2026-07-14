@@ -758,6 +758,8 @@ def _emit_call(
             gate = gate.inverse()
         if callee.controls:
             gate = gate.control(callee.controls)
+        if callee.power != 1:
+            gate = gate.power(callee.power, annotated=True)
     except (QiskitError, TypeError, ValueError) as error:
         raise EmitError(
             f"Reusable circuit {callee.name!r} cannot become a Qiskit gate"
@@ -768,10 +770,7 @@ def _emit_call(
             f"Reusable circuit {callee.name!r} expects {gate.num_qubits} "
             f"qubits but received {len(qubits)}"
         )
-    # Qiskit's Gate.power() attempts to numericize a symbolic circuit-global
-    # phase. Integer power is exact and simpler as repeated application.
-    for _ in range(callee.power):
-        circuit.append(gate, qubits)
+    circuit.append(gate, qubits)
     _publish_wires(operation.outputs, qubits, wires)
 
 
@@ -844,14 +843,15 @@ def _emit_native_semantic_op(
             gate = gate.inverse()
         if callee.controls:
             gate = gate.control(callee.controls)
+        if callee.power != 1:
+            gate = gate.power(callee.power, annotated=True)
     except (QiskitError, TypeError, ValueError) as error:
         raise EmitError(
             f"Native semantic operation {identity.key.name} cannot apply the "
             f"requested transforms (power={callee.power}, "
             f"inverse={callee.inverse}, controls={callee.controls})"
         ) from error
-    for _ in range(callee.power):
-        circuit.append(gate, qubits)
+    circuit.append(gate, qubits)
     original_qubits = [wires[wire] for wire in operation.inputs]
     _publish_wires(operation.outputs, original_qubits, wires)
 

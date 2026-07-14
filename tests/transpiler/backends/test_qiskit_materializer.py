@@ -8,6 +8,8 @@ from qiskit.circuit import ForLoopOp, IfElseOp
 from qiskit.quantum_info import Operator
 
 from qamomile.circuit.transpiler.circuit_ir import (
+    QFT_SEMANTIC_KEY,
+    CallableIdentity,
     CircuitBuilder,
     ClassicalBitExpr,
     ParameterExpr,
@@ -123,7 +125,7 @@ def test_qiskit_materializer_anchors_unused_abi_parameter() -> None:
 
     assert not bound.parameters
     assert float(bound.global_phase) == pytest.approx(0.0)
-    assert np.allclose(Operator(bound).data, np.eye(2), atol=1e-10)
+    assert np.allclose(Operator(bound).data, np.eye(2), rtol=0.0, atol=1e-10)
 
 
 def test_qiskit_materializer_preserves_structured_for_loop() -> None:
@@ -215,9 +217,11 @@ def test_qiskit_materializer_preserves_transformed_phase_only_calls(
     parameter = materialized.parameters["theta"]
     bound = materialized.artifact.assign_parameters({parameter: theta})
 
+    assert len(bound.data) == 1
     assert np.allclose(
         Operator(bound).data,
         _projector_phase_matrix(controls, phase_factor * theta),
+        rtol=0.0,
         atol=1e-10,
     )
 
@@ -247,5 +251,42 @@ def test_qiskit_materializer_shares_parameters_through_nested_inverse_calls() ->
     assert np.allclose(
         Operator(bound).data,
         _projector_phase_matrix(1, -theta),
+        rtol=0.0,
         atol=1e-10,
     )
+
+
+def test_qiskit_materializer_keeps_large_reusable_power_compact() -> None:
+    """A large reusable power remains one annotated Qiskit operation."""
+    body = CircuitBuilder(1, 0, name="powered-x")
+    body.append_gate(GateKind.X, (0,))
+    caller = CircuitBuilder(1, 0)
+    caller.append_call(
+        ReusableCircuit(body.freeze(), "powered-x", power=1024),
+        (0,),
+    )
+
+    circuit = QiskitMaterializer().materialize(caller.freeze()).artifact
+
+    assert len(circuit.data) == 1
+
+
+def test_qiskit_materializer_keeps_large_native_power_compact() -> None:
+    """A large native semantic power remains one annotated operation."""
+    body = CircuitBuilder(2, 0, name="native-qft")
+    caller = CircuitBuilder(2, 0)
+    caller.append_call(
+        ReusableCircuit(
+            body.freeze(),
+            "native-qft",
+            power=1024,
+            identity=CallableIdentity(QFT_SEMANTIC_KEY, "native-qft"),
+            native_realization="qiskit.qft",
+            operand_widths=(2,),
+        ),
+        (0, 1),
+    )
+
+    circuit = QiskitMaterializer().materialize(caller.freeze()).artifact
+
+    assert len(circuit.data) == 1

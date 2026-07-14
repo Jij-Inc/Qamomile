@@ -149,6 +149,7 @@ class TestQuriPartsGateEmitter:
         assert np.allclose(
             state,
             np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128),
+            rtol=0.0,
             atol=1e-10,
         )
 
@@ -165,6 +166,7 @@ class TestQuriPartsGateEmitter:
         assert np.allclose(
             state,
             np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128),
+            rtol=0.0,
             atol=1e-10,
         )
 
@@ -317,6 +319,7 @@ class TestQuriPartsTranspiler:
                 [np.exp(1j * angle), 0.0, 0.0, 0.0],
                 dtype=np.complex128,
             ),
+            rtol=0.0,
             atol=1e-10,
         )
 
@@ -333,6 +336,7 @@ class TestQuriPartsTranspiler:
         assert np.allclose(
             state,
             np.array([np.exp(0.25j), 0.0], dtype=np.complex128),
+            rtol=0.0,
             atol=1e-10,
         )
 
@@ -406,7 +410,7 @@ class TestQuriPartsTranspiler:
         assert materialized.implicit_output_qubit_indices == tuple(range(data_qubits))
         assert tuple(materialized.parameters) == ("theta",)
         state = _run_statevector(circuit, [theta])
-        assert np.allclose(state[2**data_qubits :], 0.0, atol=1e-10)
+        assert np.allclose(state[2**data_qubits :], 0.0, rtol=0.0, atol=1e-10)
         data_state = state[: 2**data_qubits]
         expected = _expected_phase_kickback(
             controls,

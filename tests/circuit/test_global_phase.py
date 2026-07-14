@@ -342,7 +342,7 @@ class TestGlobalPhaseStandalone:
             .compiled_quantum[0]
             .circuit
         )
-        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, atol=1e-9)
+        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, rtol=0.0, atol=1e-9)
 
     @pytest.mark.parametrize("theta", [0.0, np.pi, 2 * np.pi, -1.3])
     def test_pure_phase_is_scalar_identity(self, qiskit_transpiler, theta):
@@ -362,7 +362,7 @@ class TestGlobalPhaseStandalone:
         u = _unitary(
             qiskit_transpiler.transpile(circ, bindings={}).compiled_quantum[0].circuit
         )
-        assert np.allclose(u, np.exp(1j * theta) * np.eye(2), atol=1e-9)
+        assert np.allclose(u, np.exp(1j * theta) * np.eye(2), rtol=0.0, atol=1e-9)
 
     def test_direct_phase_call_from_loop_index_is_unrolled(self, qiskit_transpiler):
         """A boxed phase call cannot retain a caller-owned loop expression."""
@@ -379,6 +379,7 @@ class TestGlobalPhaseStandalone:
         assert np.allclose(
             _unitary(circuit),
             np.exp(0.6j) * np.eye(2),
+            rtol=0.0,
             atol=1e-9,
         )
 
@@ -451,7 +452,7 @@ class TestGlobalPhaseStandalone:
         )
         v_plain = tr.transpile(plain, bindings={"obs": obs}).run(tr.executor()).result()
         atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-        assert np.isclose(v_phase, v_plain, atol=atol), (
+        assert np.isclose(v_phase, v_plain, rtol=0.0, atol=atol), (
             f"{sdk_transpiler.backend_name}: {v_phase} vs {v_plain}"
         )
 
@@ -520,7 +521,7 @@ class TestGlobalPhaseStandalone:
         )
 
         assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: {counts}"
-        assert np.isclose(expectation, -1.0, atol=1e-8)
+        assert np.isclose(expectation, -1.0, rtol=0.0, atol=1e-8)
 
 
 # --------------------------------------------------------------------------- #
@@ -579,7 +580,7 @@ class TestGlobalPhaseControlled:
             ).result()
         )
         p0 = counts.get(0, 0) / shots
-        assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.03), (
+        assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
             f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
         )
 
@@ -630,7 +631,7 @@ class TestGlobalPhaseControlled:
         )
         probability_zero = counts.get(0, 0) / shots
         expected = np.cos(power * theta / 2) ** 2
-        assert np.isclose(probability_zero, expected, atol=0.035), (
+        assert np.isclose(probability_zero, expected, rtol=0.0, atol=0.035), (
             f"{sdk_transpiler.backend_name} power={power}: "
             f"P(0)={probability_zero} vs {expected}"
         )
@@ -767,7 +768,7 @@ class TestGlobalPhaseControlled:
         )
         probability_zero_zero = counts.get((0, 0), 0) / shots
         expected = (5 + 3 * np.cos(theta)) / 8
-        assert np.isclose(probability_zero_zero, expected, atol=0.035), (
+        assert np.isclose(probability_zero_zero, expected, rtol=0.0, atol=0.035), (
             f"{sdk_transpiler.backend_name}: "
             f"P(00)={probability_zero_zero} vs {expected}"
         )
@@ -807,7 +808,7 @@ class TestGlobalPhaseControlled:
         )
         expected = np.eye(4, dtype=complex)
         expected[np.ix_([1, 3], [1, 3])] = np.exp(1j * phase) * target_unitary
-        assert np.allclose(actual, expected, atol=1e-10)
+        assert np.allclose(actual, expected, rtol=0.0, atol=1e-10)
 
     def test_control_call_global_phase_survives_runtime_if(
         self,
@@ -931,13 +932,13 @@ class TestGlobalPhaseControlled:
         )
         # The controlled body must actually be present for non-trivial bodies.
         if body is not _ident:
-            assert not np.allclose(u_zero, np.eye(u_zero.shape[0]), atol=1e-8)
+            assert not np.allclose(u_zero, np.eye(u_zero.shape[0]), rtol=0.0, atol=1e-8)
 
         m = u_theta @ u_zero.conj().T
-        assert np.allclose(m, np.diag(np.diagonal(m)), atol=1e-8)
+        assert np.allclose(m, np.diag(np.diagonal(m)), rtol=0.0, atol=1e-8)
         diag = np.diagonal(m)
-        ones = int(np.isclose(diag, 1.0, atol=1e-8).sum())
-        phases = int(np.isclose(diag, np.exp(1j * theta), atol=1e-8).sum())
+        ones = int(np.isclose(diag, 1.0, rtol=0.0, atol=1e-8).sum())
+        phases = int(np.isclose(diag, np.exp(1j * theta), rtol=0.0, atol=1e-8).sum())
         assert ones == phases == len(diag) // 2, (
             f"θ={theta}: diag spectrum {np.round(diag, 4)}"
         )
@@ -992,7 +993,7 @@ class TestGlobalPhaseHandleTypes:
             .compiled_quantum[0]
             .circuit
         )
-        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, atol=1e-9)
+        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, rtol=0.0, atol=1e-9)
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
     def test_classical_param_body(self, qiskit_transpiler, seed):
@@ -1042,7 +1043,7 @@ class TestGlobalPhaseHandleTypes:
             .compiled_quantum[0]
             .circuit
         )
-        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, atol=1e-9)
+        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, rtol=0.0, atol=1e-9)
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
     def test_vector_body(self, qiskit_transpiler, seed):
@@ -1087,7 +1088,7 @@ class TestGlobalPhaseHandleTypes:
             .compiled_quantum[0]
             .circuit
         )
-        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, atol=1e-9)
+        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, rtol=0.0, atol=1e-9)
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
     def test_slice_view_body(self, qiskit_transpiler, seed):
@@ -1134,7 +1135,7 @@ class TestGlobalPhaseHandleTypes:
             .compiled_quantum[0]
             .circuit
         )
-        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, atol=1e-9)
+        assert np.allclose(u_phase, np.exp(1j * theta) * u_plain, rtol=0.0, atol=1e-9)
 
 
 # --------------------------------------------------------------------------- #
@@ -1544,7 +1545,7 @@ class TestGlobalPhaseArgShapes:
         )
         v_plain = tr.transpile(plain, bindings={"obs": obs}).run(tr.executor()).result()
         atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-        assert np.isclose(v_phase, v_plain, atol=atol), (
+        assert np.isclose(v_phase, v_plain, rtol=0.0, atol=atol), (
             f"{sdk_transpiler.backend_name}: {v_phase} vs {v_plain}"
         )
 
@@ -1649,7 +1650,7 @@ class TestGlobalPhaseSpecialCases:
         # only. After H⊗H, P(00) = |3 + e^{iθ}|^2 / 16.
         p00 = counts.get((0, 0), 0) / shots
         expected = abs(3 + np.exp(1j * theta)) ** 2 / 16
-        assert np.isclose(p00, expected, atol=0.03), (
+        assert np.isclose(p00, expected, rtol=0.0, atol=0.03), (
             f"{sdk_transpiler.backend_name} θ={theta}: P(00)={p00} vs {expected}"
         )
 
@@ -1746,7 +1747,9 @@ class TestGlobalPhaseSpecialCases:
             .compiled_quantum[0]
             .circuit
         )
-        assert np.allclose(u_inv, np.exp(-1j * theta) * u_body.conj().T, atol=1e-9)
+        assert np.allclose(
+            u_inv, np.exp(-1j * theta) * u_body.conj().T, rtol=0.0, atol=1e-9
+        )
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_phase_from_vector_float_element_kickback(self, sdk_transpiler, seed):
@@ -1793,7 +1796,7 @@ class TestGlobalPhaseSpecialCases:
             ).result()
         )
         p0 = counts.get(0, 0) / shots
-        assert np.isclose(p0, np.cos(phases[idx] / 2) ** 2, atol=0.03), (
+        assert np.isclose(p0, np.cos(phases[idx] / 2) ** 2, rtol=0.0, atol=0.03), (
             f"{sdk_transpiler.backend_name}: P(0)={p0}"
         )
 
@@ -1844,7 +1847,9 @@ class TestGlobalPhaseSpecialCases:
         u_plain = _unitary(
             qiskit_transpiler.transpile(plain, bindings={}).compiled_quantum[0].circuit
         )
-        assert np.allclose(u_nested, np.exp(1j * (alpha + beta)) * u_plain, atol=1e-9)
+        assert np.allclose(
+            u_nested, np.exp(1j * (alpha + beta)) * u_plain, rtol=0.0, atol=1e-9
+        )
 
 
 class TestGlobalPhaseControlledCompositions:
@@ -1921,7 +1926,7 @@ class TestGlobalPhaseControlledCompositions:
             ).result()
         )
         p0 = counts.get(0, 0) / shots
-        assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.03), (
+        assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
             f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
         )
 
@@ -2064,7 +2069,7 @@ class TestGlobalPhaseControlledCompositions:
         )
         probability_zero = counts.get(0, 0) / shots
         expected = np.cos(float(np.sum(angles)) / 2) ** 2
-        assert np.isclose(probability_zero, expected, atol=0.035), (
+        assert np.isclose(probability_zero, expected, rtol=0.0, atol=0.035), (
             f"{sdk_transpiler.backend_name}: P(0)={probability_zero} vs {expected}"
         )
 
@@ -2112,9 +2117,9 @@ class TestGlobalPhaseControlledCompositions:
             ).result()
         )
         probability_zero = counts.get(0, 0) / shots
-        assert np.isclose(probability_zero, np.cos(3.0 * step) ** 2, atol=0.03), (
-            f"{sdk_transpiler.backend_name} step={step}: P(0)={probability_zero}"
-        )
+        assert np.isclose(
+            probability_zero, np.cos(3.0 * step) ** 2, rtol=0.0, atol=0.03
+        ), f"{sdk_transpiler.backend_name} step={step}: P(0)={probability_zero}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_controlled_loop_carried_pauli_identity_phase(self, sdk_transpiler, seed):
@@ -2151,9 +2156,9 @@ class TestGlobalPhaseControlledCompositions:
             ).result()
         )
         probability_zero = counts.get(0, 0) / shots
-        assert np.isclose(probability_zero, np.cos(3.0 * step) ** 2, atol=0.04), (
-            f"{sdk_transpiler.backend_name} step={step}: P(0)={probability_zero}"
-        )
+        assert np.isclose(
+            probability_zero, np.cos(3.0 * step) ** 2, rtol=0.0, atol=0.04
+        ), f"{sdk_transpiler.backend_name} step={step}: P(0)={probability_zero}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_controlled_phase_expectation_value(self, sdk_transpiler, seed):
@@ -2204,7 +2209,7 @@ class TestGlobalPhaseControlledCompositions:
             .result()
         )
         atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-        assert np.isclose(val, np.cos(theta), atol=atol), (
+        assert np.isclose(val, np.cos(theta), rtol=0.0, atol=atol), (
             f"{sdk_transpiler.backend_name} θ={theta}: <Z>={val} vs {np.cos(theta)}"
         )
 
@@ -2311,7 +2316,7 @@ class TestGlobalPhaseControlledCompositions:
         )
         p000 = counts.get((0, 0, 0), 0) / shots
         expected = abs(7 + np.exp(1j * theta)) ** 2 / 64
-        assert np.isclose(p000, expected, atol=0.03), (
+        assert np.isclose(p000, expected, rtol=0.0, atol=0.03), (
             f"{sdk_transpiler.backend_name} θ={theta}: P(000)={p000} vs {expected}"
         )
 
@@ -2540,7 +2545,7 @@ class TestGlobalPhaseRound3Coverage:
             ).result()
         )
         p0 = counts.get(0, 0) / shots
-        assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.03), (
+        assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
             f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
         )
 
@@ -2589,7 +2594,7 @@ class TestGlobalPhaseRound3Coverage:
         )
         # Two P(θ) kickbacks compose to P(2θ): P(0) = cos^2(θ).
         p0 = counts.get(0, 0) / shots
-        assert np.isclose(p0, np.cos(theta) ** 2, atol=0.03), (
+        assert np.isclose(p0, np.cos(theta) ** 2, rtol=0.0, atol=0.03), (
             f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0} vs {np.cos(theta) ** 2}"
         )
 
@@ -2648,7 +2653,7 @@ class TestGlobalPhaseRound3Coverage:
         )
         expected = (1 + np.cos(theta)) / 2
         atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-        assert np.isclose(val, expected, atol=atol), (
+        assert np.isclose(val, expected, rtol=0.0, atol=atol), (
             f"{sdk_transpiler.backend_name} θ={theta}: <Z0 Z1>={val} vs {expected}"
         )
 
@@ -2789,7 +2794,7 @@ class TestGlobalPhaseRound5Coverage:
             ).result()
         )
         p0 = counts.get(0, 0) / shots
-        assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.03), (
+        assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
             f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
         )
 
@@ -2847,7 +2852,7 @@ class TestGlobalPhaseRound5Coverage:
             ).result()
         )
         p0 = counts.get(0, 0) / shots
-        assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.03), (
+        assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
             f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
         )
 
@@ -2918,7 +2923,7 @@ class TestGlobalPhaseRound5Coverage:
         probs = {key: value / shots for key, value in counts.items()}
         expected = {(0, 0): 0.5, (1, 0): 0.25, (1, 1): 0.25}
         for outcome, want in expected.items():
-            assert np.isclose(probs.get(outcome, 0.0), want, atol=0.03), (
+            assert np.isclose(probs.get(outcome, 0.0), want, rtol=0.0, atol=0.03), (
                 f"{sdk_transpiler.backend_name} take_true={take_true}: "
                 f"{outcome}={probs.get(outcome, 0.0)} (want {want}); full={probs}"
             )
@@ -2994,11 +2999,11 @@ class TestGlobalPhaseDeepControlRegressions:
             .run(tr.executor())
             .result()
         )
-        assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.035), (
+        assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.035), (
             f"{sdk_transpiler.backend_name} theta={theta}: P(0)={p0}"
         )
         atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-        assert np.isclose(value, np.cos(theta), atol=atol), (
+        assert np.isclose(value, np.cos(theta), rtol=0.0, atol=atol), (
             f"{sdk_transpiler.backend_name} theta={theta}: <Z>={value}"
         )
 
@@ -3090,11 +3095,11 @@ class TestGlobalPhaseDeepControlRegressions:
             .run(tr.executor())
             .result()
         )
-        assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.035), (
+        assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.035), (
             f"{sdk_transpiler.backend_name} theta={theta}: P(0)={p0}"
         )
         atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-        assert np.isclose(value, np.cos(theta), atol=atol), (
+        assert np.isclose(value, np.cos(theta), rtol=0.0, atol=atol), (
             f"{sdk_transpiler.backend_name} theta={theta}: <Z>={value}"
         )
 
@@ -3211,11 +3216,11 @@ class TestGlobalPhaseDeepControlRegressions:
             .run(tr.executor())
             .result()
         )
-        assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.035), (
+        assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.035), (
             f"{sdk_transpiler.backend_name} theta={theta}: P(0)={p0}"
         )
         atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-        assert np.isclose(value, np.cos(theta), atol=atol), (
+        assert np.isclose(value, np.cos(theta), rtol=0.0, atol=atol), (
             f"{sdk_transpiler.backend_name} theta={theta}: <Z>={value}"
         )
 
@@ -3316,11 +3321,11 @@ class TestGlobalPhaseDeepControlRegressions:
             .run(tr.executor())
             .result()
         )
-        assert np.isclose(p0, np.cos(theta / 2) ** 2, atol=0.035), (
+        assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.035), (
             f"{sdk_transpiler.backend_name} theta={theta}: P(0)={p0}"
         )
         atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-        assert np.isclose(value, np.cos(theta), atol=atol), (
+        assert np.isclose(value, np.cos(theta), rtol=0.0, atol=atol), (
             f"{sdk_transpiler.backend_name} theta={theta}: <Z>={value}"
         )
 
@@ -3824,6 +3829,24 @@ class TestGlobalPhaseArgumentValidation:
             qs = qmc.x(qs)
             assert not qs._consumed
 
+    def test_specialized_dead_if_branch_is_not_validated(self):
+        """Validation follows the exact statically selected specialization."""
+
+        @qkernel
+        def candidate(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
+            """Allocate only on the specialization's unreachable branch."""
+            if flag:
+                hidden = qmc.qubit("hidden")
+                hidden = qmc.h(hidden)
+            return q
+
+        @qkernel
+        def outer(q: qmc.Qubit) -> qmc.Qubit:
+            """Phase the allocation-free ``flag=False`` specialization."""
+            return qmc.global_phase(candidate, 0.2)(q, False)
+
+        assert outer.block is not None
+
     def test_selected_specialization_is_validated_once_and_reused(self, monkeypatch):
         """Validate and emit the same call-time-specialized Block exactly once."""
         import importlib
@@ -4041,6 +4064,85 @@ class TestGlobalPhaseArgumentValidation:
 
         assert outer.block is not None
 
+    def test_measurement_selected_unitary_family_is_standalone_only(
+        self,
+        qiskit_transpiler,
+    ):
+        """A measured selector is valid standalone but fails under control."""
+        from qiskit.circuit import IfElseOp
+
+        from qamomile.circuit.transpiler.errors import DependencyError
+
+        @qkernel
+        def conditional(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
+            """Select one resource-preserving unitary branch."""
+            if flag:
+                q = qmc.x(q)
+            else:
+                q = qmc.h(q)
+            return q
+
+        @qkernel
+        def standalone() -> qmc.Bit:
+            """Apply the family after measuring its classical selector."""
+            selector = qmc.qubit("selector")
+            target = qmc.qubit("target")
+            flag = qmc.measure(selector)
+            target = qmc.global_phase(conditional, 0.2)(target, flag)
+            return qmc.measure(target)
+
+        circuit = qiskit_transpiler.transpile(standalone).get_first_circuit()
+
+        assert any(
+            isinstance(instruction.operation, IfElseOp) for instruction in circuit.data
+        )
+        assert float(circuit.global_phase) == pytest.approx(0.2)
+
+        @qkernel
+        def phased(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
+            """Apply the same conditional family with a common phase."""
+            return qmc.global_phase(conditional, 0.2)(q, flag)
+
+        controlled = qmc.control(phased)
+
+        @qkernel
+        def controlled_circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            """Attempt coherent control with an unresolved measured selector."""
+            selector = qmc.qubit("selector")
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            flag = qmc.measure(selector)
+            control, target = controlled(control, target, flag)
+            return qmc.measure(control), qmc.measure(target)
+
+        with pytest.raises(
+            DependencyError,
+            match=r"ConcreteControlledU.*depends on measurement result",
+        ) as exc_info:
+            qiskit_transpiler.transpile(controlled_circuit)
+
+        assert exc_info.value.quantum_op == "ConcreteControlledU"
+
+    @pytest.mark.parametrize("condition", [True, False])
+    def test_compile_time_if_preserving_resource_is_accepted(self, condition):
+        """A Python-bool branch selects one resource-preserving unitary."""
+
+        @qkernel
+        def conditional_body(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply a statically selected gate while preserving the qubit."""
+            if condition:
+                q = qmc.x(q)
+            else:
+                q = qmc.z(q)
+            return q
+
+        @qkernel
+        def outer(q: qmc.Qubit) -> qmc.Qubit:
+            """Wrap the compile-time conditional body in a global phase."""
+            return qmc.global_phase(conditional_body, 0.1)(q)
+
+        assert outer.block is not None
+
     def test_nested_for_if_preserving_resource_is_accepted(self):
         """Nested static loops and runtime branches preserve one resource."""
 
@@ -4254,6 +4356,32 @@ class TestGlobalPhaseArgumentValidation:
         )
         _validate_unitary_block(block, f"empty_{loop_kind}")
 
+    def test_huge_static_loop_bound_does_not_overflow_validation(self):
+        """Loop emptiness validation does not call ``len`` on a huge range."""
+        from qamomile.circuit.frontend.operation.global_phase import (
+            _validate_unitary_block,
+        )
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+        from qamomile.circuit.ir.value import Value
+
+        qubit = Value(type=QubitType(), name="qubit")
+        zero = Value(type=UIntType(), name="zero").with_const(0)
+        stop = Value(type=UIntType(), name="stop").with_const(10**100)
+        one = Value(type=UIntType(), name="one").with_const(1)
+        loop = ForOperation(
+            operands=[zero, stop, one],
+            loop_var="index",
+            loop_var_value=Value(type=UIntType(), name="index"),
+        )
+        block = Block(
+            input_values=[qubit],
+            output_values=[qubit],
+            operations=[loop],
+        )
+
+        _validate_unitary_block(block, "huge_static_loop")
+
     def test_non_bit_if_condition_is_rejected(self):
         """Provenance must not treat a numeric constant as a Bit condition."""
         from qamomile.circuit.frontend.operation.global_phase import (
@@ -4279,37 +4407,6 @@ class TestGlobalPhaseArgumentValidation:
 
         with pytest.raises(TypeError, match="Bit"):
             _validate_unitary_block(block, "numeric_condition")
-
-    def test_invoke_scalar_vector_mismatch_is_rejected(self):
-        """A malformed Invoke may not transfer scalar provenance to a vector."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
-        from qamomile.circuit.ir.value import ArrayValue, Value
-
-        formal = Value(type=QubitType(), name="formal")
-        callee = Block(
-            name="scalar_identity",
-            label_args=["q"],
-            input_values=[formal],
-            output_values=[formal],
-        )
-        actual = ArrayValue(
-            type=QubitType(),
-            name="actual",
-            shape=(Value(type=UIntType(), name="size").with_const(2),),
-        )
-        invoke = callee.call(q=actual)
-        caller = Block(
-            input_values=[actual],
-            output_values=list(invoke.results),
-            operations=[invoke],
-        )
-
-        with pytest.raises(TypeError, match="qubit-preserving unitary"):
-            _validate_unitary_block(caller, "mismatched_invoke")
 
     def test_deep_identity_merge_chain_is_accepted(self):
         """A deep shared merge graph resolves iteratively in linear work."""
@@ -4337,6 +4434,209 @@ class TestGlobalPhaseArgumentValidation:
         )
 
         _validate_unitary_block(block, "deep_identity_merges")
+
+    def test_deep_nested_if_tree_is_accepted_without_recursion(self):
+        """Structured nesting depth does not consume the Python call stack."""
+        from qamomile.circuit.frontend.operation.global_phase import (
+            _validate_unitary_block,
+        )
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.types.primitives import BitType, QubitType
+        from qamomile.circuit.ir.value import Value
+
+        qubit = Value(type=QubitType(), name="qubit")
+        condition = Value(type=BitType(), name="condition")
+        nested = IfOperation(operands=[condition])
+        for _ in range(1500):
+            nested = IfOperation(
+                operands=[condition],
+                true_operations=[nested],
+            )
+        block = Block(
+            input_values=[qubit, condition],
+            output_values=[qubit],
+            operations=[nested],
+        )
+
+        _validate_unitary_block(block, "deep_nested_if")
+
+    def test_deep_owned_block_chain_is_accepted_without_recursion(self):
+        """Nested Invoke bodies are validated through an explicit worklist."""
+        from qamomile.circuit.frontend.operation.global_phase import (
+            _validate_unitary_block,
+        )
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation import InvokeOperation
+        from qamomile.circuit.ir.types.primitives import QubitType
+        from qamomile.circuit.ir.value import Value
+
+        leaf = Value(type=QubitType(), name="leaf")
+        block = Block(input_values=[leaf], output_values=[leaf])
+        for index in range(1500):
+            qubit = Value(type=QubitType(), name=f"q_{index}")
+            result = qubit.next_version()
+            invoke = InvokeOperation(operands=[qubit], results=[result])
+            invoke.body = block
+            block = Block(
+                input_values=[qubit],
+                output_values=[result],
+                operations=[invoke],
+            )
+
+        _validate_unitary_block(block, "deep_owned_blocks")
+
+    def test_whole_vector_control_preserves_register_provenance(self):
+        """Expanded scalar control ports reconstruct their returned Vector."""
+
+        @qkernel
+        def x_target(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.x(q)
+
+        @qkernel
+        def controlled_body(
+            controls: qmc.Vector[qmc.Qubit],
+            target: qmc.Qubit,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+            controls, target = qmc.control(x_target, num_controls=2)(
+                controls,
+                target,
+            )
+            return controls, target
+
+        @qkernel
+        def circuit() -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+            controls = qmc.qubit_array(2, "controls")
+            target = qmc.qubit("target")
+            return qmc.global_phase(controlled_body, 0.2)(controls, target)
+
+        assert circuit.block is not None
+
+    def test_individual_controls_from_one_vector_preserve_provenance(self):
+        """Scalar control elements do not create a second parent producer."""
+
+        @qkernel
+        def x_target(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.x(q)
+
+        @qkernel
+        def controlled_body(
+            controls: qmc.Vector[qmc.Qubit],
+            target: qmc.Qubit,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+            controls[0], controls[1], target = qmc.control(
+                x_target,
+                num_controls=2,
+            )(controls[0], controls[1], target)
+            return controls, target
+
+        @qkernel
+        def circuit() -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+            controls = qmc.qubit_array(2, "controls")
+            target = qmc.qubit("target")
+            return qmc.global_phase(controlled_body, 0.2)(controls, target)
+
+        assert circuit.block is not None
+
+    def test_whole_vector_controlled_composite_preserves_provenance(self):
+        """Controlled composite Invokes reconstruct a returned control Vector."""
+
+        @qmc.composite_gate(name="global_phase_boxed_x")
+        def boxed_x(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.x(q)
+
+        @qkernel
+        def controlled_body(
+            controls: qmc.Vector[qmc.Qubit],
+            target: qmc.Qubit,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+            controls, target = qmc.control(boxed_x, num_controls=2)(
+                controls,
+                target,
+            )
+            return controls, target
+
+        @qkernel
+        def circuit() -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+            controls = qmc.qubit_array(2, "controls")
+            target = qmc.qubit("target")
+            return qmc.global_phase(controlled_body, 0.2)(controls, target)
+
+        assert circuit.block is not None
+
+    def test_symbolic_vector_control_preserves_register_provenance(self):
+        """Symbolic control pools retain their array-shaped control ports."""
+
+        @qkernel
+        def x_target(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.x(q)
+
+        @qkernel
+        def controlled_body(
+            controls: qmc.Vector[qmc.Qubit],
+            target: qmc.Qubit,
+            count: qmc.UInt,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+            controls, target = qmc.control(x_target, num_controls=count)(
+                controls,
+                target,
+            )
+            return controls, target
+
+        @qkernel
+        def circuit(
+            count: qmc.UInt,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
+            controls = qmc.qubit_array(count, "controls")
+            target = qmc.qubit("target")
+            return qmc.global_phase(controlled_body, 0.2)(
+                controls,
+                target,
+                count,
+            )
+
+        assert circuit.block is not None
+
+    def test_controlled_composite_interleaved_ports_preserve_provenance(self):
+        """Controlled composite ports are realigned to declaration order."""
+
+        @qmc.composite_gate(name="global_phase_interleaved_box")
+        def boxed(
+            first: qmc.Qubit,
+            angle: qmc.Float,
+            second: qmc.Qubit,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.rx(first, angle), qmc.x(second)
+
+        @qkernel
+        def controlled_body(
+            control: qmc.Qubit,
+            first: qmc.Qubit,
+            angle: qmc.Float,
+            second: qmc.Qubit,
+        ) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+            control, first, second = qmc.control(boxed)(
+                control,
+                first,
+                angle,
+                second,
+            )
+            return control, first, second
+
+        @qkernel
+        def circuit(
+            angle: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+            control = qmc.qubit("control")
+            first = qmc.qubit("first")
+            second = qmc.qubit("second")
+            return qmc.global_phase(controlled_body, 0.2)(
+                control,
+                first,
+                angle,
+                second,
+            )
+
+        assert circuit.block is not None
 
     def test_concrete_full_reslice_body_preserves_register(self, sdk_transpiler):
         """Treat ``qs[:]`` as the same ordered register on every backend."""

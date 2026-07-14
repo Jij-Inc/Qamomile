@@ -82,6 +82,7 @@ class TestCudaqGlobalPhaseMaterialization:
         assert np.allclose(
             state,
             np.array([np.exp(1j * angle**2), 0.0], dtype=np.complex128),
+            rtol=0.0,
             atol=1e-10,
         )
 
@@ -106,6 +107,7 @@ class TestCudaqGlobalPhaseMaterialization:
         assert np.allclose(
             state,
             np.array([1.0, 0.0, 0.0, 0.0], dtype=np.complex128),
+            rtol=0.0,
             atol=1e-10,
         )
 
