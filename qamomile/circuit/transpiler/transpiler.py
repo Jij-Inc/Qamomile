@@ -394,8 +394,9 @@ class Transpiler(ABC, Generic[T]):
         so this pass cannot observe the borrow site itself. Later uses of
         that element do appear as operation operands and are checked for
         conflicts with live slice views. Trace-time validation in
-        :func:`func_to_block._validate_returned_arrays` covers unreturned
-        direct-element borrows that have no observable operand use.
+        :func:`qamomile.circuit.frontend.func_to_block._validate_returned_arrays`
+        covers unreturned direct-element borrows that have no observable
+        operand use.
 
         The pass is a pass-through for the IR — it only raises on
         violations and leaves the block unchanged on success.

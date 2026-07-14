@@ -36,7 +36,7 @@ unmeasured) compile cleanly.  The genuine hazards stay covered:
   frontend's ``ArrayBase.consume`` / ``validate_all_returned``.
 * Returning the parent with an outstanding borrow raises
   ``UnreturnedBorrowError`` from
-  ``func_to_block._validate_returned_arrays``.
+  ``qamomile.circuit.frontend.func_to_block._validate_returned_arrays``.
 * Direct ``q[i]`` access on a slot a view currently owns is caught
   at the frontend's element-access path / this pass's
   :meth:`_process_operand_borrows` for symbolic-bound views.
@@ -48,7 +48,7 @@ The creation of a direct element borrow (``q[i]``) is intentionally
 Later uses of that element do appear as operation operands, however,
 so :meth:`_process_operand_borrows` can reject a use that collides
 with a live slice view.  The frontend trace-time validator
-(``func_to_block._validate_returned_arrays`` and
+(``qamomile.circuit.frontend.func_to_block._validate_returned_arrays`` and
 ``ArrayBase.validate_all_returned``) remains the source of truth for
 unreturned direct-element borrows that have no observable operand use.
 
@@ -235,19 +235,20 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
     state map modelled on the frontend's
     :attr:`ArrayBase._borrowed_indices` — a single ``dict`` whose
     values are slice-view ``ArrayValue`` owners or the
-    ``_ConsumedSlotMarker`` sentinel.  Direct element borrows
-    (``q[i]``) emit no IR operation and are left to the trace-time
-    validator.
+    ``_ConsumedSlotMarker`` sentinel.  Creating a direct element borrow
+    (``q[i]``) emits no IR operation, but later operand uses remain visible
+    to this pass; the frontend validator handles an unreturned borrow with
+    no observable operand use.
 
     The pass does **not** flag a leftover slice view at block end —
     slice views are affine at the kernel boundary, mirroring how
     element borrows behave on a locally-allocated register (the
-    frontend's ``_validate_returned_arrays`` covers the genuine
-    leak: returning the parent with a live borrow).  Anything that
-    actually clashes with a live view (direct slot access,
-    destructive parent consume, overlapping views, use-after-
-    destroy) is rejected at the eager check points listed in the
-    module docstring.
+    frontend's
+    ``qamomile.circuit.frontend.func_to_block._validate_returned_arrays``
+    covers the genuine leak: returning the parent with a live borrow).
+    Anything that actually clashes with a live view (direct slot access,
+    destructive parent consume, overlapping views, use-after-destroy) is
+    rejected at the eager check points listed in the module docstring.
     """
 
     def __init__(self) -> None:
