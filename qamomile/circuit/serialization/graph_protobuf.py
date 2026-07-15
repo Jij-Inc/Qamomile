@@ -1120,6 +1120,7 @@ _OPERATION_TO_PROTO: dict[str, pb.OperationType] = {
     "SymbolicControlledU": pb.SYMBOLIC_CONTROLLED_OPERATION,
     "InvokeOperation": pb.INVOKE_OPERATION,
     "InverseBlockOperation": pb.INVERSE_BLOCK_OPERATION,
+    "GlobalPhaseOperation": pb.GLOBAL_PHASE_OPERATION,
 }
 _OPERATION_FROM_PROTO: dict[pb.OperationType, str] = {
     value: key for key, value in _OPERATION_TO_PROTO.items()
@@ -1209,6 +1210,7 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
             "callable_attrs",
         }
     ),
+    pb.GLOBAL_PHASE_OPERATION: frozenset(),
 }
 
 _OPERATION_REQUIRED_FIELDS: dict[pb.OperationType, frozenset[str]] = {

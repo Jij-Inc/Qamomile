@@ -11,6 +11,7 @@ from qamomile.circuit.ir.operation import (
     ForItemsOperation,
     GateOperation,
     GateOperationType,
+    GlobalPhaseOperation,
     InverseBlockOperation,
     InvokeOperation,
     MeasureOperation,
@@ -328,6 +329,9 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
             raise ValueError(f"{location} must release an ArrayValue")
     elif isinstance(operation, ReturnOperation):
         _require_result_count(operation, 0, location)
+    elif isinstance(operation, GlobalPhaseOperation):
+        _require_arity(operation, 1, 0, location)
+        _require_types(operation.operands, [FloatType()], location, "operand")
     elif isinstance(operation, ExpvalOp):
         _require_arity(operation, 2, 1, location)
         if not operation.operands[0].type.is_quantum():

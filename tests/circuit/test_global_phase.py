@@ -1024,15 +1024,21 @@ class TestGlobalPhaseHandleTypes:
 
 
 # --------------------------------------------------------------------------- #
-# IR plumbing: serialization round-trip and content hashing
+# IR plumbing: qkernel serialization round-trip
 # --------------------------------------------------------------------------- #
 class TestGlobalPhaseSerialize:
-    """The op survives canonicalization, serialization, and content hashing."""
+    """The op survives a qkernel protobuf round-trip.
 
-    def test_serialize_roundtrip_and_content_hash(self, qiskit_transpiler):
-        """JSON round-trip preserves structure and a stable content hash."""
-        from qamomile.circuit.ir.canonical import content_hash
-        from qamomile.circuit.ir.serialize import dump_json, load_json
+    ``param_slots`` are rebuilt from the qkernel interface rather than carried
+    on the wire, so a reloaded body is compared through its encoded static IR
+    instead of ``content_hash``. Canonical content hashing of the op itself is
+    covered by ``tests/transpiler/test_global_phase_pipeline.py``.
+    """
+
+    def test_serialize_roundtrip_preserves_static_body(self, qiskit_transpiler):
+        """A phase inside a controlled body survives the protobuf round-trip."""
+        from qamomile.circuit.serialization import deserialize, serialize
+        from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
 
         @qkernel
         def phased_body(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
@@ -1047,19 +1053,24 @@ class TestGlobalPhaseSerialize:
             ctrl, q = qmc.control(phased_body)(ctrl, q, angle)
             return qmc.measure(ctrl)
 
-        block = qiskit_transpiler.inline(
-            qiskit_transpiler.to_block(circ, {}, ["angle"])
-        )
-        restored = load_json(dump_json(block))
-        assert [type(o).__name__ for o in block.operations] == [
-            type(o).__name__ for o in restored.operations
-        ]
-        assert content_hash(block) == content_hash(restored)
+        restored = deserialize(serialize(circ))
+        block = qiskit_transpiler.inline(circ.block)
+        restored_block = qiskit_transpiler.inline(restored.block)
 
-    def test_control_call_phase_roundtrip_and_content_hash(self, qiskit_transpiler):
+        assert [type(o).__name__ for o in block.operations] == [
+            type(o).__name__ for o in restored_block.operations
+        ]
+        assert (
+            kernel_to_dict(restored)["artifact"]["body"]
+            == kernel_to_dict(circ)["artifact"]["body"]
+        )
+
+    def test_control_call_phase_roundtrip_preserves_static_body(
+        self, qiskit_transpiler
+    ):
         """A call-site phase formal and actual survive semantic IR round-trip."""
-        from qamomile.circuit.ir.canonical import content_hash
-        from qamomile.circuit.ir.serialize import dump_json, load_json
+        from qamomile.circuit.serialization import deserialize, serialize
+        from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Bit:
@@ -1073,15 +1084,38 @@ class TestGlobalPhaseSerialize:
             )
             return qmc.measure(control)
 
-        block = qiskit_transpiler.inline(
-            qiskit_transpiler.to_block(circ, {}, ["angle"])
-        )
-        restored = load_json(dump_json(block))
+        restored = deserialize(serialize(circ))
+        block = qiskit_transpiler.inline(circ.block)
+        restored_block = qiskit_transpiler.inline(restored.block)
 
         assert [type(operation).__name__ for operation in block.operations] == [
-            type(operation).__name__ for operation in restored.operations
+            type(operation).__name__ for operation in restored_block.operations
         ]
-        assert content_hash(block) == content_hash(restored)
+        assert (
+            kernel_to_dict(restored)["artifact"]["body"]
+            == kernel_to_dict(circ)["artifact"]["body"]
+        )
+
+    def test_roundtrip_preserves_zero_result_phase_operand(self, qiskit_transpiler):
+        """A constant phase keeps its angle and zero-result layout on reload."""
+        from qamomile.circuit.ir.operation import GlobalPhaseOperation
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        @qkernel
+        def circ() -> qmc.Bit:
+            """Apply a constant global phase to an otherwise plain body."""
+            q = qmc.qubit("q")
+            q = qmc.global_phase(_x_body, 0.375)(q)
+            return qmc.measure(q)
+
+        restored = qiskit_transpiler.inline(deserialize(serialize(circ)).block)
+
+        phase_ops = [
+            op for op in restored.operations if isinstance(op, GlobalPhaseOperation)
+        ]
+        assert len(phase_ops) == 1
+        assert phase_ops[0].results == []
+        assert phase_ops[0].phase.get_const() == pytest.approx(0.375)
 
 
 # --------------------------------------------------------------------------- #
