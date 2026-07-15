@@ -1653,6 +1653,10 @@ def _decode_concrete_controlled(
     Returns:
         ConcreteControlledU: The reconstructed op, including its
             nested unitary block.
+
+    Raises:
+        ValueError: If ``control_value`` is present but is not a Python
+            ``int``. Width validation is performed by ``ConcreteControlledU``.
     """
     operands, results = _operands_results(d, ctx)
     block = (
@@ -1661,10 +1665,17 @@ def _decode_concrete_controlled(
         else None
     )
     callable_attrs = _decode_callable_attrs(d.get("callable_attrs"))
+    control_value = d.get("control_value")
+    if control_value is not None and not is_plain_int(control_value):
+        raise ValueError(
+            "ConcreteControlledU.control_value must be a Python int or null, "
+            f"got {control_value!r}."
+        )
     return ConcreteControlledU(
         operands=operands,
         results=results,
         num_controls=int(d.get("num_controls", 1)),
+        control_value=control_value,
         power=_decode_power(d.get("power", 1), ctx),
         block=block,
         callable_ref=(
@@ -2046,6 +2057,7 @@ def _decode_inverse_block(
             else None
         ),
         callable_attrs=_decode_callable_attrs(d.get("callable_attrs")),
+        control_value=d.get("control_value"),
     )
 
 

@@ -1265,11 +1265,14 @@ def _encode_concrete_controlled(
 
     Returns:
         dict[str, Any]: Base op dict plus ``num_controls`` (concrete
-            int), ``power`` (int or value-ref), and a nested
+            int), optional ``control_value`` (a non-default LSB-first
+            activation state), ``power`` (int or value-ref), and a nested
             ``unitary_block`` dict.
     """
     d = _base_op_dict("ConcreteControlledU", op)
     d["num_controls"] = op.num_controls
+    if op.control_value is not None:
+        d["control_value"] = op.control_value
     d["power"] = _encode_power(op.power)
     if op.callable_ref is not None:
         d["callable_ref"] = _encode_callable_ref(op.callable_ref)
@@ -1522,6 +1525,8 @@ def _encode_inverse_block(
     d["num_control_qubits"] = op.num_control_qubits
     d["num_target_qubits"] = op.num_target_qubits
     d["custom_name"] = op.custom_name
+    if op.control_value is not None:
+        d["control_value"] = op.control_value
     if op.callable_ref is not None:
         d["callable_ref"] = _encode_callable_ref(op.callable_ref)
     if op.callable_attrs:

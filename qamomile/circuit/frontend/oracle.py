@@ -18,6 +18,7 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
     signature_from_values,
 )
+from qamomile.circuit.ir.operation.control_value import normalize_control_value
 
 
 @dataclasses.dataclass
@@ -90,6 +91,7 @@ class Oracle:
         self,
         *qubits: Qubit | Vector[Qubit],
         controls: Sequence[Qubit] = (),
+        control_value: int | None = None,
     ) -> tuple[Qubit, ...] | Vector[Qubit]:
         """Apply the oracle to scalar qubits or a vector register.
 
@@ -98,20 +100,31 @@ class Oracle:
                 or ``num_qubits`` scalar qubits.
             controls (Sequence[Qubit]): Explicit control qubits. Defaults to
                 an empty sequence.
+            control_value (int | None): LSB-first activation value for
+                ``controls``. ``None`` uses the ordinary all-ones state.
+                Defaults to ``None``.
 
         Returns:
             tuple[Qubit, ...] | Vector[Qubit]: Oracle outputs with the same
             shape as the input form.
 
         Raises:
-            ValueError: If the provided arity does not match ``num_qubits``.
-            TypeError: If the argument shape is not supported.
+            ValueError: If the provided arity does not match ``num_qubits``
+                or ``control_value`` does not fit the control width.
+            TypeError: If the argument shape is not supported or
+                ``control_value`` is invalid.
         """
         if len(qubits) == 1 and isinstance(qubits[0], Vector):
-            if controls:
-                raise TypeError("Oracle vector calls do not accept controls yet.")
+            if controls or control_value is not None:
+                raise TypeError(
+                    "Oracle vector calls do not accept controls or control_value yet."
+                )
             return self._call_vector(qubits[0])
-        return self._call_scalars(*qubits, controls=controls)
+        return self._call_scalars(
+            *qubits,
+            controls=controls,
+            control_value=control_value,
+        )
 
     def _call_vector(
         self,
@@ -201,6 +214,7 @@ class Oracle:
         self,
         *qubits: Qubit | Vector[Qubit],
         controls: Sequence[Qubit] = (),
+        control_value: int | None = None,
     ) -> tuple[Qubit, ...]:
         """Apply the oracle to scalar qubits.
 
@@ -208,13 +222,17 @@ class Oracle:
             *qubits (Qubit | Vector[Qubit] | VectorView[Qubit]): Scalar qubit
                 handles. Vector arguments are rejected here.
             controls (Sequence[Qubit]): Explicit scalar controls.
+            control_value (int | None): LSB-first activation value for the
+                explicit controls. Defaults to ``None``.
 
         Returns:
             tuple[Qubit, ...]: Next-version scalar qubits.
 
         Raises:
-            TypeError: If any argument is not a scalar qubit.
-            ValueError: If the number of scalar qubits is wrong.
+            TypeError: If any argument is not a scalar qubit or
+                ``control_value`` is invalid.
+            ValueError: If the number of scalar qubits is wrong or the
+                activation value does not fit the control width.
         """
         if self.num_qubits is None:
             raise TypeError(
@@ -235,6 +253,11 @@ class Oracle:
             raise TypeError("Oracle scalar calls accept only Qubit arguments.")
         if not all(isinstance(c, Qubit) for c in controls):
             raise TypeError("Oracle controls accept only Qubit arguments.")
+        normalized_control_value = (
+            normalize_control_value(control_value, len(controls)) if controls else None
+        )
+        if not controls and control_value is not None:
+            raise ValueError("Oracle control_value requires at least one control.")
 
         consumed_controls = [
             c.consume(operation_name=f"Oracle[{self.name}][control]") for c in controls
@@ -252,6 +275,8 @@ class Oracle:
             "gate_type": "CUSTOM",
             "default_policy": CallPolicy.PRESERVE_BOX.name,
         }
+        if normalized_control_value is not None:
+            attrs["control_value"] = normalized_control_value
         transform = (
             CallTransform.CONTROLLED if consumed_controls else CallTransform.DIRECT
         )

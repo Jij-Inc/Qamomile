@@ -163,6 +163,21 @@ def _hugr_two_control_call_global_phase(
 
 
 @qmc.qkernel
+def _hugr_control_value_global_phase(
+    theta: qmc.Float,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Apply a phase when two controls hold LSB-first value two."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _hugr_phased_helper,
+        num_controls=2,
+        control_value=2,
+    )(controls, target, theta)
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
 def _hugr_three_control_global_phase(
     theta: qmc.Float,
 ) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
@@ -806,6 +821,32 @@ def _hugr_controlled_program() -> tuple[qmc.Bit, qmc.Bit]:
     target = qmc.qubit("target")
     control, target = qmc.control(_hugr_x_helper)(control, target)
     return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_control_value_program() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Control a qkernel X helper on LSB-first register value two."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _hugr_x_helper,
+        num_controls=2,
+        control_value=2,
+    )(controls, target)
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_composite_control_value_program() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Control a boxed X helper on LSB-first register value two."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _hugr_same_name_x,
+        num_controls=2,
+        control_value=2,
+    )(controls, target)
+    return qmc.measure(controls), qmc.measure(target)
 
 
 @qmc.qkernel
@@ -2174,6 +2215,50 @@ def test_hugr_legalizes_controlled_x_calls_to_tket_cx() -> None:
     operations = [data.op for _, data in package.modules[0].nodes()]
 
     assert any("name='CX'" in str(op) for op in operations)
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("kernel", "expected_x_count"),
+    [
+        pytest.param(_hugr_control_value_program, 2, id="structural"),
+        pytest.param(_hugr_composite_control_value_program, 3, id="invoke"),
+    ],
+)
+def test_hugr_lowers_control_value_with_x_brackets(
+    kernel: qmc.QKernel,
+    expected_x_count: int,
+) -> None:
+    """Concrete and boxed controls lower value two as X-Toffoli-X.
+
+    Args:
+        kernel (qmc.QKernel): Patterned-control representation to lower.
+        expected_x_count (int): Total X operations, including boxed definitions.
+    """
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(kernel)
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.X") == expected_x_count
+    assert names.count("tket.quantum.Toffoli") == 1
+
+
+@pytest.mark.hugr
+def test_hugr_keeps_global_phase_inside_control_value_brackets() -> None:
+    """A patterned phase retains both its X brackets and exact phase terms."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_control_value_global_phase,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.X") == 2
+    assert names.count("tket.global_phase.global_phase") == 1
+    assert names.count("tket.quantum.Rz") == 1
+    assert names.count("tket.quantum.CRz") == 1
 
 
 @pytest.mark.hugr

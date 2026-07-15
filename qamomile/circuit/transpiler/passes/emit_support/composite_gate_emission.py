@@ -9,6 +9,7 @@ variants. Each function takes an
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,9 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_support.control_value_emission import (
+    bracket_control_value,
+)
 from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
     map_array_result_group,
 )
@@ -276,7 +280,19 @@ def emit_callable_implementation_emitter(
             "emitter without an emit() method.",
             operation=f"InvokeOperation[{op.target.name}]",
         )
-    return bool(emit(circuit, op, qubit_indices, bindings))
+    own_controls = qubit_indices[: op.num_control_qubits]
+    normalized_op = op
+    if op.control_value is not None:
+        normalized_attrs = dict(op.attrs)
+        normalized_attrs.pop("control_value", None)
+        normalized_op = dataclasses.replace(op, attrs=normalized_attrs)
+    with bracket_control_value(
+        emit_pass,
+        circuit,
+        own_controls,
+        op.control_value,
+    ):
+        return bool(emit(circuit, normalized_op, qubit_indices, bindings))
 
 
 def emit_qft_with_strategy(
