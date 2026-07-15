@@ -107,7 +107,7 @@ def test_grover_iteration_count_accepts_numpy_integers() -> None:
 def test_grover_symbolic_query_complexity() -> None:
     """Query count equals the (symbolic) iteration count: O(sqrt(N/m))."""
     est = _grover_estimate_kernel.estimate_resources()
-    iterations = sp.Symbol("iterations", integer=True, positive=True)
+    iterations = est.parameters["iterations"]
     assert est.calls.queries_by_name["query_oracle"] == iterations
 
 
@@ -137,7 +137,7 @@ def test_grover_optimal_query_complexity_via_inputs() -> None:
 def test_grover_qubit_count_is_linear() -> None:
     """Grover uses O(n) qubits (the search register width)."""
     est = _grover_estimate_kernel.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
+    n = est.parameters["n"]
     assert sp.simplify(est.qubits - n) == 0
 
 

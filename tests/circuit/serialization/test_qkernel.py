@@ -671,7 +671,7 @@ def test_inconsistent_region_result_is_rejected_during_deserialize() -> None:
     )
     loop.region_args[0].result_ref = message.body.input_value_refs[0]
 
-    with pytest.raises(ValueError, match="region result is not owned by the loop"):
+    with pytest.raises(ValueError, match="result_ref does not match result_refs"):
         _restore(message)
 
 

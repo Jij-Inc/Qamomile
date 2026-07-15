@@ -71,8 +71,12 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             shots: Number of measurement shots
 
         Returns:
-            Dictionary mapping bitstrings to counts (e.g., {"00": 512, "11": 512})
+            Dictionary mapping bitstrings to counts (e.g., {"00": 512, "11": 512).
+            A circuit without quantum or classical bits returns ``{"": shots}``.
         """
+        if circuit.num_qubits == 0 and circuit.num_clbits == 0:
+            return {"": shots}
+
         from qiskit import transpile
 
         if self.backend is None:

@@ -74,6 +74,38 @@ class TestDependencyErrorContract:
         err = DependencyError("msg")
         assert isinstance(err, QamomileCompileError)
 
+    def test_region_args_propagate_measurement_taint(self) -> None:
+        """A loop result inherits taint from its initial and yielded values."""
+        from qamomile.circuit.ir.operation.control_flow import ForOperation, RegionArg
+        from qamomile.circuit.ir.operation.gate import MeasureOperation
+        from qamomile.circuit.ir.types.primitives import BitType, QubitType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.passes.analyze import (
+            build_dependency_graph,
+            find_measurement_derived_values,
+            find_measurement_results,
+        )
+
+        qubit = Value(type=QubitType(), name="q")
+        init = Value(type=BitType(), name="init").with_const(False)
+        block_arg = Value(type=BitType(), name="carry")
+        yielded = Value(type=BitType(), name="yielded")
+        result = Value(type=BitType(), name="result")
+        measure = MeasureOperation(operands=[qubit], results=[yielded])
+        loop = ForOperation(
+            operations=[measure],
+            region_args=(RegionArg("carry", init, block_arg, yielded, result),),
+            results=[result],
+        )
+
+        graph = build_dependency_graph([loop])
+        derived = find_measurement_derived_values(
+            graph, find_measurement_results([loop])
+        )
+
+        assert block_arg.uuid in derived
+        assert result.uuid in derived
+
 
 class TestMultipleQuantumSegmentsErrorContract:
     """MultipleQuantumSegmentsError is raised when the program has more than

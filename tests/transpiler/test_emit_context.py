@@ -93,6 +93,18 @@ class TestTypedWriters:
         assert ctx[uuid] is expr
         assert ctx._runtime_exprs == {uuid: expr}
 
+    def test_container_display_names_are_not_binding_keys(self):
+        """Typed compiler data stays UUID-keyed despite duplicate labels."""
+        ctx = EmitContext()
+        ctx.set_array_data("array-uuid", [1], display_name="shared")
+        ctx.set_dict_data("dict-uuid", {1: 2}, display_name="shared")
+        ctx.set_observable("observable-uuid", object(), display_name="shared")
+
+        assert "shared" not in ctx
+        assert ctx["array-uuid"] == [1]
+        assert ctx["dict-uuid"] == {1: 2}
+        assert "observable-uuid" in ctx
+
 
 class TestCopySemantics:
     """``copy()`` is critical for loop unrollers — must preserve slots."""

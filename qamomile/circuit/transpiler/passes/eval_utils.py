@@ -37,6 +37,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     CondOpKind,
     NotOp,
+    RuntimeOpKind,
 )
 
 
@@ -280,3 +281,64 @@ def evaluate_notop_value(operand: Any) -> bool | None:
         return not bool(operand)
     except (TypeError, ValueError):
         return None
+
+
+_RUNTIME_TO_BINOP_KIND = {
+    RuntimeOpKind.ADD: BinOpKind.ADD,
+    RuntimeOpKind.SUB: BinOpKind.SUB,
+    RuntimeOpKind.MUL: BinOpKind.MUL,
+    RuntimeOpKind.DIV: BinOpKind.DIV,
+    RuntimeOpKind.FLOORDIV: BinOpKind.FLOORDIV,
+    RuntimeOpKind.MOD: BinOpKind.MOD,
+    RuntimeOpKind.POW: BinOpKind.POW,
+}
+_RUNTIME_TO_COMPOP_KIND = {
+    RuntimeOpKind.EQ: CompOpKind.EQ,
+    RuntimeOpKind.NEQ: CompOpKind.NEQ,
+    RuntimeOpKind.LT: CompOpKind.LT,
+    RuntimeOpKind.LE: CompOpKind.LE,
+    RuntimeOpKind.GT: CompOpKind.GT,
+    RuntimeOpKind.GE: CompOpKind.GE,
+}
+_RUNTIME_TO_CONDOP_KIND = {
+    RuntimeOpKind.AND: CondOpKind.AND,
+    RuntimeOpKind.OR: CondOpKind.OR,
+}
+
+
+def evaluate_runtime_op_values(
+    kind: RuntimeOpKind | None,
+    operands: list[Any],
+) -> Any | None:
+    """Evaluate a lowered runtime-classical expression on concrete operands.
+
+    Delegates to the same family evaluators used by ``BinOp``, ``CompOp``,
+    ``CondOp``, and ``NotOp`` so lowering an operation changes only when it is
+    evaluated, not its scalar semantics.
+
+    Args:
+        kind (RuntimeOpKind | None): Unified lowered operation kind.
+        operands (list[Any]): Concrete operands in IR order. ``NOT`` requires
+            one operand; every other kind requires two.
+
+    Returns:
+        Any | None: Evaluated numeric or boolean result, or ``None`` when the
+            kind/arity is invalid or the underlying operation fails.
+    """
+    if kind is RuntimeOpKind.NOT:
+        if len(operands) != 1:
+            return None
+        return evaluate_notop_value(operands[0])
+    if kind is None or len(operands) != 2:
+        return None
+
+    binop_kind = _RUNTIME_TO_BINOP_KIND.get(kind)
+    if binop_kind is not None:
+        return evaluate_binop_values(binop_kind, operands[0], operands[1])
+    compop_kind = _RUNTIME_TO_COMPOP_KIND.get(kind)
+    if compop_kind is not None:
+        return evaluate_compop_values(compop_kind, operands[0], operands[1])
+    condop_kind = _RUNTIME_TO_CONDOP_KIND.get(kind)
+    if condop_kind is not None:
+        return evaluate_condop_values(condop_kind, operands[0], operands[1])
+    return None

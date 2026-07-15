@@ -27,6 +27,7 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -47,6 +48,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
+    SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import (
@@ -559,6 +561,39 @@ class TestIfMergeAllocation:
             == clbit_map[QubitAddress(true_bit.uuid)]
         )
 
+    def test_clbit_compaction_preserves_seeded_indices(self) -> None:
+        """Remove new merge holes without renumbering caller-owned clbits."""
+        cond = _make_value("cond", BitType)
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        merged = _make_value("merged", BitType)
+        tail = _make_value("tail", BitType)
+        qubit = _make_value("q", QubitType)
+        if_op = IfOperation(
+            operands=[cond],
+            true_operations=[MeasureOperation(operands=[qubit], results=[true_bit])],
+            false_operations=[MeasureOperation(operands=[qubit], results=[false_bit])],
+        )
+        if_op.add_merge(true_bit, false_bit, merged)
+
+        seeded_address = QubitAddress(cond.uuid)
+        allocator = ResourceAllocator()
+        _, clbit_map = allocator.allocate(
+            [
+                MeasureOperation(operands=[qubit], results=[cond]),
+                if_op,
+                MeasureOperation(operands=[qubit], results=[tail]),
+            ],
+            initial_clbit_map={seeded_address: 7},
+        )
+
+        assert clbit_map[seeded_address] == 7
+        assert clbit_map[QubitAddress(true_bit.uuid)] == 8
+        assert clbit_map[QubitAddress(false_bit.uuid)] == 8
+        assert clbit_map[QubitAddress(merged.uuid)] == 8
+        assert clbit_map[QubitAddress(tail.uuid)] == 9
+        assert set(clbit_map.values()) == {7, 8, 9}
+
     @pytest.mark.parametrize("array_size", [1, 2, 4])
     def test_merge_bit_array_consolidates_both_branches(self, array_size: int) -> None:
         """BitType ArrayValue merge must consolidate per-element clbits across branches."""
@@ -814,6 +849,7 @@ class TestLoopAnalyzerBinOp:
 
     def test_no_binop_no_unroll(self) -> None:
         """A loop with no BinOps and no array access should not unroll."""
+        loop_var_val = _uint_val("i")
         q = _qubit()
         gate = _make_gate(GateOperationType.H, [q])
 
@@ -825,6 +861,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[gate],
         )
 
@@ -832,6 +869,7 @@ class TestLoopAnalyzerBinOp:
 
     def test_binop_not_using_loop_var_no_unroll(self) -> None:
         """A BinOp not referencing the loop variable should not trigger unrolling."""
+        loop_var_val = _uint_val("i")
         a = _float_val("a", const=1.0)
         b = _float_val("b", const=2.0)
         binop, _ = _make_binop(a, b, BinOpKind.ADD)
@@ -847,6 +885,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[binop, gate],
         )
 
@@ -866,6 +905,7 @@ class TestLoopAnalyzerBinOp:
             operands=[inner_start, inner_stop, inner_step],
             results=[],
             loop_var="j",
+            loop_var_value=_uint_val("j"),
             operations=[binop],
         )
 
@@ -1043,6 +1083,7 @@ class TestLoopAnalyzerThetaArrayAccess:
 
     def test_theta_array_element_without_loop_var_no_unroll(self) -> None:
         """Gate with theta = gammas[0] (constant index) should not unroll."""
+        loop_idx = Value(type=UIntType(), name="i")
         gammas_array = ArrayValue(type=FloatType(), name="gammas")
         const_idx = _uint_val("idx", const=0)
         theta_elem = Value(
@@ -1063,10 +1104,27 @@ class TestLoopAnalyzerThetaArrayAccess:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_idx,
             operations=[gate],
         )
 
         assert self.analyzer.should_unroll(for_op, {}) is False
+
+    def test_missing_loop_identity_fails_closed_to_unroll(self) -> None:
+        """Legacy IR without an index Value cannot select native emission."""
+        q = _qubit()
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=1),
+                _uint_val("step", const=1),
+            ],
+            results=[],
+            loop_var="i",
+            operations=[_make_gate(GateOperationType.H, [q])],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
 
 
 # ===========================================================================
@@ -1184,6 +1242,90 @@ class TestLoopAnalyzerMeasurementArrayAccess:
         assert (
             self.analyzer.should_unroll(self._loop_with(measure, loop_idx), {}) is False
         )
+
+
+class TestLoopAnalyzerGenericValueDependency:
+    """Test recursive loop-index discovery across generic operation inputs."""
+
+    def setup_method(self) -> None:
+        """Create a fresh analyzer for each generic dependency test."""
+        self.analyzer = LoopAnalyzer()
+
+    def _loop_with(self, operation: Operation, loop_idx: Value) -> ForOperation:
+        """Wrap one operation in a valid identity-bearing loop.
+
+        Args:
+            operation (Operation): Body operation whose structural inputs are
+                analyzed.
+            loop_idx (Value): UUID-bearing loop-index value.
+
+        Returns:
+            ForOperation: Minimal two-trip loop containing ``operation``.
+        """
+        return ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_idx,
+            operations=[operation],
+        )
+
+    def test_loop_index_comparison_triggers_unroll(self) -> None:
+        """A comparison input participates in generic dependency analysis."""
+        loop_idx = _uint_val("i")
+        comparison = CompOp(
+            operands=[loop_idx, _uint_val("zero", const=0)],
+            results=[Value(type=BitType(), name="condition")],
+            kind=CompOpKind.EQ,
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(comparison, loop_idx), {})
+
+    def test_array_slice_bound_with_loop_var_triggers_unroll(self) -> None:
+        """A vector view whose start is ``i`` requires emit-time unrolling."""
+        loop_idx = _uint_val("i")
+        one = _uint_val("one", const=1)
+        root = ArrayValue(
+            type=QubitType(),
+            name="root",
+            shape=(_uint_val("size", const=2),),
+        )
+        view = ArrayValue(
+            type=QubitType(),
+            name="view",
+            shape=(one,),
+            slice_of=root,
+            slice_start=loop_idx,
+            slice_step=one,
+        )
+        measure = MeasureVectorOperation(
+            operands=[view],
+            results=[ArrayValue(type=BitType(), name="bits", shape=(one,))],
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(measure, loop_idx), {})
+
+    def test_symbolic_control_index_with_loop_var_triggers_unroll(self) -> None:
+        """Subclass-specific ``control_indices`` participate in analysis."""
+        loop_idx = _uint_val("i")
+        pool = ArrayValue(
+            type=QubitType(),
+            name="pool",
+            shape=(_uint_val("pool_size", const=2),),
+        )
+        target = _qubit("target")
+        controlled = SymbolicControlledU(
+            operands=[pool, target],
+            results=[pool.next_version(), target.next_version()],
+            num_controls=_uint_val("num_controls", const=1),
+            control_indices=(loop_idx,),
+            block=Block(name="unitary"),
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(controlled, loop_idx), {})
 
 
 # ===========================================================================
@@ -1612,3 +1754,58 @@ class TestEmitArrayElementResolution:
         results = exe.sample(transpiler.executor(), shots=200).result().results
 
         assert results == [((1,), 200)]
+
+
+class TestAllocatorAnalysisStateIsolation:
+    """Nested allocations must not leak analysis state into the segment.
+
+    ``allocate`` recomputes the measurement-taint set, the safe
+    mixed-merge allowlist, and the monotonic counters for the operation
+    list it receives. Controlled-block emission reuses the segment
+    allocator on a sub-block mid-emission; without the
+    ``preserving_analysis_state`` snapshot, later
+    ``resolve_iteration_maps`` replays of the enclosing segment consult
+    the sub-block's (typically empty) sets — silently disarming the
+    runtime-mux guards.
+    """
+
+    def test_preserving_analysis_state_restores_segment_sets(self) -> None:
+        """The context manager restores every analysis field on exit."""
+        from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+            ResourceAllocator,
+        )
+
+        allocator = ResourceAllocator()
+        allocator._measurement_tainted = {"segment-tainted-uuid"}
+        allocator._safe_mixed_bit_merge_outputs = frozenset({"segment-safe-uuid"})
+        allocator._next_qubit_index = 5
+        allocator._next_clbit_index = 3
+
+        with allocator.preserving_analysis_state():
+            allocator._measurement_tainted = set()
+            allocator._safe_mixed_bit_merge_outputs = frozenset()
+            allocator._next_qubit_index = 0
+            allocator._next_clbit_index = 0
+
+        assert allocator._measurement_tainted == {"segment-tainted-uuid"}
+        assert allocator._safe_mixed_bit_merge_outputs == frozenset(
+            {"segment-safe-uuid"}
+        )
+        assert allocator._next_qubit_index == 5
+        assert allocator._next_clbit_index == 3
+
+    def test_preserving_analysis_state_restores_on_error(self) -> None:
+        """State is restored even when the nested work raises."""
+        from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+            ResourceAllocator,
+        )
+
+        allocator = ResourceAllocator()
+        allocator._measurement_tainted = {"segment-tainted-uuid"}
+
+        with pytest.raises(RuntimeError, match="nested failure"):
+            with allocator.preserving_analysis_state():
+                allocator._measurement_tainted = set()
+                raise RuntimeError("nested failure")
+
+        assert allocator._measurement_tainted == {"segment-tainted-uuid"}
