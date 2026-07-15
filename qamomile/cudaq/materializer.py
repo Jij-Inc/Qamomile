@@ -62,6 +62,14 @@ _CUDAQ_CONTROLLED_GATE_KINDS = frozenset(
         GateKind.CRZ,
     }
 )
+
+_CUDAQ_ARITHMETIC_BINARY_OPERATORS = ARITHMETIC_BINARY_OPERATORS - {
+    BinaryOperator.FLOORDIV
+}
+"""Arithmetic operators accepted by CUDA-Q runtime scalar expressions."""
+
+_CUDAQ_PREDICATE_BINARY_OPERATORS = ALL_BINARY_OPERATORS - {BinaryOperator.FLOORDIV}
+"""Predicate operators accepted by CUDA-Q runtime scalar expressions."""
 _SELF_INVERSE_GATE_KINDS = frozenset(
     {
         GateKind.H,
@@ -117,7 +125,7 @@ class CudaqMaterializer:
                 {ScalarAtom.LITERAL, ScalarAtom.PARAMETER, ScalarAtom.LOOP_VARIABLE}
             ),
             unary_operators=frozenset({UnaryOperator.NEG}),
-            binary_operators=ARITHMETIC_BINARY_OPERATORS,
+            binary_operators=_CUDAQ_ARITHMETIC_BINARY_OPERATORS,
             parameter_form=ScalarExpressionForm.ARBITRARY,
         )
         return CircuitCapabilities(
@@ -128,13 +136,13 @@ class CudaqMaterializer:
             predicates=ScalarCapabilities(
                 atoms=frozenset(ScalarAtom),
                 unary_operators=ALL_UNARY_OPERATORS,
-                binary_operators=ALL_BINARY_OPERATORS,
+                binary_operators=_CUDAQ_PREDICATE_BINARY_OPERATORS,
                 parameter_form=ScalarExpressionForm.ARBITRARY,
             ),
             pauli_time=numeric,
             global_phase=GlobalPhaseCapabilities(
                 scalars=numeric,
-                min_qubits=1,
+                min_qubits=0,
             ),
             generic_calls=CallTransformCapabilities(
                 supports_power=True,
@@ -184,18 +192,27 @@ class CudaqMaterializer:
         )
         if runtime:
             emitter.configure_runtime_clbits(program.num_clbits)
-        artifact = emitter.create_circuit(program.num_qubits, program.num_clbits)
+        needs_phase_carrier = _requires_phase_carrier(program)
+        phase_carrier = program.num_qubits if needs_phase_carrier else None
+        artifact = emitter.create_circuit(
+            program.num_qubits + int(needs_phase_carrier),
+            program.num_clbits,
+        )
         wires = {wire: index for index, wire in enumerate(program.input_wires)}
         parameters = {name: emitter.create_parameter(name) for name in parameter_names}
         measurements: dict[int, int] = {}
         phase = _program_global_phase(program, parameters, {}, emitter)
         if not _is_materialized_zero(phase):
-            if program.num_qubits < 1:
-                raise EmitError(
-                    "CUDA-Q requires at least 1 qubit to preserve a nonzero "
-                    "standalone global phase"
+            if program.num_qubits:
+                emitter.emit_global_phase(artifact, phase, carrier=0)
+            elif phase_carrier is None:  # pragma: no cover - carrier scan invariant
+                raise AssertionError("CUDA-Q phase carrier was not allocated")
+            else:
+                emitter.emit_global_phase_on_clean_carrier(
+                    artifact,
+                    phase,
+                    carrier=phase_carrier,
                 )
-            emitter.emit_global_phase(artifact, 0, phase)
         _emit_region(
             program.operations,
             artifact,
@@ -204,6 +221,7 @@ class CudaqMaterializer:
             measurements,
             {},
             emitter,
+            phase_carrier,
         )
         emitter.set_parametric(bool(parameters))
         artifact = emitter.finalize(artifact, mode)
@@ -212,6 +230,9 @@ class CudaqMaterializer:
             parameters=parameters,
             measurement_qubit_map={} if runtime else measurements,
             parameter_order=tuple(parameters),
+            implicit_output_qubit_indices=(
+                tuple(range(program.num_qubits)) if needs_phase_carrier else None
+            ),
         )
 
 
@@ -223,6 +244,7 @@ def _emit_region(
     measurements: dict[int, int],
     loop_variables: dict[str, int],
     emitter: CudaqKernelEmitter,
+    phase_carrier: int | None,
 ) -> dict[WireId, int]:
     """Emit one structured CUDA-Q region.
 
@@ -234,6 +256,8 @@ def _emit_region(
         measurements (dict[int, int]): Static measurement mapping.
         loop_variables (dict[str, int]): Concrete loop induction values.
         emitter (CudaqKernelEmitter): CUDA-Q source builder.
+        phase_carrier (int | None): Internal clean qubit available only to
+            preserve phases when no logical qubit enters a region.
 
     Returns:
         dict[WireId, int]: Mapping containing produced virtual wires.
@@ -290,6 +314,7 @@ def _emit_region(
                     measurements,
                     nested,
                     emitter,
+                    phase_carrier,
                 )
                 current = [body_wires[wire] for wire in operation.body_outputs]
             _publish(operation.outputs, current, wires)
@@ -302,6 +327,7 @@ def _emit_region(
                 operation.true_global_phase,
                 circuit,
                 next(iter(branch_inputs.values()), None),
+                phase_carrier,
                 parameters,
                 loop_variables,
                 emitter,
@@ -314,6 +340,7 @@ def _emit_region(
                 measurements,
                 loop_variables,
                 emitter,
+                phase_carrier,
             )
             emitter.end_source_block(branch_start)
             branch_start = emitter.begin_source_block("else:")
@@ -321,6 +348,7 @@ def _emit_region(
                 operation.false_global_phase,
                 circuit,
                 next(iter(branch_inputs.values()), None),
+                phase_carrier,
                 parameters,
                 loop_variables,
                 emitter,
@@ -333,6 +361,7 @@ def _emit_region(
                 measurements,
                 loop_variables,
                 emitter,
+                phase_carrier,
             )
             emitter.end_source_block(branch_start)
             true_slots = [true_wires[wire] for wire in operation.true_outputs]
@@ -349,6 +378,7 @@ def _emit_region(
                 operation.body_global_phase,
                 circuit,
                 next(iter(body_inputs.values()), None),
+                phase_carrier,
                 parameters,
                 loop_variables,
                 emitter,
@@ -361,6 +391,7 @@ def _emit_region(
                 measurements,
                 loop_variables,
                 emitter,
+                phase_carrier,
             )
             emitter.end_source_block(body_start)
             _publish(
@@ -431,6 +462,7 @@ def _emit_call(
             {},
             {},
             emitter,
+            None,
         )
 
     try:
@@ -676,7 +708,8 @@ def _program_global_phase(
 def _emit_scoped_global_phase(
     expression: ScalarExpr,
     circuit: Any,
-    carrier: int | None,
+    logical_carrier: int | None,
+    clean_carrier: int | None,
     parameters: dict[str, Any],
     loop_variables: dict[str, int],
     emitter: CudaqKernelEmitter,
@@ -686,23 +719,33 @@ def _emit_scoped_global_phase(
     Args:
         expression (ScalarExpr): Region-local phase expression.
         circuit (Any): CUDA-Q artifact currently being built.
-        carrier (int | None): Existing qubit slot for the identity sequence.
+        logical_carrier (int | None): Existing arbitrary-state qubit slot for
+            the exact identity sequence.
+        clean_carrier (int | None): Internal ``|0>`` qubit slot for the
+            specialized one-gate realization.
         parameters (dict[str, Any]): Runtime parameter cache.
         loop_variables (dict[str, int]): Active concrete loop values.
         emitter (CudaqKernelEmitter): CUDA-Q source emitter.
 
     Raises:
-        EmitError: If a nonzero phase has no existing carrier qubit.
+        EmitError: If a nonzero phase has no logical or clean carrier qubit.
     """
     phase = _scalar(expression, parameters, loop_variables, emitter)
     if _is_materialized_zero(phase):
         return
-    if carrier is None:
+    if logical_carrier is not None:
+        emitter.emit_global_phase(circuit, phase, carrier=logical_carrier)
+        return
+    if clean_carrier is None:
         raise EmitError(
             "CUDA-Q requires at least 1 qubit to preserve a nonzero "
             "structured-region global phase"
         )
-    emitter.emit_global_phase(circuit, carrier, phase)
+    emitter.emit_global_phase_on_clean_carrier(
+        circuit,
+        phase,
+        carrier=clean_carrier,
+    )
 
 
 def _is_materialized_zero(value: Any) -> bool:
@@ -715,6 +758,70 @@ def _is_materialized_zero(value: Any) -> bool:
         bool: True only for a concrete numeric zero.
     """
     return isinstance(value, (int, float)) and not float(value)
+
+
+def _requires_phase_carrier(program: CircuitProgram) -> bool:
+    """Return whether CUDA-Q must allocate a hidden phase carrier.
+
+    CUDA-Q can synthesize a scalar phase on any existing logical qubit without
+    changing its state. A dedicated clean qubit is therefore needed only for a
+    zero-logical-qubit program containing a root or structured-region phase.
+
+    Args:
+        program (CircuitProgram): Verified circuit program to inspect.
+
+    Returns:
+        bool: True when one internal clean qubit must be allocated.
+    """
+    if program.num_qubits:
+        return False
+    return not _is_literal_zero(program.global_phase) or _region_contains_phase(
+        program.operations
+    )
+
+
+def _region_contains_phase(
+    operations: tuple[CircuitInstruction, ...],
+) -> bool:
+    """Return whether an executable structured region contains a phase.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Region instructions to
+            inspect recursively.
+
+    Returns:
+        bool: True when an executable branch or loop can apply a nonzero phase.
+    """
+    for operation in operations:
+        if isinstance(operation, ForInstruction):
+            if operation.indexset and _region_contains_phase(operation.body):
+                return True
+        elif isinstance(operation, IfInstruction):
+            if (
+                not _is_literal_zero(operation.true_global_phase)
+                or not _is_literal_zero(operation.false_global_phase)
+                or _region_contains_phase(operation.true_body)
+                or _region_contains_phase(operation.false_body)
+            ):
+                return True
+        elif isinstance(operation, WhileInstruction):
+            if not _is_literal_zero(
+                operation.body_global_phase
+            ) or _region_contains_phase(operation.body):
+                return True
+    return False
+
+
+def _is_literal_zero(expression: ScalarExpr) -> bool:
+    """Return whether a scalar expression is the numeric literal zero.
+
+    Args:
+        expression (ScalarExpr): Expression to inspect.
+
+    Returns:
+        bool: True only for a zero-valued literal expression.
+    """
+    return isinstance(expression, LiteralExpr) and not float(expression.value)
 
 
 def _scalar(

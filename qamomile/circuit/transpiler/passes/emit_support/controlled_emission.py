@@ -1880,15 +1880,14 @@ def emit_controlled_pauli_evolve(
     to ``emit_crz`` for a single control and to the backend's
     ``_emit_irreducible_multi_controlled_gate`` hook for two or more.
 
-    A constant (identity) Hamiltonian term ``c * I`` is a global phase
-    ``exp(-i * gamma * c)`` for the uncontrolled evolution (correctly
-    dropped by :func:`emit_pauli_evolve`), but under controls it becomes
-    an *observable* relative phase on the all-controls-on subspace, so it
-    MUST be emitted here. It is realized as a ``P(-gamma * c)`` on one
-    control conditioned on the remaining controls (``emit_p`` for a single
-    control, a multi-controlled ``P`` for more), matching Qiskit's
-    native ``PauliEvolutionGate`` whose ``SparsePauliOp`` carries the
-    constant.
+    A constant (identity) Hamiltonian term ``c * I`` is the standalone phase
+    ``exp(-i * gamma * c)`` for an uncontrolled evolution and is retained by
+    :func:`emit_pauli_evolve`. Under controls it becomes an *observable*
+    relative phase on the all-controls-on subspace, so it is realized here as
+    a ``P(-gamma * c)`` on one control conditioned on the remaining controls
+    (``emit_p`` for a single control, a multi-controlled ``P`` for more),
+    matching Qiskit's native ``PauliEvolutionGate`` whose ``SparsePauliOp``
+    carries the constant.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass; provides the

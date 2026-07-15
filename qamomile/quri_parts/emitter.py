@@ -123,8 +123,10 @@ class QuriPartsGateEmitter:
 
         Args:
             phase_carrier (int | None): Dedicated clean ``|0>`` qubit used
-                only to synthesize exact scalar phases. ``None`` makes any
-                attempted scalar-phase emission fail explicitly.
+                only where exact scalar-phase synthesis cannot reuse an
+                existing qubit. ``None`` still permits a concrete phase when
+                the caller supplies an existing carrier, but rejects symbolic
+                or zero-qubit phase emission.
         """
         self._param_map: dict[str, "Parameter"] = {}
         self._current_circuit: "LinearMappedUnboundParametricQuantumCircuit | None" = (
@@ -401,7 +403,8 @@ class QuriPartsGateEmitter:
                 concrete two-gate synthesis. Defaults to None.
 
         Raises:
-            EmitError: If no valid dedicated phase carrier was configured.
+            EmitError: If an explicit carrier is invalid, or if symbolic or
+                zero-qubit emission has no valid dedicated clean carrier.
         """
         angle_mapping = self._make_angle_dict(angle)
         if isinstance(angle_mapping, (int, float)) and carrier is not None:

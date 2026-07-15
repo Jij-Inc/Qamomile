@@ -2791,7 +2791,7 @@ class TestGlobalPhaseRound5Coverage:
     """Round-5 regression: a controlled global phase nested in a compile-time ``if``.
 
     The compile-time branch must be selected before CircuitProgram phase
-    normalization, including when it is nested in a controlled callable. The
+    aggregation, including when it is nested in a controlled callable. The
     selected phase becomes relative under the outer control; the dead branch
     must contribute neither gates nor phase.
     """

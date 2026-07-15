@@ -17,6 +17,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     GateInstruction,
     IfInstruction,
     LiteralExpr,
+    LoopVariableExpr,
     MaterializedCircuit,
     MeasureVectorInstruction,
     ParameterExpr,
@@ -226,7 +227,7 @@ def test_builder_scales_phase_for_empty_and_descending_static_loops(
     verify_circuit(program)
 
 
-def test_builder_normalizes_pauli_identity_term_into_program_phase() -> None:
+def test_builder_aggregates_pauli_identity_term_into_program_phase() -> None:
     """Hamiltonian identity terms use the canonical program-phase channel."""
     builder = CircuitBuilder(1, 0)
     theta = ParameterExpr("theta")
@@ -370,6 +371,74 @@ def test_builder_rejects_dangling_loop_variable_in_root_phase() -> None:
         builder.freeze()
 
 
+def test_verifier_rejects_unbound_loop_variable_in_root_phase() -> None:
+    """Structural verification rejects a root phase with no owning loop."""
+    program = dataclasses.replace(
+        CircuitBuilder(0, 0).freeze(),
+        global_phase=LoopVariableExpr("missing"),
+    )
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
+        verify_circuit(program)
+
+
+@pytest.mark.parametrize("branch", ["true", "false"])
+def test_verifier_rejects_unbound_loop_variable_in_if_phase(branch: str) -> None:
+    """Both conditional phase fields reject a loop variable with no owner."""
+    builder = CircuitBuilder(1, 1)
+    context = builder.begin_if(ClassicalBitExpr(0))
+    if branch == "false":
+        builder.begin_else(context)
+    builder.add_global_phase(LoopVariableExpr("missing"))
+    builder.end_if(context)
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
+        verify_circuit(builder.freeze())
+
+
+def test_verifier_rejects_unbound_loop_variable_in_while_phase() -> None:
+    """A while-body phase cannot reference a loop variable outside a for."""
+    builder = CircuitBuilder(1, 1)
+    context = builder.begin_while(ClassicalBitExpr(0))
+    builder.add_global_phase(LoopVariableExpr("missing"))
+    builder.end_while(context)
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
+        verify_circuit(builder.freeze())
+
+
+def test_verifier_rejects_phase_using_completed_inner_loop_variable() -> None:
+    """A phase outside an inner for cannot reuse its completed induction value."""
+    builder = CircuitBuilder(1, 1)
+    builder.begin_for(range(1))
+    inner_variable = builder.begin_for(range(1))
+    builder.end_for()
+    context = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(inner_variable)
+    builder.end_if(context)
+    builder.end_for()
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
+        verify_circuit(builder.freeze())
+
+
+def test_verifier_accepts_nested_for_variables_in_scoped_phases() -> None:
+    """Nested conditional and while phases may use both active for variables."""
+    builder = CircuitBuilder(1, 1)
+    outer_variable = builder.begin_for(range(2))
+    inner_variable = builder.begin_for(range(3))
+    branch = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(outer_variable + inner_variable)
+    builder.end_if(branch)
+    loop = builder.begin_while(ClassicalBitExpr(0))
+    builder.add_global_phase(outer_variable - inner_variable)
+    builder.end_while(loop)
+    builder.end_for()
+    builder.end_for()
+
+    verify_circuit(builder.freeze())
+
+
 def test_verifier_rejects_reused_output_wire_definition() -> None:
     """A malformed program cannot define one virtual wire twice."""
     builder = CircuitBuilder(1, 0)
@@ -447,6 +516,19 @@ def test_verifier_recurses_into_reusable_circuit_bodies() -> None:
     caller.append_call(ReusableCircuit(malformed_body, "malformed"), (0,))
 
     with pytest.raises(ValueError, match="not unique"):
+        verify_circuit(caller.freeze())
+
+
+def test_verifier_rejects_reusable_body_capturing_enclosing_loop_variable() -> None:
+    """Reusable bodies cannot capture an enclosing loop's induction value."""
+    caller = CircuitBuilder(1, 0)
+    induction = caller.begin_for(range(2))
+    body = CircuitBuilder(1, 0, name="capturing-body")
+    body.append_gate(GateKind.RZ, (0,), (induction,))
+    caller.append_call(ReusableCircuit(body.freeze(), "capturing-body"), (0,))
+    caller.end_for()
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
         verify_circuit(caller.freeze())
 
 

@@ -2,16 +2,60 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.gate import GateOperationType
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
     resolve_angle_value,
 )
 
 if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+
+
+def _require_global_phase_hook(
+    emit_pass: "StandardEmitPass",
+) -> Callable[[Any, Any], None]:
+    """Return the target hook that preserves a standalone phase.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+
+    Returns:
+        Callable[[Any, Any], None]: Callable target hook.
+
+    Raises:
+        EmitError: If the selected emitter cannot preserve the phase.
+    """
+    emit_hook = getattr(emit_pass._emitter, "emit_global_phase", None)
+    if not callable(emit_hook):
+        raise EmitError(
+            "The selected emitter cannot preserve a standalone global phase.",
+            operation="GlobalPhaseOperation",
+        )
+    return emit_hook
+
+
+def emit_resolved_global_phase(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    angle: Any,
+) -> None:
+    """Emit an already resolved standalone phase without discarding it.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Circuit representation being emitted into.
+        angle (Any): Resolved phase angle.
+
+    Raises:
+        EmitError: If the selected emitter cannot preserve the phase.
+    """
+    emit_hook = _require_global_phase_hook(emit_pass)
+    emit_hook(circuit, angle)
 
 
 def emit_global_phase(
@@ -29,11 +73,10 @@ def emit_global_phase(
         bindings (dict[str, Any]): Active emit bindings.
 
     Raises:
-        EmitError: If a preserving adapter cannot resolve the phase angle.
+        EmitError: If the adapter cannot preserve or resolve the phase.
     """
-    emit_hook = getattr(emit_pass._emitter, "emit_global_phase", None)
-    if callable(emit_hook):
-        emit_hook(circuit, resolve_angle_value(emit_pass, op.phase, bindings))
+    emit_hook = _require_global_phase_hook(emit_pass)
+    emit_hook(circuit, resolve_angle_value(emit_pass, op.phase, bindings))
 
 
 def emit_controlled_global_phase_operation(
@@ -81,9 +124,7 @@ def emit_controlled_global_phase(
     """
     num_controls = len(control_indices)
     if num_controls == 0:
-        emit_hook = getattr(emit_pass._emitter, "emit_global_phase", None)
-        if callable(emit_hook):
-            emit_hook(circuit, angle)
+        emit_resolved_global_phase(emit_pass, circuit, angle)
         return
 
     emitter = emit_pass._emitter

@@ -74,7 +74,13 @@ class CallControlMode(enum.Enum):
 
 
 class CallPhaseMode(enum.Enum):
-    """Enumerate how a target realizes phase in coherently controlled calls."""
+    """Enumerate how a target realizes phase in coherently controlled calls.
+
+    ``NATIVE_BODY`` means the target call itself preserves the reusable body's
+    phase. ``EXPLICIT_CORRECTION`` means the materializer emits a separate
+    phase correction alongside the call. ``UNSUPPORTED`` rejects a body phase
+    once coherent controls make it observable.
+    """
 
     NATIVE_BODY = "native-body"
     EXPLICIT_CORRECTION = "explicit-correction"
@@ -109,8 +115,9 @@ class GlobalPhaseCapabilities:
         scalars (ScalarCapabilities): Scalar language accepted for the phase.
         min_qubits (int): Minimum program width required to preserve a
             nonzero standalone phase. Targets with a native zero-qubit phase
-            operation use the default zero; targets that synthesize phase on
-            an existing carrier qubit declare one.
+            operation, or permission to allocate an internal clean carrier,
+            use the default zero. Targets that require an existing logical
+            qubit declare one.
     """
 
     scalars: ScalarCapabilities
@@ -137,7 +144,10 @@ class CallTransformCapabilities:
             language accepted under distributed controls, or ``None`` when
             controlled Pauli evolution is unsupported.
         phase_mode (CallPhaseMode): How a reusable body's phase is realized
-            after coherent controls are known. Defaults to ``UNSUPPORTED``.
+            after coherent controls are known. For native semantic calls, an
+            ``EXPLICIT_CORRECTION`` declaration makes the native materializer
+            responsible for emitting that correction. Defaults to
+            ``UNSUPPORTED``.
         controlled_phase_scalars (ScalarCapabilities | None): Scalar language
             accepted for an observable controlled-call phase, or ``None``
             when no such phase is supported. Defaults to ``None``.

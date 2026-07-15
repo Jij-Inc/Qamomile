@@ -171,17 +171,18 @@ class TestQuriPartsGateEmitter:
         )
 
     def test_concrete_global_phase_uses_an_existing_qubit(self) -> None:
-        """A native U1 and RZ pair realizes phase without a clean carrier."""
+        """A U1 and RZ pair phases an arbitrary state without a carrier."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(1, 0)
 
+        emitter.emit_h(circuit, 0)
         emitter.emit_global_phase(circuit, 0.25, carrier=0)
 
-        assert len(circuit.gates) == 2
+        assert len(circuit.gates) == 3
         state = _run_statevector(circuit, [])
         assert np.allclose(
             state,
-            np.array([np.exp(0.25j), 0.0], dtype=np.complex128),
+            np.exp(0.25j) * np.array([1.0, 1.0], dtype=np.complex128) / np.sqrt(2.0),
             rtol=0.0,
             atol=1e-10,
         )

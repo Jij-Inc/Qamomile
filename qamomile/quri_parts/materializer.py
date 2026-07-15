@@ -1341,8 +1341,7 @@ def _requires_phase_carrier(program: CircuitProgram) -> bool:
         bool: True when a dedicated clean phase-carrier qubit is required.
     """
     root_requires_carrier = not _is_zero(program.global_phase) and (
-        program.num_qubits == 0
-        or _contains_runtime_parameter(program.global_phase)
+        program.num_qubits == 0 or _contains_runtime_parameter(program.global_phase)
     )
     return root_requires_carrier or _region_requires_phase_carrier(
         program.operations,
@@ -1375,10 +1374,7 @@ def _region_requires_phase_carrier(
             phase = operation.callee.body.global_phase
             if not _is_zero(phase) and (
                 _contains_runtime_parameter(phase)
-                or (
-                    effective_controls == 0
-                    and operation.callee.body.num_qubits == 0
-                )
+                or (effective_controls == 0 and operation.callee.body.num_qubits == 0)
             ):
                 return True
             if _region_requires_phase_carrier(

@@ -314,25 +314,35 @@ power_demo_concrete.draw()
 # (cg-3-4-phase)=
 # #### Global phase becomes observable under coherent control
 #
-# Multiplying an otherwise standalone unitary by `exp(1j * phi)` does not
-# change ordinary measurement probabilities. It must nevertheless be kept:
-# once that unitary is controlled, the same factor is a relative phase on the
-# all-active control subspace. This is particularly important for SELECT
+# Multiplying an otherwise standalone operation by `exp(1j * phi)` does not
+# change ordinary measurement probabilities. Qamomile nevertheless keeps the
+# phase as part of the current lexical circuit region. When a reversible
+# region is coherently controlled, the same factor becomes a relative phase on
+# the all-active control subspace. This is particularly important for SELECT
 # circuits, where even an identity Pauli term may carry a complex coefficient.
 #
-# Qamomile provides two equivalent ways to attach this phase:
+# Qamomile provides two related ways to attach this phase:
 #
-# - `qmc.global_phase(fn, phi)` constructs `exp(1j * phi) * U` from the
-#   callable `fn` implementing `U`.
+# - `qmc.global_phase(fn, phi)` invokes `fn` normally, preserves all of its
+#   outputs, and then attaches `exp(1j * phi)` to the surrounding region.
 # - `qmc.control(fn)(..., global_phase=phi)` attaches the phase at that
 #   controlled call site.
 #
-# With both modifiers, the precise call-site meaning is
-# `control((exp(1j * phi) * U) ** power)`. Therefore `power=k` repeats the
-# phase `k` times, while an inverse negates the phase together with inverting
-# `U`. `global_phase` is a reserved call-site keyword; if the target callable
-# also has an ordinary parameter named `global_phase`, pass that parameter
-# positionally.
+# The ordinary `qmc.global_phase` wrapper does not require `fn` to be
+# reversible: `fn` may measure, reset, allocate qubits, return classical
+# values, or be entirely classical. Reversibility is checked only if a
+# containing qkernel is later compiled through `qmc.control`, `qmc.inverse`, or
+# another reversible transform. For a reversible operation `U`, the precise
+# controlled-call meaning is `control((exp(1j * phi) * U) ** power)`.
+# Therefore `power=k` repeats the phase `k` times, while an inverse negates the
+# phase together with inverting `U`. `global_phase` is a reserved call-site
+# keyword; if the target callable also has an ordinary parameter named
+# `global_phase`, pass that parameter positionally.
+#
+# A phase attached inside a runtime `if` branch or `while` body stays in that
+# branch or iteration. It is not moved to the top-level circuit or discarded.
+# A target that cannot preserve the requested scoped or standalone phase fails
+# explicitly during capability verification or materialization.
 
 
 # %%
@@ -368,27 +378,37 @@ assert phase_counts == {1: 256}
 # %% [markdown]
 # :::{note}
 # Qamomile keeps one target-neutral phase meaning, then verifies the selected
-# quantum SDK/Engine/representation before materialization. Qiskit uses
-# `QuantumCircuit.global_phase`, Quration/PyQret uses its native
-# `global_phase` intrinsic, and HUGR uses `tket_exts.global_phase()`. CUDA-Q has no
+# quantum SDK/Engine/representation before materialization. Qiskit stores the
+# phase in `QuantumCircuit.global_phase` on the top-level circuit or the
+# relevant control-flow block. Quration/PyQret uses its native `global_phase`
+# intrinsic, and HUGR uses `tket_exts.global_phase()`. CUDA-Q has no
 # circuit-level phase API, so Qamomile emits the exact identity
-# `R1(2 phi) RZ(-2 phi)` on an existing qubit. QURI Parts likewise has no
-# circuit-level phase API. Qamomile reserves a dedicated internal qubit in
-# `|0>` and applies `RZ(-2 phi)` to it, which produces `exp(i phi)|0>` exactly.
-# This carrier is separate from multi-control ancillas and is excluded from
-# measurements and implicit qkernel outputs. QURI Parts can therefore retain a
-# zero-qubit program phase without changing its logical result ABI. CUDA-Q
-# still requires an existing program qubit and rejects a nonzero zero-qubit
-# phase explicitly.
+# `R1(2 phi) RZ(-2 phi)` on an existing logical qubit. For a zero-qubit
+# program, Qamomile internally adds one auxiliary qubit initialized to `|0>`
+# (a clean carrier) and applies only `RZ(-2 phi)`, which produces
+# `exp(i phi)|0>` exactly. Qamomile excludes that qubit from measurements and
+# implicit qkernel outputs, so CUDA-Q preserves the phase without changing the
+# logical result ABI. QURI Parts likewise has no circuit-level phase API. For a
+# concrete phase with an existing logical qubit, Qamomile emits the exact
+# identity `U1(2 phi) RZ(-2 phi)` on that qubit.
+# A symbolic phase, or a phase in a zero-qubit program, instead uses the same
+# kind of clean carrier and applies `RZ(-2 phi)`, producing
+# `exp(i phi)|0>` exactly. Phase carriers are separate from auxiliary qubits
+# used to synthesize multi-control gates.
 #
 # Native standalone phase does not by itself imply that a quantum
-# SDK/Engine/representation can transform every reusable call. The current
-# Quration/PyQret Python API cannot apply generic controlled or inverse call
-# transforms. HUGR currently handles phase inside a bounded subset of inlined
-# unitary bodies; exact support depends on the operation and control count and
-# includes one-control Pauli evolution. Its `power` must resolve to a positive
-# compile-time integer. Shapes outside a declared capability fail explicitly
-# rather than losing their phase.
+# SDK/Engine/representation can transform every reusable call. Quration/PyQret
+# has no generic call-transform API, so Qamomile inlines a bounded fallback for
+# inverse, power, and at most one coherent control. That fallback accepts its
+# declared primitive gates, one-control Pauli evolution, and nested static
+# `for` loops with compile-time bounds. HUGR uses the same kind of inline
+# fallback for its accepted body operations. Its global-phase correction
+# supports any positive control count: three or more controls use clean
+# auxiliary qubits and a Toffoli conjunction that is uncomputed before those
+# qubits are freed. Runtime-bounded loops, loop-carried values, and runtime
+# `if` / `while` inside either transformed body fail explicitly. HUGR's
+# `power` must resolve to a positive compile-time integer. Shapes outside a
+# declared capability fail rather than losing their phase.
 # :::
 
 # %% [markdown]

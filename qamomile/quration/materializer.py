@@ -50,6 +50,28 @@ from qamomile.circuit.transpiler.circuit_ir import (
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.gate_emitter import GateKind
 
+_QURATION_CONTROLLED_GATE_KINDS = frozenset(
+    {
+        GateKind.H,
+        GateKind.X,
+        GateKind.Y,
+        GateKind.Z,
+        GateKind.S,
+        GateKind.SDG,
+        GateKind.T,
+        GateKind.TDG,
+        GateKind.RX,
+        GateKind.RY,
+        GateKind.RZ,
+        GateKind.P,
+        GateKind.CX,
+        GateKind.CY,
+        GateKind.CZ,
+        GateKind.SWAP,
+    }
+)
+"""Primitive body gates with an exact one-control PyQret fallback."""
+
 
 def _require_pyqret() -> tuple[Any, Any]:
     """Import the optional PyQret frontend and intrinsic gate modules.
@@ -206,6 +228,8 @@ class PyQretMaterializer:
         PyQret builds static DAG circuits with concrete rotation angles, so
         runtime parameters and measurement-conditioned control flow are
         rejected at the target boundary before materialization starts.
+        Generic calls support inverse and power transforms, plus one control
+        distributed over an explicitly bounded unitary gate profile.
 
         Returns:
             CircuitCapabilities: Immutable capability declaration.
@@ -218,15 +242,23 @@ class PyQretMaterializer:
         )
         generic_call = CallTransformCapabilities(
             supports_power=True,
-            supports_inverse=False,
-            max_controls=0,
+            supports_inverse=True,
+            max_controls=1,
             supports_barrier_body=True,
-            control_mode=CallControlMode.UNSUPPORTED,
-            phase_mode=CallPhaseMode.NATIVE_BODY,
+            control_mode=CallControlMode.DISTRIBUTE,
+            controlled_gate_kinds=_QURATION_CONTROLLED_GATE_KINDS,
+            controlled_pauli_time=numeric,
+            phase_mode=CallPhaseMode.EXPLICIT_CORRECTION,
+            controlled_phase_scalars=numeric,
         )
         native_direct_call = dataclasses.replace(
             generic_call,
             supports_power=False,
+            supports_inverse=False,
+            max_controls=0,
+            control_mode=CallControlMode.UNSUPPORTED,
+            controlled_gate_kinds=frozenset(),
+            controlled_pauli_time=None,
             phase_mode=CallPhaseMode.UNSUPPORTED,
             controlled_phase_scalars=None,
         )
@@ -429,7 +461,8 @@ def _build_reusable_circuits(
         """
         for operation in operations:
             if isinstance(operation, CallInstruction):
-                visit_callee(operation.callee)
+                if not operation.callee.controls and not operation.callee.inverse:
+                    visit_callee(operation.callee)
             elif isinstance(operation, ForInstruction):
                 visit_operations(operation.body)
             elif isinstance(operation, IfInstruction):
@@ -561,7 +594,7 @@ def _emit_region(
 
     Raises:
         EmitError: If the region contains unsupported dynamic control, reset,
-            or transformed reusable calls.
+            or a reusable transform outside the declared Quration profile.
     """
     intrinsic = context.intrinsic
     precision = context.precision
@@ -649,7 +682,7 @@ def _emit_call(
     context: _PyQretContext,
     loop_values: dict[str, int],
 ) -> None:
-    """Emit an untransformed reusable circuit as a native PyQret call.
+    """Emit a reusable circuit natively or through transformed inlining.
 
     Args:
         operation (CallInstruction): Reusable circuit call.
@@ -659,7 +692,7 @@ def _emit_call(
         loop_values (dict[str, int]): Active loop-variable bindings.
 
     Raises:
-        EmitError: If the reusable circuit has control or inverse transforms.
+        EmitError: If a transformed body exceeds Quration's declared profile.
     """
     callee = operation.callee
     if callee.native_realization == "pyqret.multi_controlled_x":
@@ -675,10 +708,16 @@ def _emit_call(
             environment[output] = qubit
         return
     if callee.controls or callee.inverse:
-        raise EmitError(
-            "Quration materialization requires controlled and inverse calls "
-            "to be legalized before materialization"
+        _emit_transformed_call(
+            operation,
+            environment,
+            registers,
+            context,
+            loop_values,
+            inherited_control=None,
+            inherited_inverse=False,
         )
+        return
     current = [environment[wire] for wire in operation.inputs]
     native_circuit = context.reusable_circuits.get(id(callee))
     if native_circuit is None:
@@ -689,12 +728,447 @@ def _emit_call(
         environment[output] = qubit
 
 
+def _emit_transformed_call(
+    operation: CallInstruction,
+    environment: dict[WireId, Any],
+    registers: Any,
+    context: _PyQretContext,
+    loop_values: dict[str, int],
+    inherited_control: Any | None,
+    inherited_inverse: bool,
+) -> None:
+    """Inline a reusable call while composing one control and inversion.
+
+    Args:
+        operation (CallInstruction): Reusable circuit invocation.
+        environment (dict[WireId, Any]): Enclosing wire mapping to update.
+        registers (Any): PyQret output-register array.
+        context (_PyQretContext): Shared PyQret materialization context.
+        loop_values (dict[str, int]): Active loop-variable bindings.
+        inherited_control (Any | None): Control inherited from an enclosing
+            transformed call, or ``None`` when the call is not controlled.
+        inherited_inverse (bool): Whether the enclosing region is inverted.
+
+    Raises:
+        EmitError: If nested transforms require more than one active control
+            or the transformed body cannot be materialized exactly.
+    """
+    callee = operation.callee
+    call_inputs = operation.outputs if inherited_inverse else operation.inputs
+    call_outputs = operation.inputs if inherited_inverse else operation.outputs
+    actual = [environment[wire] for wire in call_inputs]
+    own_controls = actual[: callee.controls]
+    targets = actual[callee.controls :]
+    controls = [
+        control for control in (inherited_control, *own_controls) if control is not None
+    ]
+    if len(controls) > 1:
+        raise EmitError("Quration transformed calls support at most one control")
+    control = controls[0] if controls else None
+    inverse = inherited_inverse ^ callee.inverse
+    phase: ScalarExpr = callee.body.global_phase
+    if inverse and not _is_zero_phase(phase):
+        phase = UnaryExpr(UnaryOperator.NEG, phase)
+
+    for _ in range(callee.power):
+        body_entry = callee.body.output_wires if inverse else callee.body.input_wires
+        body_exit = callee.body.input_wires if inverse else callee.body.output_wires
+        body_environment = _emit_transformed_region(
+            callee.body.operations,
+            dict(zip(body_entry, targets, strict=True)),
+            registers,
+            context,
+            loop_values,
+            control,
+            inverse,
+        )
+        targets = [body_environment[wire] for wire in body_exit]
+        if not _is_zero_phase(phase):
+            value = float(evaluate_scalar(phase, loop_values))
+            if control is None:
+                context.intrinsic.global_phase(
+                    context.builder,
+                    value,
+                    context.precision,
+                )
+            else:
+                _emit_concrete_gate(
+                    GateKind.P,
+                    (control,),
+                    (value,),
+                    context,
+                )
+
+    for output, qubit in zip(
+        call_outputs,
+        (*own_controls, *targets),
+        strict=True,
+    ):
+        environment[output] = qubit
+
+
+def _emit_transformed_region(
+    operations: tuple[CircuitInstruction, ...],
+    input_wires: dict[WireId, Any],
+    registers: Any,
+    context: _PyQretContext,
+    loop_values: dict[str, int],
+    control: Any | None,
+    inverse: bool,
+) -> dict[WireId, Any]:
+    """Emit a static unitary region under composed call transforms.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Body operations to inline.
+        input_wires (dict[WireId, Any]): Body-entry wire mapping.
+        registers (Any): PyQret output-register array.
+        context (_PyQretContext): Shared PyQret materialization context.
+        loop_values (dict[str, int]): Active loop-variable bindings.
+        control (Any | None): Single distributed control, if present.
+        inverse (bool): Whether to reverse and invert the region.
+
+    Returns:
+        dict[WireId, Any]: Mapping containing the transformed region outputs.
+
+    Raises:
+        EmitError: If the body contains a nonunitary or unsupported construct.
+    """
+    environment = dict(input_wires)
+    sequence = reversed(operations) if inverse else operations
+    for operation in sequence:
+        if isinstance(operation, GateInstruction):
+            gate = _invert_gate(operation) if inverse else operation
+            gate_inputs = operation.outputs if inverse else operation.inputs
+            gate_outputs = operation.inputs if inverse else operation.outputs
+            qubits = tuple(environment[wire] for wire in gate_inputs)
+            if control is None:
+                _emit_gate(
+                    gate,
+                    qubits,
+                    context.intrinsic,
+                    context.precision,
+                    loop_values,
+                    context.builder,
+                )
+            else:
+                angles = tuple(
+                    float(evaluate_scalar(parameter, loop_values))
+                    for parameter in gate.parameters
+                )
+                _emit_controlled_gate(
+                    gate.kind,
+                    control,
+                    qubits,
+                    angles,
+                    context,
+                )
+            for output, qubit in zip(gate_outputs, qubits, strict=True):
+                environment[output] = qubit
+        elif isinstance(operation, ForInstruction):
+            loop_inputs = operation.outputs if inverse else operation.inputs
+            loop_outputs = operation.inputs if inverse else operation.outputs
+            body_entry = operation.body_outputs if inverse else operation.inputs
+            body_exit = operation.inputs if inverse else operation.body_outputs
+            current = [environment[wire] for wire in loop_inputs]
+            indices = list(operation.indexset)
+            if inverse:
+                indices.reverse()
+            for index in indices:
+                nested_values = dict(loop_values)
+                nested_values[operation.loop_variable.name] = index
+                body_environment = _emit_transformed_region(
+                    operation.body,
+                    dict(zip(body_entry, current, strict=True)),
+                    registers,
+                    context,
+                    nested_values,
+                    control,
+                    inverse,
+                )
+                current = [body_environment[wire] for wire in body_exit]
+            for output, qubit in zip(loop_outputs, current, strict=True):
+                environment[output] = qubit
+        elif isinstance(operation, CallInstruction):
+            _emit_transformed_call(
+                operation,
+                environment,
+                registers,
+                context,
+                loop_values,
+                control,
+                inverse,
+            )
+        elif isinstance(operation, PauliEvolutionInstruction):
+            transformed = (
+                dataclasses.replace(
+                    operation,
+                    time=UnaryExpr(UnaryOperator.NEG, operation.time),
+                )
+                if inverse
+                else operation
+            )
+            pauli_inputs = operation.outputs if inverse else operation.inputs
+            pauli_outputs = operation.inputs if inverse else operation.outputs
+            qubits = tuple(environment[wire] for wire in pauli_inputs)
+            if control is None:
+                _emit_pauli_evolution(
+                    transformed,
+                    qubits,
+                    context.intrinsic,
+                    context.precision,
+                    loop_values,
+                    reverse_terms=inverse,
+                )
+            else:
+                _emit_controlled_pauli_evolution(
+                    transformed,
+                    qubits,
+                    control,
+                    context,
+                    loop_values,
+                    reverse_terms=inverse,
+                )
+            for output, qubit in zip(pauli_outputs, qubits, strict=True):
+                environment[output] = qubit
+        elif isinstance(operation, BarrierInstruction):
+            continue
+        else:
+            raise EmitError(
+                "Quration cannot apply reusable transforms to "
+                f"{type(operation).__name__}"
+            )
+    return environment
+
+
+def _invert_gate(operation: GateInstruction) -> GateInstruction:
+    """Return the exact inverse representation of one primitive gate.
+
+    Args:
+        operation (GateInstruction): Primitive gate to invert.
+
+    Returns:
+        GateInstruction: Gate with its adjoint kind or negated parameters.
+    """
+    match operation.kind:
+        case GateKind.S:
+            kind = GateKind.SDG
+        case GateKind.SDG:
+            kind = GateKind.S
+        case GateKind.T:
+            kind = GateKind.TDG
+        case GateKind.TDG:
+            kind = GateKind.T
+        case _:
+            kind = operation.kind
+    parameters = tuple(
+        UnaryExpr(UnaryOperator.NEG, parameter) for parameter in operation.parameters
+    )
+    return dataclasses.replace(operation, kind=kind, parameters=parameters)
+
+
+def _emit_controlled_gate(
+    kind: GateKind,
+    control: Any,
+    qubits: tuple[Any, ...],
+    angles: tuple[float, ...],
+    context: _PyQretContext,
+) -> None:
+    """Emit one declared primitive under a single distributed control.
+
+    Args:
+        kind (GateKind): Primitive body gate.
+        control (Any): PyQret qubit controlling the body operation.
+        qubits (tuple[Any, ...]): Body-gate operands in circuit order.
+        angles (tuple[float, ...]): Concrete body-gate parameters.
+        context (_PyQretContext): Shared PyQret materialization context.
+
+    Raises:
+        EmitError: If ``kind`` has no declared single-control realization.
+    """
+    match kind:
+        case GateKind.H:
+            controlled_kind = GateKind.CH
+        case GateKind.X:
+            controlled_kind = GateKind.CX
+        case GateKind.Y:
+            controlled_kind = GateKind.CY
+        case GateKind.Z:
+            controlled_kind = GateKind.CZ
+        case GateKind.RX:
+            controlled_kind = GateKind.CRX
+        case GateKind.RY:
+            controlled_kind = GateKind.CRY
+        case GateKind.RZ:
+            controlled_kind = GateKind.CRZ
+        case GateKind.P:
+            controlled_kind = GateKind.CP
+        case _:
+            controlled_kind = None
+    if controlled_kind is not None:
+        _emit_concrete_gate(
+            controlled_kind,
+            (control, *qubits),
+            angles,
+            context,
+        )
+        return
+    match kind:
+        case GateKind.S:
+            angle = math.pi / 2
+        case GateKind.SDG:
+            angle = -math.pi / 2
+        case GateKind.T:
+            angle = math.pi / 4
+        case GateKind.TDG:
+            angle = -math.pi / 4
+        case _:
+            angle = None
+    if angle is not None:
+        _emit_concrete_gate(GateKind.CP, (control, qubits[0]), (angle,), context)
+        return
+    if kind is GateKind.CX:
+        _emit_concrete_gate(
+            GateKind.TOFFOLI,
+            (control, qubits[0], qubits[1]),
+            (),
+            context,
+        )
+        return
+    if kind in {GateKind.CY, GateKind.CZ}:
+        basis = GateKind.SDG if kind is GateKind.CY else GateKind.H
+        basis_inverse = GateKind.S if kind is GateKind.CY else GateKind.H
+        _emit_concrete_gate(basis, (qubits[1],), (), context)
+        _emit_concrete_gate(
+            GateKind.TOFFOLI,
+            (control, qubits[0], qubits[1]),
+            (),
+            context,
+        )
+        _emit_concrete_gate(basis_inverse, (qubits[1],), (), context)
+        return
+    if kind is GateKind.SWAP:
+        _emit_concrete_gate(GateKind.CX, qubits, (), context)
+        _emit_concrete_gate(
+            GateKind.TOFFOLI,
+            (control, qubits[1], qubits[0]),
+            (),
+            context,
+        )
+        _emit_concrete_gate(GateKind.CX, qubits, (), context)
+        return
+    raise EmitError(f"Quration cannot distribute a call control onto {kind.name}")
+
+
+def _emit_concrete_gate(
+    kind: GateKind,
+    qubits: tuple[Any, ...],
+    angles: tuple[float, ...],
+    context: _PyQretContext,
+) -> None:
+    """Emit a primitive gate whose scalar parameters are concrete.
+
+    Args:
+        kind (GateKind): Primitive gate kind.
+        qubits (tuple[Any, ...]): PyQret qubit operands in circuit order.
+        angles (tuple[float, ...]): Concrete gate parameters.
+        context (_PyQretContext): Shared PyQret materialization context.
+
+    Raises:
+        EmitError: If ``kind`` has no Quration materialization rule.
+    """
+    operation = GateInstruction(
+        kind=kind,
+        inputs=(),
+        outputs=(),
+        parameters=tuple(LiteralExpr(angle) for angle in angles),
+    )
+    _emit_gate(
+        operation,
+        qubits,
+        context.intrinsic,
+        context.precision,
+        {},
+        context.builder,
+    )
+
+
+def _emit_controlled_pauli_evolution(
+    operation: PauliEvolutionInstruction,
+    qubits: tuple[Any, ...],
+    control: Any,
+    context: _PyQretContext,
+    loop_values: dict[str, int],
+    reverse_terms: bool,
+) -> None:
+    """Emit one Pauli evolution under a single distributed control.
+
+    Args:
+        operation (PauliEvolutionInstruction): Pauli evolution to emit.
+        qubits (tuple[Any, ...]): Participating PyQret qubits.
+        control (Any): PyQret qubit controlling the evolution.
+        context (_PyQretContext): Shared PyQret materialization context.
+        loop_values (dict[str, int]): Active loop-variable bindings.
+        reverse_terms (bool): Whether to reverse the gadget-product order.
+
+    Raises:
+        EmitError: If the evolution time is not concrete or a controlled
+            rotation cannot be emitted.
+    """
+    import qamomile.observable as qm_o
+
+    time = float(evaluate_scalar(operation.time, loop_values))
+    intrinsic = context.intrinsic
+    terms = list(operation.hamiltonian)
+    if reverse_terms:
+        terms.reverse()
+    for operators, coefficient in terms:
+        selected = [qubits[item.index] for item in operators]
+        if not selected or not coefficient:
+            continue
+        for item, qubit in zip(operators, selected, strict=True):
+            if item.pauli is qm_o.Pauli.X:
+                intrinsic.h(qubit)
+            elif item.pauli is qm_o.Pauli.Y:
+                intrinsic.sdag(qubit)
+                intrinsic.h(qubit)
+        for left, right in zip(selected, selected[1:]):
+            intrinsic.cx(right, left)
+        _emit_controlled_gate(
+            GateKind.RZ,
+            control,
+            (selected[-1],),
+            (2.0 * float(coefficient.real) * time,),
+            context,
+        )
+        for left, right in reversed(list(zip(selected, selected[1:]))):
+            intrinsic.cx(right, left)
+        for item, qubit in reversed(list(zip(operators, selected, strict=True))):
+            if item.pauli is qm_o.Pauli.X:
+                intrinsic.h(qubit)
+            elif item.pauli is qm_o.Pauli.Y:
+                intrinsic.h(qubit)
+                intrinsic.s(qubit)
+
+
+def _is_zero_phase(expression: ScalarExpr) -> bool:
+    """Return whether a phase is the exact literal zero.
+
+    Args:
+        expression (ScalarExpr): Phase expression to inspect.
+
+    Returns:
+        bool: Whether ``expression`` is a zero-valued literal.
+    """
+    return isinstance(expression, LiteralExpr) and not float(expression.value)
+
+
 def _emit_pauli_evolution(
     operation: PauliEvolutionInstruction,
     qubits: tuple[Any, ...],
     intrinsic: Any,
     precision: float,
     loop_values: dict[str, int],
+    reverse_terms: bool = False,
 ) -> None:
     """Legalize an abstract Pauli evolution to PyQret gate gadgets.
 
@@ -704,6 +1178,8 @@ def _emit_pauli_evolution(
         intrinsic (Any): PyQret intrinsic gate module.
         precision (float): Rotation synthesis precision.
         loop_values (dict[str, int]): Active induction values.
+        reverse_terms (bool): Whether to reverse the gadget-product order.
+            Defaults to false.
 
     Raises:
         EmitError: If the evolution time is not concrete.
@@ -711,7 +1187,10 @@ def _emit_pauli_evolution(
     import qamomile.observable as qm_o
 
     time = float(evaluate_scalar(operation.time, loop_values))
-    for operators, coefficient in operation.hamiltonian:
+    terms = list(operation.hamiltonian)
+    if reverse_terms:
+        terms.reverse()
+    for operators, coefficient in terms:
         selected = [qubits[item.index] for item in operators]
         for item, qubit in zip(operators, selected, strict=True):
             if item.pauli is qm_o.Pauli.X:

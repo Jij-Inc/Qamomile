@@ -2,9 +2,9 @@
 
 For ``exp(-i * gamma * H)`` the identity component of ``H`` (its constant
 offset ``c``) is an unobservable global phase ``exp(-i * gamma * c)`` when
-applied uncontrolled, so every backend drops it.  Under ``qmc.control``
-that phase becomes an *observable* relative phase between the control-on
-and control-off branches.
+applied uncontrolled, but Qamomile still preserves it exactly. Under
+``qmc.control`` that phase becomes an *observable* relative phase between the
+control-on and control-off branches.
 
 CUDA-Q lowers a controlled reusable body by wrapping the *uncontrolled*
 helper in ``cudaq.control``, which omits that global phase; the CircuitProgram

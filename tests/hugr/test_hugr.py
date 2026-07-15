@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +20,9 @@ from hugr import ops
 from hugr.package import Package
 from hugr.std.float import FloatVal
 
+from qamomile.circuit.ir.operation.control_flow import ForOperation
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.hugr import HugrTranspiler
 
@@ -148,6 +154,37 @@ def _hugr_two_control_call_global_phase(
 
 
 @qmc.qkernel
+def _hugr_three_control_global_phase(
+    theta: qmc.Float,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Control a phased reusable body with three coherent controls."""
+    controls = qmc.qubit_array(3, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(_hugr_phased_helper, num_controls=3)(
+        controls,
+        target,
+        theta,
+    )
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_four_control_powered_call_global_phase(
+    theta: qmc.Float,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Repeat a four-control call-site phase with a static power."""
+    controls = qmc.qubit_array(4, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(_hugr_identity, num_controls=4)(
+        controls,
+        target,
+        power=2,
+        global_phase=theta,
+    )
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
 def _hugr_dynamic_power_control_call_global_phase(
     theta: qmc.Float,
     power: qmc.UInt,
@@ -170,6 +207,301 @@ def _hugr_inverse_global_phase(theta: qmc.Float) -> qmc.Bit:
     qubit = qmc.qubit("qubit")
     qubit = qmc.inverse(_hugr_phased_helper)(qubit, theta)
     return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _hugr_static_for_phased_helper(
+    qubit: qmc.Qubit,
+    theta: qmc.Float,
+) -> qmc.Qubit:
+    """Apply phased X operations in a statically bounded loop."""
+    for _ in qmc.range(2):
+        qubit = qmc.global_phase(_hugr_identity, theta)(qubit)
+        qubit = qmc.x(qubit)
+    return qubit
+
+
+@qmc.qkernel
+def _hugr_controlled_static_for_global_phase(
+    theta: qmc.Float,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Control a reusable static loop containing global phase."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_static_for_phased_helper)(
+        control,
+        target,
+        theta,
+    )
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_descending_static_for_phased_helper(
+    qubit: qmc.Qubit,
+    theta: qmc.Float,
+) -> qmc.Qubit:
+    """Apply phased X operations over a negative-step range."""
+    for _ in qmc.range(5, 0, -2):
+        qubit = qmc.global_phase(_hugr_identity, theta)(qubit)
+        qubit = qmc.x(qubit)
+    return qubit
+
+
+@qmc.qkernel
+def _hugr_controlled_descending_static_for(
+    theta: qmc.Float,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Control a reusable negative-step static loop."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_descending_static_for_phased_helper)(
+        control,
+        target,
+        theta,
+    )
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_inverse_descending_static_for(theta: qmc.Float) -> qmc.Bit:
+    """Invert a reusable negative-step static loop."""
+    target = qmc.qubit("target")
+    target = qmc.inverse(_hugr_descending_static_for_phased_helper)(target, theta)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_nested_static_for_phased_helper(
+    qubit: qmc.Qubit,
+    theta: qmc.Float,
+) -> qmc.Qubit:
+    """Apply phased S operations in nested static loops."""
+    for _ in qmc.range(2):
+        for _ in qmc.range(3):
+            qubit = qmc.global_phase(_hugr_identity, theta)(qubit)
+            qubit = qmc.s(qubit)
+    return qubit
+
+
+@qmc.qkernel
+def _hugr_nested_static_phase_only_helper(
+    qubit: qmc.Qubit,
+    theta: qmc.Float,
+) -> qmc.Qubit:
+    """Apply only phased identities in nested static loops."""
+    for _ in qmc.range(2):
+        for _ in qmc.range(2):
+            qubit = qmc.global_phase(_hugr_identity, theta)(qubit)
+    return qubit
+
+
+@qmc.qkernel
+def _hugr_three_control_nested_static_phase(
+    theta: qmc.Float,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Control a nested static loop with three coherent controls."""
+    controls = qmc.qubit_array(3, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _hugr_nested_static_phase_only_helper,
+        num_controls=3,
+    )(controls, target, theta)
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_inverse_nested_static_for_global_phase(theta: qmc.Float) -> qmc.Bit:
+    """Invert a reusable nested static loop containing global phase."""
+    qubit = qmc.qubit("qubit")
+    qubit = qmc.inverse(_hugr_nested_static_for_phased_helper)(qubit, theta)
+    return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _hugr_dependent_nested_static_for_phased_helper(
+    qubit: qmc.Qubit,
+    theta: qmc.Float,
+) -> qmc.Qubit:
+    """Apply phased X operations under an outer-index-dependent bound."""
+    for outer in qmc.range(3):
+        for _ in qmc.range(outer + 1):
+            qubit = qmc.global_phase(_hugr_identity, theta)(qubit)
+            qubit = qmc.x(qubit)
+    return qubit
+
+
+@qmc.qkernel
+def _hugr_controlled_dependent_nested_static_for(
+    theta: qmc.Float,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Control nested static loops whose inner bound uses the outer index."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_dependent_nested_static_for_phased_helper)(
+        control,
+        target,
+        theta,
+    )
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_static_vector_for_helper(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply X to two statically indexed vector elements."""
+    for index in qmc.range(2):
+        qubits[index] = qmc.x(qubits[index])
+    return qubits
+
+
+@qmc.qkernel
+def _hugr_controlled_static_vector_for() -> tuple[qmc.Bit, qmc.Vector[qmc.Bit]]:
+    """Control a static loop over vector elements."""
+    control = qmc.qubit("control")
+    targets = qmc.qubit_array(2, "targets")
+    control, targets = qmc.control(_hugr_static_vector_for_helper)(
+        control,
+        targets,
+    )
+    return qmc.measure(control), qmc.measure(targets)
+
+
+@qmc.qkernel
+def _hugr_repeated_static_array_element_helper(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Reuse one statically indexed element across controlled iterations."""
+    qubits[0] = qmc.x(qubits[0])
+    for _ in qmc.range(2):
+        qubits[0] = qmc.z(qubits[0])
+    return qubits
+
+
+@qmc.qkernel
+def _hugr_controlled_repeated_static_array_element() -> tuple[
+    qmc.Bit, qmc.Vector[qmc.Bit]
+]:
+    """Control repeated operations on one array element."""
+    control = qmc.qubit("control")
+    targets = qmc.qubit_array(2, "targets")
+    control, targets = qmc.control(_hugr_repeated_static_array_element_helper)(
+        control,
+        targets,
+    )
+    return qmc.measure(control), qmc.measure(targets)
+
+
+@qmc.qkernel
+def _hugr_inverse_static_vector_for() -> qmc.Vector[qmc.Bit]:
+    """Invert a static loop over vector elements."""
+    targets = qmc.qubit_array(2, "targets")
+    targets = qmc.inverse(_hugr_static_vector_for_helper)(targets)
+    return qmc.measure(targets)
+
+
+@qmc.qkernel
+def _hugr_dynamic_for_helper(
+    qubit: qmc.Qubit,
+    count: qmc.UInt,
+) -> qmc.Qubit:
+    """Apply a phased X in a runtime-bounded loop."""
+    for _ in qmc.range(count):
+        qubit = qmc.global_phase(_hugr_identity, 0.125)(qubit)
+        qubit = qmc.x(qubit)
+    return qubit
+
+
+@qmc.qkernel
+def _hugr_controlled_zero_trip_for() -> tuple[qmc.Bit, qmc.Bit]:
+    """Control a loop specialized to an empty range at its call site."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_dynamic_for_helper)(control, target, 0)
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_inverse_zero_trip_for() -> qmc.Bit:
+    """Invert a loop specialized to an empty range at its call site."""
+    target = qmc.qubit("target")
+    target = qmc.inverse(_hugr_dynamic_for_helper)(target, 0)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_dynamic_for_with_tail_helper(
+    qubit: qmc.Qubit,
+    count: qmc.UInt,
+) -> qmc.Qubit:
+    """Apply a tail gate after a potentially empty transformed loop."""
+    for _ in qmc.range(count):
+        qubit = qmc.global_phase(_hugr_identity, 0.125)(qubit)
+        qubit = qmc.x(qubit)
+    return qmc.z(qubit)
+
+
+@qmc.qkernel
+def _hugr_controlled_zero_trip_for_with_tail() -> tuple[qmc.Bit, qmc.Bit]:
+    """Control a tail gate after a loop specialized to an empty range."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_dynamic_for_with_tail_helper)(
+        control,
+        target,
+        0,
+    )
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_inverse_zero_trip_for_with_tail() -> qmc.Bit:
+    """Invert a tail gate after a loop specialized to an empty range."""
+    target = qmc.qubit("target")
+    target = qmc.inverse(_hugr_dynamic_for_with_tail_helper)(target, 0)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_controlled_dynamic_for(count: qmc.UInt) -> tuple[qmc.Bit, qmc.Bit]:
+    """Control a reusable runtime-bounded loop."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_dynamic_for_helper)(
+        control,
+        target,
+        count,
+    )
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_classical_carry_for_helper(
+    qubit: qmc.Qubit,
+    theta: qmc.Float,
+) -> qmc.Qubit:
+    """Update a classical angle across static loop iterations."""
+    angle = theta
+    for _ in qmc.range(2):
+        angle = angle + theta
+        qubit = qmc.rz(qubit, angle)
+    return qubit
+
+
+@qmc.qkernel
+def _hugr_controlled_classical_carry_for(
+    theta: qmc.Float,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Control a static loop with a classical carried value."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_classical_carry_for_helper)(
+        control,
+        target,
+        theta,
+    )
+    return qmc.measure(control), qmc.measure(target)
 
 
 @qmc.qkernel
@@ -245,6 +577,90 @@ def _hugr_controlled_phase_in_while() -> qmc.Bit:
         loop_qubit = qmc.reset(loop_qubit)
         loop_qubit, run = qmc.project_z(loop_qubit)
     return qmc.measure(control)
+
+
+@qmc.qkernel
+def _hugr_three_control_vector_phase_in_if() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Carry vector controls from a phased call through a runtime branch."""
+    predicate = qmc.x(qmc.qubit("predicate"))
+    take_branch = qmc.measure(predicate)
+    controls = qmc.qubit_array(3, "controls")
+    target = qmc.qubit("target")
+    if take_branch:
+        controls, target = qmc.control(_hugr_identity, num_controls=3)(
+            controls,
+            target,
+            global_phase=math.pi,
+        )
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_three_control_vector_phase_in_for(
+    count: qmc.UInt,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Carry phased-call controls through element and broadcast gates in a loop."""
+    controls = qmc.qubit_array(3, "controls")
+    target = qmc.qubit("target")
+    for _ in qmc.range(count):
+        controls, target = qmc.control(_hugr_identity, num_controls=3)(
+            controls,
+            target,
+            global_phase=math.pi / 3,
+        )
+        controls, target = qmc.control(_hugr_identity, num_controls=3)(
+            controls,
+            target,
+            global_phase=math.pi / 5,
+        )
+        controls[0] = qmc.x(controls[0])
+        controls = qmc.z(controls)
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_three_control_vector_phase_in_while() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Carry phased-call controls through a while-loop and following CX."""
+    loop_qubit = qmc.x(qmc.qubit("loop"))
+    loop_qubit, run = qmc.project_z(loop_qubit)
+    controls = qmc.qubit_array(3, "controls")
+    target = qmc.qubit("target")
+    while run:
+        controls, target = qmc.control(_hugr_identity, num_controls=3)(
+            controls,
+            target,
+            global_phase=math.pi / 3,
+        )
+        controls, target = qmc.control(_hugr_identity, num_controls=3)(
+            controls,
+            target,
+            global_phase=math.pi / 5,
+        )
+        controls[0], controls[1] = qmc.cx(controls[0], controls[1])
+        loop_qubit = qmc.reset(loop_qubit)
+        loop_qubit, run = qmc.project_z(loop_qubit)
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_three_control_vector_phase_in_nested_while_if() -> tuple[
+    qmc.Vector[qmc.Bit], qmc.Bit
+]:
+    """Carry vector controls through nested runtime while and if regions."""
+    loop_qubit = qmc.x(qmc.qubit("loop"))
+    loop_qubit, run = qmc.project_z(loop_qubit)
+    controls = qmc.qubit_array(3, "controls")
+    target = qmc.qubit("target")
+    while run:
+        if run:
+            controls, target = qmc.control(_hugr_identity, num_controls=3)(
+                controls,
+                target,
+                global_phase=math.pi,
+            )
+        loop_qubit = qmc.reset(loop_qubit)
+        loop_qubit, run = qmc.project_z(loop_qubit)
+    return qmc.measure(controls), qmc.measure(target)
 
 
 @qmc.qkernel
@@ -866,6 +1282,141 @@ def _hugr_controlled_pauli_evolution(
     return qmc.measure(targets)
 
 
+def _explicit_inverse_zero_trip_for_kernel() -> SimpleNamespace:
+    """Keep an empty ForOperation visible at the HUGR inverse boundary.
+
+    The frontend normally folds a literal empty range before HUGR sees it.
+    This target-boundary fixture rewrites only the range bounds of an otherwise
+    genuine inverse qkernel block so zero-trip inverse lowering is exercised.
+    """
+    transpiler = HugrTranspiler()
+    block = copy.deepcopy(
+        transpiler.compiler.to_block(
+            _hugr_inverse_descending_static_for,
+            parameters=["theta"],
+        )
+    )
+    for position, operation in enumerate(block.operations):
+        if not isinstance(operation, InverseBlockOperation):
+            continue
+        assert operation.source_block is not None
+        source = operation.source_block
+        loop = next(
+            nested for nested in source.operations if isinstance(nested, ForOperation)
+        )
+        start, stop, step = loop.operands[:3]
+        empty_loop = dataclasses.replace(
+            loop,
+            operands=[
+                start.with_const(2),
+                stop.with_const(2),
+                step.with_const(1),
+            ],
+        )
+        source = dataclasses.replace(
+            source,
+            operations=[
+                empty_loop,
+                *(
+                    nested
+                    for nested in source.operations
+                    if not isinstance(nested, ForOperation)
+                ),
+            ],
+        )
+        block.operations[position] = dataclasses.replace(
+            operation,
+            source_block=source,
+        )
+        return SimpleNamespace(block=block)
+    raise AssertionError("Expected an inverse block in the boundary fixture")
+
+
+def _explicit_controlled_inverse_kernel() -> SimpleNamespace:
+    """Keep a controlled inverse primitive at the HUGR target boundary."""
+    transpiler = HugrTranspiler()
+    block = copy.deepcopy(transpiler.compiler.to_block(_hugr_controlled_program))
+    for position, operation in enumerate(block.operations):
+        if not isinstance(operation, ControlledUOperation):
+            continue
+        assert operation.block is not None
+        block.operations[position] = InverseBlockOperation(
+            operands=list(operation.operands),
+            results=list(operation.results),
+            num_control_qubits=1,
+            num_target_qubits=1,
+            custom_name="controlled_x_inverse",
+            source_block=operation.block,
+            implementation_block=operation.block,
+            callable_ref=operation.callable_ref,
+            callable_attrs=dict(operation.callable_attrs),
+        )
+        return SimpleNamespace(block=block)
+    raise AssertionError("Expected a controlled call in the boundary fixture")
+
+
+def _explicit_three_control_inverse_phase_kernel() -> SimpleNamespace:
+    """Keep a three-control inverse phase at the HUGR target boundary."""
+    transpiler = HugrTranspiler()
+    block = copy.deepcopy(
+        transpiler.compiler.to_block(
+            _hugr_three_control_global_phase,
+            parameters=["theta"],
+        )
+    )
+    for position, operation in enumerate(block.operations):
+        if not isinstance(operation, ControlledUOperation):
+            continue
+        assert operation.block is not None
+        block.operations[position] = InverseBlockOperation(
+            operands=list(operation.operands),
+            results=list(operation.results),
+            num_control_qubits=len(operation.control_operands),
+            num_target_qubits=1,
+            custom_name="three_control_phase_inverse",
+            source_block=operation.block,
+            implementation_block=operation.block,
+            callable_ref=operation.callable_ref,
+            callable_attrs=dict(operation.callable_attrs),
+        )
+        return SimpleNamespace(block=block, build=lambda **_: block)
+    raise AssertionError("Expected a three-control call in the boundary fixture")
+
+
+def _explicit_controlled_inverse_pauli_kernel() -> SimpleNamespace:
+    """Keep a controlled inverse Pauli body at the HUGR target boundary."""
+    hamiltonian = 0.25 * qm_o.X(0) + 0.5 * qm_o.Y(0) * qm_o.Z(1) + 0.75
+    bindings = {"hamiltonian": hamiltonian, "gamma": 0.125}
+    transpiler = HugrTranspiler()
+    block = copy.deepcopy(
+        transpiler.compiler.to_block(
+            _hugr_controlled_pauli_evolution,
+            bindings=bindings,
+        )
+    )
+    for position, operation in enumerate(block.operations):
+        if not isinstance(operation, ControlledUOperation):
+            continue
+        assert operation.block is not None
+        block.operations[position] = InverseBlockOperation(
+            operands=list(operation.operands),
+            results=list(operation.results),
+            num_control_qubits=1,
+            num_target_qubits=2,
+            custom_name="controlled_pauli_inverse",
+            source_block=operation.block,
+            implementation_block=operation.block,
+            callable_ref=operation.callable_ref,
+            callable_attrs=dict(operation.callable_attrs),
+        )
+        return SimpleNamespace(
+            block=block,
+            build=lambda **_: block,
+            bindings=bindings,
+        )
+    raise AssertionError("Expected a controlled Pauli call in the boundary fixture")
+
+
 @pytest.mark.hugr
 def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
     """A bound quantum program produces a validator-clean HUGR package."""
@@ -930,6 +1481,221 @@ def test_hugr_preserves_transformed_global_phase(
 
 
 @pytest.mark.hugr
+def test_hugr_controls_static_for_body_with_global_phase() -> None:
+    """A controlled static loop repeats its exact relative-phase body."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_controlled_static_for_global_phase,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.global_phase.global_phase") == 2
+    assert names.count("tket.quantum.CX") == 2
+    assert _hugr_float_constants(package) == pytest.approx(
+        [0.5 / math.pi, 1.0 / math.pi] * 2,
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    "kernel",
+    [_hugr_controlled_zero_trip_for, _hugr_inverse_zero_trip_for],
+)
+def test_hugr_preserves_wires_through_zero_trip_transformed_for(
+    kernel: qmc.QKernel,
+) -> None:
+    """A zero-trip transformed loop emits neither its phase nor its gate."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(kernel)
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.global_phase.global_phase") == len(range(0))
+    assert names.count("tket.quantum.CX") == len(range(0))
+    assert names.count("tket.quantum.X") == len(range(0))
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("kernel", "expected_tail"),
+    [
+        (_hugr_controlled_zero_trip_for_with_tail, "tket.quantum.CZ"),
+        (_hugr_inverse_zero_trip_for_with_tail, "tket.quantum.Z"),
+    ],
+)
+def test_hugr_preserves_tail_after_zero_trip_transformed_for(
+    kernel: qmc.QKernel,
+    expected_tail: str,
+) -> None:
+    """A zero-trip body aliases its phantom output before the tail gate."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(kernel)
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count(expected_tail) == 1
+    assert names.count("tket.global_phase.global_phase") == 0
+    assert names.count("tket.quantum.CX") == 0
+    assert names.count("tket.quantum.X") == 0
+
+
+@pytest.mark.hugr
+def test_hugr_inverts_explicit_zero_trip_static_for_at_target_boundary() -> None:
+    """An inverse ForOperation with an empty range preserves its input wire."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(_explicit_inverse_zero_trip_for_kernel())
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.global_phase.global_phase") == len(range(2, 2))
+    assert names.count("tket.quantum.X") == len(range(2, 2))
+
+
+@pytest.mark.hugr
+def test_hugr_controls_negative_step_static_for_exactly() -> None:
+    """Controlled negative-step unrolling follows Python range cardinality."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_controlled_descending_static_for,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    iterations = len(range(5, 0, -2))
+    names = _hugr_operation_names(package)
+    assert names.count("tket.global_phase.global_phase") == iterations
+    assert names.count("tket.quantum.CX") == iterations
+    assert _hugr_float_constants(package) == pytest.approx(
+        [0.5 / math.pi, 1.0 / math.pi] * iterations,
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_inverts_negative_step_static_for_exactly() -> None:
+    """Inverse negative-step unrolling reverses every Python range iteration."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_inverse_descending_static_for,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    iterations = len(range(5, 0, -2))
+    names = _hugr_operation_names(package)
+    assert names.count("tket.global_phase.global_phase") == iterations
+    assert names.count("tket.quantum.X") == iterations
+    assert _hugr_float_constants(package) == pytest.approx(
+        [-1.0 / math.pi] * iterations,
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_inverts_nested_static_for_body_with_global_phase() -> None:
+    """Nested static loops reverse and negate every phased body application."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_inverse_nested_static_for_global_phase,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+    assert _hugr_operation_names(package).count("tket.global_phase.global_phase") == 6
+    assert sum("name='Sdg'" in str(operation) for operation in operations) == 6
+    assert _hugr_float_constants(package) == pytest.approx(
+        [-1.0 / math.pi] * 6,
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_controls_outer_index_dependent_nested_static_for() -> None:
+    """An outer static index resolves the nested bound before control."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_controlled_dependent_nested_static_for,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.global_phase.global_phase") == 6
+    assert names.count("tket.quantum.CX") == 6
+
+
+@pytest.mark.hugr
+def test_hugr_controls_static_for_over_vector_elements() -> None:
+    """Static element indexing advances each controlled linear target wire."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(_hugr_controlled_static_vector_for)
+
+    transpiler.target.validate(package)
+    assert _hugr_operation_names(package).count("tket.quantum.CX") == 2
+
+
+@pytest.mark.hugr
+def test_hugr_controls_repeated_static_array_element_linearly() -> None:
+    """Repeated controlled element access always consumes the latest wire."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(_hugr_controlled_repeated_static_array_element)
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.CX") == 1
+    assert names.count("tket.quantum.CZ") == 2
+
+
+@pytest.mark.hugr
+def test_hugr_inverts_static_for_over_vector_elements() -> None:
+    """Inverse static indexing advances each adjoint linear target wire."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(_hugr_inverse_static_vector_for)
+
+    transpiler.target.validate(package)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+    assert sum("name='X'" in str(operation) for operation in operations) == 2
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_dynamic_for_inside_transformed_call() -> None:
+    """Runtime bounds fail explicitly instead of emitting one iteration."""
+    with pytest.raises(
+        EmitError,
+        match="bounds must be compile-time constants",
+    ) as error:
+        HugrTranspiler().to_hugr(
+            _hugr_controlled_dynamic_for,
+            parameters=["count"],
+        )
+
+    assert error.value.operation == "ForOperation"
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_classical_carry_inside_transformed_for() -> None:
+    """Classical loop carries fail explicitly at the transformed loop."""
+    with pytest.raises(
+        EmitError,
+        match="do not support loop-carried values.*angle",
+    ) as error:
+        HugrTranspiler().to_hugr(
+            _hugr_controlled_classical_carry_for,
+            parameters=["theta"],
+        )
+
+    assert error.value.operation == "ForOperation"
+
+
+@pytest.mark.hugr
 def test_hugr_repeats_phase_and_body_for_static_controlled_power() -> None:
     """Static power repeats the complete exact phase realization."""
     package = HugrTranspiler().to_hugr(
@@ -959,6 +1725,95 @@ def test_hugr_preserves_two_control_phase_exactly() -> None:
         rel=0.0,
         abs=1e-15,
     )
+
+
+@pytest.mark.hugr
+def test_hugr_preserves_three_control_phase_with_clean_ancillas() -> None:
+    """Three controls use an uncomputed and freed conjunction cascade."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_three_control_global_phase,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.Toffoli") == 2
+    assert names.count("tket.quantum.QAlloc") == 5
+    assert names.count("tket.quantum.QFree") == 5
+    assert names.count("tket.quantum.Rz") == 1
+    assert names.count("tket.quantum.CRz") == 1
+    assert names.count("tket.global_phase.global_phase") == 1
+    assert _hugr_float_constants(package) == pytest.approx(
+        [0.25 / math.pi, 0.5 / math.pi, 1.0 / math.pi],
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_repeats_four_control_phase_cascade_for_power() -> None:
+    """Static power repeats each exact four-control phase cascade."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_four_control_powered_call_global_phase,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.Toffoli") == 8
+    assert names.count("tket.quantum.QAlloc") == 9
+    assert names.count("tket.quantum.QFree") == 9
+    assert names.count("tket.quantum.Rz") == 2
+    assert names.count("tket.quantum.CRz") == 2
+    assert names.count("tket.global_phase.global_phase") == 2
+    assert _hugr_float_constants(package) == pytest.approx(
+        [0.25 / math.pi, 0.5 / math.pi, 1.0 / math.pi] * 2,
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_inverts_three_control_phase_cascade() -> None:
+    """Inverse lowering negates the phase and restores every linear wire."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _explicit_three_control_inverse_phase_kernel(),
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.Toffoli") == 2
+    assert names.count("tket.quantum.QAlloc") == 5
+    assert names.count("tket.quantum.QFree") == 5
+    assert names.count("tket.quantum.CRz") == 1
+    assert _hugr_float_constants(package) == pytest.approx(
+        [-0.25 / math.pi, -0.5 / math.pi, -1.0 / math.pi],
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_preserves_three_control_phase_in_nested_static_for() -> None:
+    """Nested static loops reuse clean phase-conjunction ancillas safely."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_three_control_nested_static_phase,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.Toffoli") == 8
+    assert names.count("tket.quantum.QAlloc") == 8
+    assert names.count("tket.quantum.QFree") == 8
+    assert names.count("tket.quantum.Rz") == 4
+    assert names.count("tket.quantum.CRz") == 4
+    assert names.count("tket.global_phase.global_phase") == 4
 
 
 @pytest.mark.hugr
@@ -1016,6 +1871,32 @@ def test_hugr_preserves_controlled_phase_inside_runtime_while() -> None:
 
     assert any(type(operation).__name__ == "TailLoop" for operation in operations)
     assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("kernel", "parameters", "applications"),
+    [
+        (_hugr_three_control_vector_phase_in_if, [], 1),
+        (_hugr_three_control_vector_phase_in_for, ["count"], 2),
+        (_hugr_three_control_vector_phase_in_while, [], 2),
+        (_hugr_three_control_vector_phase_in_nested_while_if, [], 1),
+    ],
+)
+def test_hugr_publishes_vector_controls_from_runtime_regions(
+    kernel: qmc.QKernel,
+    parameters: list[str],
+    applications: int,
+) -> None:
+    """Runtime regions publish a reconstructed control vector for later use."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(kernel, parameters=parameters)
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.Toffoli") == 2 * applications
+    assert names.count("tket.global_phase.global_phase") == applications
+    assert names.count("tket.quantum.QAlloc") == names.count("tket.quantum.QFree")
 
 
 @pytest.mark.hugr
@@ -1201,6 +2082,19 @@ def test_hugr_lowers_controlled_pauli_evolution_at_target_boundary() -> None:
 
 
 @pytest.mark.hugr
+def test_hugr_lowers_controlled_inverse_pauli_evolution() -> None:
+    """Controlled inverse Pauli lowering resolves the body output vector."""
+    transpiler = HugrTranspiler()
+    kernel = _explicit_controlled_inverse_pauli_kernel()
+    package = transpiler.to_hugr(kernel, bindings=kernel.bindings)
+
+    transpiler.target.validate(package)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+    assert sum("name='CRz'" in str(operation) for operation in operations) == 2
+    assert sum("name='Rz'" in str(operation) for operation in operations) == 1
+
+
+@pytest.mark.hugr
 def test_hugr_preserves_tiny_controlled_identity_phase() -> None:
     """A tiny nonzero identity coefficient remains an observable relative phase."""
     hamiltonian = qm_o.Hamiltonian.identity(1e-16)
@@ -1263,6 +2157,16 @@ def test_hugr_legalizes_controlled_x_calls_to_tket_cx() -> None:
     operations = [data.op for _, data in package.modules[0].nodes()]
 
     assert any("name='CX'" in str(op) for op in operations)
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_controlled_inverse_primitive_body() -> None:
+    """Controlled inverse lowering resolves the body's output-side wire."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(_explicit_controlled_inverse_kernel())
+
+    transpiler.target.validate(package)
+    assert _hugr_operation_names(package).count("tket.quantum.CX") == 1
 
 
 @pytest.mark.hugr

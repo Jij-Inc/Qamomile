@@ -904,8 +904,10 @@ class CircuitProgram:
         output_wires (tuple[WireId, ...]): Final wire version per qubit slot.
         operations (tuple[CircuitInstruction, ...]): Structured instruction
             sequence.
-        global_phase (ScalarExpr): Program-level phase in radians. Defaults to
-            zero and becomes observable when the program is controlled.
+        global_phase (ScalarExpr): Phase accumulated in the root lexical
+            region, in radians. Dynamic control-flow regions retain their own
+            scoped phases. Defaults to zero and becomes observable when the
+            program is controlled.
     """
 
     name: str
@@ -1207,7 +1209,7 @@ class CircuitBuilder:
         self,
         phase: ScalarExpr | bool | int | float,
     ) -> None:
-        """Accumulate a program-level global phase in radians.
+        """Accumulate a global phase in the current lexical region.
 
         Args:
             phase (ScalarExpr | bool | int | float): Phase contribution.

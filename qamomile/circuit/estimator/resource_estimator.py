@@ -1447,9 +1447,11 @@ class ResourceInterpreter:
     ) -> ResourceEstimate:
         """Evaluate a zero-qubit phase under its surrounding controls.
 
-        A standalone global phase has no physical resource cost. With one or
-        more controls it becomes a phase gate on one control, with the
-        remaining controls guarding that gate.
+        The target-neutral estimator assigns a standalone global phase no
+        logical gate cost. A target materializer may still synthesize it with
+        gates or a clean carrier. With one or more coherent controls it
+        becomes a phase gate on one control, with the remaining controls
+        guarding that gate.
 
         Args:
             operation (GlobalPhaseOperation): Phase operation to estimate.

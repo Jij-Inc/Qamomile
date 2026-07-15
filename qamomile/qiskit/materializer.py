@@ -50,7 +50,12 @@ from qamomile.circuit.transpiler.gate_emitter import GateKind
 
 
 class QiskitMaterializer:
-    """Convert target-legal circuit code-generation IR to ``QuantumCircuit``."""
+    """Convert target-legal circuit code-generation IR to ``QuantumCircuit``.
+
+    Root and runtime-control-flow phases are retained in Qiskit's native
+    ``QuantumCircuit.global_phase`` metadata on the corresponding circuit or
+    block.
+    """
 
     @property
     def capabilities(self) -> CircuitCapabilities:
@@ -194,7 +199,7 @@ class QiskitMaterializer:
         program: CircuitProgram,
         parameter_names: tuple[str, ...] = (),
     ) -> MaterializedCircuit[Any]:
-        """Build and return a Qiskit circuit.
+        """Build and return a Qiskit circuit with scoped phase metadata.
 
         Args:
             program (CircuitProgram): Verified circuit-family program.

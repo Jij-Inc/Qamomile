@@ -22,6 +22,7 @@ from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL, PAULI_TERM_ZERO_ATOL
 
 from .gate_emission import resolve_angle_value
+from .global_phase_emission import emit_resolved_global_phase
 from .qubit_address import QubitAddress, QubitMap
 
 
@@ -50,6 +51,31 @@ def _resolve_gamma(
         EmitError: If gamma cannot be represented as an angle.
     """
     return resolve_angle_value(emit_pass, op.gamma, bindings)
+
+
+def _scale_gamma(gamma: Any, factor: float) -> Any:
+    """Scale a concrete or target-native evolution parameter.
+
+    Args:
+        gamma (Any): Resolved evolution time.
+        factor (float): Real coefficient multiplying ``gamma``.
+
+    Returns:
+        Any: Scaled concrete or target-native angle.
+
+    Raises:
+        EmitError: If the target parameter does not support real scaling.
+    """
+    try:
+        return factor * gamma
+    except TypeError as exc:
+        raise EmitError(
+            "Pauli evolution requires a compile-time-numeric gamma on this "
+            "target because its runtime parameter type cannot express the "
+            "required angle scaling. Bind gamma to a concrete value before "
+            "transpilation.",
+            operation="PauliEvolveOp",
+        ) from exc
 
 
 def validate_hamiltonian_within_register(
@@ -134,7 +160,14 @@ def emit_pauli_evolve(
         if n_resolved is not None:
             validate_hamiltonian_within_register(num_h_qubits, n_resolved)
 
-    # Validate Hermitian (real coefficients)
+    # Validate Hermitian (real coefficients), including the identity constant.
+    constant = complex(hamiltonian.constant)
+    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
+        raise EmitError(
+            "PauliEvolveOp requires a Hermitian Hamiltonian (real "
+            f"coefficients), but found complex constant {hamiltonian.constant}.",
+            operation="PauliEvolveOp",
+        )
     for operators, coeff in hamiltonian:
         if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
             raise EmitError(
@@ -163,24 +196,31 @@ def emit_pauli_evolve(
                 operation="PauliEvolveOp",
             )
 
+    if constant.real:
+        emit_resolved_global_phase(
+            emit_pass,
+            circuit,
+            _scale_gamma(gamma, -float(constant.real)),
+        )
+
     # Emit each Hamiltonian term using the Pauli gadget technique
     for operators, coeff in hamiltonian:
         if abs(coeff) < PAULI_TERM_ZERO_ATOL:
+            continue
+        if not operators:
+            emit_resolved_global_phase(
+                emit_pass,
+                circuit,
+                _scale_gamma(gamma, -float(coeff.real)),
+            )
             continue
         # RZ(theta) = exp(-i*theta*Z/2), so to get exp(-i*gamma*c*P)
         # we need theta = 2*gamma*c. Works for both concrete gamma
         # (float * float) and parametric gamma (float * Parameter),
         # relying on backend Parameter arithmetic.
-        angle: Any
-        if isinstance(gamma, (int, float)):
-            angle = 2.0 * float(coeff.real * gamma)
-        else:
-            angle = (2.0 * float(coeff.real)) * gamma
+        angle = _scale_gamma(gamma, 2.0 * float(coeff.real))
         term_qubit_indices = [qubit_indices[op_item.index] for op_item in operators]
         pauli_types = [op_item.pauli for op_item in operators]
-
-        if len(operators) == 0:
-            continue
 
         # Step 1: Basis change
         for qi, pi in zip(term_qubit_indices, pauli_types):

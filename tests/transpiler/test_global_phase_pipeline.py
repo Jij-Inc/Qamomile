@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,7 @@ from qamomile.circuit.ir.operation import (
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.serialize import (
     dump_json,
     dump_msgpack,
@@ -23,6 +25,7 @@ from qamomile.circuit.ir.serialize import (
     load_msgpack,
     to_dict,
 )
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
@@ -30,12 +33,22 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
 )
 from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.errors import DependencyError
+from qamomile.circuit.transpiler.errors import DependencyError, EmitError
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
+from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
+    emit_controlled_global_phase,
+    emit_global_phase,
+)
+from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
+    emit_pauli_evolve,
+)
+from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
+    QubitAddress,
+)
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.value_mapping import ValueSubstitutor
 from qamomile.circuit.transpiler.segments import QuantumStep
@@ -70,6 +83,151 @@ def _phase_only_block(angle: float) -> Block:
         kind=BlockKind.AFFINE,
         operations=[GlobalPhaseOperation(operands=[phase], results=[])],
     )
+
+
+class _EmitterWithoutGlobalPhaseHook:
+    """Expose an emitter that cannot preserve a standalone phase."""
+
+    _emitter = object()
+
+
+class _RecordingPhaseEmitter:
+    """Record exact standalone phases emitted by a compatibility walk."""
+
+    def emit_global_phase(self, circuit: list[float], angle: Any) -> None:
+        """Append one resolved phase angle to the fake circuit."""
+        circuit.append(float(angle))
+
+
+class _LegacyPauliResolver:
+    """Resolve the minimal values used by legacy Pauli emission."""
+
+    parameters: tuple[str, ...] = ()
+
+    def __init__(self, hamiltonian: Any) -> None:
+        """Store the Hamiltonian returned for the observable operand."""
+        self._hamiltonian = hamiltonian
+
+    def resolve_bound_value(self, value: Any, bindings: dict[str, Any]) -> Any:
+        """Return the configured Hamiltonian."""
+        del value, bindings
+        return self._hamiltonian
+
+    def resolve_int_value(self, value: Value, bindings: dict[str, Any]) -> int:
+        """Resolve a constant array dimension."""
+        del bindings
+        resolved = value.get_const()
+        assert isinstance(resolved, int)
+        return resolved
+
+    def resolve_slice_chain(
+        self,
+        value: ArrayValue,
+        bindings: dict[str, Any],
+        *,
+        operation: str,
+    ) -> tuple[ArrayValue, int, int]:
+        """Return an unsliced root-array mapping."""
+        del bindings, operation
+        return value, 0, 1
+
+
+class _LegacyPauliEmitPass:
+    """Expose the surfaces used by default StandardEmit Pauli lowering."""
+
+    def __init__(self, hamiltonian: Any) -> None:
+        """Initialize a resolver and phase-recording emitter."""
+        self._resolver = _LegacyPauliResolver(hamiltonian)
+        self._emitter = _RecordingPhaseEmitter()
+
+
+def _legacy_pauli_operation(
+    gamma: float,
+) -> tuple[PauliEvolveOp, ArrayValue, ArrayValue]:
+    """Build a one-qubit Pauli evolution for compatibility-path tests."""
+    size = Value(type=UIntType(), name="size").with_const(1)
+    qubits = ArrayValue(type=QubitType(), name="qubits", shape=(size,))
+    output = ArrayValue(type=QubitType(), name="output", shape=(size,))
+    observable = Value(type=ObservableType(), name="hamiltonian")
+    time = _float_value("gamma", const=gamma)
+    return (
+        PauliEvolveOp(
+            operands=[qubits, observable, time],
+            results=[output],
+        ),
+        qubits,
+        output,
+    )
+
+
+def test_missing_global_phase_hook_raises_instead_of_discarding() -> None:
+    """Legacy emission must reject a phase it cannot preserve."""
+    op = _phase_only_block(0.25).operations[0]
+    assert isinstance(op, GlobalPhaseOperation)
+
+    with pytest.raises(EmitError, match="cannot preserve") as exc_info:
+        emit_global_phase(
+            _EmitterWithoutGlobalPhaseHook(),  # type: ignore[arg-type]
+            object(),
+            op,
+            {},
+        )
+
+    assert exc_info.value.operation == "GlobalPhaseOperation"
+
+
+def test_zero_control_phase_requires_preserving_hook() -> None:
+    """The zero-control helper must not restore projective discarding."""
+    with pytest.raises(EmitError, match="cannot preserve"):
+        emit_controlled_global_phase(
+            _EmitterWithoutGlobalPhaseHook(),  # type: ignore[arg-type]
+            object(),
+            [],
+            0.25,
+        )
+
+
+def test_legacy_pauli_identity_constant_emits_standalone_phase() -> None:
+    """Default StandardEmit preserves ``exp(-i * gamma * c)`` exactly."""
+    import qamomile.observable as qm_o
+
+    hamiltonian = qm_o.Hamiltonian.identity(2.0, num_qubits=1)
+    emit_pass = _LegacyPauliEmitPass(hamiltonian)
+    operation, qubits, output = _legacy_pauli_operation(0.25)
+    circuit: list[float] = []
+    qubit_map = {QubitAddress(qubits.uuid, 0): 0}
+
+    emit_pauli_evolve(  # type: ignore[arg-type]
+        emit_pass,
+        circuit,
+        operation,
+        qubit_map,
+        {},
+    )
+
+    assert circuit == pytest.approx([-0.5])
+    assert qubit_map[QubitAddress(output.uuid, 0)] == 0
+
+
+def test_legacy_pauli_complex_identity_constant_is_rejected() -> None:
+    """Compatibility lowering rejects a non-Hermitian identity constant."""
+    import qamomile.observable as qm_o
+
+    hamiltonian = qm_o.Hamiltonian.identity(1.0 + 0.1j, num_qubits=1)
+    emit_pass = _LegacyPauliEmitPass(hamiltonian)
+    operation, qubits, _ = _legacy_pauli_operation(0.25)
+    circuit: list[float] = []
+
+    with pytest.raises(EmitError, match="complex constant"):
+        emit_pauli_evolve(  # type: ignore[arg-type]
+            emit_pass,
+            circuit,
+            operation,
+            {QubitAddress(qubits.uuid, 0): 0},
+            {},
+        )
+
+    assert circuit == []
 
 
 def test_content_hash_includes_global_phase_operand() -> None:

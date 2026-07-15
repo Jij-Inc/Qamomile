@@ -21,8 +21,13 @@ from qamomile.circuit.transpiler.circuit_ir import (  # noqa: E402
     ClassicalBitExpr,
     ParameterExpr,
     ReusableCircuit,
+    verify_target_legal,
 )
-from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
+from qamomile.circuit.transpiler.errors import TargetCapabilityError  # noqa: E402
+from qamomile.cudaq.emitter import (  # noqa: E402
+    CudaqKernelEmitter,
+    ExecutionMode,
+)
 from qamomile.cudaq.materializer import CudaqMaterializer  # noqa: E402
 from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
     TracingCudaqKernelEmitter,
@@ -87,13 +92,127 @@ class TestCudaqGlobalPhaseMaterialization:
             atol=1e-10,
         )
 
-    def test_zero_qubit_standalone_phase_is_rejected_explicitly(self) -> None:
-        """CUDA-Q never hides a carrier qubit that would change the ABI."""
+    def test_zero_qubit_standalone_phase_uses_an_internal_carrier(self) -> None:
+        """A hidden clean qubit preserves phase without changing the ABI."""
         builder = CircuitBuilder(0, 0)
         builder.add_global_phase(0.25)
 
-        with pytest.raises(EmitError, match="at least 1 qubit"):
-            CudaqMaterializer().materialize(builder.freeze())
+        program = builder.freeze()
+        materializer = CudaqMaterializer()
+        verify_target_legal(program, materializer.capabilities)
+        materialized = materializer.materialize(program)
+
+        assert materialized.artifact.num_qubits == 1
+        assert materialized.implicit_output_qubit_indices == ()
+        assert "q = cudaq.qvector(1)" in materialized.artifact.entry_source
+        assert "r1(" not in materialized.artifact.entry_source
+        assert "rz(-0.5, q[0])" in materialized.artifact.entry_source
+        state = np.array(cudaq.get_state(materialized.artifact.kernel_func))
+        assert np.allclose(
+            state,
+            np.array([np.exp(0.25j), 0.0], dtype=np.complex128),
+            rtol=0.0,
+            atol=1e-10,
+        )
+
+    def test_zero_qubit_symbolic_phase_keeps_the_parameter_abi(self) -> None:
+        """The clean-carrier path accepts CUDA-Q scalar expressions."""
+        builder = CircuitBuilder(0, 0)
+        theta = ParameterExpr("theta")
+        builder.add_global_phase(theta * theta)
+
+        materialized = CudaqMaterializer().materialize(
+            builder.freeze(),
+            ("theta",),
+        )
+
+        assert materialized.parameter_order == ("theta",)
+        assert tuple(materialized.parameters) == ("theta",)
+        assert materialized.artifact.num_qubits == 1
+        assert materialized.implicit_output_qubit_indices == ()
+        assert "r1(" not in materialized.artifact.entry_source
+        angle = 0.41
+        state = np.array(cudaq.get_state(materialized.artifact.kernel_func, [angle]))
+        assert np.allclose(
+            state,
+            np.array([np.exp(1j * angle**2), 0.0], dtype=np.complex128),
+            rtol=0.0,
+            atol=1e-10,
+        )
+
+    def test_zero_qubit_symbolic_modulo_phase_is_exact(self) -> None:
+        """CUDA-Q accepts every runtime phase operator it declares."""
+        builder = CircuitBuilder(0, 0)
+        theta = ParameterExpr("theta")
+        builder.add_global_phase(theta % 2.0)
+
+        materialized = CudaqMaterializer().materialize(
+            builder.freeze(),
+            ("theta",),
+        )
+
+        angle = 3.4
+        state = np.array(cudaq.get_state(materialized.artifact.kernel_func, [angle]))
+        assert np.allclose(
+            state,
+            np.array([np.exp(1j * (angle % 2.0)), 0.0], dtype=np.complex128),
+            rtol=0.0,
+            atol=1e-10,
+        )
+
+    def test_symbolic_floordiv_phase_fails_capability_verification(self) -> None:
+        """Unsupported CUDA-Q floor division fails before materialization."""
+        builder = CircuitBuilder(0, 0)
+        theta = ParameterExpr("theta")
+        builder.add_global_phase(theta // 2.0)
+
+        materializer = CudaqMaterializer()
+        with pytest.raises(TargetCapabilityError, match="FLOORDIV"):
+            verify_target_legal(builder.freeze(), materializer.capabilities)
+
+    def test_zero_qubit_nested_region_phases_use_the_internal_carrier(self) -> None:
+        """Nested runtime regions reuse the hidden carrier in lexical scope."""
+        builder = CircuitBuilder(0, 1)
+        loop = builder.begin_while(ClassicalBitExpr(0))
+        builder.add_global_phase(0.125)
+        branch = builder.begin_if(ClassicalBitExpr(0))
+        builder.add_global_phase(0.25)
+        builder.begin_else(branch)
+        builder.add_global_phase(0.5)
+        builder.end_if(branch)
+        builder.end_while(loop)
+
+        program = builder.freeze()
+        materializer = CudaqMaterializer()
+        verify_target_legal(program, materializer.capabilities)
+        materialized = materializer.materialize(program)
+        source = materialized.artifact.entry_source
+
+        assert materialized.artifact.num_qubits == 1
+        assert materialized.implicit_output_qubit_indices == ()
+        assert "r1(" not in source
+        assert "        rz(-0.25, q[0])\n        if " in source
+        assert "            rz(-0.5, q[0])" in source
+        assert "else:\n            rz(-1.0, q[0])" in source
+
+    def test_emitter_global_phase_hook_reuses_qubit_zero_by_default(self) -> None:
+        """The shared hook preserves phase on an arbitrary logical state."""
+        emitter = CudaqKernelEmitter()
+        artifact = emitter.create_circuit(1, 0)
+
+        emitter.emit_h(artifact, 0)
+        emitter.emit_global_phase(artifact, 0.25)
+        artifact = emitter.finalize(artifact, ExecutionMode.STATIC)
+
+        assert "r1(0.5, q[0])" in artifact.entry_source
+        assert "rz(-0.5, q[0])" in artifact.entry_source
+        state = np.array(cudaq.get_state(artifact.kernel_func))
+        assert np.allclose(
+            state,
+            np.exp(0.25j) * np.array([1.0, 1.0], dtype=np.complex128) / np.sqrt(2.0),
+            rtol=0.0,
+            atol=1e-10,
+        )
 
     def test_runtime_region_phases_are_emitted_inside_their_blocks(self) -> None:
         """CUDA-Q keeps conditional and loop phases in lexical source blocks."""
@@ -113,10 +232,29 @@ class TestCudaqGlobalPhaseMaterialization:
         assert "\n            r1(1.0, q[0])\n            rz(-1.0, q[0])" in source
         assert "else:\n        r1(1.5, q[0])\n        rz(-1.5, q[0])" in source
 
+    def test_reverse_nested_region_phases_remain_lexically_scoped(self) -> None:
+        """While-to-if nesting retains phases and aggregates static loops."""
+        builder = CircuitBuilder(1, 1)
+        loop = builder.begin_while(ClassicalBitExpr(0))
+        builder.add_global_phase(0.125)
+        branch = builder.begin_if(ClassicalBitExpr(0))
+        builder.add_global_phase(0.25)
+        builder.begin_for(range(3))
+        builder.add_global_phase(0.5)
+        builder.end_for()
+        builder.begin_else(branch)
+        builder.add_global_phase(0.75)
+        builder.end_if(branch)
+        builder.end_while(loop)
+
+        source = CudaqMaterializer().materialize(builder.freeze()).artifact.entry_source
+
+        assert "        r1(0.25, q[0])\n        rz(-0.25, q[0])\n        if " in source
+        assert "            r1(3.5, q[0])\n            rz(-3.5, q[0])" in source
+        assert "else:\n            r1(1.5, q[0])\n            rz(-1.5, q[0])" in source
+
     def test_controlled_phase_gate_preserves_the_exact_unitary(self) -> None:
         """CUDA-Q CP emission retains the global factor of its matrix."""
-        from qamomile.cudaq.emitter import CudaqKernelEmitter, ExecutionMode
-
         emitter = CudaqKernelEmitter()
         artifact = emitter.create_circuit(2, 0)
         emitter.emit_cp(artifact, 0, 1, 0.73)

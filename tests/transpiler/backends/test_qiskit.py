@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import pytest
 
 from tests.transpiler.base_test import TranspilerTestSuite
 
@@ -39,6 +40,15 @@ class TestQiskitTranspiler(TranspilerTestSuite):
         from qiskit_aer import AerSimulator
 
         return AerSimulator(method="statevector")
+
+    def test_global_phase_uses_native_circuit_metadata(self) -> None:
+        """The compatibility emitter preserves a standalone phase exactly."""
+        emitter = self.get_emitter()
+        circuit = emitter.create_circuit(0, 0)
+
+        emitter.emit_global_phase(circuit, 0.25)
+
+        assert float(circuit.global_phase) == pytest.approx(0.25)
 
     @classmethod
     def run_circuit_statevector(cls, circuit: Any) -> np.ndarray:

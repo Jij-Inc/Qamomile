@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from qiskit.circuit import ForLoopOp, IfElseOp
+from qiskit.circuit import ForLoopOp, IfElseOp, WhileLoopOp
 from qiskit.quantum_info import Operator
 
 from qamomile.circuit.transpiler.circuit_ir import (
@@ -180,6 +180,37 @@ def test_qiskit_materializer_preserves_structured_region_phases() -> None:
     assert float(while_instruction.operation.blocks[0].global_phase) == pytest.approx(
         0.5
     )
+
+
+def test_qiskit_materializer_preserves_reverse_nested_region_phases() -> None:
+    """While-to-if nesting keeps each phase in its lexical Qiskit block."""
+    builder = CircuitBuilder(1, 1)
+    loop = builder.begin_while(ClassicalBitExpr(0))
+    builder.add_global_phase(0.125)
+    branch = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(0.25)
+    builder.begin_for(range(3))
+    builder.add_global_phase(0.5)
+    builder.end_for()
+    builder.begin_else(branch)
+    builder.add_global_phase(0.75)
+    builder.end_if(branch)
+    builder.end_while(loop)
+
+    circuit = QiskitMaterializer().materialize(builder.freeze()).artifact
+
+    [while_instruction] = circuit.data
+    assert isinstance(while_instruction.operation, WhileLoopOp)
+    [while_body] = while_instruction.operation.blocks
+    assert float(while_body.global_phase) == pytest.approx(0.125)
+    [if_instruction] = while_body.data
+    assert isinstance(if_instruction.operation, IfElseOp)
+    true_block, false_block = if_instruction.operation.blocks
+    assert float(true_block.global_phase) == pytest.approx(1.75)
+    assert float(false_block.global_phase) == pytest.approx(0.75)
+    [for_instruction] = true_block.data
+    assert isinstance(for_instruction.operation, ForLoopOp)
+    assert for_instruction.operation.params[0] == range(3)
 
 
 def test_qiskit_materializer_materializes_reusable_call() -> None:

@@ -263,6 +263,54 @@ class TestSemanticLegalization:
         verify_circuit(legalized)
         verify_target_legal(legalized, capabilities)
 
+    def test_native_semantic_op_with_explicit_phase_correction_is_preserved(self):
+        """A native materializer may retain a phase via explicit correction."""
+        program = _semantic_program(controls=1)
+        call = program.operations[0]
+        assert isinstance(call, CallInstruction)
+        phased_call = dataclasses.replace(
+            call,
+            callee=dataclasses.replace(
+                call.callee,
+                body=dataclasses.replace(
+                    call.callee.body,
+                    global_phase=ParameterExpr("theta"),
+                ),
+            ),
+        )
+        phased_program = dataclasses.replace(
+            program,
+            operations=(phased_call, *program.operations[1:]),
+        )
+        numeric = _capabilities().gate_parameters
+        capabilities = _capabilities(
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.qft",
+                    CallTransformCapabilities(
+                        True,
+                        True,
+                        None,
+                        phase_mode=CallPhaseMode.EXPLICIT_CORRECTION,
+                        controlled_phase_scalars=numeric,
+                    ),
+                ),
+            ),
+        )
+
+        legalized = legalize_program(
+            phased_program,
+            capabilities,
+            CompilationPolicy(),
+        )
+        legalized_call = legalized.operations[0]
+        assert isinstance(legalized_call, CallInstruction)
+        assert legalized_call.callee.native_realization == "test.qft"
+        assert legalized_call.callee.body.global_phase == ParameterExpr("theta")
+        verify_circuit(legalized)
+        verify_target_legal(legalized, capabilities)
+
     @pytest.mark.parametrize(
         ("control_mode", "expected_native"),
         [
@@ -653,8 +701,8 @@ class TestTargetLegalityVerification:
         with pytest.raises(TargetCapabilityError, match="classical-bit"):
             verify_target_legal(legalized, capabilities)
 
-    def test_rejects_quration_controlled_reusable_call(self):
-        """Quration rejects controlled calls before PyQret materialization."""
+    def test_rejects_undeclared_quration_controlled_body_gate(self):
+        """Quration rejects undeclared controlled gates before PyQret use."""
         from qamomile.quration.materializer import PyQretMaterializer
 
         capabilities = PyQretMaterializer().capabilities
@@ -664,7 +712,7 @@ class TestTargetLegalityVerification:
             CompilationPolicy(),
         )
 
-        with pytest.raises(TargetCapabilityError, match="reusable call transforms"):
+        with pytest.raises(TargetCapabilityError, match="onto CP"):
             verify_target_legal(legalized, capabilities)
 
     def test_rejects_unsupported_distributed_control_gate(self):

@@ -414,7 +414,7 @@ class _Rewriter:
             and (
                 _is_zero_literal(callee.body.global_phase)
                 or native_declaration.call_transforms.phase_mode
-                is CallPhaseMode.NATIVE_BODY
+                is not CallPhaseMode.UNSUPPORTED
             )
         )
         if native:

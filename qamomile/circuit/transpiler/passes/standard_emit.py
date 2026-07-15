@@ -1022,8 +1022,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         """Emit a zero-qubit global-phase operation.
 
         CircuitProgram lowering collects this in the current lexical region.
-        Adapters without the optional hook discard the unconditional phase
-        projectively; observable controlled phases use ordinary gates.
+        Adapters without the structural hook fail explicitly; observable
+        controlled phases use ordinary gates.
 
         Args:
             circuit (T): Circuit representation being built.
@@ -1031,7 +1031,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             bindings (dict[str, Any]): Active emit bindings.
 
         Raises:
-            EmitError: If a preserving adapter cannot resolve the phase angle.
+            EmitError: If the adapter cannot preserve or resolve the phase.
         """
         emit_global_phase(self, circuit, op, bindings)
 

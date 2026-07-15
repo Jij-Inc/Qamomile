@@ -253,12 +253,12 @@ class GateEmitter(Protocol[T]):
         """Emit Phase gate (P(θ) = diag(1, e^(iθ)))."""
         ...
 
-    # ``emit_global_phase(circuit, angle)`` is an optional lowering hook rather
-    # than a required primitive. CircuitGateEmitter implements it to collect a
-    # region phase in CircuitProgram; adapters that omit it discard an
-    # unconditional phase projectively. Target-specific preservation and
-    # controlled-call correction belong to CircuitCapabilities and the
-    # materializer, after this semantic lowering boundary.
+    # ``emit_global_phase(circuit, angle)`` is a structural lowering hook rather
+    # than a required gate primitive. CircuitGateEmitter implements it to
+    # collect a region phase in CircuitProgram. An adapter that omits the hook
+    # fails explicitly instead of silently discarding a user-requested phase.
+    # Target-specific preservation and controlled-call correction belong to
+    # CircuitCapabilities and the materializer after this semantic boundary.
 
     # Two-qubit gates
     @abstractmethod

@@ -262,26 +262,37 @@ power_demo_concrete.draw()
 
 # %% [markdown]
 # (cg-3-4-phase)=
-# #### global phaseはcoherent controlの下で観測可能になる
+# #### global phaseは量子的な制御の下で観測可能になる
 #
-# standaloneなユニタリに`exp(1j * phi)`を掛けても、通常の測定確率は
-# 変わりません。しかし、この位相を捨ててはいけません。同じユニタリを
-# 制御化すると、この係数は全制御量子ビットがactiveな部分空間に対する
-# relative phaseになります。identity Pauli項にも複素係数を持たせられる
-# SELECT回路では、特に重要な性質です。
+# 制御されていない演算全体に`exp(1j * phi)`を掛けても、通常の測定確率は
+# 変わりません。それでもQamomileは、この位相を現在の回路領域（回路全体、`if`の
+# 枝、`while`の本体など）の一部として保持します。ここで量子的な制御とは、制御
+# 量子ビットを`|0>`と`|1>`の重ね合わせのまま使う制御です。可逆な領域をこの方法で
+# 制御すると、位相はすべての制御量子ビットが`|1>`である成分だけに掛かる相対位相に
+# なります。identity Pauli項にも複素係数を持たせられるSELECT回路では、特に重要な
+# 性質です。
 #
-# Qamomileでは、次の等価な2通りで位相を付加できます。
+# Qamomileでは、次の関連する2通りで位相を付加できます。
 #
-# - `qmc.global_phase(fn, phi)`は、`U`を実装するcallable `fn`から
-#   `exp(1j * phi) * U`を作ります。
+# - `qmc.global_phase(fn, phi)`は`fn`を通常どおり呼び出し、そのすべての戻り値を
+#   保ったまま、周囲の回路領域へ`exp(1j * phi)`を付加します。
 # - `qmc.control(fn)(..., global_phase=phi)`は、その制御呼び出しに
 #   位相を付加します。
 #
-# どちらの場合も、呼び出しの厳密な意味は
-# `control((exp(1j * phi) * U) ** power)`です。そのため`power=k`では
-# 位相も`k`回反復され、inverseでは`U`の反転と一緒に位相の符号も反転します。
-# `global_phase`は呼び出し側の予約keywordです。制御対象のcallableが同名の
-# 通常パラメータを持つ場合は、そのパラメータをpositionalに渡してください。
+# 通常の`qmc.global_phase`によるラッパーは`fn`に可逆性を要求しません。`fn`は
+# measure、reset、量子ビットの割り当て、古典値の返却を行ってもよく、量子演算を
+# まったく含まなくても構いません。可逆性は、これを含む量子カーネルを後から
+# `qmc.control`、`qmc.inverse`などで変換するときに初めて検査されます。
+# 可逆演算`U`について、制御呼び出しの厳密な意味は
+# `control((exp(1j * phi) * U) ** power)`です。そのため`power=k`では位相も`k`回
+# 反復され、inverseでは`U`の反転と一緒に位相の符号も反転します。
+# `global_phase`は呼び出し側の予約キーワードです。制御対象のcallableが同名の通常
+# パラメータを持つ場合は、そのパラメータを位置引数で渡してください。
+#
+# 測定結果など実行時に条件が決まる`if`の枝や`while`の本体で付加した位相は、
+# その枝または反復内にとどまります。回路全体へ移動したり破棄したりはしません。
+# 選択した量子SDK/Engine/representationが要求された位相を正確に保持できない場合は、
+# 変換中に明示的なエラーになります。
 
 
 # %%
@@ -317,25 +328,37 @@ assert phase_counts == {1: 256}
 # %% [markdown]
 # :::{note}
 # Qamomileは量子SDK/Engine/representationに依存しない1つの位相の意味を保ち、
-# materialize前に選択先のcapabilityを検証します。Qiskitは
-# `QuantumCircuit.global_phase`、Quration/PyQretはnativeの`global_phase`
-# intrinsic、HUGRは`tket_exts.global_phase()`を使います。CUDA-Qには回路全体の
-# phase APIがないため、既存量子ビット上に厳密な恒等演算
-# `R1(2 phi) RZ(-2 phi)`を出力します。QURI Partsにも回路全体のphase APIが
-# ないため、`|0>`に固定した専用の内部量子ビットへ`RZ(-2 phi)`を適用し、
-# `exp(i phi)|0>`を厳密に実現します。このcarrierはmulti-control用ancillaから
-# 分離され、measure結果や明示的な戻り値を持たない量子カーネルの暗黙出力には
-# 含まれません。そのためQURI Partsは、論理的な結果ABIを変えずに0量子ビット
-# プログラムの位相も保持できます。CUDA-Qは既存のプログラム量子ビットを必要と
-# するため、非ゼロ位相を持つ0量子ビットプログラムを明示的にrejectします。
+# 各表現へ変換する前に、その表現が必要な位相と制御構造を扱えるか検証します。
+# Qiskitは回路全体または該当する制御構造の部分回路にある
+# `QuantumCircuit.global_phase`へ位相を保持します。Quration/PyQretはSDK組み込みの
+# `global_phase`演算、HUGRは
+# `tket_exts.global_phase()`を使います。CUDA-Qには回路全体のphase APIがないため、
+# 既存の論理量子ビット上に厳密な恒等演算
+# `R1(2 phi) RZ(-2 phi)`を出力します。0量子ビットプログラムでは、Qamomileが
+# `|0>`で初期化された補助量子ビットを内部で1つ追加します。以下ではこれを位相用の
+# 補助量子ビットと呼び、`RZ(-2 phi)`だけを適用して`exp(i phi)|0>`を厳密に
+# 実現します。この補助量子ビットはmeasure結果や明示的な戻り値を持たない量子
+# カーネルの暗黙出力から除外されます。そのためCUDA-Qでも論理的な戻り値の構成を
+# 変えずに位相を保持できます。
+# QURI Partsにも回路全体のphase APIがありません。数値として確定した位相と既存の
+# 論理量子ビットがある場合は、その量子ビット上に厳密な恒等演算
+# `U1(2 phi) RZ(-2 phi)`を出力します。実行時パラメータを含む位相または0量子ビット
+# プログラムの位相では、同じ種類の位相用補助量子ビットへ`RZ(-2 phi)`を適用し、
+# `exp(i phi)|0>`を厳密に実現します。この補助量子ビットは、多重制御ゲートの合成に
+# 使う別の補助量子ビットとは分離されています。
 #
-# nativeなstandalone phaseを持つことと、あらゆる再利用可能呼び出しを変換できる
-# ことは別です。現在のQuration/PyQret Python APIはgenericなcontrolled/inverse
-# call変換を提供していません。HUGRはinline後のunitary bodyの限定された部分集合で
-# phaseを扱い、正確な対応範囲はoperationと制御数に依存します。1制御のPauli
-# evolutionにも対応しますが、`power`はcompile時に正の整数へ解決できる必要が
-# あります。宣言されたcapability外の構造は、phaseを失うことなく明示的に
-# 失敗します。
+# SDK自身が単独のglobal phaseを表現できても、再利用可能な量子カーネル全体へ
+# `control`や`inverse`を適用できるとは限りません。Quration/PyQretには一般的な
+# 呼び出し変換APIがないため、Qamomileが対応範囲を限定して本体を展開します。
+# 現在はinverse、power、最大1個の量子制御、対応する基本ゲート、1制御のPauli
+# evolution、および定数範囲のstatic `For`（ネストを含む）を扱います。HUGRも、
+# 対応する本体操作を同様に展開します。global phase自体は任意個の制御量子ビットに
+# 対応し、3個以上の場合は、途中結果を保存する`|0>`の補助量子ビットとToffoliで
+# 全制御が1である条件を計算し、位相を付けた後に計算を逆順で戻して補助量子ビットを
+# 解放します。実行時に範囲が決まる`For`、前の反復で計算した値を次の反復へ渡す処理、
+# 実行時の`If` / `While`を含む変換対象の本体は、現在は明示的なエラーになります。
+# またHUGRの`power`は変換時に正の整数へ確定する必要があります。
+# 対応範囲外の構造でも、位相だけを失って処理を続けることはありません。
 # :::
 
 # %% [markdown]
