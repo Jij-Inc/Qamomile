@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.cast import CastOperation
@@ -16,6 +16,7 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
     resolve_root_array_index,
     resolve_root_qubit_address,
@@ -99,45 +100,6 @@ class ValueSubstitutor:
                 seen.add(result.uuid)
                 result = self._value_map[result.uuid]
         return result
-
-    def _has_referenced_field(self, value: Value) -> bool:
-        """Return whether a value field references a mappable UUID.
-
-        Args:
-            value (Value): Value to inspect for mappable parent, index,
-                shape, slice, or typed metadata references.
-
-        Returns:
-            bool: True if any referenced field is present in `value_map`.
-        """
-        if (
-            value.parent_array is not None
-            and value.parent_array.uuid in self._value_map
-        ):
-            return True
-        if value.element_indices:
-            for idx in value.element_indices:
-                if idx.uuid in self._value_map:
-                    return True
-        if isinstance(value, ArrayValue):
-            for dim in value.shape:
-                if dim.uuid in self._value_map:
-                    return True
-            if value.slice_of is not None and value.slice_of.uuid in self._value_map:
-                return True
-            if (
-                value.slice_start is not None
-                and value.slice_start.uuid in self._value_map
-            ):
-                return True
-            if (
-                value.slice_step is not None
-                and value.slice_step.uuid in self._value_map
-            ):
-                return True
-        if self._metadata_has_referenced_field(value.metadata):
-            return True
-        return False
 
     def _mapped_value_for_uuid(self, uuid: str) -> ValueBase | None:
         """Return the replacement value for a referenced UUID.
@@ -297,40 +259,6 @@ class ValueSubstitutor:
             else:
                 rewritten.append(logical_id)
         return tuple(rewritten)
-
-    def _metadata_has_referenced_field(self, metadata: ValueMetadata) -> bool:
-        """Return whether typed metadata references a mappable UUID.
-
-        Args:
-            metadata (ValueMetadata): Metadata to inspect.
-
-        Returns:
-            bool: True when a metadata UUID reference is present in the
-                value map.
-        """
-
-        def has_uuid_ref(uuid_ref: str) -> bool:
-            """Return True when a scalar UUID or carrier-key base is mapped."""
-            parts = split_indexed_identifier(uuid_ref)
-            uuid = parts[0] if parts is not None else uuid_ref
-            return uuid in self._value_map
-
-        if metadata.cast is not None:
-            if has_uuid_ref(metadata.cast.source_uuid):
-                return True
-            if any(has_uuid_ref(uuid) for uuid in metadata.cast.qubit_uuids):
-                return True
-        if metadata.qfixed is not None:
-            if any(has_uuid_ref(uuid) for uuid in metadata.qfixed.qubit_uuids):
-                return True
-        if metadata.array_runtime is not None:
-            if any(has_uuid_ref(uuid) for uuid in metadata.array_runtime.element_uuids):
-                return True
-            return any(
-                uuid and uuid in self._value_map
-                for uuid in metadata.array_runtime.element_parent_uuids
-            )
-        return False
 
     def _resolve_replaced_parent_address(
         self,
@@ -513,88 +441,8 @@ class ValueSubstitutor:
             array_runtime=new_array_rt,
         )
 
-    def _resubstitute_fields(self, value: Value) -> Value:
-        """Rebuild a mapped value with its metadata fields substituted.
-
-        Args:
-            value (Value): Value returned by a direct lookup whose own
-                metadata still references mappable UUIDs.
-
-        Returns:
-            Value: Rebuilt value with referenced fields substituted.
-        """
-        new_parent_array = value.parent_array
-        if value.parent_array is not None:
-            sub_parent_array = self.substitute_value(value.parent_array)
-            if (
-                isinstance(sub_parent_array, ArrayValue)
-                and sub_parent_array is not value.parent_array
-            ):
-                new_parent_array = sub_parent_array
-
-        new_element_indices = value.element_indices
-        if value.element_indices:
-            new_indices: list[Value] = []
-            for idx in value.element_indices:
-                if idx.uuid in self._value_map:
-                    sub_idx = self._chase_transitive(idx)
-                    if isinstance(sub_idx, Value):
-                        new_indices.append(sub_idx)
-                        continue
-                new_indices.append(idx)
-            new_element_indices = tuple(new_indices)
-
-        new_metadata = self._substitute_metadata(value.metadata)
-        metadata_changed = new_metadata is not value.metadata
-
-        if isinstance(value, ArrayValue):
-            new_shape = self._substitute_shape(value.shape)
-
-            new_slice_of = value.slice_of
-            if value.slice_of is not None:
-                sub_slice_of = self.substitute_value(value.slice_of)
-                if (
-                    isinstance(sub_slice_of, ArrayValue)
-                    and sub_slice_of is not value.slice_of
-                ):
-                    new_slice_of = sub_slice_of
-            new_slice_start = value.slice_start
-            if (
-                value.slice_start is not None
-                and value.slice_start.uuid in self._value_map
-            ):
-                sub_slice_start = self._chase_transitive(value.slice_start)
-                if isinstance(sub_slice_start, Value):
-                    new_slice_start = sub_slice_start
-            new_slice_step = value.slice_step
-            if (
-                value.slice_step is not None
-                and value.slice_step.uuid in self._value_map
-            ):
-                sub_slice_step = self._chase_transitive(value.slice_step)
-                if isinstance(sub_slice_step, Value):
-                    new_slice_step = sub_slice_step
-
-            return dataclasses.replace(
-                value,
-                parent_array=new_parent_array,
-                element_indices=new_element_indices,
-                shape=new_shape,
-                slice_of=new_slice_of,
-                slice_start=new_slice_start,
-                slice_step=new_slice_step,
-                metadata=new_metadata,
-            )
-
-        return dataclasses.replace(
-            value,
-            parent_array=new_parent_array,
-            element_indices=new_element_indices,
-            metadata=new_metadata if metadata_changed else value.metadata,
-        )
-
     def _substitute_shape(self, shape: tuple[Value, ...]) -> tuple[Value, ...]:
-        """Substitute shape dimension values.
+        """Recursively substitute shape dimension values.
 
         Args:
             shape (tuple[Value, ...]): Shape dimensions to inspect.
@@ -604,16 +452,12 @@ class ValueSubstitutor:
         """
         new_shape: list[Value] = []
         for dim in shape:
-            if dim.uuid in self._value_map:
-                sub_dim = self._chase_transitive(dim)
-                if isinstance(sub_dim, Value):
-                    new_shape.append(sub_dim)
-                    continue
-            new_shape.append(dim)
+            substituted = self.substitute_value(dim)
+            new_shape.append(substituted if isinstance(substituted, Value) else dim)
         return tuple(new_shape)
 
     def _substitute_tuple_value(self, value: TupleValue) -> ValueBase:
-        """Substitute elements inside a tuple value.
+        """Substitute elements and typed metadata inside a tuple value.
 
         Args:
             value (TupleValue): Tuple value to inspect.
@@ -622,24 +466,25 @@ class ValueSubstitutor:
             ValueBase: Rebuilt tuple when any element changes; otherwise
             the original tuple value.
         """
-        new_elements = []
+        new_elements: list[ValueLike] = []
         changed = False
         for elem in value.elements:
-            if elem.uuid in self._value_map:
-                substituted = self._chase_transitive(elem)
-                if isinstance(substituted, Value):
-                    new_elements.append(substituted)
-                    changed = True
-                else:
-                    new_elements.append(elem)
-            else:
-                new_elements.append(elem)
+            substituted = self.substitute_value(elem)
+            new_elements.append(cast(ValueLike, substituted))
+            if substituted is not elem:
+                changed = True
+        new_metadata = self._substitute_metadata(value.metadata)
+        changed = changed or new_metadata is not value.metadata
         if changed:
-            return dataclasses.replace(value, elements=tuple(new_elements))
+            return dataclasses.replace(
+                value,
+                elements=tuple(new_elements),
+                metadata=new_metadata,
+            )
         return value
 
     def _substitute_dict_value(self, value: DictValue) -> ValueBase:
-        """Substitute keys and values inside a dict value.
+        """Substitute entries and typed metadata inside a dict value.
 
         Args:
             value (DictValue): Dict value to inspect.
@@ -653,19 +498,25 @@ class ValueSubstitutor:
         for key, entry_value in value.entries:
             new_key = key
             new_value = entry_value
-            if isinstance(key, (TupleValue, Value)) and key.uuid in self._value_map:
-                sub_key = self._chase_transitive(key)
-                if isinstance(sub_key, (TupleValue, Value)):
-                    new_key = sub_key
+            sub_key = self.substitute_value(key)
+            if isinstance(sub_key, (TupleValue, Value)):
+                new_key = sub_key
+                if sub_key is not key:
                     changed = True
-            if entry_value.uuid in self._value_map:
-                sub_value = self._chase_transitive(entry_value)
-                if isinstance(sub_value, Value):
-                    new_value = sub_value
+            sub_value = self.substitute_value(entry_value)
+            if isinstance(sub_value, Value):
+                new_value = sub_value
+                if sub_value is not entry_value:
                     changed = True
             new_entries.append((new_key, new_value))
+        new_metadata = self._substitute_metadata(value.metadata)
+        changed = changed or new_metadata is not value.metadata
         if changed:
-            return dataclasses.replace(value, entries=tuple(new_entries))
+            return dataclasses.replace(
+                value,
+                entries=tuple(new_entries),
+                metadata=new_metadata,
+            )
         return value
 
     def _substitute_value_fields(self, value: Value) -> ValueBase:
@@ -697,13 +548,10 @@ class ValueSubstitutor:
             new_indices: list[Value] = []
             indices_changed = False
             for idx in value.element_indices:
-                if idx.uuid in self._value_map:
-                    sub_idx = self._chase_transitive(idx)
-                    if isinstance(sub_idx, Value):
-                        new_indices.append(sub_idx)
-                        indices_changed = True
-                    else:
-                        new_indices.append(idx)
+                sub_idx = self.substitute_value(idx)
+                if isinstance(sub_idx, Value):
+                    new_indices.append(sub_idx)
+                    indices_changed = indices_changed or sub_idx is not idx
                 else:
                     new_indices.append(idx)
             if indices_changed:
@@ -738,23 +586,21 @@ class ValueSubstitutor:
                     new_slice_of = sub_slice_of
                     slice_meta_changed = True
 
-            if (
-                value.slice_start is not None
-                and value.slice_start.uuid in self._value_map
-            ):
-                sub_slice_start = self._chase_transitive(value.slice_start)
+            if value.slice_start is not None:
+                sub_slice_start = self.substitute_value(value.slice_start)
                 if isinstance(sub_slice_start, Value):
                     new_slice_start = sub_slice_start
-                    slice_meta_changed = True
+                    slice_meta_changed = (
+                        slice_meta_changed or sub_slice_start is not value.slice_start
+                    )
 
-            if (
-                value.slice_step is not None
-                and value.slice_step.uuid in self._value_map
-            ):
-                sub_slice_step = self._chase_transitive(value.slice_step)
+            if value.slice_step is not None:
+                sub_slice_step = self.substitute_value(value.slice_step)
                 if isinstance(sub_slice_step, Value):
                     new_slice_step = sub_slice_step
-                    slice_meta_changed = True
+                    slice_meta_changed = (
+                        slice_meta_changed or sub_slice_step is not value.slice_step
+                    )
 
             if slice_meta_changed:
                 changed = True
@@ -794,12 +640,18 @@ class ValueSubstitutor:
         """
         if value.uuid in self._value_map:
             mapped = self._chase_transitive(value)
-            if (
-                isinstance(mapped, Value)
-                and mapped is not value
-                and self._has_referenced_field(mapped)
-            ):
-                return self._resubstitute_fields(mapped)
+            if isinstance(mapped, Value) and mapped is not value:
+                # A direct replacement can itself contain references that
+                # need the same mapping (for example a selected slice view
+                # whose ``slice_start`` is ``bounds[lowered_if_result]``).
+                # Reuse the normal recursive field walker; it returns
+                # ``mapped`` unchanged when no nested reference changes, so
+                # direct-replacement identity semantics are preserved.
+                return self._substitute_value_fields(mapped)
+            if isinstance(mapped, TupleValue) and mapped is not value:
+                return self._substitute_tuple_value(mapped)
+            if isinstance(mapped, DictValue) and mapped is not value:
+                return self._substitute_dict_value(mapped)
             return mapped
 
         if isinstance(value, TupleValue):

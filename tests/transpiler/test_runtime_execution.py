@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 import qamomile.observable as qm_o
@@ -12,6 +13,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
@@ -122,6 +124,7 @@ class TestClassicalExecutorControlFlow:
         loop_out = Value(type=UIntType(), name="loop_out")
         for_op = ForOperation(
             loop_var="i",
+            loop_var_value=loop_var,
             operands=[_uint_const(0), _uint_const(3), _uint_const(1)],
             operations=[
                 BinOp(
@@ -147,7 +150,9 @@ class TestClassicalExecutorControlFlow:
         ).with_dict_runtime_metadata({0: 1.5, 2: 2.5})
         for_items = ForItemsOperation(
             key_vars=["i"],
+            key_var_values=(Value(type=UIntType(), name="i"),),
             value_var="coeff",
+            value_var_value=coeff,
             operands=[iterable],
             operations=[
                 BinOp(
@@ -164,6 +169,39 @@ class TestClassicalExecutorControlFlow:
         )
 
         assert results[out.uuid] == pytest.approx(3.5)
+
+    def test_empty_for_items_publishes_region_arg_initializer(self) -> None:
+        """An explicitly bound empty dict takes the zero-trip carry path."""
+        key = Value(type=UIntType(), name="key")
+        value = Value(type=FloatType(), name="value")
+        init = _uint_const(7, "init")
+        block_arg = Value(type=UIntType(), name="carry")
+        result = Value(type=UIntType(), name="carry_result")
+        operation = ForItemsOperation(
+            key_vars=["key"],
+            key_var_values=(key,),
+            value_var="value",
+            value_var_value=value,
+            operands=[DictValue(name="empty").with_dict_runtime_metadata({})],
+            operations=[],
+            region_args=(
+                RegionArg(
+                    var_name="carry",
+                    init=init,
+                    block_arg=block_arg,
+                    yielded=block_arg,
+                    result=result,
+                ),
+            ),
+            results=[result],
+        )
+
+        results = ClassicalExecutor().execute(
+            ClassicalSegment(operations=[operation]),
+            ExecutionContext(),
+        )
+
+        assert results[result.uuid] == 7
 
     def test_executes_while_loop(self) -> None:
         cond_in = Value(type=BitType(), name="cond")
@@ -189,6 +227,7 @@ class TestClassicalExecutorControlFlow:
             true_operations=[
                 ForOperation(
                     loop_var="i",
+                    loop_var_value=loop_var,
                     operands=[_uint_const(0), _uint_const(2), _uint_const(1)],
                     operations=[
                         BinOp(
@@ -211,6 +250,28 @@ class TestClassicalExecutorControlFlow:
 
 
 class TestExecutableProgramRuntime:
+    def test_sample_rejects_unresolved_typed_output(self) -> None:
+        """Typed output provenance gaps fail instead of sampling ``None``."""
+        output = Value(type=UIntType(), name="missing_output")
+        quantum_segment = QuantumSegment()
+        executable = ExecutableProgram[str](
+            plan=ProgramPlan(
+                steps=[QuantumStep(segment=quantum_segment)],
+                abi=ProgramABI(output_values=[output]),
+            ),
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=quantum_segment,
+                    circuit="quantum",
+                    parameter_metadata=ParameterMetadata(),
+                )
+            ],
+            output_values=[output],
+        )
+
+        with pytest.raises(ExecutionError, match="Typed output 'missing_output'"):
+            executable.sample(_FakeExecutor(counts={"": 2}), shots=2).result()
+
     def test_sample_job_aggregates_duplicate_projected_outputs(self) -> None:
         """Raw states collapsing to one public value have their counts summed."""
         job = SampleJob(
@@ -220,6 +281,56 @@ class TestExecutableProgramRuntime:
         )
 
         assert job.result().results == [((0,), 5)]
+
+    def test_sample_job_keeps_bool_and_int_outputs_distinct(self) -> None:
+        """Aggregation preserves scalar type instead of using Python equality."""
+        job = SampleJob(
+            {"0": 2, "1": 3},
+            lambda counts: [(True, counts["0"]), (1, counts["1"])],
+            shots=5,
+        )
+
+        assert job.result().results == [(True, 2), (1, 3)]
+
+    def test_sample_job_aggregates_equal_numpy_outputs(self) -> None:
+        """Independent arrays with equal dtype, shape, and values aggregate."""
+        first = np.array([1, 2], dtype=np.int32)
+        second = np.array([1, 2], dtype=np.int32)
+        job = SampleJob(
+            {"0": 2, "1": 3},
+            lambda counts: [(first, counts["0"]), (second, counts["1"])],
+            shots=5,
+        )
+
+        results = job.result().results
+        assert len(results) == 1
+        assert results[0][0] is first
+        assert results[0][1] == 5
+
+    def test_sample_job_preserves_numpy_dtype_and_shape(self) -> None:
+        """Aggregation does not collapse arrays with different public types."""
+        values = (
+            np.array([1, 2], dtype=np.int32),
+            np.array([1, 2], dtype=np.int64),
+            np.array([[1, 2]], dtype=np.int32),
+        )
+        job = SampleJob(
+            {"00": 1, "01": 1, "10": 1},
+            lambda counts: [
+                (value, count)
+                for value, count in zip(values, counts.values(), strict=True)
+            ],
+            shots=3,
+        )
+
+        results = job.result().results
+        assert [count for _, count in results] == [1, 1, 1]
+        assert [value.dtype for value, _ in results] == [
+            np.dtype(np.int32),
+            np.dtype(np.int64),
+            np.dtype(np.int32),
+        ]
+        assert [value.shape for value, _ in results] == [(2,), (2,), (1, 2)]
 
     def test_run_executes_expval_before_classical_post(self) -> None:
         exp_result = Value(type=FloatType(), name="exp_result")
@@ -250,7 +361,7 @@ class TestExecutableProgramRuntime:
                     ),
                     ClassicalStep(segment=classical_segment, role="post"),
                 ],
-                abi=ProgramABI(output_refs=[output.uuid]),
+                abi=ProgramABI(output_values=[output]),
             ),
             compiled_quantum=[
                 CompiledQuantumSegment(
@@ -267,7 +378,7 @@ class TestExecutableProgramRuntime:
                     result_ref=exp_result.uuid,
                 )
             ],
-            output_refs=[output.uuid],
+            output_values=[output],
         )
 
         job = executable.run(_FakeExecutor(expval=0.25))
@@ -327,7 +438,7 @@ class TestExecutableProgramRuntime:
                 ],
                 abi=ProgramABI(
                     public_inputs={"theta": theta},
-                    output_refs=[output.uuid],
+                    output_values=[output],
                 ),
             ),
             compiled_quantum=[
@@ -338,7 +449,7 @@ class TestExecutableProgramRuntime:
                 )
             ],
             compiled_classical=[CompiledClassicalSegment(segment=prep_segment)],
-            output_refs=[output.uuid],
+            output_values=[output],
         )
 
         result = executable.sample(

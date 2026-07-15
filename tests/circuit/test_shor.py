@@ -28,11 +28,12 @@ def test_shor_factory_returns_one_executable_qkernel() -> None:
 
     assert isinstance(kernel, QKernel)
     estimate = kernel.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
+    n = estimate.parameters["n"]
+    positive_n = sp.Symbol("positive_n", integer=True, positive=True)
     assert estimate.qubits == 6 * n + 5
     assert estimate.width.dirty_ancilla_qubits == 0
-    assert sp.Poly(estimate.gates.total, n).degree() == 3
-    assert sp.Poly(estimate.gates.toffoli, n).degree() == 3
+    assert sp.Poly(estimate.gates.total.subs(n, positive_n), positive_n).degree() == 3
+    assert sp.Poly(estimate.gates.toffoli.subs(n, positive_n), positive_n).degree() == 3
     assert "modmul_const" not in estimate.calls.calls_by_name
     assert estimate.trace is None
 

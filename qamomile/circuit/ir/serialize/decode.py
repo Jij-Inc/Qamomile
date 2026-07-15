@@ -66,6 +66,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     LoopCarriedRebind,
     RegionArg,
     WhileOperation,
+    validate_region_args,
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -106,6 +107,7 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
     _freeze_data,
 )
@@ -266,19 +268,22 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
     # Block I/O may legitimately carry ``DictValue`` / ``TupleValue``:
     # a ``qmc.Dict`` / ``qmc.Tuple`` kernel argument lands in
     # ``input_values`` and a container pass-through return lands in
-    # ``output_values``. The ``cast``s mirror the frontend, which
-    # stores these in the ``list[Value]``-typed slots at trace time.
-    input_values = cast(
-        list[Value],
-        [ctx.materialize(ref) for ref in d["input_value_refs"]],
-    )
-    output_values = cast(
-        list[Value],
-        [ctx.materialize(ref) for ref in d["output_value_refs"]],
-    )
+    # ``output_values``. Parameters are scalar / array ``Value``s plus the
+    # one structural exception: a runtime-parameter ``Dict`` keeps its
+    # ``DictValue`` in ``Block.parameters`` (paired with a ``DictType``
+    # slot in ``param_slots``).
+    input_values = [
+        _materialize_as_value_like(ctx, ref) for ref in d["input_value_refs"]
+    ]
+    output_values = [
+        _materialize_as_value_like(ctx, ref) for ref in d["output_value_refs"]
+    ]
+    # The cast mirrors the frontend: ``Block.parameters`` is annotated
+    # ``dict[str, Value]`` while a runtime-parameter ``Dict`` stores its
+    # ``DictValue`` there (the same widening #562 applies at build time).
     parameters = cast(
-        dict[str, Value],
-        {k: ctx.materialize(ref) for k, ref in d["parameters"].items()},
+        "dict[str, Value]",
+        {k: _materialize_as_parameter(ctx, ref) for k, ref in d["parameters"].items()},
     )
     param_slots = tuple(_decode_param_slot(s, ctx) for s in d.get("param_slots", ()))
 
@@ -301,10 +306,10 @@ def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
     """Materialize a UUID reference and assert it resolves to a ``Value``.
 
     Used in positions that must hold a scalar / array ``Value`` (e.g.
-    operation results, ``ForOperation.loop_var_value``, slice refs).
-    Block-level I/O and the operands of container-carrying operations
-    go through :meth:`_DecodeContext.materialize` instead, because the
-    frontend legitimately stores ``DictValue`` / ``TupleValue`` there.
+    operation results, ``ForOperation.loop_var_value``, and slice refs).
+    Block-level I/O goes through ``_materialize_as_value_like`` and
+    ``Block.parameters`` through ``_materialize_as_parameter`` instead,
+    because those positions may carry structural container values.
 
     Args:
         ctx (_DecodeContext): The active decode context.
@@ -321,6 +326,64 @@ def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
     if not isinstance(v, Value):
         raise ValueError(
             f"expected Value or ArrayValue at uuid {uuid!r}, got {type(v).__name__}"
+        )
+    return v
+
+
+def _materialize_as_parameter(ctx: _DecodeContext, uuid: str) -> Value | DictValue:
+    """Materialize a UUID reference for a ``Block.parameters`` entry.
+
+    Parameters are scalar / array ``Value``s with one structural exception:
+    a ``Dict`` kept as a runtime parameter stays in ``Block.parameters`` as
+    a ``DictValue`` (its per-key values are rebound per call, mirrored by a
+    ``DictType`` ``RUNTIME_PARAMETER`` entry in ``param_slots``).
+    ``TupleValue`` never appears here — tuples cannot be runtime parameters.
+
+    Args:
+        ctx (_DecodeContext): The active decode context.
+        uuid (str): The parameter Value UUID.
+
+    Returns:
+        Value | DictValue: The materialized scalar, array, or dict parameter
+            value.
+
+    Raises:
+        ValueError: If the materialized object is neither a ``Value`` nor a
+            ``DictValue``.
+    """
+    v = ctx.materialize(uuid)
+    if not isinstance(v, (Value, DictValue)):
+        raise ValueError(
+            f"expected Value, ArrayValue, or DictValue at parameter uuid "
+            f"{uuid!r}, got {type(v).__name__}"
+        )
+    return v
+
+
+def _materialize_as_value_like(ctx: _DecodeContext, uuid: str) -> ValueLike:
+    """Materialize a UUID reference as any block-output value type.
+
+    Block inputs and outputs can be structural values such as ``TupleValue``
+    and ``DictValue`` in addition to scalar ``Value`` / ``ArrayValue``.
+    ``Block.parameters`` goes through ``_materialize_as_parameter`` instead,
+    which additionally rejects ``TupleValue``.
+
+    Args:
+        ctx (_DecodeContext): The active decode context.
+        uuid (str): The Value-like UUID.
+
+    Returns:
+        ValueLike: The materialized scalar, array, tuple, or dict value.
+
+    Raises:
+        ValueError: If the materialized object is not a supported output value
+            type.
+    """
+    v = ctx.materialize(uuid)
+    if not isinstance(v, (Value, TupleValue, DictValue)):
+        raise ValueError(
+            f"expected Value, ArrayValue, TupleValue, or DictValue at uuid "
+            f"{uuid!r}, got {type(v).__name__}"
         )
     return v
 
@@ -397,7 +460,8 @@ def _decode_value(d: dict[str, Any], ctx: _DecodeContext) -> ValueBase:
         return TupleValue(
             name=d.get("name", ""),
             elements=tuple(
-                _materialize_as_value(ctx, ref) for ref in d.get("element_refs", ())
+                _materialize_as_value_like(ctx, ref)
+                for ref in d.get("element_refs", ())
             ),
             metadata=_decode_metadata(d.get("metadata"), ctx),
             uuid=d["uuid"],
@@ -853,6 +917,26 @@ def _operands_results(
     return operands, results
 
 
+def _value_like_operands_results(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> tuple[list[ValueLike], list[ValueLike]]:
+    """Materialize structural operation operands and results.
+
+    Args:
+        d (dict[str, Any]): The operation dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[list[ValueLike], list[ValueLike]]: Materialized operands and
+        results, including TupleValue and DictValue containers.
+    """
+    operands = [
+        _materialize_as_value_like(ctx, ref) for ref in d.get("operand_refs", ())
+    ]
+    results = [_materialize_as_value_like(ctx, ref) for ref in d.get("result_refs", ())]
+    return operands, results
+
+
 def _container_operands_results(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> tuple[list[Value], list[Value]]:
@@ -1140,7 +1224,7 @@ def _decode_return(d: dict[str, Any], ctx: _DecodeContext) -> ReturnOperation:
     Returns:
         ReturnOperation: The reconstructed op.
     """
-    operands, results = _operands_results(d, ctx)
+    operands, results = _container_operands_results(d, ctx)
     return ReturnOperation(operands=operands, results=results)
 
 
@@ -1282,8 +1366,11 @@ def _decode_loop_carried_rebinds(
     return tuple(
         LoopCarriedRebind(
             var_name=str(r.get("var_name", "")),
-            before=_materialize_as_value(ctx, r["before_ref"]),
-            after=_materialize_as_value(ctx, r["after_ref"]),
+            # Rebind diagnostics also cover structural containers.  Keep
+            # their concrete ``ValueBase`` subtype instead of forcing the
+            # scalar-only helper used by executable operands/results.
+            before=ctx.materialize(r["before_ref"]),
+            after=ctx.materialize(r["after_ref"]),
             before_synthesized=bool(r.get("before_synthesized", False)),
         )
         for r in d.get("loop_carried_rebinds", ())
@@ -1293,6 +1380,7 @@ def _decode_loop_carried_rebinds(
 def _decode_region_args(
     d: dict[str, Any],
     ctx: _DecodeContext,
+    results: list[Value],
 ) -> tuple[RegionArg, ...]:
     """Decode loop region-argument records from a loop op dict.
 
@@ -1300,12 +1388,34 @@ def _decode_region_args(
         d (dict[str, Any]): The loop op dict, possibly carrying a
             ``region_args`` list.
         ctx (_DecodeContext): The active decode context.
+        results (list[Value]): The loop operation's materialized
+            results. Every region argument must own the corresponding
+            result by both position and UUID.
 
     Returns:
         tuple[RegionArg, ...]: The reconstructed records; empty when
             the key is absent.
+
+    Raises:
+        ValueError: If a removed parallel-list carry payload is present,
+            a region argument's four values have different types, or its
+            result does not align with the loop operation's results.
     """
-    return tuple(
+    legacy_keys = {
+        "carried_names",
+        "iter_arg_refs",
+        "body_arg_refs",
+        "body_yield_refs",
+    }
+    present_legacy_keys = sorted(legacy_keys.intersection(d))
+    if present_legacy_keys:
+        raise ValueError(
+            "Legacy parallel-list loop carry fields are not supported: "
+            f"{', '.join(present_legacy_keys)}. Re-encode the block with "
+            "RegionArg records."
+        )
+
+    region_args = tuple(
         RegionArg(
             var_name=str(r.get("var_name", "")),
             init=_materialize_as_value(ctx, r["init_ref"]),
@@ -1315,6 +1425,28 @@ def _decode_region_args(
         )
         for r in d.get("region_args", ())
     )
+    if len(region_args) != len(results):
+        raise ValueError(
+            "Loop RegionArg payload is inconsistent: "
+            f"{len(region_args)} region args for {len(results)} results."
+        )
+    for index, (arg, result) in enumerate(zip(region_args, results, strict=True)):
+        if arg.result.uuid != result.uuid:
+            raise ValueError(
+                "Loop RegionArg payload is inconsistent: "
+                f"region_args[{index}].result_ref does not match "
+                f"result_refs[{index}]."
+            )
+        if not (
+            arg.init.type == arg.block_arg.type == arg.yielded.type == arg.result.type
+        ):
+            raise ValueError(
+                f"Loop RegionArg '{arg.var_name}' has mismatched slot types: "
+                f"init={arg.init.type}, block_arg={arg.block_arg.type}, "
+                f"yielded={arg.yielded.type}, result={arg.result.type}. "
+                "All four values of a RegionArg must share a type."
+            )
+    return region_args
 
 
 def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
@@ -1325,23 +1457,29 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         ctx (_DecodeContext): The active decode context.
 
     Returns:
-        ForOperation: The reconstructed op, including the
-            materialized loop variable and the recursively-decoded
+        ForOperation: The reconstructed op, including the materialized
+            loop variable, region arguments, and recursively-decoded
             loop body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _operands_results(d, ctx)
     loop_var_ref = d.get("loop_var_value_ref")
     loop_var_value = _materialize_as_value(ctx, loop_var_ref) if loop_var_ref else None
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return ForOperation(
+    op = ForOperation(
         operands=operands,
         results=results,
         loop_var=d.get("loop_var", ""),
         loop_var_value=loop_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
-        region_args=_decode_region_args(d, ctx),
+        region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperation:
@@ -1354,6 +1492,10 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
     Returns:
         ForItemsOperation: The reconstructed op, including key /
             value identity Values and the recursively-decoded body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _container_operands_results(d, ctx)
     key_refs = d.get("key_var_value_refs")
@@ -1365,7 +1507,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
     value_ref = d.get("value_var_value_ref")
     value_var_value = _materialize_as_value(ctx, value_ref) if value_ref else None
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return ForItemsOperation(
+    op = ForItemsOperation(
         operands=operands,
         results=results,
         key_vars=list(d.get("key_vars", ())),
@@ -1375,8 +1517,10 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         value_var_value=value_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
-        region_args=_decode_region_args(d, ctx),
+        region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
@@ -1389,17 +1533,23 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
     Returns:
         WhileOperation: The reconstructed op, including the
             recursively-decoded loop body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _operands_results(d, ctx)
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return WhileOperation(
+    op = WhileOperation(
         operands=operands,
         results=results,
         operations=body,
         max_iterations=d.get("max_iterations"),
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
-        region_args=_decode_region_args(d, ctx),
+        region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_branch_rebinds(
@@ -1844,7 +1994,7 @@ def _decode_invoke_operation(d: dict[str, Any], ctx: _DecodeContext) -> InvokeOp
     Raises:
         ValueError: If transform names are unknown.
     """
-    operands, results = _operands_results(d, ctx)
+    operands, results = _value_like_operands_results(d, ctx)
     transform = _enum_by_name(CallTransform, d.get("transform"), "CallTransform")
     attrs = _decode_payload(d.get("attrs"))
     if attrs is None:

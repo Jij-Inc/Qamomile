@@ -25,7 +25,7 @@
 # |\psi\rangle \;=\; \sum_{i=0}^{2^n - 1} a_i \, |i\rangle
 # $$
 #
-# を準備する操作です。古典データを量子状態として読み込むあらゆるアルゴリズム — HHL系の線形方程式ソルバー、カーネル法、多くの量子シミュレーションプロトコルなど — の入口にあたります。Qamomileは`qamomile.circuit.algorithm.state_preparation`の下に、Möttönen, Vartiainen, Bergholm, Salomaaの一様制御回転構成 {cite:p}`10.48550/arXiv.quant-ph/0407010` に基づいたSDK移植可能な実装を提供しています (元論文は任意状態 $|a\rangle \to |b\rangle$ の変換を扱っていますが、実装では入力を $|0\rangle^{\otimes n}$ に固定した state-preparation 半分だけを emit します — 詳細は §3 のリソース推定を参照)。
+# を準備する操作です。古典データを量子状態として読み込むあらゆるアルゴリズム — HHL系の線形方程式ソルバー、カーネル法、多くの量子シミュレーションプロトコルなど — の入口にあたります。Qamomileは標準ライブラリとして、Möttönen, Vartiainen, Bergholm, Salomaaの一様制御回転構成 {cite:p}`10.48550/arXiv.quant-ph/0407010` に基づいたSDK移植可能な実装を提供しています (元論文は任意状態 $|a\rangle \to |b\rangle$ の変換を扱っていますが、実装では入力を $|0\rangle^{\otimes n}$ に固定した state-preparation 半分だけを emit します — 詳細は §3 のリソース推定を参照)。
 #
 # この構成は2段階からなります:
 #
@@ -50,7 +50,7 @@ from qiskit.quantum_info import Statevector
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm import (
+from qamomile.circuit.stdlib import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
 )

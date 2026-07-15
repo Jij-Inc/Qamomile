@@ -9,6 +9,7 @@ pattern — the use case the slicing feature was introduced to support.
 from __future__ import annotations
 
 import dataclasses
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,9 +17,15 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.frontend.handle import VectorView
+from qamomile.circuit.frontend.qkernel_invocation import _wrap_array_result
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
+from qamomile.circuit.transpiler.errors import (
+    QubitBorrowConflictError,
+    QubitConsumedError,
+    ValidationError,
+)
 from qamomile.circuit.transpiler.passes.slice_borrow_check import (
     SliceBorrowCheckPass,
     _SnapshotKind,
@@ -772,6 +779,61 @@ class TestVectorViewAsKernelArgument:
         ]
         assert applied == [0, 2]
 
+    def test_full_reslice_wrapper_keeps_caller_local_metadata(self):
+        """A full re-slice keeps metadata remapped by call materialization."""
+        length = _uint_value("length", 2)
+        zero = _uint_value("zero", 0)
+        one = _uint_value("one", 1)
+
+        formal_input = _qubit_array("formal_input", length)
+        formal_output = _slice_array(
+            formal_input,
+            "formal_output",
+            zero,
+            one,
+            length,
+        ).with_array_runtime_metadata(element_uuids=("formal[0]", "formal[1]"))
+
+        caller_root = _qubit_array("caller_root", length)
+        caller_view = _slice_array(
+            caller_root,
+            "caller_view",
+            zero,
+            one,
+            length,
+        )
+        caller_result = _slice_array(
+            caller_view,
+            "caller_result",
+            zero,
+            one,
+            length,
+        ).with_array_runtime_metadata(element_uuids=("caller[0]", "caller[1]"))
+
+        call_op = SimpleNamespace(results=[caller_result])
+        wrapped = _wrap_array_result(
+            kernel=SimpleNamespace(name="helper"),
+            call_op=call_op,
+            result_idx=0,
+            val=caller_result,
+            handle_type=qmc.Vector[qmc.Qubit],
+            block_ir_for_call=Block(
+                input_values=[formal_input],
+                output_values=[formal_output],
+            ),
+            formal_input_views={
+                formal_input.logical_id: (
+                    formal_input,
+                    SimpleNamespace(value=caller_view),
+                )
+            },
+            input_view_metas={},
+        )
+
+        expected = ("caller[0]", "caller[1]")
+        assert call_op.results[0].get_element_uuids() == expected
+        assert wrapped.value.get_element_uuids() == expected
+
     def test_view_argument_mutate_then_full_reslice_targets_parent_slots(self):
         """A full re-slice return preserves in-callee operations on the view."""
         pytest.importorskip("qiskit")
@@ -1061,14 +1123,11 @@ class TestPostFoldLinearity:
         catches the aliasing immediately (``QubitBorrowConflictError``).
         When bounds stay symbolic — e.g. derived from an unbound
         parameter through arithmetic — ``SliceBorrowCheckPass``
-        resolves them post-fold and raises
-        ``SliceBorrowViolationError`` instead.
+        resolves them post-fold and raises the same
+        ``QubitBorrowConflictError``.
         """
         pytest.importorskip("qiskit")
-        from qamomile.circuit.transpiler.errors import (
-            QubitBorrowConflictError,
-            SliceBorrowViolationError,
-        )
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
         from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
@@ -1081,7 +1140,7 @@ class TestPostFoldLinearity:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises((SliceBorrowViolationError, QubitBorrowConflictError)):
+        with pytest.raises(QubitBorrowConflictError):
             transpiler.transpile(circuit, bindings={"num": 4, "lo": 0, "hi": 4})
 
     def test_symbolic_slice_disjoint_from_direct_access_passes(self):
@@ -1140,10 +1199,7 @@ class TestPostFoldLinearity:
         slots are registered before any conflict check.
         """
         pytest.importorskip("qiskit")
-        from qamomile.circuit.transpiler.errors import (
-            QubitBorrowConflictError,
-            SliceBorrowViolationError,
-        )
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
         from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
@@ -1159,7 +1215,7 @@ class TestPostFoldLinearity:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises((SliceBorrowViolationError, QubitBorrowConflictError)):
+        with pytest.raises(QubitBorrowConflictError):
             transpiler.transpile(circuit, bindings={"num": 4, "lo": 0, "hi": 4})
 
 
@@ -1444,7 +1500,7 @@ class TestSameSliceVersionRefresh:
         checker._register_slice_bulk_borrow_if_new(stale, state)
         checker._register_slice_bulk_borrow_if_new(current, state)
 
-        with pytest.raises(SliceBorrowViolationError, match="forward SSA-version"):
+        with pytest.raises(QubitConsumedError, match="forward SSA-version"):
             checker._register_slice_bulk_borrow_if_new(stale, state)
 
     def test_symbolic_exact_descriptor_forward_refresh_is_allowed(self):
@@ -1478,7 +1534,7 @@ class TestSameSliceVersionRefresh:
 
         checker._register_slice_bulk_borrow_if_new(owner, state)
 
-        with pytest.raises(SliceBorrowViolationError, match="may overlap"):
+        with pytest.raises(QubitBorrowConflictError, match="may overlap"):
             checker._register_slice_bulk_borrow_if_new(changed, state)
 
     def test_symbolic_adjacent_prefix_suffix_descriptors_are_allowed(self):
@@ -1558,7 +1614,7 @@ class TestSameSliceVersionRefresh:
 
         checker._register_slice_bulk_borrow_if_new(evens, state)
 
-        with pytest.raises(SliceBorrowViolationError, match="may overlap"):
+        with pytest.raises(QubitBorrowConflictError, match="may overlap"):
             checker._register_slice_bulk_borrow_if_new(odds, state)
 
     def test_symbolic_recomputed_descriptor_is_rejected(self):
@@ -1574,7 +1630,7 @@ class TestSameSliceVersionRefresh:
 
         checker._register_slice_bulk_borrow_if_new(owner, state)
 
-        with pytest.raises(SliceBorrowViolationError, match="not a forward"):
+        with pytest.raises(QubitBorrowConflictError, match="not a forward"):
             checker._register_slice_bulk_borrow_if_new(recomputed, state)
 
     def test_symbolic_refresh_inside_unsafe_snapshot_is_rejected(self):
@@ -1593,7 +1649,7 @@ class TestSameSliceVersionRefresh:
             (_SnapshotKind.UNSAFE_CONTROL_BODY, dict(state))
         )
         try:
-            with pytest.raises(SliceBorrowViolationError, match="may be skipped"):
+            with pytest.raises(ValidationError, match="may be skipped"):
                 checker._register_slice_bulk_borrow_if_new(refreshed, state)
         finally:
             checker._outer_snapshot_stack.pop()
@@ -2081,10 +2137,7 @@ class TestRound2Reviewer:
         slice-borrow and left the parent re-consumable, allowing a
         second measure to silently re-measure collapsed qubits.
         """
-        from qamomile.circuit.transpiler.errors import (
-            QubitConsumedError,
-            SliceBorrowViolationError,
-        )
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -2093,7 +2146,7 @@ class TestRound2Reviewer:
             _ = qmc.measure(odd)
             return qmc.measure(q)
 
-        with pytest.raises((QubitConsumedError, SliceBorrowViolationError)):
+        with pytest.raises(QubitConsumedError):
             kern.block
 
     def test_element_access_after_view_measure_rejects(self):
@@ -2806,7 +2859,7 @@ class TestRound5Reviewer:
         H = qm_o.Z(1)
         transpiler = QiskitTranspiler()
         # If borrow keys were not namespaced, this would raise
-        # SliceBorrowViolationError or a stage-later EmitError; we
+        # QubitConsumedError or a stage-later EmitError; we
         # only need the kernel to trace and transpile cleanly.
         exe = transpiler.transpile(kern, bindings={"obs": H})
         assert exe is not None
@@ -2833,10 +2886,7 @@ class TestRound5Reviewer:
 
     def test_destructive_view_consume_inside_for_loop_persists_post_loop(self):
         """A destructive view consume inside a loop body must mark consumed slots."""
-        from qamomile.circuit.transpiler.errors import (
-            QubitConsumedError,
-            SliceBorrowViolationError,
-        )
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
 
         @qmc.qkernel
         def kern(obs: qmc.Observable) -> qmc.Float:
@@ -2849,7 +2899,7 @@ class TestRound5Reviewer:
             return qmc.expval(q, obs)
 
         H = qm_o.Z(0)
-        with pytest.raises((QubitConsumedError, SliceBorrowViolationError)):
+        with pytest.raises(QubitConsumedError):
             _ = kern.build(obs=H)
 
     def test_consumed_marker_in_loop_body_does_not_leak_across_registers(self):
@@ -3207,13 +3257,11 @@ class TestSliceAssignment:
         Releasing an outer-registered view from inside a control-flow body
         would require the loop / branch merge to propagate the entry
         deletion outward, which the current consumption-priority union
-        cannot do safely.  The pass raises ``SliceBorrowViolationError``
+        cannot do safely. The pass raises ``ValidationError``
         with a hint pointing at the control-flow region.
         """
         pytest.importorskip("qiskit")
-        from qamomile.circuit.transpiler.errors import (
-            SliceBorrowViolationError,
-        )
+        from qamomile.circuit.transpiler.errors import ValidationError
         from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
@@ -3226,5 +3274,24 @@ class TestSliceAssignment:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises(SliceBorrowViolationError, match="control-flow body"):
+        with pytest.raises(ValidationError, match="control-flow body"):
             transpiler.transpile(kern)
+
+    def test_one_entry_items_keeps_outer_view_release_boundary(self):
+        """One-entry items lowering cannot hide an in-body slice release."""
+        pytest.importorskip("qiskit")
+        from qamomile.circuit.transpiler.errors import ValidationError
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def kern(
+            data: qmc.Dict[qmc.UInt, qmc.Float],
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            even = q[0::2]
+            for _key, _value in qmc.items(data):
+                q[0::2] = even
+            return qmc.measure(q)
+
+        with pytest.raises(ValidationError, match="control-flow body"):
+            QiskitTranspiler().transpile(kern, bindings={"data": {0: 1.0}})

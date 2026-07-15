@@ -7,19 +7,19 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.state_preparation import (
-    amplitude_encoding,
-    amplitude_encoding_from_angles,
-)
-from qamomile.circuit.algorithm.state_preparation.mottonen_amplitude_encoding import (
-    _mottonen_composite,
-    _MottonenAngles as MottonenAmplitudeEncoding,
-)
 from qamomile.circuit.ir.operation import InvokeOperation
 from qamomile.circuit.ir.operation.callable import CompositeGateType
 from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.value import ArrayValue, resolve_root_qubit_address
+from qamomile.circuit.stdlib.state_preparation import (
+    amplitude_encoding,
+    amplitude_encoding_from_angles,
+)
+from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
+    _mottonen_composite,
+    _MottonenAngles as MottonenAmplitudeEncoding,
+)
 from qamomile.circuit.transpiler.passes.emit_support import ResourceAllocator
 from qamomile.circuit.transpiler.segments import QuantumStep
 from qamomile.linalg import (
@@ -230,7 +230,8 @@ class TestCompositeGateMetadata:
         gate, width = _mottonen_composite([1.0, 0.0])
         assert width == 1
         assert gate._callable_gate_type == CompositeGateType.CUSTOM
-        assert gate._callable_name == "mottonen_amplitude_encoding"
+        assert gate._callable_name == "state_preparation"
+        assert gate._callable_namespace == "qamomile.stdlib"
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources_real(self, n_qubits: int) -> None:
@@ -296,7 +297,7 @@ def _build_unitary_via_emission(
             simulation, obtained by applying the emission to each
             computational basis state.
     """
-    from qamomile.circuit.algorithm.state_preparation.mottonen_amplitude_encoding import (
+    from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
         _get_cnot_controls,
     )
 
@@ -502,8 +503,7 @@ class TestLazyConstruction:
         invoke_ops = [
             op
             for op in block.operations
-            if isinstance(op, InvokeOperation)
-            and op.target.name == "mottonen_amplitude_encoding"
+            if isinstance(op, InvokeOperation) and op.target.name == "state_preparation"
         ]
         assert len(invoke_ops) == 1
         # Today: the decomposition body IS populated by kernel.build() because
@@ -1521,11 +1521,10 @@ class TestAmplitudeEncodingBoundVector:
         invoke_ops = [
             op
             for op in block.operations
-            if isinstance(op, InvokeOperation)
-            and op.target.name == "mottonen_amplitude_encoding"
+            if isinstance(op, InvokeOperation) and op.target.name == "state_preparation"
         ]
         assert len(invoke_ops) == 1
-        assert invoke_ops[0].attrs["custom_name"] == "mottonen_amplitude_encoding"
+        assert invoke_ops[0].attrs["custom_name"] == "state_preparation"
 
 
 # ---------------------------------------------------------------------------

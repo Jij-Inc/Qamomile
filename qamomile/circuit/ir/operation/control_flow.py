@@ -116,8 +116,16 @@ class RegionArg:
         block_arg (Value): The region argument the body reads each
             iteration. A definition owned by the loop operation (like
             ``ForOperation.loop_var_value``), not an outer-scope read.
-        yielded (Value): The body-produced value carried into the next
-            iteration (produced by an operation inside ``operations``).
+        yielded (Value): The value carried into the next iteration —
+            the body's final binding of the variable. Usually produced
+            by an operation inside ``operations``, but NOT always: a
+            loop-invariant overwrite (``x = c`` with ``c`` defined
+            before the loop) yields the outer-scope value directly, and
+            an identity carry yields ``block_arg`` itself. Consumers
+            must not assume a body-internal producer; in particular,
+            liveness must treat the yield as a read that keeps an
+            outer-scope producer alive (see
+            ``CompileTimeIfLoweringPass._collect_used_uuids``).
         result (Value): The value visible after the loop. A definition
             owned by the loop operation; also present in ``results``.
     """
@@ -212,11 +220,11 @@ class LoopCarriedRebind:
     Attributes:
         var_name (str): Display name of the rebound Python variable.
             Used only for error messages.
-        before (Value): The variable's IR value before the loop body ran
+        before (ValueBase): The variable's IR value before the loop body ran
             (for classical records, the stale value the traced body
             reads; for quantum records, the incoming state a rebinding
             iteration would discard).
-        after (Value): The variable's IR value after the loop body ran
+        after (ValueBase): The variable's IR value after the loop body ran
             (typically a ``BinOp`` result, an ``IfOperation`` merge
             output, or a fresh quantum allocation).
         before_synthesized (bool): True when the pre-loop value was a
@@ -227,8 +235,8 @@ class LoopCarriedRebind:
     """
 
     var_name: str
-    before: Value
-    after: Value
+    before: ValueBase
+    after: ValueBase
     before_synthesized: bool = False
 
 
@@ -272,10 +280,10 @@ def _replace_rebind_values(
         before = rebind.before
         after = rebind.after
         mapped_before = mapping.get(before.uuid)
-        if isinstance(mapped_before, Value):
+        if isinstance(mapped_before, ValueBase):
             before = mapped_before
         mapped_after = mapping.get(after.uuid)
-        if isinstance(mapped_after, Value):
+        if isinstance(mapped_after, ValueBase):
             after = mapped_after
         if before is not rebind.before or after is not rebind.after:
             rebind = dataclasses.replace(rebind, before=before, after=after)
@@ -613,6 +621,111 @@ class ForItemsOperation(HasNestedOps, Operation):
         return OperationKind.CONTROL
 
 
+def validate_region_args(
+    op: ForOperation | ForItemsOperation | WhileOperation,
+) -> tuple[RegionArg, ...]:
+    """Validate the SSA identities owned by a loop's region arguments.
+
+    A loop owns several definition namespaces: its iteration variables,
+    every ``RegionArg.block_arg``, and every ``RegionArg.result``.  Those
+    identities must be pairwise disjoint.  Otherwise different stages can
+    assign incompatible meanings to one UUID: a UUID-keyed environment has
+    only one slot, so binding either the iteration variable or the carried
+    value overwrites the other and makes both reads observe the same value.
+
+    Args:
+        op (ForOperation | ForItemsOperation | WhileOperation): Loop
+            operation whose region arguments should be validated.
+
+    Returns:
+        tuple[RegionArg, ...]: The validated ``op.region_args`` tuple.
+
+    Raises:
+        ValueError: If result counts or positions disagree, slot types differ,
+            or any loop-owned definition identity collides with another
+            definition or with a region initializer/body yield.
+    """
+    region_args = op.region_args
+    if len(region_args) != len(op.results):
+        raise ValueError(
+            "Loop RegionArg data is inconsistent: "
+            f"{len(region_args)} region args for {len(op.results)} results."
+        )
+
+    block_arg_uuids: set[str] = set()
+    result_uuids: set[str] = set()
+    init_uuids = {arg.init.uuid for arg in region_args}
+    yielded_uuids = {arg.yielded.uuid for arg in region_args}
+    for index, (arg, result) in enumerate(zip(region_args, op.results, strict=True)):
+        if arg.result.uuid != result.uuid:
+            raise ValueError(
+                "Loop RegionArg data is inconsistent: "
+                f"region_args[{index}].result does not match results[{index}]."
+            )
+        if not (
+            arg.init.type == arg.block_arg.type == arg.yielded.type == arg.result.type
+        ):
+            raise ValueError(
+                f"Loop RegionArg '{arg.var_name}' has mismatched value types: "
+                f"init={arg.init.type}, block_arg={arg.block_arg.type}, "
+                f"yielded={arg.yielded.type}, result={arg.result.type}."
+            )
+        if arg.block_arg.uuid in block_arg_uuids:
+            raise ValueError(
+                "Loop RegionArg data contains duplicate block-argument identities."
+            )
+        if arg.result.uuid in result_uuids:
+            raise ValueError(
+                "Loop RegionArg data contains duplicate result identities."
+            )
+        block_arg_uuids.add(arg.block_arg.uuid)
+        result_uuids.add(arg.result.uuid)
+
+    if block_arg_uuids & result_uuids:
+        raise ValueError(
+            "Loop RegionArg block-argument and result identities must be disjoint."
+        )
+    if block_arg_uuids & init_uuids:
+        raise ValueError(
+            "Loop RegionArg block arguments must not reuse initializer identities."
+        )
+    if result_uuids & init_uuids:
+        raise ValueError(
+            "Loop RegionArg results must not reuse initializer identities."
+        )
+    if result_uuids & yielded_uuids:
+        raise ValueError("Loop RegionArg results must not reuse body-yield identities.")
+
+    loop_formal_uuids: set[str] = set()
+    if isinstance(op, ForOperation):
+        if op.loop_var_value is not None:
+            loop_formal_uuids.add(op.loop_var_value.uuid)
+    elif isinstance(op, ForItemsOperation):
+        if op.key_var_values is not None:
+            for key_value in op.key_var_values:
+                loop_formal_uuids.add(key_value.uuid)
+                if hasattr(key_value, "shape"):
+                    loop_formal_uuids.update(dim.uuid for dim in key_value.shape)
+        if op.value_var_value is not None:
+            loop_formal_uuids.add(op.value_var_value.uuid)
+
+    collisions = loop_formal_uuids & (block_arg_uuids | result_uuids)
+    if collisions:
+        raise ValueError(
+            "Loop RegionArg block/result identities must be disjoint from "
+            "loop-variable, item-key, item-value, and key-shape identities: "
+            f"{sorted(collisions)}."
+        )
+    if loop_formal_uuids & init_uuids:
+        raise ValueError(
+            "Loop RegionArg initializers must not reuse a loop-formal "
+            "identity (loop variable, item key/value, or key shape); an "
+            "initializer is a pre-loop value the loop reads, never a "
+            "definition the loop owns."
+        )
+    return region_args
+
+
 @dataclasses.dataclass(frozen=True)
 class BranchRebind:
     """Trace-time record of a quantum variable rebound inside an if branch.
@@ -905,11 +1018,20 @@ def genuine_input_values(op: Operation) -> list[ValueBase]:
 
     ``Operation.all_input_values`` also surfaces the bookkeeping values
     that ride along only for cloning / substitution: the ``before`` /
-    ``after`` of a loop operation's ``loop_carried_rebinds`` and the
-    ``before`` of an ``IfOperation``'s ``branch_rebinds``. Those records
-    are NOT data reads, so read-based analyses (liveness / dead-op
-    elimination, measurement-taint tracing, loop-carried stale-read
-    checks) must exclude them.
+    ``after`` of a loop operation's ``loop_carried_rebinds``, the
+    ``before`` of an ``IfOperation``'s ``branch_rebinds``, and the
+    loop-owned fields of a ``RegionArg`` (``block_arg`` / ``yielded`` /
+    ``result``). Those are NOT outer-scope data reads, so read-based
+    analyses (measurement-taint tracing, loop-carried stale-read
+    checks, segmentation demand) must exclude them. ``RegionArg.init``
+    stays: it is the genuine read of the pre-loop value.
+
+    LIVENESS IS THE EXCEPTION: ``RegionArg.yielded`` may be an
+    outer-scope value (the loop-invariant overwrite shape ``x = c``),
+    in which case the region back-edge is the producer's only read.
+    Dead-op elimination therefore re-adds yields on top of this
+    helper's result (``CompileTimeIfLoweringPass._collect_used_uuids``)
+    — a consumer deciding what may be DELETED must do the same.
 
     The exclusion is by **last occurrence**, not by UUID set: a single
     value can be BOTH a genuine input AND a rebind ``before``. The
@@ -930,11 +1052,15 @@ def genuine_input_values(op: Operation) -> list[ValueBase]:
             rebind-record value removed.
     """
     values = list(op.all_input_values())
-    record_values: list[Value] = []
+    record_values: list[ValueBase] = []
     if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
         for loop_record in op.loop_carried_rebinds:
             record_values.append(loop_record.before)
             record_values.append(loop_record.after)
+        for region_arg in op.region_args:
+            record_values.append(region_arg.block_arg)
+            record_values.append(region_arg.yielded)
+            record_values.append(region_arg.result)
     elif isinstance(op, IfOperation):
         for branch_record in op.branch_rebinds:
             record_values.append(branch_record.before)

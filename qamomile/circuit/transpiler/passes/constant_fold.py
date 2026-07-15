@@ -19,13 +19,25 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
 )
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
-from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    ForOperation,
+    IfOperation,
+    validate_region_args,
+)
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
     SymbolicControlledU,
 )
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    ValueLike,
+    collect_value_like_uuids,
+)
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.value_resolver import (
     ValueResolver as UnifiedValueResolver,
@@ -78,7 +90,17 @@ class ConstantFoldingPass(Pass[Block, Block]):
         return "constant_fold"
 
     def run(self, input: Block) -> Block:
-        """Run constant folding on the block."""
+        """Fold resolvable classical values throughout a block.
+
+        Args:
+            input (Block): Affine or hierarchical block to rewrite.
+
+        Returns:
+            Block: Copy with folded operations and output values.
+
+        Raises:
+            ValidationError: If the block is neither affine nor hierarchical.
+        """
         # HIERARCHICAL is accepted during the self-recursion unroll loop;
         # unresolved inline callable invocations are passed through untouched.
         if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
@@ -93,12 +115,28 @@ class ConstantFoldingPass(Pass[Block, Block]):
         # Block-output UUIDs: a folded store whose result is returned must
         # stay in the IR so the classical executor materializes the value
         # at runtime (folding records compile-time metadata only).
-        output_uuids = {v.uuid for v in input.output_values if isinstance(v, ValueBase)}
+        output_uuids: set[str] = set()
+        for value in input.output_values:
+            output_uuids.update(collect_value_like_uuids(value))
 
         # Process operations
         new_ops = self._fold_operations(input.operations, folded_values, output_uuids)
 
-        return dataclasses.replace(input, operations=new_ops)
+        # A folded producer may itself be a block output.  Rewriting only
+        # operation fields would then remove the producer while leaving the
+        # output table pointing at its pre-fold, metadata-free Value.  Carry
+        # the constant replacement onto the output so segmentation can expose
+        # it through ProgramABI.output_values without a runtime operation.
+        new_outputs: list[ValueLike] = [
+            self._substitute_in_value_like(value, folded_values)
+            for value in input.output_values
+        ]
+
+        return dataclasses.replace(
+            input,
+            operations=new_ops,
+            output_values=new_outputs,
+        )
 
     def _fold_operations(
         self,
@@ -139,19 +177,32 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 self._nesting_depth = 0
 
             def _transform_control_flow(self, op: Operation) -> Operation:
-                """Recurse into control-flow bodies, tracking nesting depth.
+                """Recurse into control flow and publish nested folds upward.
+
+                A nested branch/body can fold and remove an operation whose
+                result is referenced by a parent-only field such as
+                ``IfOperation.true_yields`` or ``RegionArg.yielded``.  Those
+                fields are visited through ``Operation.replace_values`` only
+                after the nested bodies have populated ``folded_values``;
+                otherwise one-trip loop lowering can expose an orphaned yield.
 
                 Args:
                     op (Operation): The (possibly control-flow) operation.
 
                 Returns:
-                    Operation: The operation with nested bodies transformed.
+                    Operation: The operation with nested bodies transformed and
+                        newly folded values propagated to parent-owned fields.
                 """
                 self._nesting_depth += 1
                 try:
-                    return super()._transform_control_flow(op)
+                    transformed = super()._transform_control_flow(op)
                 finally:
                     self._nesting_depth -= 1
+                if folded_values:
+                    return transformed.replace_values(
+                        cast(dict[str, ValueBase], folded_values)
+                    )
+                return transformed
 
             def transform_operation(self, op: Operation) -> Operation | None:
                 if isinstance(op, BinOp):
@@ -401,15 +452,29 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 evaluable (symbolic bounds / init, non-``BinOp`` body
                 operations, or a trip count above the folding cap).
         """
+        try:
+            validate_region_args(op)
+        except ValueError as error:
+            raise ValidationError(str(error)) from error
+
         if op.loop_var_value is None or len(op.operands) < 3:
             return None
         start = self._resolve_value(op.operands[0], folded_values)
         stop = self._resolve_value(op.operands[1], folded_values)
         step = self._resolve_value(op.operands[2], folded_values)
-        if start is None or stop is None or step is None or int(step) == 0:
+        if start is None or stop is None or step is None:
             return None
-        trips = range(int(start), int(stop), int(step))
-        if len(trips) > self._MAX_REGION_FOLD_TRIPS:
+        try:
+            start_int = int(start)
+            stop_int = int(stop)
+            step_int = int(step)
+            if step_int == 0:
+                return None
+            trips = range(start_int, stop_int, step_int)
+            trip_count = len(trips)
+        except (OverflowError, ValueError):
+            return None
+        if trip_count > self._MAX_REGION_FOLD_TRIPS:
             return None
         if not self._region_body_supported(op.operations):
             return None
@@ -448,9 +513,14 @@ class ConstantFoldingPass(Pass[Block, Block]):
             carried[arg.block_arg.uuid] = init
 
         for trip_value in trips:
-            _bind_const(op.loop_var_value, trip_value)
+            # Match emit/executor replay: install carried block arguments
+            # before the iteration formal. Validation keeps their UUIDs
+            # disjoint, so this order is not semantic; keeping one canonical
+            # order makes every evaluation path construct its environment the
+            # same way.
             for arg in op.region_args:
                 _bind_const(arg.block_arg, carried[arg.block_arg.uuid])
+            _bind_const(op.loop_var_value, trip_value)
             if not self._eval_region_body(op.operations, _resolve, _bind_const):
                 return None
             for arg in op.region_args:
@@ -462,11 +532,10 @@ class ConstantFoldingPass(Pass[Block, Block]):
         region_consts: dict[str, Value] = {}
         for arg in op.region_args:
             final = carried[arg.block_arg.uuid]
-            region_consts[arg.result.uuid] = Value(
-                type=arg.result.type,
-                name=f"folded_{arg.var_name}",
-                uuid=arg.result.uuid,
-            ).with_const(final)
+            # Preserve the loop result's complete SSA identity. Re-running the
+            # public constant-fold pass must not mint a fresh logical_id for
+            # the same result on every invocation.
+            region_consts[arg.result.uuid] = arg.result.with_const(final)
         return region_consts
 
     def _region_body_supported(self, operations: list[Operation]) -> bool:
@@ -713,6 +782,48 @@ class ConstantFoldingPass(Pass[Block, Block]):
                 parent_array=new_parent_array,
             )
         return v
+
+    def _substitute_in_value_like(
+        self,
+        value: ValueLike,
+        folded_values: dict[str, Value],
+    ) -> ValueLike:
+        """Recursively substitute folded leaves in a structural value.
+
+        Args:
+            value (ValueLike): Scalar, array, tuple, or dictionary value to
+                rewrite.
+            folded_values (dict[str, Value]): UUID-keyed folded scalar and
+                array replacements.
+
+        Returns:
+            ValueLike: Rewritten value preserving its container structure.
+        """
+        if isinstance(value, TupleValue):
+            elements = tuple(
+                self._substitute_in_value_like(element, folded_values)
+                for element in value.elements
+            )
+            if all(
+                replacement is original
+                for replacement, original in zip(elements, value.elements, strict=True)
+            ):
+                return value
+            return dataclasses.replace(value, elements=elements)
+
+        if isinstance(value, DictValue):
+            entries: list[Any] = []
+            changed = False
+            for key, entry_value in value.entries:
+                new_key = self._substitute_in_value_like(key, folded_values)
+                new_value = self._substitute_in_value_like(entry_value, folded_values)
+                entries.append((new_key, new_value))
+                changed = changed or new_key is not key or new_value is not entry_value
+            if changed:
+                return dataclasses.replace(value, entries=tuple(entries))
+            return value
+
+        return self._substitute_in_value(value, folded_values)
 
     def _substitute_folded_results(
         self,

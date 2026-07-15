@@ -12,11 +12,12 @@ for caching and (later) for serialization keyed on IR contents rather
 than build-local Python state.
 
 Supported scope:
-    Only ``BlockKind.AFFINE`` and ``BlockKind.ANALYZED`` are accepted at the
-    top level. Boxed ``InvokeOperation`` definitions may legitimately retain
-    nested ``HIERARCHICAL`` bodies after inlining; those bodies and every
-    transform-specific implementation body are canonicalized recursively in
-    the same UUID universe.
+    Only ``BlockKind.AFFINE`` and ``BlockKind.ANALYZED`` are accepted.
+    ``HIERARCHICAL`` Blocks may still contain inline-policy
+    ``InvokeOperation``s that reference nested Blocks before inlining;
+    canonical treatment for those pre-inline references is deferred (see
+    backlog ``[IR design] Add named/versioned module references for
+    cross-process kernel composition``).
 
 Output guarantees:
     1. ``canonicalize`` does not change ``Block.kind``; it is a
@@ -72,12 +73,20 @@ import numpy as np
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.callable import CallableDef, InvokeOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
+    ForItemsOperation,
+    ForOperation,
+    HasNestedOps,
+    LoopCarriedRebind,
+    RegionArg,
+    WhileOperation,
+    validate_region_args,
+)
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
-from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
@@ -86,6 +95,7 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
     remap_indexed_identifier,
     remap_value_metadata_references,
@@ -114,7 +124,9 @@ def canonicalize(block: Block) -> Block:
             manifest (carried over verbatim) are preserved.
 
     Raises:
-        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
+        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``,
+            or if a loop operation's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
         NotImplementedError: If an unsupported operation is encountered.
 
     Example:
@@ -150,7 +162,9 @@ def canonicalize_and_remap(
             tracked in separate maps.
 
     Raises:
-        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
+        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``,
+            or if a loop operation's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
         NotImplementedError: If an unsupported operation is encountered.
     """
     if block.kind not in _SUPPORTED_KINDS:
@@ -343,8 +357,8 @@ class _Canonicalizer:
         if cached is not None:
             return cached
 
-        new_input_values: list[Value] = [
-            cast(Value, self.canonical_value(v)) for v in block.input_values
+        new_input_values: list[ValueLike] = [
+            cast(ValueLike, self.canonical_value(v)) for v in block.input_values
         ]
         new_parameters: dict[str, Value] = {
             key: cast(Value, self.canonical_value(block.parameters[key]))
@@ -353,8 +367,8 @@ class _Canonicalizer:
         new_operations: list[Operation] = [
             self.canonical_operation(op) for op in block.operations
         ]
-        new_output_values: list[Value] = [
-            cast(Value, self.canonical_value(v)) for v in block.output_values
+        new_output_values: list[ValueLike] = [
+            cast(ValueLike, self.canonical_value(v)) for v in block.output_values
         ]
 
         new_block = Block(
@@ -393,6 +407,9 @@ class _Canonicalizer:
         Raises:
             NotImplementedError: If ``op`` contains unsupported nested data.
         """
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            validate_region_args(op)
+
         sub_map: dict[str, ValueBase] = {}
         for v in op.all_input_values():
             sub_map[v.uuid] = self.canonical_value(v)
@@ -418,32 +435,11 @@ class _Canonicalizer:
                 ],
             )
 
-        if isinstance(new_op, InvokeOperation) and new_op.definition is not None:
-            definition = new_op.definition
-            body = (
-                self.canonical_block(definition.body)
-                if definition.body is not None
-                else None
-            )
-            implementations = [
-                dataclasses.replace(
-                    implementation,
-                    body=(
-                        self.canonical_block(implementation.body)
-                        if implementation.body is not None
-                        else None
-                    ),
-                )
-                for implementation in definition.implementations
-            ]
-            new_op = dataclasses.replace(
-                new_op,
-                definition=dataclasses.replace(
-                    definition,
-                    body=body,
-                    implementations=implementations,
-                ),
-            )
+        if isinstance(new_op, InvokeOperation) and new_op.body is not None:
+            sub = self.canonical_block(new_op.body)
+            assert new_op.definition is not None
+            definition = dataclasses.replace(new_op.definition, body=sub)
+            new_op = dataclasses.replace(new_op, definition=definition)
         if isinstance(new_op, InverseBlockOperation):
             if new_op.source_block is not None:
                 sub = self.canonical_block(new_op.source_block)
@@ -459,13 +455,6 @@ class _Canonicalizer:
         if isinstance(new_op, ControlledUOperation) and new_op.block is not None:
             sub_block = self.canonical_block(new_op.block)
             new_op = dataclasses.replace(new_op, block=sub_block)
-        if isinstance(new_op, SelectOperation):
-            new_op = dataclasses.replace(
-                new_op,
-                case_blocks=[
-                    self.canonical_block(block) for block in new_op.case_blocks
-                ],
-            )
 
         return new_op
 
@@ -503,7 +492,7 @@ class _Canonicalizer:
         cloned: ValueBase
         if isinstance(value, TupleValue):
             new_elements = tuple(
-                cast(Value, self.canonical_value(e)) for e in value.elements
+                cast(ValueLike, self.canonical_value(e)) for e in value.elements
             )
             cloned = dataclasses.replace(
                 value,
@@ -687,6 +676,18 @@ def _token(obj: Any) -> str:
         return _value_token(obj)
     if isinstance(obj, ValueType):
         return f"Type<{obj.label()}>"
+    if isinstance(obj, (RegionArg, LoopCarriedRebind, BranchRebind)):
+        # ``var_name`` is a display-only diagnostic label and must not
+        # perturb content identity; every other field participates.
+        # Iterate the dataclass fields dynamically so a functional field
+        # added later is hashed automatically instead of being silently
+        # ignored by a hand-frozen list.
+        parts = ",".join(
+            f"{field.name}={_token(getattr(obj, field.name))}"
+            for field in dataclasses.fields(obj)
+            if field.name != "var_name"
+        )
+        return f"{type(obj).__name__}({parts})"
     if isinstance(obj, (list, tuple)):
         return "[" + ",".join(_token(x) for x in obj) + "]"
     if isinstance(obj, dict):
@@ -882,15 +883,10 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
             for child in child_list:
                 _collect_from_operation(child, visit)
     if isinstance(op, InvokeOperation):
-        definition = op.definition
-        if definition is not None:
-            if definition.body is not None:
-                # Nested block's values participate in the same canonical
-                # universe; recurse to ensure they are declared too.
-                _collect_from_subblock(definition.body, visit)
-            for implementation in definition.implementations:
-                if implementation.body is not None:
-                    _collect_from_subblock(implementation.body, visit)
+        if op.body is not None:
+            # Nested block's values participate in the same canonical
+            # universe; recurse to ensure they are declared too.
+            _collect_from_subblock(op.body, visit)
     if isinstance(op, InverseBlockOperation):
         if op.source_block is not None:
             _collect_from_subblock(op.source_block, visit)
@@ -898,9 +894,6 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
             _collect_from_subblock(op.implementation_block, visit)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _collect_from_subblock(op.block, visit)
-    if isinstance(op, SelectOperation):
-        for case_block in op.case_blocks:
-            _collect_from_subblock(case_block, visit)
 
 
 def _collect_from_subblock(sub: Block, visit: Any) -> None:
@@ -944,12 +937,11 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         "implementation_block",
         "source_block",
         "block",
-        "case_blocks",
-        # CallableDef contains nested Blocks and an optional opaque emitter.
-        # It is emitted structurally by ``_emit_callable_definition`` below;
-        # generic dataclass tokenization would double-print bodies and leak
-        # non-portable Python emitter reprs into the content hash.
-        "definition",
+        # Control-flow source labels. Their UUID-bearing formal Values and
+        # operation structure carry the semantics.
+        "loop_var",
+        "key_vars",
+        "value_var",
     }
 )
 
@@ -1075,8 +1067,9 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
             for child in child_list:
                 _emit_operation(child, out, indent + 2)
 
-    if isinstance(op, InvokeOperation):
-        _emit_callable_definition(op.definition, out, indent + 1)
+    if isinstance(op, InvokeOperation) and op.body is not None:
+        out.append(f"{pad}{_INLINE_INDENT}body:")
+        _emit_block(op.body, out, indent + 2)
     if isinstance(op, InverseBlockOperation):
         if op.source_block is not None:
             out.append(f"{pad}{_INLINE_INDENT}source:")
@@ -1088,66 +1081,6 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
     if isinstance(op, ControlledUOperation) and op.block is not None:
         out.append(f"{pad}{_INLINE_INDENT}unitary_block:")
         _emit_block(op.block, out, indent + 2)
-    if isinstance(op, SelectOperation):
-        for index, case_block in enumerate(op.case_blocks):
-            out.append(f"{pad}{_INLINE_INDENT}case[{index}]:")
-            _emit_block(case_block, out, indent + 2)
-
-
-def _emit_callable_definition(
-    definition: CallableDef | None,
-    out: list[str],
-    indent: int,
-) -> None:
-    """Append a callable definition without opaque Python emitter identity.
-
-    Callable bodies are emitted as canonical Blocks rather than through the
-    generic dataclass tokenizer. Native emitter objects are intentionally
-    omitted because their Python ``repr`` and identity are process-local;
-    stable implementation identity must be carried by ``backend``,
-    ``strategy``, ``body_ref``, or serializer-friendly ``attrs``.
-
-    Args:
-        definition (CallableDef | None): Definition attached to an invocation.
-        out (list[str]): Output line buffer; appended to in place.
-        indent (int): Current indentation level in ``_INLINE_INDENT`` units.
-
-    Returns:
-        None: The function appends to ``out`` in place.
-    """
-    pad = _INLINE_INDENT * indent
-    if definition is None:
-        out.append(f"{pad}definition=None")
-        return
-
-    metadata = {
-        "attrs": definition.attrs,
-        "body_ref": definition.body_ref,
-        "default_policy": definition.default_policy,
-        "opaque_cost": definition.opaque_cost,
-        "ref": definition.ref,
-        "signature": definition.signature,
-    }
-    out.append(f"{pad}definition={_token(metadata)}")
-    if definition.body is not None:
-        out.append(f"{pad}{_INLINE_INDENT}body:")
-        _emit_block(definition.body, out, indent + 2)
-
-    for index, implementation in enumerate(definition.implementations):
-        implementation_metadata = {
-            "attrs": implementation.attrs,
-            "backend": implementation.backend,
-            "body_ref": implementation.body_ref,
-            "strategy": implementation.strategy,
-            "transform": implementation.transform,
-        }
-        out.append(
-            f"{pad}{_INLINE_INDENT}implementation[{index}]="
-            f"{_token(implementation_metadata)}"
-        )
-        if implementation.body is not None:
-            out.append(f"{pad}{_INLINE_INDENT * 2}body:")
-            _emit_block(implementation.body, out, indent + 3)
 
 
 def _extra_field_tokens(op: Operation) -> list[str]:

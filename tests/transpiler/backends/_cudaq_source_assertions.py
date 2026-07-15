@@ -8,14 +8,12 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from qamomile.circuit.transpiler.passes.emit import EmitPass
-from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.cudaq.emitter import (
     CudaqKernelArtifact,
     CudaqKernelEmitter,
     ExecutionMode,
 )
-from qamomile.cudaq.transpiler import CudaqEmitPass, CudaqTranspiler
+from qamomile.cudaq.transpiler import CudaqTranspiler
 
 _TRACE_ATTR = "_cudaq_source_trace"
 
@@ -203,31 +201,6 @@ class _ExpectedCudaqSourceBuilder:
             else:
                 self._emit(f"x(q[{target}])")
             return
-        if kind == "controlled_kernel_call":
-            helper_name, controls, targets, uses_thetas = args
-            if len(controls) == 1:
-                control_src = f"q[{controls[0]}]"
-            else:
-                control_src = "[" + ", ".join(f"q[{index}]" for index in controls) + "]"
-            call_args = [
-                helper_name,
-                control_src,
-                *[f"q[{index}]" for index in targets],
-            ]
-            if uses_thetas:
-                call_args.append("thetas")
-            self._emit(f"cudaq.control({', '.join(call_args)})")
-            return
-        if kind == "adjoint_kernel_call":
-            helper_name, targets, uses_thetas = args
-            call_args = [
-                helper_name,
-                *[f"q[{index}]" for index in targets],
-            ]
-            if uses_thetas:
-                call_args.append("thetas")
-            self._emit(f"cudaq.adjoint({', '.join(call_args)})")
-            return
         if kind == "measure":
             qubit, clbit = args
             if self._mode == ExecutionMode.RUNNABLE:
@@ -238,26 +211,6 @@ class _ExpectedCudaqSourceBuilder:
             return
         if kind == "barrier":
             return
-        if kind == "if_start":
-            self._emit(f"if {self._clbit_ref(args[0])}:")
-            self._indent += 1
-            return
-        if kind == "else_start":
-            self._indent -= 1
-            self._emit("else:")
-            self._indent += 1
-            return
-        if kind == "if_end":
-            self._indent -= 1
-            return
-        if kind == "while_start":
-            self._emit(f"while {self._clbit_ref(args[0])}:")
-            self._indent += 1
-            return
-        if kind == "while_end":
-            self._indent -= 1
-            return
-
         raise AssertionError(f"Unsupported CUDA-Q emission action: {kind}")
 
 
@@ -328,8 +281,6 @@ class TracingCudaqKernelEmitter(CudaqKernelEmitter):
         return finalized
 
     def _record(self, circuit: CudaqKernelArtifact, kind: str, *args: Any) -> None:
-        if getattr(self, "_suppress_trace", False):
-            return
         _get_trace(circuit).append(EmissionAction(kind, args))
 
     def emit_h(self, circuit: CudaqKernelArtifact, qubit: int) -> None:
@@ -498,111 +449,9 @@ class TracingCudaqKernelEmitter(CudaqKernelEmitter):
         )
         super().emit_multi_controlled_x(circuit, control_indices, target_idx)
 
-    def emit_controlled_kernel_call(
-        self,
-        circuit: CudaqKernelArtifact,
-        helper_name: str,
-        control_indices: list[int],
-        target_indices: list[int],
-        uses_thetas: bool,
-    ) -> None:
-        self._record(
-            circuit,
-            "controlled_kernel_call",
-            helper_name,
-            list(control_indices),
-            list(target_indices),
-            uses_thetas,
-        )
-        super().emit_controlled_kernel_call(
-            circuit,
-            helper_name,
-            control_indices,
-            target_indices,
-            uses_thetas,
-        )
-
-    def emit_adjoint_kernel_call(
-        self,
-        circuit: CudaqKernelArtifact,
-        helper_name: str,
-        target_indices: list[int],
-        uses_thetas: bool,
-    ) -> None:
-        self._record(
-            circuit,
-            "adjoint_kernel_call",
-            helper_name,
-            list(target_indices),
-            uses_thetas,
-        )
-        super().emit_adjoint_kernel_call(
-            circuit,
-            helper_name,
-            target_indices,
-            uses_thetas,
-        )
-
-    def emit_if_start(
-        self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
-    ) -> dict[str, Any]:
-        self._record(circuit, "if_start", clbit, value)
-        return super().emit_if_start(circuit, clbit, value)
-
-    def emit_else_start(
-        self, circuit: CudaqKernelArtifact, context: dict[str, Any]
-    ) -> None:
-        self._record(circuit, "else_start")
-        super().emit_else_start(circuit, context)
-
-    def emit_if_end(
-        self, circuit: CudaqKernelArtifact, context: dict[str, Any]
-    ) -> None:
-        self._record(circuit, "if_end")
-        super().emit_if_end(circuit, context)
-
-    def emit_while_start(
-        self, circuit: CudaqKernelArtifact, clbit: int, value: int = 1
-    ) -> dict[str, Any]:
-        self._record(circuit, "while_start", clbit, value)
-        return super().emit_while_start(circuit, clbit, value)
-
-    def emit_while_end(
-        self, circuit: CudaqKernelArtifact, context: dict[str, Any]
-    ) -> None:
-        self._record(circuit, "while_end")
-        super().emit_while_end(circuit, context)
-
-
-class ValidatingCudaqEmitPass(CudaqEmitPass):
-    """CUDA-Q emit pass wired to the tracing test emitter."""
-
-    def __init__(
-        self,
-        bindings: dict[str, Any] | None = None,
-        parameters: list[str] | None = None,
-    ) -> None:
-        parametric = bool(parameters)
-        emitter = TracingCudaqKernelEmitter(parametric=parametric)
-        composite_emitters: list[Any] = []
-        StandardEmitPass.__init__(
-            self,
-            emitter,
-            bindings,
-            parameters,
-            composite_emitters,
-        )
-
 
 class ValidatingCudaqTranspiler(CudaqTranspiler):
     """CUDA-Q transpiler that validates generated source on every transpile."""
-
-    def _create_emit_pass(
-        self,
-        bindings: dict[str, Any] | None = None,
-        parameters: list[str] | None = None,
-    ) -> EmitPass[CudaqKernelArtifact]:
-        return ValidatingCudaqEmitPass(bindings, parameters)
 
     def transpile(self, *args: Any, **kwargs: Any) -> Any:
         """Transpile and verify that inspectable source matches every artifact."""

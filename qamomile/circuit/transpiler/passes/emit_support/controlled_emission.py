@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -25,9 +24,18 @@ from qamomile.circuit.ir.operation import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
 )
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
+)
 from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
-from qamomile.circuit.ir.operation.control_flow import ForOperation, HasNestedOps
+from qamomile.circuit.ir.operation.control_flow import (
+    ForOperation,
+    HasNestedOps,
+    IfOperation,
+)
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
@@ -38,11 +46,24 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    block_parameter_binding_keys,
+    pair_block_parameter_operands,
+)
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+    _set_emit_value,
     evaluate_binop,
+    evaluate_classical_predicate,
+)
+from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
+    remap_static_merge_outputs,
+    resolve_if_condition,
+)
+from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+    register_classical_merge_aliases,
+    resolve_loop_bounds,
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
     reject_duplicate_physical_indices,
@@ -100,67 +121,6 @@ def _checked_append_gate(
     """
     reject_duplicate_physical_indices(gate_label, qubit_indices)
     emit_pass._emitter.append_gate(circuit, gate, qubit_indices)
-
-
-def zero_control_physical_indices(
-    control_values: tuple[int, ...],
-    control_indices: list[int],
-    *,
-    operation: str,
-) -> list[int]:
-    """Resolve an activation pattern to physical anti-control qubits.
-
-    Args:
-        control_values (tuple[int, ...]): Empty for ordinary controls, or one
-            binary activation value per control.
-        control_indices (list[int]): Physical control qubits in operand order.
-        operation (str): Operation name for diagnostics.
-
-    Returns:
-        list[int]: Physical controls that fire on ``|0>``.
-
-    Raises:
-        EmitError: If a non-empty pattern has the wrong width.
-    """
-    if not control_values:
-        return []
-    if len(control_values) != len(control_indices):
-        raise EmitError(
-            f"control_values length ({len(control_values)}) does not match "
-            f"the number of resolved controls ({len(control_indices)}).",
-            operation=operation,
-        )
-    return [
-        physical
-        for value, physical in zip(control_values, control_indices, strict=True)
-        if value == 0
-    ]
-
-
-@contextmanager
-def bracket_zero_controls(
-    emit_pass: "StandardEmitPass",
-    circuit: Any,
-    zero_control_indices: list[int],
-) -> Iterator[None]:
-    """Bracket anti-controls with X gates during controlled emission.
-
-    Args:
-        emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being built.
-        zero_control_indices (list[int]): Physical controls that fire on
-            ``|0>``.
-
-    Yields:
-        None: Control returns while the zero-controls are inverted.
-    """
-    for physical in zero_control_indices:
-        emit_pass._emitter.emit_x(circuit, physical)
-    try:
-        yield
-    finally:
-        for physical in reversed(zero_control_indices):
-            emit_pass._emitter.emit_x(circuit, physical)
 
 
 def emit_controlled_powers(
@@ -241,91 +201,6 @@ def emit_controlled_block(
         block_value.operations,
         [control_idx],
         qubit_map,
-        bindings,
-    )
-
-
-def emit_controlled_block_at_indices(
-    emit_pass: "StandardEmitPass",
-    circuit: Any,
-    block_value: Any,
-    num_controls: int,
-    control_indices: list[int],
-    target_indices: list[int],
-    power: int,
-    bindings: dict[str, Any],
-    *,
-    input_operands: list[Value] | None = None,
-    operation_name: str = "ControlledUOperation",
-) -> None:
-    """Emit a block under an already-resolved physical control set.
-
-    Reusable backend gates are preferred; the mapped controlled walker is the
-    fallback. SELECT and ordinary controlled calls share this function so
-    alias checks, power handling, and fallback selection cannot diverge.
-
-    Args:
-        emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being built.
-        block_value (Any): Prepared unitary block.
-        num_controls (int): Number of physical controls.
-        control_indices (list[int]): Physical control qubits.
-        target_indices (list[int]): Physical target qubits.
-        power (int): Positive repetition count.
-        bindings (dict[str, Any]): Bindings visible in the block.
-        input_operands (list[Value] | None): Optional actual block operands
-            used during reusable-gate construction. Defaults to ``None``.
-        operation_name (str): Diagnostic operation name.
-
-    Raises:
-        EmitError: If control metadata is inconsistent or the block cannot be
-            emitted under the requested controls.
-    """
-    if num_controls != len(control_indices):
-        raise EmitError(
-            f"num_controls={num_controls} does not match "
-            f"control_indices={control_indices!r}.",
-            operation=operation_name,
-        )
-    if input_operands is None and operation_name == "ControlledUOperation":
-        # Preserve the historical three-argument override contract for the
-        # ordinary controlled-U path. The extended keyword arguments are only
-        # needed for operation-owned call bodies such as SELECT cases.
-        unitary_gate = emit_pass._blockvalue_to_gate(
-            block_value,
-            len(target_indices),
-            bindings,
-        )
-    else:
-        unitary_gate = emit_pass._blockvalue_to_gate(
-            block_value,
-            len(target_indices),
-            bindings,
-            input_operands=input_operands,
-            operation_name=operation_name,
-        )
-    if unitary_gate is not None:
-        if power > 1:
-            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power)
-        controlled_gate = emit_pass._emitter.gate_controlled(
-            unitary_gate,
-            num_controls,
-        )
-        _checked_append_gate(
-            emit_pass,
-            circuit,
-            controlled_gate,
-            [*control_indices, *target_indices],
-            operation_name,
-        )
-        return
-    emit_pass._emit_controlled_fallback(
-        circuit,
-        block_value,
-        num_controls,
-        control_indices,
-        target_indices,
-        power,
         bindings,
     )
 
@@ -416,7 +291,7 @@ def _batch_op_weight(
         int: 0 for ops that emit nothing, 1 for a single controlled gate,
             2 for constructs that on their own justify batching.
     """
-    if isinstance(op, (BinOp, ReturnOperation)):
+    if isinstance(op, (BinOp, CompOp, CondOp, NotOp, ReturnOperation)):
         return 0
     if isinstance(op, GateOperation):
         return 1
@@ -432,6 +307,12 @@ def _batch_op_weight(
         return 2
     if isinstance(op, ForOperation):
         return _for_batch_weight(emit_pass, op, bindings)
+    if isinstance(op, IfOperation):
+        resolved = resolve_if_condition(op.condition, bindings)
+        if resolved is None:
+            return 1
+        selected = op.true_operations if resolved else op.false_operations
+        return _controlled_body_batch_weight(emit_pass, selected, bindings)
     if isinstance(op, InvokeOperation):
         block = op.effective_body(backend=getattr(emit_pass, "backend_name", None))
         if block is None:
@@ -472,10 +353,6 @@ def _for_batch_weight(
     Returns:
         int: The loop's batch weight (0, 1, or 2).
     """
-    from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-        resolve_loop_bounds,
-    )
-
     start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
     if start is None or stop is None or step is None or step == 0:
         # Unresolvable bounds make the non-batch walker raise the same
@@ -677,22 +554,21 @@ def emit_controlled_operations(
             _propagate_controlled_gate_results(op, gate_targets, qubit_map)
         elif isinstance(op, BinOp):
             evaluate_binop(emit_pass, op, bindings)
-        elif isinstance(op, ControlledUOperation):
-            _emit_nested_controlled_u(
-                emit_pass, circuit, op, control_indices, qubit_map, bindings
-            )
-        elif isinstance(op, SelectOperation):
-            from qamomile.circuit.transpiler.passes.emit_support.select_emission import (
-                emit_controlled_select,
-            )
-
-            emit_controlled_select(
+        elif isinstance(op, (CompOp, CondOp, NotOp)):
+            evaluate_classical_predicate(emit_pass, op, bindings)
+        elif isinstance(op, IfOperation):
+            emit_static_controlled_if(
                 emit_pass,
                 circuit,
                 op,
                 control_indices,
                 qubit_map,
                 bindings,
+                walker=emit_controlled_operations,
+            )
+        elif isinstance(op, ControlledUOperation):
+            _emit_nested_controlled_u(
+                emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
         elif isinstance(op, InvokeOperation):
             composite_control_groups = [
@@ -779,33 +655,20 @@ def emit_controlled_operations(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
         elif isinstance(op, ForOperation):
-            from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-                _bind_loop_var,
-                resolve_loop_bounds,
+            replay_controlled_for(
+                emit_pass,
+                circuit,
+                op,
+                control_indices,
+                qubit_map,
+                bindings,
+                walker=emit_controlled_operations,
             )
-
-            start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
-            if start is not None and stop is not None and step is not None:
-                for i in range(start, stop, step):
-                    loop_bindings = bindings.copy()
-                    _bind_loop_var(loop_bindings, op, i)
-                    emit_controlled_operations(
-                        emit_pass,
-                        circuit,
-                        op.operations,
-                        control_indices,
-                        qubit_map,
-                        loop_bindings,
-                    )
-            else:
-                raise EmitError(
-                    "Cannot resolve ForOperation bounds in controlled block. "
-                    "Loop bounds must be resolvable at transpile time."
-                )
         elif isinstance(op, HasNestedOps):
             raise EmitError(
                 f"Unsupported control flow {type(op).__name__} in controlled "
-                f"block decomposition. Only ForOperation is supported.",
+                "block decomposition. Only compile-time-resolved IfOperation "
+                "and statically bounded ForOperation bodies are supported.",
                 operation="ControlledGate",
             )
         elif isinstance(op, ReturnOperation):
@@ -816,6 +679,155 @@ def emit_controlled_operations(
                 f"block decomposition.",
                 operation="ControlledGate",
             )
+
+
+def replay_controlled_for(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: ForOperation,
+    control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+    *,
+    walker: Callable[..., None],
+) -> None:
+    """Replay one static range loop under accumulated quantum controls.
+
+    Controlled blocks use a specialized operation walker because every
+    quantum gate in the body must inherit the outer controls.  Reusing only
+    the old loop-variable binding logic here skipped the loop's explicit
+    ``RegionArg`` protocol, so a scalar recurrence such as ``index += 1``
+    either stayed pinned to its initial value or became unresolved.  This
+    helper shares the canonical emit-time carry primitives with ordinary
+    loop emission and accepts the backend-specific controlled walker as a
+    callback.  Nested range loops therefore replay recursively with the same
+    ``init -> block_arg -> yielded -> result`` semantics on every backend.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass and value resolver.
+        circuit (Any): Backend circuit being constructed.
+        op (ForOperation): Static range loop to replay.
+        control_indices (list[int]): Physical controls accumulated from the
+            enclosing controlled operations.
+        qubit_map (QubitMap): Mutable block-local qubit map.
+        bindings (dict[str, Any]): Bindings visible before the loop.  Final
+            RegionArg results and the final loop variable are published here.
+        walker (Callable[..., None]): Controlled operation walker with the
+            same leading arguments as :func:`emit_controlled_operations`.
+
+    Returns:
+        None: The callback appends operations to ``circuit`` in place.
+
+    Raises:
+        EmitError: If the bounds are unresolved or invalid, loop identities
+            are malformed, or a RegionArg value cannot be resolved.
+    """
+    from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+        _advance_region_args,
+        _bind_loop_var,
+        _publish_region_results,
+        _seed_region_args,
+        resolve_loop_bounds,
+        validated_loop_indexset,
+    )
+
+    if op.loop_var_value is None:
+        raise EmitError(
+            f"ForOperation '{op.loop_var or '<unnamed>'}' has no "
+            "loop_var_value; the IR must be rebuilt with the current frontend.",
+            operation="ForOperation",
+        )
+    start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
+    if start is None or stop is None or step is None:
+        raise EmitError(
+            "Cannot resolve ForOperation bounds in controlled block. "
+            "Loop bounds must be resolvable at transpile time.",
+            operation="ControlledUOperation",
+        )
+
+    indexset = validated_loop_indexset(start, stop, step)
+    carried = _seed_region_args(emit_pass, op, bindings)
+    last_index: int | None = None
+    for index in indexset:
+        last_index = index
+        loop_bindings = bindings.copy()
+        for value_uuid, carried_value in carried.items():
+            _set_emit_value(loop_bindings, value_uuid, carried_value)
+        _bind_loop_var(loop_bindings, op, index)
+        walker(
+            emit_pass,
+            circuit,
+            op.operations,
+            control_indices,
+            qubit_map,
+            loop_bindings,
+        )
+        _advance_region_args(emit_pass, op, carried, loop_bindings)
+
+    _publish_region_results(op, carried, bindings)
+    if last_index is not None:
+        _bind_loop_var(bindings, op, last_index)
+
+
+def emit_static_controlled_if(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: IfOperation,
+    control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+    walker: Callable[..., None],
+) -> None:
+    """Emit the selected branch of a static if under accumulated controls.
+
+    This is the common safety net for controlled-body walkers. Compile-time
+    lowering normally removes these nodes earlier, but a loop induction value
+    can make the condition concrete only while emit unrolls that iteration.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (IfOperation): Static branch to resolve and emit.
+        control_indices (list[int]): Accumulated physical control qubits.
+        qubit_map (QubitMap): Mutable block-local qubit map.
+        bindings (dict[str, Any]): Bindings visible in the current iteration.
+        walker (Callable[..., None]): Backend controlled-body walker used to
+            emit the selected branch.
+
+    Raises:
+        EmitError: If the condition remains runtime-dependent.
+    """
+    resolved = resolve_if_condition(op.condition, bindings)
+    if resolved is None:
+        raise EmitError(
+            "IfOperation in a controlled unitary must resolve from compile-time "
+            "or loop-iteration bindings before fallback emission. Runtime "
+            "measurement-backed control flow is not unitary.",
+            operation="ControlledGate",
+        )
+    selected = op.true_operations if resolved else op.false_operations
+    walker(
+        emit_pass,
+        circuit,
+        selected,
+        control_indices,
+        qubit_map,
+        bindings,
+    )
+    remap_static_merge_outputs(
+        op,
+        resolved,
+        qubit_map,
+        {},
+        bindings=bindings,
+        resolver=emit_pass._resolver,
+    )
+    register_classical_merge_aliases(
+        emit_pass,
+        op,
+        bindings,
+        resolved,
+    )
 
 
 def _resolve_controlled_gate_targets(
@@ -884,13 +896,10 @@ def _map_operand_result_groups(
 ) -> None:
     """Map result values onto the physical slots of their operands.
 
-    Controlled emission never moves qubits, so each quantum result occupies
-    exactly the physical slots its corresponding operand resolved to. Scalar
-    results get a scalar address; ``ArrayValue`` results get one address per
-    element plus a base address. A scalar result carrying ``parent_array`` /
-    ``element_indices`` metadata also registers the matching array-element
-    alias. Concrete-control and SELECT frontends use that form to return a
-    whole Vector while keeping per-control scalar result slots in the IR.
+    Controlled emission never moves qubits, so each quantum result
+    occupies exactly the physical slots its corresponding operand
+    resolved to. Scalar results get a scalar address; ``ArrayValue``
+    results get one address per element plus a base address.
 
     Args:
         results (list[Any]): Quantum results, paired positionally with
@@ -905,16 +914,7 @@ def _map_operand_result_groups(
         if isinstance(result, ArrayValue):
             map_array_result_group(result.uuid, group, qubit_map)
         elif group:
-            physical = group[0]
-            qubit_map[QubitAddress(result.uuid)] = physical
-            if result.parent_array is None or len(result.element_indices) != 1:
-                continue
-            element_index = result.element_indices[0].get_const()
-            if type(element_index) is not int:
-                continue
-            qubit_map[QubitAddress(result.parent_array.uuid, element_index)] = physical
-            if element_index == 0:
-                qubit_map[QubitAddress(result.parent_array.uuid)] = physical
+            qubit_map[QubitAddress(result.uuid)] = group[0]
 
 
 @dataclasses.dataclass
@@ -929,8 +929,6 @@ class ResolvedControlledU:
         control_phys (list[int]): Active physical control qubits, in
             control-operand order (for the ``control_indices`` form,
             in listed-index order).
-        zero_control_phys (list[int]): Subset of ``control_phys`` that fires
-            on ``|0>``.
         control_operand_groups (list[list[int]]): Physical indices per
             control operand slot. For the ``control_indices`` form this
             is the full pool — every element keeps its slot, whether or
@@ -946,7 +944,6 @@ class ResolvedControlledU:
     """
 
     control_phys: list[int]
-    zero_control_phys: list[int]
     control_operand_groups: list[list[int]]
     target_qubit_operands: list[Any]
     target_index_groups: list[list[int]]
@@ -1086,11 +1083,10 @@ def resolve_controlled_u_call(
                 operation="ControlledUOperation",
             )
 
-    remaining_operands = op.operands[num_control_args:]
-    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [
-        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    target_qubit_operands = [
+        operand for operand in op.target_operands if operand.type.is_quantum()
     ]
+    param_operands = op.param_operands
 
     target_index_groups = [
         _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
@@ -1105,15 +1101,8 @@ def resolve_controlled_u_call(
         emit_pass._resolver, op.block, target_qubit_operands, bindings, local_bindings
     )
 
-    control_values = op.control_values if isinstance(op, ConcreteControlledU) else ()
-    zero_control_phys = zero_control_physical_indices(
-        control_values,
-        control_phys,
-        operation="ControlledUOperation",
-    )
     return ResolvedControlledU(
         control_phys=control_phys,
-        zero_control_phys=zero_control_phys,
         control_operand_groups=control_operand_groups,
         target_qubit_operands=target_qubit_operands,
         target_index_groups=target_index_groups,
@@ -1200,21 +1189,35 @@ def _emit_nested_controlled_u(
     block = _prepare_nested_block_for_emit(resolved.block, resolved.local_bindings)
     power = resolve_power(emit_pass, op, bindings)
 
-    with bracket_zero_controls(
-        emit_pass,
-        circuit,
-        resolved.zero_control_phys,
-    ):
-        emit_controlled_block_at_indices(
+    unitary_gate = emit_pass._blockvalue_to_gate(
+        block, len(resolved.target_phys), resolved.local_bindings
+    )
+    if unitary_gate is not None:
+        if power > 1:
+            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power)
+        controlled_gate = emit_pass._emitter.gate_controlled(
+            unitary_gate, len(composed_controls)
+        )
+        _checked_append_gate(
             emit_pass,
             circuit,
-            block,
-            len(composed_controls),
-            composed_controls,
-            resolved.target_phys,
-            power,
-            resolved.local_bindings,
+            controlled_gate,
+            composed_controls + resolved.target_phys,
+            "controlled gate",
         )
+    else:
+        inner_map = build_controlled_block_qubit_map(
+            emit_pass, block, resolved.target_phys, resolved.local_bindings
+        )
+        for _ in range(power):
+            emit_controlled_operations(
+                emit_pass,
+                circuit,
+                block.operations,
+                composed_controls,
+                inner_map,
+                resolved.local_bindings,
+            )
 
     map_nested_controlled_u_results(op, resolved, qubit_map)
 
@@ -2262,11 +2265,10 @@ def emit_controlled_u_with_symbolic_indices(
         pool_phys.append(qubit_map[addr])
     control_phys = [pool_phys[i] for i in resolved_indices]
 
-    remaining_operands = op.operands[1:]
-    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [
-        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    target_qubit_operands = [
+        operand for operand in op.target_operands if operand.type.is_quantum()
     ]
+    param_operands = op.param_operands
 
     target_indices: list[int] = []
     target_index_groups: list[list[int]] = []
@@ -2424,11 +2426,10 @@ def emit_controlled_u_multi_arg(
             operation="ControlledUOperation",
         )
 
-    remaining_operands = op.operands[op.num_control_args :]
-    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [
-        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    target_qubit_operands = [
+        operand for operand in op.target_operands if operand.type.is_quantum()
     ]
+    param_operands = op.param_operands
 
     target_indices: list[int] = []
     target_index_groups: list[list[int]] = []
@@ -2540,12 +2541,10 @@ def emit_controlled_u(
     nc: int = op.num_controls
     block_value = op.block
     control_operands = op.control_operands
-    remaining_operands = op.operands[nc:]
-
-    target_qubit_operands = [v for v in remaining_operands if v.type.is_quantum()]
-    param_operands = [
-        v for v in remaining_operands if v.type.is_classical() or v.type.is_object()
+    target_qubit_operands = [
+        operand for operand in op.target_operands if operand.type.is_quantum()
     ]
+    param_operands = op.param_operands
 
     # Resolve controls via ``resolve_qubit_index``: frontend Step 2.a
     # normalises ``operands[:num_controls]`` to one scalar per physical
@@ -2609,38 +2608,55 @@ def emit_controlled_u(
     block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
     power_value = resolve_power(emit_pass, op, bindings)
-    zero_controls = zero_control_physical_indices(
-        op.control_values,
-        control_indices,
-        operation="ControlledUOperation",
-    )
-    with bracket_zero_controls(emit_pass, circuit, zero_controls):
-        if _should_emit_single_target_block_per_vector_element(
+    if _should_emit_single_target_block_per_vector_element(
+        block_value, target_qubit_operands, target_indices
+    ):
+        _emit_single_target_block_per_vector_element(
+            emit_pass,
+            circuit,
             block_value,
-            target_qubit_operands,
+            nc,
+            control_indices,
             target_indices,
-        ):
-            _emit_single_target_block_per_vector_element(
-                emit_pass,
-                circuit,
-                block_value,
-                nc,
-                control_indices,
-                target_indices,
-                power_value,
-                local_bindings,
-            )
-        else:
-            emit_controlled_block_at_indices(
-                emit_pass,
-                circuit,
-                block_value,
-                nc,
-                control_indices,
-                target_indices,
-                power_value,
-                local_bindings,
-            )
+            power_value,
+            local_bindings,
+        )
+        _map_controlled_u_results(
+            op,
+            nc,
+            control_indices,
+            target_qubit_operands,
+            target_index_groups,
+            qubit_map,
+        )
+        return
+
+    num_targets = len(target_indices)
+    unitary_gate = emit_pass._blockvalue_to_gate(
+        block_value, num_targets, local_bindings
+    )
+
+    if unitary_gate is not None:
+        if power_value > 1:
+            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power_value)
+        controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
+        _checked_append_gate(
+            emit_pass,
+            circuit,
+            controlled_gate,
+            control_indices + target_indices,
+            "controlled gate",
+        )
+    else:
+        emit_pass._emit_controlled_fallback(
+            circuit,
+            block_value,
+            nc,
+            control_indices,
+            target_indices,
+            power_value,
+            local_bindings,
+        )
 
     _map_controlled_u_results(
         op, nc, control_indices, target_qubit_operands, target_index_groups, qubit_map
@@ -2907,29 +2923,31 @@ def emit_controlled_composite_at_indices(
     selected_impl = op.implementation_for(
         backend=getattr(emit_pass, "backend_name", None)
     )
-    if (
-        selected_impl is not None
-        and selected_impl.body is not None
-        and not control_indices
-    ):
-        emit_custom_composite(
-            emit_pass,
-            circuit,
-            op,
-            selected_impl.body,
-            qubit_indices,
-            bindings,
-        )
-        return
-
     if selected_impl is not None and selected_impl.body is not None:
-        # A transform-specific implementation already realizes the invoke's
-        # own direct/inverse/controlled semantics. Enclosing controls still
-        # have to control that complete body.
+        if not control_indices:
+            emit_pass._emit_custom_composite(
+                circuit,
+                op,
+                selected_impl.body,
+                qubit_indices,
+                bindings,
+            )
+            return
+        # A transform-specific body already implements the invocation's own
+        # control/inverse semantics. Treat all of its qubits as body targets
+        # and apply only the controls accumulated from enclosing blocks.
         impl = selected_impl.body
         body_qubits = qubit_indices
         body_operands = op.operands
         all_controls = list(control_indices)
+    elif op.transform is CallTransform.INVERSE:
+        raise EmitError(
+            f"Inverse callable '{op.target.name}' has no inverse "
+            "implementation body for this backend. Bind structural "
+            "parameters at compile time so the inverse can be "
+            "materialized, or register an inverse implementation.",
+            operation=f"InvokeOperation[{op.target.name}]",
+        )
     else:
         own_control_count = (
             op.num_control_qubits if op.transform is CallTransform.CONTROLLED else 0
@@ -2938,12 +2956,13 @@ def emit_controlled_composite_at_indices(
         body_qubits = qubit_indices[own_control_count:]
         body_operands = op.operands[own_control_count:]
         all_controls = [*control_indices, *own_controls]
+
         impl = op.body
-    if impl is None:
-        raise EmitError(
-            "Cannot emit controlled invocation without an implementation block.",
-            operation="InvokeOperation",
-        )
+        if impl is None:
+            raise EmitError(
+                "Cannot emit controlled invocation without an implementation block.",
+                operation="InvokeOperation",
+            )
 
     num_qubits = len(body_qubits)
     custom_gate = emit_pass._blockvalue_to_gate(
@@ -3075,32 +3094,38 @@ def blockvalue_to_gate(
             operation_name=operation_name,
         )
 
-        local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
-            block_value.operations,
-            local_bindings,
-            initial_qubit_map=local_qubit_map,
-            initial_clbit_map=local_clbit_map,
-        )
-
-        qubit_count = (
-            max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
-        )
-        sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
-
-        # The segment ancilla pool addresses the parent circuit; suspend
-        # it so a multi-controlled gate inside this block cannot index it
-        # against the narrower sub-circuit. If one is present, the shared
-        # cascade raises EmitError (caught below) and the caller falls
-        # back to gate-by-gate emission on the parent circuit.
-        with emit_pass._suspended_mc_ancilla_pool():
-            emit_pass._emit_operations(
-                sub_circuit,
+        # The nested allocate() below recomputes the allocator's
+        # segment-level analysis state (measurement taint, safe-merge
+        # allowlist, counters) for the SUB-block; snapshot it so later
+        # iteration replays of the enclosing segment keep consulting
+        # the segment's own sets.
+        with emit_pass._allocator.preserving_analysis_state():
+            local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
                 block_value.operations,
-                local_qubit_map,
-                local_clbit_map,
                 local_bindings,
-                force_unroll=True,
+                initial_qubit_map=local_qubit_map,
+                initial_clbit_map=local_clbit_map,
             )
+
+            qubit_count = (
+                max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
+            )
+            sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
+
+            # The segment ancilla pool addresses the parent circuit; suspend
+            # it so a multi-controlled gate inside this block cannot index it
+            # against the narrower sub-circuit. If one is present, the shared
+            # cascade raises EmitError (caught below) and the caller falls
+            # back to gate-by-gate emission on the parent circuit.
+            with emit_pass._suspended_mc_ancilla_pool():
+                emit_pass._emit_operations(
+                    sub_circuit,
+                    block_value.operations,
+                    local_qubit_map,
+                    local_clbit_map,
+                    local_bindings,
+                    force_unroll=True,
+                )
 
         return emit_pass._emitter.circuit_to_gate(sub_circuit, "U")
 
@@ -3147,25 +3172,29 @@ def _bind_block_inputs(
     if input_operands is None or not hasattr(block_value, "input_values"):
         return local_bindings
 
-    quantum_inputs = [
-        formal
-        for formal in block_value.input_values
-        if hasattr(formal, "type") and formal.type.is_quantum()
+    for formal in block_value.input_values:
+        if not (formal.type.is_classical() or formal.type.is_object()):
+            continue
+        for key in block_parameter_binding_keys(formal):
+            local_bindings.pop(key, None)
+    param_operands = [
+        cast(Value, operand)
+        for operand in input_operands
+        if hasattr(operand, "type")
+        and (operand.type.is_classical() or operand.type.is_object())
     ]
-    classical_inputs = [
-        formal
-        for formal in block_value.input_values
-        if not (hasattr(formal, "type") and formal.type.is_quantum())
-    ]
-    classical_operands = list(input_operands[len(quantum_inputs) :])
-
-    for formal, actual in zip(classical_inputs, classical_operands):
-        if hasattr(formal, "uuid"):
-            local_bindings[formal.uuid] = _resolve_call_operand(
-                emit_pass,
-                actual,
-                bindings,
-            )
+    for formal, actual in pair_block_parameter_operands(
+        block_value,
+        param_operands,
+    ):
+        inner_keys = block_parameter_binding_keys(formal)
+        resolved = _resolve_call_operand(
+            emit_pass,
+            actual,
+            bindings,
+        )
+        for key in inner_keys:
+            local_bindings[key] = resolved
 
     return local_bindings
 
@@ -3255,12 +3284,11 @@ def _quantum_input_operands(
     """
     if input_operands is None or not hasattr(block_value, "input_values"):
         return []
-    quantum_input_count = sum(
-        1
-        for input_value in block_value.input_values
-        if hasattr(input_value, "type") and input_value.type.is_quantum()
-    )
-    return list(input_operands[:quantum_input_count])
+    return [
+        operand
+        for operand in input_operands
+        if hasattr(operand, "type") and operand.type.is_quantum()
+    ]
 
 
 def _remap_local_qubit_map(
@@ -3381,15 +3409,16 @@ def _prepare_nested_block_for_emit(
     bindings: dict[str, Any],
     _seen: set[int] | None = None,
 ) -> Any:
-    """Partially evaluate and validate an operation-owned Block for emission.
+    """Run nested-block slice checks and remove emit-only markers.
 
     Top-level blocks pass through ``SliceBorrowCheckPass`` and
-    ``StripSliceArrayOpsPass`` before segmentation and emission, and they also
-    undergo partial evaluation. A ``ControlledUOperation``, SELECT case, or
-    custom composite carries its inner ``Block`` as an operation field rather
-    than as regular control-flow children, so generic pass visitors do not
-    descend into it. Apply those same invariants here before a nested block is
-    converted to a backend gate or emitted through a fallback path.
+    ``StripSliceArrayOpsPass`` before segmentation and emission, but a
+    ``ControlledUOperation`` or custom composite carries its inner
+    ``Block`` as an operation field rather than as regular control-flow
+    children. Generic pass visitors therefore do not descend into that
+    nested block. Apply the same invariant here before any nested block
+    with slice markers is converted to a backend gate or emitted through
+    a fallback path.
 
     Args:
         block_value (Any): Candidate nested block to normalize.
@@ -3397,17 +3426,19 @@ def _prepare_nested_block_for_emit(
             the nested block.
 
     Returns:
-        Any: ``block_value`` after partial evaluation and, when needed,
-            ``SliceBorrowCheckPass`` plus marker stripping. Non-Block inputs
-            are returned unchanged.
+        Any: ``block_value`` after ``SliceBorrowCheckPass`` and marker
+        stripping when it is a ``Block`` containing slice markers; otherwise
+        the original object unchanged.
 
     Raises:
         EmitError: If the marker-bearing block is already past the stages
             that can be safely checked.
-        ValidationError: If ``SliceBorrowCheckPass`` rejects the block
-            stage.
-        SliceBorrowViolationError: If nested slice borrows violate the
-            same linearity rules enforced for top-level blocks.
+        ValidationError: If ``SliceBorrowCheckPass`` rejects the block stage
+            or cannot represent nested ownership across control flow.
+        QubitBorrowConflictError: If nested slice views have overlapping live
+            ownership.
+        QubitConsumedError: If the nested block accesses a qubit slot after a
+            destructive operation consumed it.
     """
     if not isinstance(block_value, Block):
         return block_value
@@ -3419,20 +3450,6 @@ def _prepare_nested_block_for_emit(
     seen.add(block_id)
 
     try:
-        if block_value.kind == BlockKind.TRACED:
-            block_value = dataclasses.replace(
-                block_value,
-                kind=BlockKind.HIERARCHICAL,
-            )
-        if block_value.kind in (BlockKind.HIERARCHICAL, BlockKind.AFFINE):
-            # Import lazily to avoid making the emit-support module graph depend
-            # on the high-level pass orchestration during module initialization.
-            from qamomile.circuit.transpiler.passes.partial_eval import (
-                PartialEvaluationPass,
-            )
-
-            block_value = PartialEvaluationPass(bindings).run(block_value)
-
         block_value = _prepare_nested_operation_blocks(block_value, bindings, seen)
         if not _contains_slice_markers(block_value.operations, seen):
             return block_value
@@ -3447,7 +3464,9 @@ def _prepare_nested_block_for_emit(
             StripSliceArrayOpsPass,
         )
 
-        if block_value.kind not in (BlockKind.HIERARCHICAL, BlockKind.AFFINE):
+        if block_value.kind == BlockKind.TRACED:
+            block_value = dataclasses.replace(block_value, kind=BlockKind.HIERARCHICAL)
+        elif block_value.kind not in (BlockKind.HIERARCHICAL, BlockKind.AFFINE):
             raise EmitError(
                 f"Cannot normalize nested slice markers in {block_value.kind} block "
                 f"{block_value.name!r}; slice markers must be checked before "

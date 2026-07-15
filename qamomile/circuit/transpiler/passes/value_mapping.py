@@ -15,6 +15,7 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
     remap_indexed_identifier,
     remap_value_metadata_references,
@@ -192,7 +193,7 @@ class UUIDRemapper:
         if isinstance(value, TupleValue):
             # Clone tuple elements
             new_elements = tuple(
-                cast(Value, self.clone_value(e)) for e in value.elements
+                cast(ValueLike, self.clone_value(e)) for e in value.elements
             )
             cloned = dataclasses.replace(
                 value,

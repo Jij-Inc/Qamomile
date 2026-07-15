@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 import sympy as sp
 
 from qamomile.circuit.estimator._loop_executor import symbolic_iterations
-from qamomile.circuit.estimator._resolver import ExprResolver
+from qamomile.circuit.estimator._resolver import ExprResolver, UnresolvedValueError
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
     CallTransform,
@@ -37,9 +37,19 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.operation.select import SelectOperation
-from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    FloatType,
+    QubitType,
+    UIntType,
+)
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    ValueBase,
+    resolve_root_array_index,
+)
+from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
     find_measurement_derived_values,
@@ -53,6 +63,51 @@ if TYPE_CHECKING:
 ResourceExpr = sp.Expr
 _ZERO = sp.Integer(0)
 _ONE = sp.Integer(1)
+
+
+def _typed_value_symbol(
+    value: ValueBase,
+    name: str,
+    *,
+    fresh: bool = False,
+) -> sp.Symbol:
+    """Create a symbolic scalar matching an IR value's domain.
+
+    Args:
+        value (ValueBase): IR value whose type supplies the symbol
+            assumptions.
+        name (str): Human-readable symbol name.
+        fresh (bool): Whether to create an identity-distinct ``Dummy``
+            instead of a same-name ``Symbol``. Defaults to False.
+
+    Returns:
+        sp.Symbol: A real symbol for Float, a nonnegative integer for
+            UInt/Bit, or an unconstrained symbol for other value types.
+    """
+    factory = sp.Dummy if fresh else sp.Symbol
+    if isinstance(value.type, FloatType):
+        return factory(name, real=True)
+    if isinstance(value.type, (BitType, UIntType)):
+        return factory(name, integer=True, nonnegative=True)
+    return factory(name)
+
+
+def _symbol_display_name(symbol: sp.Basic) -> str:
+    """Return a stable user-facing name for a SymPy symbol.
+
+    ``Dummy`` symbols print with a leading underscore even though their
+    declared ``name`` is unchanged. Resource input/substitution APIs are keyed
+    by the declared Qamomile name, so identity-distinct dummies must retain the
+    same external spelling as ordinary symbols.
+
+    Args:
+        symbol (sp.Basic): Symbol or identity-distinct ``Dummy`` to name.
+
+    Returns:
+        str: The symbol's declared name without SymPy's dummy-printing prefix.
+    """
+    name = getattr(symbol, "name", None)
+    return name if isinstance(name, str) else str(symbol)
 
 
 def _combine_quality(
@@ -412,6 +467,10 @@ class ResourceEstimate:
             Defaults to an empty dict.
         quality (EstimateQuality): Confidence classification. Defaults to
             ``EXACT`` for body-derived logical estimates.
+        _allocation_sites (dict[str, ResourceExpr]): Internal QInit-site sizes
+            keyed by stable operation-result UUID. Concrete loop evaluation
+            uses this identity map to count one static allocation site once
+            even when the body is replayed across multiple iterations.
     """
 
     width: WidthResources = dataclasses.field(default_factory=WidthResources.zero)
@@ -422,6 +481,11 @@ class ResourceEstimate:
     trace: ResourceTraceNode | None = None
     parameters: dict[str, sp.Symbol] = dataclasses.field(default_factory=dict)
     quality: EstimateQuality = EstimateQuality.EXACT
+    _allocation_sites: dict[str, ResourceExpr] = dataclasses.field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def qubits(self) -> ResourceExpr:
@@ -501,6 +565,10 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("seq", self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
+            _allocation_sites=_merge_allocation_sites(
+                self._allocation_sites,
+                other._allocation_sites,
+            ),
         )
 
     def parallel(self, other: ResourceEstimate) -> ResourceEstimate:
@@ -520,6 +588,10 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("parallel", self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
+            _allocation_sites=_merge_allocation_sites(
+                self._allocation_sites,
+                other._allocation_sites,
+            ),
         )
 
     def choice(self, other: ResourceEstimate) -> ResourceEstimate:
@@ -576,14 +648,24 @@ class ResourceEstimate:
             ResourceEstimate: Repeated estimate.
         """
         f = _expr(factor)
+        active_width = _conditional_width(
+            self.width,
+            WidthResources.zero(),
+            sp.Gt(f, _ZERO),
+        )
+        active_sites = _activate_allocation_sites(
+            self._allocation_sites,
+            sp.Gt(f, _ZERO),
+        )
         return ResourceEstimate(
-            width=self.width,
+            width=active_width,
             gates=_scale_gates(self.gates, f),
             depth=_scale_depth(self.depth, f),
             calls=_scale_calls(self.calls, f),
             assumptions=self.assumptions,
             trace=_wrap_trace(f"repeat({f})", self.trace),
             quality=self.quality,
+            _allocation_sites=active_sites,
         )
 
     def controlled(self, num_controls: ResourceExpr | int) -> ResourceEstimate:
@@ -616,6 +698,7 @@ class ResourceEstimate:
             calls=self.calls,
             assumptions=(*self.assumptions, assumption),
             trace=_wrap_trace(f"controlled({controls})", self.trace),
+            _allocation_sites=self._allocation_sites,
         )
 
     def inverse(self) -> ResourceEstimate:
@@ -632,6 +715,7 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=_wrap_trace("inverse", self.trace),
             parameters=self.parameters,
+            _allocation_sites=self._allocation_sites,
         )
 
     def sum_over(
@@ -656,13 +740,24 @@ class ResourceEstimate:
         iterations = symbolic_iterations(start, stop, step)
         if loop_symbol not in _free_symbols(self):
             return self.repeat(iterations)
+        condition = sp.Gt(iterations, _ZERO)
+        active_width = _conditional_width(
+            self.width,
+            WidthResources.zero(),
+            condition,
+        )
+        active_sites = _activate_allocation_sites(
+            self._allocation_sites,
+            condition,
+        )
         return ResourceEstimate(
-            width=self.width,
+            width=active_width,
             gates=_sum_gates(self.gates, loop_symbol, start, step, iterations),
             depth=_sum_depth(self.depth, loop_symbol, start, step, iterations),
             calls=_sum_calls(self.calls, loop_symbol, start, step, iterations),
             assumptions=self.assumptions,
             trace=_wrap_trace(f"sum({loop_symbol}={start}..{stop})", self.trace),
+            _allocation_sites=active_sites,
         )
 
     def substitute(self, **values: int | float) -> ResourceEstimate:
@@ -673,14 +768,32 @@ class ResourceEstimate:
 
         Returns:
             ResourceEstimate: Estimate with substituted expressions.
+
+        Raises:
+            ValueError: If a negative value is supplied for a resource symbol
+                whose domain is nonnegative.
         """
-        subs: dict[Any, Any] = {}
+        symbols_by_name: dict[str, set[sp.Symbol]] = {}
+        for symbol in _free_symbols(self):
+            symbols_by_name.setdefault(_symbol_display_name(symbol), set()).add(symbol)
+
+        subs: dict[sp.Symbol, sp.Expr] = {}
         for name, value in values.items():
-            symbol = self.parameters.get(name)
-            if symbol is None:
-                symbol = sp.Symbol(name, integer=True, positive=True)
-            subs[symbol] = value
-        return self._map_expr(lambda expr: cast(sp.Expr, expr.subs(subs).doit()))
+            matching = set(symbols_by_name.get(name, ()))
+            parameter = self.parameters.get(name)
+            if parameter is not None:
+                matching.add(parameter)
+            if not matching:
+                matching.add(sp.Symbol(name))
+            if value < 0 and any(symbol.is_nonnegative is True for symbol in matching):
+                raise ValueError(
+                    f"Cannot substitute negative value {value!r} for "
+                    f"nonnegative resource parameter '{name}'."
+                )
+            replacement = cast(sp.Expr, sp.sympify(value))
+            for symbol in matching:
+                subs[symbol] = replacement
+        return self._map_expr(lambda expr: _substitute_resource_expr(expr, subs))
 
     def simplify(self) -> ResourceEstimate:
         """Simplify all symbolic expressions.
@@ -696,6 +809,9 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=self.trace,
             quality=self.quality,
+            _allocation_sites={
+                site: sp.simplify(size) for site, size in self._allocation_sites.items()
+            },
         )
         simplified.parameters = _collect_parameters(simplified)
         return simplified
@@ -766,7 +882,8 @@ class ResourceEstimate:
                 for assumption in self.assumptions
             ],
             "parameters": {
-                name: str(symbol) for name, symbol in self.parameters.items()
+                name: _symbol_display_name(symbol)
+                for name, symbol in self.parameters.items()
             },
             "quality": self.quality.value,
         }
@@ -820,6 +937,9 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=self.trace,
             quality=self.quality,
+            _allocation_sites={
+                site: fn(size) for site, size in self._allocation_sites.items()
+            },
         )
         mapped.parameters = _collect_parameters(mapped)
         return mapped
@@ -1106,7 +1226,7 @@ class ResourceInterpreter:
             input_allocations = {
                 value.logical_id: _qubit_value_size(value, resolver)
                 for value in block_or_ops.input_values
-                if value.type.is_quantum()
+                if isinstance(value, Value) and value.type.is_quantum()
             }
             body = self.eval_operations(
                 block_or_ops.operations,
@@ -1253,8 +1373,6 @@ class ResourceInterpreter:
                 return self.eval_invoke(operation, resolver, controls=controls)
             case ControlledUOperation():
                 return self.eval_controlled_u(operation, resolver, controls=controls)
-            case SelectOperation():
-                return self.eval_select(operation, resolver, controls=controls)
             case InverseBlockOperation():
                 return self.eval_inverse_block(operation, resolver, controls=controls)
             case PauliEvolveOp():
@@ -1340,6 +1458,7 @@ class ResourceInterpreter:
         return ResourceEstimate(
             width=width,
             trace=ResourceTraceNode("qinit", "primitive", summary=f"qubits={count}"),
+            _allocation_sites={operation.results[0].uuid: count},
         )
 
     def eval_measure(self, operation: Operation) -> ResourceEstimate:
@@ -1503,13 +1622,16 @@ class ResourceInterpreter:
             controls (ResourceExpr | int): Surrounding controls.
 
         Returns:
-            ResourceEstimate: Sequential composition of every iteration.
+            ResourceEstimate: Sequential work with per-iteration peak width
+                and identity-deduplicated static allocations.
         """
         carried = {
             arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
             for arg in operation.region_args
         }
         estimate = ResourceEstimate.zero()
+        iteration_width = WidthResources.zero()
+        anonymous_allocated = _ZERO
         body = _LocalBlock(operation.operations)
         for loop_value in iterations:
             loop_expr = sp.Integer(loop_value)
@@ -1521,8 +1643,19 @@ class ResourceInterpreter:
                 extra_context=context,
                 extra_loop_vars={operation.loop_var: loop_expr},
             )
-            estimate = estimate.seq(
-                self.eval_operations(operation.operations, child, controls=controls)
+            iteration_estimate = self.eval_operations(
+                operation.operations,
+                child,
+                controls=controls,
+            )
+            estimate = estimate.seq(iteration_estimate)
+            iteration_width = _max_width(iteration_width, iteration_estimate.width)
+            anonymous_allocated = sp.Max(
+                anonymous_allocated,
+                _anonymous_allocation_width(
+                    iteration_estimate.width,
+                    iteration_estimate._allocation_sites,
+                ),
             )
             carried = {
                 arg.block_arg.uuid: self._apply_condition_values(
@@ -1532,7 +1665,14 @@ class ResourceInterpreter:
             }
         for arg in operation.region_args:
             resolver.bind(arg.result, carried[arg.block_arg.uuid])
-        return estimate
+        return dataclasses.replace(
+            estimate,
+            width=_width_with_identity_aware_allocations(
+                iteration_width,
+                estimate._allocation_sites,
+                anonymous_allocated=anonymous_allocated,
+            ),
+        )
 
     def _eval_symbolic_region_for(
         self,
@@ -1560,7 +1700,11 @@ class ResourceInterpreter:
             ResourceEstimate: Symbolic loop estimate and recurrence assumptions.
         """
         carry_symbols = {
-            arg.block_arg.uuid: sp.Symbol(f"{arg.var_name}_carry", integer=True)
+            arg.block_arg.uuid: _typed_value_symbol(
+                arg.block_arg,
+                f"{arg.var_name}_carry",
+                fresh=True,
+            )
             for arg in operation.region_args
         }
         context: dict[str, sp.Expr] = dict(carry_symbols)
@@ -1597,7 +1741,11 @@ class ResourceInterpreter:
             )
             if recurrence is None:
                 at_value = sp.Function(f"{arg.var_name}_carry")(loop_symbol)
-                final_value = sp.Symbol(f"{arg.var_name}_after_loop", integer=True)
+                final_value = _typed_value_symbol(
+                    arg.result,
+                    f"{arg.var_name}_after_loop",
+                    fresh=True,
+                )
                 assumptions.append(
                     ResourceAssumption(
                         "loop-carried recurrence could not be reduced to an "
@@ -1640,13 +1788,16 @@ class ResourceInterpreter:
             sp.Expr: Specialized expression.
         """
         condition_inputs = {
-            symbol: self.condition_values[str(symbol)]
+            symbol: self.condition_values[_symbol_display_name(symbol)]
             for symbol in expression.free_symbols
-            if str(symbol) in self.condition_values
+            if not isinstance(symbol, sp.Dummy)
+            and _symbol_display_name(symbol) in self.condition_values
         }
         if not condition_inputs:
             return expression
-        self.branch_condition_names.update(str(symbol) for symbol in condition_inputs)
+        self.branch_condition_names.update(
+            _symbol_display_name(symbol) for symbol in condition_inputs
+        )
         return cast(
             sp.Expr,
             expression.subs(list(condition_inputs.items()), simultaneous=True).doit(),
@@ -1688,7 +1839,22 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Repeated loop-body estimate.
+
+        Raises:
+            NotImplementedError: If the loop carries a rebound value whose
+                recurrence the symbolic while-loop model cannot represent.
         """
+        if operation.loop_carried_rebinds or operation.region_args:
+            names = sorted(
+                {rebind.var_name for rebind in operation.loop_carried_rebinds}
+                | {arg.var_name for arg in operation.region_args}
+            )
+            variables = ", ".join(names) or "(unnamed)"
+            raise NotImplementedError(
+                "Resource estimation does not support loop-carried values in "
+                f"WhileOperation ({variables}). A symbolic trip count alone "
+                "cannot determine the carried recurrence."
+            )
         child, trip_count = build_while_scope(operation, resolver)
         inner = self.eval_operations(operation.operations, child, controls=controls)
         return inner.repeat(trip_count)
@@ -1807,7 +1973,11 @@ class ResourceInterpreter:
                     (false_value, True),
                 )
             else:
-                merged = sp.Symbol(merge.result.name, integer=True)
+                merged = _typed_value_symbol(
+                    merge.result,
+                    merge.result.name,
+                    fresh=True,
+                )
             resolver.bind(merge.result, cast(sp.Expr, merged))
 
     def _decide_branch(
@@ -1837,7 +2007,9 @@ class ResourceInterpreter:
         if self.condition_values and condition.free_symbols:
             subs: dict[Any, Any] = {}
             for symbol in condition.free_symbols:
-                name = str(symbol)
+                if isinstance(symbol, sp.Dummy):
+                    continue
+                name = _symbol_display_name(symbol)
                 if name in self.condition_values:
                     subs[symbol] = self.condition_values[name]
                     used.add(name)
@@ -1852,7 +2024,10 @@ class ResourceInterpreter:
         self.branch_condition_names |= used
         if decision is not None or not used:
             return decision, None
-        unresolved = ", ".join(sorted(str(s) for s in condition.free_symbols))
+        separator: str = ", "
+        unresolved = separator.join(
+            sorted(_symbol_display_name(symbol) for symbol in condition.free_symbols)
+        )
         message = (
             f"branch condition '{original}' is undecidable from the supplied "
             "values; conservative maximum of both branches used; "
@@ -1880,6 +2055,10 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Repeated body estimate.
+
+        Raises:
+            NotImplementedError: If an unbound dictionary loop has a body
+                whose resource use depends on the current key or value.
         """
         cardinality = resolve_for_items_cardinality(operation)
         if operation.region_args:
@@ -1889,8 +2068,21 @@ class ResourceInterpreter:
                 cardinality=cardinality,
                 controls=controls,
             )
-        child = build_for_items_scope(operation, resolver)
+        entries = self._for_items_entries(operation)
+        if entries is not None:
+            return self._eval_concrete_for_items(
+                operation,
+                resolver,
+                entries,
+                controls=controls,
+            )
+        context, item_symbols = self._symbolic_for_items_context(operation)
+        child = resolver.child_scope(
+            inner_block=_LocalBlock(operation.operations),
+            extra_context=context,
+        )
         inner = self.eval_operations(operation.operations, child, controls=controls)
+        self._ensure_for_items_resource_independent(inner, item_symbols)
         return inner.repeat(cardinality)
 
     def _eval_region_for_items(
@@ -1923,9 +2115,13 @@ class ResourceInterpreter:
             )
 
         item_symbol = sp.Symbol("item_index", integer=True, nonnegative=True)
-        context = self._symbolic_for_items_context(operation)
+        context, item_symbols = self._symbolic_for_items_context(operation)
         carry_symbols = {
-            arg.block_arg.uuid: sp.Symbol(f"{arg.var_name}_carry", integer=True)
+            arg.block_arg.uuid: _typed_value_symbol(
+                arg.block_arg,
+                f"{arg.var_name}_carry",
+                fresh=True,
+            )
             for arg in operation.region_args
         }
         context.update(carry_symbols)
@@ -1933,7 +2129,12 @@ class ResourceInterpreter:
             inner_block=_LocalBlock(operation.operations),
             extra_context=context,
         )
-        self.eval_operations(operation.operations, probe, controls=controls)
+        probe_estimate = self.eval_operations(
+            operation.operations,
+            probe,
+            controls=controls,
+        )
+        self._ensure_for_items_resource_independent(probe_estimate, item_symbols)
 
         at_iteration: dict[str, sp.Expr] = {}
         final_values: dict[str, sp.Expr] = {}
@@ -1941,8 +2142,16 @@ class ResourceInterpreter:
         all_carry_symbols = set(carry_symbols.values())
         for arg in operation.region_args:
             carry_symbol = carry_symbols[arg.block_arg.uuid]
+            yielded = probe.resolve(arg.yielded)
+            if yielded.free_symbols & item_symbols:
+                raise NotImplementedError(
+                    "Resource estimation does not support a symbolic "
+                    "ForItemsOperation carry whose recurrence depends on the "
+                    "current item key or value. Supply a concrete dictionary "
+                    "or make the recurrence entry-independent."
+                )
             recurrence = _solve_affine_recurrence(
-                yielded=probe.resolve(arg.yielded),
+                yielded=yielded,
                 carry_symbol=carry_symbol,
                 other_carry_symbols=all_carry_symbols - {carry_symbol},
                 loop_symbol=item_symbol,
@@ -1953,7 +2162,11 @@ class ResourceInterpreter:
             )
             if recurrence is None:
                 at_value = sp.Function(f"{arg.var_name}_carry")(item_symbol)
-                final_value = sp.Symbol(f"{arg.var_name}_after_items", integer=True)
+                final_value = _typed_value_symbol(
+                    arg.result,
+                    f"{arg.var_name}_after_items",
+                    fresh=True,
+                )
                 assumptions.append(
                     ResourceAssumption(
                         "items-loop carry could not be reduced to an independent "
@@ -1975,7 +2188,7 @@ class ResourceInterpreter:
             operation.operations,
             child,
             controls=controls,
-        ).repeat(cardinality)
+        ).sum_over(item_symbol, _ZERO, cardinality, _ONE)
         for arg in operation.region_args:
             resolver.bind(arg.result, final_values[arg.result.uuid])
         if assumptions:
@@ -1984,6 +2197,67 @@ class ResourceInterpreter:
                 assumptions=(*estimate.assumptions, *assumptions),
             )
         return estimate
+
+    def _eval_concrete_for_items(
+        self,
+        operation: ForItemsOperation,
+        resolver: ExprResolver,
+        entries: tuple[tuple[Any, Any], ...],
+        *,
+        controls: ResourceExpr | int,
+    ) -> ResourceEstimate:
+        """Interpret a bound items loop without carried values exactly.
+
+        Args:
+            operation (ForItemsOperation): Bound dictionary loop to evaluate.
+            resolver (ExprResolver): Enclosing symbolic environment.
+            entries (tuple[tuple[Any, Any], ...]): Concrete key-value entries
+                in insertion order.
+            controls (ResourceExpr | int): Surrounding controls.
+
+        Returns:
+            ResourceEstimate: Per-entry composition — gates, depth, and
+                calls accumulate sequentially; peak and ancilla width use the
+                per-entry maximum, while allocated width is the union of
+                distinct QInit identities.
+        """
+        estimate = ResourceEstimate.zero()
+        iteration_width = WidthResources.zero()
+        anonymous_allocated = _ZERO
+        for key, value in entries:
+            child = resolver.child_scope(
+                inner_block=_LocalBlock(operation.operations),
+                extra_context=self._concrete_for_items_context(
+                    operation,
+                    key,
+                    value,
+                ),
+            )
+            entry_estimate = self.eval_operations(
+                operation.operations,
+                child,
+                controls=controls,
+            )
+            estimate = estimate.seq(entry_estimate)
+            iteration_width = _max_width(iteration_width, entry_estimate.width)
+            anonymous_allocated = sp.Max(
+                anonymous_allocated,
+                _anonymous_allocation_width(
+                    entry_estimate.width,
+                    entry_estimate._allocation_sites,
+                ),
+            )
+        # ``seq`` counts every concrete visit to a QInit. Keep sequential
+        # gate/depth/call totals, take reusable width fields per-entry, and
+        # replace only allocated_qubits with the distinct static-site union.
+        return dataclasses.replace(
+            estimate,
+            width=_width_with_identity_aware_allocations(
+                iteration_width,
+                estimate._allocation_sites,
+                anonymous_allocated=anonymous_allocated,
+            ),
+        )
 
     def _eval_concrete_region_for_items(
         self,
@@ -2002,13 +2276,16 @@ class ResourceInterpreter:
             controls (ResourceExpr | int): Surrounding controls.
 
         Returns:
-            ResourceEstimate: Sequential composition of all item iterations.
+            ResourceEstimate: Sequential work with per-entry peak width and
+                identity-deduplicated static allocations.
         """
         carried = {
             arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
             for arg in operation.region_args
         }
         estimate = ResourceEstimate.zero()
+        iteration_width = WidthResources.zero()
+        anonymous_allocated = _ZERO
         for key, value in entries:
             context = {
                 **carried,
@@ -2018,8 +2295,19 @@ class ResourceInterpreter:
                 inner_block=_LocalBlock(operation.operations),
                 extra_context=context,
             )
-            estimate = estimate.seq(
-                self.eval_operations(operation.operations, child, controls=controls)
+            iteration_estimate = self.eval_operations(
+                operation.operations,
+                child,
+                controls=controls,
+            )
+            estimate = estimate.seq(iteration_estimate)
+            iteration_width = _max_width(iteration_width, iteration_estimate.width)
+            anonymous_allocated = sp.Max(
+                anonymous_allocated,
+                _anonymous_allocation_width(
+                    iteration_estimate.width,
+                    iteration_estimate._allocation_sites,
+                ),
             )
             carried = {
                 arg.block_arg.uuid: self._apply_condition_values(
@@ -2029,7 +2317,14 @@ class ResourceInterpreter:
             }
         for arg in operation.region_args:
             resolver.bind(arg.result, carried[arg.block_arg.uuid])
-        return estimate
+        return dataclasses.replace(
+            estimate,
+            width=_width_with_identity_aware_allocations(
+                iteration_width,
+                estimate._allocation_sites,
+                anonymous_allocated=anonymous_allocated,
+            ),
+        )
 
     def _for_items_entries(
         self,
@@ -2047,38 +2342,157 @@ class ResourceInterpreter:
         if not operation.operands:
             return ()
         operand = operation.operands[0]
-        get_items = getattr(operand, "get_bound_data_items", None)
-        if callable(get_items):
-            items = tuple(get_items())
-            if items:
-                return items
         parameter_name = getattr(operand, "parameter_name", lambda: None)()
         bound = self.bindings.get(parameter_name) if parameter_name else None
         if isinstance(bound, Mapping):
             return tuple(bound.items())
+        metadata = getattr(operand, "metadata", None)
+        dict_runtime = getattr(metadata, "dict_runtime", None)
+        if dict_runtime is not None:
+            return tuple(dict_runtime.bound_data)
         return None
 
     def _symbolic_for_items_context(
         self,
         operation: ForItemsOperation,
-    ) -> dict[str, sp.Expr]:
-        """Build symbolic key and value bindings for an items loop.
+    ) -> tuple[dict[str, sp.Expr], frozenset[sp.Symbol]]:
+        """Build identity-bearing symbolic bindings for an items loop.
 
         Args:
             operation (ForItemsOperation): Items loop to bind.
 
         Returns:
-            dict[str, sp.Expr]: UUID-keyed symbolic loop-variable context.
+            tuple[dict[str, sp.Expr], frozenset[sp.Symbol]]: UUID-keyed
+                symbolic context and every symbol derived from the current
+                key/value entry.
+
+        Raises:
+            UnresolvedValueError: If key or value formal identities are absent.
         """
+        if operation.key_var_values is None:
+            raise UnresolvedValueError(
+                "?",
+                "ForItemsOperation is missing key_var_values identities.",
+            )
+        if operation.value_var_value is None:
+            raise UnresolvedValueError(
+                "?",
+                "ForItemsOperation is missing value_var_value identity.",
+            )
+
         context: dict[str, sp.Expr] = {}
-        for index, key_value in enumerate(operation.key_var_values or ()):
+        iteration_symbols: set[sp.Symbol] = set()
+        array_symbols: dict[str, sp.Symbol] = {}
+
+        for index, key_value in enumerate(operation.key_var_values):
             name = (
                 operation.key_vars[index] if index < len(operation.key_vars) else "key"
             )
-            context[key_value.uuid] = sp.Symbol(name, integer=True)
-        if operation.value_var_value is not None:
-            context[operation.value_var_value.uuid] = sp.Symbol(operation.value_var)
-        return context
+            symbol = _typed_value_symbol(key_value, name, fresh=True)
+            context[key_value.uuid] = symbol
+            iteration_symbols.add(symbol)
+            if isinstance(key_value, ArrayValue):
+                array_symbols[key_value.uuid] = symbol
+                for axis, dimension in enumerate(key_value.shape):
+                    dimension_symbol = sp.Dummy(
+                        f"{name}_dim{axis}",
+                        integer=True,
+                        nonnegative=True,
+                    )
+                    context[dimension.uuid] = dimension_symbol
+                    iteration_symbols.add(dimension_symbol)
+
+        value_symbol = _typed_value_symbol(
+            operation.value_var_value,
+            operation.value_var,
+            fresh=True,
+        )
+        context[operation.value_var_value.uuid] = value_symbol
+        iteration_symbols.add(value_symbol)
+
+        def array_iteration_symbol(array: ArrayValue) -> sp.Symbol | None:
+            """Find the item symbol behind an array value or view.
+
+            Args:
+                array (ArrayValue): Array whose slice ancestry is inspected.
+
+            Returns:
+                sp.Symbol | None: Matching item symbol, if any.
+            """
+            current: ArrayValue | None = array
+            visited: set[str] = set()
+            while current is not None and current.uuid not in visited:
+                visited.add(current.uuid)
+                if current.uuid in array_symbols:
+                    return array_symbols[current.uuid]
+                current = current.slice_of
+            return None
+
+        def register_array_alias(value: ValueBase) -> None:
+            """Map vector-key elements and views to their item dependency.
+
+            Args:
+                value (ValueBase): Referenced IR value to inspect.
+            """
+            if isinstance(value, Value) and value.parent_array is not None:
+                symbol = array_iteration_symbol(value.parent_array)
+                if symbol is not None:
+                    context[value.uuid] = symbol
+            if isinstance(value, ArrayValue):
+                for dimension in value.shape:
+                    register_array_alias(dimension)
+                if value.slice_start is not None:
+                    register_array_alias(value.slice_start)
+                if value.slice_step is not None:
+                    register_array_alias(value.slice_step)
+
+        def walk(operations: list[Operation]) -> None:
+            """Register vector-key aliases throughout nested body operations.
+
+            Args:
+                operations (list[Operation]): Operations in the current scope.
+            """
+            for nested_operation in operations:
+                for value in (
+                    *nested_operation.all_input_values(),
+                    *nested_operation.results,
+                ):
+                    if isinstance(value, ValueBase):
+                        register_array_alias(value)
+                if isinstance(nested_operation, HasNestedOps):
+                    for nested in nested_operation.nested_op_lists():
+                        walk(nested)
+
+        walk(operation.operations)
+        return context, frozenset(iteration_symbols)
+
+    def _ensure_for_items_resource_independent(
+        self,
+        estimate: ResourceEstimate,
+        iteration_symbols: frozenset[sp.Symbol],
+    ) -> None:
+        """Reject symbolic item loops whose resources vary by entry.
+
+        Args:
+            estimate (ResourceEstimate): One symbolic body evaluation.
+            iteration_symbols (frozenset[sp.Symbol]): Identity-bearing symbols
+                assigned to current key/value formals and their derived array
+                values.
+
+        Raises:
+            NotImplementedError: If any resource metric depends on a current
+                dictionary key or value.
+        """
+        if any(
+            expression.free_symbols & iteration_symbols
+            for expression in _all_exprs(estimate)
+        ):
+            raise NotImplementedError(
+                "Resource estimation does not support a symbolic "
+                "ForItemsOperation body whose resource use depends on the "
+                "current item key or value. Supply a concrete dictionary or "
+                "make the body entry-independent."
+            )
 
     def _concrete_for_items_context(
         self,
@@ -2098,7 +2512,18 @@ class ResourceInterpreter:
         """
         context: dict[str, sp.Expr] = {}
         key_values = list(operation.key_var_values or ())
-        if len(key_values) > 1 and isinstance(key, Sequence):
+        if (
+            operation.key_is_vector
+            and len(key_values) == 1
+            and isinstance(key_values[0], ArrayValue)
+        ):
+            self._bind_concrete_vector_key(
+                operation,
+                key_values[0],
+                key,
+                context,
+            )
+        elif len(key_values) > 1 and isinstance(key, Sequence):
             for ir_value, concrete in zip(key_values, key, strict=False):
                 context[ir_value.uuid] = _sympify_resource_value(
                     concrete, ir_value.name
@@ -2114,6 +2539,145 @@ class ResourceInterpreter:
                 operation.value_var,
             )
         return context
+
+    def _bind_concrete_vector_key(
+        self,
+        operation: ForItemsOperation,
+        formal: ArrayValue,
+        key: Any,
+        context: dict[str, sp.Expr],
+    ) -> None:
+        """Bind a concrete Vector dictionary key into body Value identities.
+
+        Args:
+            operation (ForItemsOperation): Items loop whose body references the
+                vector key.
+            formal (ArrayValue): Vector-key region formal.
+            key (Any): Concrete dictionary key for one iteration.
+            context (dict[str, sp.Expr]): UUID-keyed context updated in place.
+
+        Raises:
+            ValueError: If the concrete key is not a sequence or a constant
+                element access is out of bounds.
+            NotImplementedError: If the body dynamically indexes the current
+                vector key; exact per-entry resource evaluation for that shape
+                is not implemented.
+        """
+        if not isinstance(key, Sequence) or isinstance(key, (str, bytes)):
+            raise ValueError(
+                "A concrete Dict[Vector, ...] key must be a sequence of scalar values."
+            )
+        elements = tuple(key)
+        if formal.shape:
+            context[formal.shape[0].uuid] = sp.Integer(len(elements))
+
+        seen: set[int] = set()
+
+        def belongs_to_formal(array: ArrayValue) -> bool:
+            """Return whether an array is the formal or one of its views.
+
+            Args:
+                array (ArrayValue): Candidate key array or view.
+
+            Returns:
+                bool: True when its slice ancestry reaches the vector formal.
+            """
+            current: ArrayValue | None = array
+            visited: set[int] = set()
+            while current is not None and id(current) not in visited:
+                visited.add(id(current))
+                if current.logical_id == formal.logical_id:
+                    return True
+                current = current.slice_of
+            return False
+
+        def register_value(value: ValueBase) -> None:
+            """Bind concrete key elements reachable through one IR value.
+
+            Args:
+                value (ValueBase): Referenced body value to inspect
+                    recursively.
+
+            Raises:
+                ValueError: If a constant key index is out of bounds.
+                NotImplementedError: If a current-key element has a dynamic
+                    index or unresolved view mapping.
+            """
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+
+            for index in getattr(value, "element_indices", ()):
+                register_value(index)
+            parent = getattr(value, "parent_array", None)
+            if isinstance(parent, ArrayValue):
+                register_value(parent)
+
+            if (
+                isinstance(value, Value)
+                and isinstance(parent, ArrayValue)
+                and belongs_to_formal(parent)
+            ):
+                if len(value.element_indices) != 1:
+                    raise NotImplementedError(
+                        "Resource estimation supports only one-dimensional "
+                        "constant indexing of a concrete ForItems Vector key."
+                    )
+                index_value = value.element_indices[0]
+                if not index_value.is_constant():
+                    raise NotImplementedError(
+                        "Resource estimation cannot exactly evaluate a "
+                        "dynamically indexed concrete ForItems Vector key."
+                    )
+                local_index = index_value.get_const()
+                if isinstance(local_index, bool) or not isinstance(local_index, int):
+                    raise NotImplementedError(
+                        "Resource estimation requires integer indexing for a "
+                        "concrete ForItems Vector key."
+                    )
+                resolved = resolve_root_array_index(parent, local_index)
+                if resolved is None or resolved[0].logical_id != formal.logical_id:
+                    raise NotImplementedError(
+                        "Resource estimation could not resolve a concrete "
+                        "ForItems Vector-key view to its formal index space."
+                    )
+                root_index = resolved[1]
+                if not 0 <= root_index < len(elements):
+                    raise ValueError(
+                        f"ForItems Vector-key index {root_index} is out of "
+                        f"bounds for a key of length {len(elements)}."
+                    )
+                context[value.uuid] = _sympify_resource_value(
+                    elements[root_index],
+                    value.name,
+                )
+
+            if isinstance(value, ArrayValue):
+                for dimension in value.shape:
+                    register_value(dimension)
+                if value.slice_start is not None:
+                    register_value(value.slice_start)
+                if value.slice_step is not None:
+                    register_value(value.slice_step)
+
+        def walk(operations: list[Operation]) -> None:
+            """Visit nested loop-body operations for key references.
+
+            Args:
+                operations (list[Operation]): Operations to inspect.
+            """
+            for body_operation in operations:
+                for value in (
+                    *body_operation.all_input_values(),
+                    *body_operation.results,
+                ):
+                    if isinstance(value, ValueBase):
+                        register_value(value)
+                if isinstance(body_operation, HasNestedOps):
+                    for nested in body_operation.nested_op_lists():
+                        walk(nested)
+
+        walk(operation.operations)
 
     def eval_invoke(
         self,
@@ -2184,7 +2748,7 @@ class ResourceInterpreter:
                 child,
                 controls=total_controls,
             )
-            return body.repeat(power)
+            return _namespace_allocation_sites(body.repeat(power), operation)
 
         name = (
             operation.callable_ref.name
@@ -2215,51 +2779,6 @@ class ResourceInterpreter:
             ),
         )
 
-    def eval_select(
-        self,
-        operation: SelectOperation,
-        resolver: ExprResolver,
-        *,
-        controls: ResourceExpr | int = 0,
-    ) -> ResourceEstimate:
-        """Evaluate every coherent branch of a quantum multiplexer.
-
-        SELECT is one abstract IR operation, but its portable lowering applies
-        every case body under the index-register controls. Logical gate cost is
-        therefore the sum of all controlled case bodies; peak width remains the
-        maximum required by a case because their temporary workspaces can be
-        reused.
-
-        Args:
-            operation (SelectOperation): Multiplexer to estimate.
-            resolver (ExprResolver): Resolver for call-site values and shapes.
-            controls (ResourceExpr | int): Surrounding control count.
-                Defaults to zero.
-
-        Returns:
-            ResourceEstimate: Body-derived logical resource estimate.
-        """
-        total = ResourceEstimate.zero("select")
-        total_controls = _expr(controls) + operation.num_index_qubits
-        for case_index, case_block in enumerate(operation.case_blocks):
-            child = _select_case_child_resolver(operation, case_block, resolver)
-            case_estimate = self.eval_operations(
-                case_block.operations,
-                child,
-                controls=total_controls,
-            )
-            total = total.seq(
-                dataclasses.replace(
-                    case_estimate,
-                    trace=_wrap_trace(
-                        f"select[{case_index}]",
-                        case_estimate.trace,
-                        source_kind="body",
-                    ),
-                )
-            )
-        return total
-
     def eval_inverse_block(
         self,
         operation: InverseBlockOperation,
@@ -2281,11 +2800,12 @@ class ResourceInterpreter:
         if not isinstance(operation.implementation_block, Block):
             return ResourceEstimate.zero(operation.name).inverse()
         child = _inverse_block_child_resolver(operation, resolver)
-        return self.eval_operations(
+        estimate = self.eval_operations(
             operation.implementation_block.operations,
             child,
             controls=_expr(controls) + operation.num_control_qubits,
         ).inverse()
+        return _namespace_allocation_sites(estimate, operation)
 
     def eval_pauli_evolve(self, operation: PauliEvolveOp) -> ResourceEstimate:
         """Evaluate a Pauli evolution operation when its Hamiltonian is bound.
@@ -2463,13 +2983,16 @@ class ResourceInterpreter:
             and not body_implements_transform
         ):
             body_estimate = body_estimate.inverse()
-        return dataclasses.replace(
-            body_estimate,
-            trace=_wrap_trace(
-                operation.custom_name,
-                body_estimate.trace,
-                source_kind="body",
+        return _namespace_allocation_sites(
+            dataclasses.replace(
+                body_estimate,
+                trace=_wrap_trace(
+                    operation.custom_name,
+                    body_estimate.trace,
+                    source_kind="body",
+                ),
             ),
+            operation,
         )
 
     def _handle_unknown_invoke(
@@ -2589,6 +3112,36 @@ def _expr(value: ResourceExpr | int | float) -> ResourceExpr:
     return sp.Float(value)
 
 
+def _substitute_resource_expr(
+    expression: sp.Expr,
+    substitutions: Mapping[sp.Symbol, sp.Expr],
+) -> sp.Expr:
+    """Substitute a resource expression and enforce its concrete lower bound.
+
+    Symbolic simplification and later substitution are separate phases, so a
+    boundary substitution can expose a negative concrete expression even when
+    the symbolic estimate was retained in an unspecialized form. Resource
+    metrics cannot be negative, so only fully concrete negative results are
+    clamped; partially symbolic expressions stay unchanged.
+
+    Args:
+        expression (sp.Expr): Resource expression to rewrite.
+        substitutions (Mapping[sp.Symbol, sp.Expr]): Simultaneous symbol
+            replacements.
+
+    Returns:
+        sp.Expr: Substituted expression, or zero for a concrete negative
+            resource count.
+    """
+    resolved = cast(
+        sp.Expr,
+        expression.subs(substitutions, simultaneous=True).doit(),
+    )
+    if resolved.is_number and resolved.is_negative is True:
+        return _ZERO
+    return resolved
+
+
 def _resource_expr(value: sp.Basic) -> ResourceExpr:
     """Narrow a SymPy scalar expression to the resource expression type.
 
@@ -2663,25 +3216,24 @@ def build_for_loop_scope(
     Returns:
         tuple[ExprResolver, ResourceExpr, ResourceExpr, ResourceExpr, sp.Symbol]:
         Child resolver, start, stop, step, and loop-variable symbol.
+
+    Raises:
+        UnresolvedValueError: If the loop has no UUID-bearing loop-variable
+            value and would require unsafe display-name resolution.
     """
-    loop_symbol = sp.Symbol(operation.loop_var, integer=True, positive=True)
-    loop_var_names: dict[str, sp.Expr] = {
-        name: symbol
-        for name, symbol in _collect_loop_var_names(
-            operation.operations,
-            operation.loop_var,
-            loop_symbol,
-        ).items()
-    }
-    context: dict[str, sp.Expr] | None = (
-        {operation.loop_var_value.uuid: loop_symbol}
-        if operation.loop_var_value is not None
-        else None
-    )
+    if operation.loop_var_value is None:
+        raise UnresolvedValueError(
+            "?",
+            "ForOperation is missing loop_var_value identity; display-name "
+            "resolution is unsafe for nested loops.",
+        )
+    loop_symbol = sp.Dummy(operation.loop_var, integer=True)
     child = resolver.child_scope(
         inner_block=_LocalBlock(operation.operations),
-        extra_context=context,
-        extra_loop_vars=loop_var_names,
+        extra_context={operation.loop_var_value.uuid: loop_symbol},
+        # Opaque resource models expose loop variables by their source-level
+        # names. Expression resolution itself remains UUID-based above.
+        extra_loop_vars={operation.loop_var: loop_symbol},
     )
     start = child.resolve(operation.operands[0])
     stop = child.resolve(operation.operands[1])
@@ -2780,47 +3332,6 @@ def _solve_affine_recurrence(
     return value_after(completed_at_loop_value), value_after(iterations)
 
 
-def _collect_loop_var_names(
-    operations: list[Operation],
-    loop_var_name: str,
-    loop_symbol: sp.Symbol,
-) -> dict[str, sp.Symbol]:
-    """Collect value-name aliases for a loop variable.
-
-    Args:
-        operations (list[Operation]): Loop body operations.
-        loop_var_name (str): Display name of the loop variable.
-        loop_symbol (sp.Symbol): Symbol representing the loop variable.
-
-    Returns:
-        dict[str, sp.Symbol]: Name-to-symbol aliases for resolver fallback.
-    """
-    result: dict[str, sp.Symbol] = {loop_var_name: loop_symbol}
-    seen: set[str] = set()
-
-    def check(operation: Operation) -> None:
-        """Inspect one operation's operands.
-
-        Args:
-            operation (Operation): Operation to inspect.
-        """
-        for operand in getattr(operation, "operands", []):
-            if (
-                hasattr(operand, "name")
-                and hasattr(operand, "uuid")
-                and operand.name == loop_var_name
-                and operand.uuid not in seen
-            ):
-                seen.add(operand.uuid)
-                result[operand.name] = loop_symbol
-
-    for operation in operations:
-        check(operation)
-        for nested in getattr(operation, "operations", []):
-            check(nested)
-    return result
-
-
 def build_while_scope(
     operation: WhileOperation,
     resolver: ExprResolver,
@@ -2835,7 +3346,7 @@ def build_while_scope(
         tuple[ExprResolver, sp.Symbol]: Child resolver and ``|while|`` symbol.
     """
     child = resolver.child_scope(inner_block=_LocalBlock(operation.operations))
-    return child, sp.Symbol("|while|", integer=True, positive=True)
+    return child, sp.Symbol("|while|", integer=True, nonnegative=True)
 
 
 def build_if_scopes(
@@ -2891,7 +3402,7 @@ def resolve_for_items_cardinality(operation: ForItemsOperation) -> ResourceExpr:
         dict_name = dict_operand.parameter_name() or dict_operand.name
     else:
         dict_name = dict_operand.name
-    return sp.Symbol(f"|{dict_name}|", integer=True, positive=True)
+    return sp.Symbol(f"|{dict_name}|", integer=True, nonnegative=True)
 
 
 def _resolve_controlled_u(
@@ -3923,6 +4434,156 @@ def _parallel_width(left: WidthResources, right: WidthResources) -> WidthResourc
     )
 
 
+def _merge_allocation_sites(
+    left: Mapping[str, ResourceExpr],
+    right: Mapping[str, ResourceExpr],
+) -> dict[str, ResourceExpr]:
+    """Merge static QInit sites without counting one identity twice.
+
+    A QInit operation in a loop body is emitted once and reset before each
+    replayed iteration. The same result UUID therefore denotes one allocation
+    site even when concrete interpretation visits it repeatedly. If a symbolic
+    site size differs between visits, the largest size is retained safely.
+
+    Args:
+        left (Mapping[str, ResourceExpr]): Sites collected so far.
+        right (Mapping[str, ResourceExpr]): Sites from another estimate.
+
+    Returns:
+        dict[str, ResourceExpr]: Union keyed by QInit result UUID.
+    """
+    merged = dict(left)
+    for site, size in right.items():
+        previous = merged.get(site)
+        merged[site] = size if previous is None else sp.Max(previous, size)
+    return merged
+
+
+def _namespace_allocation_sites(
+    estimate: ResourceEstimate,
+    operation: Operation,
+) -> ResourceEstimate:
+    """Qualify nested QInit identities by their static call site.
+
+    Callable implementation Blocks are shared recipes: two distinct Invoke,
+    ControlledU, or Inverse operations may traverse the SAME inner QInit UUID.
+    The emitter clones/allocates those call sites independently, while repeated
+    evaluation of ONE operation in a concrete loop must still reuse its site.
+    Prefixing with the stable in-memory operation identity provides exactly
+    that scope for one estimation run; the map is internal and excluded from
+    equality and serialization, so process-local identities never leak.
+
+    Args:
+        estimate (ResourceEstimate): Nested body estimate to qualify.
+        operation (Operation): Static call-site operation owning the body.
+
+    Returns:
+        ResourceEstimate: Estimate with call-site-qualified allocation keys.
+    """
+    if not estimate._allocation_sites:
+        return estimate
+    namespace = f"{type(operation).__name__}:{id(operation)}"
+    return dataclasses.replace(
+        estimate,
+        _allocation_sites={
+            f"{namespace}/{site}": size
+            for site, size in estimate._allocation_sites.items()
+        },
+    )
+
+
+def _activate_allocation_sites(
+    sites: Mapping[str, ResourceExpr],
+    condition: sp.Basic,
+) -> dict[str, ResourceExpr]:
+    """Guard allocation-site sizes by whether a repeated body executes.
+
+    Args:
+        sites (Mapping[str, ResourceExpr]): Static QInit sites in the body.
+        condition (sp.Basic): Boolean expression that is true when the body
+            executes at least once.
+
+    Returns:
+        dict[str, ResourceExpr]: Site sizes that become zero on a zero-trip
+        path.
+    """
+    return {
+        site: _resource_expr(sp.Piecewise((size, condition), (_ZERO, True)))
+        for site, size in sites.items()
+    }
+
+
+def _allocation_site_total(
+    sites: Mapping[str, ResourceExpr],
+) -> ResourceExpr:
+    """Sum the sizes of distinct static QInit identities.
+
+    Args:
+        sites (Mapping[str, ResourceExpr]): QInit result UUIDs and sizes.
+
+    Returns:
+        ResourceExpr: Total qubits allocated by the distinct sites.
+    """
+    return sum(sites.values(), _ZERO)
+
+
+def _anonymous_allocation_width(
+    width: WidthResources,
+    sites: Mapping[str, ResourceExpr],
+) -> ResourceExpr:
+    """Return allocated width not attributable to explicit QInit sites.
+
+    Opaque cost models may report allocated qubits without exposing an IR
+    QInit identity. Their contribution stays reusable across iterations and
+    is tracked separately from the identity-aware site union.
+
+    Args:
+        width (WidthResources): Width summary containing total allocations.
+        sites (Mapping[str, ResourceExpr]): Explicit QInit sites represented in
+            that summary.
+
+    Returns:
+        ResourceExpr: Nonnegative anonymous allocation contribution.
+    """
+    return sp.Max(
+        _ZERO,
+        sp.simplify(width.allocated_qubits - _allocation_site_total(sites)),
+    )
+
+
+def _width_with_identity_aware_allocations(
+    width: WidthResources,
+    sites: Mapping[str, ResourceExpr],
+    *,
+    anonymous_allocated: ResourceExpr | None = None,
+) -> WidthResources:
+    """Replace only allocated width with a static-site-aware total.
+
+    Peak width and ancilla fields retain their liveness/reuse semantics. Only
+    ``allocated_qubits`` distinguishes repeated visits to one QInit identity
+    from visits to different identities.
+
+    Args:
+        width (WidthResources): Reusable width summary to preserve otherwise.
+        sites (Mapping[str, ResourceExpr]): Distinct explicit QInit sites.
+        anonymous_allocated (ResourceExpr | None): Reusable allocation amount
+            without explicit site identities. Defaults to the residual derived
+            from ``width``.
+
+    Returns:
+        WidthResources: Width with identity-aware ``allocated_qubits``.
+    """
+    residual = (
+        _anonymous_allocation_width(width, sites)
+        if anonymous_allocated is None
+        else anonymous_allocated
+    )
+    return dataclasses.replace(
+        width,
+        allocated_qubits=sp.simplify(_allocation_site_total(sites) + residual),
+    )
+
+
 def _max_width(left: WidthResources, right: WidthResources) -> WidthResources:
     """Take element-wise maxima of width resources.
 
@@ -4294,7 +4955,13 @@ def _collect_parameters(estimate: ResourceEstimate) -> dict[str, sp.Symbol]:
     Returns:
         dict[str, sp.Symbol]: Symbol map keyed by printed name.
     """
-    return {str(symbol): symbol for symbol in sorted(_free_symbols(estimate), key=str)}
+    return {
+        _symbol_display_name(symbol): symbol
+        for symbol in sorted(
+            _free_symbols(estimate),
+            key=lambda item: (_symbol_display_name(item), sp.default_sort_key(item)),
+        )
+    }
 
 
 def _substitute_bindings(
@@ -4546,13 +5213,20 @@ def _apply_inputs(
 
     Raises:
         ValueError: If an input name is neither a free symbol of the
-            estimate nor a declared kernel argument.
+            estimate nor a declared kernel argument, or a negative input is
+            supplied for a nonnegative resource symbol.
     """
     # SymPy treats same-named symbols with different assumptions as distinct, so
     # a name can map to more than one symbol object; substitute every match.
     symbols_by_name: dict[str, list[sp.Symbol]] = {}
     for symbol in _free_symbols(estimate):
-        symbols_by_name.setdefault(str(symbol), []).append(symbol)
+        # Identity-fresh internal fallbacks are not qkernel inputs even when a
+        # frontend-generated display name collides with a declared argument.
+        # Users may still specialize them explicitly through
+        # ``ResourceEstimate.substitute`` after estimation.
+        if isinstance(symbol, sp.Dummy):
+            continue
+        symbols_by_name.setdefault(_symbol_display_name(symbol), []).append(symbol)
     known = contract_names or frozenset()
     referenced = branch_condition_names or set()
     unknown = [
@@ -4576,14 +5250,19 @@ def _apply_inputs(
                 ignored.append(name)
             continue
         sympified = sp.sympify(value)
+        if sympified.is_negative is True and any(
+            symbol.is_nonnegative is True for symbol in symbols_by_name[name]
+        ):
+            raise ValueError(
+                f"Cannot apply negative value {value!r} to nonnegative "
+                f"resource parameter '{name}'."
+            )
         for symbol in symbols_by_name[name]:
             subs[symbol] = sympified
     # Simultaneous substitution: the only way a requested name survives is that
     # the caller's own value reintroduced it (a legitimate shift like n -> n+1),
     # never a partially-applied replacement.
-    substituted = estimate._map_expr(
-        lambda expr: cast(sp.Expr, expr.subs(subs, simultaneous=True).doit())
-    )
+    substituted = estimate._map_expr(lambda expr: _substitute_resource_expr(expr, subs))
     if ignored:
         note = ResourceAssumption(
             "input(s) "
@@ -4703,9 +5382,7 @@ def _controlled_u_child_resolver(
         return resolver.child_scope(block)
 
     extra: dict[str, ResourceExpr] = {}
-    quantum_formals = [value for value in block.input_values if value.type.is_quantum()]
-    actuals = [value for value in operation.target_operands if value.type.is_quantum()]
-    for formal, actual in zip(quantum_formals, actuals):
+    for formal, actual in pair_block_operands(block, operation.target_operands):
         extra[formal.uuid] = resolver.resolve(actual)
         if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
             for formal_dim, actual_dim in zip(formal.shape, actual.shape):
@@ -4715,47 +5392,6 @@ def _controlled_u_child_resolver(
     context.update(extra)
     return ExprResolver(
         block=block,
-        context=context,
-        loop_var_names=resolver.loop_var_names,
-        parent_blocks=[],
-    )
-
-
-def _select_case_child_resolver(
-    operation: SelectOperation,
-    case_block: Block,
-    resolver: ExprResolver,
-) -> ExprResolver:
-    """Build a resolver for one SELECT case body.
-
-    Args:
-        operation (SelectOperation): Parent multiplexer call site.
-        case_block (Block): Case body whose formals need binding.
-        resolver (ExprResolver): Resolver for the parent scope.
-
-    Returns:
-        ExprResolver: Resolver scoped to ``case_block``.
-    """
-    quantum_actuals = iter(operation.target_operands)
-    parameter_actuals = iter(operation.param_operands)
-    extra: dict[str, ResourceExpr] = {}
-    for formal in case_block.input_values:
-        actual = (
-            next(quantum_actuals, None)
-            if formal.type.is_quantum()
-            else next(parameter_actuals, None)
-        )
-        if actual is None:
-            continue
-        extra[formal.uuid] = resolver.resolve(actual)
-        if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
-            for formal_dim, actual_dim in zip(formal.shape, actual.shape):
-                extra[formal_dim.uuid] = resolver.resolve(actual_dim)
-
-    context = resolver.context
-    context.update(extra)
-    return ExprResolver(
-        block=case_block,
         context=context,
         loop_var_names=resolver.loop_var_names,
         parent_blocks=[],
@@ -4785,21 +5421,12 @@ def _inverse_block_child_resolver(
         return resolver.child_scope(impl)
 
     extra: dict[str, ResourceExpr] = {}
-    quantum_actuals = iter(operation.target_qubits)
-    parameter_actuals = iter(operation.parameters)
-    for formal in impl.input_values:
-        if formal.type.is_quantum():
-            actual = next(quantum_actuals, None)
-            if actual is None:
-                continue
-            extra[formal.uuid] = resolver.resolve(actual)
-            if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
-                for formal_dim, actual_dim in zip(formal.shape, actual.shape):
-                    extra[formal_dim.uuid] = resolver.resolve(actual_dim)
-            continue
-        actual = next(parameter_actuals, None)
-        if actual is not None:
-            extra[formal.uuid] = resolver.resolve(actual)
+    operands = [*operation.target_qubits, *operation.parameters]
+    for formal, actual in pair_block_operands(impl, operands):
+        extra[formal.uuid] = resolver.resolve(actual)
+        if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
+            for formal_dim, actual_dim in zip(formal.shape, actual.shape):
+                extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
     context = resolver.context
     context.update(extra)

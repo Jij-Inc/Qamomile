@@ -10,12 +10,17 @@ bindings were applied:
 
 1. Aliasing between a (now-concrete) slice view and another live
    view of the same root parent (raised as
-   :class:`SliceBorrowViolationError` from
+   :class:`QubitBorrowConflictError` from
    :meth:`_register_slice_bulk_borrow_if_new`).
 2. A view whose newly-concrete coverage hits a slot that was
-   consumed by a destructive view operation earlier in the block
-   (raised as :class:`SliceBorrowViolationError` from
-   :meth:`_process_operand_borrows`).
+   consumed by a destructive operation earlier in the block
+   (raised as :class:`QubitConsumedError` while registering the view
+   in :meth:`_register_slice_bulk_borrow_if_new` or inspecting its
+   operands in :meth:`_process_operand_borrows`).
+3. A slice ownership release, drain, or refresh that crosses a
+   control-flow boundary the current state merge cannot represent
+   safely (raised as :class:`ValidationError` from the corresponding
+   snapshot guard).
 
 Slice views are otherwise treated as **affine** at the kernel
 boundary: a view that goes out of scope without being slice-
@@ -31,19 +36,21 @@ unmeasured) compile cleanly.  The genuine hazards stay covered:
   frontend's ``ArrayBase.consume`` / ``validate_all_returned``.
 * Returning the parent with an outstanding borrow raises
   ``UnreturnedBorrowError`` from
-  ``func_to_block._validate_returned_arrays``.
+  ``qamomile.circuit.frontend.func_to_block._validate_returned_arrays``.
 * Direct ``q[i]`` access on a slot a view currently owns is caught
   at the frontend's element-access path / this pass's
   :meth:`_process_operand_borrows` for symbolic-bound views.
 * Overlapping live views and use-after-destroy are caught at
   registration time (see the two error sites above).
 
-Direct element borrows (``q[i]``) are intentionally **not** observed
-here.  Element access emits no IR operation, so the IR layer has
-nothing to track; the frontend trace-time validator
-(``func_to_block._validate_returned_arrays`` and
-``ArrayBase.validate_all_returned``) is the source of truth for
-direct-element-borrow violations.
+The creation of a direct element borrow (``q[i]``) is intentionally
+**not** observed here because element access emits no IR operation.
+Later uses of that element do appear as operation operands, however,
+so :meth:`_process_operand_borrows` can reject a use that collides
+with a live slice view.  The frontend trace-time validator
+(``qamomile.circuit.frontend.func_to_block._validate_returned_arrays`` and
+``ArrayBase.validate_all_returned``) remains the source of truth for
+unreturned direct-element borrows that have no observable operand use.
 
 State shape: a single dict keyed by a 2-tuple
 ``(root_logical_id, slot_descriptor)`` where
@@ -99,7 +106,8 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.errors import (
-    SliceBorrowViolationError,
+    QubitBorrowConflictError,
+    QubitConsumedError,
     ValidationError,
 )
 
@@ -227,19 +235,20 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
     state map modelled on the frontend's
     :attr:`ArrayBase._borrowed_indices` — a single ``dict`` whose
     values are slice-view ``ArrayValue`` owners or the
-    ``_ConsumedSlotMarker`` sentinel.  Direct element borrows
-    (``q[i]``) emit no IR operation and are left to the trace-time
-    validator.
+    ``_ConsumedSlotMarker`` sentinel.  Creating a direct element borrow
+    (``q[i]``) emits no IR operation, but later operand uses remain visible
+    to this pass; the frontend validator handles an unreturned borrow with
+    no observable operand use.
 
     The pass does **not** flag a leftover slice view at block end —
     slice views are affine at the kernel boundary, mirroring how
     element borrows behave on a locally-allocated register (the
-    frontend's ``_validate_returned_arrays`` covers the genuine
-    leak: returning the parent with a live borrow).  Anything that
-    actually clashes with a live view (direct slot access,
-    destructive parent consume, overlapping views, use-after-
-    destroy) is rejected at the eager check points listed in the
-    module docstring.
+    frontend's
+    ``qamomile.circuit.frontend.func_to_block._validate_returned_arrays``
+    covers the genuine leak: returning the parent with a live borrow).
+    Anything that actually clashes with a live view (direct slot access,
+    destructive parent consume, overlapping views, use-after-destroy) is
+    rejected at the eager check points listed in the module docstring.
     """
 
     def __init__(self) -> None:
@@ -281,17 +290,20 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         """Run the borrow tracker over ``input``.
 
         Args:
-            input: Block to check.  Expected to be in AFFINE or
+            input (Block): Block to check. Expected to be in AFFINE or
                 HIERARCHICAL kind — post-fold but pre-segmentation.
 
         Returns:
-            The same ``Block`` unchanged (pass-through).
+            Block: The same block unchanged after successful validation.
 
         Raises:
-            ValidationError: If called on an unexpected block kind.
-            SliceBorrowViolationError: If a slice view and a direct
-                access collide, two views overlap, or a use-after-
-                destroy is observed.
+            ValidationError: If called on an unexpected block kind or slice
+                ownership cannot be propagated safely across a control-flow
+                boundary.
+            QubitBorrowConflictError: If a slice view and a direct access
+                collide or two live views may overlap.
+            QubitConsumedError: If an operand accesses a destroyed slot or a
+                stale slice version attempts to replace its live successor.
         """
         if input.kind not in (BlockKind.AFFINE, BlockKind.HIERARCHICAL):
             raise ValidationError(
@@ -525,12 +537,15 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         element access alone emits nothing to the IR.
 
         Args:
-            op: The operation whose operands are being inspected.
-            state: Mutable borrow tracker (slice views only).
+            op (Operation): Operation whose operands are being inspected.
+            state (State): Mutable borrow tracker containing slice views and
+                consumed-slot markers.
 
         Raises:
-            SliceBorrowViolationError: If an operand's resolved slot
-                is owned by a view that does not contain the operand.
+            QubitBorrowConflictError: If an operand's resolved slot is owned
+                by a view that does not contain the operand.
+            QubitConsumedError: If an operand's resolved slot has already
+                been destroyed by a destructive operation.
         """
         # Mark whole-ArrayValue operands as "used" for drain tracking.
         # A whole-view operand (``measure(view)``, ``qft(view)``,
@@ -557,11 +572,10 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                     for idx in range(length):
                         key = _const_key(v, idx)
                         if isinstance(state.get(key), _ConsumedSlotMarker):
-                            raise SliceBorrowViolationError(
+                            raise QubitConsumedError(
                                 f"Whole-array operand '{v.name}' (slot {idx}) "
                                 f"is accessed after it was consumed by a "
-                                f"destructive view operation "
-                                f"(e.g. measure / cast on a view); the "
+                                f"destructive operation; the "
                                 f"physical qubit is no longer available."
                             )
 
@@ -589,10 +603,10 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 # earlier destructive view op (``measure(q[1::2])``).
                 # Any subsequent operand access — direct or via
                 # another view — is invalid.
-                raise SliceBorrowViolationError(
+                raise QubitConsumedError(
                     f"Operand '{v.name}' accesses slot "
                     f"{_slot_descriptor(key)} after it was "
-                    f"consumed by a destructive view operation; the physical "
+                    f"consumed by a destructive operation; the physical "
                     f"qubit is no longer available."
                 )
 
@@ -602,7 +616,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 # chain).  Otherwise it's a direct access colliding
                 # with the view.
                 if not self._is_element_of_view(v, existing):
-                    raise SliceBorrowViolationError(
+                    raise QubitBorrowConflictError(
                         self._format_view_vs_direct(existing, v, op, key)
                     )
                 # Same view — legitimate view-internal access, no state
@@ -789,17 +803,17 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         The current loop / branch merge cannot propagate entry deletions
         out of the body, so such cross-body releases would leave the
         outer state inconsistent — they are rejected with
-        ``SliceBorrowViolationError`` for predictability.
+        ``ValidationError`` for predictability.
 
         Args:
-            view_value: The sliced ``ArrayValue`` whose borrow is
+            view_value (ValueBase): Sliced value whose borrow is
                 being released.  Must be an ``ArrayValue`` (the
                 ``ReleaseSliceViewOperation`` op invariant guarantees
                 this).
-            state: Mutable borrow tracker for the current scope.
+            state (State): Mutable borrow tracker for the current scope.
 
         Raises:
-            SliceBorrowViolationError: When invoked inside a
+            ValidationError: When invoked inside a
                 control-flow body and any entry being removed was
                 recorded in the outer snapshot (cross-body release).
         """
@@ -814,7 +828,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             if k in snapshot
         ]
         if offenders:
-            raise SliceBorrowViolationError(
+            raise ValidationError(
                 f"Slice assignment inside a control-flow body "
                 f"attempted to release view '{view_value.name}', "
                 f"which was registered by the enclosing block.  "
@@ -850,20 +864,20 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         instead.
 
         Args:
-            drained_view: The view whose state entries the caller is
+            drained_view (ArrayValue): View whose state entries the caller is
                 about to delete.
-            new_view: The view being registered, used in the error
+            new_view (ArrayValue): View being registered, used in the error
                 message to point users at the construction site.
-            root: The shared root parent ArrayValue (used for the
+            root (ArrayValue): Shared root parent used for the
                 ``<root>[idx]`` reference in the error body).
-            reason: Short descriptor of which drain path triggered the
+            reason (str): Short descriptor of which drain path triggered the
                 guard (``"same-coverage replacement"`` /
                 ``"nested-slice drain of outer view"``), surfaced in
                 the error message so the user can see *why* the IR
                 tried to drop the outer view.
 
         Raises:
-            SliceBorrowViolationError: If any active outer snapshot
+            ValidationError: If any active outer snapshot
                 owns ``drained_view`` or an equivalent prior version of
                 the same sliced view.
         """
@@ -877,7 +891,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         ]
         if not offenders:
             return
-        raise SliceBorrowViolationError(
+        raise ValidationError(
             f"Slice construction inside a control-flow body would "
             f"implicitly drain view '{drained_view.name}' (registered "
             f"on '{root.name}' by the enclosing block) to make room "
@@ -943,13 +957,18 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         already present in ``state`` is idempotently skipped.
 
         Args:
-            av: Candidate sliced ``ArrayValue`` (or ``None``).  Silently
+            av (ValueBase | None): Candidate sliced value. Silently
                 returns on ``None`` or non-sliced values.
-            state: Mutable borrow tracker.
+            state (State): Mutable borrow tracker.
 
         Raises:
-            SliceBorrowViolationError: If any covered slot is already
-                held by a different owner.
+            QubitBorrowConflictError: If any covered slot is already held by
+                another live owner.
+            QubitConsumedError: If any covered slot was destroyed by a
+                previous destructive operation or a stale slice version
+                attempts to replace its live successor.
+            ValidationError: If registering the view would mutate ownership
+                across an unsupported control-flow boundary.
         """
         if av is None or not isinstance(av, ArrayValue):
             return
@@ -986,28 +1005,23 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 continue
             if isinstance(existing, _ConsumedSlotMarker):
                 # Attempting to slice into an already-destroyed slot.
-                raise SliceBorrowViolationError(
+                raise QubitConsumedError(
                     f"Slice view '{av.name}' covers slot {idx} on "
                     f"'{root.name}', but that physical qubit was destroyed "
-                    f"by a prior destructive view operation (measure / cast)."
+                    f"by a prior destructive operation."
                 )
             if isinstance(existing, ArrayValue):
                 if existing.uuid == av.uuid:
                     continue  # idempotent re-registration on same uuid
                 touched_views.setdefault(existing.uuid, existing)
                 touched_views_coverage.setdefault(existing.uuid, set()).add(idx)
-            else:
-                # Direct element borrow collides with the new view.
-                raise SliceBorrowViolationError(
-                    self._format_view_registration_conflict(existing, av, idx, root)
-                )
 
         for other_uuid, other_view in touched_views.items():
             other_full = self._collect_view_coverage(other_view)
             if other_full is None:
                 # Symbolic / unresolvable bounds on the earlier view —
                 # we can't prove coverage equality, so be conservative.
-                raise SliceBorrowViolationError(
+                raise QubitBorrowConflictError(
                     self._format_view_registration_conflict(
                         other_view,
                         av,
@@ -1129,7 +1143,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 # explicitly return / consume the outer view before
                 # constructing an overlapping inner view.  Matches the
                 # frontend's strict ``VectorView._wrap`` overlap check.
-                raise SliceBorrowViolationError(
+                raise QubitBorrowConflictError(
                     self._format_view_registration_conflict(
                         other_view,
                         av,
@@ -1166,10 +1180,13 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             state (State): Mutable borrow tracker.
 
         Raises:
-            SliceBorrowViolationError: If a symbolic descriptor is
-                already owned by a different slice lineage, a stale
-                version attempts to replace the current owner, or an
-                unsafe control-flow snapshot would be rewritten.
+            QubitBorrowConflictError: If a symbolic descriptor is already
+                owned by a different live slice lineage.
+            QubitConsumedError: If the symbolic view may cover a slot already
+                destroyed by a destructive operation or a stale version
+                attempts to replace the current owner.
+            ValidationError: If refreshing the descriptor would rewrite an
+                unsafe control-flow snapshot.
         """
         root = _root_of(av)
         key = self._symbolic_view_key(root, av)
@@ -1194,7 +1211,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             if isinstance(owner, ArrayValue) and owner.uuid != av.uuid:
                 if self._symbolic_slices_definitely_disjoint(av, owner):
                     continue
-                raise SliceBorrowViolationError(
+                raise QubitBorrowConflictError(
                     f"Symbolic slice view '{av.name}' on '{root.name}' "
                     f"may overlap live symbolic view '{owner.name}'.  "
                     f"Only exact forward refresh of the same symbolic "
@@ -1204,9 +1221,11 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         if existing is None:
             state[key] = av
             return
-        if not isinstance(existing, ArrayValue):
-            raise SliceBorrowViolationError(
-                self._format_view_registration_conflict(existing, av, -1, root)
+        if isinstance(existing, _ConsumedSlotMarker):
+            raise QubitConsumedError(
+                f"Symbolic slice view '{av.name}' on '{root.name}' reuses a "
+                f"slice descriptor whose physical qubits were destroyed by "
+                f"a prior destructive operation."
             )
         if existing.uuid == av.uuid:
             return
@@ -1219,7 +1238,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             return
         if self._same_slice_lineage(av, existing) and av.version <= existing.version:
             self._raise_stale_same_slice_replacement(av, existing, root)
-        raise SliceBorrowViolationError(
+        raise QubitBorrowConflictError(
             f"Symbolic slice view '{av.name}' has the same descriptor as "
             f"live view '{existing.name}' on '{root.name}', but it is not "
             f"a forward SSA-version refresh of that view.  Return or "
@@ -1616,7 +1635,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             state (State): Mutable borrow tracker.
 
         Raises:
-            SliceBorrowViolationError: If the same root has a live
+            QubitBorrowConflictError: If the same root has a live
                 symbolic descriptor owner whose overlap with ``av``
                 cannot be disproved.
         """
@@ -1624,7 +1643,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             if key[0] != root.logical_id or not key[1].startswith("sym:"):
                 continue
             if isinstance(owner, ArrayValue) and owner.uuid != av.uuid:
-                raise SliceBorrowViolationError(
+                raise QubitBorrowConflictError(
                     f"Slice view '{av.name}' has concrete coverage on "
                     f"'{root.name}', but live symbolic view "
                     f"'{owner.name}' on the same root may overlap it.  "
@@ -1647,22 +1666,23 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             state (State): Mutable borrow tracker.
 
         Raises:
-            SliceBorrowViolationError: If the same root has a live
-                concrete-slot owner whose overlap with ``av`` cannot be
-                disproved.
+            QubitBorrowConflictError: If the same root has a live concrete
+                view whose overlap with ``av`` cannot be disproved.
+            QubitConsumedError: If the symbolic view may cover a slot already
+                destroyed by a destructive operation.
         """
         for key, owner in state.items():
             if key[0] != root.logical_id or key[1].startswith("sym:"):
                 continue
             if isinstance(owner, _ConsumedSlotMarker):
-                raise SliceBorrowViolationError(
+                raise QubitConsumedError(
                     f"Slice view '{av.name}' has symbolic coverage on "
                     f"'{root.name}', but concrete slot "
                     f"'{_slot_descriptor(key)}' was destroyed by a prior "
-                    f"destructive view operation."
+                    f"destructive operation."
                 )
             if isinstance(owner, ArrayValue) and owner.uuid != av.uuid:
-                raise SliceBorrowViolationError(
+                raise QubitBorrowConflictError(
                     f"Slice view '{av.name}' has symbolic coverage on "
                     f"'{root.name}', but live concrete view "
                     f"'{owner.name}' on the same root may overlap it.  "
@@ -1818,7 +1838,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 refresh would rewrite.
 
         Raises:
-            SliceBorrowViolationError: If any matching active snapshot
+            ValidationError: If any matching active snapshot
                 frame is not a statically non-zero ``For`` body.
         """
         matching_kinds: list[str] = []
@@ -1841,7 +1861,7 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         if all(kind == _SnapshotKind.FOR_STATIC_NONZERO for kind in matching_kinds):
             return
         root = _root_of(candidate)
-        raise SliceBorrowViolationError(
+        raise ValidationError(
             f"Slice construction inside a control-flow body would "
             f"refresh view '{owner.name}' (registered on '{root.name}' "
             f"by an enclosing block) to '{candidate.name}', but that "
@@ -1864,9 +1884,10 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             root (ArrayValue): Shared root parent ArrayValue.
 
         Raises:
-            SliceBorrowViolationError: Always raised.
+            QubitConsumedError: Always raised because ``candidate`` is an
+                already-consumed predecessor of the live ``owner`` version.
         """
-        raise SliceBorrowViolationError(
+        raise QubitConsumedError(
             f"Slice view '{candidate.name}' on '{root.name}' attempts "
             f"to replace an equal or newer registered version of the "
             f"same slice view '{owner.name}'.  Only forward SSA-version "
