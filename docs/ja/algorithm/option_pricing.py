@@ -18,16 +18,17 @@
 # tags: [algorithm, finance, simulation]
 # ---
 #
-# # 量子コンピュータを用いたオプションプライシング
+# # 量子振幅推定を用いたオプションプライシング
 #
 # ゲート型量子コンピュータ上で実行する量子振幅推定は、様々な応用が提案されています。
-# その中でも、金融工学のオプションプライシングは、その最たる例です。
-# これまで、オプションプライシングには古典モンテカルロ法が用いられてきましたが、量子振幅推定はそれと比較して2次高速化をもたらすことが知られています。
+# その中でも、金融工学のオプションプライシングは、その代表的な応用例の一つです。
+# これまでオプションプライシングには古典モンテカルロ法が用いられてきましたが、これは目標精度 $\epsilon$ を達成するための必要なオラクルの呼び出し回数が $\mathcal{O} (\epsilon^{-2})$ でした。
+# これに対し、量子振幅推定は $\mathcal{O} (\epsilon^{-1})$ で済み、2次の高速化をもたらすアルゴリズムであることが知られています。
 # そこで本記事では、[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)で提案された、量子振幅推定によるオプションおよびオプションポートフォリオプライシング手法の理解と実装についてまとめました。オプションプライシングの例を通して、Qamomileの使い方を学びましょう。
 
 # %%
 # Install the latest Qamomile through pip! 
-# # !pip install qamomile
+# #!pip install qamomile
 
 # %%
 import numpy as np
@@ -35,21 +36,27 @@ from scipy.optimize import minimize_scalar
 import matplotlib.pyplot as plt
 
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.state_preparation import amplitude_encoding
+from qamomile.circuit.stdlib import amplitude_encoding
 from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # ## 背景
 #
+# 最初に、この記事で出てくる用語についてまとめておきましょう。
+#
+# * アセット (原資産): 株式など、オプションの対象となる金融商品
+# * オプション: 将来の決められた時点 (満期) に、決められた価格 (権利行使価格) でアセットを売買する権利
+# * ペイオフ: 満期時点でのオプションの価値
+#
 # ### 問題: オプションプライシング
 #
 # 金融リスクの計算は、大きな需要があります。
-# モンテカルロ (MC) 計算はその中心的な計算手法であり、Value at Risk (VaR) の推定や店頭デリバティブのプライシング決定など、幅広く用いられています。
+# モンテカルロ (MC) 計算はその中心的な計算手法であり、Value at Risk (VaR) の推定や店頭デリバティブの価格決定など、幅広く用いられています。
 # しかし収束が悪く、その誤差は $\varepsilon = \mathcal{O} (M^{-1/2})$ で減衰するという欠点があります。
 # ここで $M$ はサンプル数です。  
 # 対象となる確率分布が量子状態として準備される場合、量子振幅推定 (QAE) により、期待値などの統計量を $\mathcal{O} (M^{-1})$ で推定できることが知られています。
 # これは先ほどの古典MCに対し、二次の高速化をもたらすことがわかります。  
-# [Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、先行研究のプライシング手法を拡張し、NISQ実機での計算を可能にする量子回路実装を示しました。
+# [Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、先行研究のプライシング手法を拡張した量子回路実装を示しました。
 #
 # ### 先行研究
 #
@@ -158,23 +165,33 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # のように $f(i)$ を規格化したもので、その値の範囲は $\tilde{f}(i) \in [-1, 1]$ となります。
 # ここで、$f_\mathrm{max} = \max_i f(i), f_\mathrm{min} = \min_i f(i)$ です。
-# (7)式から、ペイオフ量子ビットが $\vert 1 \rangle$ となる確率は
+# 式(7)から、ペイオフ量子ビットが $\vert 1 \rangle$ となる確率は
 #
 # $$
 # P_1 
 # = \sum_i p_i \sin^2 \left\{ c \tilde{f}(i) + \frac{\pi}{4} \right\} 
-# = \sum_i p_i \frac{1}{2} \left[ 1 + \sin \left\{ 2 c \tilde{f}(i) + \frac{\pi}{2} \right\} \right] 
+# = \sum_i p_i \frac{1}{2} \left[ 1 - \cos \left\{ 2 c \tilde{f}(i) + \frac{\pi}{2} \right\} \right] 
+# = \sum_i p_i \frac{1}{2} \left[ 1 + \sin \left\{ 2 c \tilde{f}(i) \right\} \right] 
 # \underbrace{\approx}_{cf \ll 1} \sum_i p_i \left( \frac{1}{2} + c\tilde{f} (i) + \mathcal{O}(c^3 \tilde{f}^3)\right) 
 # = \frac{1}{2} + c \mathbb{E} [\tilde{f}(i)] + \mathcal{O} (c^3 \tilde{f}^3) \tag{9}
 # $$
 #
 # のようになります。
-# $P_1$ を振幅推定で推定すれば、既知の $c, f_\mathrm{min}, f_\mathrm{max}$ により $\mathbb{E}[f(S)]$ を算出することが可能になります。
+# $P_1$ を振幅推定で推定すれば、既知の $c, f_\mathrm{min}, f_\mathrm{max}$ により $\mathbb{E}[\tilde{f}]$ を算出することが可能になります。
 # しかし、ここでは $c$ の選び方が重要になります。
-# $c$ を小さくすると、(9)式の精度は良くなりますが、$P_1 \sim \frac{1}{2}$ に値が集中し、振幅推定精度が落ちることになります。
-# 逆に大きな $c$ に対しては $P_1$ の範囲が大きくなりますが、(9)式の $\mathcal{O}(c^3 \tilde{f}^3)$ の誤差が増えることになります。
+# 式(9)より $\mathbb{E}[\tilde{f}]$ は
+#
+# $$
+# \mathbb{E}[\tilde{f}] 
+# \approx \frac{P_1 - \frac{1}{2}}{c} \tag{10}
+# $$
+#
+# のように計算されます。
+# したがってこの計算では、$P_1$ の推定誤差 $\delta P_1$ としたときに $\delta P_1 / c$ だけの誤差が生まれます。
+# $c$ を小さくすると、この誤差増幅が大きくなります。
+# 逆に $c$ を大きくするとこの誤差増幅は抑えられますが、式(9)の線形近似の高次項 $\mathcal{O}(c^3 \tilde{f}^3)$ を $c$ で割った $\mathcal{O}(c^2)$ の近似誤差が大きくなります。
 # このトレードオフから、収束率はサンプル数に対して $\mathcal{O}(M^{-2/3})$ のような中間的な収束率となります。
-# 完全な2次高速化を達成することはできませんが、依然として古典MCの $\mathcal{O}(M^{-1/2})$ を凌駕することがわかります。  
+# 完全なサンプル数の2次高速化を達成することはできませんが、依然として古典MCの $\mathcal{O}(M^{-1/2})$ を凌駕することがわかります。  
 # 以下に示す実装では、QAE の中でも最尤振幅推定 (Maximum Likelihood Amplitude Estimation: MLAE) と呼ばれる手法を用いています。
 # この手法は、QAE の中でも位相推定を用いない軽量な手法であることから、実用に適しています。
 #
@@ -246,7 +263,7 @@ from qamomile.qiskit import QiskitTranspiler
 # ここではまず、幾何ブラウン運動下にある満期 $S_T$ の対数正規分布を離散化したものを準備し、これを株価のデータとします。
 
 # %%
-n_qubits = 4 
+n_qubits = 4
 S0, K, r, sigma, T = 2.0, 1.9, 0.05, 0.4, 40 / 365
 mu  = (r - 0.5 * sigma**2) * T
 std = sigma * np.sqrt(T)
@@ -260,31 +277,32 @@ def lognpdf(S):
 
 probs = lognpdf(S_grid)
 probs /= probs.sum()
-amps  = np.sqrt(probs)
+amps  = np.sqrt(probs)   # Möttönen エンコード用の振幅 √p_i
 
-c          = 0.25
-F_max      = S_max - K
-delta_S    = float(S_grid[1] - S_grid[0])
-theta_S    = 4 * c * delta_S / F_max
-slopes     = [(2**j) * theta_S for j in range(n_qubits)]
-neg_slopes = [-s for s in slopes]
-offset     = 4 * c * (S_min - K) / F_max - 2 * c + np.pi / 2
+c     = 0.25             # スケーリングパラメータ
+F_max = float(S_max - K)
 
-alpha_min = offset / 2
-alpha_max = (offset + (2**n_qubits - 1) * theta_S) / 2
-print(f"S_min での振幅角: {alpha_min:.4f}  "
-      f"(期待値 {2*c*(S_min-K)/F_max - c + np.pi/4:.4f})")
-print(f"S_max での振幅角: {alpha_max:.4f}  "
-      f"(期待値 {np.pi/4 + c:.4f})")
+# ── 目標振幅角(式7: 区分線形コールオプションペイオフ) ──
+payoff       = np.maximum(S_grid - K, 0.0)
+alpha_target = np.pi / 4 - c + 2 * c * payoff / F_max   # shape: (2^n,)
 
-mc_E_f  = float(np.sum(probs * np.maximum(S_grid - K, 0)))
-mc_fair = np.exp(-r * T) * mc_E_f
-print(f"\n古典 MC E[f(S)]:     {mc_E_f:.6f}")
-print(f"古典 MC フェアバリュー: {mc_fair:.6f}")
+# ── 参照値 ──
+# exact_E_f: 数値積分による厳密な期待ペイオフ(MC 推定値ではなく離散格子上の積分値)
+exact_E_f  = float(np.sum(probs * payoff))
+exact_fair = np.exp(-r * T) * exact_E_f
 
-E_ftilde_theory = 2 * mc_E_f / F_max - 1
-P1_theory       = c * E_ftilde_theory + 0.5
-print(f"理論 P1 (k=0):       {P1_theory:.4f}")
+# P1 の厳密値: Σ_i p_i sin²(α_i)  ← 線形近似を使わない
+P1_exact  = float(np.sum(probs * np.sin(alpha_target)**2))
+
+# P1 の近似値: 式(5) の線形近似
+E_ftilde  = 2 * exact_E_f / F_max - 1
+P1_approx = c * E_ftilde + 0.5
+
+print(f"期待ペイオフ(数値積分):     {exact_E_f:.6f}")
+print(f"フェアバリュー(参照値):     {exact_fair:.6f}")
+print(f"P1 厳密値:                 {P1_exact:.6f}")
+print(f"P1 近似値(式5 線形近似):   {P1_approx:.6f}")
+print(f"P1 近似誤差:               {abs(P1_exact - P1_approx):.6f}")
 
 
 # %% [markdown]
@@ -312,15 +330,68 @@ print(f"理論 P1 (k=0):       {P1_theory:.4f}")
 # まず先ほど準備した株価データを読み込む演算と、そのエルミート演算を実装しましょう。
 
 # %%
-# ============================================================
-# P_X と P_X†(qmc.inverse でエルミート演算を生成)
-# ============================================================
+# ── UCR-Y ゲートリストを事前計算(Python レベルの再帰) ──
+def _ucry_recursive(angles, ctrl_indices, tgt_index, gates):
+    """UCR-Y の再帰的 demultiplexing。ゲートを ('ry'|'cx', ...) のリストに積む。"""
+    if len(ctrl_indices) == 0:
+        if abs(angles[0]) > 1e-12:
+            gates.append(('ry', tgt_index, angles[0]))
+        return
+    m = len(angles) // 2
+    a = [(angles[i] + angles[i + m]) / 2 for i in range(m)]
+    b = [(angles[i] - angles[i + m]) / 2 for i in range(m)]
+    _ucry_recursive(a, ctrl_indices[:-1], tgt_index, gates)
+    gates.append(('cx', ctrl_indices[-1], tgt_index))
+    _ucry_recursive(b, ctrl_indices[:-1], tgt_index, gates)
+    gates.append(('cx', ctrl_indices[-1], tgt_index))
+
+# UCR-Y の回転角 = 2 × 振幅角(qmc.ry の定義 Ry(θ)|0⟩ = cos(θ/2)|0⟩ + sin(θ/2)|1⟩ より)
+ucry_gates = []
+_ucry_recursive(
+    (2 * alpha_target).tolist(),   # 振幅角 α を 2 倍して渡す
+    list(range(n_qubits)),         # コントロール: q_S[0..n-1]
+    n_qubits,                      # ターゲット: payoff qubit (インデックス n_qubits)
+    ucry_gates
+)
+
+# UCR-Y の随伴ゲートリスト(逆順 + Ry 角度反転)
+ucry_inv_gates = []
+for gate in reversed(ucry_gates):
+    if gate[0] == 'ry':
+        ucry_inv_gates.append(('ry', gate[1], -gate[2]))
+    else:  # CNOT は自己逆
+        ucry_inv_gates.append(gate)
+
+print(f"UCR-Y ゲート数: {len(ucry_gates)} (Ry + CNOT)")
+
+# ── UCR-Y を @qkernel 内から呼ぶための Python 関数 ──
+# @qkernel 内でシーケンスのループは禁止されているが、
+# 通常の Python 関数を @qkernel 内から呼ぶことは可能。
+# ゲートリストのループは Python 関数内で実行され、
+# qmc.ry / qmc.cx の各呼び出しが Qamomile トレーサーに捕捉される。
+
+def _make_ucry_func(gate_list):
+    """UCR-Y ゲートリストを順に適用する Python 関数を返す。"""
+    def apply_ucry(q_S, q_p):
+        for gate in gate_list:
+            if gate[0] == 'ry':
+                q_p = qmc.ry(q_p, gate[2])
+            else:                                       # 'cx': CNOT
+                q_S[gate[1]], q_p = qmc.cx(q_S[gate[1]], q_p)
+        return q_S, q_p
+    return apply_ucry
+
+apply_payoff_ucr     = _make_ucry_func(ucry_gates)      # F  (ペイオフ回路)
+apply_payoff_ucr_inv = _make_ucry_func(ucry_inv_gates)  # F† (ペイオフ随伴)
+
+# ── P_X と P_X†(分布ロードとその随伴) ──
 @qmc.qkernel
 def load_distribution(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     """P_X: 対数正規分布を Möttönen でロード"""
     q = amplitude_encoding(q, amps.tolist())
     return q
 
+# qmc.inverse で随伴を自動生成
 load_distribution_inv = qmc.inverse(load_distribution)
 
 
@@ -331,33 +402,28 @@ load_distribution_inv = qmc.inverse(load_distribution)
 # ここで算出された $P_1$ の値が理論値と近い値となることを示すことで、ペイオフ回路が正しく機能していることを確認しています。
 
 # %%
-# ============================================================
-# 2. ペイオフ回路(k=0 の動作確認)
-# ============================================================
 @qmc.qkernel
-def payoff_call(slopes_p: qmc.Vector[qmc.Float]) -> qmc.Bit:
+def payoff_call() -> qmc.Bit:
     q_S = qmc.qubit_array(n_qubits, "q_S")
     q_p = qmc.qubit(name="q_p")
 
+    # (1) 分布ロード: P_X
     q_S = load_distribution(q_S)
 
-    cry = qmc.control(qmc.ry)
-    for j in range(n_qubits):
-        q_S[j], q_p = cry(q_S[j], q_p, angle=slopes_p[j])
-
-    q_p = qmc.ry(q_p, offset)
+    # (2) UCR-Y ペイオフ回路: F
+    #     |i⟩|0⟩ → |i⟩(cos α(i)|0⟩ + sin α(i)|1⟩)
+    #     α(i) = π/4 - c + 2c*max(S_i-K, 0) / (S_max-K)
+    #     S < K: 定数角 π/4 - c  /  S >= K: 線形増加
+    q_S, q_p = apply_payoff_ucr(q_S, q_p)
 
     _ = qmc.measure(q_S)
     return qmc.measure(q_p)
 
 
-num_shots      = 8192
+num_shots      = 4096
 transpiler_qmc = QiskitTranspiler()
-exe_k0 = transpiler_qmc.transpile(
-    payoff_call,
-    bindings={"slopes_p": slopes}
-)
-res_k0  = exe_k0.sample(transpiler_qmc.executor(), shots=num_shots).result()
+exe_k0 = transpiler_qmc.transpile(payoff_call)   # バインディング不要
+res_k0 = exe_k0.sample(transpiler_qmc.executor(), shots=num_shots).result()
 
 ones_k0 = 0
 for q, num in res_k0.results:
@@ -365,8 +431,11 @@ for q, num in res_k0.results:
         ones_k0 += num
 P1_k0 = ones_k0 / num_shots
 
-print(f"\n[Qamomile k=0] P1 測定: {P1_k0:.4f}  理論値: {P1_theory:.4f}")
-print("→ 両者が近ければペイオフ回路は正しく動いています")
+print(f"\n[Qamomile k=0]")
+print(f"P1 測定値:           {P1_k0:.4f}")
+print(f"P1 厳密値(参照):     {P1_exact:.4f}")
+print(f"P1 近似値(式5, 参照):{P1_approx:.4f}")
+print("→ 測定値が厳密値に近ければペイオフ回路は正しく動いています")
 
 
 # %% [markdown]
@@ -374,42 +443,31 @@ print("→ 両者が近ければペイオフ回路は正しく動いています
 # $k$ 回適用した量子状態において、ペイオフ量子ビットが $\vert 1 \rangle$ になる確率 $P_1^{(k)} = \sin^2 ((2k+1) \theta_\alpha)$ を求めます。
 
 # %%
-# ============================================================
-# 3. Qamomile による MLAE (可変 k)
-# ============================================================
 def build_Ak_kernel(k: int):
     n_anc = max(0, n_qubits - 2)
 
     if n_anc == 0:
         # n_qubits <= 2: アンシラ不要
         @qmc.qkernel
-        def Ak(
-            slopes_p:     qmc.Vector[qmc.Float],
-            neg_slopes_p: qmc.Vector[qmc.Float],
-        ) -> qmc.Bit:
+        def Ak() -> qmc.Bit:
             q_S = qmc.qubit_array(n_qubits, "q_S")
             q_p = qmc.qubit(name="q_p")
-            cry = qmc.control(qmc.ry)
 
-            # ── A ──
+            # ── A = P_X · F ──
             q_S = load_distribution(q_S)
-            for j in range(n_qubits):
-                q_S[j], q_p = cry(q_S[j], q_p, angle=slopes_p[j])
-            q_p = qmc.ry(q_p, offset)
+            q_S, q_p = apply_payoff_ucr(q_S, q_p)
 
             # ── Q を k 回適用 ──
             for _ in range(k):
 
-                # S_χ
+                # S_χ: payoff qubit が |1⟩ のとき位相 -1
                 q_p = qmc.z(q_p)
 
-                # A†: F† → P_X†
-                q_p = qmc.ry(q_p, -offset)
-                for j in range(n_qubits - 1, -1, -1):
-                    q_S[j], q_p = cry(q_S[j], q_p, angle=neg_slopes_p[j])
+                # A† = F† · P_X†
+                q_S, q_p = apply_payoff_ucr_inv(q_S, q_p)
                 q_S = load_distribution_inv(q_S)
 
-                # S₀
+                # S₀: |0…0⟩ のとき位相 -1
                 q_S = qmc.x(q_S)
                 q_p = qmc.x(q_p)
                 if n_qubits == 1:
@@ -423,30 +481,22 @@ def build_Ak_kernel(k: int):
 
                 # A
                 q_S = load_distribution(q_S)
-                for j in range(n_qubits):
-                    q_S[j], q_p = cry(q_S[j], q_p, angle=slopes_p[j])
-                q_p = qmc.ry(q_p, offset)
+                q_S, q_p = apply_payoff_ucr(q_S, q_p)
 
             _ = qmc.measure(q_S)
             return qmc.measure(q_p)
 
     else:
-        # n_qubits >= 3: Toffoli ラダー用アンシラあり
+        # n_qubits >= 3: S₀ の MCZ に Toffoli ラダーとアンシラを使用
         @qmc.qkernel
-        def Ak(
-            slopes_p:     qmc.Vector[qmc.Float],
-            neg_slopes_p: qmc.Vector[qmc.Float],
-        ) -> qmc.Bit:
+        def Ak() -> qmc.Bit:
             q_S = qmc.qubit_array(n_qubits, "q_S")
             q_p = qmc.qubit(name="q_p")
             anc = qmc.qubit_array(n_anc, "anc")
-            cry = qmc.control(qmc.ry)
 
-            # ── A ──
+            # ── A = P_X · F ──
             q_S = load_distribution(q_S)
-            for j in range(n_qubits):
-                q_S[j], q_p = cry(q_S[j], q_p, angle=slopes_p[j])
-            q_p = qmc.ry(q_p, offset)
+            q_S, q_p = apply_payoff_ucr(q_S, q_p)
 
             # ── Q を k 回適用 ──
             for _ in range(k):
@@ -454,22 +504,24 @@ def build_Ak_kernel(k: int):
                 # S_χ
                 q_p = qmc.z(q_p)
 
-                # A†: F† → P_X†
-                q_p = qmc.ry(q_p, -offset)
-                for j in range(n_qubits - 1, -1, -1):
-                    q_S[j], q_p = cry(q_S[j], q_p, angle=neg_slopes_p[j])
+                # A† = F† · P_X†
+                q_S, q_p = apply_payoff_ucr_inv(q_S, q_p)
                 q_S = load_distribution_inv(q_S)
 
                 # S₀: Toffoli ラダー(n_qubits >= 3)
+                # アンシラに桁上がりを伝播(前半) → 最終段 → アンシラをゼロ戻し(後半)
                 q_S = qmc.x(q_S)
                 q_p = qmc.x(q_p)
                 q_p = qmc.h(q_p)
+                # 前半
                 q_S[0], q_S[1], anc[0] = qmc.ccx(q_S[0], q_S[1], anc[0])
-                for i in range(1, n_qubits - 2):
+                for i in qmc.range(1, n_qubits - 2):
                     anc[i-1], q_S[i+1], anc[i] = qmc.ccx(
                         anc[i-1], q_S[i+1], anc[i])
+                # 最終段
                 anc[n_qubits-3], q_S[n_qubits-1], q_p = qmc.ccx(
                     anc[n_qubits-3], q_S[n_qubits-1], q_p)
+                # 後半(uncompute): 逆順
                 for i in range(n_qubits - 3, 0, -1):
                     anc[i-1], q_S[i+1], anc[i] = qmc.ccx(
                         anc[i-1], q_S[i+1], anc[i])
@@ -480,9 +532,7 @@ def build_Ak_kernel(k: int):
 
                 # A
                 q_S = load_distribution(q_S)
-                for j in range(n_qubits):
-                    q_S[j], q_p = cry(q_S[j], q_p, angle=slopes_p[j])
-                q_p = qmc.ry(q_p, offset)
+                q_S, q_p = apply_payoff_ucr(q_S, q_p)
 
             _ = qmc.measure(anc)
             _ = qmc.measure(q_S)
@@ -497,17 +547,12 @@ shots_per_k = 2048
 transpiler_q = QiskitTranspiler()
 h_list, N_list = [], []
 
-theta_a_theory = np.asin(np.sqrt(max(0.0, min(1.0, P1_theory))))
+# P1 の理論値には線形近似値ではなく厳密値を使用
+theta_a_theory = np.arcsin(np.sqrt(max(0.0, min(1.0, P1_exact))))
 print()
 for k in k_list:
     kernel = build_Ak_kernel(k)
-    exe    = transpiler_q.transpile(
-        kernel,
-        bindings={
-            "slopes_p":     slopes,
-            "neg_slopes_p": neg_slopes,
-        }
-    )
+    exe    = transpiler_q.transpile(kernel)   # バインディング不要
     result = exe.sample(transpiler_q.executor(), shots=shots_per_k).result()
 
     ones = 0
@@ -518,7 +563,7 @@ for k in k_list:
     N_list.append(shots_per_k)
     P1_k  = ones / shots_per_k
     P1_th = np.sin((2*k + 1) * theta_a_theory)**2
-    print(f"k={k:2d}: P1 測定={P1_k:.4f}  理論値={P1_th:.4f}")
+    print(f"k={k:2d}: P1 測定={P1_k:.4f}  理論値(厳密)={P1_th:.4f}")
 
 
 # %% [markdown]
@@ -532,6 +577,10 @@ for k in k_list:
 # 4. 最尤推定(MLE)
 # ============================================================
 def neg_log_lik(theta: float) -> float:
+    """
+    負の対数尤度:
+      -Σ_k [h_k log sin²((2k+1)θ) + (N_k - h_k) log cos²((2k+1)θ)]
+    """
     ll = 0.0
     for k, h, N in zip(k_list, h_list, N_list):
         s2 = float(np.clip(np.sin((2*k + 1) * theta)**2, 1e-12, 1 - 1e-12))
@@ -542,15 +591,18 @@ opt       = minimize_scalar(neg_log_lik, bounds=(0, np.pi / 2), method='bounded'
 theta_hat = opt.x
 a_hat     = np.sin(theta_hat)**2
 
+# P1 → E[f(S)] の逆算(式5 の線形近似を使用、近似バイアスは O(c²))
+# E[f̃] ≈ (P1 - 1/2) / c, E[f] = F_max/2 * (E[f̃] + 1)
 E_ftilde_hat = (a_hat - 0.5) / c
 E_f_hat      = (E_ftilde_hat + 1) * F_max / 2
 fair_hat     = np.exp(-r * T) * E_f_hat
 
 print(f"\n===== 推定結果 =====")
-print(f"推定 P1:          {a_hat:.6f}  (理論値 {P1_theory:.6f})")
-print(f"推定 E[f(S)]:     {E_f_hat:.6f}  (MC参照 {mc_E_f:.6f})")
-print(f"推定フェアバリュー: {fair_hat:.6f}  (MC参照 {mc_fair:.6f})")
-print(f"絶対誤差:          {abs(fair_hat - mc_fair):.6f}")
+print(f"推定 P1:          {a_hat:.6f}  "
+      f"(厳密値 {P1_exact:.6f}, 近似値 {P1_approx:.6f})")
+print(f"推定 E[f(S)]:     {E_f_hat:.6f}  (参照値 {exact_E_f:.6f})")
+print(f"推定フェアバリュー: {fair_hat:.6f}  (参照値 {exact_fair:.6f})")
+print(f"絶対誤差:          {abs(fair_hat - exact_fair):.6f}")
 
 # %% [markdown]
 # 対数尤度関数 $\log \mathcal{L} (\sin^2 \theta)$と、$P_1^{(k)}$ をプロットしてみましょう。
@@ -568,10 +620,12 @@ a_grid     = np.sin(theta_grid)**2
 fig, axes = plt.subplots(1, 2, figsize=(11, 4))
 
 axes[0].plot(a_grid, ll_grid, color='steelblue')
-axes[0].axvline(a_hat,     color='red',  ls='--',
-                label=f'estimate value  {a_hat:.4f}')
-axes[0].axvline(P1_theory, color='navy', ls=':',
-                label=f'theoretical value  {P1_theory:.4f}')
+axes[0].axvline(a_hat,     color='red',   ls='--',
+                label=f'estimate  {a_hat:.4f}')
+axes[0].axvline(P1_exact,  color='navy',  ls=':',
+                label=f'exact P1  {P1_exact:.4f}')
+axes[0].axvline(P1_approx, color='green', ls='-.',
+                label=f'approx P1 {P1_approx:.4f}')
 axes[0].set_xlabel('a = sin²(θ)')
 axes[0].set_ylabel('log-likelihood')
 axes[0].set_title('MLAE likelihood')
@@ -591,7 +645,141 @@ axes[1].legend()
 plt.tight_layout()
 plt.show()
 
+
 # %% [markdown]
 # 今回の実装が、理論値に近い結果を得られていることがわかります。
+
+# %% [markdown]
+# ## まとめ
+#
+# ここでは、[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/) で提案されたオプションプライシングアルゴリズムを Qamomile で実装する方法をご紹介しました。
+# 以下にこのページで紹介した重要な情報をまとめます。
+#
+# * 対数正規分布を Möttönen の符号化手法により量子状態に符号化し、一様な制御回転を用いてコールオプションのペイオフをペイオフ量子ビット振幅に符号化しました。
+# * Grover 演算子 $\mathcal{Q}$ を $k$ 回適用した回路を様々な $k$ で測定し、最尤推定から振幅角を推定することで、期待ペイオフを求めました。
+
+# %%
+def build_Ak_kernel(k: int):
+    n_anc = max(0, n_qubits - 2)
+
+    if n_anc == 0:
+        # n_qubits <= 2: アンシラ不要
+        @qmc.qkernel
+        def Ak() -> qmc.Bit:
+            q_S = qmc.qubit_array(n_qubits, "q_S")
+            q_p = qmc.qubit(name="q_p")
+
+            # ── A = P_X · F ──
+            q_S = load_distribution(q_S)
+            q_S, q_p = apply_payoff_ucr(q_S, q_p)
+
+            # ── Q を k 回適用 ──
+            for _ in range(k):
+
+                # S_χ: payoff qubit が |1⟩ のとき位相 -1
+                q_p = qmc.z(q_p)
+
+                # A† = F† · P_X†
+                q_S, q_p = apply_payoff_ucr_inv(q_S, q_p)
+                q_S = load_distribution_inv(q_S)
+
+                # S₀: |0…0⟩ のとき位相 -1
+                q_S = qmc.x(q_S)
+                q_p = qmc.x(q_p)
+                if n_qubits == 1:
+                    q_S[0], q_p = qmc.cz(q_S[0], q_p)
+                elif n_qubits == 2:
+                    q_p = qmc.h(q_p)
+                    q_S[0], q_S[1], q_p = qmc.ccx(q_S[0], q_S[1], q_p)
+                    q_p = qmc.h(q_p)
+                q_S = qmc.x(q_S)
+                q_p = qmc.x(q_p)
+
+                # A
+                q_S = load_distribution(q_S)
+                q_S, q_p = apply_payoff_ucr(q_S, q_p)
+
+            _ = qmc.measure(q_S)
+            return qmc.measure(q_p)
+
+    else:
+        # n_qubits >= 3: S₀ の MCZ に Toffoli ラダーとアンシラを使用
+        @qmc.qkernel
+        def Ak() -> qmc.Bit:
+            q_S = qmc.qubit_array(n_qubits, "q_S")
+            q_p = qmc.qubit(name="q_p")
+            anc = qmc.qubit_array(n_anc, "anc")
+
+            # ── A = P_X · F ──
+            q_S = load_distribution(q_S)
+            q_S, q_p = apply_payoff_ucr(q_S, q_p)
+
+            # ── Q を k 回適用 ──
+            for _ in range(k):
+
+                # S_χ
+                q_p = qmc.z(q_p)
+
+                # A† = F† · P_X†
+                q_S, q_p = apply_payoff_ucr_inv(q_S, q_p)
+                q_S = load_distribution_inv(q_S)
+
+                # S₀: Toffoli ラダー(n_qubits >= 3)
+                # アンシラに桁上がりを伝播(前半) → 最終段 → アンシラをゼロ戻し(後半)
+                q_S = qmc.x(q_S)
+                q_p = qmc.x(q_p)
+                q_p = qmc.h(q_p)
+                # 前半
+                q_S[0], q_S[1], anc[0] = qmc.ccx(q_S[0], q_S[1], anc[0])
+                for i in qmc.range(1, n_qubits - 2):
+                    anc[i-1], q_S[i+1], anc[i] = qmc.ccx(
+                        anc[i-1], q_S[i+1], anc[i])
+                # 最終段
+                anc[n_qubits-3], q_S[n_qubits-1], q_p = qmc.ccx(
+                    anc[n_qubits-3], q_S[n_qubits-1], q_p)
+                # 後半(uncompute): 逆順
+                for i in range(n_qubits - 3, 0, -1):
+                    anc[i-1], q_S[i+1], anc[i] = qmc.ccx(
+                        anc[i-1], q_S[i+1], anc[i])
+                q_S[0], q_S[1], anc[0] = qmc.ccx(q_S[0], q_S[1], anc[0])
+                q_p = qmc.h(q_p)
+                q_S = qmc.x(q_S)
+                q_p = qmc.x(q_p)
+
+                # A
+                q_S = load_distribution(q_S)
+                q_S, q_p = apply_payoff_ucr(q_S, q_p)
+
+            _ = qmc.measure(anc)
+            _ = qmc.measure(q_S)
+            return qmc.measure(q_p)
+
+    return Ak
+
+# ── どこでクラッシュするか特定する ──
+for k in [0, 1, 2]:
+    print(f"\n--- k={k} 開始 ---")
+    kernel = build_Ak_kernel(k)
+    print(f"  カーネル定義: OK")
+
+    try:
+        exe = transpiler_q.transpile(kernel)
+        print(f"  transpile: OK")
+        # 回路情報を表示
+        qc = exe.circuit if hasattr(exe, 'circuit') else None
+        if qc is not None:
+            print(f"  qubit数={qc.num_qubits}, "
+                  f"depth={qc.depth()}, "
+                  f"ゲート数={qc.size()}")
+    except Exception as e:
+        print(f"  transpile エラー: {type(e).__name__}: {e}")
+        break
+
+    try:
+        result = exe.sample(transpiler_q.executor(), shots=100).result()
+        print(f"  sample: OK")
+    except Exception as e:
+        print(f"  sample エラー: {type(e).__name__}: {e}")
+        break
 
 # %%
