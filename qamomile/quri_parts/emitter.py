@@ -20,6 +20,7 @@ from qamomile.circuit.transpiler.decompositions import (  # noqa: F401 -- recipe
     CRZ_DECOMPOSITION,
     CY_DECOMPOSITION,
 )
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
 
 from .exceptions import QamomileQuriPartsTranspileError
@@ -117,12 +118,21 @@ class QuriPartsGateEmitter:
         """QURI Parts always uses STATIC measurement (sampler handles it)."""
         return MeasurementMode.STATIC
 
-    def __init__(self) -> None:
-        """Initialize the emitter."""
+    def __init__(self, phase_carrier: int | None = None) -> None:
+        """Initialize the emitter.
+
+        Args:
+            phase_carrier (int | None): Dedicated clean ``|0>`` qubit used
+                only where exact scalar-phase synthesis cannot reuse an
+                existing qubit. ``None`` still permits a concrete phase when
+                the caller supplies an existing carrier, but rejects symbolic
+                or zero-qubit phase emission.
+        """
         self._param_map: dict[str, "Parameter"] = {}
         self._current_circuit: "LinearMappedUnboundParametricQuantumCircuit | None" = (
             None
         )
+        self._phase_carrier = phase_carrier
 
     def create_circuit(
         self, num_qubits: int, num_clbits: int
@@ -358,17 +368,73 @@ class QuriPartsGateEmitter:
         P(θ) = U1(θ) = diag(1, e^{iθ}).
         For non-parametric angles we use the native U1 gate which is
         mathematically identical to the Phase gate.
-        For parametric angles we fall back to ParametricRZ because QURI Parts
-        does not provide a ParametricU1 gate. RZ differs only by a global
-        phase: P(θ) = e^{iθ/2} · RZ(θ), which is physically irrelevant for
-        single-qubit usage. Controlled-phase (CP) has its own decomposition
-        and does not go through this path.
+        For parametric angles we use ParametricRZ plus a scalar phase on the
+        dedicated clean carrier that restores
+        ``P(θ) = exp(iθ/2) RZ(θ)`` exactly.
         """
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, (int, float)):
             circuit.add_U1_gate(qubit, angle_dict)
         else:
             circuit.add_ParametricRZ_gate(qubit, angle_dict)
+            self.emit_global_phase(
+                circuit,
+                _scale_form(angle_dict, 0.5),
+            )
+
+    def emit_global_phase(
+        self,
+        circuit: "LinearMappedUnboundParametricQuantumCircuit",
+        angle: float | Any,
+        carrier: int | None = None,
+    ) -> None:
+        """Synthesize ``exp(i * angle) I`` exactly.
+
+        A concrete phase reuses an arbitrary existing qubit through
+        ``U1(2a) RZ(-2a) = exp(ia) I``. Symbolic and zero-qubit phases use the
+        configured clean carrier because QURI Parts has no ParametricU1 or
+        circuit-level phase operation.
+
+        Args:
+            circuit (LinearMappedUnboundParametricQuantumCircuit): Destination
+                QURI circuit.
+            angle (float | Any): Concrete or linear phase in radians.
+            carrier (int | None): Existing arbitrary-state qubit available for
+                concrete two-gate synthesis. Defaults to None.
+
+        Raises:
+            EmitError: If an explicit carrier is invalid, or if symbolic or
+                zero-qubit emission has no valid dedicated clean carrier.
+        """
+        angle_mapping = self._make_angle_dict(angle)
+        if isinstance(angle_mapping, (int, float)) and carrier is not None:
+            if carrier < 0 or carrier >= circuit.qubit_count:
+                raise EmitError(
+                    "QURI Parts phase-carrier index is outside the circuit: "
+                    f"carrier={carrier}, width={circuit.qubit_count}"
+                )
+            circuit.add_U1_gate(carrier, 2.0 * angle_mapping)
+            circuit.add_RZ_gate(carrier, -2.0 * angle_mapping)
+            return
+
+        clean_carrier = self._phase_carrier
+        if clean_carrier is None:
+            raise EmitError(
+                "QURI Parts scalar phase emission requires a dedicated "
+                "clean phase-carrier qubit"
+            )
+        if clean_carrier < 0 or clean_carrier >= circuit.qubit_count:
+            raise EmitError(
+                "QURI Parts phase-carrier index is outside the circuit: "
+                f"carrier={clean_carrier}, width={circuit.qubit_count}"
+            )
+        if isinstance(angle_mapping, (int, float)):
+            circuit.add_RZ_gate(clean_carrier, -2.0 * angle_mapping)
+        else:
+            circuit.add_ParametricRZ_gate(
+                clean_carrier,
+                _scale_form(angle_mapping, -2.0),
+            )
 
     # Two-qubit gates
     def emit_cx(
@@ -408,9 +474,10 @@ class QuriPartsGateEmitter:
     ) -> None:
         """Emit controlled-Phase gate using decomposition.
 
-        Follows the shared CP_DECOMPOSITION recipe from
-        ``qamomile.circuit.transpiler.decompositions``.
-        Inlined here because QURI Parts parametric angles use dict representation.
+        Follows the shared CP decomposition. The concrete case replaces its
+        final ``exp(iθ/4) RZ(θ/2)`` pair with the exact native ``U1(θ/2)``.
+        The parametric case has no native ParametricU1, so it emits RZ plus
+        the missing scalar factor on the dedicated phase carrier.
         """
         angle_dict = self._make_angle_dict(angle)
         if isinstance(angle_dict, (int, float)):
@@ -419,7 +486,7 @@ class QuriPartsGateEmitter:
             circuit.add_CNOT_gate(control, target)
             circuit.add_RZ_gate(target, -half_angle)
             circuit.add_CNOT_gate(control, target)
-            circuit.add_RZ_gate(control, half_angle)
+            circuit.add_U1_gate(control, half_angle)
         else:
             # Parametric case
             half_angle_dict = {k: v / 2 for k, v in angle_dict.items()}
@@ -429,6 +496,10 @@ class QuriPartsGateEmitter:
             circuit.add_ParametricRZ_gate(target, neg_half_angle_dict)
             circuit.add_CNOT_gate(control, target)
             circuit.add_ParametricRZ_gate(control, half_angle_dict)
+            self.emit_global_phase(
+                circuit,
+                _scale_form(angle_dict, 0.25),
+            )
 
     def emit_rzz(
         self,

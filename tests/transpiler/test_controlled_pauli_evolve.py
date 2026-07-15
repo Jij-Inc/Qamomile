@@ -472,8 +472,8 @@ _CASES: list[tuple[str, Any, Any, int, int, Callable[[np.random.Generator], Any]
     ("c2t1_Z", None, _cpe_sample_c2t1, 2, 1, _single_z),
     ("c2t2_XX", _cpe_run_c2t2, _cpe_sample_c2t2, 2, 2, _two_xx),
     ("c2t2_heisenberg", _cpe_run_c2t2, _cpe_sample_c2t2, 2, 2, _two_heisenberg),
-    # Constant (identity) Hamiltonian terms: dropped uncontrolled (global
-    # phase) but an observable relative phase once controlled.
+    # Constant (identity) Hamiltonian terms: retained as a standalone phase,
+    # and observable as a relative phase once controlled.
     ("c1t1_X_const", _cpe_run_c1t1, _cpe_sample_c1t1, 1, 1, _single_x_plus_const),
     ("c2t1_X_const", None, _cpe_sample_c2t1, 2, 1, _single_x_plus_const),
     (

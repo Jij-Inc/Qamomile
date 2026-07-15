@@ -84,6 +84,7 @@ from .gate import (
     ResetOperation,
     SymbolicControlledU,
 )
+from .global_phase import GlobalPhaseOperation
 from .inverse_block import InverseBlockOperation
 from .operation import Operation
 from .return_operation import ReturnOperation
@@ -100,6 +101,7 @@ __all__ = [
     "CallTransform",
     "InvokeOperation",
     "InverseBlockOperation",
+    "GlobalPhaseOperation",
     "CompositeGateType",
     "GateOperation",
     "GateOperationType",

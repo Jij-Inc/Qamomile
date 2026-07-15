@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from qiskit.circuit import ForLoopOp, IfElseOp
+import numpy as np
+import pytest
+from qiskit.circuit import ForLoopOp, IfElseOp, WhileLoopOp
+from qiskit.quantum_info import Operator
 
 from qamomile.circuit.transpiler.circuit_ir import (
+    QFT_SEMANTIC_KEY,
+    CallableIdentity,
     CircuitBuilder,
     ClassicalBitExpr,
     ParameterExpr,
@@ -12,6 +17,43 @@ from qamomile.circuit.transpiler.circuit_ir import (
 )
 from qamomile.circuit.transpiler.gate_emitter import GateKind
 from qamomile.qiskit.materializer import QiskitMaterializer
+
+
+def _phase_only_call(
+    *,
+    controls: int,
+    inverse: bool = False,
+    power: int = 1,
+) -> CircuitBuilder:
+    """Build a reusable identity whose only effect is a symbolic phase."""
+    body = CircuitBuilder(1, 0, name="phase-only")
+    body.add_global_phase(ParameterExpr("theta"))
+    caller = CircuitBuilder(controls + 1, 0, name="phase-caller")
+    caller.append_call(
+        ReusableCircuit(
+            body.freeze(),
+            "phase-only",
+            controls=controls,
+            inverse=inverse,
+            power=power,
+        ),
+        tuple(range(controls + 1)),
+    )
+    return caller
+
+
+def _projector_phase_matrix(
+    controls: int,
+    phase: float,
+) -> np.ndarray:
+    """Return a phase conditioned on all low-order control qubits."""
+    dimension = 2 ** (controls + 1)
+    mask = (1 << controls) - 1
+    diagonal = np.ones(dimension, dtype=np.complex128)
+    for basis in range(dimension):
+        if basis & mask == mask:
+            diagonal[basis] = np.exp(1j * phase)
+    return np.diag(diagonal)
 
 
 def test_qiskit_materializer_emits_primitive_circuit() -> None:
@@ -66,6 +108,26 @@ def test_qiskit_materializer_preserves_symbolic_expression() -> None:
     assert str(circuit.data[0].operation.params[0]) == "2*theta"
 
 
+def test_qiskit_materializer_anchors_unused_abi_parameter() -> None:
+    """An unused ABI parameter remains bindable through a zero phase term."""
+    builder = CircuitBuilder(1, 0)
+
+    materialized = QiskitMaterializer().materialize(
+        builder.freeze(),
+        parameter_names=("theta",),
+    )
+
+    assert tuple(materialized.parameters) == ("theta",)
+    parameter = materialized.parameters["theta"]
+    assert parameter in materialized.artifact.parameters
+
+    bound = materialized.artifact.assign_parameters({parameter: 0.37})
+
+    assert not bound.parameters
+    assert float(bound.global_phase) == pytest.approx(0.0)
+    assert np.allclose(Operator(bound).data, np.eye(2), rtol=0.0, atol=1e-10)
+
+
 def test_qiskit_materializer_preserves_structured_for_loop() -> None:
     """Circuit for regions become native Qiskit ForLoopOp instructions."""
     builder = CircuitBuilder(1, 0)
@@ -93,6 +155,62 @@ def test_qiskit_materializer_preserves_structured_if() -> None:
 
     [instruction] = circuit.data
     assert isinstance(instruction.operation, IfElseOp)
+
+
+def test_qiskit_materializer_preserves_structured_region_phases() -> None:
+    """Branch and while-body phases remain native block metadata."""
+    builder = CircuitBuilder(1, 1)
+    branch = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(0.25)
+    loop = builder.begin_while(ClassicalBitExpr(0))
+    builder.add_global_phase(0.5)
+    builder.end_while(loop)
+    builder.begin_else(branch)
+    builder.add_global_phase(0.75)
+    builder.end_if(branch)
+
+    circuit = QiskitMaterializer().materialize(builder.freeze()).artifact
+
+    [instruction] = circuit.data
+    assert isinstance(instruction.operation, IfElseOp)
+    true_block, false_block = instruction.operation.blocks
+    assert float(true_block.global_phase) == pytest.approx(0.25)
+    assert float(false_block.global_phase) == pytest.approx(0.75)
+    [while_instruction] = true_block.data
+    assert float(while_instruction.operation.blocks[0].global_phase) == pytest.approx(
+        0.5
+    )
+
+
+def test_qiskit_materializer_preserves_reverse_nested_region_phases() -> None:
+    """While-to-if nesting keeps each phase in its lexical Qiskit block."""
+    builder = CircuitBuilder(1, 1)
+    loop = builder.begin_while(ClassicalBitExpr(0))
+    builder.add_global_phase(0.125)
+    branch = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(0.25)
+    builder.begin_for(range(3))
+    builder.add_global_phase(0.5)
+    builder.end_for()
+    builder.begin_else(branch)
+    builder.add_global_phase(0.75)
+    builder.end_if(branch)
+    builder.end_while(loop)
+
+    circuit = QiskitMaterializer().materialize(builder.freeze()).artifact
+
+    [while_instruction] = circuit.data
+    assert isinstance(while_instruction.operation, WhileLoopOp)
+    [while_body] = while_instruction.operation.blocks
+    assert float(while_body.global_phase) == pytest.approx(0.125)
+    [if_instruction] = while_body.data
+    assert isinstance(if_instruction.operation, IfElseOp)
+    true_block, false_block = if_instruction.operation.blocks
+    assert float(true_block.global_phase) == pytest.approx(1.75)
+    assert float(false_block.global_phase) == pytest.approx(0.75)
+    [for_instruction] = true_block.data
+    assert isinstance(for_instruction.operation, ForLoopOp)
+    assert for_instruction.operation.params[0] == range(3)
 
 
 def test_qiskit_materializer_materializes_reusable_call() -> None:
@@ -124,3 +242,107 @@ def test_qiskit_materializer_reuses_parameters_across_reusable_calls() -> None:
         "rotation",
     ]
     assert {parameter.name for parameter in circuit.parameters} == {"theta"}
+
+
+@pytest.mark.parametrize(
+    ("controls", "inverse", "power", "phase_factor"),
+    [
+        (1, False, 1, 1),
+        (2, True, 1, -1),
+        (2, False, 3, 3),
+    ],
+)
+def test_qiskit_materializer_preserves_transformed_phase_only_calls(
+    controls: int,
+    inverse: bool,
+    power: int,
+    phase_factor: int,
+) -> None:
+    """Control, inverse, and power retain a reusable body's global phase."""
+    theta = 0.37
+    materialized = QiskitMaterializer().materialize(
+        _phase_only_call(
+            controls=controls,
+            inverse=inverse,
+            power=power,
+        ).freeze(),
+        parameter_names=("theta",),
+    )
+
+    assert tuple(materialized.parameters) == ("theta",)
+    parameter = materialized.parameters["theta"]
+    bound = materialized.artifact.assign_parameters({parameter: theta})
+
+    assert len(bound.data) == 1
+    assert np.allclose(
+        Operator(bound).data,
+        _projector_phase_matrix(controls, phase_factor * theta),
+        rtol=0.0,
+        atol=1e-10,
+    )
+
+
+def test_qiskit_materializer_shares_parameters_through_nested_inverse_calls() -> None:
+    """Nested custom-gate definitions bind one shared parameter identity."""
+    theta = 0.37
+    controlled_phase = _phase_only_call(controls=1).freeze()
+    caller = CircuitBuilder(2, 0, name="nested-inverse")
+    caller.append_call(
+        ReusableCircuit(
+            controlled_phase,
+            "controlled-phase-wrapper",
+            inverse=True,
+        ),
+        (0, 1),
+    )
+
+    materialized = QiskitMaterializer().materialize(
+        caller.freeze(),
+        parameter_names=("theta",),
+    )
+    parameter = materialized.parameters["theta"]
+    bound = materialized.artifact.assign_parameters({parameter: theta})
+
+    assert not bound.parameters
+    assert np.allclose(
+        Operator(bound).data,
+        _projector_phase_matrix(1, -theta),
+        rtol=0.0,
+        atol=1e-10,
+    )
+
+
+def test_qiskit_materializer_keeps_large_reusable_power_compact() -> None:
+    """A large reusable power remains one annotated Qiskit operation."""
+    body = CircuitBuilder(1, 0, name="powered-x")
+    body.append_gate(GateKind.X, (0,))
+    caller = CircuitBuilder(1, 0)
+    caller.append_call(
+        ReusableCircuit(body.freeze(), "powered-x", power=1024),
+        (0,),
+    )
+
+    circuit = QiskitMaterializer().materialize(caller.freeze()).artifact
+
+    assert len(circuit.data) == 1
+
+
+def test_qiskit_materializer_keeps_large_native_power_compact() -> None:
+    """A large native semantic power remains one annotated operation."""
+    body = CircuitBuilder(2, 0, name="native-qft")
+    caller = CircuitBuilder(2, 0)
+    caller.append_call(
+        ReusableCircuit(
+            body.freeze(),
+            "native-qft",
+            power=1024,
+            identity=CallableIdentity(QFT_SEMANTIC_KEY, "native-qft"),
+            native_realization="qiskit.qft",
+            operand_widths=(2,),
+        ),
+        (0, 1),
+    )
+
+    circuit = QiskitMaterializer().materialize(caller.freeze()).artifact
+
+    assert len(circuit.data) == 1

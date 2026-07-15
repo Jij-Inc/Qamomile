@@ -12,6 +12,8 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     ForInstruction,
     GateInstruction,
     IfInstruction,
+    LiteralExpr,
+    LoopVariableExpr,
     MeasureInstruction,
     MeasureVectorInstruction,
     PauliEvolutionInstruction,
@@ -33,7 +35,8 @@ def verify_circuit(program: CircuitProgram) -> None:
     Raises:
         ValueError: If the program contains duplicate wire definitions,
             consumes a non-live wire, has malformed structured-region yields,
-            references an invalid classical bit, or reports incorrect outputs.
+            references an invalid classical bit or loop variable, or reports
+            incorrect outputs.
     """
     if program.num_qubits < 0 or program.num_clbits < 0:
         raise ValueError("Circuit slot counts must be non-negative")
@@ -43,7 +46,11 @@ def verify_circuit(program: CircuitProgram) -> None:
         raise ValueError("Output wire count does not match num_qubits")
     if len(set(program.input_wires)) != len(program.input_wires):
         raise ValueError("Circuit input wires must be unique")
-    _verify_expression(program.global_phase, program.num_clbits)
+    _verify_expression(
+        program.global_phase,
+        program.num_clbits,
+        frozenset(),
+    )
 
     definitions = set(program.input_wires)
     final = _verify_region(
@@ -51,32 +58,58 @@ def verify_circuit(program: CircuitProgram) -> None:
         program.input_wires,
         definitions,
         program.num_clbits,
+        frozenset(),
     )
     if final != program.output_wires:
         raise ValueError("Circuit output wires do not match the final region state")
 
 
-def _verify_expression(expression: ScalarExpr, num_clbits: int) -> None:
-    """Verify all classical-bit references in a scalar expression.
+def _verify_expression(
+    expression: ScalarExpr,
+    num_clbits: int,
+    loop_variables: frozenset[str],
+) -> None:
+    """Verify classical-bit bounds and loop-variable scope in an expression.
 
     Args:
         expression (ScalarExpr): Expression to inspect recursively.
         num_clbits (int): Number of allocated classical bit slots.
+        loop_variables (frozenset[str]): Loop-variable names in scope at the
+            expression's lexical position.
 
     Raises:
         ValueError: If a classical-bit reference is outside the allocated
-            circuit range.
+            circuit range or a loop-variable reference is outside its owning
+            structured for-loop.
     """
     if isinstance(expression, ClassicalBitExpr):
         if expression.index < 0 or expression.index >= num_clbits:
             raise ValueError(
                 f"Classical bit expression {expression.index} is out of range"
             )
+    elif isinstance(expression, LoopVariableExpr):
+        if expression.name not in loop_variables:
+            raise ValueError(
+                f"Loop variable expression {expression.name!r} is outside "
+                "its owning structured for-loop"
+            )
     elif isinstance(expression, BinaryExpr):
-        _verify_expression(expression.left, num_clbits)
-        _verify_expression(expression.right, num_clbits)
+        _verify_expression(expression.left, num_clbits, loop_variables)
+        _verify_expression(expression.right, num_clbits, loop_variables)
     elif isinstance(expression, UnaryExpr):
-        _verify_expression(expression.operand, num_clbits)
+        _verify_expression(expression.operand, num_clbits, loop_variables)
+
+
+def _is_zero_literal(expression: ScalarExpr) -> bool:
+    """Return whether an expression is the canonical literal zero.
+
+    Args:
+        expression (ScalarExpr): Expression to inspect.
+
+    Returns:
+        bool: Whether the expression is a zero-valued literal.
+    """
+    return isinstance(expression, LiteralExpr) and not float(expression.value)
 
 
 def _define_wires(wires: tuple[WireId, ...], definitions: set[WireId]) -> None:
@@ -156,6 +189,7 @@ def _verify_region(
     initial_live: tuple[WireId, ...],
     definitions: set[WireId],
     num_clbits: int,
+    loop_variables: frozenset[str],
 ) -> tuple[WireId, ...]:
     """Verify one structured region and return its yielded wire state.
 
@@ -165,6 +199,8 @@ def _verify_region(
             physical-slot order.
         definitions (set[WireId]): Program-global wire definitions.
         num_clbits (int): Number of allocated classical bit slots.
+        loop_variables (frozenset[str]): Loop-variable names in scope for this
+            region.
 
     Returns:
         tuple[WireId, ...]: Live wires yielded in physical-slot order.
@@ -193,7 +229,7 @@ def _verify_region(
                     f"parameters, received {len(operation.parameters)}"
                 )
             for parameter in operation.parameters:
-                _verify_expression(parameter, num_clbits)
+                _verify_expression(parameter, num_clbits, loop_variables)
             live = _advance(live, operation.inputs, operation.outputs, definitions)
         elif isinstance(operation, MeasureInstruction):
             if operation.clbit < 0 or operation.clbit >= num_clbits:
@@ -225,7 +261,12 @@ def _verify_region(
                 definitions,
             )
         elif isinstance(operation, PauliEvolutionInstruction):
-            _verify_expression(operation.time, num_clbits)
+            if complex(getattr(operation.hamiltonian, "constant", 0.0)):
+                raise ValueError(
+                    "Pauli evolution identity terms must be aggregated into "
+                    "CircuitProgram.global_phase"
+                )
+            _verify_expression(operation.time, num_clbits, loop_variables)
             live = _advance(live, operation.inputs, operation.outputs, definitions)
         elif isinstance(operation, BarrierInstruction):
             if set(operation.wires) - set(live):
@@ -246,23 +287,42 @@ def _verify_region(
                     "Reusable call operand widths must cover the fallback body"
                 )
             verify_circuit(operation.callee.body)
+            if not operation.callee.controls and not _is_zero_literal(
+                operation.callee.body.global_phase
+            ):
+                raise ValueError(
+                    "Uncontrolled reusable-call phases must be aggregated into "
+                    "the enclosing CircuitProgram.global_phase"
+                )
             if len(operation.inputs) != operation.callee.num_qubits:
                 raise ValueError("Reusable call input arity does not match its callee")
             live = _advance(live, operation.inputs, operation.outputs, definitions)
         elif isinstance(operation, IfInstruction):
-            _verify_expression(operation.condition, num_clbits)
+            _verify_expression(operation.condition, num_clbits, loop_variables)
+            _verify_expression(
+                operation.true_global_phase,
+                num_clbits,
+                loop_variables,
+            )
+            _verify_expression(
+                operation.false_global_phase,
+                num_clbits,
+                loop_variables,
+            )
             _verify_control_inputs(operation.inputs, live)
             true_live = _verify_region(
                 operation.true_body,
                 operation.inputs,
                 definitions,
                 num_clbits,
+                loop_variables,
             )
             false_live = _verify_region(
                 operation.false_body,
                 operation.inputs,
                 definitions,
                 num_clbits,
+                loop_variables,
             )
             if true_live != operation.true_outputs:
                 raise ValueError("True branch outputs do not match its final wires")
@@ -271,23 +331,31 @@ def _verify_region(
             live = _advance(live, operation.inputs, operation.outputs, definitions)
         elif isinstance(operation, ForInstruction):
             _verify_control_inputs(operation.inputs, live)
+            body_loop_variables = loop_variables | {operation.loop_variable.name}
             body_live = _verify_region(
                 operation.body,
                 operation.inputs,
                 definitions,
                 num_clbits,
+                body_loop_variables,
             )
             if body_live != operation.body_outputs:
                 raise ValueError("For-loop body outputs do not match its final wires")
             live = _advance(live, operation.inputs, operation.outputs, definitions)
         elif isinstance(operation, WhileInstruction):
-            _verify_expression(operation.condition, num_clbits)
+            _verify_expression(operation.condition, num_clbits, loop_variables)
+            _verify_expression(
+                operation.body_global_phase,
+                num_clbits,
+                loop_variables,
+            )
             _verify_control_inputs(operation.inputs, live)
             body_live = _verify_region(
                 operation.body,
                 operation.inputs,
                 definitions,
                 num_clbits,
+                loop_variables,
             )
             if body_live != operation.body_outputs:
                 raise ValueError("While-loop body outputs do not match its final wires")

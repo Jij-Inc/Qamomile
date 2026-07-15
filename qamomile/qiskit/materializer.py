@@ -15,6 +15,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     BinaryExpr,
     BinaryOperator,
     CallInstruction,
+    CallPhaseMode,
     CallTransformCapabilities,
     CircuitCapabilities,
     CircuitInstruction,
@@ -48,7 +49,12 @@ from qamomile.circuit.transpiler.gate_emitter import GateKind
 
 
 class QiskitMaterializer:
-    """Convert target-legal circuit code-generation IR to ``QuantumCircuit``."""
+    """Convert target-legal circuit code-generation IR to ``QuantumCircuit``.
+
+    Root and runtime-control-flow phases are retained in Qiskit's native
+    ``QuantumCircuit.global_phase`` metadata on the corresponding circuit or
+    block.
+    """
 
     @property
     def capabilities(self) -> CircuitCapabilities:
@@ -61,66 +67,6 @@ class QiskitMaterializer:
         Returns:
             CircuitCapabilities: Immutable capability declaration.
         """
-        native_semantic_ops: tuple[NativeSemanticOpCapabilities, ...] = ()
-        call_transforms = CallTransformCapabilities(
-            supports_power=True,
-            supports_inverse=True,
-            max_controls=None,
-        )
-        direct_only = CallTransformCapabilities(
-            supports_power=False,
-            supports_inverse=False,
-            max_controls=0,
-        )
-        try:
-            from qiskit.circuit.library import (  # noqa: F401
-                FullAdderGate,
-                MCXGate,
-                QFTGate,
-                StatePreparation,
-            )
-
-            native_semantic_ops = (
-                NativeSemanticOpCapabilities(
-                    QFT_SEMANTIC_KEY,
-                    "qiskit.qft",
-                    call_transforms,
-                    operand_widths=(None,),
-                    min_qubits=1,
-                ),
-                NativeSemanticOpCapabilities(
-                    IQFT_SEMANTIC_KEY,
-                    "qiskit.iqft",
-                    call_transforms,
-                    operand_widths=(None,),
-                    min_qubits=1,
-                ),
-                NativeSemanticOpCapabilities(
-                    STATE_PREPARATION_SEMANTIC_KEY,
-                    "qiskit.state_preparation",
-                    direct_only,
-                    operand_widths=(None,),
-                    min_qubits=1,
-                    required_arguments=frozenset({"amplitudes"}),
-                ),
-                NativeSemanticOpCapabilities(
-                    RIPPLE_CARRY_ADD_SEMANTIC_KEY,
-                    "qiskit.ripple_carry_add",
-                    direct_only,
-                    operand_widths=(None, None, 1, 1),
-                    min_qubits=4,
-                    matching_operand_widths=((0, 1),),
-                ),
-                NativeSemanticOpCapabilities(
-                    MULTI_CONTROLLED_X_SEMANTIC_KEY,
-                    "qiskit.multi_controlled_x",
-                    direct_only,
-                    operand_widths=(None, 1),
-                    min_qubits=2,
-                ),
-            )
-        except ImportError:
-            pass
         numeric = ScalarCapabilities(
             atoms=frozenset(
                 {ScalarAtom.LITERAL, ScalarAtom.PARAMETER, ScalarAtom.LOOP_VARIABLE}
@@ -158,6 +104,73 @@ class QiskitMaterializer:
             ),
             parameter_form=ScalarExpressionForm.ARBITRARY,
         )
+        native_semantic_ops: tuple[NativeSemanticOpCapabilities, ...] = ()
+        call_transforms = CallTransformCapabilities(
+            supports_power=True,
+            supports_inverse=True,
+            max_controls=None,
+            phase_mode=CallPhaseMode.NATIVE_BODY,
+            controlled_phase_scalars=numeric,
+        )
+        native_call_transforms = CallTransformCapabilities(
+            supports_power=True,
+            supports_inverse=True,
+            max_controls=None,
+        )
+        direct_only = CallTransformCapabilities(
+            supports_power=False,
+            supports_inverse=False,
+            max_controls=0,
+        )
+        try:
+            from qiskit.circuit.library import (  # noqa: F401
+                FullAdderGate,
+                MCXGate,
+                QFTGate,
+                StatePreparation,
+            )
+
+            native_semantic_ops = (
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "qiskit.qft",
+                    native_call_transforms,
+                    operand_widths=(None,),
+                    min_qubits=1,
+                ),
+                NativeSemanticOpCapabilities(
+                    IQFT_SEMANTIC_KEY,
+                    "qiskit.iqft",
+                    native_call_transforms,
+                    operand_widths=(None,),
+                    min_qubits=1,
+                ),
+                NativeSemanticOpCapabilities(
+                    STATE_PREPARATION_SEMANTIC_KEY,
+                    "qiskit.state_preparation",
+                    direct_only,
+                    operand_widths=(None,),
+                    min_qubits=1,
+                    required_arguments=frozenset({"amplitudes"}),
+                ),
+                NativeSemanticOpCapabilities(
+                    RIPPLE_CARRY_ADD_SEMANTIC_KEY,
+                    "qiskit.ripple_carry_add",
+                    direct_only,
+                    operand_widths=(None, None, 1, 1),
+                    min_qubits=4,
+                    matching_operand_widths=((0, 1),),
+                ),
+                NativeSemanticOpCapabilities(
+                    MULTI_CONTROLLED_X_SEMANTIC_KEY,
+                    "qiskit.multi_controlled_x",
+                    direct_only,
+                    operand_widths=(None, 1),
+                    min_qubits=2,
+                ),
+            )
+        except ImportError:
+            pass
         return CircuitCapabilities(
             name="qiskit",
             primitive_gates=ALL_PRIMITIVE_GATES,
@@ -178,11 +191,18 @@ class QiskitMaterializer:
             ),
         )
 
-    def materialize(self, program: CircuitProgram) -> MaterializedCircuit[Any]:
-        """Build and return a Qiskit circuit.
+    def materialize(
+        self,
+        program: CircuitProgram,
+        parameter_names: tuple[str, ...] = (),
+    ) -> MaterializedCircuit[Any]:
+        """Build and return a Qiskit circuit with scoped phase metadata.
 
         Args:
             program (CircuitProgram): Verified circuit-family program.
+            parameter_names (tuple[str, ...]): Public parameter ABI. Qiskit
+                binds by name, so this is used for boundary validation only.
+                Defaults to an empty tuple.
 
         Returns:
             MaterializedCircuit[Any]: Qiskit circuit and parameter mapping.
@@ -193,15 +213,29 @@ class QiskitMaterializer:
         """
         verify_circuit(program)
         artifact = self._materialize(program, preserve_control_flow=True)
+        parameters = {parameter.name: parameter for parameter in artifact.parameters}
+        if missing_names := set(parameter_names) - parameters.keys():
+            from qiskit.circuit import Parameter
+
+            for name in parameter_names:
+                if name not in missing_names:
+                    continue
+                parameter = Parameter(name)
+                # Qiskit has no standalone parameter declaration. A zero
+                # global-phase coefficient preserves the public ABI without
+                # changing the circuit's exact unitary.
+                artifact.global_phase += 0 * parameter
+                parameters[name] = parameter
         return MaterializedCircuit(
             artifact=artifact,
-            parameters={parameter.name: parameter for parameter in artifact.parameters},
+            parameters=parameters,
         )
 
     def _materialize(
         self,
         program: CircuitProgram,
         preserve_control_flow: bool,
+        parameters: dict[str, Any] | None = None,
     ) -> Any:
         """Build a Qiskit circuit with native or unrolled loop regions.
 
@@ -210,6 +244,10 @@ class QiskitMaterializer:
             preserve_control_flow (bool): Whether concrete loops remain native.
                 Reusable gate bodies disable this because Qiskit gates cannot
                 contain control-flow instructions.
+            parameters (dict[str, Any] | None): Parameter cache shared with an
+                enclosing reusable circuit. Reusing the same Qiskit Parameter
+                identities through every nested definition keeps recursive
+                ``assign_parameters`` reliable. Defaults to a fresh cache.
 
         Returns:
             Any: Materialized ``QuantumCircuit``.
@@ -225,19 +263,19 @@ class QiskitMaterializer:
             wire: circuit.qubits[index]
             for index, wire in enumerate(program.input_wires)
         }
-        parameters: dict[str, Any] = {}
+        parameter_cache = {} if parameters is None else parameters
         _emit_region(
             program.operations,
             circuit,
             wires,
-            parameters,
+            parameter_cache,
             {},
             preserve_control_flow,
         )
         circuit.global_phase += _materialize_scalar(
             program.global_phase,
             circuit,
-            parameters,
+            parameter_cache,
             {},
         )
         return circuit
@@ -458,6 +496,34 @@ def _materialize_binary(operator: BinaryOperator, left: Any, right: Any) -> Any:
     Raises:
         EmitError: If Qiskit has no corresponding runtime operation.
     """
+    python_functions = {
+        BinaryOperator.ADD: lambda: left + right,
+        BinaryOperator.SUB: lambda: left - right,
+        BinaryOperator.MUL: lambda: left * right,
+        BinaryOperator.DIV: lambda: left / right,
+        BinaryOperator.FLOORDIV: lambda: left // right,
+        BinaryOperator.MOD: lambda: left % right,
+        BinaryOperator.POW: lambda: left**right,
+        BinaryOperator.EQ: lambda: left == right,
+        BinaryOperator.NEQ: lambda: left != right,
+        BinaryOperator.LT: lambda: left < right,
+        BinaryOperator.LE: lambda: left <= right,
+        BinaryOperator.GT: lambda: left > right,
+        BinaryOperator.GE: lambda: left >= right,
+        BinaryOperator.AND: lambda: bool(left) and bool(right),
+        BinaryOperator.OR: lambda: bool(left) or bool(right),
+    }
+    if isinstance(left, (bool, int, float)) and isinstance(
+        right,
+        (bool, int, float),
+    ):
+        try:
+            return python_functions[operator]()
+        except (KeyError, TypeError, ValueError) as error:
+            raise EmitError(
+                f"Unsupported Qiskit binary operator: {operator.value}"
+            ) from error
+
     from qiskit.circuit.classical import expr
 
     functions = {
@@ -480,15 +546,6 @@ def _materialize_binary(operator: BinaryOperator, left: Any, right: Any) -> Any:
         except (TypeError, ValueError):
             pass
 
-    python_functions = {
-        BinaryOperator.ADD: lambda: left + right,
-        BinaryOperator.SUB: lambda: left - right,
-        BinaryOperator.MUL: lambda: left * right,
-        BinaryOperator.DIV: lambda: left / right,
-        BinaryOperator.FLOORDIV: lambda: left // right,
-        BinaryOperator.MOD: lambda: left % right,
-        BinaryOperator.POW: lambda: left**right,
-    }
     try:
         return python_functions[operator]()
     except (KeyError, TypeError, ValueError) as error:
@@ -599,6 +656,12 @@ def _emit_if(
     )
     branch_inputs = {wire: wires[wire] for wire in operation.inputs}
     with circuit.if_test(condition) as else_context:
+        circuit.global_phase += _materialize_scalar(
+            operation.true_global_phase,
+            circuit,
+            parameters,
+            loop_variables,
+        )
         true_wires = _emit_region(
             operation.true_body,
             circuit,
@@ -608,6 +671,12 @@ def _emit_if(
             preserve_control_flow,
         )
     with else_context:
+        circuit.global_phase += _materialize_scalar(
+            operation.false_global_phase,
+            circuit,
+            parameters,
+            loop_variables,
+        )
         false_wires = _emit_region(
             operation.false_body,
             circuit,
@@ -649,6 +718,12 @@ def _emit_while(
     )
     body_inputs = {wire: wires[wire] for wire in operation.inputs}
     with circuit.while_loop(condition):
+        circuit.global_phase += _materialize_scalar(
+            operation.body_global_phase,
+            circuit,
+            parameters,
+            loop_variables,
+        )
         body_wires = _emit_region(
             operation.body,
             circuit,
@@ -691,24 +766,18 @@ def _emit_call(
     nested = QiskitMaterializer()._materialize(
         callee.body,
         preserve_control_flow=False,
+        parameters=parameters,
     )
-    replacements: dict[Any, Any] = {}
-    for parameter in nested.parameters:
-        shared = parameters.setdefault(parameter.name, parameter)
-        if shared is not parameter:
-            replacements[parameter] = shared
-    if replacements:
-        nested = nested.assign_parameters(replacements)
     from qiskit.exceptions import QiskitError
 
     try:
         gate = nested.to_gate(label=callee.name)
-        if callee.power != 1:
-            gate = gate.power(callee.power)
         if callee.inverse:
             gate = gate.inverse()
         if callee.controls:
             gate = gate.control(callee.controls)
+        if callee.power != 1:
+            gate = gate.power(callee.power, annotated=True)
     except (QiskitError, TypeError, ValueError) as error:
         raise EmitError(
             f"Reusable circuit {callee.name!r} cannot become a Qiskit gate"
@@ -788,12 +857,12 @@ def _emit_native_semantic_op(
             f"{identity.key.namespace}.{identity.key.name}"
         )
     try:
-        if callee.power != 1:
-            gate = gate.power(callee.power)
         if callee.inverse:
             gate = gate.inverse()
         if callee.controls:
             gate = gate.control(callee.controls)
+        if callee.power != 1:
+            gate = gate.power(callee.power, annotated=True)
     except (QiskitError, TypeError, ValueError) as error:
         raise EmitError(
             f"Native semantic operation {identity.key.name} cannot apply the "
@@ -860,7 +929,6 @@ def _emit_pauli_evolution(
     )
     qubits = tuple(wires[wire] for wire in operation.inputs)
     if not qubits:
-        circuit.global_phase += -float(operation.hamiltonian.constant.real) * time
         return
     observable = hamiltonian_to_sparse_pauli_op(operation.hamiltonian)
     circuit.append(PauliEvolutionGate(observable, time=time), qubits)
@@ -912,7 +980,6 @@ def _emit_pauli_evolution_gadget(
             elif item.pauli is qm_o.Pauli.Y:
                 circuit.h(qubit)
                 circuit.s(qubit)
-    circuit.global_phase += -float(operation.hamiltonian.constant.real) * time
     _publish_wires(operation.outputs, qubits, wires)
 
 

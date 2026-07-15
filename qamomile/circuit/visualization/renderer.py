@@ -54,6 +54,10 @@ class MatplotlibRenderer:
 
     Takes pre-computed layout coordinates and draws the circuit
     using matplotlib primitives.
+
+    Args:
+        style (CircuitStyle): Visual style configuration used for all drawing
+            primitives.
     """
 
     def __init__(self, style: CircuitStyle):
@@ -909,9 +913,34 @@ class MatplotlibRenderer:
         block_width: float | None = None,
         layout_width: float | None = None,
     ) -> None:
-        """Draw a VGate node using pre-resolved fields."""
+        """Draw a gate node using its pre-resolved visual fields.
+
+        Args:
+            fig (Figure): Matplotlib figure containing the circuit axes.
+            node (VGate): Visual gate node to draw.
+            x_pos (float): Horizontal center of the node.
+            block_width (float | None): Width of a block-style gate, or None
+                to use the node's resolved width. Defaults to None.
+            layout_width (float | None): Width reserved by layout, or None to
+                use the node's estimated width. Defaults to None.
+        """
         ax = fig._qm_ax  # type: ignore[attr-defined]
         qubit_indices = self._visible_qubits(node.qubit_indices)
+
+        if node.kind == VGateKind.GLOBAL_PHASE:
+            top_wire_y = (
+                max(self.qubit_y[q] for q in qubit_indices)
+                if qubit_indices
+                else max(self.qubit_y, default=0.0)
+            )
+            self._draw_vglobal_phase(
+                ax,
+                node,
+                x_pos,
+                top_wire_y,
+                layout_width or node.estimated_width,
+            )
+            return
 
         if not qubit_indices:
             return
@@ -944,6 +973,56 @@ class MatplotlibRenderer:
 
         elif node.kind == VGateKind.EXPVAL:
             self._draw_vexpval(ax, node, x_pos, block_width)
+
+    def _draw_vglobal_phase(
+        self,
+        ax: Axes,
+        node: VGate,
+        x: float,
+        top_wire_y: float,
+        width: float,
+    ) -> None:
+        """Draw a global-phase badge without interrupting a qubit wire.
+
+        The badge floats entirely above the top wire in the surrounding
+        quantum scope. Its horizontal position preserves source order, while
+        the absence of an on-wire gate glyph reflects the operation's
+        zero-qubit semantics.
+
+        Args:
+            ax (Axes): Matplotlib axes to draw on.
+            node (VGate): ``GLOBAL_PHASE`` visual node carrying the label.
+            x (float): Horizontal center of the phase annotation.
+            top_wire_y (float): Vertical coordinate of the scope's top wire.
+            width (float): Reserved annotation width.
+
+        """
+        height = self.style.gate_height / 3
+        y = top_wire_y + self.style.gate_height / 4
+        badge = mpatches.FancyBboxPatch(
+            (x - width / 2, y - height / 2),
+            width,
+            height,
+            boxstyle=mpatches.BoxStyle.Round(
+                pad=0, rounding_size=self.style.gate_corner_radius / 2
+            ),
+            facecolor=self.style.background_color,
+            edgecolor=self.style.block_border_color,
+            linewidth=1,
+            linestyle=":",
+            zorder=PORDER_GATE,
+        )
+        ax.add_patch(badge)
+        ax.text(
+            x,
+            y,
+            node.label,
+            ha="center",
+            va="center",
+            color=self.style.block_border_color,
+            fontsize=self.style.subfont_size,
+            zorder=PORDER_TEXT,
+        )
 
     def _draw_vgate_single(
         self, ax: Axes, node: VGate, x: float, y: float, width: float
@@ -1633,14 +1712,38 @@ class MatplotlibRenderer:
             fig = Figure(figsize=(4, 2))
             FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
-            ax.text(
-                0.5,
-                0.5,
-                "Empty circuit",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
+            assert self.layout is not None
+            if self.layout.gate_widths:
+                wire_ext = self.style.wire_extension
+                x_left = (
+                    self.layout.first_gate_x
+                    - self.layout.first_gate_half_width
+                    - wire_ext
+                    - 0.7
+                )
+                x_right = max(
+                    self.layout.width + 0.5,
+                    self.layout.actual_width + wire_ext + 0.2,
+                )
+                phase_height = self.style.gate_height / 3
+                phase_y = self.style.gate_height / 4
+                y_bottom = -0.6
+                y_top = max(0.8, phase_y + phase_height / 2 + 0.3)
+                ax.set_xlim(x_left, x_right)
+                ax.set_ylim(y_bottom, y_top)
+                fig.set_size_inches(
+                    max(4, x_right - x_left),
+                    max(2, (y_top - y_bottom) * 0.8),
+                )
+            else:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "Empty circuit",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
             ax.axis("off")
             fig._qm_ax = ax  # type: ignore[attr-defined]
             return fig

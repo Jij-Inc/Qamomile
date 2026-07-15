@@ -30,6 +30,7 @@ from qamomile.circuit.ir.operation import (
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
+    GlobalPhaseOperation,
     InverseBlockOperation,
     InvokeOperation,
     MeasureOperation,
@@ -1533,6 +1534,22 @@ def _encode_inverse_block(
     return d
 
 
+def _encode_global_phase_operation(
+    op: GlobalPhaseOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode a zero-qubit global-phase operation.
+
+    Args:
+        op (GlobalPhaseOperation): Operation to encode.
+        ctx (_EncodeContext): Active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary containing the phase operand.
+    """
+    del ctx
+    return _base_op_dict("GlobalPhaseOperation", op)
+
+
 _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     GateOperation: _encode_gate_operation,
     MeasureOperation: _encode_measure_operation,
@@ -1564,4 +1581,5 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     SymbolicControlledU: _encode_symbolic_controlled,
     InvokeOperation: _encode_invoke_operation,
     InverseBlockOperation: _encode_inverse_block,
+    GlobalPhaseOperation: _encode_global_phase_operation,
 }

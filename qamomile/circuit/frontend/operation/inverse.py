@@ -27,7 +27,10 @@ from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.frontend.qkernel_specialization import (
     select_specialized_block,
 )
-from qamomile.circuit.frontend.qkernel_utils import promote_literal_to_handle
+from qamomile.circuit.frontend.qkernel_utils import (
+    promote_literal_to_handle,
+    reject_aliased_quantum_args,
+)
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
@@ -59,6 +62,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import (
     Operation,
@@ -168,7 +172,8 @@ class _InputBinding:
         name (str): Python parameter name in the wrapped kernel.
         handle (Handle): Original frontend handle supplied by the caller.
         active_handle (Handle): Handle whose value should be used in IR.
-            Quantum non-view handles are consumed before they become active.
+            Starts as a validation preview and becomes the consume successor
+            only when ownership is committed.
         block_input (ValueBase): The corresponding input value in the
             selected block.
     """
@@ -772,6 +777,12 @@ class _BlockInverter:
             return self._invert_inverse_block(op, value_map)
         if isinstance(op, InvokeOperation):
             return self._invert_invoke(op, value_map)
+        if isinstance(op, GlobalPhaseOperation):
+            operations, phase = self._negate_angle(op.phase, value_map)
+            return [
+                *operations,
+                GlobalPhaseOperation(operands=[phase], results=[]),
+            ]
         if isinstance(op, PauliEvolveOp):
             return self._invert_pauli_evolve(op, value_map)
         if isinstance(op, ControlledUOperation):
@@ -1990,33 +2001,48 @@ class InverseGate:
         block: Block,
         arguments: dict[str, Any],
     ) -> list[_InputBinding]:
-        """Consume quantum arguments and pair them with block inputs.
+        """Validate arguments and pair them with block inputs without consuming.
 
         Args:
             block (Block): Selected block.
             arguments (dict[str, Any]): Bound call arguments.
 
         Returns:
-            list[_InputBinding]: One binding per block input.
+            list[_InputBinding]: One preview binding per block input.
         """
         bindings: list[_InputBinding] = []
         for name, block_input in zip(block.label_args, block.input_values):
             handle = cast(Handle, arguments[name])
-            active_handle = handle
-            if handle._should_enforce_linear() and not isinstance(handle, VectorView):
-                active_handle = handle.consume(
-                    operation_name=f"Inverse[{self._qkernel.name}]"
-                )
-            _validate_input_shape(name, block_input, active_handle.value)
+            if handle._should_enforce_linear():
+                handle.validate_consumable(f"Inverse[{self._qkernel.name}]")
+            _validate_input_shape(name, block_input, handle.value)
             bindings.append(
                 _InputBinding(
                     name=name,
                     handle=handle,
-                    active_handle=active_handle,
+                    active_handle=handle,
                     block_input=block_input,
                 )
             )
         return bindings
+
+    def _commit_inputs(self, bindings: list[_InputBinding]) -> None:
+        """Commit ownership after inverse construction has succeeded.
+
+        ``VectorView`` ownership remains on the original view until result
+        wrapping can transfer its parent borrow directly to the new view.
+
+        Args:
+            bindings (list[_InputBinding]): Validated preview bindings.
+
+        Returns:
+            None.
+        """
+        operation_name = f"Inverse[{self._qkernel.name}]"
+        for binding in bindings:
+            handle = binding.handle
+            if handle._should_enforce_linear() and not isinstance(handle, VectorView):
+                binding.active_handle = handle.consume(operation_name)
 
     def _initial_value_map(
         self,
@@ -2086,12 +2112,14 @@ class InverseGate:
             )
         if not isinstance(value, Value) or isinstance(value, ArrayValue):
             raise TypeError("inverse(): scalar input produced array output.")
-        return type(active)(
+        output = type(active)(
             value=value,
             parent=active.parent,
             indices=active.indices,
             name=active.name,
         )
+        active._handoff_direct_borrow_to(output)
+        return output
 
     def _can_emit_atomic_inverse(
         self,
@@ -2123,20 +2151,21 @@ class InverseGate:
             if binding.is_quantum
         )
 
-    def _emit_atomic_inverse(
+    def _build_atomic_inverse(
         self,
         block: Block,
         bindings: list[_InputBinding],
-    ) -> Any:
-        """Emit an inverse qkernel as an atomic inverse composite.
+    ) -> tuple[InverseBlockOperation, list[_InputBinding], list[Value]]:
+        """Build an atomic inverse composite without mutating tracer state.
 
         Args:
             block (Block): Wrapped qkernel block.
             bindings (list[_InputBinding]): Prepared call-site bindings.
 
         Returns:
-            Any: Quantum output handle, or a tuple of handles when the
-                wrapped kernel has multiple quantum inputs.
+            tuple[InverseBlockOperation, list[_InputBinding], list[Value]]:
+                Operation, quantum bindings, and fresh result values ready for
+                ownership commit and emission.
         """
         shape_value_map: dict[str, ValueBase] = {}
         for binding in bindings:
@@ -2180,15 +2209,7 @@ class InverseGate:
             callable_ref=self._callable_ref(),
             callable_attrs=self._callable_attrs(),
         )
-        get_current_tracer().add_operation(op)
-
-        outputs = [
-            self._wrap_quantum_result(binding, value)
-            for binding, value in zip(quantum_bindings, result_values)
-        ]
-        if len(outputs) == 1:
-            return outputs[0]
-        return tuple(outputs)
+        return op, quantum_bindings, result_values
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Apply the inverse at the current trace site.
@@ -2199,18 +2220,48 @@ class InverseGate:
 
         Returns:
             Any: Quantum output handle, or a tuple of handles when the
-            wrapped kernel has multiple quantum inputs.
+                wrapped kernel has multiple quantum inputs.
+
+        Raises:
+            QubitConsumedError: If an input was consumed or two quantum
+                arguments overlap the same physical qubit.
+            RuntimeError: If no tracer is active or inverse construction
+                fails.
+            NotImplementedError: If the selected body contains an operation
+                that cannot be inverted structurally.
         """
         bound_args = self._bind_arguments(*args, **kwargs)
+        tracer = get_current_tracer()
+        reject_aliased_quantum_args(
+            self._qkernel.name,
+            {
+                name: handle
+                for name, handle in bound_args.arguments.items()
+                if isinstance(handle, Handle) and handle._should_enforce_linear()
+            },
+            caller="inverse()",
+        )
         block = self._select_block(bound_args.arguments)
         bindings = self._prepare_inputs(block, bound_args.arguments)
         if self._can_emit_atomic_inverse(block, bindings):
-            return self._emit_atomic_inverse(block, bindings)
+            operation, quantum_bindings, result_values = self._build_atomic_inverse(
+                block,
+                bindings,
+            )
+            self._commit_inputs(bindings)
+            tracer.add_operation(operation)
+            outputs = [
+                self._wrap_quantum_result(binding, value)
+                for binding, value in zip(quantum_bindings, result_values)
+            ]
+            if len(outputs) == 1:
+                return outputs[0]
+            return tuple(outputs)
 
         value_map = self._initial_value_map(bindings)
         operations = _BlockInverter().invert_call_site(block, value_map)
 
-        tracer = get_current_tracer()
+        self._commit_inputs(bindings)
         for op in operations:
             tracer.add_operation(op)
 
