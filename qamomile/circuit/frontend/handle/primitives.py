@@ -163,6 +163,24 @@ class UInt(ArithmeticMixin, Handle):
             return self._coerce(other)
         return None
 
+    def _coerce_equality(self, other: object) -> "UInt | Float | Bit | None":
+        """Normalize an operand for an abstract equality comparison.
+
+        Equality additionally accepts a ``Bit`` handle so a measured Boolean
+        can be compared with a bound unsigned integer without Python reducing
+        the two unsupported reflected operations to ``False``.
+
+        Args:
+            other (object): The equality operand to normalize.
+
+        Returns:
+            UInt | Float | Bit | None: A supported classical handle, or
+                ``None`` when Python should handle the unsupported operand.
+        """
+        if isinstance(other, Bit):
+            return other
+        return self._coerce_comparison(other)
+
     def __lt__(self, other: object) -> "Bit":
         """Emit a less-than comparison.
 
@@ -241,7 +259,7 @@ class UInt(ArithmeticMixin, Handle):
             Bit: The comparison result. Unsupported operands delegate to
                 Python through ``NotImplemented``.
         """
-        coerced = self._coerce_comparison(other)
+        coerced = self._coerce_equality(other)
         if coerced is None:
             return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
@@ -258,7 +276,7 @@ class UInt(ArithmeticMixin, Handle):
             Bit: The comparison result. Unsupported operands delegate to
                 Python through ``NotImplemented``.
         """
-        coerced = self._coerce_comparison(other)
+        coerced = self._coerce_equality(other)
         if coerced is None:
             return NotImplemented  # type: ignore[return-value]
         result = self._make_bit()
@@ -818,16 +836,19 @@ class Bit(Handle):
         _emit_notop(self.value, result.value)
         return result
 
-    def _coerce_comparison(self, other: object) -> "Bit | None":
+    def _coerce_comparison(self, other: object) -> "Bit | UInt | None":
         """Normalize an equality operand without raising for unsupported types.
 
         Args:
             other (object): The comparison operand to normalize.
 
         Returns:
-            Bit | None: A ``Bit`` handle for another bit, a Boolean, or the
-                integer zero or one; otherwise ``None``.
+            Bit | UInt | None: A ``Bit`` handle for another bit, a Boolean, or
+                the integer zero or one; an existing ``UInt`` handle; or
+                ``None`` for an unsupported operand.
         """
+        if isinstance(other, UInt):
+            return other
         if isinstance(other, (Bit, bool)) or (
             isinstance(other, int) and other in (0, 1)
         ):

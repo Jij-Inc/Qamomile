@@ -478,7 +478,13 @@ def _materialize_binary(operator: BinaryOperator, left: Any, right: Any) -> Any:
         try:
             return functions[operator](left, right)
         except (TypeError, ValueError):
-            pass
+            mixed_comparison = _materialize_bool_uint_comparison(
+                operator,
+                left,
+                right,
+            )
+            if mixed_comparison is not None:
+                return mixed_comparison
 
     python_functions = {
         BinaryOperator.ADD: lambda: left + right,
@@ -495,6 +501,65 @@ def _materialize_binary(operator: BinaryOperator, left: Any, right: Any) -> Any:
         raise EmitError(
             f"Unsupported Qiskit binary operator: {operator.value}"
         ) from error
+
+
+def _materialize_bool_uint_comparison(
+    operator: BinaryOperator,
+    left: Any,
+    right: Any,
+) -> Any | None:
+    """Materialize mixed Qiskit Bool and Uint equality at the target boundary.
+
+    Qiskit does not directly compare its classical ``Bool`` and ``Uint``
+    types. Preserve the single abstract comparison through Qamomile's shared
+    circuit IR, then express equality using the Boolean value's numeric domain
+    only when Qiskit rejects the direct operation.
+
+    Args:
+        operator (BinaryOperator): Requested equality operation.
+        left (Any): Materialized left operand.
+        right (Any): Materialized right operand.
+
+    Returns:
+        Any | None: Qiskit classical expression for mixed equality, or
+            ``None`` when the operands or operator do not match this case.
+    """
+    if operator not in {BinaryOperator.EQ, BinaryOperator.NEQ}:
+        return None
+
+    from qiskit.circuit.classical import expr, types
+
+    try:
+        left_expression = expr.lift(left)
+        right_expression = expr.lift(right)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(left_expression.type, types.Bool) and isinstance(
+        right_expression.type, types.Uint
+    ):
+        bit_expression = left_expression
+        uint_expression = right_expression
+    elif isinstance(left_expression.type, types.Uint) and isinstance(
+        right_expression.type, types.Bool
+    ):
+        uint_expression = left_expression
+        bit_expression = right_expression
+    else:
+        return None
+
+    equality = expr.logic_or(
+        expr.logic_and(
+            expr.logic_not(bit_expression),
+            expr.equal(uint_expression, 0),
+        ),
+        expr.logic_and(
+            bit_expression,
+            expr.equal(uint_expression, 1),
+        ),
+    )
+    if operator is BinaryOperator.NEQ:
+        return expr.logic_not(equality)
+    return equality
 
 
 def _condition(

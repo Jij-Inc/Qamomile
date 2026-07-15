@@ -681,6 +681,23 @@ def _hugr_bit_comparison_if() -> qmc.Bit:
 
 
 @qmc.qkernel
+def _hugr_bit_uint_comparisons(
+    integer: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]:
+    """Compare a measured Bit and runtime UInt in both operand orders.
+
+    Args:
+        integer (qmc.UInt): Runtime unsigned-integer comparison operand.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]: Equality and inequality
+            results in Bit-UInt and UInt-Bit order.
+    """
+    bit = qmc.measure(qmc.qubit("bit"))
+    return bit == integer, bit != integer, integer == bit, integer != bit
+
+
+@qmc.qkernel
 def _hugr_uint_comparisons(
     left: qmc.UInt,
     right: qmc.UInt,
@@ -782,6 +799,23 @@ def test_hugr_lowers_bit_comparisons() -> None:
         type(operation).__name__ == "Conditional"
         for operation in conditional_operations
     )
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_bit_uint_comparisons() -> None:
+    """Mixed Bit and UInt equality widens the Boolean before comparison."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_bit_uint_comparisons,
+        parameters=["integer"],
+    )
+
+    transpiler.target.validate(package)
+    operations = "\n".join(str(data.op) for _, data in package.modules[0].nodes())
+    assert operations.count("name='ifrombool'") == 4
+    assert operations.count("name='iwiden_u'") == 4
+    assert operations.count("name='ieq'") == 2
+    assert operations.count("name='ine'") == 2
 
 
 @pytest.mark.hugr

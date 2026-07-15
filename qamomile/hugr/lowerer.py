@@ -3270,9 +3270,9 @@ def _lower_compop(
 ) -> None:
     """Lower Boolean and numeric comparisons to HUGR extensions.
 
-    Mixed UInt and Float operands stay abstract in Qamomile IR. This target
-    converts only the UInt wire to Float immediately before selecting the
-    floating-point comparison operation.
+    Mixed operands stay abstract in Qamomile IR. This target converts a Bit to
+    the UInt width only for mixed equality, or a UInt to Float only for mixed
+    numeric comparisons, immediately before selecting the target operation.
 
     Args:
         operation (CompOp): Qamomile comparison operation.
@@ -3326,6 +3326,39 @@ def _lower_compop(
             concrete_signature=tys.FunctionType([INT_T, INT_T], [tys.Bool]),
         )
         [wire] = builder.add_op(comparison, *operands)
+    elif all(
+        isinstance(value.type, (BitType, UIntType)) for value in operation.operands
+    ):
+        from hugr import tys
+        from hugr.std.int import (
+            CONVERSIONS_EXTENSION,
+            INT_OPS_EXTENSION,
+            INT_T,
+            int_t,
+        )
+
+        name = _UINT_COMPARISON_NAMES.get(operation.kind)
+        if name not in {"ieq", "ine"}:
+            raise EmitError(
+                "HUGR Bit and UInt comparisons support only equality and inequality"
+            )
+        bit_int_type = int_t(0)
+        converted = []
+        for value, operand in zip(operation.operands, operands, strict=True):
+            if isinstance(value.type, BitType):
+                from_bool = CONVERSIONS_EXTENSION.get_op("ifrombool").instantiate()
+                [operand] = builder.add_op(from_bool, operand)
+                widen = INT_OPS_EXTENSION.get_op("iwiden_u").instantiate(
+                    [*bit_int_type.args, *INT_T.args],
+                    concrete_signature=tys.FunctionType([bit_int_type], [INT_T]),
+                )
+                [operand] = builder.add_op(widen, operand)
+            converted.append(operand)
+        comparison = INT_OPS_EXTENSION.get_op(name).instantiate(
+            list(INT_T.args),
+            concrete_signature=tys.FunctionType([INT_T, INT_T], [tys.Bool]),
+        )
+        [wire] = builder.add_op(comparison, *converted)
     elif all(
         isinstance(value.type, (UIntType, FloatType)) for value in operation.operands
     ):
