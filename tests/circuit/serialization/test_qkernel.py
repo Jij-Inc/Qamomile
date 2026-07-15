@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation.callable import (
     CallTransform,
     CompositeGateType,
 )
+from qamomile.circuit.ir.serialize.encode import _OP_ENCODERS
 from qamomile.circuit.serialization import (
     QAMOMILE_VERSION,
     SerializedQKernel,
@@ -33,6 +34,7 @@ from qamomile.circuit.serialization import (
 )
 from qamomile.circuit.serialization.decode import from_dict as kernel_from_dict
 from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
+from qamomile.circuit.serialization.graph_protobuf import _OPERATION_TO_PROTO
 from qamomile.circuit.serialization.proto import qamomile_ir_pb2 as pb
 from qamomile.qiskit import QiskitTranspiler
 from tests.circuit.qkernel_catalog import QKERNEL_BY_ID
@@ -298,6 +300,20 @@ def test_schema_has_one_qkernel_root() -> None:
         "callable_definition",
         "return_annotation",
     ]
+
+
+def test_every_encodable_operation_has_a_protobuf_mapping() -> None:
+    """The IR encoder and the protobuf operation table cover the same ops.
+
+    The two tables are edited in different modules, so an operation added to
+    only one of them still merges cleanly and fails at runtime instead. Both
+    are private, and the invariant relates them directly, so it is asserted
+    here rather than through a public entry point.
+    """
+    encodable = {operation.__name__ for operation in _OP_ENCODERS}
+    mapped = set(_OPERATION_TO_PROTO)
+
+    assert encodable == mapped
 
 
 def test_ir_serialize_package_imports_in_a_fresh_interpreter() -> None:
