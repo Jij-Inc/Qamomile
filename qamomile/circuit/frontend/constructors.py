@@ -7,9 +7,7 @@ from qamomile.circuit.ir.value import ArrayValue, Value
 from .handle import (
     Bit,
     Float,
-    Matrix,
     Qubit,
-    Tensor,
     UInt,
     Vector,
 )
@@ -23,14 +21,36 @@ def uint(arg: str) -> UInt: ...
 
 
 def uint(arg: int | str) -> UInt:
-    """Create a UInt handle from an integer literal or declare a named UInt parameter."""
-    name = str(arg) if isinstance(arg, str) else "uint_const"
+    """Create a UInt handle from an integer literal or a named parameter.
+
+    Args:
+        arg (int | str): An integer literal to bake in as a compile-time
+            constant, or a ``str`` naming a symbolic UInt parameter. A
+            ``bool`` is rejected: ``True`` / ``False`` are not valid integer
+            values here even though ``bool`` subclasses ``int``. (Sign is
+            not validated here -- a negative literal is accepted and baked
+            in as-is.)
+
+    Returns:
+        UInt: A constant-valued handle for an ``int`` argument, or a named
+            symbolic handle for a ``str`` argument.
+
+    Raises:
+        TypeError: If ``arg`` is neither a plain ``int`` nor a ``str``
+            (in particular, if it is a ``bool``).
+    """
+    # Reject bool first with an explicit guard (not is_plain_int): is_plain_int
+    # alone would send a bool to the ``str`` (named-parameter) branch below and
+    # build a malformed UInt(name=True) rather than raising.
+    if isinstance(arg, bool):
+        raise TypeError(f"uint() argument must be an int or str, got bool ({arg}).")
     if isinstance(arg, int):
-        value = Value(type=ir_type.UIntType(), name=name).with_const(arg)
+        value = Value(type=ir_type.UIntType(), name="uint_const").with_const(arg)
         return UInt(value=value, init_value=arg)
-    else:
-        value = Value(type=ir_type.UIntType(), name=name)
+    if isinstance(arg, str):
+        value = Value(type=ir_type.UIntType(), name=arg)
         return UInt(name=arg, value=value)
+    raise TypeError(f"uint() argument must be an int or str, got {type(arg).__name__}.")
 
 
 @typing.overload
@@ -93,39 +113,58 @@ def qubit_array(shape: int | UInt, name: str) -> Vector[Qubit]: ...
 
 
 @typing.overload
-def qubit_array(shape: tuple[int | UInt, int | UInt], name: str) -> Matrix[Qubit]: ...
-
-
-@typing.overload
-def qubit_array(shape: tuple[int | UInt, ...], name: str) -> Tensor[Qubit]: ...
+def qubit_array(shape: tuple[int | UInt], name: str) -> Vector[Qubit]: ...
 
 
 def qubit_array(
     shape: UInt | int | tuple[UInt | int, ...],
     name: str,
-) -> Vector[Qubit] | Matrix[Qubit] | Tensor[Qubit]:
-    """Create a new qubit array (vector/matrix/tensor) and emit QInitOperations."""
+) -> Vector[Qubit]:
+    """Create a new 1-D qubit register and emit its QInitOperation.
+
+    Args:
+        shape (UInt | int | tuple[UInt | int, ...]): Number of qubits in
+            the register, given either as a scalar or as a 1-tuple.
+            Tuples with more than one dimension are rejected (see
+            Raises).
+        name (str): Name for the underlying ArrayValue.
+
+    Returns:
+        Vector[Qubit]: A 1-D quantum register handle of the requested
+            size.
+
+    Raises:
+        ValueError: If ``shape`` is an empty tuple.
+        NotImplementedError: If ``shape`` has more than one dimension.
+            The quantum addressing path is rank-1, so a higher-rank
+            register would silently alias distinct elements onto the
+            same physical qubit. Allocate a 1-D ``Vector[Qubit]`` of
+            the total size and compute flat indices explicitly instead
+            (e.g. ``q[i * ncols + j]``).
+    """
 
     if not isinstance(shape, tuple):
         shape = (shape,)
 
-    if len(shape) == 0:
+    # ``len()`` is read into a variable so zuban does not narrow the
+    # variadic tuple to fixed-length forms that make ``shape[0]`` look
+    # out of range below.
+    ndim = len(shape)
+
+    if ndim == 0:
         raise ValueError("Shape must have at least one dimension.")
 
-    dims: list[UInt] = [dim if isinstance(dim, UInt) else uint(dim) for dim in shape]
+    if ndim > 1:
+        raise NotImplementedError(
+            f"qubit_array does not support rank-{ndim} shapes: the "
+            f"quantum addressing path is rank-1, so a higher-rank register "
+            f"would silently alias distinct elements onto the same physical "
+            f"qubit. Allocate a 1-D Vector[Qubit] of the total size and "
+            f"compute flat indices explicitly (e.g. q[i * ncols + j])."
+        )
 
-    raw_shape_values = tuple(d.value for d in dims)
+    dim = shape[0] if isinstance(shape[0], UInt) else uint(shape[0])
 
-    array_value = ArrayValue(
-        type=ir_type.QubitType(), name=name, shape=raw_shape_values
-    )
+    array_value = ArrayValue(type=ir_type.QubitType(), name=name, shape=(dim.value,))
 
-    shape_tuple = tuple(dims)
-    ndim = len(dims)
-
-    if ndim == 1:
-        return Vector[Qubit](value=array_value, _shape=(shape_tuple[0],))
-    elif ndim == 2:
-        return Matrix[Qubit](value=array_value, _shape=(shape_tuple[0], shape_tuple[1]))
-    else:
-        return Tensor[Qubit](value=array_value, _shape=shape_tuple)
+    return Vector[Qubit](value=array_value, _shape=(dim,))

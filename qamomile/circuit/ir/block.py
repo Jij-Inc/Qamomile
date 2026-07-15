@@ -7,19 +7,19 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.parameter import ParamSlot
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueLike
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.operation import Operation
-    from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+    from qamomile.circuit.ir.operation.callable import InvokeOperation
 
 
 class BlockKind(Enum):
     """Classification of block structure for pipeline stages."""
 
     TRACED = auto()  # Direct output of frontend tracing / build()
-    HIERARCHICAL = auto()  # May contain CallBlockOperations
-    AFFINE = auto()  # No CallBlockOperations, For/If preserved
+    HIERARCHICAL = auto()  # May contain inline callable invocations
+    AFFINE = auto()  # No inline callable invocations, For/If preserved
     ANALYZED = auto()  # Validated and dependency-analyzed
 
 
@@ -33,8 +33,8 @@ class Block:
 
     name: str = ""
     label_args: list[str] = dataclasses.field(default_factory=list)
-    input_values: list[Value] = dataclasses.field(default_factory=list)
-    output_values: list[Value] = dataclasses.field(default_factory=list)
+    input_values: list[ValueLike] = dataclasses.field(default_factory=list)
+    output_values: list[ValueLike] = dataclasses.field(default_factory=list)
     output_names: list[str] = dataclasses.field(default_factory=list)
     operations: list["Operation"] = dataclasses.field(default_factory=list)
 
@@ -81,26 +81,52 @@ class Block:
         return list(self.parameters.keys())
 
     def is_affine(self) -> bool:
-        """Check if block contains no CallBlockOperations."""
+        """Return whether this block has passed affine validation.
+
+        Returns:
+            bool: True for ``AFFINE`` and ``ANALYZED`` blocks.
+        """
         return self.kind in (BlockKind.AFFINE, BlockKind.ANALYZED)
 
-    def call(self, **kwargs: Value) -> "CallBlockOperation":
-        """Create a CallBlockOperation against this block."""
-        from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+    def call(self, **kwargs: ValueLike) -> "InvokeOperation":
+        """Create an inline callable invocation against this block.
 
-        inputs = [kwargs[label] for label in self.label_args]
-        dummy_inputs = {v.logical_id: idx for idx, v in enumerate(self.input_values)}
+        Args:
+            **kwargs (ValueLike): Actual argument values keyed by
+                ``self.label_args``.
 
-        results = []
-        for dummy_return in self.output_values:
-            if dummy_return.logical_id in dummy_inputs:
-                input_idx = dummy_inputs[dummy_return.logical_id]
-                results.append(inputs[input_idx].next_version())
-            else:
-                results.append(dummy_return)
+        Returns:
+            InvokeOperation: Inline-policy invocation whose callable
+                definition points at this block.
 
-        return CallBlockOperation(
-            block=self,
+        Raises:
+            KeyError: If a required label in ``self.label_args`` is missing
+                from ``kwargs``.
+        """
+        from qamomile.circuit.ir.operation.callable import (
+            CallableDef,
+            CallableRef,
+            CallPolicy,
+            InvokeOperation,
+            block_call_operands_and_results,
+            signature_from_block,
+        )
+
+        inputs, results = block_call_operands_and_results(self, kwargs)
+
+        name = self.name or "anonymous"
+        attrs = {"kind": "block", "default_policy": CallPolicy.INLINE.name}
+        ref = CallableRef(namespace="user.block", name=name)
+        return InvokeOperation(
             operands=inputs,
             results=results,
+            target=ref,
+            attrs=attrs,
+            definition=CallableDef(
+                ref=ref,
+                signature=signature_from_block(self),
+                body=self,
+                default_policy=CallPolicy.INLINE,
+                attrs=attrs,
+            ),
         )

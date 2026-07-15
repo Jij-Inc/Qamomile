@@ -25,10 +25,10 @@
 #
 # - トレーシングからemissionの間のどこかで失敗するカーネルをデバッグしたい
 # - カスタムコンパイラパスを書きたい
-# - 新しいバックエンド（別の量子SDKなど）を追加したい
+# - 新しい量子SDK連携を追加したい
 # - `transpile()`が実際に何をしているのかを単純に理解したい
 #
-# 小さな`@qkernel`を`Transpiler`のステップ実行用公開APIでパイプラインを1段ずつ通し、各ステップで中間表現を確認します。そして同じプランを2つのバックエンド（QiskitとQURI Parts）がどのように異なる回路へ変換するかを比較します。
+# 小さな`@qkernel`を`Transpiler`のステップ実行用公開APIでパイプラインを1段ずつ通し、各ステップで中間表現を確認します。そして同じプランを2つの量子SDK連携（QiskitとQURI Parts）がどのように異なる回路へ変換するかを比較します。
 
 # %%
 # 最新のQamomileをpipからインストールします！
@@ -48,7 +48,7 @@
 # Block [HIERARCHICAL]
 #    │  substitute                  (ルールベースの置換、オプション)
 #    │  resolve_parameter_shapes    (Vectorのshape次元を具体化)
-#    │  inline                      (CallBlockOperationsを展開)
+#    │  inline                      (InvokeOperationsを展開)
 #    ▼
 # Block [AFFINE]
 #    │  unroll_recursion            (inline ↔ partial_evalの反復)
@@ -124,7 +124,7 @@
 # | `GateOperation` | `H`、`RX`、`CX`、… | `ir/operation/gate.py` |
 # | `MeasureOperation` | 測定 | `ir/operation/measurement.py` |
 # | `ForOperation`、`IfOperation`、`WhileOperation` | 制御フロー | `ir/operation/control_flow.py` |
-# | `CallBlockOperation` | 別の`Block`の呼び出し（`inline`で除去） | `ir/operation/call_block_ops.py` |
+# | `InvokeOperation` | 別の`Block`の呼び出し（`inline`で除去） | `ir/operation/callable.py` |
 #
 # 制御フロー系のOperationはすべて`HasNestedOps`プロトコル（`nested_op_lists()` / `rebuild_nested()`）を実装しているので、パスは各Operationの型を特別扱いせず、ループや分岐の本体へ統一的に踏み込めます。
 #
@@ -133,7 +133,7 @@
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir import pretty_print_block
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.qiskit import QiskitTranspiler
 
@@ -188,7 +188,7 @@ def summarise(block):
 
 
 # %% [markdown]
-# 1行サマリーでは十分でないときのために、`qamomile.circuit.ir.pretty_print_block`が`Block`のMLIR風テキストダンプを返します。各パスの前後で**何がどう変わったか**を目で確認するには、こちらが最速です。`depth`引数で`CallBlockOperation`の展開深さを制御できるので、たとえば`depth=1`なら「`inline`が実行したら何が起こるか」を先取りして眺められます。
+# 1行サマリーでは十分でないときのために、`qamomile.circuit.ir.pretty_print_block`が`Block`のMLIR風テキストダンプを返します。各パスの前後で**何がどう変わったか**を目で確認するには、こちらが最速です。`depth`引数で`InvokeOperation`の展開深さを制御できるので、たとえば`depth=1`なら「`inline`が実行したら何が起こるか」を先取りして眺められます。
 
 # %% [markdown]
 # ## 4. ステージごとのウォークスルー
@@ -197,7 +197,7 @@ def summarise(block):
 #
 # ### 4.1 `to_block` — Python関数のトレーシング
 #
-# `to_block`はデコレート済み関数をトレーサコンテキスト下で実行します。`qmc.h(...)`、`qmc.range(...)`、`entangle_pair(...)`の各呼び出しは`Operation`としてBlockに記録されます。他の`@qkernel`への呼び出しは`CallBlockOperation`になり、本体は**まだ**インライン展開されません。
+# `to_block`はデコレート済み関数をトレーサコンテキスト下で実行します。`qmc.h(...)`、`qmc.range(...)`、`entangle_pair(...)`の各呼び出しは`Operation`としてBlockに記録されます。他の`@qkernel`への呼び出しは`InvokeOperation`になり、本体は**まだ**インライン展開されません。
 
 # %%
 bindings = {"n": 3}
@@ -210,10 +210,10 @@ assert block.kind.name == "HIERARCHICAL"
 print("parameters:       ", list(block.parameters))
 assert list(block.parameters) == ["theta"]
 print(
-    "CallBlockOps:     ",
-    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
+    "InvokeOps:     ",
+    sum(1 for op in block.operations if isinstance(op, InvokeOperation)),
 )
-# 注意: `CallBlockOperation`は`ForOperation`の本体内部にも存在しうるので、
+# 注意: `InvokeOperation`は`ForOperation`の本体内部にも存在しうるので、
 # 必ずしもトップレベルのリストにあるとは限りません。
 
 # %% [markdown]
@@ -223,7 +223,7 @@ print(
 print(pretty_print_block(block))
 
 # %% [markdown]
-# `depth=1`を付けると、`CallBlockOperation`の先が呼び出し行のブレース内にインライン展開された形で表示されます。これは「`inline`を1回通したらどうなるか」を先読みしているのと同じ見た目で、次の節の内容を予習できます。
+# `depth=1`を付けると、`InvokeOperation`の先が呼び出し行のブレース内にインライン展開された形で表示されます。これは「`inline`を1回通したらどうなるか」を先読みしているのと同じ見た目で、次の節の内容を予習できます。
 
 # %%
 print(pretty_print_block(block, depth=1))
@@ -233,14 +233,14 @@ print(pretty_print_block(block, depth=1))
 #
 # ### 4.2 `inline` — ネストしたブロック呼び出しの平坦化
 #
-# `inline`はすべての`CallBlockOperation`を対象ブロックのOperationで置き換え、結果がwell-formedであり続けるようSSA値を置換します。`CallBlockOperation`が残らなくなるとブロックは`AFFINE`へ遷移します。
+# `inline`はすべての`InvokeOperation`を対象ブロックのOperationで置き換え、結果がwell-formedであり続けるようSSA値を置換します。`InvokeOperation`が残らなくなるとブロックは`AFFINE`へ遷移します。
 
 
 # %%
 def count_calls(ops):
     total = 0
     for op in ops:
-        if isinstance(op, CallBlockOperation):
+        if isinstance(op, InvokeOperation):
             total += 1
         # ループ内の呼び出しも数えるため、ネストした制御フロー本体を再帰的に辿ります。
         for child in getattr(op, "nested_op_lists", lambda: [])():
@@ -251,7 +251,7 @@ def count_calls(ops):
 block = transpiler.inline(block)
 print("after inline:     ", summarise(block))
 assert block.kind.name == "AFFINE"
-print("CallBlockOps (deep):", count_calls(block.operations))
+print("InvokeOps (deep):", count_calls(block.operations))
 assert count_calls(block.operations) == 0
 print("is_affine:        ", block.is_affine())
 assert block.is_affine()
@@ -298,7 +298,7 @@ assert sum(1 for op in block.operations if isinstance(op, ForOperation)) == 1
 # 1. ブロックの入出力が古典であること（量子I/Oはエントリポイントではなく*サブルーチン*ブロックでのみ許可されます）。
 # 2. **`OperationKind.QUANTUM`のOperation** が、**古典型オペランド**として測定由来の古典値を受け取らないこと。より具体的には、`rx(q, theta)`の`theta`のようなゲートの古典引数が、測定結果から計算された値であってはいけません（rotation角などの古典計算をJITする必要が出るため）。
 #
-# この規則は**動的量子回路を禁止するものではありません**。`IfOperation`/`WhileOperation`は`OperationKind.CONTROL`なのでこのチェック対象外で、測定結果`Bit`を条件とする制御フロー（`if bit: ...` / `while bit: ...`）は通ります。また、Phiで合流した量子型の値も明示的に例外扱いです。動的量子回路と禁止パターンの具体的な違いは5章で扱います。
+# この規則は**動的量子回路を禁止するものではありません**。`IfOperation`/`WhileOperation`は`OperationKind.CONTROL`なのでこのチェック対象外で、測定結果`Bit`を条件とする制御フロー（`if bit: ...` / `while bit: ...`）は通ります。また、ifマージで合流した量子型の値も明示的に例外扱いです。動的量子回路と禁止パターンの具体的な違いは5章で扱います。
 #
 # 成功するとブロックは`ANALYZED`へ遷移します。
 
@@ -350,7 +350,7 @@ print(executable.quantum_circuit)
 # - **`resolve_parameter_shapes`** — `bindings`が具体的な`Vector`や`Matrix`値を提供する場合、`{name}_dim{i}`のshape次元を埋めます。これにより下流で`arr.shape[0]`が具体的な`UInt`として解決されます。
 # - **`unroll_recursion`** — 自己再帰の`@qkernel`（例: Suzuki–Trotter、チュートリアル08参照）に対する`inline ↔ partial_eval`の固定点ループです。再帰が底まで展開されると終了し、bindingsでベースケースに到達できない場合はエラーになります。
 # - **`affine_validate`** — フロントエンドのチェックをすり抜けたアフィン型違反を捕まえるセーフティネットです。
-# - **`slice_borrow_check`** — `Vector`スライス view 用の定数畳み込み後検査です。フロントエンドは具体境界の重複 view を構築時点で reject しますが、トレース時に境界が symbolic だった view（`q[lo:hi]`で`lo`/`hi`が`UInt`の場合）は`bindings`で境界が具体的になった後でしか検査できません。このパスは`partial_eval`の直後でブロックを walk し、生きている view 同士の重複や破壊済みスロットへの再アクセス（先行する`measure` / `cast` / `expval`で消費されたスロットに後からアクセスするケース）には`SliceBorrowViolationError`を投げます。スライス view はカーネル境界では **affine** として扱われ、ブロック末尾で slice-assign 返却されないまま残っていても flag しません — Deutsch-Jozsa の`ancilla = qs[n]`や Simon's の`qs2 = qs[n:2*n]`（オラクルで使った後、測定せず破棄する scratch register）パターンが素直にコンパイルされます。本当に問題のあるケース — view が生きている間に親を consume / return する — は frontend の`ArrayBase.consume` / `validate_all_returned` / `_validate_returned_arrays`が引き続き捕まえます。`q[i]`のような単一要素借り出しは IR Operation を出さないので、こちらは frontend のトレース時 validator が担当します。
+# - **`slice_borrow_check`** — `Vector`スライス view 用の定数畳み込み後検査です。フロントエンドは具体境界の重複 view を構築時点で reject しますが、トレース時に境界が symbolic だった view（`q[lo:hi]`で`lo`/`hi`が`UInt`の場合）は`bindings`で境界が具体的になった後でしか検査できません。このパスは`partial_eval`の直後でブロックを walk し、生きている view 同士の重複には`QubitBorrowConflictError`、先行する`measure` / `cast` / `expval`で破壊されたスロットへの再アクセスには`QubitConsumedError`を投げます。これは具体的なスライス境界に対してフロントエンドが投げる例外と同じ意味分類です。スライス view はカーネル境界では **affine** として扱われ、ブロック末尾で slice-assign 返却されないまま残っていても flag しません — Deutsch-Jozsa の`ancilla = qs[n]`や Simon's の`qs2 = qs[n:2*n]`（オラクルで使った後、測定せず破棄する scratch register）パターンが素直にコンパイルされます。本当に問題のあるケース — view が生きている間に親を consume / return する — は frontend の`ArrayBase.consume` / `validate_all_returned` / `_validate_returned_arrays`が引き続き捕まえます。`q[i]`のような単一要素借り出しは IR Operation を出さないので、こちらは frontend のトレース時 validator が担当します。
 # - **`strip_slice_ops`** — `slice_borrow_check`の検査が終わった後で、不要になった`SliceArrayOperation`と`ReleaseSliceViewOperation`の宣言マーカーをブロックから取り除きます。これによりセグメンテーション / emit は純粋な量子 op 列だけを見るようになります。スライス済みの`ArrayValue`自体は下流オペランドの`slice_of`チェーンから引き続き参照できます。
 # - **`validate_symbolic_shapes`** — 未解決の`Vector`shape次元が`ForOperation`の境界に到達した場合、実行可能なエラーメッセージで拒否します。
 #
@@ -384,12 +384,12 @@ print(executable.quantum_circuit)
 # |-----------|------------|----------|--------|
 # | `ForOperation` | `operations`（本体） | `operands = [start, stop, step]`（いずれも`UInt`） | `loop_var`名を持つ |
 # | `ForItemsOperation` | `operations`（本体） | `operands[0]`が`DictValue` | 常にコンパイル時アンロール |
-# | `IfOperation` | `true_operations`, `false_operations` | `operands[0]`が`Bit` | `phi_ops`で分岐後の値マージ |
+# | `IfOperation` | `true_operations`, `false_operations` | `operands[0]`が`Bit` | `true_yields`/`false_yields`で分岐後の値マージ |
 # | `WhileOperation` | `operations`（本体） | `operands[0]`（初期条件）, `operands[1]`（ループキャリー条件） | 測定結果`Bit`必須、`max_iterations`ヒント可 |
 #
 # 4つとも`HasNestedOps`を実装しているので、パスは`nested_op_lists()` / `rebuild_nested()`経由で本体へ再帰的に入れます。`isinstance`のチェーンは書かないのが流儀です。
 #
-# `IfOperation`には値をマージする**Phiノード** (`PhiOp`) が付きます。両分岐で同じ論理量子ビット・古典変数を異なるバージョンで更新した場合、分岐後に使う側はPhi経由でどちらのバージョンなのかを参照します。
+# `IfOperation`は並列リスト**`true_yields`/`false_yields`**で値をマージします。`true_yields[i]`と`false_yields[i]`が`results[i]`にマージされる分岐値です。両分岐で同じ論理量子ビット・古典変数を異なるバージョンで更新した場合、分岐後に使う側はマージ結果を通じてどちらのバージョンなのかを参照します。パスがマージを読むときはyieldリストを直接触らず`IfOperation.iter_merges()`を使います。
 #
 # ### 5.3 パスごとの挙動
 #
@@ -399,7 +399,7 @@ print(executable.quantum_circuit)
 # |------|-------------|---------------|-----------------|
 # | `inline` | 両分岐の本体へ再帰 | 本体へ再帰 | 本体へ再帰 |
 # | `partial_eval` | 条件が定数なら**選ばれた分岐で置換**（`CompileTimeIfLoweringPass`）。測定結果条件なら保持 | 境界の`BinOp`は畳み込まれる。**アンロールはしない** | 何もしない（ここでは変形対象外） |
-# | `analyze` | Phiが依存グラフに反映される | `loop_var`が本体の依存に入る | 測定結果条件を量子オペランドと同様に扱う |
+# | `analyze` | マージが依存グラフに反映される | `loop_var`が本体の依存に入る | 測定結果条件を量子オペランドと同様に扱う |
 # | `validate_symbolic_shapes` | — | 未解決の`Vector`shape次元が境界にあると拒否 | — |
 # | `plan` | `OperationKind.CONTROL`としてセグメント境界を作る | 同左 | 同左 |
 # | `emit` | 実行時`if`として出力（バックエンドが対応していれば） | `LoopAnalyzer.should_unroll()`で判定し、必要ならアンロール | 実行時`while`として出力 |
@@ -576,7 +576,7 @@ except ModuleNotFoundError:
 #
 # 1. **回路の型。** Qiskitは`Parameter`オブジェクトを埋め込んだ`QuantumCircuit`をemitします。QURI PartsはパラメータがQURI Partsの`Parameter`インスタンスである`LinearMappedParametricQuantumCircuit`をemitします。どちらもQamomileの`parameter_names`を同じ形で往復します。
 # 2. **測定。** Qiskitの回路は`measure`命令で終わります（`measurement_mode=NATIVE`）。QURI Partsの回路は測定ゲートを持ちません。サンプリングは実行時にexecutorが処理します（`measurement_mode=STATIC`）。
-# 3. **複合ゲート。** カーネルが`qmc.qft(...)`を使う場合、Qiskitの`QiskitQFTEmitter`は`QFTGate`ボックスを配置しますが、QURI Partsバックエンドはライブラリパス経由で分解します。IRは同じですが、実現される回路は異なります。カーネルごとに`TranspilerConfig.with_strategies({"qft": "approximate"})`で上書きできます。
+# 3. **複合ゲート。** カーネルが`qmc.qft(...)`を使う場合、Qiskitの`QiskitQFTEmitter`は`QFTGate`ボックスを配置しますが、QURI Parts連携ではライブラリパス経由で分解します。IRは同じですが、実現される回路は異なります。カーネルごとに`TranspilerConfig.with_strategies({"qft": "approximate"})`で上書きできます。
 
 # %% [markdown]
 # ## 8. コントリビュータ向けのポインタ
@@ -600,7 +600,7 @@ except ModuleNotFoundError:
 # 3. ユーザーが`executor()`を呼べるように`QuantumExecutor[T]`のサブクラスを実装します。
 # 4. オプション: emitされた回路で高レベル構造を保つため、QFT/QPEなどの`CompositeGateEmitter`を追加します。
 #
-# **transpileエラーのデバッグ。** パスを1つずつ実行し、その間に`summarise(block)`で件数の変化を追い、気になるところは`pretty_print_block(block)`で中身を覗きます。`BlockKind`が進まない、Operation数が爆発する、例外が送出される、というステージが最初に見るべき場所です。`pretty_print_block(block, depth=N)`で`CallBlockOperation`の展開深さを変えながら`inline`前後を比較すると、どこで値が切れたか・どのPhiが漏れたかが読み取りやすくなります。
+# **transpileエラーのデバッグ。** パスを1つずつ実行し、その間に`summarise(block)`で件数の変化を追い、気になるところは`pretty_print_block(block)`で中身を覗きます。`BlockKind`が進まない、Operation数が爆発する、例外が送出される、というステージが最初に見るべき場所です。`pretty_print_block(block, depth=N)`で`InvokeOperation`の展開深さを変えながら`inline`前後を比較すると、どこで値が切れたか・どのマージが漏れたかが読み取りやすくなります。
 
 # %% [markdown]
 # ## 9. まとめ

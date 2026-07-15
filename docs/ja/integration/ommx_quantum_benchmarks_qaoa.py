@@ -17,7 +17,7 @@
 # tags: [integration, optimization, variational]
 # ---
 #
-# # OMMX Quantum Benchmarksの活用 (1): Qamomileによる量子アルゴリズムの実装とベンチマーク
+# # OMMX Quantum Benchmarksの活用: Qamomileによる量子アルゴリズムの実装とベンチマーク
 #
 # 本チュートリアルでは、公開ベンチマークデータセットの問題にQamomileの量子アルゴリズムを適用し、その解の品質を同じワークフロー上で古典ソルバーと比較する方法を示します。
 #
@@ -424,4 +424,4 @@ print(f"QAOA hit rate on E* = {ref_E}: {hit_rate:.1%}  ({final_shots} shots)")
 # 2. `Instance.to_qubo()`でQUBOを取り出して`BinaryModel`にラップし、スピン領域に切り替えた上で、`@qkernel`を使った自作のQAOA ansatzを`QiskitTranspiler` + `AerSimulator`を通じて実行しました。
 # 3. QAOAの出力(ベストショット、ヒット率、サンプリング分布)を、同じインスタンスに対する`ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve`の結果、およびベンチマークに同梱された参照最適値と比較しました。
 #
-# 同じパターンは他のQOBLIBデータセット(`Marketsplit`、`IndependentSet`、`Network`など)にも適用できます。対応するデータセットクラスでロードし、`Instance.to_qubo()`でQUBOを取り出して、同じ`BinaryModel` + QAOA ansatz + transpileのループを再利用します。大きなインスタンスがローカルシミュレータの能力を超えた場合は、同じ`executable`をQamomileの他のバックエンド(`QuriPartsTranspiler`、`CudaqTranspiler`など)や実機に切り替えられます。
+# 同じパターンは他のQOBLIBデータセット(`Marketsplit`、`IndependentSet`、`Network`など)にも適用できます。対応するデータセットクラスでロードし、`Instance.to_qubo()`でQUBOを取り出して、同じ`BinaryModel` + QAOA ansatz + transpileのループを再利用します。大きなインスタンスがローカルシミュレータの能力を超えた場合は、同じ`executable`をQamomileの他の量子SDK連携(`QuriPartsTranspiler`、`CudaqTranspiler`など)や実機に切り替えられます。

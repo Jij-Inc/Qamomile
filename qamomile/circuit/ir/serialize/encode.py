@@ -1,8 +1,11 @@
-"""IR → intermediate dict encoder.
+"""Semantic IR block → private graph-record encoder.
 
-Walks a ``Block`` (AFFINE or ANALYZED) and produces the dict shape
-documented in :mod:`qamomile.circuit.ir.serialize.schema`. Values are
-deduplicated into ``value_table`` and referenced elsewhere by UUID.
+Walks a :class:`Block` and produces the internal graph records consumed by
+:mod:`qamomile.circuit.serialization.graph_protobuf`. Values and callable
+definitions are deduplicated into module-wide tables and referenced elsewhere
+by stable IDs. Keeping those registries outside individual blocks preserves
+recursive call graphs and shared callable identity without expanding the
+high-level IR into backend-specific instructions.
 
 Every encoder branch is dispatched through a hard-coded table keyed
 on the runtime class; there is no dynamic resolution, no ``getattr``
@@ -16,18 +19,26 @@ from typing import Any, Callable
 
 import numpy as np
 
-from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile._utils import is_plain_int
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import (
-    CompositeGateOperation,
+    CallableBodyRef,
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
     ControlledUOperation,
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
+    GlobalPhaseOperation,
     InverseBlockOperation,
+    InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
+    ProjectOperation,
+    ResetOperation,
     ReturnOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -35,29 +46,37 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
-    PhiOp,
     RuntimeClassicalExpr,
 )
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
+from qamomile.circuit.ir.operation.classical_ops import (
+    DecodeQFixedOperation,
+    DictGetItemOperation,
+    StoreArrayElementOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
     ForOperation,
     IfOperation,
+    LoopCarriedRebind,
+    RegionArg,
     WhileOperation,
+    validate_region_args,
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     SymbolicControlledU,
 )
-from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
+from qamomile.circuit.ir.operation.operation import (
+    CInitOperation,
+    QInitOperation,
+    Signature,
+)
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
 )
-from qamomile.circuit.ir.parameter import ParamSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -83,46 +102,10 @@ from qamomile.circuit.ir.value import (
     ValueBase,
     ValueMetadata,
 )
+from qamomile.observable.hamiltonian import Hamiltonian
 
-from .numpy_io import array_to_dict
-from .schema import SCHEMA_VERSION
-
-_SUPPORTED_KINDS = frozenset({BlockKind.AFFINE, BlockKind.ANALYZED})
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-def to_dict(block: Block) -> dict[str, Any]:
-    """Encode a ``Block`` into the intermediate dict envelope.
-
-    Args:
-        block (Block): The block to encode. Must be at
-            ``BlockKind.AFFINE`` or ``BlockKind.ANALYZED``.
-
-    Returns:
-        dict[str, Any]: ``{"schema_version": SCHEMA_VERSION, "block":
-            <block dict>}`` ready to be passed to a wire-format
-            encoder (JSON / msgpack).
-
-    Raises:
-        ValueError: If ``block.kind`` is not ``AFFINE`` / ``ANALYZED``.
-        NotImplementedError: If the block contains a
-            ``CallBlockOperation`` (HIERARCHICAL holdover).
-        TypeError: If a payload (e.g., ``ParamSlot.bound_value``)
-            cannot be encoded with a known wire representation.
-    """
-    if block.kind not in _SUPPORTED_KINDS:
-        raise ValueError(
-            f"to_dict() requires BlockKind.AFFINE or BlockKind.ANALYZED; "
-            f"got {block.kind.name}. Inline first."
-        )
-    ctx = _EncodeContext()
-    block_dict = _encode_block(block, ctx)
-    return {"schema_version": SCHEMA_VERSION, "block": block_dict}
-
+from .hamiltonian_io import hamiltonian_to_dict
+from .numpy_io import array_to_dict, scalar_to_dict
 
 # ---------------------------------------------------------------------------
 # Context: collects unique Values into a flat table
@@ -130,17 +113,19 @@ def to_dict(block: Block) -> dict[str, Any]:
 
 
 class _EncodeContext:
-    """Working state for one ``to_dict`` invocation.
+    """Collect module-wide Value and CallableDef registries.
 
-    Collects every Value reachable from the Block under encoding into
-    ``value_table_dicts`` in first-visit order, keyed by UUID for
-    deduplication.
+    Values are keyed by semantic UUID. Callable definitions are keyed by
+    object identity because one :class:`CallableRef` may intentionally identify
+    more than one semantic body in a surrounding module.
     """
 
     def __init__(self) -> None:
         """Initialize an empty encode context."""
         self.value_table_dicts: list[dict[str, Any]] = []
         self._seen_uuids: set[str] = set()
+        self._definition_ids: dict[int, str] = {}
+        self._definitions: list[CallableDef] = []
 
     def register_value(self, v: ValueBase) -> str:
         """Record ``v`` in the value table if not already present.
@@ -163,6 +148,56 @@ class _EncodeContext:
         self.value_table_dicts[slot_index] = _encode_value(v, self)
         return v.uuid
 
+    def register_definition(self, definition: CallableDef | None) -> str | None:
+        """Register a callable definition and every reachable semantic body.
+
+        The ID is assigned before walking bodies so direct and mutual recursion
+        terminate naturally and serialize as graph edges.
+
+        Args:
+            definition (CallableDef | None): Definition to register, or
+                ``None`` for an invocation without an explicit definition.
+
+        Returns:
+            str | None: Module-local definition ID, or ``None``.
+        """
+        if definition is None:
+            return None
+        object_id = id(definition)
+        existing = self._definition_ids.get(object_id)
+        if existing is not None:
+            return existing
+        definition_id = f"callable_{len(self._definitions)}"
+        self._definition_ids[object_id] = definition_id
+        self._definitions.append(definition)
+        if definition.body is not None:
+            _walk_block_values(definition.body, self)
+        for implementation in definition.implementations:
+            if implementation.body is not None:
+                _walk_block_values(implementation.body, self)
+        return definition_id
+
+    def encode_callable_table(self) -> list[dict[str, Any]]:
+        """Encode every registered callable definition exactly once.
+
+        Returns:
+            list[dict[str, Any]]: Definition-table entries in deterministic
+                first-visit order.
+        """
+        encoded: list[dict[str, Any]] = []
+        index = 0
+        while index < len(self._definitions):
+            definition = self._definitions[index]
+            definition_id = self._definition_ids[id(definition)]
+            encoded.append(
+                {
+                    "id": definition_id,
+                    "definition": _encode_callable_def(definition, self),
+                }
+            )
+            index += 1
+        return encoded
+
 
 # ---------------------------------------------------------------------------
 # Block / Operation / Value encoders
@@ -177,7 +212,7 @@ def _encode_block(block: Block, ctx: _EncodeContext) -> dict[str, Any]:
         ctx (_EncodeContext): The active encoding context.
 
     Returns:
-        dict[str, Any]: The Block dict; see schema documentation.
+        dict[str, Any]: Internal graph record for the block.
     """
     # Walk all reachable Values into the table. Order matters for the
     # output dict's ``value_table`` field but the actual ordering is
@@ -200,8 +235,6 @@ def _encode_block(block: Block, ctx: _EncodeContext) -> dict[str, Any]:
         "output_value_refs": [v.uuid for v in block.output_values],
         "output_names": list(block.output_names),
         "parameters": {k: v.uuid for k, v in block.parameters.items()},
-        "param_slots": [_encode_param_slot(s) for s in block.param_slots],
-        "value_table": ctx.value_table_dicts,
         "operations": [_encode_operation(op, ctx) for op in block.operations],
     }
 
@@ -211,7 +244,7 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
 
     Covers operands, results, subclass-extra Value fields (via
     ``all_input_values``), nested control-flow op bodies, and nested
-    Blocks inside ``CompositeGateOperation`` /
+    Blocks inside ``InvokeOperation`` /
     ``InverseBlockOperation`` /
     ``ControlledUOperation``.
 
@@ -230,9 +263,8 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _walk_op_values(child, ctx)
-    if isinstance(op, CompositeGateOperation):
-        if op.implementation_block is not None:
-            _walk_block_values(op.implementation_block, ctx)
+    if isinstance(op, InvokeOperation):
+        ctx.register_definition(op.definition)
     if isinstance(op, InverseBlockOperation):
         if op.source_block is not None:
             _walk_block_values(op.source_block, ctx)
@@ -487,72 +519,70 @@ def _encode_dict_runtime_metadata(
 
 
 # ---------------------------------------------------------------------------
-# ParamSlot
-# ---------------------------------------------------------------------------
-
-
-def _encode_param_slot(slot: ParamSlot) -> dict[str, Any]:
-    """Encode a ``ParamSlot``.
-
-    Args:
-        slot (ParamSlot): The slot to encode.
-
-    Returns:
-        dict[str, Any]: Dict form with the slot's type encoded via
-            :func:`_encode_value_type` and ``bound_value`` /
-            ``default`` routed through :func:`_encode_payload`.
-    """
-    return {
-        "name": slot.name,
-        "type": _encode_value_type(slot.type),
-        "kind": slot.kind.value,
-        "ndim": slot.ndim,
-        "default": _encode_payload(slot.default),
-        "bound_value": _encode_payload(slot.bound_value),
-        "differentiable": slot.differentiable,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Payload encoding for arbitrary Python data in metadata / param slots
+# Payload encoding for arbitrary Python data in metadata and defaults
 # ---------------------------------------------------------------------------
 
 
 def _encode_payload(value: Any) -> Any:
-    """Encode a Python payload (binding value / const) into a JSON-able form.
+    """Encode a Python payload without collapsing container identity.
 
     Supports primitives (``None``, ``bool``, ``int``, ``float``,
-    ``str``), homogeneous containers (``list``, ``tuple``, ``dict``),
-    numpy arrays, and ``numpy`` scalar types. Falls through to raising
-    ``TypeError`` for unknown types so an unencodable binding never
-    silently slips into the wire format.
+    ``str``), bytes, complex numbers, lists, tuples, sets, arbitrary-key
+    dictionaries, numpy arrays, ``numpy`` scalar types, and
+    ``qamomile.observable.Hamiltonian`` (the bound value of an
+    ``Observable`` kernel parameter). Dictionaries use a list-of-pairs
+    ``$map`` wrapper, so arbitrary key types and reserved names remain distinct.
 
     Args:
         value (Any): The Python value to encode.
 
     Returns:
-        Any: A JSON / msgpack-friendly representation of ``value``.
+        Any: A closed intermediate representation for protobuf conversion.
 
     Raises:
-        TypeError: If ``value`` has no known wire representation.
+        TypeError: If ``value`` has no known lossless wire representation.
     """
+    # NumPy float64 subclasses Python float on some NumPy versions, so scalar
+    # dispatch must precede the primitive branch to retain dtype and bits.
+    if isinstance(value, np.generic):
+        return scalar_to_dict(value)
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, bytes):
-        # bytes pass through; JSON encoder converts to base64 at the boundary.
+        # Bytes pass through into protobuf's native bytes field.
         return value
     if isinstance(value, np.ndarray):
         return array_to_dict(value)
-    if isinstance(value, np.generic):
-        # Cast numpy scalar to its closest Python primitive.
-        return value.item()
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, Hamiltonian):
+        return hamiltonian_to_dict(value)
+    if isinstance(value, complex):
+        return {
+            "$complex_number": [float(value.real), float(value.imag)],
+        }
+    if isinstance(value, tuple):
+        return {"$tuple": [_encode_payload(item) for item in value]}
+    if isinstance(value, list):
         return [_encode_payload(x) for x in value]
+    if isinstance(value, set):
+        return {"$set": [_encode_payload(item) for item in value]}
+    if isinstance(value, frozenset):
+        return {"$frozenset": [_encode_payload(item) for item in value]}
     if isinstance(value, dict):
-        return {str(k): _encode_payload(v) for k, v in value.items()}
+        return {
+            "$map": [
+                [_encode_payload(key), _encode_payload(item)]
+                for key, item in value.items()
+            ]
+        }
+    if callable(value):
+        raise TypeError(
+            "Cannot serialize a Python callable payload. Evaluate it while "
+            "tracing or replace it with serializer-friendly semantic metadata."
+        )
     raise TypeError(
         f"Cannot encode payload of type {type(value).__name__!r}; supported types "
-        f"are primitives, bytes, list/tuple, dict, np.ndarray, np.generic."
+        f"are primitives, bytes, complex, list/tuple/set/frozenset, dict, "
+        f"np.ndarray, np.generic, and Hamiltonian."
     )
 
 
@@ -631,7 +661,7 @@ def _encode_qreg_width(width: Any) -> Any:
     Raises:
         TypeError: If the width is neither.
     """
-    if isinstance(width, int):
+    if is_plain_int(width):
         return width
     if isinstance(width, Value):
         return {"$value_ref": width.uuid}
@@ -656,14 +686,8 @@ def _encode_operation(op: Operation, ctx: _EncodeContext) -> dict[str, Any]:
         dict[str, Any]: A tagged op dict.
 
     Raises:
-        NotImplementedError: If ``op`` is a ``CallBlockOperation``
-            (HIERARCHICAL-only).
         TypeError: If ``op`` has no encoder in the dispatch table.
     """
-    if isinstance(op, CallBlockOperation):
-        raise NotImplementedError(
-            "Cannot serialize CallBlockOperation; the block must be inlined first."
-        )
     encoder = _OP_ENCODERS.get(type(op))
     if encoder is None:
         raise TypeError(
@@ -745,6 +769,36 @@ def _encode_measure_operation(
     return _base_op_dict("MeasureOperation", op)
 
 
+def _encode_project_operation(
+    op: ProjectOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`ProjectOperation`.
+
+    Args:
+        op (ProjectOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus the projection axis.
+    """
+    d = _base_op_dict("ProjectOperation", op)
+    d["axis"] = op.axis
+    return d
+
+
+def _encode_reset_operation(op: ResetOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode :class:`ResetOperation`.
+
+    Args:
+        op (ResetOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict.
+    """
+    return _base_op_dict("ResetOperation", op)
+
+
 def _encode_measure_vector(
     op: MeasureVectorOperation, ctx: _EncodeContext
 ) -> dict[str, Any]:
@@ -793,6 +847,38 @@ def _encode_decode_qfixed(
     d = _base_op_dict("DecodeQFixedOperation", op)
     d["num_bits"] = op.num_bits
     d["int_bits"] = op.int_bits
+    return d
+
+
+def _encode_store_array_element(
+    op: StoreArrayElementOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`StoreArrayElementOperation`.
+
+    Args:
+        op (StoreArrayElementOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict (the op carries no extra fields).
+    """
+    return _base_op_dict("StoreArrayElementOperation", op)
+
+
+def _encode_dict_getitem(
+    op: DictGetItemOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`DictGetItemOperation`.
+
+    Args:
+        op (DictGetItemOperation): The op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus ``key_arity``.
+    """
+    d = _base_op_dict("DictGetItemOperation", op)
+    d["key_arity"] = op.key_arity
     return d
 
 
@@ -990,17 +1076,58 @@ def _encode_runtime_classical(
     return d
 
 
-def _encode_phi(op: PhiOp, ctx: _EncodeContext) -> dict[str, Any]:
-    """Encode :class:`PhiOp`.
+def _encode_loop_carried_rebinds(
+    rebinds: tuple[LoopCarriedRebind, ...],
+) -> list[dict[str, Any]]:
+    """Encode loop-carried rebind records as value references.
 
     Args:
-        op (PhiOp): The op.
-        ctx (_EncodeContext): The active encoding context.
+        rebinds (tuple[LoopCarriedRebind, ...]): Records attached to a
+            loop operation. Their ``before`` / ``after`` values are
+            already registered in the value table via
+            ``all_input_values``.
 
     Returns:
-        dict[str, Any]: Base op dict.
+        list[dict[str, Any]]: One dict per record with ``var_name``,
+            ``before_ref`` / ``after_ref`` UUIDs, and
+            ``before_synthesized``.
     """
-    return _base_op_dict("PhiOp", op)
+    return [
+        {
+            "var_name": r.var_name,
+            "before_ref": r.before.uuid,
+            "after_ref": r.after.uuid,
+            "before_synthesized": r.before_synthesized,
+        }
+        for r in rebinds
+    ]
+
+
+def _encode_region_args(
+    region_args: tuple[RegionArg, ...],
+) -> list[dict[str, Any]]:
+    """Encode loop region arguments as value references.
+
+    Args:
+        region_args (tuple[RegionArg, ...]): Records attached to a loop
+            operation. Their ``init`` / ``block_arg`` / ``yielded`` /
+            ``result`` values are already registered in the value table
+            via ``all_input_values`` (and ``result`` via ``results``).
+
+    Returns:
+        list[dict[str, Any]]: One dict per record with ``var_name`` and
+            the four UUID refs.
+    """
+    return [
+        {
+            "var_name": a.var_name,
+            "init_ref": a.init.uuid,
+            "block_arg_ref": a.block_arg.uuid,
+            "yielded_ref": a.yielded.uuid,
+            "result_ref": a.result.uuid,
+        }
+        for a in region_args
+    ]
 
 
 def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
@@ -1012,13 +1139,22 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
 
     Returns:
         dict[str, Any]: Base op dict plus ``loop_var`` display name,
-            ``loop_var_value_ref`` (or ``None``), and ``body`` op list.
+            ``loop_var_value_ref`` (or ``None``), the
+            ``loop_carried_rebinds`` and ``region_args`` record lists,
+            and ``body`` op list.
+
+    Raises:
+        ValueError: If the loop's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
     """
+    validate_region_args(op)
     d = _base_op_dict("ForOperation", op)
     d["loop_var"] = op.loop_var
     d["loop_var_value_ref"] = (
         op.loop_var_value.uuid if op.loop_var_value is not None else None
     )
+    d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
+    d["region_args"] = _encode_region_args(op.region_args)
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1032,9 +1168,14 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
 
     Returns:
         dict[str, Any]: Base op dict plus display key/value var names,
-            their UUID refs (or ``None`` for legacy IR), the
+            their optional UUID refs, the
             ``key_is_vector`` flag, and the ``body`` op list.
+
+    Raises:
+        ValueError: If the loop's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
     """
+    validate_region_args(op)
     d = _base_op_dict("ForItemsOperation", op)
     d["key_vars"] = list(op.key_vars)
     d["value_var"] = op.value_var
@@ -1045,6 +1186,8 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
     d["value_var_value_ref"] = (
         op.value_var_value.uuid if op.value_var_value is not None else None
     )
+    d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
+    d["region_args"] = _encode_region_args(op.region_args)
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1057,17 +1200,56 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
         ctx (_EncodeContext): The active encoding context.
 
     Returns:
-        dict[str, Any]: Base op dict plus ``max_iterations`` and the
-            loop ``body``.
+        dict[str, Any]: Base op dict plus ``max_iterations``, the
+            ``loop_carried_rebinds`` and ``region_args`` record lists,
+            and the loop ``body``.
+
+    Raises:
+        ValueError: If the loop's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
     """
+    validate_region_args(op)
     d = _base_op_dict("WhileOperation", op)
     d["max_iterations"] = op.max_iterations
+    d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
+    d["region_args"] = _encode_region_args(op.region_args)
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
 
+def _encode_branch_rebinds(
+    rebinds: tuple[BranchRebind, ...],
+) -> list[dict[str, Any]]:
+    """Encode branch rebind records as value references.
+
+    Args:
+        rebinds (tuple[BranchRebind, ...]): Records attached to an
+            ``IfOperation``. Their ``before`` values are already
+            registered in the value table via ``all_input_values``.
+
+    Returns:
+        list[dict[str, Any]]: One dict per record with ``var_name``,
+            ``before_ref`` UUID, and the ``rebound_in_true`` /
+            ``rebound_in_false`` flags.
+    """
+    return [
+        {
+            "var_name": r.var_name,
+            "before_ref": r.before.uuid,
+            "rebound_in_true": r.rebound_in_true,
+            "rebound_in_false": r.rebound_in_false,
+        }
+        for r in rebinds
+    ]
+
+
 def _encode_if(op: IfOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`IfOperation`.
+
+    Branch merges are encoded as two value-reference lists parallel to
+    ``results``: ``true_yield_refs[i]`` / ``false_yield_refs[i]`` are the
+    branch sources merged into ``results[i]``. The referenced Values are
+    already registered in the value table by the block-wide value walk.
 
     Args:
         op (IfOperation): The op.
@@ -1075,13 +1257,17 @@ def _encode_if(op: IfOperation, ctx: _EncodeContext) -> dict[str, Any]:
 
     Returns:
         dict[str, Any]: Base op dict plus ``true_body`` /
-            ``false_body`` operation lists and a parallel
-            ``phi_ops`` list.
+            ``false_body`` operation lists, the parallel
+            ``true_yield_refs`` / ``false_yield_refs`` UUID lists, and
+            the ``branch_rebinds`` record list.
     """
     d = _base_op_dict("IfOperation", op)
     d["true_body"] = [_encode_operation(child, ctx) for child in op.true_operations]
     d["false_body"] = [_encode_operation(child, ctx) for child in op.false_operations]
-    d["phi_ops"] = [_encode_operation(p, ctx) for p in op.phi_ops]
+    merges = list(op.iter_merges())
+    d["true_yield_refs"] = [m.true_value.uuid for m in merges]
+    d["false_yield_refs"] = [m.false_value.uuid for m in merges]
+    d["branch_rebinds"] = _encode_branch_rebinds(op.branch_rebinds)
     return d
 
 
@@ -1102,6 +1288,10 @@ def _encode_concrete_controlled(
     d = _base_op_dict("ConcreteControlledU", op)
     d["num_controls"] = op.num_controls
     d["power"] = _encode_power(op.power)
+    if op.callable_ref is not None:
+        d["callable_ref"] = _encode_callable_ref(op.callable_ref)
+    if op.callable_attrs:
+        d["callable_attrs"] = _encode_payload(op.callable_attrs)
     d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
     return d
 
@@ -1120,30 +1310,24 @@ def _encode_symbolic_controlled(
             (symbolic Value's UUID), ``power``, ``control_index_refs``
             (per-element ``UInt`` Value UUIDs, or ``None`` when the op
             uses the entire pool), ``num_control_args`` (count of
-            positional control arguments at the call site -- the legacy
-            single-pool form is ``1``, the multi-arg control prefix
-            stores the actual N), and nested ``unitary_block`` dict.
+            positional control arguments at the call site), and nested
+            ``unitary_block`` dict.
     """
     d = _base_op_dict("SymbolicControlledU", op)
     ctx.register_value(op.num_controls)
     d["num_controls_ref"] = op.num_controls.uuid
     d["power"] = _encode_power(op.power)
+    if op.callable_ref is not None:
+        d["callable_ref"] = _encode_callable_ref(op.callable_ref)
+    if op.callable_attrs:
+        d["callable_attrs"] = _encode_payload(op.callable_attrs)
     if op.control_indices is not None:
         for v in op.control_indices:
             ctx.register_value(v)
         d["control_index_refs"] = [v.uuid for v in op.control_indices]
     else:
         d["control_index_refs"] = None
-    # ``num_control_args`` tracks how many positional control arguments
-    # the call site supplied (one ArrayBase pool in the legacy form;
-    # any sequence of scalar Qubits and / or ArrayBases in the multi-
-    # arg form).  The emit pass uses it to split ``operands`` into the
-    # control prefix vs the sub-kernel quantum tail, so a wrong default
-    # at decode time shifts the boundary and corrupts the operand
-    # layout.  Persist the field whenever it differs from the legacy
-    # default of 1 so existing v1 payloads stay readable.
-    if op.num_control_args != 1:
-        d["num_control_args"] = op.num_control_args
+    d["num_control_args"] = op.num_control_args
     d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
     return d
 
@@ -1161,7 +1345,7 @@ def _encode_power(power: Any) -> Any:
     Raises:
         TypeError: If ``power`` is neither.
     """
-    if isinstance(power, int):
+    if is_plain_int(power):
         return power
     if isinstance(power, Value):
         return {"$value_ref": power.uuid}
@@ -1170,36 +1354,151 @@ def _encode_power(power: Any) -> Any:
     )
 
 
-def _encode_composite_gate(
-    op: CompositeGateOperation, ctx: _EncodeContext
-) -> dict[str, Any]:
-    """Encode :class:`CompositeGateOperation`.
+def _encode_callable_ref(ref: CallableRef) -> dict[str, str]:
+    """Encode a callable reference.
 
     Args:
-        op (CompositeGateOperation): The op.
+        ref (CallableRef): Callable reference to encode.
+
+    Returns:
+        dict[str, str]: Dict with namespace, name, and version.
+    """
+    return {
+        "namespace": ref.namespace,
+        "name": ref.name,
+        "version": ref.version,
+    }
+
+
+def _encode_callable_body_ref(
+    body_ref: CallableBodyRef | None,
+) -> dict[str, Any] | None:
+    """Encode a deferred callable body reference.
+
+    Args:
+        body_ref (CallableBodyRef | None): Body reference to encode.
+
+    Returns:
+        dict[str, Any] | None: Encoded reference payload, or ``None`` when
+        absent.
+    """
+    if body_ref is None:
+        return None
+    return {
+        "ref": _encode_callable_ref(body_ref.ref),
+        "kind": body_ref.kind,
+        "attrs": _encode_payload(body_ref.attrs),
+    }
+
+
+def _encode_callable_implementation(
+    impl: CallableImplementation,
+    ctx: _EncodeContext,
+) -> dict[str, Any]:
+    """Encode a callable implementation candidate.
+
+    Args:
+        impl (CallableImplementation): Implementation to encode.
         ctx (_EncodeContext): The active encoding context.
 
     Returns:
-        dict[str, Any]: Base op dict plus gate-type enum, control /
-            target counts, custom name, strategy, resource metadata,
-            and the nested implementation Block dict (or ``None``).
+        dict[str, Any]: Serialized implementation.
     """
-    d = _base_op_dict("CompositeGateOperation", op)
-    d["gate_type"] = op.gate_type.name
-    d["num_control_qubits"] = op.num_control_qubits
-    d["num_target_qubits"] = op.num_target_qubits
-    d["custom_name"] = op.custom_name
-    d["has_implementation"] = op.has_implementation
-    d["strategy_name"] = op.strategy_name
-    d["resource_metadata"] = _encode_resource_metadata(op.resource_metadata)
-    d["implementation_block"] = (
-        _encode_block(op.implementation_block, ctx)
-        if op.implementation_block is not None
-        else None
-    )
-    # ``composite_gate_instance`` is an opaque Python callable; it is
-    # intentionally not serialized. The receiver reconstructs the gate
-    # from the implementation block (or via a registry, future work).
+    if impl.emitter is not None:
+        raise TypeError(
+            "CallableImplementation.emitter contains a process-local extension "
+            "object and cannot be represented in semantic Qamomile IR. Standard "
+            "Qamomile backend emitters are registered outside the serialized "
+            "module. Store a backend/strategy/body_ref contract instead."
+        )
+    return {
+        "transform": impl.transform.name,
+        "backend": impl.backend,
+        "strategy": impl.strategy,
+        "body": _encode_block(impl.body, ctx) if impl.body is not None else None,
+        "body_ref": _encode_callable_body_ref(impl.body_ref),
+        "attrs": _encode_payload(impl.attrs),
+    }
+
+
+def _encode_signature(signature: Signature | None) -> dict[str, Any] | None:
+    """Encode an operation signature carried by a callable definition.
+
+    Args:
+        signature (Signature | None): Signature to encode.
+
+    Returns:
+        dict[str, Any] | None: Encoded signature or ``None``.
+    """
+    if signature is None:
+        return None
+    return {
+        "operands": [
+            None
+            if hint is None
+            else {
+                "name": hint.name,
+                "type": _encode_value_type(hint.type),
+            }
+            for hint in signature.operands
+        ],
+        "results": [
+            {
+                "name": hint.name,
+                "type": _encode_value_type(hint.type),
+            }
+            for hint in signature.results
+        ],
+    }
+
+
+def _encode_callable_def(
+    definition: CallableDef,
+    ctx: _EncodeContext,
+) -> dict[str, Any]:
+    """Encode a callable definition.
+
+    Args:
+        definition (CallableDef): Definition to encode.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Serialized definition.
+    """
+    return {
+        "ref": _encode_callable_ref(definition.ref),
+        "signature": _encode_signature(definition.signature),
+        "body": (
+            _encode_block(definition.body, ctx) if definition.body is not None else None
+        ),
+        "body_ref": _encode_callable_body_ref(definition.body_ref),
+        "implementations": [
+            _encode_callable_implementation(impl, ctx)
+            for impl in definition.implementations
+        ],
+        "default_policy": definition.default_policy.name,
+        "attrs": _encode_payload(definition.attrs),
+    }
+
+
+def _encode_invoke_operation(
+    op: InvokeOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`InvokeOperation`.
+
+    Args:
+        op (InvokeOperation): The invocation op.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base op dict plus callable identity, transform,
+            attrs, definition, and optional nested body.
+    """
+    d = _base_op_dict("InvokeOperation", op)
+    d["target"] = _encode_callable_ref(op.target)
+    d["transform"] = op.transform.name
+    d["attrs"] = _encode_payload(op.attrs)
+    d["definition_ref"] = ctx.register_definition(op.definition)
     return d
 
 
@@ -1220,6 +1519,10 @@ def _encode_inverse_block(
     d["num_control_qubits"] = op.num_control_qubits
     d["num_target_qubits"] = op.num_target_qubits
     d["custom_name"] = op.custom_name
+    if op.callable_ref is not None:
+        d["callable_ref"] = _encode_callable_ref(op.callable_ref)
+    if op.callable_attrs:
+        d["callable_attrs"] = _encode_payload(op.callable_attrs)
     d["source_block"] = (
         _encode_block(op.source_block, ctx) if op.source_block is not None else None
     )
@@ -1231,41 +1534,32 @@ def _encode_inverse_block(
     return d
 
 
-def _encode_resource_metadata(
-    m: ResourceMetadata | None,
-) -> dict[str, Any] | None:
-    """Encode :class:`ResourceMetadata`.
+def _encode_global_phase_operation(
+    op: GlobalPhaseOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode a zero-qubit global-phase operation.
 
     Args:
-        m (ResourceMetadata | None): The resource metadata or ``None``.
+        op (GlobalPhaseOperation): Operation to encode.
+        ctx (_EncodeContext): Active encoding context.
 
     Returns:
-        dict[str, Any] | None: ``None`` when absent; else a dict with
-            all numeric fields plus ``custom_metadata`` routed
-            through :func:`_encode_payload`.
+        dict[str, Any]: Base operation dictionary containing the phase operand.
     """
-    if m is None:
-        return None
-    return {
-        "query_complexity": m.query_complexity,
-        "t_gates": m.t_gates,
-        "ancilla_qubits": m.ancilla_qubits,
-        "total_gates": m.total_gates,
-        "single_qubit_gates": m.single_qubit_gates,
-        "two_qubit_gates": m.two_qubit_gates,
-        "multi_qubit_gates": m.multi_qubit_gates,
-        "clifford_gates": m.clifford_gates,
-        "rotation_gates": m.rotation_gates,
-        "custom_metadata": _encode_payload(m.custom_metadata),
-    }
+    del ctx
+    return _base_op_dict("GlobalPhaseOperation", op)
 
 
 _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     GateOperation: _encode_gate_operation,
     MeasureOperation: _encode_measure_operation,
+    ProjectOperation: _encode_project_operation,
+    ResetOperation: _encode_reset_operation,
     MeasureVectorOperation: _encode_measure_vector,
     MeasureQFixedOperation: _encode_measure_qfixed,
     DecodeQFixedOperation: _encode_decode_qfixed,
+    DictGetItemOperation: _encode_dict_getitem,
+    StoreArrayElementOperation: _encode_store_array_element,
     CastOperation: _encode_cast,
     QInitOperation: _encode_qinit,
     CInitOperation: _encode_cinit,
@@ -1279,13 +1573,13 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     CondOp: _encode_condop,
     NotOp: _encode_notop,
     RuntimeClassicalExpr: _encode_runtime_classical,
-    PhiOp: _encode_phi,
     ForOperation: _encode_for,
     ForItemsOperation: _encode_for_items,
     WhileOperation: _encode_while,
     IfOperation: _encode_if,
     ConcreteControlledU: _encode_concrete_controlled,
     SymbolicControlledU: _encode_symbolic_controlled,
-    CompositeGateOperation: _encode_composite_gate,
+    InvokeOperation: _encode_invoke_operation,
     InverseBlockOperation: _encode_inverse_block,
+    GlobalPhaseOperation: _encode_global_phase_operation,
 }

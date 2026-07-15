@@ -26,13 +26,13 @@
 #
 # - Debug a kernel that fails somewhere between tracing and emission
 # - Write a custom compiler pass
-# - Add a new backend (e.g., a different quantum SDK)
+# - Add a new quantum SDK integration
 # - Simply understand what `transpile()` actually does
 #
 # We will walk a small `@qkernel` through the pipeline stage by stage using the
 # step-by-step public API on `Transpiler`, inspect the intermediate
-# representation at each step, and compare how two backends (Qiskit and
-# QURI Parts) turn the same plan into different circuits.
+# representation at each step, and compare how two quantum SDK integrations
+# (Qiskit and QURI Parts) turn the same plan into different circuits.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -53,7 +53,7 @@
 # Block [HIERARCHICAL]
 #    │  substitute                  (optional rule-based replacement)
 #    │  resolve_parameter_shapes    (concretise Vector shape dims)
-#    │  inline                      (remove CallBlockOperations)
+#    │  inline                      (remove InvokeOperations)
 #    ▼
 # Block [AFFINE]
 #    │  unroll_recursion            (iterated inline ↔ partial_eval)
@@ -148,7 +148,7 @@
 # | `GateOperation` | `H`, `RX`, `CX`, … | `ir/operation/gate.py` |
 # | `MeasureOperation` | Measurement | `ir/operation/measurement.py` |
 # | `ForOperation`, `IfOperation`, `WhileOperation` | Control flow | `ir/operation/control_flow.py` |
-# | `CallBlockOperation` | Call to another `Block` (removed by `inline`) | `ir/operation/call_block_ops.py` |
+# | `InvokeOperation` | Call to another `Block` (removed by `inline`) | `ir/operation/callable.py` |
 #
 # All control-flow ops implement the `HasNestedOps` protocol
 # (`nested_op_lists()` / `rebuild_nested()`) so passes can walk into loop and
@@ -161,7 +161,7 @@
 # %%
 import qamomile.circuit as qmc
 from qamomile.circuit.ir import pretty_print_block
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.qiskit import QiskitTranspiler
 
@@ -223,7 +223,7 @@ def summarise(block):
 # `qamomile.circuit.ir.pretty_print_block` returns an MLIR-style textual
 # dump of the block — the fastest way to see *what changed* between two
 # passes. The `depth` argument controls how many layers of
-# `CallBlockOperation` to expand inline, so e.g. `depth=1` previews what
+# `InvokeOperation` to expand inline, so e.g. `depth=1` previews what
 # `inline` will produce without running it.
 
 # %% [markdown]
@@ -238,7 +238,7 @@ def summarise(block):
 # `to_block` executes the decorated function under a tracer context. Every
 # `qmc.h(...)`, `qmc.range(...)`, and `entangle_pair(...)` call records an
 # `Operation` into the Block. Calls to other `@qkernel`s become
-# `CallBlockOperation`s — the body is **not** inlined yet.
+# `InvokeOperation`s — the body is **not** inlined yet.
 
 # %%
 bindings = {"n": 3}
@@ -250,10 +250,10 @@ assert block.kind.name == "HIERARCHICAL"
 print("parameters:       ", list(block.parameters))
 assert list(block.parameters) == ["theta"]
 print(
-    "CallBlockOps:     ",
-    sum(1 for op in block.operations if isinstance(op, CallBlockOperation)),
+    "InvokeOps:     ",
+    sum(1 for op in block.operations if isinstance(op, InvokeOperation)),
 )
-# Note: `CallBlockOperation`s may live inside a `ForOperation` body too —
+# Note: `InvokeOperation`s may live inside a `ForOperation` body too —
 # they are not necessarily in the top-level list.
 
 # %% [markdown]
@@ -265,7 +265,7 @@ print(
 print(pretty_print_block(block))
 
 # %% [markdown]
-# With `depth=1`, the `CallBlockOperation` is expanded inside its call line
+# With `depth=1`, the `InvokeOperation` is expanded inside its call line
 # — the same shape `inline` will produce in the next stage, so you can
 # preview it without actually running the pass.
 
@@ -280,16 +280,16 @@ print(pretty_print_block(block, depth=1))
 #
 # ### 4.2 `inline` — flattening nested block calls
 #
-# `inline` replaces every `CallBlockOperation` with the operations of the
+# `inline` replaces every `InvokeOperation` with the operations of the
 # target block, substituting SSA values so the result stays well-formed. Once
-# no `CallBlockOperation` remains, the block transitions to `AFFINE`.
+# no `InvokeOperation` remains, the block transitions to `AFFINE`.
 
 
 # %%
 def count_calls(ops):
     total = 0
     for op in ops:
-        if isinstance(op, CallBlockOperation):
+        if isinstance(op, InvokeOperation):
             total += 1
         # Walk nested control-flow bodies so we count calls inside loops.
         for child in getattr(op, "nested_op_lists", lambda: [])():
@@ -300,7 +300,7 @@ def count_calls(ops):
 block = transpiler.inline(block)
 print("after inline:     ", summarise(block))
 assert block.kind.name == "AFFINE"
-print("CallBlockOps (deep):", count_calls(block.operations))
+print("InvokeOps (deep):", count_calls(block.operations))
 assert count_calls(block.operations) == 0
 print("is_affine:        ", block.is_affine())
 assert block.is_affine()
@@ -376,7 +376,7 @@ assert sum(1 for op in block.operations if isinstance(op, ForOperation)) == 1
 # This rule **does not forbid dynamic quantum circuits**: `IfOperation` and
 # `WhileOperation` are `OperationKind.CONTROL`, not QUANTUM, so control flow
 # conditioned on a measurement `Bit` (`if bit: ...`, `while bit: ...`)
-# passes the check. Quantum-typed values that survive a phi merge are also
+# passes the check. Quantum-typed values that survive an if-merge are also
 # explicitly exempt. Section 5 walks through which dynamic patterns are
 # allowed and which are rejected, with code examples.
 #
@@ -453,10 +453,12 @@ print(executable.quantum_circuit)
 #   construction time, but views whose bounds were symbolic at trace time
 #   (`q[lo:hi]` for a `UInt lo` / `hi`) can only be checked once `bindings`
 #   make the bounds concrete. This pass walks the block after
-#   `partial_eval` and raises `SliceBorrowViolationError` on overlapping
-#   live views or use-after-destroy (a view's covered slot accessed after
-#   it was destroyed by an earlier `measure` / `cast` / `expval`). Slice
-#   views are treated as **affine** at the kernel boundary: a view left
+#   `partial_eval`. It raises `QubitBorrowConflictError` for overlapping live
+#   views and `QubitConsumedError` for use-after-destroy (a view's covered
+#   slot accessed after it was destroyed by an earlier `measure` / `cast` /
+#   `expval`). These are the same semantic errors raised by the frontend for
+#   concrete slice bounds. Slice views are treated as **affine** at the kernel
+#   boundary: a view left
 #   live at block end without being slice-assigned back is *not* flagged
 #   here — natural ancilla / scratch-register patterns (Deutsch-Jozsa's
 #   `ancilla = qs[n]`, Simon's `qs2 = qs[n:2*n]`) compile cleanly. The
@@ -522,15 +524,18 @@ print(executable.quantum_circuit)
 # |-----------|-------------|--------------------|-------|
 # | `ForOperation` | `operations` (body) | `operands = [start, stop, step]` (all `UInt`) | carries `loop_var` name |
 # | `ForItemsOperation` | `operations` (body) | `operands[0]` is a `DictValue` | always unrolled at transpile time |
-# | `IfOperation` | `true_operations`, `false_operations` | `operands[0]` is a `Bit` | `phi_ops` merge values post-branch |
+# | `IfOperation` | `true_operations`, `false_operations` | `operands[0]` is a `Bit` | `true_yields` / `false_yields` merge values post-branch |
 # | `WhileOperation` | `operations` (body) | `operands[0]` (initial), `operands[1]` (loop-carried) | measurement-backed `Bit` required; optional `max_iterations` hint |
 #
 # All four implement `HasNestedOps`, so passes walk into bodies uniformly via
 # `nested_op_lists()` / `rebuild_nested()` — no isinstance chains.
 #
-# `IfOperation` carries **Phi nodes** (`PhiOp`) to merge values. When both
-# branches update the same logical value, readers past the if refer through
-# the phi to know which branch's version they get.
+# `IfOperation` merges values through its parallel **`true_yields` /
+# `false_yields`** lists: `true_yields[i]` and `false_yields[i]` are the
+# branch values merged into `results[i]`. When both branches update the same
+# logical value, readers past the if refer to the merged result to know which
+# branch's version they get. Passes read the merges through
+# `IfOperation.iter_merges()` rather than touching the yield lists directly.
 #
 # ### 5.3 Per-Pass Behavior
 #
@@ -538,7 +543,7 @@ print(executable.quantum_circuit)
 # |------|-------------|---------------|-----------------|
 # | `inline` | recurses into both branch bodies | recurses into body | recurses into body |
 # | `partial_eval` | constant condition → **replaced by selected branch** (`CompileTimeIfLoweringPass`); measurement condition preserved | bound `BinOp`s folded. **No unrolling** | untouched here |
-# | `analyze` | phi edges enter the dependency graph | `loop_var` enters body deps | measurement-condition treated like a quantum operand |
+# | `analyze` | merge edges enter the dependency graph | `loop_var` enters body deps | measurement-condition treated like a quantum operand |
 # | `validate_symbolic_shapes` | — | unresolved `Vector` shape dim as a bound → rejected | — |
 # | `plan` | `OperationKind.CONTROL` — creates a segment boundary | same | same |
 # | `emit` | emitted as runtime `if` if the backend supports it | `LoopAnalyzer.should_unroll()` decides unroll vs native-loop | emitted as runtime `while` |
@@ -833,7 +838,7 @@ except ModuleNotFoundError:
 # stage where `BlockKind` fails to advance, the operation count explodes,
 # or an exception is raised is the stage you should look at first. Varying
 # `pretty_print_block(block, depth=N)` before and after `inline` makes it
-# much easier to spot where a value got disconnected or a phi got dropped.
+# much easier to spot where a value got disconnected or a merge got dropped.
 
 # %% [markdown]
 # ## 9. Summary

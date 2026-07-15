@@ -38,7 +38,9 @@ BINOP_TO_SYMPY = {
     BinOpKind.MUL: lambda lhs, r: lhs * r,
     BinOpKind.DIV: lambda lhs, r: lhs / r,
     BinOpKind.FLOORDIV: _smart_floordiv,
+    BinOpKind.MOD: lambda lhs, r: sp.Mod(lhs, r),
     BinOpKind.POW: lambda lhs, r: lhs**r,
+    BinOpKind.MIN: lambda lhs, r: sp.Min(lhs, r),
 }
 
 

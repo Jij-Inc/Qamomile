@@ -25,7 +25,13 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
     ValueType,
 )
-from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueLike,
+)
 
 TYPE_MAPPING: dict[typing.Any, typing.Any] = {
     int: UIntType,
@@ -88,10 +94,13 @@ def build_param_slots(
     """Build a ``ParamSlot`` tuple for the classical arguments of a kernel.
 
     Mirrors the argument-classification logic in
-    ``QKernel._create_traced_block`` so the resulting slot list reflects
-    the same decisions that drive symbolic-vs-bound input creation. Only
-    classical (non-quantum, non-Tuple, non-Dict) arguments are included;
-    pure-quantum arguments live in ``Block.input_values`` instead.
+    ``qkernel_build.create_traced_block`` so the resulting slot list reflects
+    the same decisions that drive symbolic-vs-bound input creation.
+    Classical scalar / array arguments are always included; a ``Dict``
+    argument is included only when it is a runtime parameter (its slot
+    carries a ``DictType``). Pure-quantum arguments, ``Tuple`` arguments,
+    and compile-time-bound ``Dict`` arguments are excluded and live in
+    ``Block.input_values`` instead.
 
     Args:
         signature (inspect.Signature): The kernel function's signature.
@@ -128,8 +137,8 @@ def build_param_slots(
     for name, param in signature.parameters.items():
         param_type = input_types.get(name, param.annotation)
 
-        # Skip pure-quantum and structural-container arguments. These
-        # do not participate in the classical parameter contract.
+        # Skip pure-quantum arguments. These do not participate in the
+        # classical parameter contract.
         if param_type is Qubit:
             continue
         if name in qubit_sizes_set:
@@ -138,12 +147,36 @@ def build_param_slots(
             elem_handle_type = _array_element_type(param_type)
             if elem_handle_type is Qubit:
                 continue
-        if is_tuple_type(param_type) or is_dict_type(param_type):
+        # Tuple arguments are purely structural (multi-index keys) and are
+        # never runtime parameters, so they stay out of the manifest.
+        if is_tuple_type(param_type):
+            continue
+        # A Dict kept as a runtime parameter DOES participate in the
+        # contract: its per-key values are rebound per call, which is
+        # exactly what the manifest exists to describe. Emit a slot whose
+        # ``type`` is the ``DictType`` (it already captures the key and
+        # value types, so no extra ParamSlot fields are needed). A
+        # compile-time-bound Dict has no rebind role and — like Tuple —
+        # stays out; its ``DictValue`` lives in ``Block.input_values``.
+        if is_dict_type(param_type):
+            if name not in parameters_set:
+                continue
+            dict_default = (
+                param.default if param.default is not inspect.Parameter.empty else None
+            )
+            slots.append(
+                ParamSlot(
+                    name=name,
+                    type=handle_type_map(param_type),
+                    kind=ParamKind.RUNTIME_PARAMETER,
+                    ndim=0,
+                    default=dict_default,
+                )
+            )
             continue
 
         # Decide the slot's kind. ``Observable`` semantics mirror the
-        # tracer in ``QKernel._create_traced_block`` (see
-        # ``qamomile/circuit/frontend/qkernel.py``): a scalar
+        # tracer in ``qkernel_build.create_traced_block``: a scalar
         # ``Observable`` and an *unbound* ``Vector[Observable]`` are
         # always RUNTIME_PARAMETER (the value is supplied at execute
         # time and ``partial_eval`` cannot fold it). A *bound*
@@ -315,7 +348,7 @@ def create_dummy_input(
         emit_init (bool): If True, emit QInitOperation for qubit arrays
             (default: True). Set to False when creating a nested Block's
             internal dummy inputs, or when the dummy will receive its
-            qubits from a caller's CallBlockOperation.
+            qubits from a caller-side callable invocation.
         shape (tuple[int, ...] | None): Optional concrete shape for array
             types. When provided, the dummy array's shape Values carry
             compile-time constants instead of symbolic placeholders.
@@ -334,6 +367,13 @@ def create_dummy_input(
         TypeError: If ``param_type`` is not a supported parameter type,
             or if a Tuple/array annotation is missing its element
             type(s).
+        NotImplementedError: If ``param_type`` is a rank>1 quantum
+            array annotation (``Matrix[Qubit]`` / ``Tensor[Qubit]``).
+            The quantum addressing path is rank-1, so a higher-rank
+            register would silently alias distinct elements onto the
+            same physical qubit. This path constructs the handle via
+            ``object.__new__`` (bypassing ``ArrayBase.__post_init__``),
+            so it needs its own guard.
     """
     # Handle Tuple types (e.g., Tuple[UInt, UInt])
     if is_tuple_type(param_type):
@@ -382,6 +422,7 @@ def create_dummy_input(
             dict_handle.id = str(id(dict_handle))
             dict_handle._consumed = False
             dict_handle._key_type = param_type.__args__[0]
+            dict_handle._value_type = param_type.__args__[1]
             return dict_handle
         raise TypeError(f"Dict type missing key/value types: {param_type}")
 
@@ -400,6 +441,16 @@ def create_dummy_input(
 
         # Determine number of dimensions (Vector=1, Matrix=2, Tensor=3)
         ndim = _get_ndim(param_type)
+
+        if ndim > 1 and isinstance(element_ir_type, ir_types.QubitType):
+            raise NotImplementedError(
+                f"Parameter {name!r} is a rank-{ndim} quantum register "
+                f"({param_type}): the quantum addressing path is rank-1, "
+                f"so a higher-rank register would silently alias distinct "
+                f"elements onto the same physical qubit. Declare a 1-D "
+                f"Vector[Qubit] parameter and compute flat indices "
+                f"explicitly instead (e.g. q[i * ncols + j])."
+            )
 
         if shape is not None:
             if len(shape) != ndim:
@@ -567,10 +618,10 @@ def func_to_block(func: typing.Callable) -> Block:
 
     # Extract the input Values from the dummy Handles
     label_args = list(dummy_inputs.keys())
-    input_values = [h.value for h in dummy_inputs.values()]
+    input_values: list[ValueLike] = [h.value for h in dummy_inputs.values()]
 
     # Extract return Values from result
-    return_values: list[Value] = []
+    return_values: list[ValueLike] = []
     if result is not None:
         if isinstance(result, tuple):
             for r in result:
@@ -583,7 +634,10 @@ def func_to_block(func: typing.Callable) -> Block:
                 return_values.append(result.value)
 
     # Always emit ReturnOperation (even for void returns with empty operands)
-    return_op = ReturnOperation(operands=return_values, results=[])
+    return_op = ReturnOperation(
+        operands=typing.cast(list[Value], return_values),
+        results=[],
+    )
     tracer.add_operation(return_op)
 
     # Re-fetch operations after adding ReturnOperation

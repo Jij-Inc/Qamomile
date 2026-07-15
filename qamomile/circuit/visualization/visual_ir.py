@@ -32,6 +32,7 @@ class VGateKind(enum.Enum):
     """Classification of VGate nodes for rendering dispatch."""
 
     GATE = enum.auto()
+    GLOBAL_PHASE = enum.auto()
     MEASURE = enum.auto()
     MEASURE_VECTOR = enum.auto()
     BLOCK_BOX = enum.auto()
@@ -59,7 +60,7 @@ class VUnfoldedKind(enum.Enum):
 
 @dataclass
 class VGate:
-    """Pre-resolved gate, measurement, block-box, or expval node.
+    """Pre-resolved gate, annotation, measurement, block-box, or expval node.
 
     Carries all information needed for layout and rendering:
     - label: TeX-formatted display text (e.g. "$R_x(0.5)$")
@@ -67,6 +68,32 @@ class VGate:
     - estimated_width: pre-computed width for layout
     - kind: determines rendering strategy
     - gate_type: for CX/SWAP/TOFFOLI special drawing
+    - terminates_wire: whether a measurement node ends its measured wires
+
+    For ``GLOBAL_PHASE``, ``qubit_indices`` names the quantum scope whose
+    horizontal position must stay synchronized. The renderer draws one
+    floating annotation above the scope's top wire; it does not draw a gate on
+    any of those wires.
+
+    Args:
+        node_key (tuple): Stable identifier used to associate the node with
+            layout coordinates.
+        label (str): TeX-formatted display label.
+        qubit_indices (list[int]): Resolved wire indices participating in the
+            node.
+        estimated_width (float): Width reserved for layout.
+        kind (VGateKind): Rendering strategy for the node.
+        gate_type (GateOperationType | None): Primitive gate type used for
+            specialized drawing, or None. Defaults to None.
+        has_param (bool): Whether the displayed gate has a parameter. Defaults
+            to False.
+        box_width (float | None): Explicit width for block-style nodes, or
+            None. Defaults to None.
+        control_count (int): Number of leading control wires for a controlled
+            block. Defaults to 0.
+        power (int): Exponent displayed for a controlled block. Defaults to 1.
+        terminates_wire (bool): Whether a measurement ends its measured wire.
+            Defaults to True.
     """
 
     node_key: tuple
@@ -83,11 +110,17 @@ class VGate:
     # around the inner controlled-U rectangle (matching the
     # ``VInlineBlock`` rendering of an expanded controlled-U block).
     power: int = 1
+    # Whether a measurement node terminates its wire at this x-position.
+    # True for a top-level measurement (the wire ends after it, the usual
+    # final-measure convention). False for a measurement inside an if/else
+    # branch: that is a mid-circuit measurement on one alternative, so the
+    # wire must keep going (the other branch never measured this qubit).
+    terminates_wire: bool = True
 
 
 @dataclass
 class VInlineBlock:
-    """Inlined CallBlock/ControlledU/CompositeGate with visible border.
+    """Inlined callable/control body with visible border.
 
     Carries pre-resolved children, affected qubits, and pre-computed widths
     so that Layout and Renderer need no Analyzer access.
@@ -127,6 +160,8 @@ class VFoldedBlock:
     folded_width: float
     kind: VFoldedKind
     affected_qubits_precise: bool = True
+    condition_measure_node_key: tuple | None = None
+    condition_measure_qubit_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -144,6 +179,18 @@ class VUnfoldedSequence:
     iteration_widths: list[float] = field(default_factory=list)
     condition_label: str | None = None
     affected_qubits_precise: bool = True
+    # Estimated width of the ``if <cond>:`` header (IF only). The layout
+    # reserves this much horizontal room so the condition label does not
+    # collide with the else branch or get clipped by the figure edge.
+    # Equals ``branch_label_widths[0]``.
+    condition_label_width: float = 0.0
+    # Estimated header-box width per branch (IF only), aligned with
+    # ``iterations``: ``[width("if <cond>:"), width("else:")]``. The renderer
+    # sizes each branch box to its header using the same estimate the layout
+    # reserves, so the boxes butt together with no gap and no label overflow.
+    branch_label_widths: list[float] = field(default_factory=list)
+    condition_measure_node_key: tuple | None = None
+    condition_measure_qubit_indices: list[int] = field(default_factory=list)
 
 
 @dataclass

@@ -82,6 +82,19 @@ class QiskitGateEmitter:
     def emit_p(self, circuit: "QuantumCircuit", qubit: int, angle: float | Any) -> None:
         circuit.p(angle, qubit)
 
+    def emit_global_phase(
+        self,
+        circuit: "QuantumCircuit",
+        angle: float | Any,
+    ) -> None:
+        """Accumulate an exact phase in Qiskit's native circuit metadata.
+
+        Args:
+            circuit (QuantumCircuit): Circuit whose phase is updated.
+            angle (float | Any): Concrete or Qiskit-native symbolic angle.
+        """
+        circuit.global_phase += angle
+
     # Two-qubit gates
     def emit_cx(self, circuit: "QuantumCircuit", control: int, target: int) -> None:
         circuit.cx(control, target)
@@ -134,6 +147,10 @@ class QiskitGateEmitter:
     # Measurement
     def emit_measure(self, circuit: "QuantumCircuit", qubit: int, clbit: int) -> None:
         circuit.measure(qubit, clbit)
+
+    def emit_reset(self, circuit: "QuantumCircuit", qubit: int) -> None:
+        """Emit reset to the |0> state."""
+        circuit.reset(qubit)
 
     # Barrier
     def emit_barrier(self, circuit: "QuantumCircuit", qubits: list[int]) -> None:

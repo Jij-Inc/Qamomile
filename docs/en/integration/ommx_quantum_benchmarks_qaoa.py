@@ -17,7 +17,7 @@
 # tags: [integration, optimization, variational]
 # ---
 #
-# # Using OMMX Quantum Benchmarks (1): Implementing and Benchmarking Quantum Algorithms with Qamomile
+# # Using OMMX Quantum Benchmarks: Implementing and Benchmarking Quantum Algorithms with Qamomile
 #
 # This tutorial shows how to run a Qamomile quantum algorithm on a problem
 # from a public benchmark dataset and compare its solution quality with a
@@ -536,5 +536,5 @@ print(f"QAOA hit rate on E* = {ref_E}: {hit_rate:.1%}  ({final_shots} shots)")
 # QUBO via `Instance.to_qubo()`, and reuse the same `BinaryModel` +
 # QAOA ansatz + transpile loop. Larger instances will
 # eventually outgrow local simulators, at which point the same
-# `executable` can be re-targeted to other Qamomile backends
+# `executable` can be re-targeted to other Qamomile quantum SDK integrations
 # (`QuriPartsTranspiler`, `CudaqTranspiler`, …) or real hardware.

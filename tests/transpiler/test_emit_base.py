@@ -1,14 +1,14 @@
-"""Tests for emit_support helpers — ResourceAllocator phi_ops & LoopAnalyzer.
+"""Tests for emit_support helpers — ResourceAllocator merge allocation & LoopAnalyzer.
 
-Section 1: ResourceAllocator phi_ops allocation (Bug #6).
-    ResourceAllocator._allocate_recursive() calls _allocate_phi_ops()
-    after processing IfOperation branches.  _allocate_phi_ops() delegates
-    to the shared map_phi_outputs() utility which:
-    - Maps scalar QubitType phi outputs to the same physical qubit as
+Section 1: ResourceAllocator if-merge allocation (Bug #6).
+    ResourceAllocator._allocate_recursive() registers IfOperation merge
+    slots after processing the branches, delegating to the shared
+    map_merge_outputs() utility which:
+    - Maps scalar QubitType merge outputs to the same physical qubit as
       the branch source value.
     - Copies composite element keys ``{source_uuid}_{i}`` →
-      ``{output_uuid}_{i}`` for ArrayValue phi outputs.
-    - Maps scalar BitType phi outputs to the same classical bit index.
+      ``{output_uuid}_{i}`` for ArrayValue merge outputs.
+    - Maps scalar BitType merge outputs to the same classical bit index.
 
 Section 2: LoopAnalyzer BinOp dependency detection.
     LoopAnalyzer.should_unroll correctly identifies ForOperation loops
@@ -16,7 +16,7 @@ Section 2: LoopAnalyzer BinOp dependency detection.
     inside nested control-flow), and theta array-element access
     referencing the loop variable triggers unrolling.
 
-Section 3: Integration tests for UInt BinOp (``//``, ``**``) folding
+Section 3: Integration tests for UInt BinOp (``//``, ``%``, ``**``) folding
     into loop bounds via the constant folding pass.
 """
 
@@ -26,23 +26,35 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
-    PhiOp,
+    CompOp,
+    CompOpKind,
 )
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
     GateOperation,
     GateOperationType,
     MeasureOperation,
+    MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
+    SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
@@ -55,12 +67,12 @@ from qamomile.circuit.transpiler.passes.emit_support import (
     LoopAnalyzer,
     QubitAddress,
     ResourceAllocator,
-    map_phi_outputs,
+    map_merge_outputs,
     resolve_qubit_key,
 )
 
 # ---------------------------------------------------------------------------
-# Helpers — phi_ops tests
+# Helpers — merge-slot tests
 # ---------------------------------------------------------------------------
 
 
@@ -109,6 +121,28 @@ def _make_array_element(
         parent_array=parent,
         element_indices=(idx_value,),
     )
+
+
+def _make_if_with_merge(
+    cond: Value,
+    true_value: Value,
+    false_value: Value,
+    result: Value,
+) -> IfOperation:
+    """Build a minimal IfOperation carrying a single branch merge.
+
+    Args:
+        cond (Value): Condition operand (Bit).
+        true_value (Value): Value selected when the condition is true.
+        false_value (Value): Value selected when the condition is false.
+        result (Value): Merged output value.
+
+    Returns:
+        IfOperation: If-else with empty branches and one merge slot.
+    """
+    if_op = IfOperation(operands=[cond])
+    if_op.add_merge(true_value, false_value, result)
+    return if_op
 
 
 # ---------------------------------------------------------------------------
@@ -172,12 +206,12 @@ def _make_gate(
 
 
 # ===========================================================================
-# Bug #6: Phi output allocation
+# Bug #6: Merge output allocation
 # ===========================================================================
 
 
-class TestPhiOpsAllocation:
-    """Tests that ResourceAllocator processes phi_ops for IfOperation."""
+class TestIfMergeAllocation:
+    """Tests that ResourceAllocator processes IfOperation merge slots."""
 
     def test_resolve_qubit_key_uses_root_for_nested_slice_element(self) -> None:
         """Constant nested slice elements resolve to the root qubit address."""
@@ -225,8 +259,8 @@ class TestPhiOpsAllocation:
         assert is_array
         assert key is None
 
-    def test_scalar_phi_merges_root_and_slice_element_aliases(self) -> None:
-        """Scalar qubit PhiOp should recognize root and slice element aliases."""
+    def test_scalar_merges_root_and_slice_element_aliases(self) -> None:
+        """Scalar qubit merge should recognize root and slice element aliases."""
         q_array = _make_array_value("q", shape_vals=(_make_const_value("q_dim0", 3),))
         view = ArrayValue(
             type=QubitType(),
@@ -239,16 +273,16 @@ class TestPhiOpsAllocation:
         cond = _make_value("cond", BitType)
         root_element = _make_array_element(q_array, 1, "q[1]")
         view_element = _make_array_element(view, 0, "q_view[0]")
-        phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, root_element, view_element], results=[phi_output])
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, root_element, view_element, merge_output)
         qubit_map = {QubitAddress(q_array.uuid, i): i for i in range(3)}
 
-        map_phi_outputs([phi], qubit_map, {})
+        map_merge_outputs(if_op, qubit_map, {})
 
-        assert qubit_map[QubitAddress(phi_output.uuid)] == 1
+        assert qubit_map[QubitAddress(merge_output.uuid)] == 1
         assert QubitAddress(view.uuid, 0) not in qubit_map
 
-    def test_scalar_phi_defers_unresolved_symbolic_slice_element(self) -> None:
+    def test_scalar_merge_defers_unresolved_symbolic_slice_element(self) -> None:
         """Unresolved symbolic slice elements must not create slice-address aliases."""
         q_array = _make_array_value("q", shape_vals=(_make_const_value("q_dim0", 3),))
         view = ArrayValue(
@@ -261,17 +295,17 @@ class TestPhiOpsAllocation:
         )
         cond = _make_value("cond", BitType)
         view_element = _make_array_element(view, 0, "q_view[0]")
-        phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, view_element, view_element], results=[phi_output])
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, view_element, view_element, merge_output)
         qubit_map = {QubitAddress(q_array.uuid, i): i for i in range(3)}
 
-        map_phi_outputs([phi], qubit_map, {})
+        map_merge_outputs(if_op, qubit_map, {})
 
-        assert QubitAddress(phi_output.uuid) not in qubit_map
+        assert QubitAddress(merge_output.uuid) not in qubit_map
         assert QubitAddress(view.uuid, 0) not in qubit_map
 
-    def test_phi_output_qubit_is_allocated(self) -> None:
-        """Phi output for a qubit type should be registered in qubit_map."""
+    def test_merge_output_qubit_is_allocated(self) -> None:
+        """Merge output for a qubit type should be registered in qubit_map."""
         # QInit → q
         q_init = _make_value("q", QubitType)
         q_init_out = q_init.next_version()
@@ -289,7 +323,7 @@ class TestPhiOpsAllocation:
         bit = _make_value("bit", BitType)
         measure_op = MeasureOperation(operands=[q_after_h], results=[bit])
 
-        # If-else with phi merge
+        # If-else with merge
         q_true = q_after_h.next_version()
         x_gate = GateOperation(
             operands=[q_after_h],
@@ -298,38 +332,32 @@ class TestPhiOpsAllocation:
         )
         q_false = q_after_h  # identity in false branch
 
-        phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(
-            operands=[bit, q_true, q_false],
-            results=[phi_output],
-        )
-
+        merge_output = _make_value("q_merge", QubitType)
         if_op = IfOperation(
             operands=[bit],
-            results=[phi_output],
             true_operations=[x_gate],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(q_true, q_false, merge_output)
 
-        # Measure phi output
+        # Measure merge output
         bit2 = _make_value("bit2", BitType)
-        measure2 = MeasureOperation(operands=[phi_output], results=[bit2])
+        measure2 = MeasureOperation(operands=[merge_output], results=[bit2])
 
         operations = [qinit_op, h_gate, measure_op, if_op, measure2]
 
         allocator = ResourceAllocator()
         qubit_map, clbit_map = allocator.allocate(operations, bindings={})
 
-        # phi_output should be in qubit_map, mapped to same physical qubit
-        assert QubitAddress(phi_output.uuid) in qubit_map
+        # merge_output should be in qubit_map, mapped to same physical qubit
+        assert QubitAddress(merge_output.uuid) in qubit_map
         assert (
-            qubit_map[QubitAddress(phi_output.uuid)]
+            qubit_map[QubitAddress(merge_output.uuid)]
             == qubit_map[QubitAddress(q_init_out.uuid)]
         )
 
-    def test_phi_output_bit_is_allocated(self) -> None:
-        """Phi output for a bit type should be registered in clbit_map."""
+    def test_merge_output_bit_is_allocated(self) -> None:
+        """Merge output for a bit type should be registered in clbit_map."""
         # Setup: condition bit
         cond = _make_value("cond", BitType)
 
@@ -341,7 +369,7 @@ class TestPhiOpsAllocation:
         # Measure to get condition
         measure_op = MeasureOperation(operands=[q_out], results=[cond])
 
-        # Bit phi: both branches produce the same bit
+        # Bit merge: both branches produce the same bit
         true_bit = _make_value("true_bit", BitType)
         false_bit = _make_value("false_bit", BitType)
         true_measure = MeasureOperation(
@@ -351,33 +379,27 @@ class TestPhiOpsAllocation:
             operands=[q_out.next_version()], results=[false_bit]
         )
 
-        phi_bit = _make_value("phi_bit", BitType)
-        phi = PhiOp(
-            operands=[cond, true_bit, false_bit],
-            results=[phi_bit],
-        )
-
+        merge_bit = _make_value("merge_bit", BitType)
         if_op = IfOperation(
             operands=[cond],
-            results=[phi_bit],
             true_operations=[true_measure],
             false_operations=[false_measure],
-            phi_ops=[phi],
         )
+        if_op.add_merge(true_bit, false_bit, merge_bit)
 
         operations = [qinit_op, measure_op, if_op]
 
         allocator = ResourceAllocator()
         _, clbit_map = allocator.allocate(operations, bindings={})
 
-        # phi_bit should be in clbit_map
-        assert QubitAddress(phi_bit.uuid) in clbit_map
+        # merge_bit should be in clbit_map
+        assert QubitAddress(merge_bit.uuid) in clbit_map
 
     @pytest.mark.parametrize("array_size", [1, 2, 4])
-    def test_phi_output_array_composite_keys_are_allocated(
+    def test_merge_output_array_composite_keys_are_allocated(
         self, array_size: int
     ) -> None:
-        """Phi output for an ArrayValue should copy composite element keys."""
+        """Merge output for an ArrayValue should copy composite element keys."""
         size_val = _make_const_value("size", array_size)
         q_array = _make_array_value("q", shape_vals=(size_val,))
         qinit_op = QInitOperation(operands=[], results=[q_array])
@@ -393,35 +415,24 @@ class TestPhiOpsAllocation:
         bit = _make_value("bit", BitType)
         measure_op = MeasureOperation(operands=[q0_elem], results=[bit])
 
-        # If-else with phi on the whole array
-        phi_array = _make_array_value("q_phi", shape_vals=(size_val,))
-        phi = PhiOp(
-            operands=[bit, q_array, q_array],
-            results=[phi_array],
-        )
-
-        if_op = IfOperation(
-            operands=[bit],
-            results=[phi_array],
-            true_operations=[],
-            false_operations=[],
-            phi_ops=[phi],
-        )
+        # If-else with merge on the whole array
+        merge_array = _make_array_value("q_merge", shape_vals=(size_val,))
+        if_op = _make_if_with_merge(bit, q_array, q_array, merge_array)
 
         operations = [qinit_op, measure_op, if_op]
 
         allocator = ResourceAllocator()
         qubit_map, _ = allocator.allocate(operations, bindings={})
 
-        # All composite keys for the phi output array should exist
+        # All composite keys for the merge output array should exist
         for i in range(array_size):
-            phi_addr = QubitAddress(phi_array.uuid, i)
+            merge_addr = QubitAddress(merge_array.uuid, i)
             src_addr = QubitAddress(q_array.uuid, i)
-            assert phi_addr in qubit_map, f"phi array element {i} not allocated"
-            assert qubit_map[phi_addr] == qubit_map[src_addr]
+            assert merge_addr in qubit_map, f"merge array element {i} not allocated"
+            assert qubit_map[merge_addr] == qubit_map[src_addr]
 
-    def test_identity_phi_maps_to_same_qubit(self) -> None:
-        """Phi with true_val == false_val (identity) still maps correctly."""
+    def test_identity_merge_maps_to_same_qubit(self) -> None:
+        """Merge with true_val == false_val (identity) still maps correctly."""
         q = _make_value("q", QubitType)
         q_out = q.next_version()
         qinit_op = QInitOperation(operands=[], results=[q_out])
@@ -429,34 +440,23 @@ class TestPhiOpsAllocation:
         bit = _make_value("bit", BitType)
         measure_op = MeasureOperation(operands=[q_out], results=[bit])
 
-        # Identity phi: both branches refer to the same qubit
-        phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(
-            operands=[bit, q_out, q_out],
-            results=[phi_output],
-        )
-
-        if_op = IfOperation(
-            operands=[bit],
-            results=[phi_output],
-            true_operations=[],
-            false_operations=[],
-            phi_ops=[phi],
-        )
+        # Identity merge: both branches refer to the same qubit
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(bit, q_out, q_out, merge_output)
 
         operations = [qinit_op, measure_op, if_op]
 
         allocator = ResourceAllocator()
         qubit_map, _ = allocator.allocate(operations, bindings={})
 
-        assert QubitAddress(phi_output.uuid) in qubit_map
+        assert QubitAddress(merge_output.uuid) in qubit_map
         assert (
-            qubit_map[QubitAddress(phi_output.uuid)]
+            qubit_map[QubitAddress(merge_output.uuid)]
             == qubit_map[QubitAddress(q_out.uuid)]
         )
 
-    def test_phi_output_already_registered_is_skipped(self) -> None:
-        """Phi output UUID already in qubit_map is not overwritten."""
+    def test_merge_output_already_registered_is_skipped(self) -> None:
+        """Merge output UUID already in qubit_map is not overwritten."""
         q = _make_value("q", QubitType)
         q_out = q.next_version()
         qinit_op = QInitOperation(operands=[], results=[q_out])
@@ -464,35 +464,24 @@ class TestPhiOpsAllocation:
         bit = _make_value("bit", BitType)
         measure_op = MeasureOperation(operands=[q_out], results=[bit])
 
-        phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(
-            operands=[bit, q_out, q_out],
-            results=[phi_output],
-        )
-
-        if_op = IfOperation(
-            operands=[bit],
-            results=[phi_output],
-            true_operations=[],
-            false_operations=[],
-            phi_ops=[phi],
-        )
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(bit, q_out, q_out, merge_output)
 
         operations = [qinit_op, measure_op, if_op]
 
         allocator = ResourceAllocator()
         qubit_map, clbit_map = allocator.allocate(operations, bindings={})
 
-        # Pre-register the phi output with a sentinel value
+        # Pre-register the merge output with a sentinel value
         sentinel_idx = 999
-        qubit_map[QubitAddress(phi_output.uuid)] = sentinel_idx
+        qubit_map[QubitAddress(merge_output.uuid)] = sentinel_idx
 
         # Re-running allocation should not overwrite it
-        allocator._allocate_phi_ops(if_op.phi_ops, qubit_map, clbit_map)
-        assert qubit_map[QubitAddress(phi_output.uuid)] == sentinel_idx
+        map_merge_outputs(if_op, qubit_map, clbit_map)
+        assert qubit_map[QubitAddress(merge_output.uuid)] == sentinel_idx
 
-    def test_multiple_phi_ops_all_allocated(self) -> None:
-        """Multiple phi_ops in a single IfOperation are all allocated."""
+    def test_multiple_merges_all_allocated(self) -> None:
+        """Multiple merge slots in a single IfOperation are all allocated."""
         q0 = _make_value("q0", QubitType)
         q0_out = q0.next_version()
         q1 = _make_value("q1", QubitType)
@@ -503,42 +492,40 @@ class TestPhiOpsAllocation:
         bit = _make_value("bit", BitType)
         measure_op = MeasureOperation(operands=[q0_out], results=[bit])
 
-        # Two phi merges
-        phi_out0 = _make_value("phi0", QubitType)
-        phi_out1 = _make_value("phi1", QubitType)
-        phi0 = PhiOp(operands=[bit, q0_out, q0_out], results=[phi_out0])
-        phi1 = PhiOp(operands=[bit, q1_out, q1_out], results=[phi_out1])
+        # Two merge slots
+        merge_out0 = _make_value("merge0", QubitType)
+        merge_out1 = _make_value("merge1", QubitType)
 
         if_op = IfOperation(
             operands=[bit],
-            results=[phi_out0, phi_out1],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi0, phi1],
         )
+        if_op.add_merge(q0_out, q0_out, merge_out0)
+        if_op.add_merge(q1_out, q1_out, merge_out1)
 
         operations = [qinit0, qinit1, measure_op, if_op]
 
         allocator = ResourceAllocator()
         qubit_map, _ = allocator.allocate(operations, bindings={})
 
-        assert QubitAddress(phi_out0.uuid) in qubit_map
-        assert QubitAddress(phi_out1.uuid) in qubit_map
+        assert QubitAddress(merge_out0.uuid) in qubit_map
+        assert QubitAddress(merge_out1.uuid) in qubit_map
         assert (
-            qubit_map[QubitAddress(phi_out0.uuid)]
+            qubit_map[QubitAddress(merge_out0.uuid)]
             == qubit_map[QubitAddress(q0_out.uuid)]
         )
         assert (
-            qubit_map[QubitAddress(phi_out1.uuid)]
+            qubit_map[QubitAddress(merge_out1.uuid)]
             == qubit_map[QubitAddress(q1_out.uuid)]
         )
 
-    def test_phi_bit_consolidates_both_branches(self) -> None:
+    def test_merge_bit_consolidates_both_branches(self) -> None:
         """Both branches' clbits must be consolidated to the same physical clbit.
 
         Under Qiskit's ``if_test``, only one branch executes, so both
         branches must measure into the same physical clbit. Otherwise
-        the phi output always reads the true branch's result.
+        the merge output always reads the true branch's result.
         """
         q = _make_value("q", QubitType)
         q_out = q.next_version()
@@ -556,36 +543,64 @@ class TestPhiOpsAllocation:
             operands=[q_out.next_version()], results=[false_bit]
         )
 
-        phi_bit = _make_value("phi_bit", BitType)
-        phi = PhiOp(
-            operands=[cond, true_bit, false_bit],
-            results=[phi_bit],
-        )
+        merge_bit = _make_value("merge_bit", BitType)
         if_op = IfOperation(
             operands=[cond],
-            results=[phi_bit],
             true_operations=[true_measure],
             false_operations=[false_measure],
-            phi_ops=[phi],
         )
+        if_op.add_merge(true_bit, false_bit, merge_bit)
 
         operations = [qinit_op, measure_cond, if_op]
         allocator = ResourceAllocator()
         _, clbit_map = allocator.allocate(operations, bindings={})
 
-        # All three — true_bit, false_bit, phi_bit — must share the same physical clbit
+        # All three — true_bit, false_bit, merge_bit — must share the same physical clbit
         assert (
             clbit_map[QubitAddress(true_bit.uuid)]
             == clbit_map[QubitAddress(false_bit.uuid)]
         )
         assert (
-            clbit_map[QubitAddress(phi_bit.uuid)]
+            clbit_map[QubitAddress(merge_bit.uuid)]
             == clbit_map[QubitAddress(true_bit.uuid)]
         )
 
+    def test_clbit_compaction_preserves_seeded_indices(self) -> None:
+        """Remove new merge holes without renumbering caller-owned clbits."""
+        cond = _make_value("cond", BitType)
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        merged = _make_value("merged", BitType)
+        tail = _make_value("tail", BitType)
+        qubit = _make_value("q", QubitType)
+        if_op = IfOperation(
+            operands=[cond],
+            true_operations=[MeasureOperation(operands=[qubit], results=[true_bit])],
+            false_operations=[MeasureOperation(operands=[qubit], results=[false_bit])],
+        )
+        if_op.add_merge(true_bit, false_bit, merged)
+
+        seeded_address = QubitAddress(cond.uuid)
+        allocator = ResourceAllocator()
+        _, clbit_map = allocator.allocate(
+            [
+                MeasureOperation(operands=[qubit], results=[cond]),
+                if_op,
+                MeasureOperation(operands=[qubit], results=[tail]),
+            ],
+            initial_clbit_map={seeded_address: 7},
+        )
+
+        assert clbit_map[seeded_address] == 7
+        assert clbit_map[QubitAddress(true_bit.uuid)] == 8
+        assert clbit_map[QubitAddress(false_bit.uuid)] == 8
+        assert clbit_map[QubitAddress(merged.uuid)] == 8
+        assert clbit_map[QubitAddress(tail.uuid)] == 9
+        assert set(clbit_map.values()) == {7, 8, 9}
+
     @pytest.mark.parametrize("array_size", [1, 2, 4])
-    def test_phi_bit_array_consolidates_both_branches(self, array_size: int) -> None:
-        """BitType ArrayValue phi must consolidate per-element clbits across branches."""
+    def test_merge_bit_array_consolidates_both_branches(self, array_size: int) -> None:
+        """BitType ArrayValue merge must consolidate per-element clbits across branches."""
         size_val = _make_const_value("size", array_size)
 
         q_array = _make_array_value("q", shape_vals=(size_val,))
@@ -613,20 +628,10 @@ class TestPhiOpsAllocation:
         # Simulate allocation of individual array element clbits
         # (MeasureVectorOperation would do this, but for unit test we pre-fill)
 
-        phi_bits = _make_array_value(
-            "phi_bits", shape_vals=(size_val,), type_cls=BitType
+        merge_bits = _make_array_value(
+            "merge_bits", shape_vals=(size_val,), type_cls=BitType
         )
-        phi = PhiOp(
-            operands=[cond, true_bits, false_bits],
-            results=[phi_bits],
-        )
-        if_op = IfOperation(
-            operands=[cond],
-            results=[phi_bits],
-            true_operations=[],
-            false_operations=[],
-            phi_ops=[phi],
-        )
+        if_op = _make_if_with_merge(cond, true_bits, false_bits, merge_bits)
 
         # Pre-fill clbit_map with element keys for both arrays
         clbit_map = {QubitAddress(cond.uuid): 0}
@@ -634,45 +639,45 @@ class TestPhiOpsAllocation:
             clbit_map[QubitAddress(true_bits.uuid, i)] = i + 1
             clbit_map[QubitAddress(false_bits.uuid, i)] = array_size + i + 1
 
-        map_phi_outputs(if_op.phi_ops, {}, clbit_map)
+        map_merge_outputs(if_op, {}, clbit_map)
 
-        # Phi output elements should exist AND both branches consolidated
+        # Merge output elements should exist AND both branches consolidated
         for i in range(array_size):
-            phi_addr = QubitAddress(phi_bits.uuid, i)
+            merge_addr = QubitAddress(merge_bits.uuid, i)
             true_addr = QubitAddress(true_bits.uuid, i)
             false_addr = QubitAddress(false_bits.uuid, i)
-            assert phi_addr in clbit_map, f"phi element {i} not allocated"
-            assert clbit_map[phi_addr] == clbit_map[true_addr]
+            assert merge_addr in clbit_map, f"merge element {i} not allocated"
+            assert clbit_map[merge_addr] == clbit_map[true_addr]
             assert clbit_map[false_addr] == clbit_map[true_addr], (
                 f"element {i}: false branch clbit not consolidated"
             )
 
-    # --- Quantum phi merge validation tests ---
+    # --- Quantum merge validation tests ---
 
-    def test_quantum_phi_scalar_different_resources_raises_emit_error(self) -> None:
-        """Scalar qubit phi with different physical resources must raise EmitError."""
+    def test_quantum_merge_scalar_different_resources_raises_emit_error(self) -> None:
+        """Scalar qubit merge with different physical resources must raise EmitError."""
         q0 = _make_value("q0", QubitType)
         q0_out = q0.next_version()
         q1 = _make_value("q1", QubitType)
         q1_out = q1.next_version()
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, q0_out, q1_out], results=[phi_output])
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, q0_out, q1_out, merge_output)
 
         qubit_map = {QubitAddress(q0_out.uuid): 0, QubitAddress(q1_out.uuid): 1}
-        with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
-            map_phi_outputs([phi], qubit_map, {})
+        with pytest.raises(EmitError, match="merge requires identical"):
+            map_merge_outputs(if_op, qubit_map, {})
 
-    def test_quantum_phi_array_different_resources_raises_emit_error(self) -> None:
-        """Array qubit phi with different physical resources must raise EmitError."""
+    def test_quantum_merge_array_different_resources_raises_emit_error(self) -> None:
+        """Array qubit merge with different physical resources must raise EmitError."""
         size_val = _make_const_value("size", 2)
         arr_a = _make_array_value("arr_a", shape_vals=(size_val,))
         arr_b = _make_array_value("arr_b", shape_vals=(size_val,))
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
-        phi = PhiOp(operands=[cond, arr_a, arr_b], results=[phi_output])
+        merge_output = _make_array_value("merge_arr", shape_vals=(size_val,))
+        if_op = _make_if_with_merge(cond, arr_a, arr_b, merge_output)
 
         qubit_map = {
             QubitAddress(arr_a.uuid, 0): 0,
@@ -680,34 +685,34 @@ class TestPhiOpsAllocation:
             QubitAddress(arr_b.uuid, 0): 2,
             QubitAddress(arr_b.uuid, 1): 3,
         }
-        with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
-            map_phi_outputs([phi], qubit_map, {})
+        with pytest.raises(EmitError, match="merge requires identical"):
+            map_merge_outputs(if_op, qubit_map, {})
 
-    def test_quantum_phi_scalar_unresolved_branch_raises_emit_error(self) -> None:
-        """Scalar qubit phi with one unresolved branch must raise EmitError."""
+    def test_quantum_merge_scalar_unresolved_branch_raises_emit_error(self) -> None:
+        """Scalar qubit merge with one unresolved branch must raise EmitError."""
         q0 = _make_value("q0", QubitType)
         q0_out = q0.next_version()
         q1 = _make_value("q1", QubitType)
         q1_out = q1.next_version()
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, q0_out, q1_out], results=[phi_output])
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, q0_out, q1_out, merge_output)
 
         # Only q0_out is in qubit_map; q1_out is unresolved
         qubit_map = {QubitAddress(q0_out.uuid): 0}
-        with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
-            map_phi_outputs([phi], qubit_map, {})
+        with pytest.raises(EmitError, match="merge requires identical"):
+            map_merge_outputs(if_op, qubit_map, {})
 
-    def test_quantum_phi_array_unresolved_suffix_raises_emit_error(self) -> None:
-        """Array qubit phi with missing suffix in one branch must raise EmitError."""
+    def test_quantum_merge_array_unresolved_suffix_raises_emit_error(self) -> None:
+        """Array qubit merge with missing suffix in one branch must raise EmitError."""
         size_val = _make_const_value("size", 2)
         arr_a = _make_array_value("arr_a", shape_vals=(size_val,))
         arr_b = _make_array_value("arr_b", shape_vals=(size_val,))
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
-        phi = PhiOp(operands=[cond, arr_a, arr_b], results=[phi_output])
+        merge_output = _make_array_value("merge_arr", shape_vals=(size_val,))
+        if_op = _make_if_with_merge(cond, arr_a, arr_b, merge_output)
 
         # arr_a has both elements, arr_b only has element 0
         qubit_map = {
@@ -715,44 +720,44 @@ class TestPhiOpsAllocation:
             QubitAddress(arr_a.uuid, 1): 1,
             QubitAddress(arr_b.uuid, 0): 0,
         }
-        with pytest.raises(EmitError, match="Quantum PhiOp merge requires identical"):
-            map_phi_outputs([phi], qubit_map, {})
+        with pytest.raises(EmitError, match="merge requires identical"):
+            map_merge_outputs(if_op, qubit_map, {})
 
-    def test_quantum_phi_scalar_identity_still_allowed(self) -> None:
-        """Identity scalar phi (same physical resource) must succeed."""
+    def test_quantum_merge_scalar_identity_still_allowed(self) -> None:
+        """Identity scalar merge (same physical resource) must succeed."""
         q = _make_value("q", QubitType)
         q_out = q.next_version()
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_value("q_phi", QubitType)
-        phi = PhiOp(operands=[cond, q_out, q_out], results=[phi_output])
+        merge_output = _make_value("q_merge", QubitType)
+        if_op = _make_if_with_merge(cond, q_out, q_out, merge_output)
 
         qubit_map = {QubitAddress(q_out.uuid): 0}
-        map_phi_outputs([phi], qubit_map, {})
-        assert QubitAddress(phi_output.uuid) in qubit_map
-        assert qubit_map[QubitAddress(phi_output.uuid)] == 0
+        map_merge_outputs(if_op, qubit_map, {})
+        assert QubitAddress(merge_output.uuid) in qubit_map
+        assert qubit_map[QubitAddress(merge_output.uuid)] == 0
 
-    def test_quantum_phi_array_identity_still_allowed(self) -> None:
-        """Identity array phi (same physical resources) must succeed."""
+    def test_quantum_merge_array_identity_still_allowed(self) -> None:
+        """Identity array merge (same physical resources) must succeed."""
         size_val = _make_const_value("size", 3)
         arr = _make_array_value("arr", shape_vals=(size_val,))
         cond = _make_value("cond", BitType)
 
-        phi_output = _make_array_value("phi_arr", shape_vals=(size_val,))
-        phi = PhiOp(operands=[cond, arr, arr], results=[phi_output])
+        merge_output = _make_array_value("merge_arr", shape_vals=(size_val,))
+        if_op = _make_if_with_merge(cond, arr, arr, merge_output)
 
         qubit_map = {
             QubitAddress(arr.uuid, 0): 0,
             QubitAddress(arr.uuid, 1): 1,
             QubitAddress(arr.uuid, 2): 2,
         }
-        map_phi_outputs([phi], qubit_map, {})
+        map_merge_outputs(if_op, qubit_map, {})
         for i in range(3):
-            assert qubit_map[QubitAddress(phi_output.uuid, i)] == i
+            assert qubit_map[QubitAddress(merge_output.uuid, i)] == i
 
 
 # ===========================================================================
-# LoopAnalyzer._has_loop_var_binop
+# LoopAnalyzer classical-expression dependency detection
 # ===========================================================================
 
 
@@ -785,8 +790,103 @@ class TestLoopAnalyzerBinOp:
 
         assert self.analyzer.should_unroll(for_op, {}) is True
 
+    def test_direct_pauli_time_dependency_triggers_unroll(self) -> None:
+        """Pauli identity phase extraction needs a concrete loop time."""
+        loop_var = _uint_val("i")
+        qubits = _make_array_value(
+            "qubits",
+            (_uint_val("size", const=1),),
+        )
+        evolution = PauliEvolveOp(
+            operands=[
+                qubits,
+                Value(type=ObservableType(), name="hamiltonian"),
+                loop_var,
+            ],
+            results=[
+                _make_array_value(
+                    "evolved",
+                    (_uint_val("result_size", const=1),),
+                )
+            ],
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=3),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[evolution],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_controlled_body_parameter_from_loop_var_triggers_unroll(self) -> None:
+        """A controlled fresh scope receives a concrete iteration value."""
+        loop_var = _uint_val("i")
+        control = _qubit("control")
+        target = _qubit("target")
+        inner_target = _qubit("inner_target")
+        inner_selector = _uint_val("inner_selector")
+        controlled = ConcreteControlledU(
+            operands=[control, target, loop_var],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=Block(input_values=[inner_target, inner_selector]),
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[controlled],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_controlled_predicate_from_loop_var_triggers_unroll(self) -> None:
+        """A loop-derived predicate passed into a fresh body forces unrolling."""
+        loop_var = _uint_val("i")
+        predicate = Value(type=BitType(), name="predicate")
+        comparison = CompOp(
+            operands=[loop_var, _uint_val("zero", const=0)],
+            results=[predicate],
+            kind=CompOpKind.EQ,
+        )
+        control = _qubit("control")
+        target = _qubit("target")
+        controlled = ConcreteControlledU(
+            operands=[control, target, predicate],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=Block(
+                input_values=[
+                    _qubit("inner_target"),
+                    Value(type=BitType(), name="inner_predicate"),
+                ]
+            ),
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[comparison, controlled],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
     def test_no_binop_no_unroll(self) -> None:
         """A loop with no BinOps and no array access should not unroll."""
+        loop_var_val = _uint_val("i")
         q = _qubit()
         gate = _make_gate(GateOperationType.H, [q])
 
@@ -798,6 +898,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[gate],
         )
 
@@ -805,6 +906,7 @@ class TestLoopAnalyzerBinOp:
 
     def test_binop_not_using_loop_var_no_unroll(self) -> None:
         """A BinOp not referencing the loop variable should not trigger unrolling."""
+        loop_var_val = _uint_val("i")
         a = _float_val("a", const=1.0)
         b = _float_val("b", const=2.0)
         binop, _ = _make_binop(a, b, BinOpKind.ADD)
@@ -820,6 +922,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[binop, gate],
         )
 
@@ -839,6 +942,7 @@ class TestLoopAnalyzerBinOp:
             operands=[inner_start, inner_stop, inner_step],
             results=[],
             loop_var="j",
+            loop_var_value=_uint_val("j"),
             operations=[binop],
         )
 
@@ -1016,6 +1120,7 @@ class TestLoopAnalyzerThetaArrayAccess:
 
     def test_theta_array_element_without_loop_var_no_unroll(self) -> None:
         """Gate with theta = gammas[0] (constant index) should not unroll."""
+        loop_idx = Value(type=UIntType(), name="i")
         gammas_array = ArrayValue(type=FloatType(), name="gammas")
         const_idx = _uint_val("idx", const=0)
         theta_elem = Value(
@@ -1036,10 +1141,267 @@ class TestLoopAnalyzerThetaArrayAccess:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_idx,
             operations=[gate],
         )
 
         assert self.analyzer.should_unroll(for_op, {}) is False
+
+    def test_missing_loop_identity_fails_closed_to_unroll(self) -> None:
+        """Legacy IR without an index Value cannot select native emission."""
+        q = _qubit()
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=1),
+                _uint_val("step", const=1),
+            ],
+            results=[],
+            loop_var="i",
+            operations=[_make_gate(GateOperationType.H, [q])],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+
+# ===========================================================================
+# LoopAnalyzer — measurement / reset / projection array element access (M2)
+# ===========================================================================
+
+
+class TestLoopAnalyzerMeasurementArrayAccess:
+    """Loop-var element access by measurement/reset/projection forces unroll.
+
+    Regression for the silent-measurement-drop bug: ``MeasureOperation``,
+    ``MeasureVectorOperation``, ``ProjectOperation`` and ``ResetOperation``
+    are not ``GateOperation`` subclasses, so the old type-enumerated
+    ``_has_array_element_access`` skipped them. A native backend loop whose
+    only loop-var element access was ``measure(q[i])`` then took the native
+    path and dropped the measurement at emit. The scan is now generic over
+    ``all_input_values()``.
+    """
+
+    def setup_method(self) -> None:
+        self.analyzer = LoopAnalyzer()
+
+    def _loop_with(self, op, loop_idx) -> ForOperation:
+        """Wrap a single op in a ``for i in range(0, 3)`` loop."""
+        return ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=3),
+                _uint_val("step", const=1),
+            ],
+            results=[],
+            loop_var="i",
+            loop_var_value=loop_idx,
+            operations=[op],
+        )
+
+    def _element_qubit(self, loop_idx) -> Value:
+        """Build ``q[i]`` — a qubit element indexed by the loop variable."""
+        q_array = ArrayValue(type=QubitType(), name="q")
+        return Value(
+            type=QubitType(),
+            name="q_i",
+            parent_array=q_array,
+            element_indices=(loop_idx,),
+        )
+
+    def test_measure_of_loop_var_element_triggers_unroll(self) -> None:
+        """``measure(q[i])`` as the only body op must force unrolling."""
+        loop_idx = Value(type=UIntType(), name="i")
+        q_elem = self._element_qubit(loop_idx)
+        measure = MeasureOperation(
+            operands=[q_elem],
+            results=[Value(type=BitType(), name="b")],
+        )
+        assert (
+            self.analyzer.should_unroll(self._loop_with(measure, loop_idx), {}) is True
+        )
+
+    def test_reset_of_loop_var_element_triggers_unroll(self) -> None:
+        """``reset(q[i])`` must force unrolling."""
+        loop_idx = Value(type=UIntType(), name="i")
+        q_elem = self._element_qubit(loop_idx)
+        reset = ResetOperation(
+            operands=[q_elem],
+            results=[Value(type=QubitType(), name="q_i2")],
+        )
+        assert self.analyzer.should_unroll(self._loop_with(reset, loop_idx), {}) is True
+
+    def test_project_of_loop_var_element_triggers_unroll(self) -> None:
+        """``project_z(q[i])`` must force unrolling."""
+        loop_idx = Value(type=UIntType(), name="i")
+        q_elem = self._element_qubit(loop_idx)
+        project = ProjectOperation(
+            operands=[q_elem],
+            results=[
+                Value(type=QubitType(), name="q_i2"),
+                Value(type=BitType(), name="b"),
+            ],
+            axis="z",
+        )
+        assert (
+            self.analyzer.should_unroll(self._loop_with(project, loop_idx), {}) is True
+        )
+
+    def test_measure_vector_of_loop_var_element_triggers_unroll(self) -> None:
+        """A vector measurement whose operand is ``q[i]`` must unroll.
+
+        This builds an ``element_indices``-based operand (``q[i]``), not a
+        ``slice_of``-chain view — the generic ``all_input_values`` scan flags
+        it because the operand carries ``parent_array`` + ``element_indices``
+        depending on the loop variable.
+        """
+        loop_idx = Value(type=UIntType(), name="i")
+        q_elem = self._element_qubit(loop_idx)
+        mvec = MeasureVectorOperation(
+            operands=[q_elem],
+            results=[ArrayValue(type=BitType(), name="bits")],
+        )
+        assert self.analyzer.should_unroll(self._loop_with(mvec, loop_idx), {}) is True
+
+    def test_measure_of_constant_index_does_not_unroll(self) -> None:
+        """``measure(q[0])`` (constant index) does not need unrolling."""
+        loop_idx = Value(type=UIntType(), name="i")
+        q_array = ArrayValue(type=QubitType(), name="q")
+        q_const = Value(
+            type=QubitType(),
+            name="q_0",
+            parent_array=q_array,
+            element_indices=(_uint_val("idx", const=0),),
+        )
+        measure = MeasureOperation(
+            operands=[q_const],
+            results=[Value(type=BitType(), name="b")],
+        )
+        assert (
+            self.analyzer.should_unroll(self._loop_with(measure, loop_idx), {}) is False
+        )
+
+
+class TestLoopAnalyzerGenericValueDependency:
+    """Test recursive loop-index discovery across generic operation inputs."""
+
+    def setup_method(self) -> None:
+        """Create a fresh analyzer for each generic dependency test."""
+        self.analyzer = LoopAnalyzer()
+
+    def _loop_with(self, operation: Operation, loop_idx: Value) -> ForOperation:
+        """Wrap one operation in a valid identity-bearing loop.
+
+        Args:
+            operation (Operation): Body operation whose structural inputs are
+                analyzed.
+            loop_idx (Value): UUID-bearing loop-index value.
+
+        Returns:
+            ForOperation: Minimal two-trip loop containing ``operation``.
+        """
+        return ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_idx,
+            operations=[operation],
+        )
+
+    def test_loop_index_comparison_triggers_unroll(self) -> None:
+        """A comparison input participates in generic dependency analysis."""
+        loop_idx = _uint_val("i")
+        comparison = CompOp(
+            operands=[loop_idx, _uint_val("zero", const=0)],
+            results=[Value(type=BitType(), name="condition")],
+            kind=CompOpKind.EQ,
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(comparison, loop_idx), {})
+
+    def test_array_slice_bound_with_loop_var_triggers_unroll(self) -> None:
+        """A vector view whose start is ``i`` requires emit-time unrolling."""
+        loop_idx = _uint_val("i")
+        one = _uint_val("one", const=1)
+        root = ArrayValue(
+            type=QubitType(),
+            name="root",
+            shape=(_uint_val("size", const=2),),
+        )
+        view = ArrayValue(
+            type=QubitType(),
+            name="view",
+            shape=(one,),
+            slice_of=root,
+            slice_start=loop_idx,
+            slice_step=one,
+        )
+        measure = MeasureVectorOperation(
+            operands=[view],
+            results=[ArrayValue(type=BitType(), name="bits", shape=(one,))],
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(measure, loop_idx), {})
+
+    def test_symbolic_control_index_with_loop_var_triggers_unroll(self) -> None:
+        """Subclass-specific ``control_indices`` participate in analysis."""
+        loop_idx = _uint_val("i")
+        pool = ArrayValue(
+            type=QubitType(),
+            name="pool",
+            shape=(_uint_val("pool_size", const=2),),
+        )
+        target = _qubit("target")
+        controlled = SymbolicControlledU(
+            operands=[pool, target],
+            results=[pool.next_version(), target.next_version()],
+            num_controls=_uint_val("num_controls", const=1),
+            control_indices=(loop_idx,),
+            block=Block(name="unitary"),
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(controlled, loop_idx), {})
+
+    def test_direct_invoke_parameter_with_loop_var_triggers_unroll(self) -> None:
+        """A boxed callee cannot capture its caller's native loop parameter."""
+        loop_idx = _uint_val("i")
+        target = _qubit("target")
+        invoke = InvokeOperation(
+            operands=[target, loop_idx],
+            results=[target.next_version()],
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(invoke, loop_idx), {})
+
+    def test_nested_region_arg_seeded_from_outer_index_triggers_unroll(self) -> None:
+        """A nested carry preserves the outer-index dependency edge."""
+        outer_index = _uint_val("outer_index")
+        block_arg = _uint_val("block_arg")
+        result = _uint_val("result")
+        inner = ForOperation(
+            operands=[
+                _uint_val("inner_start", const=0),
+                _uint_val("inner_stop", const=2),
+                _uint_val("inner_step", const=1),
+            ],
+            results=[result],
+            loop_var="inner_index",
+            loop_var_value=_uint_val("inner_index"),
+            operations=[],
+            region_args=(
+                RegionArg(
+                    "carry",
+                    outer_index,
+                    block_arg,
+                    block_arg,
+                    result,
+                ),
+            ),
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(inner, outer_index), {})
 
 
 # ===========================================================================
@@ -1060,10 +1422,10 @@ from qamomile.qiskit.transpiler import QiskitTranspiler  # noqa: E402
 
 
 @qmc.qkernel
-def broken_phi_bit_array_example() -> qmc.Vector[qmc.Bit]:
+def broken_merge_bit_array_example() -> qmc.Vector[qmc.Bit]:
     """Regression: different qubit arrays in true/false branches must not silently merge.
 
-    Before the fix, this returned ``[((0, 0, 0, 0, 1), 200)]`` because the phi
+    Before the fix, this returned ``[((0, 0, 0, 0, 1), 200)]`` because the merge
     always picked the true branch's physical resources regardless of the runtime
     condition. the kernel transpiles and executes successfully.
     """
@@ -1084,10 +1446,10 @@ def broken_phi_bit_array_example() -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
-def broken_phi_bit_scalar_example() -> qmc.Bit:
-    """Regression: scalar bit phi with different source qubits.
+def broken_merge_bit_scalar_example() -> qmc.Bit:
+    """Regression: scalar bit merge with different source qubits.
 
-    Before the fix, the phi always read the true branch's clbit regardless of
+    Before the fix, the merge always read the true branch's clbit regardless of
     the runtime condition.  ``b`` is 0, so the else branch (``measure(q[2])``,
     which is ``|1>``) must be chosen → result ``(1, 200)``.
     Before the fix this returned ``(0, 200)``.
@@ -1107,9 +1469,9 @@ def broken_phi_bit_scalar_example() -> qmc.Bit:
 
 @qmc.qkernel
 def frontend_target_vars_leak_example() -> qmc.Bit:
-    """Regression: Store-only reassignment of ``b`` leaked from phi merge.
+    """Regression: Store-only reassignment of ``b`` leaked from merge.
 
-    Before the fix, ``b = qmc.bit(False)`` was never updated by the phi merge
+    Before the fix, ``b = qmc.bit(False)`` was never updated by the merge
     (Store-only reassignment excluded from ``target_vars``), so the second
     ``if b`` always saw the stale ``False`` value and skipped the X gate.
     Before the fix this returned ``(0, 200)``.
@@ -1132,6 +1494,32 @@ def frontend_target_vars_leak_example() -> qmc.Bit:
 
 
 @qmc.qkernel
+def runtime_bit_merge_selects_external_source_example() -> qmc.Bit:
+    """A runtime Bit merge should select a pre-existing measured bit."""
+    q = qmc.qubit_array(4, "q")
+    q[2] = qmc.x(q[2])
+
+    selector = qmc.measure(q[0])  # 0
+    a = qmc.measure(q[1])  # 0
+    b = qmc.measure(q[2])  # 1
+
+    out = a
+    if selector:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = a
+    else:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = b
+
+    if out:
+        q[3] = qmc.x(q[3])
+
+    return qmc.measure(q[3])
+
+
+@qmc.qkernel
 def binop_floordiv_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     """Apply RX(theta) to first n // 2 qubits of a 4-qubit register."""
     q = qmc.qubit_array(4, "q")
@@ -1146,6 +1534,26 @@ def binop_pow_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
     """Apply RX(theta) to first n ** 2 qubits of a 4-qubit register."""
     q = qmc.qubit_array(4, "q")
     count = n**2
+    for i in qmc.range(count):
+        q[i] = qmc.rx(q[i], angle=theta)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_mod_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Apply RX(theta) to first n % 3 qubits of a 4-qubit register."""
+    q = qmc.qubit_array(4, "q")
+    count = n % 3
+    for i in qmc.range(count):
+        q[i] = qmc.rx(q[i], angle=theta)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def binop_rmod_circuit(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+    """Apply RX(theta) to first 7 % n qubits of a 4-qubit register."""
+    q = qmc.qubit_array(4, "q")
+    count = 7 % n  # exercises UInt.__rmod__
     for i in qmc.range(count):
         q[i] = qmc.rx(q[i], angle=theta)
     return qmc.measure(q)
@@ -1209,10 +1617,10 @@ def _extract_rx_angles(qc: "QuantumCircuit") -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-class TestPhiMergeAliasRegression:
-    """End-to-end regression for phi quantum merge alias miscompile.
+class TestMergeAliasRegression:
+    """End-to-end regression for quantum merge alias miscompile.
 
-    ``broken_phi_bit_array_example`` uses distinct qubit arrays (``true_q``,
+    ``broken_merge_bit_array_example`` uses distinct qubit arrays (``true_q``,
     ``false_q``) in the two branches.  Before the fix the transpiler silently
     picked the true branch's physical qubits, producing wrong results
     ``[((0, 0, 0, 0, 1), 200)]``.  After the fix the classical bit
@@ -1221,9 +1629,9 @@ class TestPhiMergeAliasRegression:
     index 1.
     """
 
-    def test_phi_bit_array_produces_correct_result(self) -> None:
+    def test_merge_bit_array_produces_correct_result(self) -> None:
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(broken_phi_bit_array_example)
+        exe = transpiler.transpile(broken_merge_bit_array_example)
         executor = transpiler.executor()
         job = exe.sample(executor, shots=200, bindings={})
         results = job.result().results
@@ -1238,10 +1646,10 @@ class TestPhiMergeAliasRegression:
         )
         assert count == 200
 
-    def test_phi_bit_scalar_produces_correct_result(self) -> None:
-        """Scalar bit phi must pick the else branch (measure q[2] = |1>)."""
+    def test_merge_bit_scalar_produces_correct_result(self) -> None:
+        """Scalar bit merge must pick the else branch (measure q[2] = |1>)."""
         transpiler = QiskitTranspiler()
-        exe = transpiler.transpile(broken_phi_bit_scalar_example)
+        exe = transpiler.transpile(broken_merge_bit_scalar_example)
         executor = transpiler.executor()
         job = exe.sample(executor, shots=200, bindings={})
         results = job.result().results
@@ -1269,9 +1677,22 @@ class TestPhiMergeAliasRegression:
         )
         assert count == 200
 
+    def test_runtime_bit_merge_selects_external_source(self) -> None:
+        """A runtime Bit merge must select between existing measured bits."""
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(runtime_bit_merge_selects_external_source_example)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200, bindings={})
+        results = job.result().results
+        # selector = 0 chooses b = 1, so q[3] is flipped.
+        assert len(results) == 1
+        bitstring, count = results[0]
+        assert bitstring == 1
+        assert count == 200
+
 
 class TestUIntBinOpFolding:
-    """Tests for UInt BinOp kinds (``//``, ``**``) that affect loop bounds.
+    """Tests for UInt BinOp kinds (``//``, ``%``, ``**``) that affect loop bounds.
 
     At tracing time ``n`` is a symbolic ``UInt`` handle, so ``n // 2``
     emits a ``BinOp(FLOORDIV)`` into the IR.  The constant folding pass
@@ -1330,6 +1751,59 @@ class TestUIntBinOpFolding:
                 f"RX[{i}] angle {angle} != expected {theta}"
             )
 
+    @pytest.mark.parametrize(
+        "n, theta, expected_rx_count",
+        [
+            (4, 0.5, 1),  # 4 % 3 = 1
+            (5, 0.3, 2),  # 5 % 3 = 2
+            (6, 1.0, 0),  # 6 % 3 = 0 (boundary: empty loop)
+            (2, 0.2, 2),  # 2 % 3 = 2
+        ],
+        ids=["4%3=1", "5%3=2", "6%3=0", "2%3=2"],
+    )
+    def test_mod_loop_bound(self, n: int, theta: float, expected_rx_count: int) -> None:
+        """``n % 3`` correctly folded as loop bound; angles verified."""
+        _, qc = _transpile_and_get_circuit(
+            binop_mod_circuit, bindings={"n": n, "theta": theta}
+        )
+        rx_angles = _extract_rx_angles(qc)
+
+        assert len(rx_angles) == expected_rx_count, (
+            f"Expected {expected_rx_count} RX gates (n={n}, n%3={n % 3}), "
+            f"got {len(rx_angles)}"
+        )
+        for i, angle in enumerate(rx_angles):
+            assert np.isclose(angle, theta), (
+                f"RX[{i}] angle {angle} != expected {theta}"
+            )
+
+    @pytest.mark.parametrize(
+        "n, theta, expected_rx_count",
+        [
+            (2, 0.5, 1),  # 7 % 2 = 1
+            (3, 0.3, 1),  # 7 % 3 = 1
+            (4, 1.0, 3),  # 7 % 4 = 3
+        ],
+        ids=["7%2=1", "7%3=1", "7%4=3"],
+    )
+    def test_rmod_loop_bound(
+        self, n: int, theta: float, expected_rx_count: int
+    ) -> None:
+        """``7 % n`` (UInt.__rmod__) correctly folded as loop bound."""
+        _, qc = _transpile_and_get_circuit(
+            binop_rmod_circuit, bindings={"n": n, "theta": theta}
+        )
+        rx_angles = _extract_rx_angles(qc)
+
+        assert len(rx_angles) == expected_rx_count, (
+            f"Expected {expected_rx_count} RX gates (n={n}, 7%n={7 % n}), "
+            f"got {len(rx_angles)}"
+        )
+        for i, angle in enumerate(rx_angles):
+            assert np.isclose(angle, theta), (
+                f"RX[{i}] angle {angle} != expected {theta}"
+            )
+
 
 class TestEmitArrayElementResolution:
     """Integration coverage for array elements resolved during emit."""
@@ -1356,3 +1830,58 @@ class TestEmitArrayElementResolution:
         results = exe.sample(transpiler.executor(), shots=200).result().results
 
         assert results == [((1,), 200)]
+
+
+class TestAllocatorAnalysisStateIsolation:
+    """Nested allocations must not leak analysis state into the segment.
+
+    ``allocate`` recomputes the measurement-taint set, the safe
+    mixed-merge allowlist, and the monotonic counters for the operation
+    list it receives. Controlled-block emission reuses the segment
+    allocator on a sub-block mid-emission; without the
+    ``preserving_analysis_state`` snapshot, later
+    ``resolve_iteration_maps`` replays of the enclosing segment consult
+    the sub-block's (typically empty) sets — silently disarming the
+    runtime-mux guards.
+    """
+
+    def test_preserving_analysis_state_restores_segment_sets(self) -> None:
+        """The context manager restores every analysis field on exit."""
+        from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+            ResourceAllocator,
+        )
+
+        allocator = ResourceAllocator()
+        allocator._measurement_tainted = {"segment-tainted-uuid"}
+        allocator._safe_mixed_bit_merge_outputs = frozenset({"segment-safe-uuid"})
+        allocator._next_qubit_index = 5
+        allocator._next_clbit_index = 3
+
+        with allocator.preserving_analysis_state():
+            allocator._measurement_tainted = set()
+            allocator._safe_mixed_bit_merge_outputs = frozenset()
+            allocator._next_qubit_index = 0
+            allocator._next_clbit_index = 0
+
+        assert allocator._measurement_tainted == {"segment-tainted-uuid"}
+        assert allocator._safe_mixed_bit_merge_outputs == frozenset(
+            {"segment-safe-uuid"}
+        )
+        assert allocator._next_qubit_index == 5
+        assert allocator._next_clbit_index == 3
+
+    def test_preserving_analysis_state_restores_on_error(self) -> None:
+        """State is restored even when the nested work raises."""
+        from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+            ResourceAllocator,
+        )
+
+        allocator = ResourceAllocator()
+        allocator._measurement_tainted = {"segment-tainted-uuid"}
+
+        with pytest.raises(RuntimeError, match="nested failure"):
+            with allocator.preserving_analysis_state():
+                allocator._measurement_tainted = set()
+                raise RuntimeError("nested failure")
+
+        assert allocator._measurement_tainted == {"segment-tainted-uuid"}

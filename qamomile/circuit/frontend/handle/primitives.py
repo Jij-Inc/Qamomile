@@ -31,10 +31,68 @@ from .handle import (
 class Qubit(Handle):
     value: Value[QubitType]
 
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Qubit":
+        """Wrap a merged value in a fresh ``Qubit`` handle.
+
+        Args:
+            value (Value): Fresh IR value produced for the merge output.
+            counterpart (Value): The false-branch IR value (unused for
+                qubits).
+
+        Returns:
+            Qubit: Handle wrapping ``value``.
+        """
+        return Qubit(value=value)
+
 
 @dataclasses.dataclass
 class QFixed(Handle):
     value: Value[QFixedType]
+
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "QFixed":
+        """Wrap a merged value, copying validated QFixed carrier metadata.
+
+        QFixed is a scalar quantum handle backed by multiple physical
+        qubit carriers recorded in metadata. A merged QFixed can only
+        reuse that metadata when both branches describe the exact same
+        carrier layout; otherwise the frontend cannot represent the
+        condition-dependent carrier set safely.
+
+        Args:
+            value (Value): Fresh IR value produced for the merge output.
+            counterpart (Value): The false-branch QFixed value whose
+                carrier layout must match this handle's.
+
+        Returns:
+            QFixed: Handle wrapping ``value`` rebuilt with the shared
+                carrier metadata.
+
+        Raises:
+            TypeError: If either branch lacks QFixed metadata or the
+                branch carrier layouts differ.
+        """
+        true_meta = self.value.metadata.qfixed
+        false_meta = counterpart.metadata.qfixed
+        if true_meta is None or false_meta is None:
+            raise TypeError(
+                "QFixed if-else merge requires QFixed metadata on both branches."
+            )
+        if (
+            true_meta.qubit_uuids != false_meta.qubit_uuids
+            or true_meta.num_bits != false_meta.num_bits
+            or true_meta.int_bits != false_meta.int_bits
+        ):
+            raise TypeError(
+                "QFixed if-else merge requires identical carrier qubits and "
+                "fixed-point layout across branches."
+            )
+        return QFixed(
+            value=value.with_qfixed_metadata(
+                qubit_uuids=true_meta.qubit_uuids,
+                num_bits=true_meta.num_bits,
+                int_bits=true_meta.int_bits,
+            )
+        )
 
 
 @dataclasses.dataclass
@@ -57,6 +115,19 @@ class UInt(ArithmeticMixin, Handle):
     def _make_float_result(self) -> "Float":
         """Create a Float result for division operations (required by ArithmeticMixin)."""
         return Float(value=Value(type=FloatType(), name=""), init_value=0.0)
+
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "UInt":
+        """Wrap a merged value in a fresh ``UInt`` handle.
+
+        Args:
+            value (Value): Fresh IR value produced for the merge output.
+            counterpart (Value): The false-branch IR value (unused for
+                classical scalars).
+
+        Returns:
+            UInt: Handle wrapping ``value``.
+        """
+        return UInt(value=value)
 
     def _make_bit(self) -> "Bit":
         """Create a Bit result for a comparison."""
@@ -228,6 +299,59 @@ class UInt(ArithmeticMixin, Handle):
         _emit_binop(coerced.value, self.value, result, BinOpKind.FLOORDIV)
         return result
 
+    # UInt-specific modulo
+    def __mod__(self, other: "int | UInt") -> "UInt":
+        """Take this UInt modulo an integer-like operand.
+
+        Mirrors the other ``UInt`` arithmetic operators by emitting a
+        ``BinOp(MOD)`` whose result is a fresh ``UInt`` handle. When both
+        operands are compile-time constants the result is folded eagerly
+        (``_emit_binop``), so ``i % k`` is a valid index/loop-bound
+        expression and ``i % k == 0`` is a valid compile-time ``if``
+        predicate once the enclosing loop is unrolled.
+
+        Like the sibling integer operators (``__floordiv__`` / ``__pow__``),
+        the ``int | UInt`` operand contract is enforced statically by the
+        type checker; passing a non-integral operand (e.g. a Python
+        ``float``) is a type error rather than a runtime branch here.
+
+        Args:
+            other (int | UInt): The divisor. A Python ``int`` is coerced
+                to a constant ``UInt`` operand.
+
+        Returns:
+            UInt: A new ``UInt`` handle holding ``self % other``.
+
+        Example:
+            >>> import qamomile.circuit as qmc
+            >>> @qmc.qkernel
+            ... def circuit() -> qmc.Vector[qmc.Qubit]:
+            ...     q = qmc.qubit_array(4, "q")
+            ...     for i in qmc.range(4):
+            ...         if i % 2 == 0:
+            ...             q[i] = qmc.x(q[i])
+            ...     return q
+        """
+        coerced = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(self.value, coerced.value, result, BinOpKind.MOD)
+        return result
+
+    def __rmod__(self, other: "int | UInt") -> "UInt":
+        """Take an integer-like operand modulo this UInt.
+
+        Args:
+            other (int | UInt): The dividend. A Python ``int`` is coerced
+                to a constant ``UInt`` operand.
+
+        Returns:
+            UInt: A new ``UInt`` handle holding ``other % self``.
+        """
+        coerced = self._coerce(other)
+        result = self._make_result()
+        _emit_binop(coerced.value, self.value, result, BinOpKind.MOD)
+        return result
+
     # UInt-specific power operation
     def __pow__(self, other: "int | UInt") -> "UInt":
         coerced = self._coerce(other)
@@ -312,6 +436,19 @@ class Float(ArithmeticMixin, Handle):
     def _make_float_result(self) -> "Float":
         """Create a Float result for division (same as _make_result for Float)."""
         return self._make_result()
+
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Float":
+        """Wrap a merged value in a fresh ``Float`` handle.
+
+        Args:
+            value (Value): Fresh IR value produced for the merge output.
+            counterpart (Value): The false-branch IR value (unused for
+                classical scalars).
+
+        Returns:
+            Float: Handle wrapping ``value``.
+        """
+        return Float(value=value)
 
     def _coerce(self, other: "int | float | Float") -> "Float":
         """Convert int or float to Float if needed (required by ArithmeticMixin)."""
@@ -457,6 +594,19 @@ class Bit(Handle):
     def _make_bit(self) -> "Bit":
         """Create a fresh result Bit handle for an op."""
         return Bit(value=Value(type=BitType(), name=""))
+
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Bit":
+        """Wrap a merged value in a fresh ``Bit`` handle.
+
+        Args:
+            value (Value): Fresh IR value produced for the merge output.
+            counterpart (Value): The false-branch IR value (unused for
+                classical scalars).
+
+        Returns:
+            Bit: Handle wrapping ``value``.
+        """
+        return Bit(value=value)
 
     def _coerce(self, other: "bool | int | Bit") -> "Bit":
         """Promote ``bool`` / ``int`` (0 or 1) to a constant Bit handle.

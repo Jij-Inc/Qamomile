@@ -5,7 +5,7 @@ construction.  Takes an amplitude vector and returns the Gray-walk
 ``Ry`` (and, for complex inputs, ``Rz``) angle vectors that the
 Möttönen Gray-code emission consumes — assuming that the target
 register starts in :math:`|0\\rangle^{\\otimes n}`.  See
-:mod:`qamomile.circuit.algorithm.state_preparation.mottonen_amplitude_encoding`
+:mod:`qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding`
 for the gate-emission side and the all-zero-state pre-condition.
 
 The math here is intentionally separated from gate emission so it

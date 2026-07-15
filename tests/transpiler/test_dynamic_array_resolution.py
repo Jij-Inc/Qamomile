@@ -9,10 +9,37 @@ These tests verify that the transpiler correctly handles:
 These tests were added to prevent regression of bugs fixed in the emit pass.
 """
 
+from typing import Any
+
 import numpy as np
+import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import (
+    EmitError,
+    QamomileCompileError,
+    ResolutionFailureReason,
+)
+from qamomile.circuit.transpiler.passes.emit_support.qubit_address import QubitAddress
+from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+    ResourceAllocator,
+)
+from qamomile.circuit.transpiler.passes.emit_support.value_resolver import ValueResolver
+
+# Most tests in this module transpile through Qiskit, and the module-level
+# import below pulls qiskit in at collection time. Skip the whole module when
+# the optional dependency is absent so a qiskit-free environment skips rather
+# than errors. The allocator-only tests (TestDynamicArraySizeResolution's
+# ``test_allocator_*`` / ``test_resolver_*``) do not need qiskit themselves,
+# but they are covered in CI where qiskit is always installed.
+pytest.importorskip("qiskit")
+
 from qamomile.qiskit.transpiler import QiskitTranspiler
+
+Backend = tuple[str, Any, Any]
 
 # ==============================================================================
 # Kernel definitions at module level (required for inspect.getsource to work)
@@ -38,6 +65,159 @@ def kernel_matrix_size(
     """Kernel with qubit array sized by matrix dimension."""
     n = edges.shape[0]
     q = qmc.qubit_array(n, name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_scalar(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a bound UInt scalar.
+
+    Args:
+        n (qmc.UInt): Compile-time bound scalar that determines the
+            qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(n, name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a bound UInt vector element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose first
+            element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[0], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_slice_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a bound UInt vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose sliced
+            view element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[1:3][0], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_strided_slice_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a strided vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose strided
+            view element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[0:3:2][1], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_default_start_slice_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a default-start vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose
+            default-start sliced view element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[:3][0], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_uint_default_stop_slice_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a default-stop vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector whose
+            default-stop sliced view element determines the qubit-array size.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[1:][0], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_symbolic_uint_element(
+    sizes: qmc.Vector[qmc.UInt],
+    i: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a symbolic UInt vector index.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Compile-time bound vector indexed by a
+            runtime symbolic parameter.
+        i (qmc.UInt): Runtime symbolic index into ``sizes``.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[i], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_negative_index_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a negative-index vector element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Vector accessed with an unsupported
+            Python-style negative index.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[-1], name="q")
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def kernel_size_from_negative_view_element(
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Measure a qubit array sized by a negative-index vector-view element.
+
+    Args:
+        sizes (qmc.Vector[qmc.UInt]): Vector whose sliced view is accessed
+            with an unsupported Python-style negative index.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement result for the allocated qubits.
+    """
+    q = qmc.qubit_array(sizes[1:3][-1], name="q")
     return qmc.measure(q)
 
 
@@ -124,6 +304,91 @@ def kernel_qaoa(
     return qmc.measure(q)
 
 
+@pytest.fixture(
+    params=[
+        "qiskit",
+        pytest.param("quri_parts", marks=pytest.mark.quri_parts),
+        pytest.param("cudaq", marks=pytest.mark.cudaq),
+    ]
+)
+def sdk_backend(request) -> Backend:
+    """Yield an installed SDK backend for cross-backend execution.
+
+    Args:
+        request (pytest.FixtureRequest): Parametrized pytest request whose
+            value selects the backend name.
+
+    Returns:
+        Backend: Tuple of backend name, transpiler, and executor. Optional
+            SDK dependencies are skipped with ``pytest.importorskip``.
+
+    Raises:
+        AssertionError: If the fixture parameter is not a known backend name.
+    """
+    name = request.param
+    if name == "qiskit":
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        transpiler = QiskitTranspiler()
+        return name, transpiler, transpiler.executor()
+    if name == "quri_parts":
+        pytest.importorskip("quri_parts")
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        transpiler = QuriPartsTranspiler()
+        return name, transpiler, transpiler.executor()
+    if name == "cudaq":
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq import CudaqTranspiler
+
+        transpiler = CudaqTranspiler()
+        return name, transpiler, transpiler.executor()
+    raise AssertionError(f"Unknown backend: {name}")
+
+
+def _counts(result: Any) -> dict[tuple[int, ...], int]:
+    """Convert a sample result into counts keyed by bit tuples.
+
+    Args:
+        result (Any): Backend sample result exposing ``results`` as
+            bitstring/count pairs.
+
+    Returns:
+        dict[tuple[int, ...], int]: Counts keyed by integer bit tuples.
+    """
+    counts: dict[tuple[int, ...], int] = {}
+    for bits, count in result.results:
+        bit_tuple = tuple(int(bit) for bit in bits)
+        counts[bit_tuple] = counts.get(bit_tuple, 0) + int(count)
+    return counts
+
+
+def _assert_all_zero_counts(
+    name: str,
+    counts: dict[tuple[int, ...], int],
+    *,
+    width: int,
+    shots: int,
+) -> None:
+    """Assert that deterministic all-zero sampling returned every shot.
+
+    Args:
+        name (str): Backend name used in the assertion message.
+        counts (dict[tuple[int, ...], int]): Observed counts keyed by bit
+            tuples.
+        width (int): Expected bitstring width.
+        shots (int): Expected total shot count for the all-zero outcome.
+
+    Raises:
+        AssertionError: If the counts contain any non-zero outcome or an
+            unexpected shot count.
+    """
+    expected = tuple(0 for _ in range(width))
+    assert counts == {expected: shots}, f"{name}: unexpected counts {counts}"
+
+
 # ==============================================================================
 # Test classes
 # ==============================================================================
@@ -166,6 +431,438 @@ class TestDynamicArraySizeResolution:
         assert result is not None
         for bitstring, _count in result.results:
             assert len(bitstring) == 3
+
+    @pytest.mark.parametrize("n", [5, np.uint64(5)])
+    def test_qubit_array_size_from_bound_uint_scalar(self, n: int):
+        """Test that Python and NumPy integer scalar sizes resolve."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(
+            kernel_size_from_uint_scalar,
+            bindings={"n": n},
+        )
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == 5
+        assert circuit.num_clbits == 5
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
+
+    def test_qubit_array_size_from_bound_uint_vector_element(self):
+        """Test that a bound UInt vector-element size executes deterministically."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(
+            kernel_size_from_uint_element,
+            bindings={"sizes": np.array([5], dtype=np.uint64)},
+        )
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == 5
+        assert circuit.num_clbits == 5
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
+
+    def test_qubit_array_size_from_bound_uint_vector_view_element(self):
+        """Test that a bound UInt vector-view size executes deterministically."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(
+            kernel_size_from_uint_slice_element,
+            bindings={"sizes": np.array([2, 5, 7], dtype=np.uint64)},
+        )
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == 5
+        assert circuit.num_clbits == 5
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
+
+    def test_qubit_array_size_from_bound_uint_strided_vector_view_element(self):
+        """Test that a strided UInt vector-view size remaps to its root index."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(
+            kernel_size_from_uint_strided_slice_element,
+            bindings={"sizes": np.array([2, 7, 5], dtype=np.uint64)},
+        )
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == 5
+        assert circuit.num_clbits == 5
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=5, shots=16)
+
+    @pytest.mark.parametrize(
+        ("kernel", "sizes", "width"),
+        [
+            (
+                kernel_size_from_uint_default_start_slice_element,
+                np.array([5, 7, 11], dtype=np.uint64),
+                5,
+            ),
+            (
+                kernel_size_from_uint_default_stop_slice_element,
+                np.array([2, 5, 7], dtype=np.uint64),
+                5,
+            ),
+        ],
+    )
+    def test_qubit_array_size_from_implicit_bound_vector_view_element(
+        self,
+        kernel: Any,
+        sizes: np.ndarray,
+        width: int,
+    ):
+        """Test that implicit slice bounds resolve for vector-view elements."""
+        transpiler = QiskitTranspiler()
+
+        executor = transpiler.transpile(kernel, bindings={"sizes": sizes})
+
+        circuit = executor.compiled_quantum[0].circuit
+        assert circuit.num_qubits == width
+        assert circuit.num_clbits == width
+        counts = _counts(executor.sample(transpiler.executor(), shots=16).result())
+        _assert_all_zero_counts("qiskit", counts, width=width, shots=16)
+
+    @pytest.mark.parametrize(
+        ("kernel", "sizes", "width"),
+        [
+            (
+                kernel_size_from_uint_element,
+                np.array([5], dtype=np.uint64),
+                5,
+            ),
+            (
+                kernel_size_from_uint_slice_element,
+                np.array([2, 5, 7], dtype=np.uint64),
+                5,
+            ),
+            (
+                kernel_size_from_uint_strided_slice_element,
+                np.array([2, 7, 5], dtype=np.uint64),
+                5,
+            ),
+        ],
+    )
+    def test_bound_uint_vector_element_executes_on_sdk_backends(
+        self,
+        sdk_backend: Backend,
+        kernel: Any,
+        sizes: np.ndarray,
+        width: int,
+    ):
+        """Test UInt vector-element size allocation on every SDK backend."""
+        name, transpiler, executor = sdk_backend
+
+        executable = transpiler.transpile(
+            kernel,
+            bindings={"sizes": sizes},
+        )
+        counts = _counts(executable.sample(executor, shots=16).result())
+
+        _assert_all_zero_counts(name, counts, width=width, shots=16)
+
+    @pytest.mark.parametrize("n", [-1, np.int64(-3)])
+    def test_negative_scalar_size_raises(self, n: int):
+        """Test that negative scalar sizes are rejected."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(kernel_size_from_uint_scalar, bindings={"n": n})
+
+    @pytest.mark.parametrize(
+        "sizes",
+        [
+            np.array([-1], dtype=np.int64),
+            np.array([-3], dtype=np.int64),
+        ],
+    )
+    def test_negative_vector_element_size_raises(self, sizes: np.ndarray):
+        """Test that negative vector-element sizes are rejected."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_size_from_uint_element, bindings={"sizes": sizes}
+            )
+
+    def test_symbolic_uint_vector_element_size_raises(self):
+        """Test that symbolic element indices do not fall back to array length."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_size_from_symbolic_uint_element,
+                bindings={"sizes": np.array([2, 5], dtype=np.uint64)},
+                parameters=["i"],
+            )
+
+    def test_negative_bound_index_size_rejected(self):
+        """Test that an index bound to ``-1`` does not Python-wrap the container.
+
+        Binding ``i=-1`` previously made ``sizes[i]`` silently resolve to the
+        last container element (7 qubits); call-time specialization now folds
+        the negative constant into the element access, where the frontend
+        rejection fires.
+        """
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(NotImplementedError, match="Negative index"):
+            transpiler.transpile(
+                kernel_size_from_symbolic_uint_element,
+                bindings={"sizes": np.array([2, 5, 7], dtype=np.uint64), "i": -1},
+            )
+
+    def test_non_integral_vector_element_size_raises(self):
+        """Test that non-integral element sizes are not silently truncated."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_size_from_uint_element,
+                bindings={"sizes": np.array([5.5], dtype=np.float64)},
+            )
+
+    def test_bool_vector_element_size_raises(self):
+        """Test that boolean element sizes are not coerced to one or zero."""
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+            transpiler.transpile(
+                kernel_size_from_uint_element,
+                bindings={"sizes": np.array([True], dtype=np.bool_)},
+            )
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            kernel_size_from_negative_index_element,
+            kernel_size_from_negative_view_element,
+        ],
+    )
+    def test_negative_const_element_index_size_rejected_at_trace(self, kernel: Any):
+        """Test that constant negative element indices are rejected at trace.
+
+        ``sizes[-1]`` previously resolved by Python container accident while
+        ``sizes[1:3][-1]`` silently affine-composed to ``sizes[0]`` and
+        produced a wrong-sized circuit; both now fail loudly before IR is
+        built.
+        """
+        transpiler = QiskitTranspiler()
+
+        with pytest.raises(NotImplementedError, match="Negative index"):
+            transpiler.transpile(
+                kernel,
+                bindings={"sizes": np.array([2, 5, 7], dtype=np.uint64)},
+            )
+
+    def test_allocator_size_from_const_uint_vector_element(self):
+        """Test that const-array metadata resolves an array element size."""
+        dim = Value(type=UIntType(), name="dim_0").with_const(1)
+        parent = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(dim,),
+        ).with_array_runtime_metadata(const_array=(5,))
+        idx = Value(type=UIntType(), name="idx_0").with_const(0)
+        size = Value(
+            type=UIntType(),
+            name="sizes[0]",
+            parent_array=parent,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator()
+
+        qubit_map, clbit_map = allocator.allocate([QInitOperation([], [q])])
+
+        assert len(qubit_map) == 5
+        assert clbit_map == {}
+
+    def test_allocator_size_from_const_uint_vector_view_element(self):
+        """Test that a const-array VectorView element resolves through its root."""
+        root_dim = Value(type=UIntType(), name="dim_0").with_const(3)
+        root = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(root_dim,),
+        ).with_array_runtime_metadata(const_array=(2, 5, 7))
+        view_dim = Value(type=UIntType(), name="view_dim_0").with_const(2)
+        start = Value(type=UIntType(), name="slice_start").with_const(1)
+        step = Value(type=UIntType(), name="slice_step").with_const(1)
+        view = ArrayValue(
+            type=UIntType(),
+            name="sizes_slice",
+            shape=(view_dim,),
+            slice_of=root,
+            slice_start=start,
+            slice_step=step,
+        )
+        idx = Value(type=UIntType(), name="idx_0").with_const(0)
+        size = Value(
+            type=UIntType(),
+            name="sizes_slice[0]",
+            parent_array=view,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator()
+
+        qubit_map, clbit_map = allocator.allocate([QInitOperation([], [q])])
+
+        assert len(qubit_map) == 5
+        assert clbit_map == {}
+
+    def test_allocator_does_not_resolve_internal_size_by_display_name(self):
+        """An internal size Value cannot capture an unrelated user binding."""
+        internal_size = Value(type=UIntType(), name="n")
+        q = ArrayValue(type=QubitType(), name="q", shape=(internal_size,))
+        allocator = ResourceAllocator()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            allocator.allocate(
+                [QInitOperation([], [q])],
+                bindings={"n": 5},
+            )
+
+    def test_allocator_size_prefers_uuid_over_colliding_display_name(self):
+        """A UUID-bound internal size wins over a same-named user binding."""
+        internal_size = Value(type=UIntType(), name="n")
+        q = ArrayValue(type=QubitType(), name="q", shape=(internal_size,))
+        allocator = ResourceAllocator()
+
+        qubit_map, clbit_map = allocator.allocate(
+            [QInitOperation([], [q])],
+            bindings={internal_size.uuid: 2, "n": 5},
+        )
+
+        assert len(qubit_map) == 2
+        assert clbit_map == {}
+
+    def test_allocator_runtime_parameter_vector_element_size_stays_unresolved(self):
+        """Test that runtime parameter array elements are not indexed."""
+        dim = Value(type=UIntType(), name="dim_0").with_const(1)
+        parent = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(dim,),
+        )
+        idx = Value(type=UIntType(), name="idx_0").with_const(0)
+        size = Value(
+            type=UIntType(),
+            name="sizes[0]",
+            parent_array=parent,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator(ValueResolver(parameters={"sizes"}))
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            allocator.allocate(
+                [QInitOperation([], [q])],
+                bindings={"sizes": np.array([5], dtype=np.uint64)},
+            )
+
+    def test_allocator_negative_symbolic_element_index_stays_unresolved(self):
+        """Test that a negative-resolved element index does not Python-wrap.
+
+        A symbolic index bound to ``-1`` must not silently read the last
+        container element (``container[-1]``); the size stays unresolved
+        and surfaces as the standard unresolved-size error.
+        """
+        dim = Value(type=UIntType(), name="dim_0").with_const(3)
+        parent = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(dim,),
+        ).with_array_runtime_metadata(const_array=(2, 5, 7))
+        idx = Value(type=UIntType(), name="i")
+        size = Value(
+            type=UIntType(),
+            name="sizes[i]",
+            parent_array=parent,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            allocator.allocate([QInitOperation([], [q])], bindings={"i": -1})
+
+    def test_allocator_negative_symbolic_view_element_index_stays_unresolved(self):
+        """Test that a negative-resolved view-local index is not affine-composed.
+
+        For a view over ``sizes`` with ``start=1, step=1``, a local index
+        bound to ``-1`` must not compose to root index ``0`` (which would
+        silently allocate ``sizes[0]`` qubits); the size stays unresolved.
+        """
+        root_dim = Value(type=UIntType(), name="dim_0").with_const(3)
+        root = ArrayValue(
+            type=UIntType(),
+            name="sizes",
+            shape=(root_dim,),
+        ).with_array_runtime_metadata(const_array=(2, 5, 7))
+        view_dim = Value(type=UIntType(), name="view_dim_0").with_const(2)
+        start = Value(type=UIntType(), name="slice_start").with_const(1)
+        step = Value(type=UIntType(), name="slice_step").with_const(1)
+        view = ArrayValue(
+            type=UIntType(),
+            name="sizes_slice",
+            shape=(view_dim,),
+            slice_of=root,
+            slice_start=start,
+            slice_step=step,
+        )
+        idx = Value(type=UIntType(), name="i")
+        size = Value(
+            type=UIntType(),
+            name="sizes_slice[i]",
+            parent_array=view,
+            element_indices=(idx,),
+        )
+        q = ArrayValue(type=QubitType(), name="q", shape=(size,))
+        allocator = ResourceAllocator()
+
+        with pytest.raises(EmitError, match="Cannot resolve array size"):
+            allocator.allocate([QInitOperation([], [q])], bindings={"i": -1})
+
+    def test_resolver_negative_view_qubit_index_fails(self):
+        """Test that emit-time qubit routing refuses negative view indices.
+
+        Without the guard, a view-local index bound to ``-1`` composes to
+        root index ``start + step * (-1)`` — a valid-but-wrong physical
+        wire — instead of failing with ``NEGATIVE_INDEX``.
+        """
+        root_dim = Value(type=UIntType(), name="dim_0").with_const(3)
+        root = ArrayValue(type=QubitType(), name="q", shape=(root_dim,))
+        view_dim = Value(type=UIntType(), name="view_dim_0").with_const(2)
+        start = Value(type=UIntType(), name="slice_start").with_const(1)
+        step = Value(type=UIntType(), name="slice_step").with_const(1)
+        view = ArrayValue(
+            type=QubitType(),
+            name="q_slice",
+            shape=(view_dim,),
+            slice_of=root,
+            slice_start=start,
+            slice_step=step,
+        )
+        idx = Value(type=UIntType(), name="i")
+        element = Value(
+            type=QubitType(),
+            name="q_slice[i]",
+            parent_array=view,
+            element_indices=(idx,),
+        )
+        qubit_map = {QubitAddress(root.uuid, k): k for k in range(3)}
+        resolver = ValueResolver()
+
+        result = resolver.resolve_qubit_index_detailed(
+            element, qubit_map, bindings={"i": -1}
+        )
+
+        assert not result.success
+        assert result.failure_reason is ResolutionFailureReason.NEGATIVE_INDEX
 
 
 class TestNestedArrayAccess:

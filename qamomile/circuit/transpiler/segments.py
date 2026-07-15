@@ -8,7 +8,7 @@ from enum import Enum, auto
 from typing import TypeAlias
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueLike
 
 
 class SegmentKind(Enum):
@@ -115,13 +115,42 @@ class HybridBoundary:
 
 
 class MultipleQuantumSegmentsError(Exception):
-    """Raised when program has multiple quantum segments.
+    """Raised when a program cannot fit the single-quantum-segment model.
 
     Qamomile enforces a single quantum circuit execution pattern:
         [Classical Prep] → Quantum Circuit → [Classical Post/Expval]
 
-    Your program has multiple quantum segments, suggesting quantum operations
-    that depend on measurement results (JIT compilation not supported).
+    The error fires when segmentation finds more than one quantum segment
+    (classical work that must execute between two quantum regions, e.g.
+    quantum operations resuming after a ``qmc.expval``), or when a
+    classical value feeding a quantum gate is also consumed by classical
+    work and therefore cannot be absorbed into the quantum segment.
+
+    Note that a loop bound left as a runtime parameter is diagnosed
+    earlier, by ``SymbolicShapeValidationPass``, with a dedicated
+    "Cannot unroll loop" message — it does not reach segmentation.
+
+    Example:
+        Incorrect — quantum operations resume after an expectation value,
+        which closes the quantum segment::
+
+            @qmc.qkernel
+            def kernel(obs: qmc.Observable) -> tuple[qmc.Float, qmc.Bit]:
+                q = qmc.qubit("q")
+                q = qmc.h(q)
+                e = qmc.expval(q, obs)   # quantum segment ends here
+                q2 = qmc.qubit("q2")
+                q2 = qmc.x(q2)           # second quantum segment -> error
+                return e, qmc.measure(q2)
+
+        Correct — keep all quantum operations in one contiguous region and
+        take the expectation value at the end::
+
+            @qmc.qkernel
+            def kernel(obs: qmc.Observable) -> qmc.Float:
+                q = qmc.qubit("q")
+                q = qmc.h(q)
+                return qmc.expval(q, obs)
     """
 
     pass
@@ -131,8 +160,8 @@ class MultipleQuantumSegmentsError(Exception):
 class ProgramABI:
     """Runtime-visible ABI for a segmented program."""
 
-    public_inputs: dict[str, Value] = dataclasses.field(default_factory=dict)
-    output_refs: list[str] = dataclasses.field(default_factory=list)
+    public_inputs: dict[str, ValueLike] = dataclasses.field(default_factory=dict)
+    output_values: list[ValueLike] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass

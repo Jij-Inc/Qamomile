@@ -99,36 +99,86 @@ class ValueMetadata:
     dict_runtime: DictRuntimeMetadata | None = None
 
 
+def split_indexed_identifier(identifier: str) -> tuple[str, str] | None:
+    """Split a legacy indexed identifier into base and index suffix.
+
+    Args:
+        identifier (str): Identifier to inspect. Legacy carrier keys use the
+            ``"<base>_<index>"`` spelling, where ``index`` is decimal.
+
+    Returns:
+        tuple[str, str] | None: ``(base, index)`` when ``identifier`` carries a
+            numeric suffix, otherwise ``None``.
+    """
+    separator = identifier.rfind("_")
+    if separator <= 0:
+        return None
+    suffix = identifier[separator + 1 :]
+    if not suffix.isdigit():
+        return None
+    return identifier[:separator], suffix
+
+
+def remap_indexed_identifier(
+    identifier: str,
+    remap_identifier: typing.Callable[[str], str],
+) -> str:
+    """Remap an identifier while preserving a legacy index suffix.
+
+    Args:
+        identifier (str): Scalar identifier or legacy ``"<base>_<index>"``
+            carrier key.
+        remap_identifier (typing.Callable[[str], str]): Function that remaps
+            scalar identifiers and carrier-key bases.
+
+    Returns:
+        str: Remapped identifier. Numeric index suffixes are preserved after
+            remapping the base identifier.
+    """
+    parts = split_indexed_identifier(identifier)
+    if parts is None:
+        return remap_identifier(identifier)
+    base, suffix = parts
+    return f"{remap_identifier(base)}_{suffix}"
+
+
 def remap_value_metadata_references(
     metadata: ValueMetadata,
     remap_uuid: typing.Callable[[str], str],
     remap_logical_id: typing.Callable[[str], str],
 ) -> ValueMetadata:
-    """Rewrite UUID and logical-id references inside ``ValueMetadata``.
+    """Rewrite UUID and logical-id references inside value metadata.
 
     Args:
-        metadata (ValueMetadata): Metadata bundle to rewrite.
-        remap_uuid (Callable[[str], str]): Function that maps a referenced
-            Value UUID to its replacement UUID.
-        remap_logical_id (Callable[[str], str]): Function that maps a
-            referenced Value logical ID to its replacement logical ID.
+        metadata (ValueMetadata): Metadata bundle whose embedded references
+            should be rewritten.
+        remap_uuid (typing.Callable[[str], str]): Function that maps scalar
+            UUID references (and carrier-key bases) to replacement UUIDs.
+        remap_logical_id (typing.Callable[[str], str]): Function that maps
+            scalar logical-id references (and carrier-key bases) to
+            replacement logical IDs.
 
     Returns:
-        ValueMetadata: Metadata with UUID-bearing sections rewritten.
-            Sections that do not carry Value references are preserved.
+        ValueMetadata: Metadata with every embedded UUID / logical-id reference
+            rewritten. Legacy ``"<uuid>_<index>"`` carrier keys keep their
+            index suffix while remapping the base UUID. The original bundle is
+            returned unchanged when no reference is rewritten.
     """
     new_cast = metadata.cast
     if new_cast is not None:
         new_cast = CastMetadata(
             source_uuid=remap_uuid(new_cast.source_uuid),
-            qubit_uuids=tuple(remap_uuid(uuid) for uuid in new_cast.qubit_uuids),
+            qubit_uuids=tuple(
+                remap_indexed_identifier(uuid_ref, remap_uuid)
+                for uuid_ref in new_cast.qubit_uuids
+            ),
             source_logical_id=(
                 remap_logical_id(new_cast.source_logical_id)
                 if new_cast.source_logical_id is not None
                 else None
             ),
             qubit_logical_ids=tuple(
-                remap_logical_id(logical_id)
+                remap_indexed_identifier(logical_id, remap_logical_id)
                 for logical_id in new_cast.qubit_logical_ids
             ),
         )
@@ -136,7 +186,10 @@ def remap_value_metadata_references(
     new_qfixed = metadata.qfixed
     if new_qfixed is not None:
         new_qfixed = QFixedMetadata(
-            qubit_uuids=tuple(remap_uuid(uuid) for uuid in new_qfixed.qubit_uuids),
+            qubit_uuids=tuple(
+                remap_indexed_identifier(uuid_ref, remap_uuid)
+                for uuid_ref in new_qfixed.qubit_uuids
+            ),
             num_bits=new_qfixed.num_bits,
             int_bits=new_qfixed.int_bits,
         )
@@ -146,17 +199,18 @@ def remap_value_metadata_references(
         new_array_rt = ArrayRuntimeMetadata(
             const_array=new_array_rt.const_array,
             element_uuids=tuple(
-                remap_uuid(uuid) for uuid in new_array_rt.element_uuids
+                remap_indexed_identifier(uuid_ref, remap_uuid)
+                for uuid_ref in new_array_rt.element_uuids
             ),
             element_logical_ids=tuple(
-                remap_logical_id(logical_id)
+                remap_indexed_identifier(logical_id, remap_logical_id)
                 for logical_id in new_array_rt.element_logical_ids
             ),
             # Empty parent UUID is a sentinel for standalone or unresolved
             # elements, not a Value UUID, so keep it unchanged.
             element_parent_uuids=tuple(
-                remap_uuid(uuid) if uuid else uuid
-                for uuid in new_array_rt.element_parent_uuids
+                remap_uuid(uuid_ref) if uuid_ref else uuid_ref
+                for uuid_ref in new_array_rt.element_parent_uuids
             ),
             element_parent_indices=new_array_rt.element_parent_indices,
         )
@@ -192,6 +246,14 @@ class ValueBase(typing.Protocol):
     def name(self) -> str: ...
     @property
     def metadata(self) -> ValueMetadata: ...
+    @property
+    def type(self) -> ValueType:
+        """Return the value's IR type.
+
+        Returns:
+            ValueType: Static type carried by the IR value.
+        """
+        ...
 
     def next_version(self) -> ValueBase: ...
     def is_parameter(self) -> bool: ...
@@ -482,10 +544,10 @@ class Value(_MetadataValueMixin, typing.Generic[T]):
 
     An empty string (``name=""``) is the **anonymous marker** used by
     auto-generated tmp values (arithmetic results, comparison results,
-    coerced constants). Name-based readers must guard with truthiness
-    (``if value.name and value.name in bindings: ...``) so anonymous values
-    never collide on a shared empty key. User-supplied parameter names and
-    array names continue to be non-empty.
+    coerced constants). Compiler-internal identity and writes use UUIDs or
+    explicit parameter metadata. Compatibility readers may consult a non-empty
+    label only after those identity channels, so anonymous temporaries cannot
+    collide through a shared display key.
     """
 
     type: T
@@ -586,6 +648,157 @@ class ArrayValue(Value[T]):
         return self.slice_of is not None
 
 
+def resolve_root_array_index(
+    array: "ArrayValue",
+    index: int,
+) -> tuple["ArrayValue", int] | None:
+    """Fold a view-local element index into the root array's index space.
+
+    Walks the ``slice_of`` chain root-ward, composing each strided view's
+    affine map ``parent_index = start + step * local_index``. This is the
+    array-level counterpart of :func:`resolve_root_qubit_address` (which
+    starts from an array-element ``Value``); both must stay consistent with
+    the composite carrier keys ``"<root_uuid>_<root_index>"`` registered by
+    ``QInitOperation`` at emit time.
+
+    Args:
+        array (ArrayValue): Array the index is local to. May be a root array
+            (``slice_of`` unset) or an arbitrarily nested strided view.
+        index (int): Element index in ``array``'s own index space.
+
+    Returns:
+        tuple[ArrayValue, int] | None: ``(root_array, composed_index)`` when
+            every slice bound on the chain is compile-time constant and
+            satisfies the frontend contract (non-negative ``slice_start``,
+            positive ``slice_step``). ``None`` when any ``slice_start`` /
+            ``slice_step`` on the chain is missing, symbolic, or violates
+            that contract; callers must then defer resolution rather than
+            guess. Out-of-contract bounds would compose ``index`` onto a
+            wrong root slot, so they are refused here too (the frontend
+            rejects them at trace time; this guard covers programmatically
+            constructed IR).
+    """
+    current = array
+    idx = index
+    while current.slice_of is not None:
+        # Symbolic view bounds cannot be folded to a fixed root index at
+        # this stage; defer to a resolver that has bindings available.
+        if (
+            current.slice_start is None
+            or current.slice_step is None
+            or not current.slice_start.is_constant()
+            or not current.slice_step.is_constant()
+        ):
+            return None
+        start = int(typing.cast(int, current.slice_start.get_const()))
+        step = int(typing.cast(int, current.slice_step.get_const()))
+        # Mirror the frontend slice contract (non-negative start, positive
+        # step); composing a negative start or non-positive step would remap
+        # ``idx`` onto a wrong root slot.
+        if start < 0 or step <= 0:
+            return None
+        idx = start + step * idx
+        current = current.slice_of
+    return current, idx
+
+
+def array_static_length(array: "ArrayValue") -> int | None:
+    """Resolve a one-dimensional array's compile-time length.
+
+    Args:
+        array (ArrayValue): Array whose sole shape dimension is inspected.
+
+    Returns:
+        int | None: Non-negative static length, or None when the array is not
+            one-dimensional, its length is symbolic/non-integral, or it is
+            malformed with a negative length. Boolean constants are rejected
+            even though ``bool`` is an ``int`` subclass.
+    """
+    if len(array.shape) != 1:
+        return None
+    length_value = array.shape[0]
+    if not length_value.is_constant():
+        return None
+    length = length_value.get_const()
+    if isinstance(length, bool) or not isinstance(length, int) or length < 0:
+        return None
+    return int(length)
+
+
+def array_physical_region(
+    array: "ArrayValue",
+) -> tuple[str, tuple[int, ...]] | None:
+    """Resolve a one-dimensional array to its ordered physical region.
+
+    The region is expressed independently of SSA version UUIDs: the first
+    element is the root array's ``logical_id`` and the second is the ordered
+    tuple of root-space indices addressed by the array. This makes a root
+    register and its full view compare equal while keeping partial, strided,
+    reordered, and different-root registers distinct.
+
+    Args:
+        array (ArrayValue): Root array or nested sliced view to resolve. The
+            array must be one-dimensional and have a compile-time integer
+            length; every slice bound in its ancestry must also be constant.
+
+    Returns:
+        tuple[str, tuple[int, ...]] | None: ``(root_logical_id, indices)``
+            when the complete ordered coverage is statically known, otherwise
+            ``None``. Symbolic shapes or slice bounds remain unresolved so
+            callers can defer to emit-time physical mappings.
+    """
+    length = array_static_length(array)
+    if length is None:
+        return None
+
+    root: ArrayValue | None = None
+    root_indices: list[int] = []
+    for local_index in range(length):
+        resolved = resolve_root_array_index(array, local_index)
+        if resolved is None:
+            return None
+        element_root, root_index = resolved
+        if root is None:
+            root = element_root
+        elif element_root.logical_id != root.logical_id:
+            return None
+        root_indices.append(root_index)
+
+    # Empty views do not visit an element above, but their slice ancestry still
+    # identifies the physical root unambiguously when all bounds are valid.
+    if root is None:
+        resolved = resolve_root_array_index(array, 0)
+        if resolved is None:
+            return None
+        root = resolved[0]
+    return root.logical_id, tuple(root_indices)
+
+
+def arrays_share_physical_region(left: "ArrayValue", right: "ArrayValue") -> bool:
+    """Return whether two arrays denote the same ordered physical region.
+
+    Args:
+        left (ArrayValue): First root array or sliced view.
+        right (ArrayValue): Second root array or sliced view.
+
+    Returns:
+        bool: ``True`` for the same SSA value/version lineage, when both arrays
+            resolve to the same root logical identity and ordered root indices,
+            or when both resolve to empty regions (whose root is unobservable).
+            Returns ``False`` for non-empty divergent regions and unresolved
+            symbolic coverage.
+    """
+    if left.uuid == right.uuid:
+        return True
+    if array_static_length(left) == 0 and array_static_length(right) == 0:
+        return True
+    left_region = array_physical_region(left)
+    right_region = array_physical_region(right)
+    if left_region is None or right_region is None:
+        return False
+    return left_region == right_region
+
+
 def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
     """Resolve an array-element value to its root ``(array_uuid, index)``.
 
@@ -612,7 +825,12 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
             ``None`` when ``value`` is not an array element, when its index is
             non-constant, or when any slice bound in the chain is non-constant
             (those cases are deferred to the emit-time resolver, which has
-            bindings available).
+            bindings available). Also ``None`` for a negative constant index
+            or a chain frame with negative ``slice_start`` / non-positive
+            ``slice_step`` — composing those would silently address a wrong
+            root slot, so they are refused rather than guessed (the frontend
+            rejects them at trace time; this guard covers programmatically
+            constructed IR).
     """
     # Not an array element (e.g. a standalone qubit / scalar): there is no
     # root array to address against.
@@ -634,28 +852,25 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
     if not idx_value.is_constant():
         return None
     idx = int(typing.cast(int, idx_value.get_const()))
+    # A negative local index would compose through the affine map below into
+    # a valid-but-wrong non-negative root index (``view[-1]`` for
+    # ``view = q[1:3]`` would address ``q[0]`` instead of ``q[2]``). The
+    # frontend rejects constant negative indices at trace time; refuse them
+    # here as well so programmatically constructed IR cannot slip through.
+    if idx < 0:
+        return None
     # Walk the ``slice_of`` chain root-ward. Each strided view contributes the
     # affine map ``parent_index = start + step * local_index``; composing them
     # rewrites a (possibly nested) view element into the underlying root array's
     # own index space, so the result matches the composite key QInit registered.
-    parent: ArrayValue | None = value.parent_array
-    while parent is not None and parent.slice_of is not None:
-        # Same constant-only restriction as the element index: a view whose
-        # bounds are symbolic is deferred (None), not guessed.
-        if (
-            parent.slice_start is None
-            or parent.slice_step is None
-            or not parent.slice_start.is_constant()
-            or not parent.slice_step.is_constant()
-        ):
-            return None
-        start = int(typing.cast(int, parent.slice_start.get_const()))
-        step = int(typing.cast(int, parent.slice_step.get_const()))
-        idx = start + step * idx
-        parent = parent.slice_of
-    if parent is None:
+    # ``resolve_root_array_index`` also refuses out-of-contract slice bounds
+    # (negative start / non-positive step) so the negative-index defense lives
+    # in one shared place.
+    resolved = resolve_root_array_index(value.parent_array, idx)
+    if resolved is None:
         return None
-    return (parent.uuid, idx)
+    root, root_idx = resolved
+    return (root.uuid, root_idx)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -663,7 +878,7 @@ class TupleValue(_MetadataValueMixin):
     """A tuple of IR values for structured data."""
 
     name: str
-    elements: tuple[Value, ...] = dataclasses.field(default_factory=tuple)
+    elements: tuple[ValueLike, ...] = dataclasses.field(default_factory=tuple)
     metadata: ValueMetadata = dataclasses.field(default_factory=ValueMetadata)
     uuid: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
     logical_id: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
@@ -684,7 +899,7 @@ class TupleValue(_MetadataValueMixin):
         )
 
     def is_constant(self) -> bool:
-        return all(isinstance(e, Value) and e.is_constant() for e in self.elements)
+        return all(element.is_constant() for element in self.elements)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -720,3 +935,50 @@ class DictValue(_MetadataValueMixin):
 
     def __len__(self) -> int:
         return len(self.entries)
+
+
+def collect_value_like_uuids(value: "ValueLike") -> set[str]:
+    """Collect UUIDs contained in a value-like IR object.
+
+    Args:
+        value (ValueLike): Value-like object to inspect.
+
+    Returns:
+        set[str]: UUIDs for ``value`` itself, recursively contained tuple/dict
+            elements, and array view/element dependencies.
+    """
+    uuids: set[str] = set()
+
+    def collect(current: ValueLike) -> None:
+        """Collect one value and recursively embedded dependencies.
+
+        Args:
+            current (ValueLike): Value-like object to visit.
+        """
+        if current.uuid in uuids:
+            return
+        uuids.add(current.uuid)
+        if isinstance(current, TupleValue):
+            for element in current.elements:
+                collect(element)
+        elif isinstance(current, DictValue):
+            for key, entry_value in current.entries:
+                collect(key)
+                collect(entry_value)
+        elif isinstance(current, ArrayValue):
+            for dimension in current.shape:
+                collect(dimension)
+            if current.slice_of is not None:
+                collect(current.slice_of)
+            if current.slice_start is not None:
+                collect(current.slice_start)
+            if current.slice_step is not None:
+                collect(current.slice_step)
+        elif isinstance(current, Value):
+            if current.parent_array is not None:
+                collect(current.parent_array)
+            for index in current.element_indices:
+                collect(index)
+
+    collect(value)
+    return uuids
