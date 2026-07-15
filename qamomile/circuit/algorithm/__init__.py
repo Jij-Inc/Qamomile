@@ -12,6 +12,10 @@ from .basic import (
     rz_layer,
     superposition_vector,
 )
+from .block_encoding import (
+    PeriodicStencilEncoding,
+    periodic_stencil_block_encoding,
+)
 from .fqaoa import (
     cost_layer,
     fqaoa_layers,
@@ -34,6 +38,9 @@ from .qaoa import (
 from .trotter import trotterized_time_evolution
 
 __all__ = [
+    # Block encoding
+    "PeriodicStencilEncoding",
+    "periodic_stencil_block_encoding",
     # Arithmetic
     "modular_increment",
     "modular_decrement",
