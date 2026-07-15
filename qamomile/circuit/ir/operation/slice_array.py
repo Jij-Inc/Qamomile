@@ -112,8 +112,8 @@ class ReleaseSliceViewOperation(Operation):
     / ``IfOperation``), this op only releases view borrows that were
     *created within the same body*.  Releasing a borrow that the
     enclosing block has registered (an "outer-snapshot" borrow) is
-    rejected by ``SliceBorrowCheckPass`` with
-    ``SliceBorrowViolationError`` — the loop-merge semantics of the
+    rejected by ``SliceBorrowCheckPass`` with ``ValidationError`` — the
+    loop-merge semantics of the
     pass cannot propagate entry deletions out of the body, so the only
     way to keep the static check consistent is to forbid that pattern.
 

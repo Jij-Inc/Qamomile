@@ -376,7 +376,7 @@ assert sum(1 for op in block.operations if isinstance(op, ForOperation)) == 1
 # This rule **does not forbid dynamic quantum circuits**: `IfOperation` and
 # `WhileOperation` are `OperationKind.CONTROL`, not QUANTUM, so control flow
 # conditioned on a measurement `Bit` (`if bit: ...`, `while bit: ...`)
-# passes the check. Quantum-typed values that survive a phi merge are also
+# passes the check. Quantum-typed values that survive an if-merge are also
 # explicitly exempt. Section 5 walks through which dynamic patterns are
 # allowed and which are rejected, with code examples.
 #
@@ -522,15 +522,18 @@ print(executable.quantum_circuit)
 # |-----------|-------------|--------------------|-------|
 # | `ForOperation` | `operations` (body) | `operands = [start, stop, step]` (all `UInt`) | carries `loop_var` name |
 # | `ForItemsOperation` | `operations` (body) | `operands[0]` is a `DictValue` | always unrolled at transpile time |
-# | `IfOperation` | `true_operations`, `false_operations` | `operands[0]` is a `Bit` | `phi_ops` merge values post-branch |
+# | `IfOperation` | `true_operations`, `false_operations` | `operands[0]` is a `Bit` | `true_yields` / `false_yields` merge values post-branch |
 # | `WhileOperation` | `operations` (body) | `operands[0]` (initial), `operands[1]` (loop-carried) | measurement-backed `Bit` required; optional `max_iterations` hint |
 #
 # All four implement `HasNestedOps`, so passes walk into bodies uniformly via
 # `nested_op_lists()` / `rebuild_nested()` — no isinstance chains.
 #
-# `IfOperation` carries **Phi nodes** (`PhiOp`) to merge values. When both
-# branches update the same logical value, readers past the if refer through
-# the phi to know which branch's version they get.
+# `IfOperation` merges values through its parallel **`true_yields` /
+# `false_yields`** lists: `true_yields[i]` and `false_yields[i]` are the
+# branch values merged into `results[i]`. When both branches update the same
+# logical value, readers past the if refer to the merged result to know which
+# branch's version they get. Passes read the merges through
+# `IfOperation.iter_merges()` rather than touching the yield lists directly.
 #
 # ### 5.3 Per-Pass Behavior
 #
@@ -538,7 +541,7 @@ print(executable.quantum_circuit)
 # |------|-------------|---------------|-----------------|
 # | `inline` | recurses into both branch bodies | recurses into body | recurses into body |
 # | `partial_eval` | constant condition → **replaced by selected branch** (`CompileTimeIfLoweringPass`); measurement condition preserved | bound `BinOp`s folded. **No unrolling** | untouched here |
-# | `analyze` | phi edges enter the dependency graph | `loop_var` enters body deps | measurement-condition treated like a quantum operand |
+# | `analyze` | merge edges enter the dependency graph | `loop_var` enters body deps | measurement-condition treated like a quantum operand |
 # | `validate_symbolic_shapes` | — | unresolved `Vector` shape dim as a bound → rejected | — |
 # | `plan` | `OperationKind.CONTROL` — creates a segment boundary | same | same |
 # | `emit` | emitted as runtime `if` if the backend supports it | `LoopAnalyzer.should_unroll()` decides unroll vs native-loop | emitted as runtime `while` |
@@ -833,7 +836,7 @@ except ModuleNotFoundError:
 # stage where `BlockKind` fails to advance, the operation count explodes,
 # or an exception is raised is the stage you should look at first. Varying
 # `pretty_print_block(block, depth=N)` before and after `inline` makes it
-# much easier to spot where a value got disconnected or a phi got dropped.
+# much easier to spot where a value got disconnected or a merge got dropped.
 
 # %% [markdown]
 # ## 9. Summary

@@ -11,7 +11,16 @@ from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
     InvokeOperation,
 )
-from qamomile.circuit.ir.value import Value, resolve_root_qubit_address
+from qamomile.circuit.ir.types.primitives import BitType
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    collect_value_like_uuids,
+    resolve_root_qubit_address,
+)
 from qamomile.circuit.transpiler.executable import (
     CompiledClassicalSegment,
     CompiledExpvalSegment,
@@ -20,6 +29,9 @@ from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
 )
 from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
+    resolve_condition_address_detailed,
+)
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     ClbitMap,
     QubitAddress,
@@ -44,36 +56,22 @@ C = TypeVar("C", contravariant=True)  # Circuit type for emitter
 
 @runtime_checkable
 class CompositeGateEmitter(Protocol[C]):
-    """Protocol for backend-specific boxed-call emitters.
+    """Protocol for preserving or lowering boxed callable operations.
 
-    Each backend can implement emitters for specific boxed callable types
-    (QPE, QFT, IQFT, etc.) using native backend libraries.
-
-    The emitter pattern allows:
-    1. Backends to use native implementations when available (e.g., Qiskit QFT)
-    2. Fallback to manual decomposition when native is unavailable
-    3. Easy addition of new backends without modifying core code
-
-    Example:
-        class QiskitQFTEmitter:
-            def can_emit(self, gate_type: CompositeGateType) -> bool:
-                return gate_type in (CompositeGateType.QFT, CompositeGateType.IQFT)
-
-            def emit(self, circuit, op, qubit_indices, bindings) -> bool:
-                from qiskit.circuit.library import QFTGate
-                qft_gate = QFTGate(len(qubit_indices))
-                circuit.append(qft_gate, qubit_indices)
-                return True
+    The concrete compiler installs a semantic emitter that boxes every
+    executable callable into circuit IR with its identity and fallback body.
+    Native SDK selection happens later, through target capabilities and
+    legalization; this traversal hook must not import or select a backend.
     """
 
     def can_emit(self, gate_type: CompositeGateType) -> bool:
-        """Check if this emitter can handle the given gate type.
+        """Check whether this emitter handles the given callable kind.
 
         Args:
-            gate_type: The CompositeGateType to check
+            gate_type (CompositeGateType): Callable kind to check.
 
         Returns:
-            True if this emitter supports native emission for the gate type
+            bool: True if this emitter handles the callable kind.
         """
         ...
 
@@ -84,16 +82,17 @@ class CompositeGateEmitter(Protocol[C]):
         qubit_indices: list[int],
         bindings: dict[str, Any],
     ) -> bool:
-        """Emit the boxed callable to the circuit.
+        """Preserve or lower the boxed callable into the output builder.
 
         Args:
-            circuit: The backend-specific circuit to emit to
-            op: The invocation to emit
-            qubit_indices: Physical qubit indices for the operation
-            bindings: Parameter bindings for the operation
+            circuit (C): Output builder receiving the callable representation.
+            op (InvokeOperation): Invocation to preserve or lower.
+            qubit_indices (list[int]): Physical qubit indices for the operation.
+            bindings (dict[str, Any]): Parameter bindings for the operation.
 
         Returns:
-            True if emission succeeded, False to fall back to manual decomposition
+            bool: True if handled, or False to use the generic fallback
+            decomposition.
         """
         ...
 
@@ -157,7 +156,22 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         self._resolver = ValueResolver(self.parameters)
 
     def run(self, input: ProgramPlan) -> ExecutableProgram[T]:
-        """Emit backend code from a program plan."""
+        """Emit backend code from a program plan.
+
+        Args:
+            input (ProgramPlan): Segmented plan whose quantum and classical
+                steps should be compiled.
+
+        Returns:
+            ExecutableProgram[T]: Executable program containing all compiled
+                segments and the public output contract.
+        """
+        self._program_output_values = tuple(input.abi.output_values)
+        self._program_output_refs = frozenset(
+            uuid
+            for value in self._program_output_values
+            for uuid in collect_value_like_uuids(value)
+        )
         quantum_segments: list[QuantumSegment] = []
         compiled_classical: list[CompiledClassicalSegment] = []
         classical_segments: list[ClassicalSegment] = []
@@ -195,11 +209,26 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         self,
         segment: QuantumSegment,
     ) -> CompiledQuantumSegment[T]:
-        """Compile a quantum segment to backend circuit."""
-        circuit, qubit_map, clbit_map = self._emit_quantum_segment(
-            segment.operations,
-            self.bindings,
-        )
+        """Compile a quantum segment to a backend circuit.
+
+        Args:
+            segment (QuantumSegment): Segment whose operations and live
+                quantum-to-classical boundary outputs should be emitted.
+
+        Returns:
+            CompiledQuantumSegment[T]: Compiled circuit plus physical resource
+                and parameter metadata.
+        """
+        self._current_quantum_output_refs = frozenset(segment.output_refs)
+        try:
+            circuit, qubit_map, clbit_map = self._emit_quantum_segment(
+                segment.operations,
+                self.bindings,
+            )
+        finally:
+            del self._current_quantum_output_refs
+
+        self._register_public_output_clbit_aliases(clbit_map)
 
         # Build parameter metadata after emission
         param_metadata = self._build_parameter_metadata()
@@ -217,6 +246,133 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             measurement_qubit_map=dict(measurement_qubit_map),
             parameter_metadata=param_metadata,
         )
+
+    def _register_public_output_clbit_aliases(self, clbit_map: ClbitMap) -> None:
+        """Alias structural public Bit outputs onto their physical clbits.
+
+        Vector measurements allocate classical resources under root-array
+        addresses such as ``QubitAddress(bits.uuid, i)``. A later element or
+        slice access has its own UUID, while the public ABI historically kept
+        only that UUID. Registering aliases after emission (when loop-carried
+        indices have their final emit-time bindings) lets measurement loading
+        populate both the physical root address and the public output identity.
+
+        Args:
+            clbit_map (ClbitMap): Physical clbit map to extend in place.
+
+        Returns:
+            None: The supplied map receives zero or more alias addresses.
+
+        Raises:
+            EmitError: If a public Bit view carries slice bounds or a length
+                that cannot be resolved at emit time.
+        """
+        output_values = getattr(self, "_program_output_values", ())
+        for descriptor in output_values:
+            for output in self._flatten_public_output_leaves(descriptor):
+                if isinstance(output, Value) and isinstance(output.type, BitType):
+                    address, resolved_as_element = resolve_condition_address_detailed(
+                        output,
+                        self.bindings,
+                        self._resolver,
+                    )
+                    if resolved_as_element and address in clbit_map:
+                        clbit_map[QubitAddress(output.uuid)] = clbit_map[address]
+                    continue
+
+                if not (
+                    isinstance(output, ArrayValue)
+                    and isinstance(output.type, BitType)
+                    and output.slice_of is not None
+                ):
+                    continue
+
+                root, start, step = self._resolver.resolve_slice_chain(
+                    output,
+                    self.bindings,
+                    operation="public Bit view output",
+                )
+                if not output.shape:
+                    from qamomile.circuit.transpiler.errors import EmitError
+
+                    raise EmitError(
+                        "A public Vector[Bit] view has no shape information.",
+                        operation="public Bit view output",
+                    )
+                length = self._resolver.resolve_int_value(
+                    output.shape[0], self.bindings
+                )
+                if length is None:
+                    from qamomile.circuit.transpiler.errors import EmitError
+
+                    raise EmitError(
+                        "A public Vector[Bit] view has an unresolved length.",
+                        operation="public Bit view output",
+                    )
+                for local_index in range(length):
+                    source = QubitAddress(root.uuid, start + step * local_index)
+                    if source in clbit_map:
+                        clbit_map[QubitAddress(output.uuid, local_index)] = clbit_map[
+                            source
+                        ]
+
+    @staticmethod
+    def _flatten_public_output_leaves(value: ValueBase) -> tuple[ValueBase, ...]:
+        """Flatten tuple and dictionary output descriptors to typed leaves.
+
+        Frontend return values normally arrive as already-flattened ABI
+        descriptors. Low-level blocks may instead expose a ``TupleValue`` or
+        ``DictValue`` directly, so emit-time output handling must inspect the
+        scalar and array leaves stored in both dictionary keys and values.
+        Array ancestry is deliberately not traversed here: a returned element
+        is one leaf, while its parent vector is only addressing metadata and
+        must not be treated as a separate whole-vector output.
+
+        Args:
+            value (ValueBase): Public output descriptor to flatten.
+
+        Returns:
+            tuple[ValueBase, ...]: Non-container leaves in deterministic
+                tuple/dictionary entry order.
+        """
+        leaves: list[ValueBase] = []
+        pending: list[ValueBase] = [value]
+        visited: set[int] = set()
+        while pending:
+            current = pending.pop()
+            identity = id(current)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            if isinstance(current, TupleValue):
+                pending.extend(reversed(current.elements))
+                continue
+            if isinstance(current, DictValue):
+                children = [child for entry in current.entries for child in entry]
+                pending.extend(reversed(children))
+                continue
+            leaves.append(current)
+        return tuple(leaves)
+
+    def _allocator_live_output_refs(self) -> frozenset[str] | None:
+        """Return outputs that must survive quantum resource allocation.
+
+        The public ABI output may be a classical expression produced after the
+        quantum segment.  In that shape its measurement input is absent from
+        ``ProgramABI.output_refs`` but present in ``QuantumSegment.output_refs``.
+        Both sets must therefore seed allocator liveness.  Returning ``None``
+        when neither context exists keeps direct low-level emit calls
+        fail-closed for mixed prior/fresh Bit merges.
+
+        Returns:
+            frozenset[str] | None: Union of public and current-segment output
+                UUIDs, or None when emission has no complete plan context.
+        """
+        program_outputs = getattr(self, "_program_output_refs", None)
+        segment_outputs = getattr(self, "_current_quantum_output_refs", None)
+        if program_outputs is None and segment_outputs is None:
+            return None
+        return frozenset(program_outputs or ()) | frozenset(segment_outputs or ())
 
     def _build_parameter_metadata(self) -> ParameterMetadata:
         """Build parameter metadata after emission.

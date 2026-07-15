@@ -213,11 +213,11 @@ def test_controlled_block_fallback_path_rejects_alias(monkeypatch):
     Forcing that path here confirms the shared aliasing check still fires — the
     diagnostic is labelled ``controlled gate (fallback)``.
     """
-    from qamomile.qiskit.transpiler import QiskitEmitPass
+    from qamomile.circuit.transpiler.circuit_ir import CircuitLoweringPass
 
     # Force the fallback branch (``unitary_gate is None``).
     monkeypatch.setattr(
-        QiskitEmitPass, "_blockvalue_to_gate", lambda self, *a, **k: None
+        CircuitLoweringPass, "_blockvalue_to_gate", lambda self, *a, **k: None
     )
 
     @qmc.qkernel
@@ -268,26 +268,6 @@ def test_inverse_block_diagonal_alias_is_rejected():
         QiskitTranspiler().transpile(diagonal_inverse, bindings={"n": 2})
 
 
-def test_inverse_block_forced_fallback_rejects_alias(monkeypatch):
-    """The inverse fallback (no reusable gate) also rejects aliasing."""
-    from qamomile.qiskit.transpiler import QiskitEmitPass
-
-    monkeypatch.setattr(
-        QiskitEmitPass, "_blockvalue_to_gate", lambda self, *a, **k: None
-    )
-
-    @qmc.qkernel
-    def diagonal_inverse(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-        qs = qmc.qubit_array(n, "qs")
-        for i in qmc.range(n):
-            for j in qmc.range(n):
-                qs[i], qs[j] = _inverse_cx(qs[i], qs[j])
-        return qmc.measure(qs)
-
-    with pytest.raises(QubitAliasError, match="inverse block"):
-        QiskitTranspiler().transpile(diagonal_inverse, bindings={"n": 2})
-
-
 def test_inverse_block_diagonal_alias_is_rejected_on_cudaq():
     """CUDA-Q's inverse adjoint fast path also rejects target aliasing.
 
@@ -323,31 +303,6 @@ def test_inverse_block_off_diagonal_transpiles():
 
     executable = QiskitTranspiler().transpile(chain_inverse, bindings={"n": 3})
     assert executable is not None
-
-
-def test_qubit_alias_error_is_not_swallowed_by_fallback(monkeypatch):
-    """A ``QubitAliasError`` from a controlled block body is not caught.
-
-    The fallback decomposition wraps inner emission in a broad ``except``; this
-    pins that ``QubitAliasError`` (a ``QamomileCompileError``, not a bare
-    ``ValueError``) propagates rather than being silently swallowed.
-    """
-    from qamomile.qiskit.transpiler import QiskitEmitPass
-
-    monkeypatch.setattr(
-        QiskitEmitPass, "_blockvalue_to_gate", lambda self, *a, **k: None
-    )
-
-    @qmc.qkernel
-    def diagonal_controlled(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-        qs = qmc.qubit_array(n, "qs")
-        for i in qmc.range(n):
-            for j in qmc.range(n):
-                qs[i], qs[j] = _controlled_x(qs[i], qs[j])
-        return qmc.measure(qs)
-
-    with pytest.raises(QubitAliasError):
-        QiskitTranspiler().transpile(diagonal_controlled, bindings={"n": 2})
 
 
 def test_reject_duplicate_physical_indices_unit():

@@ -367,36 +367,55 @@ def _backend_statevector(sdk_transpiler: Any, circuit: Any) -> np.ndarray:
     raise AssertionError(f"Unsupported backend {sdk_transpiler.backend_name!r}")
 
 
-def _rz_count_qiskit(qc) -> int:
-    """Count RZ gates inside Qiskit ``for_loop`` bodies (plus top-level)."""
+def _pauli_evolution_count_qiskit(qc: Any) -> int:
+    """Count native Qiskit Pauli-evolution operations recursively.
+
+    Args:
+        qc (Any): Qiskit circuit or nested control-flow block.
+
+    Returns:
+        int: Number of native Pauli-evolution operations.
+    """
     count = 0
     for inst in qc.data:
         if inst.operation.name == "for_loop":
-            count += _rz_count_qiskit(inst.operation.blocks[0])
-        elif inst.operation.name == "rz":
+            count += _pauli_evolution_count_qiskit(inst.operation.blocks[0])
+        elif inst.operation.name == "PauliEvolution":
             count += 1
     return count
 
 
-def _rz_count_quri_parts(qp_circuit) -> int:
-    """Count RZ gates in a (bound) QURI Parts circuit."""
+def _pauli_rotation_count_quri_parts(qp_circuit: Any) -> int:
+    """Count native QURI Parts Pauli-rotation operations.
+
+    Args:
+        qp_circuit (Any): Bound or parametric QURI Parts circuit.
+
+    Returns:
+        int: Number of native Pauli-rotation operations.
+    """
     if hasattr(qp_circuit, "parameter_count") and qp_circuit.parameter_count > 0:
         bound = qp_circuit.bind_parameters([0.0] * qp_circuit.parameter_count)
     elif hasattr(qp_circuit, "bind_parameters"):
         bound = qp_circuit.bind_parameters([])
     else:
         bound = qp_circuit
-    return sum(1 for g in bound.gates if g.name == "RZ")
+    return sum(1 for g in bound.gates if g.name == "PauliRotation")
 
 
-def _exp_pauli_count_cudaq(cudaq_circuit) -> int:
+def _exp_pauli_count_cudaq(cudaq_circuit: Any) -> int:
     """Count ``exp_pauli(`` call sites in the CUDA-Q kernel source.
 
     CUDA-Q lowers each ``pauli_evolve`` term to a native ``exp_pauli``
-    rather than the ``h`` / ``rz`` gadget the other backends use, so the
-    cross-backend per-step invariant is "one ``exp_pauli`` per Pauli
-    rotation", which equals the Qiskit / QURI Parts per-step RZ count for
-    the single-qubit terms in ``HS_2TERM``.
+    rather than a gate gadget. The cross-backend per-step invariant is one
+    high-level evolution operation per formula term: ``PauliEvolutionGate``
+    in Qiskit, ``PauliRotation`` in QURI Parts, and ``exp_pauli`` in CUDA-Q.
+
+    Args:
+        cudaq_circuit (Any): Generated CUDA-Q kernel artifact.
+
+    Returns:
+        int: Number of native ``exp_pauli`` call sites.
     """
     return cudaq_circuit.source.count("exp_pauli(")
 
@@ -404,17 +423,17 @@ def _exp_pauli_count_cudaq(cudaq_circuit) -> int:
 class TestCrossBackendCompilation:
     """Trotter kernel transpiles across every available SDK.
 
-    Per-step RZ count is formula-dependent and must agree between
-    backends: order=1 emits one RZ per term, order=2 uses the merged
-    palindrome (three RZs for two terms), and higher orders unfold
-    recursively via the standard ``pauli_evolve`` decomposition.
+    Per-step semantic evolution count is formula-dependent and must agree
+    between backends: order=1 emits one operation per term, order=2 uses the
+    merged palindrome (three operations for two terms), and higher orders
+    unfold recursively through the product-formula construction.
     """
 
-    # Expected RZ counts for a single Trotter step on HS_2TERM.
-    _EXPECTED_RZ_PER_STEP = {1: 2, 2: 3, 4: 15}
+    # Expected high-level Pauli-evolution operations for one HS_2TERM step.
+    _EXPECTED_EVOLUTIONS_PER_STEP = {1: 2, 2: 3, 4: 15}
 
     @pytest.mark.parametrize("order", [1, 2, 4])
-    def test_native_rotation_count(self, sdk_transpiler: Any, order: int) -> None:
+    def test_native_evolution_count(self, sdk_transpiler: Any, order: int) -> None:
         """Every backend emits one native phase rotation per formula term."""
         exe = sdk_transpiler.transpiler.transpile(
             _rabi_trotter,
@@ -426,13 +445,13 @@ class TestCrossBackendCompilation:
             },
         )
         circuit = exe.compiled_quantum[0].circuit
-        expected = self._EXPECTED_RZ_PER_STEP[order]
+        expected = self._EXPECTED_EVOLUTIONS_PER_STEP[order]
         if sdk_transpiler.backend_name == "qiskit":
             assert circuit.num_qubits == 1
-            assert _rz_count_qiskit(circuit) == expected
+            assert _pauli_evolution_count_qiskit(circuit) == expected
         elif sdk_transpiler.backend_name == "quri_parts":
             assert circuit.qubit_count == 1
-            assert _rz_count_quri_parts(circuit) == expected
+            assert _pauli_rotation_count_quri_parts(circuit) == expected
         else:
             assert sdk_transpiler.backend_name == "cudaq"
             assert circuit.num_qubits == 1

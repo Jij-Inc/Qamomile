@@ -75,7 +75,16 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
+    ForItemsOperation,
+    ForOperation,
+    HasNestedOps,
+    LoopCarriedRebind,
+    RegionArg,
+    WhileOperation,
+    validate_region_args,
+)
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
@@ -115,7 +124,9 @@ def canonicalize(block: Block) -> Block:
             manifest (carried over verbatim) are preserved.
 
     Raises:
-        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
+        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``,
+            or if a loop operation's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
         NotImplementedError: If an unsupported operation is encountered.
 
     Example:
@@ -151,7 +162,9 @@ def canonicalize_and_remap(
             tracked in separate maps.
 
     Raises:
-        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
+        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``,
+            or if a loop operation's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
         NotImplementedError: If an unsupported operation is encountered.
     """
     if block.kind not in _SUPPORTED_KINDS:
@@ -394,6 +407,9 @@ class _Canonicalizer:
         Raises:
             NotImplementedError: If ``op`` contains unsupported nested data.
         """
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            validate_region_args(op)
+
         sub_map: dict[str, ValueBase] = {}
         for v in op.all_input_values():
             sub_map[v.uuid] = self.canonical_value(v)
@@ -660,6 +676,18 @@ def _token(obj: Any) -> str:
         return _value_token(obj)
     if isinstance(obj, ValueType):
         return f"Type<{obj.label()}>"
+    if isinstance(obj, (RegionArg, LoopCarriedRebind, BranchRebind)):
+        # ``var_name`` is a display-only diagnostic label and must not
+        # perturb content identity; every other field participates.
+        # Iterate the dataclass fields dynamically so a functional field
+        # added later is hashed automatically instead of being silently
+        # ignored by a hand-frozen list.
+        parts = ",".join(
+            f"{field.name}={_token(getattr(obj, field.name))}"
+            for field in dataclasses.fields(obj)
+            if field.name != "var_name"
+        )
+        return f"{type(obj).__name__}({parts})"
     if isinstance(obj, (list, tuple)):
         return "[" + ",".join(_token(x) for x in obj) + "]"
     if isinstance(obj, dict):
@@ -909,6 +937,11 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         "implementation_block",
         "source_block",
         "block",
+        # Control-flow source labels. Their UUID-bearing formal Values and
+        # operation structure carry the semantics.
+        "loop_var",
+        "key_vars",
+        "value_var",
     }
 )
 

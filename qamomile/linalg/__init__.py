@@ -17,7 +17,7 @@ Exposes:
   :func:`compute_mottonen_amplitude_encoding_rz_angles`,
   :func:`validate_and_normalize_amplitudes`).  The actual quantum
   gate emission lives under
-  :mod:`qamomile.circuit.algorithm.state_preparation`; this module
+  :mod:`qamomile.circuit.stdlib.state_preparation`; this module
   provides only the classical angle math so that hybrid loops can
   pre-compute angle vectors outside any kernel and feed them to
   ``amplitude_encoding_from_angles`` via ``parameters=[...]``.

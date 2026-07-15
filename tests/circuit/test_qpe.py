@@ -370,9 +370,11 @@ class TestQPEBuiltin:
         assert {op.callable_ref.name for op in controlled_ops if op.callable_ref} == {
             "_p_gate"
         }
-        assert {
-            op.callable_ref.namespace for op in controlled_ops if op.callable_ref
-        } == {"user.qkernel"}
+        assert all(
+            op.callable_ref.namespace.startswith("user.qkernel.")
+            for op in controlled_ops
+            if op.callable_ref
+        )
         assert {op.callable_attrs["kind"] for op in controlled_ops} == {"qkernel"}
         assert {op.callable_attrs["default_policy"] for op in controlled_ops} == {
             "INLINE"
@@ -392,9 +394,11 @@ class TestQPEBuiltin:
 
         assert controlled_ops
         assert all(op.callable_ref is not None for op in controlled_ops)
-        assert {
-            op.callable_ref.namespace for op in controlled_ops if op.callable_ref
-        } == {"user.composite"}
+        assert all(
+            op.callable_ref.namespace.startswith("user.composite.")
+            for op in controlled_ops
+            if op.callable_ref
+        )
         assert {op.callable_ref.name for op in controlled_ops if op.callable_ref} == {
             "boxed_p_gate"
         }

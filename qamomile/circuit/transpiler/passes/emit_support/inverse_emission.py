@@ -73,9 +73,12 @@ def _normalize_inverse_block_op(
     Raises:
         EmitError: If a marker-bearing nested block is already past the
             stages that can be safely checked.
-        SliceBorrowViolationError: If a nested block's slice usage
-            violates the same linearity rules enforced for top-level
-            blocks.
+        QubitBorrowConflictError: If nested slice views have overlapping live
+            ownership.
+        QubitConsumedError: If a nested block accesses a qubit slot after a
+            destructive operation consumed it.
+        ValidationError: If nested slice ownership cannot be represented
+            safely across a control-flow boundary.
     """
     source_block = _prepare_nested_block_for_emit(op.source_block, bindings)
     implementation_block = _prepare_nested_block_for_emit(
@@ -173,8 +176,12 @@ def emit_inverse_block_at_indices(
     Raises:
         EmitError: If required source/fallback blocks are missing or no
             emission path can represent the operation.
-        SliceBorrowViolationError: If a nested block's slice usage fails
-            the borrow check run by ``_normalize_inverse_block_op``.
+        QubitBorrowConflictError: If nested slice views have overlapping live
+            ownership.
+        QubitConsumedError: If a nested block accesses a qubit slot after a
+            destructive operation consumed it.
+        ValidationError: If nested slice ownership cannot be represented
+            safely across a control-flow boundary.
     """
     if op.source_block is None or op.implementation_block is None:
         raise EmitError(

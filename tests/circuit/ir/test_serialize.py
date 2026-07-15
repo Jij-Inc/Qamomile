@@ -663,7 +663,9 @@ class TestRoundTripIRFeatures:
             op for op in block.operations if isinstance(op, InvokeOperation)
         ]
         assert controlled_ops
-        assert {op.target.namespace for op in controlled_ops} == {"user.composite"}
+        assert all(
+            op.target.namespace.startswith("user.composite.") for op in controlled_ops
+        )
         assert {op.target.name for op in controlled_ops} == {"boxed_phase"}
         assert {op.transform for op in controlled_ops} == {CallTransform.CONTROLLED}
         assert {op.attrs["kind"] for op in controlled_ops} == {"composite"}
@@ -676,7 +678,9 @@ class TestRoundTripIRFeatures:
             restored_ops = [
                 op for op in restored.operations if isinstance(op, InvokeOperation)
             ]
-            assert [op.target.namespace for op in restored_ops] == ["user.composite"]
+            assert [op.target.namespace for op in restored_ops] == [
+                controlled_ops[0].target.namespace
+            ]
             assert [op.target.name for op in restored_ops] == ["boxed_phase"]
             assert [op.transform for op in restored_ops] == [CallTransform.CONTROLLED]
             assert [op.attrs["kind"] for op in restored_ops] == ["composite"]
@@ -689,7 +693,9 @@ class TestRoundTripIRFeatures:
         block = _to_affine(_inverse_boxed_phase)
         inverse_ops = [op for op in block.operations if isinstance(op, InvokeOperation)]
         assert inverse_ops
-        assert {op.target.namespace for op in inverse_ops} == {"user.composite"}
+        assert all(
+            op.target.namespace.startswith("user.composite.") for op in inverse_ops
+        )
         assert {op.target.name for op in inverse_ops} == {"boxed_phase"}
         assert {op.transform for op in inverse_ops} == {CallTransform.INVERSE}
         assert {op.attrs["kind"] for op in inverse_ops} == {"composite"}
@@ -702,7 +708,9 @@ class TestRoundTripIRFeatures:
             restored_ops = [
                 op for op in restored.operations if isinstance(op, InvokeOperation)
             ]
-            assert [op.target.namespace for op in restored_ops] == ["user.composite"]
+            assert [op.target.namespace for op in restored_ops] == [
+                inverse_ops[0].target.namespace
+            ]
             assert [op.target.name for op in restored_ops] == ["boxed_phase"]
             assert [op.transform for op in restored_ops] == [CallTransform.INVERSE]
             assert [op.attrs["kind"] for op in restored_ops] == ["composite"]

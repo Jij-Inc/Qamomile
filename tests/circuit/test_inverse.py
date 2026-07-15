@@ -28,11 +28,6 @@ from qamomile.circuit.algorithm.fqaoa import (
     mixer_layer,
 )
 from qamomile.circuit.algorithm.qaoa import x_mixer
-from qamomile.circuit.algorithm.state_preparation import (
-    amplitude_encoding,
-    amplitude_encoding_from_angles,
-    computational_basis_state,
-)
 from qamomile.circuit.estimator import estimate_resources
 from qamomile.circuit.frontend.operation.inverse import (
     _BlockInverter,
@@ -62,6 +57,11 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+from qamomile.circuit.stdlib.state_preparation import (
+    amplitude_encoding,
+    amplitude_encoding_from_angles,
+    computational_basis_state,
+)
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import CircuitStyle
 from tests.circuit.conftest import run_statevector
@@ -1786,7 +1786,7 @@ def test_inverse_accepts_qkernel_backed_composite_decorator() -> None:
     assert len(inverse_ops) == 1
     op = inverse_ops[0]
     assert op.transform is CallTransform.INVERSE
-    assert op.target.namespace == "user.composite"
+    assert op.target.namespace.startswith("user.composite.")
     assert op.target.name == "boxed_h"
     assert op.attrs["kind"] == "composite"
     assert op.attrs["custom_name"] == "boxed_h"
@@ -1990,27 +1990,12 @@ def test_qiskit_emitter_falls_back_on_qiskit_error() -> None:
     assert emitter.gate_inverse(BadGate()) is None
 
 
-def test_inverse_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None:
-    """inverse(qkernel) uses QURI Parts inverse_circuit when available."""
+def test_inverse_qkernel_lowers_directly_to_quri_parts_gates() -> None:
+    """inverse(qkernel) lowers directly through the QURI materializer."""
     pytest.importorskip("quri_parts")
     pytest.importorskip("quri_parts.qulacs")
 
-    import quri_parts.circuit as qp_c
-
     from qamomile.quri_parts import QuriPartsTranspiler
-
-    # The emitter looks up `qp_c.inverse_circuit` at call time, so patching
-    # the quri_parts.circuit module attribute observes the backend-native
-    # inverse path without changing its behavior.
-    original_inverse_circuit = qp_c.inverse_circuit
-    inverse_calls = []
-
-    def inverse_circuit_spy(circuit):
-        """Record backend inverse calls while preserving QURI Parts behavior."""
-        inverse_calls.append(circuit)
-        return original_inverse_circuit(circuit)
-
-    monkeypatch.setattr(qp_c, "inverse_circuit", inverse_circuit_spy)
 
     @qmc.qkernel
     def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2023,7 +2008,6 @@ def test_inverse_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None
     executable = transpiler.transpile(circuit)
     gates = executable.compiled_quantum[0].circuit.gates
 
-    assert len(inverse_calls) == 1
     assert [(gate.name, gate.target_indices) for gate in gates] == [
         ("H", (1,)),
         ("RZ", (1,)),
@@ -2038,27 +2022,12 @@ def test_inverse_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None
     ]
 
 
-def test_inverse_vector_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None:
-    """inverse(qkernel) keeps Vector inputs atomic for QURI Parts inversion."""
+def test_inverse_vector_qkernel_lowers_directly_to_quri_parts_gates() -> None:
+    """inverse(qkernel) preserves vector order during direct QURI lowering."""
     pytest.importorskip("quri_parts")
     pytest.importorskip("quri_parts.qulacs")
 
-    import quri_parts.circuit as qp_c
-
     from qamomile.quri_parts import QuriPartsTranspiler
-
-    # The emitter looks up `qp_c.inverse_circuit` at call time, so patching
-    # the quri_parts.circuit module attribute observes the backend-native
-    # inverse path without changing its behavior.
-    original_inverse_circuit = qp_c.inverse_circuit
-    inverse_calls = []
-
-    def inverse_circuit_spy(circuit):
-        """Record backend inverse calls while preserving QURI Parts behavior."""
-        inverse_calls.append(circuit)
-        return original_inverse_circuit(circuit)
-
-    monkeypatch.setattr(qp_c, "inverse_circuit", inverse_circuit_spy)
 
     @qmc.qkernel
     def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2070,7 +2039,6 @@ def test_inverse_vector_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) 
     executable = transpiler.transpile(circuit)
     gates = executable.compiled_quantum[0].circuit.gates
 
-    assert len(inverse_calls) == 1
     assert [(gate.name, gate.target_indices, gate.params) for gate in gates] == [
         ("RX", (1,), (-0.37,)),
         ("RX", (0,), (-0.37,)),
@@ -2078,8 +2046,8 @@ def test_inverse_vector_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) 
 
 
 @pytest.mark.cudaq
-def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
-    """inverse(qkernel) uses CUDA-Q cudaq.adjoint when available.
+def test_inverse_qkernel_uses_cudaq_adjoint_helper() -> None:
+    """inverse(qkernel) preserves a named helper and uses CUDA-Q adjoint.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2100,10 +2068,12 @@ def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
     quantum_step = executable.compiled_quantum[0]
     cudaq_circuit = quantum_step.circuit
 
-    assert "def _qamomile_adjoint_0(t0: cudaq.qubit, thetas: list[float]):" in (
+    assert "def _qamomile_U_0(q0: cudaq.qubit, thetas: list[float]):" in (
         cudaq_circuit.source
     )
-    assert "cudaq.adjoint(_qamomile_adjoint_0, q[1], thetas)" in cudaq_circuit.source
+    assert "rz(thetas[0], q0)" in cudaq_circuit.source
+    assert "cudaq.adjoint(_qamomile_U_0, q0, thetas)" in cudaq_circuit.source
+    assert "_adjoint_1(q[1], thetas)" in cudaq_circuit.entry_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -2118,8 +2088,8 @@ def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
 
 
 @pytest.mark.cudaq
-def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
-    """inverse(qkernel) keeps Vector inputs atomic for CUDA-Q adjoint.
+def test_inverse_vector_qkernel_uses_cudaq_adjoint_helper() -> None:
+    """Vector inverse stays atomic in a named CUDA-Q adjoint helper.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2141,12 +2111,12 @@ def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
     cudaq_circuit = quantum_step.circuit
 
     assert (
-        "def _qamomile_adjoint_0(t0: cudaq.qubit, t1: cudaq.qubit, "
-        "thetas: list[float]):"
+        "def _qamomile_U_0(q0: cudaq.qubit, q1: cudaq.qubit, thetas: list[float]):"
     ) in cudaq_circuit.source
-    assert (
-        "cudaq.adjoint(_qamomile_adjoint_0, q[0], q[1], thetas)" in cudaq_circuit.source
-    )
+    assert "rx(thetas[0], q0)" in cudaq_circuit.source
+    assert "rx(thetas[0], q1)" in cudaq_circuit.source
+    assert "cudaq.adjoint(_qamomile_U_0, q0, q1, thetas)" in (cudaq_circuit.source)
+    assert "_adjoint_1(q[0], q[1], thetas)" in cudaq_circuit.entry_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -2161,8 +2131,8 @@ def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
 
 
 @pytest.mark.cudaq
-def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
-    """CUDA-Q inverse-of-inverse falls back before nested adjoint emission.
+def test_inverse_of_inverse_cudaq_uses_explicit_late_fallback() -> None:
+    """Nested adjoint uses the SDK-safe fallback at materialization only.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2192,7 +2162,8 @@ def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
         "@cudaq.kernel\ndef _qamomile_kernel",
         maxsplit=1,
     )
-    assert "cudaq.adjoint(" not in helper_source
+    assert helper_source.count("cudaq.adjoint(") == 1
+    assert "def _qamomile_U_inverse_" in helper_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -2206,7 +2177,7 @@ def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
     assert np.allclose(statevector, expected, atol=1e-8)
 
 
-# The two layers below are shared by the CUDA-Q adjoint-source test in this
+# The two layers below are shared by the CUDA-Q adjoint-helper test in this
 # section and by the nested-call wire-availability test in the nested
 # qkernel call section.
 @qmc.qkernel
@@ -2231,8 +2202,8 @@ def _inverse_runtime_call_then_gate_layer(
 
 
 @pytest.mark.cudaq
-def test_inverse_cudaq_adjoint_inlines_nested_source_block() -> None:
-    """CUDA-Q adjoint helpers include nested qkernel call bodies.
+def test_inverse_cudaq_materializer_preserves_nested_adjoint_helper() -> None:
+    """CUDA-Q keeps a nested body named and applies adjoint at the call site.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2250,10 +2221,10 @@ def test_inverse_cudaq_adjoint_inlines_nested_source_block() -> None:
     executable = CudaqTranspiler().transpile(circuit, parameters=["rotation_angle"])
     source = executable.compiled_quantum[0].circuit.source
 
-    assert "def _qamomile_adjoint_0(t0: cudaq.qubit, thetas: list[float]):" in source
-    assert "h(t0)" in source
-    assert "rx(thetas[0], t0)" in source
-    assert "cudaq.adjoint(_qamomile_adjoint_0, q[0], thetas)" in source
+    assert "h(q0)" in source
+    assert "rx(thetas[0], q0)" in source
+    assert "cudaq.adjoint(_qamomile_U_0, q0, thetas)" in source
+    assert "_adjoint_1(q[0], thetas)" in source
 
 
 # ---------------------------------------------------------------------------

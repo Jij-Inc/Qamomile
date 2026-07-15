@@ -3,12 +3,14 @@ import contextlib
 import contextvars
 import copy
 import dataclasses
+import struct
 import typing
 
-from qamomile.circuit.frontend.func_to_block import is_array_type
+from qamomile.circuit.frontend.func_to_block import handle_type_map, is_array_type
 from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.containers import Dict, DictItemsIterator
 from qamomile.circuit.frontend.handle.primitives import (
+    Bit,
     Float,
     Handle,
     UInt,
@@ -22,12 +24,21 @@ from qamomile.circuit.ir.operation.control_flow import (
     LoopCarriedRebind,
     RegionArg,
     WhileOperation,
+    validate_region_args,
 )
-from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    FloatType,
+    TupleType,
+    UIntType,
+    ValueType,
+)
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 
 
 class WhileLoop:
+    """Mark the body of a traced Qamomile while loop."""
+
     pass
 
 
@@ -41,11 +52,17 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     ``ValidateWhileContractPass`` during transpilation.
 
     Args:
-        cond: A callable (lambda) that returns the loop condition.
+        cond (typing.Callable): A callable (lambda) that returns the loop condition.
             Must return a ``Bit`` handle originating from ``qmc.measure()``.
 
     Yields:
         WhileLoop: A marker object for the while loop context.
+
+    Raises:
+        TypeError: If either condition evaluation cannot be represented as a
+            scalar IR value.
+        ValueError: If the constructed loop has inconsistent region-result
+            metadata.
 
     Example::
 
@@ -66,6 +83,12 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
     control-flow discard check, because the runtime loop re-executes its
     body on one persistent register without reset and cannot realize
     "fresh per iteration" semantics for the rebound name.
+
+    Classical scalar updates (``count = count + 1``) are likewise
+    rejected on while loops: the trip count is a runtime measurement
+    outcome, so the loop cannot unroll, and no backend can thread a
+    classical value between runtime-loop iterations. Use a
+    compile-time-bounded ``qmc.range`` loop for carried reductions.
     """
     # 1. Get the PARENT tracer (the one active before entering the while loop)
     parent_tracer = get_current_tracer()
@@ -113,6 +136,7 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
         while_op.operands.append(condition_after_value)
 
     # 8. Add the WhileOperation to the PARENT tracer (not a local one)
+    validate_region_args(while_op)
     parent_tracer.add_operation(while_op)
 
 
@@ -120,16 +144,23 @@ def while_loop(cond: typing.Callable) -> typing.Generator[WhileLoop, None, None]
 def for_loop(
     start, stop, step=1, var_name: str = "_loop_idx"
 ) -> typing.Generator[UInt, None, None]:
-    """Builder function to create a for loop in Qamomile frontend.
+    """Create a traced for loop in the Qamomile frontend.
 
     Args:
-        start: Loop start value (can be Handle or int)
-        stop: Loop stop value (can be Handle or int)
-        step: Loop step value (default=1)
-        var_name: Name of the loop variable (default="_loop_idx")
+        start (typing.Any): Inclusive loop start as an integer or ``UInt``.
+        stop (typing.Any): Exclusive loop stop as an integer or ``UInt``.
+        step (typing.Any): Nonzero loop step as an integer or ``UInt``.
+            Defaults to 1.
+        var_name (str): Display name of the loop variable. Defaults to
+            ``"_loop_idx"``.
 
     Yields:
         UInt: The loop iteration variable (can be used as array index)
+
+    Raises:
+        TypeError: If a bound cannot be represented as a scalar IR value.
+        ValueError: If the constructed loop has inconsistent region-result
+            metadata.
 
     Example:
         ```python
@@ -145,6 +176,11 @@ def for_loop(
                 qubits[i] = h(qubits[i])
             return qubits
         ```
+
+    Classical scalar updates (``total = total + i``) become explicit
+    ``RegionArg`` records on the ``ForOperation``: the loop enters with
+    the initializer, each iteration reads the previous iteration's
+    value, and post-loop code reads the loop result.
     """
     parent_tracer = get_current_tracer()
     body_tracer = Tracer()
@@ -169,17 +205,18 @@ def for_loop(
     # Create ForOperation
     # operands: [start, stop, step]
     for_op = ForOperation(
+        results=list(region_results),
         loop_var=var_name,
         loop_var_value=loop_var_value,
         operations=body_tracer.operations,
         loop_carried_rebinds=body_tracer.loop_carried_rebinds,
         region_args=region_args,
     )
-    for_op.results.extend(region_results)
     for_op.operands.append(_value_to_ir_value(start, "start"))
     for_op.operands.append(_value_to_ir_value(stop, "stop"))
     for_op.operands.append(_value_to_ir_value(step, "step"))
 
+    validate_region_args(for_op)
     parent_tracer.add_operation(for_op)
 
 
@@ -404,14 +441,16 @@ def _value_to_ir_value(val: typing.Any, name_prefix: str = "const") -> Value:
     """Convert a Python value or Handle to an IR Value.
 
     Args:
-        val: Python primitive, Handle, or Value to convert
-        name_prefix: Prefix for generated value name
+        val (typing.Any): Python primitive, frontend handle, or IR value to
+            convert.
+        name_prefix (str): Prefix for a generated value name. Defaults to
+            ``"const"``.
 
     Returns:
-        IR Value object
+        Value: Scalar IR value carrying the original identity or constant.
 
     Raises:
-        TypeError: If value type is not supported
+        TypeError: If ``val`` cannot be represented as a scalar IR value.
     """
     # Already a Value
     if isinstance(val, Value):
@@ -432,6 +471,108 @@ def _value_to_ir_value(val: typing.Any, name_prefix: str = "const") -> Value:
 
     # Unsupported type
     raise TypeError(f"Cannot convert {type(val)} to IR Value")
+
+
+def _scalar_handle_class(value_type: ValueType) -> type[Handle]:
+    """Return the frontend handle class for a scalar IR type.
+
+    Args:
+        value_type (ValueType): UInt, Float, or Bit IR type.
+
+    Returns:
+        type[Handle]: Matching frontend handle class.
+
+    Raises:
+        TypeError: If ``value_type`` is not a supported scalar type.
+    """
+    if isinstance(value_type, UIntType):
+        return UInt
+    if isinstance(value_type, FloatType):
+        return Float
+    if isinstance(value_type, BitType):
+        return Bit
+    raise TypeError(
+        "Only UInt, Float, and Bit values have classical scalar handles; "
+        f"got {value_type!r}."
+    )
+
+
+def _scalar_handle_for_value(value: Value) -> Handle:
+    """Wrap a classical scalar IR value in its matching frontend handle.
+
+    Args:
+        value (Value): UInt-, Float-, or Bit-typed scalar value.
+
+    Returns:
+        Handle: A ``UInt``, ``Float``, or ``Bit`` carrying ``value``.
+
+    Raises:
+        TypeError: If ``value`` has a non-scalar or unsupported type.
+    """
+    handle_class = _scalar_handle_class(value.type)
+    return handle_class(value=value)
+
+
+def _promote_branch_scalar(value: typing.Any) -> typing.Any:
+    """Promote a Python branch scalar to a mergeable frontend handle.
+
+    Runtime branch bodies execute once during tracing. Returning a bare
+    Python scalar from each body must therefore create an IR merge just like
+    returning ``qmc.uint`` / ``qmc.float_`` / ``qmc.bit`` handles; selecting
+    the true Python value unconditionally would freeze the branch outcome at
+    trace time.
+
+    Args:
+        value (typing.Any): Branch result value to normalize.
+
+    Returns:
+        typing.Any: A scalar handle for bool/int/float and scalar ``Value``
+            inputs, or ``value`` unchanged for existing handles and unsupported
+            opaque objects.
+    """
+    if isinstance(value, Handle):
+        return value
+    if isinstance(value, Value) and isinstance(
+        value.type, (UIntType, FloatType, BitType)
+    ):
+        return _scalar_handle_for_value(value)
+    if isinstance(value, (bool, int, float)):
+        return _scalar_handle_for_value(_value_to_ir_value(value, "branch_const"))
+    return value
+
+
+def _same_plain_scalar(true_val: typing.Any, false_val: typing.Any) -> bool:
+    """Report whether both branch results are the identical plain scalar.
+
+    A plain Python ``bool`` / ``int`` / ``float`` that both branches
+    yield with the exact same type and value cannot diverge at runtime,
+    so it needs no merge and must NOT be promoted: promotion would hand
+    the tracing frame a symbolic handle where the user wrote a plain
+    Python value, breaking trace-time interop (list indexing, builtin
+    ``range``, format strings). Divergent plain scalars still promote —
+    that is the represented-merge fix for the trace-time freeze bug.
+
+    Args:
+        true_val (typing.Any): True branch result slot.
+        false_val (typing.Any): False branch result slot.
+
+    Returns:
+        bool: True when both values are plain scalars of the exact same
+            type and representation. Floats compare bit-exactly (matching
+            ``_same_exact_typed_constant`` on the lowering side): NaNs with
+            the same payload pass through, while distinct NaN payloads and a
+            ``0.0`` / ``-0.0`` pair still promote so no payload or sign bit is
+            frozen to one branch's value.
+    """
+    if isinstance(true_val, (Handle, Value)) or isinstance(false_val, (Handle, Value)):
+        return False
+    if not isinstance(true_val, (bool, int, float)):
+        return False
+    if type(true_val) is not type(false_val):
+        return False
+    if isinstance(true_val, float):
+        return struct.pack("!d", true_val) == struct.pack("!d", false_val)
+    return true_val == false_val
 
 
 def _const_int_for_loop_bound(val: typing.Any) -> int | None:
@@ -545,6 +686,9 @@ class _PendingRegionArg:
         entry_handle (Handle): The frontend handle wrapping
             ``block_arg`` that the AST-injected entry assignment bound
             into the loop body's frame.
+        original_binding (typing.Any): Exact pre-loop Python binding. Identity
+            carries restore this object so plain scalars stay available to
+            ordinary Python operations after the traced loop.
         yielded (Value | None): The body's final IR value for the
             variable, set by ``record_loop_rebinds``. ``None`` means the
             body produced no representable update (identity carry).
@@ -559,6 +703,7 @@ class _PendingRegionArg:
     init: Value
     block_arg: Value
     entry_handle: Handle
+    original_binding: typing.Any
     yielded: Value | None = None
     publish_result: bool = True
 
@@ -652,6 +797,7 @@ def loop_region_enter(
         init=init_value,
         block_arg=block_arg,
         entry_handle=entry_handle,
+        original_binding=resolved,
     )
     return entry_handle
 
@@ -686,11 +832,12 @@ def _close_region_entries(
     """Convert pending region entries into IR ``RegionArg`` records.
 
     Called by the ``for`` / ``for-items`` loop builders after the body
-    trace completes. For each pending entry, synthesizes the loop-result
-    ``Value``, builds the ``RegionArg``, and publishes the post-loop
-    result handle on ``parent_tracer.loop_region_results`` (replacing
-    any leftovers from a previously closed loop) for the AST-injected
-    ``loop_region_result`` assignments to consume.
+    trace completes. For every pending entry, synthesizes the loop-result
+    ``Value`` and builds the ``RegionArg``. Genuine recurrences publish that
+    result handle after the loop. Exact identity carries instead publish the
+    original Python binding so plain scalars stay usable by ordinary Python
+    code; their well-formed RegionArgs remain in the IR until compile-time
+    lowering removes them through the normal identity-carry path.
 
     Args:
         body_tracer (Tracer): The tracer that captured the loop body
@@ -720,11 +867,36 @@ def _close_region_entries(
         )
         results.append(result)
         if entry.publish_result:
-            result_handles[entry.var_name] = _region_scalar_handle(
-                result, entry.entry_handle
-            )
+            if _is_identity_region_entry(entry):
+                result_handles[entry.var_name] = entry.original_binding
+            else:
+                result_handles[entry.var_name] = _region_scalar_handle(
+                    result, entry.entry_handle
+                )
     parent_tracer.loop_region_results = result_handles
     return tuple(region_args), results
+
+
+def _is_identity_region_entry(entry: _PendingRegionArg) -> bool:
+    """Return whether a pending carry preserves its exact initializer.
+
+    Args:
+        entry (_PendingRegionArg): Pending frontend region argument.
+
+    Returns:
+        bool: True when the body yields its own block argument, or an exact
+            typed constant equal to the initializer.
+    """
+    if entry.yielded is None or entry.yielded.uuid in {
+        entry.block_arg.uuid,
+        entry.init.uuid,
+    }:
+        return True
+    if entry.init.type != entry.yielded.type:
+        return False
+    if not entry.init.is_constant() or not entry.yielded.is_constant():
+        return False
+    return _same_plain_scalar(entry.init.get_const(), entry.yielded.get_const())
 
 
 def loop_rebind_snapshot(
@@ -778,17 +950,17 @@ def record_loop_rebinds(
       or another register) rather than a gate self-update, which keeps
       the logical_id. These feed the transpiler's loop-body quantum
       discard check.
-    - **Classical scalar** (only names in ``classical_names``, the
-      read-before-write candidates): the post-body value is a classical
-      scalar with a different IR identity — the ``total = total + i``
-      shape. Candidates that were region-bound at body entry
-      (``loop_region_enter``) complete their pending ``RegionArg``
-      instead of producing a record — the carry is then explicit and
-      supported. A record is created only for the shapes region binding
-      declined (``while`` bodies, measurement-backed ``Bit`` carries),
-      which the transpiler still rejects. Store-only classical
-      reassignments (a value recomputed from scratch each iteration)
-      are deliberately not recorded; they trace correctly.
+    - **Classical values** (only names in ``classical_names``): supported
+      same-type ``UInt`` / ``Float`` values that were region-bound at body
+      entry complete their pending ``RegionArg`` instead of producing a
+      record. Every other representable rebind produces a residual record,
+      including measurement-backed ``Bit`` values and containers. The
+      transpiler rejects shapes that need unsupported routing; a store-only
+      scalar ``Bit`` is accepted only for a statically non-empty unrolled loop,
+      where reusing the measurement-result UUID correctly selects the last
+      iteration and no zero-trip initializer must be routed.
+      ``classical_names`` includes both read-before-write carries and
+      store-only values that are live after the loop.
 
     No IR operations are emitted; this only annotates the tracer.
 
@@ -799,8 +971,9 @@ def record_loop_rebinds(
             at the end of the loop body.
         names (tuple[str, ...]): All candidate variable names.
         classical_names (tuple[str, ...]): The subset of ``names`` the
-            loop body reads before writing; only these may produce
-            classical records.
+            loop body either reads before writing or overwrites and exposes
+            after the loop; only these may produce classical records or
+            complete pending region arguments.
     """
     post_bindings = branch_rebind_pre_bindings(frame_locals, names)
     classical_candidates = set(classical_names)
@@ -823,16 +996,24 @@ def record_loop_rebinds(
             if after_value is None and isinstance(after, (bool, int, float)):
                 after_value = _value_to_ir_value(after, name)
             if (
-                after_value is None
-                or isinstance(after_value, ArrayValue)
+                not isinstance(after_value, Value)
                 or after_value.type.is_quantum()
+                or after_value.type != entry.init.type
             ):
-                # The body's final Python value is not representable as
-                # a carried classical scalar (opaque object / array /
-                # quantum). Keep the identity carry for the body's
-                # block-argument reads, but let the Python binding keep
-                # the body's final value after the loop.
+                # The body's final value is not a same-type classical scalar.
+                # Keep the identity RegionArg for reads already traced via the
+                # block argument, but retain a residual record so validation
+                # rejects the unsupported post-loop binding instead of leaking
+                # the one trace-time body value.
                 entry.publish_result = False
+                if isinstance(after_value, ValueBase):
+                    records.append(
+                        LoopCarriedRebind(
+                            var_name=name,
+                            before=entry.init,
+                            after=after_value,
+                        )
+                    )
                 continue
             entry.yielded = after_value
             continue
@@ -878,7 +1059,7 @@ def record_loop_rebinds(
             continue
         if name not in classical_candidates:
             continue
-        if after_value is None or isinstance(after_value, ArrayValue):
+        if after_value is None:
             continue
         if after_value.type.is_quantum():
             continue
@@ -889,7 +1070,7 @@ def record_loop_rebinds(
                 before_synthesized = True
             else:
                 continue
-        if isinstance(before_value, ArrayValue) or before_value.type.is_quantum():
+        if before_value.type.is_quantum():
             continue
         if before_value.uuid == after_value.uuid:
             continue
@@ -940,7 +1121,7 @@ def _create_merge_for_values(
     # Type mismatch check
     if true_v.type != false_v.type:
         raise TypeError(
-            f"Type mismatch in if-else branches: "
+            f"Branch value mismatch: Type mismatch in if-else branches: "
             f"true branch has {true_v.type}, false branch has {false_v.type}"
         )
 
@@ -1137,20 +1318,20 @@ def _branch_touches_array_elements(
     )
 
 
-def _ir_value_from_handle_like(value: typing.Any) -> Value | None:
+def _ir_value_from_handle_like(value: typing.Any) -> ValueBase | None:
     """Extract the IR value carried by a handle-like object.
 
     Args:
         value (typing.Any): Candidate handle or IR value.
 
     Returns:
-        Value | None: The contained IR ``Value`` when available, otherwise
+        ValueBase | None: The contained IR value when available, otherwise
         ``None``.
     """
-    if isinstance(value, Value):
+    if isinstance(value, ValueBase):
         return value
     ir_value = getattr(value, "value", None)
-    if isinstance(ir_value, Value):
+    if isinstance(ir_value, ValueBase):
         return ir_value
     return None
 
@@ -1513,7 +1694,7 @@ def emit_if(
     rebind_pre_bindings: dict | None = None,
     dead_names: tuple = (),
 ) -> typing.Any:
-    """Builder function for if-else conditional with merge function merging.
+    """Trace an if/else conditional and merge its branch results.
 
     This function is called from AST-transformed code. The AST transformer
     converts:
@@ -1529,10 +1710,13 @@ def emit_if(
         result = emit_if(_cond_N, _body_N, _body_N+1, [var_list])
 
     Args:
-        cond_func: Function returning the condition (Bit or bool-like Handle)
-        true_func: Function executing true branch, returns updated variables
-        false_func: Function executing false branch, returns updated variables
-        variables: List of variables used in the branches
+        cond_func (typing.Callable): Function returning the condition as a
+            ``Bit`` or bool-like handle.
+        true_func (typing.Callable): Function tracing the true branch and
+            returning its updated variables.
+        false_func (typing.Callable): Function tracing the false branch and
+            returning its updated variables.
+        variables (list): Variables captured by the two branch functions.
         output_names (tuple): Variable names positionally aligned with the
             branch return tuples, used for branch-rebind records. Empty
             when the transformer found no rebind candidates.
@@ -1548,7 +1732,13 @@ def emit_if(
             are no dead candidates.
 
     Returns:
-        Merged variable values after conditional execution (using merge functions)
+        typing.Any: The sole merged value, a tuple of merged values, or None
+            when the branches return no values.
+
+    Raises:
+        TypeError: If corresponding branch values have incompatible types or
+            divergent values with no Qamomile IR representation.
+        ValueError: If branch result lengths or probe-tail lengths disagree.
 
     Example:
         ```python
@@ -1623,6 +1813,14 @@ def emit_if(
     false_result = false_result[:n_merged]
     merged_results = []
     for true_val, false_val in zip(true_result, false_result, strict=True):
+        if _same_plain_scalar(true_val, false_val):
+            # Identical plain scalar on both sides: no runtime divergence
+            # to represent, and the surrounding Python code may rely on
+            # it staying a genuine Python value after the if.
+            merged_results.append(true_val)
+            continue
+        true_val = _promote_branch_scalar(true_val)
+        false_val = _promote_branch_scalar(false_val)
         if isinstance(true_val, (Handle, Value)):
             if not isinstance(false_val, (Handle, Value)):
                 raise TypeError(
@@ -1666,7 +1864,17 @@ def emit_if(
                 f"Both branches of an if-else must return the same variables."
             )
         else:
-            # Non-Handle/Value values (int, float, etc.) don't need merge
+            # Opaque pass-through objects are safe only when both branches
+            # return the exact same object. Divergent opaque values have no IR
+            # representation and must fail instead of silently selecting the
+            # true branch's trace-time value.
+            if true_val is not false_val:
+                raise TypeError(
+                    "Branch values cannot be merged because they have no "
+                    "Qamomile scalar/handle representation: "
+                    f"true={type(true_val).__name__}, "
+                    f"false={type(false_val).__name__}."
+                )
             merged_results.append(true_val)
 
     # 5. Add IfOperation to parent tracer
@@ -1728,13 +1936,59 @@ def items(d: Dict) -> DictItemsIterator:
     return d.items()
 
 
+def _for_items_key_ir_types(
+    d: Dict,
+    key_is_vector: bool,
+    key_var_names: list[str],
+) -> tuple[ValueType, ...]:
+    """Resolve the IR type of each for-items key binding.
+
+    Args:
+        d (Dict): Iterated dict handle carrying its ``Dict[K, V]``
+            annotation.
+        key_is_vector (bool): Whether one binding represents a Vector key.
+        key_var_names (list[str]): Flattened key-binding names from the AST.
+
+    Returns:
+        tuple[ValueType, ...]: One scalar element type for a Vector key, or
+            one scalar type per unpacked key variable.
+
+    Raises:
+        TypeError: If the declared key type is unsupported or its tuple arity
+            disagrees with the loop target.
+    """
+    key_annotation = getattr(d, "_key_type", None)
+    if key_annotation is None:
+        # Legacy Dict handles created without a generic annotation used UInt
+        # keys. Preserve that compatibility while typed handles take the path
+        # below.
+        return tuple(UIntType() for _ in key_var_names)
+
+    mapped = handle_type_map(key_annotation)
+    if key_is_vector:
+        key_types = (mapped,)
+    elif isinstance(mapped, TupleType):
+        key_types = mapped.element_types
+    else:
+        key_types = (mapped,)
+
+    if len(key_types) != len(key_var_names):
+        raise TypeError(
+            "For-items key binding arity does not match the declared Dict key "
+            f"type: {len(key_var_names)} names for {len(key_types)} values."
+        )
+    for key_type in key_types:
+        _scalar_handle_class(key_type)
+    return key_types
+
+
 @contextlib.contextmanager
 def for_items(
     d: Dict,
     key_var_names: list[str],
     value_var_name: str,
 ) -> typing.Generator[tuple[typing.Any, typing.Any], None, None]:
-    """Builder function to create a for-items loop in Qamomile frontend.
+    """Create a traced for-items loop in the Qamomile frontend.
 
     This context manager creates a ForItemsOperation that iterates over
     dictionary (key, value) pairs. The operation is always unrolled at
@@ -1742,19 +1996,26 @@ def for_items(
     classical data structures.
 
     Args:
-        d: Dict handle to iterate over
-        key_var_names: Names of key unpacking variables (e.g., ["i", "j"] for tuple keys)
-        value_var_name: Name of value variable (e.g., "Jij")
+        d (Dict): Dict handle whose compile-time-known entries are iterated.
+        key_var_names (list[str]): Names of key-unpacking variables, for
+            example ``["i", "j"]`` for tuple keys.
+        value_var_name (str): Display name of the item-value variable.
 
     Yields:
-        Tuple of (key_handles, value_handle) for use in loop body
+        tuple[typing.Any, typing.Any]: Key handle(s) and the typed scalar
+            value handle used while tracing the loop body.
 
     Raises:
         TypeError: If ``d`` is a runtime-parameter Dict (declared via
-            ``parameters=[...]`` without bound data). Its key structure
-            is unknown at compile time, so an items() loop cannot be
-            unrolled; only constant-key subscript lookups (``d[key]``)
+            ``parameters=[...]`` without bound data), or its key annotation
+            cannot be represented by the loop target. A runtime Dict's key
+            structure is unknown at compile time, so an items() loop cannot
+            be unrolled; only constant-key subscript lookups (``d[key]``)
             are supported for runtime-parameter dicts.
+        NotImplementedError: If the Dict value annotation is a container or
+            another type without a scalar frontend handle.
+        ValueError: If the constructed loop has inconsistent region-result
+            metadata.
 
     Example:
         ```python
@@ -1793,6 +2054,7 @@ def for_items(
     _key_is_vector = (
         key_type is not None and is_array_type(key_type) and len(key_var_names) == 1
     )
+    key_ir_types = _for_items_key_ir_types(d, _key_is_vector, key_var_names)
 
     # Track the IR Values for each key/value variable so we can store them
     # on the ForItemsOperation. Identity (for emit-time bindings + loop
@@ -1804,7 +2066,7 @@ def for_items(
         kv_name = key_var_names[0]
         dim0_value = Value(type=UIntType(), name=f"{kv_name}_dim0")
         array_value = ArrayValue(
-            type=UIntType(),
+            type=key_ir_types[0],
             name=kv_name,
             shape=(dim0_value,),
         )
@@ -1819,17 +2081,16 @@ def for_items(
         key_result.name = kv_name
         key_result.id = str(id(key_result))
         key_result._consumed = False
-        key_result.element_type = UInt  # type: ignore[assignment]
+        key_result.element_type = _scalar_handle_class(  # type: ignore[assignment]
+            key_ir_types[0]
+        )
     else:
-        # Create symbolic key handles (UInt for each key variable)
+        # Create symbolic key handles according to the declared Dict key type.
         key_handles = []
-        for kv_name in key_var_names:
-            kv_value = Value(type=UIntType(), name=kv_name)
+        for kv_name, key_ir_type in zip(key_var_names, key_ir_types, strict=True):
+            kv_value = Value(type=key_ir_type, name=kv_name)
             key_var_values.append(kv_value)
-            key_handle = UInt(
-                value=kv_value,
-                init_value=0,  # Placeholder, actual value bound at emit time
-            )
+            key_handle = _scalar_handle_for_value(kv_value)
             key_handles.append(key_handle)
 
         # Package key handles: tuple for multiple keys, single handle otherwise
@@ -1838,12 +2099,11 @@ def for_items(
         else:
             key_result = tuple(key_handles)
 
-    # Create symbolic value handle (Float for Ising coefficients)
-    value_var_value = Value(type=FloatType(), name=value_var_name)
-    value_handle = Float(
-        value=value_var_value,
-        init_value=0.0,  # Placeholder, actual value bound at emit time
-    )
+    # Create the symbolic item-value handle from Dict[K, V], preserving UInt,
+    # Float, and Bit rather than treating every coefficient as Float.
+    value_ir_type, _value_handle_class, _value_coercer = d._result_spec()
+    value_var_value = Value(type=value_ir_type, name=value_var_name)
+    value_handle = _scalar_handle_for_value(value_var_value)
 
     with trace(body_tracer):
         yield (key_result, value_handle)
@@ -1855,6 +2115,7 @@ def for_items(
 
     # Create ForItemsOperation with captured body operations
     for_items_op = ForItemsOperation(
+        results=list(region_results),
         key_vars=key_var_names,
         value_var=value_var_name,
         key_is_vector=_key_is_vector,
@@ -1864,7 +2125,7 @@ def for_items(
         loop_carried_rebinds=body_tracer.loop_carried_rebinds,
         region_args=region_args,
     )
-    for_items_op.results.extend(region_results)
     for_items_op.operands.append(d.value)  # type: ignore[arg-type]  # DictValue is not Value but stored as operand
 
+    validate_region_args(for_items_op)
     parent_tracer.add_operation(for_items_op)

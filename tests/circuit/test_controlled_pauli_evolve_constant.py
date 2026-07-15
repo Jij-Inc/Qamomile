@@ -177,6 +177,24 @@ def _fidelity_error(kernel, ham, gamma) -> float:
 class TestControlledPauliEvolveConstant:
     """CUDA-Q controlled ``pauli_evolve`` agrees with Qiskit on constant offsets."""
 
+    def test_preserves_native_control_and_pauli_evolution(self) -> None:
+        """Phase repair does not flatten CUDA-Q's high-level operations."""
+        from qamomile.cudaq import CudaqTranspiler
+
+        artifact = (
+            CudaqTranspiler()
+            .transpile(
+                _single_control_kernel(_evolve),
+                bindings={"ham": qm_o.X(0) + 0.7, "gamma": 0.5},
+            )
+            .compiled_quantum[0]
+            .circuit
+        )
+
+        assert 'exp_pauli(-0.5, [q0], "X")' in artifact.source
+        assert "cudaq.control(_qamomile_U_0, q[0], q[1])" in artifact.entry_source
+        assert "r1(-0.35, q[0])" in artifact.entry_source
+
     @pytest.mark.parametrize(
         "ham, gamma",
         [

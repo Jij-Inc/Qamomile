@@ -1,11 +1,9 @@
-"""QURI Parts backend for Qamomile: emit pass, executor, and observable conversion.
+"""QURI Parts backend for Qamomile.
 
 Design intent: this package concretizes circuit's abstract IR for QURI
-Parts by implementing circuit's extension protocols —
-``QuriPartsTranspiler`` (``transpiler.py``) plugs a QURI Parts
-``EmitPass`` into the shared pipeline, ``QuriPartsGateEmitter``
-(``emitter.py``) implements the ``GateEmitter`` protocol, and
-``observable.py`` converts Hamiltonians to QURI Parts ``Operator``s.
+Parts through ``QuriPartsMaterializer``. ``QuriPartsTranspiler`` plugs the
+materializer into the shared compiler pipeline, while ``observable.py``
+converts Hamiltonians to QURI Parts ``Operator``s.
 
 Backend-specific quirks stay confined here: parametric circuits use
 ``LinearMappedUnboundParametricQuantumCircuit``, so symbolic angles are
@@ -23,11 +21,10 @@ backends. Lowering decisions belong at emit time, not in the IR.
 from .emitter import QuriPartsGateEmitter
 from .exceptions import QamomileQuriPartsTranspileError
 from .observable import hamiltonian_to_quri_operator, to_quri_operator
-from .transpiler import QuriPartsEmitPass, QuriPartsExecutor, QuriPartsTranspiler
+from .transpiler import QuriPartsExecutor, QuriPartsTranspiler
 
 __all__ = [
     "QuriPartsTranspiler",
-    "QuriPartsEmitPass",
     "QuriPartsExecutor",
     "QuriPartsGateEmitter",
     # Observable support

@@ -65,6 +65,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     LoopCarriedRebind,
     RegionArg,
     WhileOperation,
+    validate_region_args,
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -1364,8 +1365,11 @@ def _decode_loop_carried_rebinds(
     return tuple(
         LoopCarriedRebind(
             var_name=str(r.get("var_name", "")),
-            before=_materialize_as_value(ctx, r["before_ref"]),
-            after=_materialize_as_value(ctx, r["after_ref"]),
+            # Rebind diagnostics also cover structural containers.  Keep
+            # their concrete ``ValueBase`` subtype instead of forcing the
+            # scalar-only helper used by executable operands/results.
+            before=ctx.materialize(r["before_ref"]),
+            after=ctx.materialize(r["after_ref"]),
             before_synthesized=bool(r.get("before_synthesized", False)),
         )
         for r in d.get("loop_carried_rebinds", ())
@@ -1375,6 +1379,7 @@ def _decode_loop_carried_rebinds(
 def _decode_region_args(
     d: dict[str, Any],
     ctx: _DecodeContext,
+    results: list[Value],
 ) -> tuple[RegionArg, ...]:
     """Decode loop region-argument records from a loop op dict.
 
@@ -1382,12 +1387,34 @@ def _decode_region_args(
         d (dict[str, Any]): The loop op dict, possibly carrying a
             ``region_args`` list.
         ctx (_DecodeContext): The active decode context.
+        results (list[Value]): The loop operation's materialized
+            results. Every region argument must own the corresponding
+            result by both position and UUID.
 
     Returns:
         tuple[RegionArg, ...]: The reconstructed records; empty when
             the key is absent.
+
+    Raises:
+        ValueError: If a removed parallel-list carry payload is present,
+            a region argument's four values have different types, or its
+            result does not align with the loop operation's results.
     """
-    return tuple(
+    legacy_keys = {
+        "carried_names",
+        "iter_arg_refs",
+        "body_arg_refs",
+        "body_yield_refs",
+    }
+    present_legacy_keys = sorted(legacy_keys.intersection(d))
+    if present_legacy_keys:
+        raise ValueError(
+            "Legacy parallel-list loop carry fields are not supported: "
+            f"{', '.join(present_legacy_keys)}. Re-encode the block with "
+            "RegionArg records."
+        )
+
+    region_args = tuple(
         RegionArg(
             var_name=str(r.get("var_name", "")),
             init=_materialize_as_value(ctx, r["init_ref"]),
@@ -1397,6 +1424,28 @@ def _decode_region_args(
         )
         for r in d.get("region_args", ())
     )
+    if len(region_args) != len(results):
+        raise ValueError(
+            "Loop RegionArg payload is inconsistent: "
+            f"{len(region_args)} region args for {len(results)} results."
+        )
+    for index, (arg, result) in enumerate(zip(region_args, results, strict=True)):
+        if arg.result.uuid != result.uuid:
+            raise ValueError(
+                "Loop RegionArg payload is inconsistent: "
+                f"region_args[{index}].result_ref does not match "
+                f"result_refs[{index}]."
+            )
+        if not (
+            arg.init.type == arg.block_arg.type == arg.yielded.type == arg.result.type
+        ):
+            raise ValueError(
+                f"Loop RegionArg '{arg.var_name}' has mismatched slot types: "
+                f"init={arg.init.type}, block_arg={arg.block_arg.type}, "
+                f"yielded={arg.yielded.type}, result={arg.result.type}. "
+                "All four values of a RegionArg must share a type."
+            )
+    return region_args
 
 
 def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
@@ -1407,23 +1456,29 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         ctx (_DecodeContext): The active decode context.
 
     Returns:
-        ForOperation: The reconstructed op, including the
-            materialized loop variable and the recursively-decoded
+        ForOperation: The reconstructed op, including the materialized
+            loop variable, region arguments, and recursively-decoded
             loop body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _operands_results(d, ctx)
     loop_var_ref = d.get("loop_var_value_ref")
     loop_var_value = _materialize_as_value(ctx, loop_var_ref) if loop_var_ref else None
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return ForOperation(
+    op = ForOperation(
         operands=operands,
         results=results,
         loop_var=d.get("loop_var", ""),
         loop_var_value=loop_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
-        region_args=_decode_region_args(d, ctx),
+        region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperation:
@@ -1436,6 +1491,10 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
     Returns:
         ForItemsOperation: The reconstructed op, including key /
             value identity Values and the recursively-decoded body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _container_operands_results(d, ctx)
     key_refs = d.get("key_var_value_refs")
@@ -1447,7 +1506,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
     value_ref = d.get("value_var_value_ref")
     value_var_value = _materialize_as_value(ctx, value_ref) if value_ref else None
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return ForItemsOperation(
+    op = ForItemsOperation(
         operands=operands,
         results=results,
         key_vars=list(d.get("key_vars", ())),
@@ -1457,8 +1516,10 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         value_var_value=value_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
-        region_args=_decode_region_args(d, ctx),
+        region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
@@ -1471,17 +1532,23 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
     Returns:
         WhileOperation: The reconstructed op, including the
             recursively-decoded loop body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _operands_results(d, ctx)
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return WhileOperation(
+    op = WhileOperation(
         operands=operands,
         results=results,
         operations=body,
         max_iterations=d.get("max_iterations"),
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
-        region_args=_decode_region_args(d, ctx),
+        region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_branch_rebinds(

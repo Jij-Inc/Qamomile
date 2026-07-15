@@ -1,12 +1,13 @@
-"""Standard emit pass using GateEmitter protocol.
+"""Shared semantic-to-circuit lowering engine.
 
-This module provides StandardEmitPass, a reusable emit pass implementation
-that uses the GateEmitter protocol for backend-specific gate emission.
+This module provides the legacy-named ``StandardEmitPass`` used internally
+by ``CircuitLoweringPass`` to walk Qamomile semantic IR and construct the
+backend-neutral circuit-family IR.
 
 The actual emission logic is decomposed into focused modules under
 ``emit_support/``. This class serves as the orchestrator with thin
-wrappers that delegate to those module functions while preserving
-subclass override points (used by QiskitEmitPass, CudaqEmitPass).
+wrappers that delegate to those module functions. SDK backends do not
+subclass this engine; they consume the resulting immutable circuit program.
 """
 
 from __future__ import annotations
@@ -14,10 +15,7 @@ from __future__ import annotations
 import contextlib
 import re
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
-
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.value import Value
+from typing import Any, Generic, TypeVar, cast
 
 from qamomile.circuit.ir.operation import (
     Operation,
@@ -57,6 +55,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.emit_context import EmitContext
 from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
@@ -84,6 +83,8 @@ from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission impor
     emit_if,
     emit_while,
     evaluate_dict_getitem,
+    mark_updated_while_condition,
+    reject_stale_runtime_condition,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     blockvalue_to_gate,
@@ -147,18 +148,19 @@ def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
 class StandardEmitPass(EmitPass[T], Generic[T]):
     """Standard emit pass implementation using GateEmitter protocol.
 
-    This class provides the orchestration logic for circuit emission
-    while delegating backend-specific operations to a GateEmitter.
-
-    Subclasses (QiskitEmitPass, CudaqEmitPass) override specific methods
-    to provide native backend support. The thin wrappers here delegate to
-    module functions in ``emit_support/`` by default.
+    This class provides orchestration for semantic IR traversal while
+    delegating circuit instruction construction to a GateEmitter. The
+    concrete compiler use is ``CircuitLoweringPass``; SDK targets materialize
+    its immutable result instead of subclassing this class.
 
     Args:
-        gate_emitter: Backend-specific gate emitter
-        bindings: Parameter bindings for the circuit
-        parameters: List of parameter names to preserve as backend parameters
-        composite_emitters: Optional list of CompositeGateEmitter for native implementations
+        gate_emitter (GateEmitter[T]): Instruction builder used during the
+            semantic traversal.
+        bindings (dict[str, Any] | None): Compile-time parameter bindings.
+        parameters (list[str] | None): Parameter names preserved at runtime.
+        composite_emitters (list[CompositeGateEmitter[T]] | None): Optional
+            callable-preservation or lowering hooks.
+        backend_name (str | None): Diagnostic name for the traversal target.
     """
 
     def __init__(
@@ -200,6 +202,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # inverse) consult this to stay on a counting-safe route.
         self._counting_emission = False
 
+        # Path-local measurement snapshots whose physical clbits may have
+        # been overwritten by runtime while-condition updates. The state is
+        # forked/merged by runtime If emission and reset for each segment.
+        self._overwritten_runtime_condition_sources: set[tuple[str, int]] = set()
+
     # ------------------------------------------------------------------
     # Core orchestration (stays on this class)
     # ------------------------------------------------------------------
@@ -240,13 +247,173 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             self._parameter_sources.setdefault(name, source_ref)
         return self._parameter_map[name]
 
+    def _reject_overwritten_live_condition_outputs(self) -> None:
+        """Reject exposing a measurement snapshot overwritten by a while.
+
+        A runtime while update is implemented by remeasuring into the
+        condition's physical clbit.  The updated condition Value is safe to
+        expose, but the immutable measurement snapshot that originally owned
+        that clbit is not.  Structural live-output refs include parent vector
+        UUIDs, so returning the whole measured vector is caught as well as
+        returning one scalar snapshot.
+
+        Raises:
+            EmitError: If a public or inter-segment live output still refers
+                to an overwritten initial condition snapshot.
+        """
+        if not self._overwritten_runtime_condition_sources:
+            return
+
+        from qamomile.circuit.ir.types.primitives import BitType
+        from qamomile.circuit.ir.value import ArrayValue, ValueBase
+        from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
+            resolve_condition_address_detailed,
+        )
+
+        live_refs = self._allocator_live_output_refs()
+        if live_refs is None:
+            return
+        output_values = getattr(self, "_program_output_values", ())
+        precise_output_addresses: set[QubitAddress] = set()
+        scalar_output_identities: set[str] = set()
+        coarse_output_roots: set[str] = set()
+        covered_output_refs: set[str] = set()
+
+        def collect_structural_refs(
+            value: ValueBase,
+            visiting: frozenset[str] = frozenset(),
+        ) -> None:
+            """Collect UUID refs explained by one public output descriptor.
+
+            Args:
+                value (ValueBase): Public output or structural ancestor.
+                visiting (frozenset[str]): UUIDs already visited on this path.
+                    Defaults to an empty set.
+            """
+            if value.uuid in visiting:
+                return
+            covered_output_refs.add(value.uuid)
+            next_visiting = visiting | {value.uuid}
+            for attr in ("parent_array", "slice_of", "slice_start", "slice_step"):
+                child = getattr(value, attr, None)
+                if isinstance(child, ValueBase):
+                    collect_structural_refs(child, next_visiting)
+            for attr in ("element_indices", "shape", "elements"):
+                for child in getattr(value, attr, ()):
+                    if isinstance(child, ValueBase):
+                        collect_structural_refs(child, next_visiting)
+            for key, item in getattr(value, "entries", ()):
+                if isinstance(key, ValueBase):
+                    collect_structural_refs(key, next_visiting)
+                if isinstance(item, ValueBase):
+                    collect_structural_refs(item, next_visiting)
+
+        for descriptor in output_values:
+            if not isinstance(descriptor, ValueBase):
+                continue
+            collect_structural_refs(descriptor)
+            for output in self._flatten_public_output_leaves(descriptor):
+                if (
+                    isinstance(output, Value)
+                    and not isinstance(output, ArrayValue)
+                    and isinstance(output.type, BitType)
+                ):
+                    address, resolved_as_element = resolve_condition_address_detailed(
+                        output,
+                        self.bindings,
+                        self._resolver,
+                    )
+                    if resolved_as_element:
+                        precise_output_addresses.add(address)
+                    else:
+                        scalar_output_identities.add(output.uuid)
+                    continue
+                if not (
+                    isinstance(output, ArrayValue) and isinstance(output.type, BitType)
+                ):
+                    continue
+                if output.slice_of is None:
+                    root = output
+                    start = 0
+                    step = 1
+                else:
+                    root, start, step = self._resolver.resolve_slice_chain(
+                        output,
+                        self.bindings,
+                        operation="public Bit view output liveness",
+                    )
+                length = (
+                    self._resolver.resolve_int_value(output.shape[0], self.bindings)
+                    if output.shape
+                    else None
+                )
+                if length is None:
+                    coarse_output_roots.add(root.uuid)
+                    continue
+                precise_output_addresses.update(
+                    QubitAddress(root.uuid, start + step * index)
+                    for index in range(length)
+                )
+
+        # Structural ancestry for a direct public ``bits[1]`` output includes
+        # the root vector UUID. Remove descriptor-covered refs before applying
+        # the conservative segment-boundary fallback, otherwise overwriting
+        # ``bits[0]`` would incorrectly reject the disjoint ``bits[1]`` output.
+        residual_live_refs = set(live_refs) - covered_output_refs
+        for source_identity, _physical in self._overwritten_runtime_condition_sources:
+            source_address = QubitAddress.from_composite_key(source_identity)
+            if (
+                source_address not in precise_output_addresses
+                and source_identity not in scalar_output_identities
+                and source_address.uuid not in coarse_output_roots
+                and source_identity not in residual_live_refs
+                and source_address.uuid not in residual_live_refs
+            ):
+                continue
+            from qamomile.circuit.transpiler.errors import EmitError
+
+            raise EmitError(
+                "A measured Bit snapshot remains live after a runtime while "
+                "update reused its physical clbit. Return or consume the "
+                "updated condition Value instead of the original scalar or "
+                "Vector measurement snapshot.",
+                operation="WhileOperation",
+            )
+
     def _emit_quantum_segment(
         self,
         operations: list[Operation],
         bindings: dict[str, Any],
     ) -> tuple[T, QubitMap, ClbitMap]:
-        """Generate backend circuit from operations."""
-        qubit_map, clbit_map = self._allocator.allocate(operations, bindings)
+        """Generate a backend circuit from one quantum segment.
+
+        Args:
+            operations (list[Operation]): Quantum/control-flow operation tree
+                to allocate and emit.
+            bindings (dict[str, Any]): Compile-time and emit-local value
+                bindings.
+
+        Returns:
+            tuple[T, QubitMap, ClbitMap]: Emitted backend circuit and its
+                logical-to-physical qubit and clbit maps.
+
+        Raises:
+            EmitError: If resource allocation or backend emission cannot
+                represent the operation tree safely.
+            RuntimeError: If an IR marker that should have been removed by an
+                earlier pass reaches emission.
+            ValueError: If a loop that requires unrolling has unresolved or
+                invalid bounds.
+        """
+        self._overwritten_runtime_condition_sources.clear()
+        qubit_map, clbit_map = self._allocator.allocate(
+            operations,
+            bindings,
+            public_output_uuids=self._allocator_live_output_refs(),
+        )
+        self._safe_mixed_bit_merge_outputs = (
+            self._allocator.safe_mixed_bit_merge_outputs
+        )
 
         qubit_count = max(qubit_map.values()) + 1 if qubit_map else 0
         clbit_count = max(clbit_map.values()) + 1 if clbit_map else 0
@@ -268,6 +435,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         self._measurement_qubit_map.clear()
 
         self._emit_operations(circuit, operations, qubit_map, clbit_map, bindings)
+        self._reject_overwritten_live_condition_outputs()
 
         return circuit, qubit_map, clbit_map
 
@@ -311,6 +479,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         saved_params = dict(self._parameter_map)
         saved_sources = dict(self._parameter_sources)
         saved_measure = dict(self._measurement_qubit_map)
+        saved_overwritten_conditions = set(self._overwritten_runtime_condition_sources)
         saved_context = (
             bindings.snapshot_state()
             if isinstance(bindings, EmitContext)
@@ -340,6 +509,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             self._parameter_sources.update(saved_sources)
             self._measurement_qubit_map.clear()
             self._measurement_qubit_map.update(saved_measure)
+            self._overwritten_runtime_condition_sources.clear()
+            self._overwritten_runtime_condition_sources.update(
+                saved_overwritten_conditions
+            )
             if isinstance(bindings, EmitContext):
                 bindings.restore_state(saved_context)
             else:
@@ -357,7 +530,28 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         force_unroll: bool = False,
         emit_qinit_reset: bool = False,
     ) -> None:
-        """Emit operations to the circuit (dispatcher)."""
+        """Dispatch an operation list into a backend circuit.
+
+        Args:
+            circuit (T): Backend circuit being mutated.
+            operations (list[Operation]): Operations in program order.
+            qubit_map (QubitMap): Current logical-to-physical qubit map.
+            clbit_map (ClbitMap): Current logical-to-physical clbit map.
+            bindings (dict[str, Any]): Active compile-time and loop-local
+                bindings.
+            force_unroll (bool): Whether range loops must use emit-time
+                unrolling. Defaults to False.
+            emit_qinit_reset (bool): Whether nested allocations should reset
+                their persistent backend wires at each body entry. Defaults to
+                False.
+
+        Raises:
+            EmitError: If an operation or control-flow shape cannot be emitted
+                safely by the backend.
+            RuntimeError: If slice-lifetime markers or another invalid
+                pipeline-stage artifact reaches this dispatcher.
+            ValueError: If required loop values cannot be resolved.
+        """
         for op in operations:
             if isinstance(op, QInitOperation):
                 if emit_qinit_reset:
@@ -399,9 +593,64 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             elif isinstance(op, ForItemsOperation):
                 emit_for_items(self, circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, IfOperation):
-                self._emit_if(circuit, op, qubit_map, clbit_map, bindings)
+                reject_stale_runtime_condition(
+                    self,
+                    op.condition,
+                    clbit_map,
+                    bindings,
+                )
+                bound_qubit_map, bound_clbit_map = (
+                    self._allocator.resolve_iteration_maps(
+                        [op],
+                        qubit_map,
+                        clbit_map,
+                        bindings,
+                    )
+                )
+                self._emit_if(
+                    circuit,
+                    op,
+                    bound_qubit_map,
+                    bound_clbit_map,
+                    bindings,
+                )
+                qubit_map.update(bound_qubit_map)
+                clbit_map.update(bound_clbit_map)
             elif isinstance(op, WhileOperation):
-                self._emit_while(circuit, op, qubit_map, clbit_map, bindings)
+                condition = op.operands[0] if op.operands else None
+                condition_value = (
+                    condition.value if hasattr(condition, "value") else condition
+                )
+                if isinstance(condition_value, Value):
+                    reject_stale_runtime_condition(
+                        self,
+                        condition_value,
+                        clbit_map,
+                        bindings,
+                    )
+                bound_qubit_map, bound_clbit_map = (
+                    self._allocator.resolve_iteration_maps(
+                        [op],
+                        qubit_map,
+                        clbit_map,
+                        bindings,
+                    )
+                )
+                self._emit_while(
+                    circuit,
+                    op,
+                    bound_qubit_map,
+                    bound_clbit_map,
+                    bindings,
+                )
+                mark_updated_while_condition(
+                    self,
+                    op,
+                    bound_clbit_map,
+                    bindings,
+                )
+                qubit_map.update(bound_qubit_map)
+                clbit_map.update(bound_clbit_map)
             elif isinstance(op, InvokeOperation):
                 emit_invoke_operation(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, InverseBlockOperation):
@@ -680,8 +929,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             ) from e
 
     # ------------------------------------------------------------------
-    # Methods overridden by backend subclasses (QiskitEmitPass, CudaqEmitPass).
-    # Only methods with actual overrides are kept as instance methods.
+    # Structured lowering extension points used by CircuitLoweringPass.
     # ------------------------------------------------------------------
 
     def _emit_for(

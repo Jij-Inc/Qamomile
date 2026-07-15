@@ -26,8 +26,8 @@ from qamomile.circuit.ir.types.primitives import FloatType, QubitType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import (
     EmitError,
+    QubitBorrowConflictError,
     QubitConsumedError,
-    SliceBorrowViolationError,
 )
 from tests.transpiler.gate_test_specs import (
     all_zeros_state,
@@ -1154,7 +1154,7 @@ class TestControlledAcceptsBuiltinGate:
 
         assert len(controlled_ops) == 1
         op = controlled_ops[0]
-        assert op.target.namespace == "user.composite"
+        assert op.target.namespace.startswith("user.composite.")
         assert op.target.name == "boxed_h"
         assert op.transform is CallTransform.CONTROLLED
         assert op.attrs["kind"] == "composite"
@@ -4171,7 +4171,7 @@ class TestControlledVectorSubArgFollowUpOps:
             region[0] = qmc.x(region[0])
             return q
 
-        with pytest.raises(SliceBorrowViolationError):
+        with pytest.raises(QubitBorrowConflictError):
             _prepare_nested_block_for_emit(bad_sliced_block.block, {"lo": 0, "hi": 2})
 
     def test_controlled_slice_fallback_strips_markers(self, monkeypatch):

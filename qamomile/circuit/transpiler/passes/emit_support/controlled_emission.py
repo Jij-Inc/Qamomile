@@ -53,6 +53,7 @@ from qamomile.circuit.transpiler.block_parameter_binding import (
 )
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
+    _set_emit_value,
     evaluate_binop,
     evaluate_classical_predicate,
 )
@@ -61,7 +62,6 @@ from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import
     resolve_if_condition,
 )
 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-    _bind_loop_var,
     register_classical_merge_aliases,
     resolve_loop_bounds,
 )
@@ -655,24 +655,15 @@ def emit_controlled_operations(
                 emit_pass, circuit, op, control_indices, qubit_map, bindings
             )
         elif isinstance(op, ForOperation):
-            start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
-            if start is not None and stop is not None and step is not None:
-                for i in range(start, stop, step):
-                    loop_bindings = bindings.copy()
-                    _bind_loop_var(loop_bindings, op, i)
-                    emit_controlled_operations(
-                        emit_pass,
-                        circuit,
-                        op.operations,
-                        control_indices,
-                        qubit_map,
-                        loop_bindings,
-                    )
-            else:
-                raise EmitError(
-                    "Cannot resolve ForOperation bounds in controlled block. "
-                    "Loop bounds must be resolvable at transpile time."
-                )
+            replay_controlled_for(
+                emit_pass,
+                circuit,
+                op,
+                control_indices,
+                qubit_map,
+                bindings,
+                walker=emit_controlled_operations,
+            )
         elif isinstance(op, HasNestedOps):
             raise EmitError(
                 f"Unsupported control flow {type(op).__name__} in controlled "
@@ -688,6 +679,94 @@ def emit_controlled_operations(
                 f"block decomposition.",
                 operation="ControlledGate",
             )
+
+
+def replay_controlled_for(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: ForOperation,
+    control_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+    *,
+    walker: Callable[..., None],
+) -> None:
+    """Replay one static range loop under accumulated quantum controls.
+
+    Controlled blocks use a specialized operation walker because every
+    quantum gate in the body must inherit the outer controls.  Reusing only
+    the old loop-variable binding logic here skipped the loop's explicit
+    ``RegionArg`` protocol, so a scalar recurrence such as ``index += 1``
+    either stayed pinned to its initial value or became unresolved.  This
+    helper shares the canonical emit-time carry primitives with ordinary
+    loop emission and accepts the backend-specific controlled walker as a
+    callback.  Nested range loops therefore replay recursively with the same
+    ``init -> block_arg -> yielded -> result`` semantics on every backend.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass and value resolver.
+        circuit (Any): Backend circuit being constructed.
+        op (ForOperation): Static range loop to replay.
+        control_indices (list[int]): Physical controls accumulated from the
+            enclosing controlled operations.
+        qubit_map (QubitMap): Mutable block-local qubit map.
+        bindings (dict[str, Any]): Bindings visible before the loop.  Final
+            RegionArg results and the final loop variable are published here.
+        walker (Callable[..., None]): Controlled operation walker with the
+            same leading arguments as :func:`emit_controlled_operations`.
+
+    Returns:
+        None: The callback appends operations to ``circuit`` in place.
+
+    Raises:
+        EmitError: If the bounds are unresolved or invalid, loop identities
+            are malformed, or a RegionArg value cannot be resolved.
+    """
+    from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+        _advance_region_args,
+        _bind_loop_var,
+        _publish_region_results,
+        _seed_region_args,
+        resolve_loop_bounds,
+        validated_loop_indexset,
+    )
+
+    if op.loop_var_value is None:
+        raise EmitError(
+            f"ForOperation '{op.loop_var or '<unnamed>'}' has no "
+            "loop_var_value; the IR must be rebuilt with the current frontend.",
+            operation="ForOperation",
+        )
+    start, stop, step = resolve_loop_bounds(emit_pass._resolver, op, bindings)
+    if start is None or stop is None or step is None:
+        raise EmitError(
+            "Cannot resolve ForOperation bounds in controlled block. "
+            "Loop bounds must be resolvable at transpile time.",
+            operation="ControlledUOperation",
+        )
+
+    indexset = validated_loop_indexset(start, stop, step)
+    carried = _seed_region_args(emit_pass, op, bindings)
+    last_index: int | None = None
+    for index in indexset:
+        last_index = index
+        loop_bindings = bindings.copy()
+        for value_uuid, carried_value in carried.items():
+            _set_emit_value(loop_bindings, value_uuid, carried_value)
+        _bind_loop_var(loop_bindings, op, index)
+        walker(
+            emit_pass,
+            circuit,
+            op.operations,
+            control_indices,
+            qubit_map,
+            loop_bindings,
+        )
+        _advance_region_args(emit_pass, op, carried, loop_bindings)
+
+    _publish_region_results(op, carried, bindings)
+    if last_index is not None:
+        _bind_loop_var(bindings, op, last_index)
 
 
 def emit_static_controlled_if(
@@ -3015,32 +3094,38 @@ def blockvalue_to_gate(
             operation_name=operation_name,
         )
 
-        local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
-            block_value.operations,
-            local_bindings,
-            initial_qubit_map=local_qubit_map,
-            initial_clbit_map=local_clbit_map,
-        )
-
-        qubit_count = (
-            max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
-        )
-        sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
-
-        # The segment ancilla pool addresses the parent circuit; suspend
-        # it so a multi-controlled gate inside this block cannot index it
-        # against the narrower sub-circuit. If one is present, the shared
-        # cascade raises EmitError (caught below) and the caller falls
-        # back to gate-by-gate emission on the parent circuit.
-        with emit_pass._suspended_mc_ancilla_pool():
-            emit_pass._emit_operations(
-                sub_circuit,
+        # The nested allocate() below recomputes the allocator's
+        # segment-level analysis state (measurement taint, safe-merge
+        # allowlist, counters) for the SUB-block; snapshot it so later
+        # iteration replays of the enclosing segment keep consulting
+        # the segment's own sets.
+        with emit_pass._allocator.preserving_analysis_state():
+            local_qubit_map, local_clbit_map = emit_pass._allocator.allocate(
                 block_value.operations,
-                local_qubit_map,
-                local_clbit_map,
                 local_bindings,
-                force_unroll=True,
+                initial_qubit_map=local_qubit_map,
+                initial_clbit_map=local_clbit_map,
             )
+
+            qubit_count = (
+                max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
+            )
+            sub_circuit = emit_pass._emitter.create_circuit(qubit_count, 0)
+
+            # The segment ancilla pool addresses the parent circuit; suspend
+            # it so a multi-controlled gate inside this block cannot index it
+            # against the narrower sub-circuit. If one is present, the shared
+            # cascade raises EmitError (caught below) and the caller falls
+            # back to gate-by-gate emission on the parent circuit.
+            with emit_pass._suspended_mc_ancilla_pool():
+                emit_pass._emit_operations(
+                    sub_circuit,
+                    block_value.operations,
+                    local_qubit_map,
+                    local_clbit_map,
+                    local_bindings,
+                    force_unroll=True,
+                )
 
         return emit_pass._emitter.circuit_to_gate(sub_circuit, "U")
 
@@ -3348,10 +3433,12 @@ def _prepare_nested_block_for_emit(
     Raises:
         EmitError: If the marker-bearing block is already past the stages
             that can be safely checked.
-        ValidationError: If ``SliceBorrowCheckPass`` rejects the block
-            stage.
-        SliceBorrowViolationError: If nested slice borrows violate the
-            same linearity rules enforced for top-level blocks.
+        ValidationError: If ``SliceBorrowCheckPass`` rejects the block stage
+            or cannot represent nested ownership across control flow.
+        QubitBorrowConflictError: If nested slice views have overlapping live
+            ownership.
+        QubitConsumedError: If the nested block accesses a qubit slot after a
+            destructive operation consumed it.
     """
     if not isinstance(block_value, Block):
         return block_value

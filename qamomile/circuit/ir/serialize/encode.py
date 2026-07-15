@@ -57,6 +57,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     LoopCarriedRebind,
     RegionArg,
     WhileOperation,
+    validate_region_args,
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -1147,8 +1148,14 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
     Returns:
         dict[str, Any]: Base op dict plus ``loop_var`` display name,
             ``loop_var_value_ref`` (or ``None``), the
-            ``loop_carried_rebinds`` record list, and ``body`` op list.
+            ``loop_carried_rebinds`` and ``region_args`` record lists,
+            and ``body`` op list.
+
+    Raises:
+        ValueError: If the loop's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
     """
+    validate_region_args(op)
     d = _base_op_dict("ForOperation", op)
     d["loop_var"] = op.loop_var
     d["loop_var_value_ref"] = (
@@ -1171,7 +1178,12 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
         dict[str, Any]: Base op dict plus display key/value var names,
             their UUID refs (or ``None`` for legacy IR), the
             ``key_is_vector`` flag, and the ``body`` op list.
+
+    Raises:
+        ValueError: If the loop's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
     """
+    validate_region_args(op)
     d = _base_op_dict("ForItemsOperation", op)
     d["key_vars"] = list(op.key_vars)
     d["value_var"] = op.value_var
@@ -1196,9 +1208,15 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
         ctx (_EncodeContext): The active encoding context.
 
     Returns:
-        dict[str, Any]: Base op dict plus ``max_iterations`` and the
-            loop ``body``.
+        dict[str, Any]: Base op dict plus ``max_iterations``, the
+            ``loop_carried_rebinds`` and ``region_args`` record lists,
+            and the loop ``body``.
+
+    Raises:
+        ValueError: If the loop's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
     """
+    validate_region_args(op)
     d = _base_op_dict("WhileOperation", op)
     d["max_iterations"] = op.max_iterations
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)

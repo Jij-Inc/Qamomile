@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOpKind,
 )
 from qamomile.circuit.ir.operation.callable import CallTransform
+from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
@@ -45,10 +46,9 @@ class ExprResolver:
       3. UUID in context (call_context / BinOp)   → return mapped expression
       4. Constant value                           → sp.Integer / sp.Float
       5. Unbound parameter                        → sp.Symbol (symbolic) or raise (concrete)
-      6. Loop variable (name-based)               → return mapped symbol
-      7. BinOp/CompOp result                      → trace in block operations
-      8. Search parent blocks                     → trace in ancestors
-      9. Fallback                                 → sp.Symbol (symbolic) or raise (concrete)
+      6. BinOp/CompOp result                      → trace in block operations
+      7. Search parent blocks                     → trace in ancestors
+      8. Fallback                                 → identity-qualified symbol or raise
     """
 
     __slots__ = ("_block", "_context", "_loop_var_names", "_parent_blocks")
@@ -314,28 +314,53 @@ class ExprResolver:
             if pname is not None:
                 if concrete:
                     raise UnresolvedValueError(v.uuid, f"Symbolic parameter '{pname}'")
-                return sp.Symbol(pname, integer=True, positive=True)
+                return _parameter_symbol(v, pname)
 
-        # 6. Loop variable (name-based lookup)
-        if v.name in self._loop_var_names:
-            return self._loop_var_names[v.name]
-
-        # 7. Trace BinOp / CompOp in current block
+        # 6. Trace BinOp / CompOp in current block
         if self._block is not None:
             traced = self._trace(v, self._block, set(), concrete)
             if traced is not None:
                 return traced
 
-        # 8. Parent blocks
+        # 7. Parent blocks
         for pb in reversed(self._parent_blocks):
             traced = self._trace(v, pb, set(), concrete)
             if traced is not None:
                 return traced
 
-        # 9. Fallback
+        # 8. Public input shapes retain their stable names. Other unresolved
+        # values use the complete UUID because display names are not identity
+        # and canonical UUIDs commonly share long prefixes.
         if concrete:
             raise UnresolvedValueError(v.uuid, f"Unresolvable: '{v.name}'")
-        return sp.Symbol(v.name, integer=True, positive=True)
+        if self._is_input_shape_dimension(v):
+            return sp.Symbol(v.name, integer=True, nonnegative=True)
+        fallback_name = f"{v.name}_{v.uuid}"
+        if isinstance(v.type, FloatType):
+            return sp.Symbol(fallback_name, real=True)
+        if isinstance(v.type, (BitType, UIntType)):
+            return sp.Symbol(fallback_name, integer=True, nonnegative=True)
+        return sp.Symbol(fallback_name)
+
+    def _is_input_shape_dimension(self, value: Value) -> bool:
+        """Return whether a value is a public input-array dimension.
+
+        Args:
+            value (Value): Unresolved value considered for symbolic fallback.
+
+        Returns:
+            bool: Whether ``value`` appears in an input array's shape in the
+                current or an enclosing block.
+        """
+        for block in (self._block, *reversed(self._parent_blocks)):
+            if not isinstance(block, Block):
+                continue
+            for input_value in block.input_values:
+                if isinstance(input_value, ArrayValue) and any(
+                    dimension.uuid == value.uuid for dimension in input_value.shape
+                ):
+                    return True
+        return False
 
     def _trace(
         self, v: Value, block: Any, visited: set[int], concrete: bool
@@ -382,6 +407,28 @@ class ExprResolver:
 # ------------------------------------------------------------------ #
 #  Module-level helpers                                               #
 # ------------------------------------------------------------------ #
+
+
+def _parameter_symbol(value: Value, name: str) -> sp.Symbol:
+    """Create a symbol matching an IR parameter's scalar domain.
+
+    Args:
+        value (Value): Parameter value whose IR type defines assumptions.
+        name (str): Public parameter name used for the symbol.
+
+    Returns:
+        sp.Symbol: A nonnegative integer for UInt/Bit, a real symbol for
+            Float, or an unconstrained symbol for other value types.
+    """
+    if isinstance(value.type, FloatType):
+        return sp.Symbol(name, real=True)
+    if isinstance(value.type, (BitType, UIntType)):
+        # Zero is a valid UInt/Bit value. Assuming strict positivity lets SymPy
+        # erase ``value == 0`` branches and zero-trip width guards before a
+        # later substitution can recover them.
+        return sp.Symbol(name, integer=True, nonnegative=True)
+    return sp.Symbol(name)
+
 
 _COMPOP_MAP = {
     CompOpKind.EQ: sp.Eq,

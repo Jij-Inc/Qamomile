@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from qamomile.circuit.frontend.decomposition import DecompositionConfig
 from qamomile.circuit.frontend.param_validation import (
     validate_bindings_parameters_disjoint,
 )
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.transpiler.compiler import QamomileCompiler
+from qamomile.circuit.transpiler.config import TranspilerConfig
 from qamomile.circuit.transpiler.errors import (
     FrontendTransformError,
     QamomileCompileError,
@@ -24,9 +25,6 @@ from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
 )
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
-from qamomile.circuit.transpiler.passes.entrypoint_validation import (
-    EntrypointValidationPass,
-)
 from qamomile.circuit.transpiler.passes.inline import (
     InlinePass,
     count_inline_invokes,
@@ -40,87 +38,17 @@ from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.slice_borrow_check import (
     SliceBorrowCheckPass,
 )
-from qamomile.circuit.transpiler.passes.substitution import (
-    SubstitutionConfig,
-    SubstitutionPass,
-    SubstitutionRule,
-)
+from qamomile.circuit.transpiler.passes.substitution import SubstitutionPass
 from qamomile.circuit.transpiler.passes.symbolic_shape_validation import (
     SymbolicShapeValidationPass,
 )
+from qamomile.circuit.transpiler.prepared import PreparedModule
 from qamomile.circuit.transpiler.segments import ProgramPlan
 
 if TYPE_CHECKING:
     pass
 
 T = TypeVar("T")  # Backend circuit type
-
-
-@dataclass
-class TranspilerConfig:
-    """Configuration for the transpiler pipeline.
-
-    This configuration allows customizing the compilation behavior,
-    including decomposition strategies and subroutine substitutions.
-
-    Attributes:
-        decomposition: Configuration for decomposition strategies.
-            Controls which strategies are used for composite gates.
-        substitutions: Configuration for subroutine/gate substitutions.
-            Allows replacing blocks or setting gate strategies.
-
-    Example:
-        config = TranspilerConfig(
-            decomposition=DecompositionConfig(
-                strategy_overrides={"qft": "approximate"},
-            ),
-            substitutions=SubstitutionConfig(
-                rules=[
-                    SubstitutionRule("my_oracle", target=optimized_oracle),
-                ],
-            ),
-        )
-        transpiler = QiskitTranspiler(config=config)
-    """
-
-    decomposition: DecompositionConfig = field(default_factory=DecompositionConfig)
-    substitutions: SubstitutionConfig = field(default_factory=SubstitutionConfig)
-
-    @classmethod
-    def with_strategies(
-        cls,
-        strategy_overrides: dict[str, str] | None = None,
-        **kwargs: Any,
-    ) -> "TranspilerConfig":
-        """Create config with strategy overrides.
-
-        Args:
-            strategy_overrides: Map of gate name to strategy name
-            **kwargs: Additional config options
-
-        Returns:
-            TranspilerConfig instance
-
-        Example:
-            config = TranspilerConfig.with_strategies(
-                strategy_overrides={"qft": "approximate", "iqft": "approximate"}
-            )
-        """
-        decomp = DecompositionConfig(
-            strategy_overrides=strategy_overrides or {},
-        )
-
-        # Convert strategy overrides to substitution rules
-        rules = []
-        if strategy_overrides:
-            for gate_name, strategy in strategy_overrides.items():
-                rules.append(SubstitutionRule(source_name=gate_name, strategy=strategy))
-
-        return cls(
-            decomposition=decomp,
-            substitutions=SubstitutionConfig(rules=rules),
-            **kwargs,
-        )
 
 
 class Transpiler(ABC, Generic[T]):
@@ -289,7 +217,7 @@ class Transpiler(ABC, Generic[T]):
         """
         return ParameterShapeResolutionPass(bindings).run(block)
 
-    # Upper bound on unroll iterations for self-recursive qkernels.
+    # Upper bound on unroll iterations for self-recursive @qkernels.
     # 64 covers Suzuki–Trotter up to order 130 (64 levels at 2-per-level).
     MAX_UNROLL_DEPTH: int = 64
 
@@ -308,10 +236,10 @@ class Transpiler(ABC, Generic[T]):
         callable invocation and then folds the base-case
         ``IfOperation`` via ``partial_eval``. Terminates when no
         inline callable invocation remains (success), when every residual call
-        is trapped inside an operation-owned block that ``inline`` cannot
-        re-enter (control / inverse of a recursive kernel — raises a targeted
-        error, see below), or when ``MAX_UNROLL_DEPTH`` is reached (genuinely
-        non-terminating top-level recursion — raises).
+        is trapped inside an operation-owned block where ``partial_eval``
+        cannot fold it (control / inverse of a recursive kernel — raises a
+        targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is reached
+        (genuinely non-terminating top-level recursion — raises).
 
         Args:
             block (Block): The block to unroll. May be ``HIERARCHICAL``
@@ -351,32 +279,29 @@ class Transpiler(ABC, Generic[T]):
             # After a full inline + partial_eval iteration, if calls remain
             # only inside operation-owned blocks (a ControlledUOperation's
             # ``block`` or an InverseBlockOperation's nested blocks), no
-            # further iteration can make progress: ``inline`` unrolled the
-            # self-call one layer there and its cycle guard then declined to
-            # re-enter, leaving a residual inline callable invocation that
-            # ``count_unrollable_inline_invokes`` deliberately does not count.
-            # (``CompileTimeIfLoweringPass`` does fold compile-time ``if``s
-            # inside a ControlledUOperation.block, but that never removes the
-            # trapped call itself.) This is the signature of a self-recursive
-            # qkernel passed to ``qmc.control`` / ``qmc.inverse``; fail fast
-            # with a targeted message instead of spinning to
-            # ``MAX_UNROLL_DEPTH`` and blaming the bindings.
+            # further iteration can make progress: ``inline`` already
+            # unrolled one layer there, but ``partial_eval`` never descends
+            # into those blocks to fold the base-case ``if``. This is the
+            # signature of a self-recursive @qkernel passed to
+            # ``qmc.control`` / ``qmc.inverse``; fail fast with a targeted
+            # message instead of spinning to ``MAX_UNROLL_DEPTH`` and
+            # blaming the bindings.
             if count_unrollable_inline_invokes(block.operations) == 0:
                 raise FrontendTransformError(
                     "qmc.control / qmc.inverse was given a recursive "
-                    "qkernel: after inlining, an inline callable invocation "
-                    "still remains inside the controlled / inverted block, where "
-                    "the unroll loop cannot resolve it — inline's cycle "
-                    "guard stops after one layer and does not re-enter an "
-                    "operation-owned block. Controlling or inverting a "
-                    "self-recursive kernel is not supported. Rewrite the "
-                    "kernel non-recursively (manually unrolled to the "
-                    "required depth) before passing it to qmc.control / "
-                    "qmc.inverse."
+                    "@qkernel: after inlining, an inline callable invocation still "
+                    "remains inside the controlled / inverted block, and "
+                    "partial_eval cannot fold its base-case `if` there "
+                    "(constant folding does not descend into a "
+                    "ControlledUOperation.block or an InverseBlockOperation "
+                    "block). Controlling or inverting a self-recursive "
+                    "kernel is not supported. Rewrite the kernel "
+                    "non-recursively (manually unrolled to the required "
+                    "depth) before passing it to qmc.control / qmc.inverse."
                 )
 
         raise FrontendTransformError(
-            f"Recursive qkernel did not terminate after "
+            f"Recursive @qkernel did not terminate after "
             f"{self.MAX_UNROLL_DEPTH} unroll iterations.  Either the "
             f"recursion does not terminate under the provided bindings, "
             f"or the parameter driving the base-case condition was not "
@@ -460,19 +385,35 @@ class Transpiler(ABC, Generic[T]):
         1. A view whose newly-concrete coverage overlaps another live
            view of the same root parent.
         2. A view whose newly-concrete coverage hits a slot that was
-           consumed by a destructive view operation earlier in the
+           consumed by a destructive operation earlier in the
            block.
-        3. A view that reaches the end of the block while still
-           recorded as the owner of the parent's slots (i.e. it was
-           never used or never released).
+        3. Slice ownership changes that cannot be represented safely across
+           control-flow boundaries.
 
-        Direct element borrows (``q[i]``) emit no IR operation, so the
-        IR-level pass cannot observe them; the trace-time validation
-        in :func:`func_to_block._validate_returned_arrays` covers that
-        path.
+        Creating a direct element borrow (``q[i]``) emits no IR operation,
+        so this pass cannot observe the borrow site itself. Later uses of
+        that element do appear as operation operands and are checked for
+        conflicts with live slice views. Trace-time validation in
+        :func:`qamomile.circuit.frontend.func_to_block._validate_returned_arrays`
+        covers unreturned direct-element borrows that have no observable
+        operand use.
 
         The pass is a pass-through for the IR — it only raises on
         violations and leaves the block unchanged on success.
+
+        Args:
+            block (Block): Post-fold affine or hierarchical block to validate.
+
+        Returns:
+            Block: The input block unchanged after successful validation.
+
+        Raises:
+            QubitBorrowConflictError: If live slice ownership conflicts with
+                another view or direct access.
+            QubitConsumedError: If a slice or operand accesses a slot already
+                destroyed by a destructive operation.
+            ValidationError: If the block kind is invalid or ownership cannot
+                be propagated safely through control flow.
         """
         return SliceBorrowCheckPass().run(block)
 
@@ -534,6 +475,39 @@ class Transpiler(ABC, Generic[T]):
         segmentation_pass = self._create_segmentation_pass()
         return segmentation_pass.run(block)
 
+    def prepare(
+        self,
+        kernel: QKernelLike,
+        bindings: dict[str, Any] | None = None,
+        parameters: list[str] | None = None,
+    ) -> PreparedModule:
+        """Prepare a qkernel for target-specific planning and lowering.
+
+        This phase preserves callable boundaries. It performs tracing,
+        entrypoint validation, configured substitutions, and parameter-shape
+        resolution, then collects the reachable callable graph into a
+        program-level semantic view.
+
+        Args:
+            kernel (QKernelLike): QKernel or qkernel-like frontend object to
+                prepare as a top-level entrypoint.
+            bindings (dict[str, Any] | None): Compile-time values used while
+                tracing and resolving parameter shapes. Defaults to ``None``.
+            parameters (list[str] | None): Argument names preserved as runtime
+                parameters. Defaults to ``None``.
+
+        Returns:
+            PreparedModule: Hierarchical entrypoint, reachable callables,
+                call graph, and public ABI.
+
+        Raises:
+            ValueError: If a name appears in both ``bindings`` and
+                ``parameters``.
+            EntrypointValidationError: If the top-level kernel uses quantum
+                inputs or outputs.
+        """
+        return QamomileCompiler(self.config).prepare(kernel, bindings, parameters)
+
     def emit(
         self,
         separated: ProgramPlan,
@@ -558,6 +532,45 @@ class Transpiler(ABC, Generic[T]):
         validate_bindings_parameters_disjoint(bindings, parameters)
         emit_pass = self._create_emit_pass(bindings, parameters)
         return emit_pass.run(separated)
+
+    def plan_circuit(
+        self,
+        prepared: PreparedModule,
+        bindings: dict[str, Any] | None = None,
+    ) -> ProgramPlan:
+        """Lower a prepared semantic module into the circuit execution model.
+
+        This is the destructive circuit-family path: inline-policy calls are
+        flattened, compile-time structure is evaluated, affine and borrow
+        invariants are checked, measurement-dependent classical expressions
+        are classified, and the result is segmented into C-to-Q-to-C steps.
+        Program-graph targets must compile :class:`PreparedModule` directly
+        instead of invoking this method.
+
+        Args:
+            prepared (PreparedModule): Hierarchical semantic program returned
+                by :meth:`prepare`.
+            bindings (dict[str, Any] | None): Compile-time bindings used for
+                recursion unrolling and partial evaluation. Defaults to
+                ``None``.
+
+        Returns:
+            ProgramPlan: Circuit-family host-orchestrated execution plan.
+
+        Raises:
+            QamomileCompileError: If validation, partial evaluation, or
+                segmentation rejects the program.
+        """
+        affine = self.inline(prepared.entrypoint)
+        affine = self.unroll_recursion(affine, bindings)
+        validated = self.affine_validate(affine)
+        partially_evaluated = self.partial_eval(validated, bindings)
+        partially_evaluated = self.slice_borrow_check(partially_evaluated)
+        partially_evaluated = self.strip_slice_ops(partially_evaluated)
+        analyzed = self.analyze(partially_evaluated)
+        analyzed = self.classical_lowering(analyzed)
+        analyzed = self.validate_symbolic_shapes(analyzed)
+        return self.plan(analyzed)
 
     # === Convenience Methods ===
 
@@ -609,47 +622,26 @@ class Transpiler(ABC, Generic[T]):
             QKernels remain valid as subroutines and for ``build()``.
 
         Pipeline:
-            1. to_block: Convert a qkernel-like frontend object to Block
-            2. substitute: Apply substitutions (if configured)
-            3. resolve_parameter_shapes: Constant-fold symbolic Vector param dims
-            4. inline: Inline inline-policy callable invocations
-            5. affine_validate: Validate affine type semantics
-            6. partial_eval: Fold constants and lower compile-time control flow
-            7. analyze: Validate and analyze dependencies
-            8. validate_symbolic_shapes: Reject unresolved parameter shape dims
-            9. plan: Build ProgramPlan (segment into C->Q->C steps)
-            10. emit: Generate backend-specific code
+            1. prepare: Trace and validate the entrypoint, apply configured
+               substitutions, resolve parameter shapes, and preserve the
+               reachable callable graph.
+            2. plan_circuit: Inline inline-policy calls, unroll recursion,
+               validate affine and borrow rules, partially evaluate
+               compile-time structure, analyze dependencies, and segment the
+               program into the host-orchestrated C-to-Q-to-C model.
+            3. lower: Convert each quantum segment to immutable,
+               backend-neutral ``CircuitProgram`` IR.
+            4. legalize: Select native intrinsics and Pauli-evolution
+               realizations from target capabilities and compilation policy.
+            5. verify: Prove circuit structure and target legality before
+               constructing backend objects.
+            6. materialize: Convert the legalized circuit IR to backend-native
+               artifacts and preserve the executable ABI.
         """
         validate_bindings_parameters_disjoint(bindings, parameters)
 
-        entrypoint_validator = EntrypointValidationPass()
-
-        # Pass bindings and parameters to to_block for proper shape resolution
-        block = self.to_block(kernel, bindings, parameters)
-        entrypoint_validator.run(block)
-        # Apply substitutions if configured
-        substituted = self.substitute(block)
-        shape_resolved = self.resolve_parameter_shapes(substituted, bindings)
-        affine = self.inline(shape_resolved)
-        # Self-recursive qkernels need iterated inline ↔ partial_eval so
-        # each unroll step can have its base-case `if` folded before the
-        # next unroll.  No-op when the block is already affine.
-        affine = self.unroll_recursion(affine, bindings)
-        validated = self.affine_validate(affine)
-        partially_evaluated = self.partial_eval(validated, bindings)
-        partially_evaluated = self.slice_borrow_check(partially_evaluated)
-        partially_evaluated = self.strip_slice_ops(partially_evaluated)
-        analyzed = self.analyze(partially_evaluated)
-        # Lower measurement-derived classical ops to ``RuntimeClassicalExpr``
-        # so emit can dispatch them through a dedicated backend hook
-        # instead of fold-or-translate logic over ``CompOp``/``CondOp``/
-        # ``NotOp``/``BinOp``. Non-runtime (foldable) classical ops are
-        # left untouched and continue through the existing emit-time fold
-        # path. Runs before symbolic-shape validation and segmentation
-        # so those passes see the rewritten IR.
-        analyzed = self.classical_lowering(analyzed)
-        analyzed = self.validate_symbolic_shapes(analyzed)
-        separated = self.plan(analyzed)
+        prepared = self.prepare(kernel, bindings, parameters)
+        separated = self.plan_circuit(prepared, bindings)
         return self.emit(separated, bindings, parameters)
 
     def to_circuit(
