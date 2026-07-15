@@ -45,6 +45,10 @@ def qkernel_callable_attrs(kernel: Any) -> dict[str, Any]:
     Returns:
         dict[str, Any]: Serializer-friendly callable attributes.
     """
+    preserved_attrs = getattr(kernel, "_callable_attrs_override", None)
+    if isinstance(preserved_attrs, dict):
+        return dict(preserved_attrs)
+
     kind = getattr(kernel, "_callable_kind", "qkernel")
     policy = getattr(kernel, "_callable_policy", CallPolicy.INLINE)
     attrs: dict[str, Any] = {
@@ -78,6 +82,10 @@ def qkernel_callable_ref(kernel: Any) -> CallableRef:
     Returns:
         CallableRef: Stable reference used by ``InvokeOperation`` call sites.
     """
+    preserved_ref = getattr(kernel, "_callable_ref_override", None)
+    if isinstance(preserved_ref, CallableRef):
+        return preserved_ref
+
     kind = getattr(kernel, "_callable_kind", "qkernel")
     name = _qkernel_callable_name(kernel)
     namespace = getattr(kernel, "_callable_namespace", None)
