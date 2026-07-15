@@ -31,6 +31,7 @@ from qamomile.circuit.serialization import (
     deserialize,
     serialize,
 )
+from qamomile.circuit.serialization.decode import from_dict as kernel_from_dict
 from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
 from qamomile.circuit.serialization.proto import qamomile_ir_pb2 as pb
 from qamomile.qiskit import QiskitTranspiler
@@ -140,6 +141,13 @@ def _carried_scalar(n: qmc.UInt) -> qmc.UInt:
     for i in qmc.range(n):
         total = total + i
     return total
+
+
+@qmc.qkernel
+def _array_parent_metadata(obs: qmc.Observable) -> qmc.Float:
+    """Attach root-array addresses to tuple-form expectation operands."""
+    qubits = qmc.qubit_array(2, "qubits")
+    return qmc.expval((qubits[0], qubits[1]), obs)
 
 
 _controlled_oracle = qmc.Oracle(
@@ -673,6 +681,53 @@ def test_inconsistent_region_result_is_rejected_during_deserialize() -> None:
 
     with pytest.raises(ValueError, match="result_ref does not match result_refs"):
         _restore(message)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["element_parent_uuids", "element_parent_indices"],
+)
+def test_missing_array_parent_value_is_rejected_during_deserialize(
+    field_name: str,
+) -> None:
+    """Missing optional parent values cannot leak ``None`` into semantic IR."""
+    message = _message(_array_parent_metadata)
+    runtime = next(
+        value.metadata.array_runtime
+        for value in message.value_table
+        if value.metadata.HasField("array_runtime")
+        and value.metadata.array_runtime.element_parent_indices
+    )
+    getattr(runtime, field_name)[0].ClearField("value")
+
+    with pytest.raises(ValueError, match="not in canonical form"):
+        _restore(message)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("element_parent_uuids", 1),
+        ("element_parent_indices", "0"),
+        ("element_parent_indices", True),
+    ],
+)
+def test_invalid_array_parent_type_is_rejected(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    """Internal graph decoding rejects invalid array-parent entry types."""
+    envelope = kernel_to_dict(_array_parent_metadata)
+    runtime = next(
+        value["metadata"]["array_runtime"]
+        for value in envelope["value_table"]
+        if value["metadata"].get("array_runtime") is not None
+        and value["metadata"]["array_runtime"]["element_parent_indices"]
+    )
+    runtime[field_name][0] = invalid_value
+
+    with pytest.raises(ValueError, match=rf"{field_name}\[0\]"):
+        kernel_from_dict(envelope)
 
 
 def test_version_mismatch_is_rejected() -> None:

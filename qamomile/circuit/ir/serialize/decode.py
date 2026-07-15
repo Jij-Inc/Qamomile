@@ -596,6 +596,67 @@ def _decode_qfixed_metadata(d: Any) -> QFixedMetadata | None:
     )
 
 
+def _decode_array_parent_uuids(values: Any) -> tuple[str, ...]:
+    """Decode array-parent UUIDs and restore the standalone sentinel.
+
+    Args:
+        values (Any): Sequence of parent UUID strings or ``None`` entries from
+            optional protobuf fields.
+
+    Returns:
+        tuple[str, ...]: Parent UUIDs with missing entries normalized to ``""``.
+
+    Raises:
+        ValueError: If the collection is not a list or tuple, or an entry is
+            neither ``str`` nor ``None``.
+    """
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("element_parent_uuids must be a list or tuple")
+    decoded: list[str] = []
+    for index, value in enumerate(values):
+        if value is None:
+            decoded.append("")
+        elif isinstance(value, str):
+            decoded.append(value)
+        else:
+            raise ValueError(
+                f"element_parent_uuids[{index}] must be str or None, "
+                f"got {type(value).__name__}"
+            )
+    return tuple(decoded)
+
+
+def _decode_array_parent_indices(values: Any) -> tuple[int, ...]:
+    """Decode array-parent indices and restore the standalone sentinel.
+
+    Args:
+        values (Any): Sequence of plain integer indices or ``None`` entries
+            from optional protobuf fields.
+
+    Returns:
+        tuple[int, ...]: Parent indices with missing entries normalized to
+            ``-1``.
+
+    Raises:
+        ValueError: If the collection is not a list or tuple, or an entry is
+            neither a plain ``int`` nor ``None``.
+    """
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("element_parent_indices must be a list or tuple")
+    decoded: list[int] = []
+    for index, value in enumerate(values):
+        if value is None:
+            decoded.append(-1)
+        elif is_plain_int(value):
+            decoded.append(value)
+        else:
+            raise ValueError(
+                f"element_parent_indices[{index}] must be int or None, "
+                f"got {type(value).__name__}"
+            )
+    return tuple(decoded)
+
+
 def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
     """Decode :class:`ArrayRuntimeMetadata` (or ``None``).
 
@@ -610,6 +671,10 @@ def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
 
     Returns:
         ArrayRuntimeMetadata | None: The metadata, or ``None`` if absent.
+
+    Raises:
+        ValueError: If array-parent metadata has an invalid collection or
+            entry type.
     """
     if d is None:
         return None
@@ -617,8 +682,12 @@ def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
         const_array=_freeze_data(_decode_payload(d.get("const_array"))),
         element_uuids=tuple(d.get("element_uuids", ())),
         element_logical_ids=tuple(d.get("element_logical_ids", ())),
-        element_parent_uuids=tuple(d.get("element_parent_uuids", ())),
-        element_parent_indices=tuple(d.get("element_parent_indices", ())),
+        element_parent_uuids=_decode_array_parent_uuids(
+            d.get("element_parent_uuids", ())
+        ),
+        element_parent_indices=_decode_array_parent_indices(
+            d.get("element_parent_indices", ())
+        ),
     )
 
 
