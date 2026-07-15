@@ -33,7 +33,6 @@ from typing import Any, cast
 import numpy as np
 
 import qamomile.circuit as qmc
-from qamomile._utils import is_close_zero
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
 )
@@ -272,6 +271,11 @@ def _canonical_terms(
             raise TypeError(
                 f"coefficient for offset {offset!r} cannot be converted to complex"
             ) from error
+        except OverflowError as error:
+            raise ValueError(
+                f"coefficient for offset {offset!r} must be representable as a "
+                "finite complex number"
+            ) from error
         if not math.isfinite(value.real) or not math.isfinite(value.imag):
             raise ValueError(
                 f"coefficient for offset {offset!r} must be finite, got {coefficient!r}"
@@ -282,7 +286,7 @@ def _canonical_terms(
     terms = tuple(
         (offset, coefficient)
         for offset, coefficient in sorted(combined.items())
-        if not is_close_zero(abs(coefficient))
+        if coefficient
     )
     if not terms:
         raise ValueError("periodic stencil is the zero operator after combining terms")
@@ -469,8 +473,8 @@ def periodic_stencil_block_encoding(
     Equivalent offsets are combined before computing the normalization.
     A shift uses the shorter of repeated modular increments or decrements, so
     its gate cost is linear in that shortest displacement.
-    Combined coefficients with magnitude at most ``1e-15`` are treated as
-    numerical zero before ``lambda`` and PREPARE are constructed.
+    Only exact cancellations are removed before ``lambda`` and PREPARE are
+    constructed, so every representable nonzero coefficient is preserved.
 
     The returned qkernel expects an all-zero signal register.  Projecting that
     register onto all zero before and after the qkernel yields ``A / lambda``,
@@ -487,8 +491,9 @@ def periodic_stencil_block_encoding(
 
     Raises:
         ValueError: If no axes or terms are supplied, an axis width is not
-            positive, an offset has the wrong dimension, a coefficient is
-            non-finite, or all terms cancel modulo the axis sizes.
+            positive, an offset has the wrong dimension, a coefficient or
+            normalization is non-finite, or all terms cancel modulo the axis
+            sizes.
         TypeError: If widths or offsets are not integers, or coefficients are
             not numeric.
 
@@ -509,6 +514,8 @@ def periodic_stencil_block_encoding(
     sizes = _validate_register_sizes(register_sizes)
     terms = _canonical_terms(coefficients, sizes)
     normalization = float(sum(abs(coefficient) for _, coefficient in terms))
+    if not math.isfinite(normalization):
+        raise ValueError("periodic stencil normalization must be finite")
 
     num_terms = len(terms)
     num_signal_qubits = max(1, (num_terms - 1).bit_length())

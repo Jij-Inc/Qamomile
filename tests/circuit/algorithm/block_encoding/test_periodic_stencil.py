@@ -299,15 +299,36 @@ def test_periodic_stencil_factory_is_publicly_exported() -> None:
     assert qmc.periodic_stencil_block_encoding is periodic_stencil_block_encoding
 
 
-def test_periodic_stencil_drops_numerically_zero_terms() -> None:
-    """Terms below the documented tolerance do not inflate LCU normalization."""
+def test_periodic_stencil_preserves_tiny_nonzero_terms() -> None:
+    """Every representable nonzero term remains part of the encoded operator."""
     encoding = qmc.periodic_stencil_block_encoding(
         {0: 1e-16, 1: 2.0},
         register_sizes=(2,),
     )
 
-    assert encoding.offsets == ((1,),)
+    assert encoding.offsets == ((0,), (1,))
+    np.testing.assert_allclose(
+        encoding.coefficients,
+        (1e-16 + 0.0j, 2.0 + 0.0j),
+        atol=0.0,
+        rtol=0.0,
+    )
     assert encoding.normalization == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    "coefficients",
+    [
+        {0: 10**1000},
+        {0: 1e308, 1: 1e308},
+    ],
+)
+def test_periodic_stencil_rejects_unrepresentable_normalization(
+    coefficients: dict[int, complex],
+) -> None:
+    """Unrepresentable coefficients and overflowing normalizations fail early."""
+    with pytest.raises(ValueError, match="finite"):
+        qmc.periodic_stencil_block_encoding(coefficients, register_sizes=(2,))
 
 
 @pytest.mark.parametrize(
@@ -339,14 +360,8 @@ def test_periodic_stencil_rejects_wrong_register_widths(
         qiskit_transpiler.transpile(circuit)
 
 
-@pytest.mark.parametrize(
-    ("register_sizes", "seed"),
-    [
-        ((1,), 0),
-        ((2,), 1),
-        ((1, 2), 42),
-    ],
-)
+@pytest.mark.parametrize("register_sizes", [(1,), (2,), (1, 2)])
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
 def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
     sdk_transpiler: Any,
     register_sizes: tuple[int, ...],
