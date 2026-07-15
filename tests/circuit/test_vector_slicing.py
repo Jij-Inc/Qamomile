@@ -20,6 +20,7 @@ from qamomile.circuit.frontend.handle import VectorView
 from qamomile.circuit.frontend.qkernel_invocation import _wrap_array_result
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.control_flow import IfMerge
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import (
@@ -55,7 +56,7 @@ def _slice_array(
 ) -> ArrayValue:
     """Create a sliced ArrayValue for slice-borrow synthetic tests."""
     return ArrayValue(
-        type=QubitType(),
+        type=root.type,
         name=name,
         shape=(length,),
         slice_of=root,
@@ -1455,21 +1456,70 @@ class TestSameSliceVersionRefresh:
 
         assert state == {key: full_view}
 
-    def test_root_reordered_slice_merge_is_not_representation_alias(self):
-        """Equal unordered coverage cannot hide a reordered slice as an alias."""
+    @pytest.mark.parametrize(
+        ("start", "step", "view_length"),
+        [(0, 1, 3), (0, 2, 2), (3, -1, 4)],
+        ids=["partial", "strided", "reordered"],
+    )
+    def test_root_non_full_slice_merge_is_not_representation_alias(
+        self,
+        start: int,
+        step: int,
+        view_length: int,
+    ) -> None:
+        """Partial, strided, and reordered slices remain distinct resources."""
         checker = SliceBorrowCheckPass()
         length = _uint_value("length", 4)
         root = _qubit_array("q", length)
-        reversed_view = _slice_array(
+        view = _slice_array(
             root,
-            "reversed",
-            _uint_value("start", 3),
-            _uint_value("step", -1),
-            length,
+            "view",
+            _uint_value("start", start),
+            _uint_value("step", step),
+            _uint_value("view_length", view_length),
         )
-        merge = IfMerge(0, root, reversed_view, root.next_version())
+        merge = IfMerge(0, root, view, root.next_version())
 
         assert not checker._record_if_representation_alias(merge)
+
+    def test_malformed_reslice_merge_is_not_representation_alias(self) -> None:
+        """Malformed non-vector metadata is rejected without indexing shape."""
+        checker = SliceBorrowCheckPass()
+        length = _uint_value("length", 4)
+        root = _qubit_array("q", length)
+        malformed = dataclasses.replace(
+            _slice_array(
+                root,
+                "malformed",
+                _uint_value("start", 0),
+                _uint_value("step", 1),
+                length,
+            ),
+            shape=(),
+        )
+        merge = IfMerge(0, root, malformed, root.next_version())
+
+        assert not checker._record_if_representation_alias(merge)
+
+    def test_unhashable_type_full_slice_merge_is_representation_alias(self) -> None:
+        """Resource equality never requires an IR element type to be hashable."""
+        checker = SliceBorrowCheckPass()
+        length = _uint_value("length", 4)
+        root = ArrayValue(
+            type=ObservableType(),
+            name="observables",
+            shape=(length,),
+        )
+        full_view = _slice_array(
+            root,
+            "full",
+            _uint_value("start", 0),
+            _uint_value("step", 1),
+            length,
+        )
+        merge = IfMerge(0, root, full_view, root.next_version())
+
+        assert checker._record_if_representation_alias(merge)
 
     def test_runtime_if_reslices_existing_partial_view(self):
         """A branch-local full reslice retains the pre-branch borrow owner."""

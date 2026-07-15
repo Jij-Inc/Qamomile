@@ -309,22 +309,11 @@ class TestGlobalPhaseStandalone:
         theta = float(rng.uniform(-np.pi, np.pi))
 
         def make(use_phase: bool):
-            """Build the phased or reference kernel used by this test.
-
-            Args:
-                use_phase (bool): Whether to apply the global-phase wrapper.
-
-            Returns:
-                QKernel: Constructed local test kernel.
-            """
+            """Build the phased or reference kernel used by this test."""
 
             @qkernel
             def circ() -> qmc.Bit:
-                """Build the local circuit exercised by this test.
-
-                Returns:
-                    qmc.Bit: Measured output bit.
-                """
+                """Build the local circuit exercised by this test."""
                 q = qmc.qubit("q")
                 if use_phase:
                     q = qmc.global_phase(body, theta)(q)
@@ -352,11 +341,7 @@ class TestGlobalPhaseStandalone:
 
         @qkernel
         def circ() -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             q = qmc.qubit("q")
             q = qmc.global_phase(_ident, theta)(q)
             return qmc.measure(q)
@@ -440,11 +425,7 @@ class TestGlobalPhaseStandalone:
 
         @qkernel
         def circ() -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             q = qmc.qubit("q")
             q = qmc.global_phase(_x_body, theta)(q)
             return qmc.measure(q)
@@ -466,14 +447,7 @@ class TestGlobalPhaseStandalone:
 
         @qkernel
         def phased(obs: qmc.Observable) -> qmc.Float:
-            """Build the globally phased circuit path.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the globally phased circuit path."""
             q = qmc.qubit("q")
             q = qmc.h(q)
             q = qmc.global_phase(_hz_body, theta)(q)
@@ -481,14 +455,7 @@ class TestGlobalPhaseStandalone:
 
         @qkernel
         def plain(obs: qmc.Observable) -> qmc.Float:
-            """Build the unphased reference circuit.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the unphased reference circuit."""
             q = qmc.qubit("q")
             q = qmc.h(q)
             q = _hz_body(q)
@@ -520,14 +487,7 @@ class TestGlobalPhaseStandalone:
         def sample_circuit(
             values: qmc.Dict[qmc.UInt, qmc.Float],
         ) -> qmc.Bit:
-            """Sample a phased dictionary loop from ``|1>``.
-
-            Args:
-                values (qmc.Dict[qmc.UInt, qmc.Float]): Bound phase angles.
-
-            Returns:
-                qmc.Bit: Measurement of the target qubit.
-            """
+            """Sample a phased dictionary loop from ``|1>``."""
             q = qmc.qubit("q")
             q = qmc.x(q)
             q = _for_items_phase_body(q, values)
@@ -538,15 +498,7 @@ class TestGlobalPhaseStandalone:
             obs: qmc.Observable,
             values: qmc.Dict[qmc.UInt, qmc.Float],
         ) -> qmc.Float:
-            """Estimate an observable after a phased dictionary loop.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-                values (qmc.Dict[qmc.UInt, qmc.Float]): Bound phase angles.
-
-            Returns:
-                qmc.Float: Observable expectation value.
-            """
+            """Estimate an observable after a phased dictionary loop."""
             q = qmc.qubit("q")
             q = qmc.x(q)
             q = _for_items_phase_body(q, values)
@@ -593,27 +545,12 @@ class TestGlobalPhaseControlled:
 
         @qkernel
         def phased_ident(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply a global phase to an identity body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase to an identity body."""
             return qmc.global_phase(_ident, angle)(q)
 
         @qkernel
         def htest(angle: qmc.Float) -> qmc.Bit:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl = qmc.h(ctrl)
@@ -646,14 +583,7 @@ class TestGlobalPhaseControlled:
 
         @qkernel
         def htest(angle: qmc.Float) -> qmc.Bit:
-            """Observe a call-site target phase through one coherent control.
-
-            Args:
-                angle (qmc.Float): Target-global phase in radians.
-
-            Returns:
-                qmc.Bit: Hadamard-test control measurement.
-            """
+            """Observe a call-site target phase through one coherent control."""
             control = qmc.qubit("control")
             target = qmc.qubit("target")
             control = qmc.h(control)
@@ -700,16 +630,7 @@ class TestGlobalPhaseControlled:
             target: qmc.Qubit,
             angle: qmc.Float,
         ) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Apply identity with a phase on the active control branch.
-
-            Args:
-                control (qmc.Qubit): Coherent control qubit.
-                target (qmc.Qubit): Identity target qubit.
-                angle (qmc.Float): Target-global phase in radians.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated control and target.
-            """
+            """Apply identity with a phase on the active control branch."""
             return qmc.control(_ident)(
                 control,
                 target,
@@ -718,14 +639,7 @@ class TestGlobalPhaseControlled:
 
         @qkernel
         def circuit(angle: qmc.Float) -> qmc.Bit:
-            """Apply the phased call and its inverse before interference.
-
-            Args:
-                angle (qmc.Float): Target-global phase in radians.
-
-            Returns:
-                qmc.Bit: Control measurement, deterministically zero.
-            """
+            """Apply the phased call and its inverse before interference."""
             control = qmc.qubit("control")
             target = qmc.qubit("target")
             control = qmc.h(control)
@@ -762,16 +676,7 @@ class TestGlobalPhaseControlled:
             target: qmc.Qubit,
             angle: qmc.Float,
         ) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Apply a relative phase when the inner control is active.
-
-            Args:
-                control (qmc.Qubit): Inner control qubit.
-                target (qmc.Qubit): Identity target qubit.
-                angle (qmc.Float): Target-global phase in radians.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated control and target.
-            """
+            """Apply a relative phase when the inner control is active."""
             return qmc.control(_ident)(
                 control,
                 target,
@@ -780,14 +685,7 @@ class TestGlobalPhaseControlled:
 
         @qkernel
         def circuit(angle: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]:
-            """Interfere two controls around the nested phased call.
-
-            Args:
-                angle (qmc.Float): Target-global phase in radians.
-
-            Returns:
-                tuple[qmc.Bit, qmc.Bit]: Outer and inner control measurements.
-            """
+            """Interfere two controls around the nested phased call."""
             outer = qmc.qubit("outer")
             inner = qmc.qubit("inner")
             target = qmc.qubit("target")
@@ -943,27 +841,12 @@ class TestGlobalPhaseControlled:
 
         @qkernel
         def phased_body(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply the test body with a global phase.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the test body with a global phase."""
             return qmc.global_phase(body, angle)(q)
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl, q = qmc.control(phased_body)(ctrl, q, angle)
@@ -1006,22 +889,11 @@ class TestGlobalPhaseHandleTypes:
         theta = float(rng.uniform(-np.pi, np.pi))
 
         def make(use_phase: bool):
-            """Build the phased or reference kernel used by this test.
-
-            Args:
-                use_phase (bool): Whether to apply the global-phase wrapper.
-
-            Returns:
-                QKernel: Constructed local test kernel.
-            """
+            """Build the phased or reference kernel used by this test."""
 
             @qkernel
             def circ() -> qmc.Bit:
-                """Build the local circuit exercised by this test.
-
-                Returns:
-                    qmc.Bit: Measured output bit.
-                """
+                """Build the local circuit exercised by this test."""
                 q = qmc.qubit("q")
                 q = (
                     qmc.global_phase(_nested_body, theta)(q)
@@ -1052,25 +924,11 @@ class TestGlobalPhaseHandleTypes:
         inner = float(rng.uniform(-np.pi, np.pi))
 
         def make(use_phase: bool):
-            """Build the phased or reference kernel used by this test.
-
-            Args:
-                use_phase (bool): Whether to apply the global-phase wrapper.
-
-            Returns:
-                QKernel: Constructed local test kernel.
-            """
+            """Build the phased or reference kernel used by this test."""
 
             @qkernel
             def circ(angle: qmc.Float) -> qmc.Bit:
-                """Build the local circuit exercised by this test.
-
-                Args:
-                    angle (qmc.Float): Phase or rotation angle in radians.
-
-                Returns:
-                    qmc.Bit: Measured output bit.
-                """
+                """Build the local circuit exercised by this test."""
                 q = qmc.qubit("q")
                 q = qmc.h(q)
                 q = (
@@ -1101,22 +959,11 @@ class TestGlobalPhaseHandleTypes:
         theta = float(rng.uniform(-np.pi, np.pi))
 
         def make(use_phase: bool):
-            """Build the phased or reference kernel used by this test.
-
-            Args:
-                use_phase (bool): Whether to apply the global-phase wrapper.
-
-            Returns:
-                QKernel: Constructed local test kernel.
-            """
+            """Build the phased or reference kernel used by this test."""
 
             @qkernel
             def circ() -> qmc.Vector[qmc.Bit]:
-                """Build the local circuit exercised by this test.
-
-                Returns:
-                    qmc.Vector[qmc.Bit]: Measured output bits.
-                """
+                """Build the local circuit exercised by this test."""
                 qs = qmc.qubit_array(2, "qs")
                 qs = (
                     qmc.global_phase(_vec_body, theta)(qs)
@@ -1146,22 +993,11 @@ class TestGlobalPhaseHandleTypes:
         theta = float(rng.uniform(-np.pi, np.pi))
 
         def make(use_phase: bool):
-            """Build the phased or reference kernel used by this test.
-
-            Args:
-                use_phase (bool): Whether to apply the global-phase wrapper.
-
-            Returns:
-                QKernel: Constructed local test kernel.
-            """
+            """Build the phased or reference kernel used by this test."""
 
             @qkernel
             def circ() -> qmc.Vector[qmc.Bit]:
-                """Build the local circuit exercised by this test.
-
-                Returns:
-                    qmc.Vector[qmc.Bit]: Measured output bits.
-                """
+                """Build the local circuit exercised by this test."""
                 qs = qmc.qubit_array(4, "qs")
                 view = qs[0:2]
                 view = (
@@ -1200,27 +1036,12 @@ class TestGlobalPhaseSerialize:
 
         @qkernel
         def phased_body(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply the test body with a global phase.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the test body with a global phase."""
             return qmc.global_phase(_x_body, angle)(q)
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl, q = qmc.control(phased_body)(ctrl, q, angle)
@@ -1242,14 +1063,7 @@ class TestGlobalPhaseSerialize:
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Bit:
-            """Build a directly phase-augmented controlled identity.
-
-            Args:
-                angle (qmc.Float): Target-global phase in radians.
-
-            Returns:
-                qmc.Bit: Control measurement.
-            """
+            """Build a directly phase-augmented controlled identity."""
             control = qmc.qubit("control")
             target = qmc.qubit("target")
             control, target = qmc.control(_ident)(
@@ -1365,14 +1179,7 @@ class TestGlobalPhaseArgShapes:
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs[0], qs[1] = qmc.global_phase(_two_qubit_body, angle)(qs[0], qs[1])
             return qmc.measure(qs)
@@ -1392,14 +1199,7 @@ class TestGlobalPhaseArgShapes:
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(4, "qs")
             v0 = qs[0:2]
             v1 = qs[2:4]
@@ -1423,14 +1223,7 @@ class TestGlobalPhaseArgShapes:
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             whole = qmc.qubit_array(2, "whole")
             big = qmc.qubit_array(4, "big")
             view = big[1:3]  # a VectorView slice
@@ -1454,14 +1247,7 @@ class TestGlobalPhaseArgShapes:
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(4, "qs")
             view = qs[0::2]  # elements 0 and 2
             view = qmc.global_phase(_vec_body, angle)(view)
@@ -1485,15 +1271,7 @@ class TestGlobalPhaseArgShapes:
 
         @qkernel
         def circ(angle: qmc.Float, inner_ang: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-                inner_ang (qmc.Float): Rotation angle used by the wrapped body.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs[0], qs[1] = qmc.global_phase(_interleaved_body, angle)(
                 qs[0], inner_ang, qs[1]
@@ -1521,15 +1299,7 @@ class TestGlobalPhaseArgShapes:
 
         @qkernel
         def circ(angle: qmc.Float, ar: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-                ar (qmc.Vector[qmc.Float]): Phase-angle vector.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs = qmc.global_phase(_vecfloat_body, angle)(qs, ar)
             return qmc.measure(qs)
@@ -1557,14 +1327,7 @@ class TestGlobalPhaseArgShapes:
 
         @qkernel
         def phased(obs: qmc.Observable) -> qmc.Float:
-            """Build the globally phased circuit path.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the globally phased circuit path."""
             qs = qmc.qubit_array(2, "qs")
             qs[0] = qmc.h(qs[0])
             qs[1] = qmc.h(qs[1])
@@ -1573,14 +1336,7 @@ class TestGlobalPhaseArgShapes:
 
         @qkernel
         def plain(obs: qmc.Observable) -> qmc.Float:
-            """Build the unphased reference circuit.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the unphased reference circuit."""
             qs = qmc.qubit_array(2, "qs")
             qs[0] = qmc.h(qs[0])
             qs[1] = qmc.h(qs[1])
@@ -1615,15 +1371,7 @@ class TestGlobalPhaseSpecialCases:
 
         @qkernel
         def circ(m: qmc.UInt, angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                m (qmc.UInt): Register size or loop bound.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(m, "qs")
             for i in qmc.range(m):
                 qs[i] = qmc.global_phase(_x_body, angle)(qs[i])
@@ -1656,27 +1404,12 @@ class TestGlobalPhaseSpecialCases:
 
         @qkernel
         def phased_ident(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply a global phase to an identity body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase to an identity body."""
             return qmc.global_phase(_ident, angle)(q)
 
         @qkernel
         def htest(angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             cs = qmc.qubit_array(2, "cs")
             q = qmc.qubit("q")
             cs[0] = qmc.h(cs[0])
@@ -1711,27 +1444,12 @@ class TestGlobalPhaseSpecialCases:
 
         @qkernel
         def phased(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Build the globally phased circuit path.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Build the globally phased circuit path."""
             return qmc.global_phase(_hz_body, angle)(q)
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             q = qmc.qubit("q")
             q = qmc.x(q)  # start from |1> so identity is observable as outcome 1
             q = phased(q, angle)
@@ -1754,34 +1472,19 @@ class TestGlobalPhaseSpecialCases:
 
         @qkernel
         def phased(q: qmc.Qubit) -> qmc.Qubit:
-            """Build the globally phased circuit path.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Build the globally phased circuit path."""
             return qmc.global_phase(_hz_body, theta)(q)
 
         @qkernel
         def inv_circ() -> qmc.Bit:
-            """Build the circuit for the inverse phased body.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the circuit for the inverse phased body."""
             q = qmc.qubit("q")
             q = qmc.inverse(phased)(q)
             return qmc.measure(q)
 
         @qkernel
         def body_circ() -> qmc.Bit:
-            """Build the circuit for the non-inverted phased body.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the circuit for the non-inverted phased body."""
             q = qmc.qubit("q")
             q = _hz_body(q)
             return qmc.measure(q)
@@ -1809,27 +1512,12 @@ class TestGlobalPhaseSpecialCases:
 
         @qkernel
         def phased_ident(q: qmc.Qubit, angles: qmc.Vector[qmc.Float]) -> qmc.Qubit:
-            """Apply a global phase to an identity body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angles (qmc.Vector[qmc.Float]): Phase-angle vector.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase to an identity body."""
             return qmc.global_phase(_ident, angles[idx])(q)
 
         @qkernel
         def htest(ph: qmc.Vector[qmc.Float]) -> qmc.Bit:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                ph (qmc.Vector[qmc.Float]): Phase-angle vector.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl = qmc.h(ctrl)
@@ -1858,34 +1546,19 @@ class TestGlobalPhaseSpecialCases:
 
         @qkernel
         def inner(q: qmc.Qubit) -> qmc.Qubit:
-            """Apply the inner globally phased body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the inner globally phased body."""
             return qmc.global_phase(_x_body, beta)(q)
 
         @qkernel
         def outer() -> qmc.Bit:
-            """Build the outer kernel that invokes the test body.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the outer kernel that invokes the test body."""
             q = qmc.qubit("q")
             q = qmc.global_phase(inner, alpha)(q)
             return qmc.measure(q)
 
         @qkernel
         def plain() -> qmc.Bit:
-            """Build the unphased reference circuit.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the unphased reference circuit."""
             q = qmc.qubit("q")
             q = _x_body(q)
             return qmc.measure(q)
@@ -1926,40 +1599,17 @@ class TestGlobalPhaseControlledCompositions:
 
         @qkernel
         def phased(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Build the globally phased circuit path.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Build the globally phased circuit path."""
             return qmc.global_phase(_ident, angle)(q)
 
         @qkernel
         def inv_phased(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply the inverse of the globally phased body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the inverse of the globally phased body."""
             return qmc.inverse(phased)(q, angle)
 
         @qkernel
         def htest(angle: qmc.Float) -> qmc.Bit:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl = qmc.h(ctrl)
@@ -1991,40 +1641,17 @@ class TestGlobalPhaseControlledCompositions:
 
         @qkernel
         def phased(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Build the globally phased circuit path.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Build the globally phased circuit path."""
             return qmc.global_phase(_ident, angle)(q)
 
         @qkernel
         def inv_phased(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply the inverse of the globally phased body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the inverse of the globally phased body."""
             return qmc.inverse(phased)(q, angle)
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl = qmc.h(ctrl)
@@ -2055,14 +1682,7 @@ class TestGlobalPhaseControlledCompositions:
 
         @qkernel
         def circ(ar: qmc.Vector[qmc.Float]) -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                ar (qmc.Vector[qmc.Float]): Phase-angle vector.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(1, "qs")
             for i in qmc.range(2):
                 qs[0] = qmc.global_phase(_x_body, ar[i])(qs[0])
@@ -2085,14 +1705,7 @@ class TestGlobalPhaseControlledCompositions:
 
         @qkernel
         def circuit(phases: qmc.Vector[qmc.Float]) -> qmc.Bit:
-            """Apply two indexed phases directly at controlled call sites.
-
-            Args:
-                phases (qmc.Vector[qmc.Float]): Two phase angles.
-
-            Returns:
-                qmc.Bit: Hadamard-test control measurement.
-            """
+            """Apply two indexed phases directly at controlled call sites."""
             control = qmc.qubit("control")
             target = qmc.qubit("target")
             control = qmc.h(control)
@@ -2134,14 +1747,7 @@ class TestGlobalPhaseControlledCompositions:
 
         @qkernel
         def htest(angle: qmc.Float) -> qmc.Bit:
-            """Expose the carried phase as interference on one control.
-
-            Args:
-                angle (qmc.Float): Per-iteration phase increment.
-
-            Returns:
-                qmc.Bit: Hadamard-test measurement of the control.
-            """
+            """Expose the carried phase as interference on one control."""
             control = qmc.qubit("control")
             target = qmc.qubit("target")
             control = qmc.h(control)
@@ -2223,28 +1829,12 @@ class TestGlobalPhaseControlledCompositions:
 
         @qkernel
         def phased_ident(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply a global phase to an identity body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase to an identity body."""
             return qmc.global_phase(_ident, angle)(q)
 
         @qkernel
         def htest(obs: qmc.Observable, angle: qmc.Float) -> qmc.Float:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             qs = qmc.qubit_array(2, "qs")
             qs[0] = qmc.h(qs[0])
             qs[0], qs[1] = qmc.control(phased_ident)(qs[0], qs[1], angle)
@@ -2275,27 +1865,12 @@ class TestGlobalPhaseControlledCompositions:
 
         @qkernel
         def phased_x(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply a globally phased X body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a globally phased X body."""
             return qmc.global_phase(_x_body, angle)(q)
 
         @qkernel
         def circ(angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs[0] = qmc.x(qs[0])  # control = |1> so the controlled op fires
             qs[0], qs[1] = qmc.control(phased_x)(qs[0], qs[1], angle)
@@ -2321,27 +1896,12 @@ class TestGlobalPhaseControlledCompositions:
 
         @qkernel
         def phased_ident(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply a global phase to an identity body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase to an identity body."""
             return qmc.global_phase(_ident, angle)(q)
 
         @qkernel
         def htest(angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             cs = qmc.qubit_array(3, "cs")
             q = qmc.qubit("q")
             cs[0] = qmc.h(cs[0])
@@ -2377,30 +1937,14 @@ class TestGlobalPhaseControlledCompositions:
 
         @qkernel
         def vec_x(qs: qmc.Vector[qmc.Qubit], m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-            """Apply X gates across the requested register prefix.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Qubit register to transform.
-                m (qmc.UInt): Register size or loop bound.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated qubit register.
-            """
+            """Apply X gates across the requested register prefix."""
             for i in qmc.range(m):
                 qs[i] = qmc.x(qs[i])
             return qs
 
         @qkernel
         def circ(m: qmc.UInt, angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                m (qmc.UInt): Register size or loop bound.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(m, "qs")
             qs = qmc.global_phase(vec_x, angle)(qs, m)
             return qmc.measure(qs)
@@ -2471,46 +2015,19 @@ class TestGlobalPhaseRound3Coverage:
         def gp_body(
             a: qmc.Qubit, b: qmc.Qubit, ang: qmc.Float
         ) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Apply a global phase to the control-bearing body.
-
-            Args:
-                a (qmc.Qubit): First body qubit.
-                b (qmc.Qubit): Second body qubit.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
-                    second qubit (qmc.Qubit).
-            """
+            """Apply a global phase to the control-bearing body."""
             return qmc.global_phase(_control_bearing_body, ang)(a, b)
 
         @qkernel
         def inv_gp(
             a: qmc.Qubit, b: qmc.Qubit, ang: qmc.Float
         ) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Apply the inverse globally phased control-bearing body.
-
-            Args:
-                a (qmc.Qubit): First body qubit.
-                b (qmc.Qubit): Second body qubit.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
-                    second qubit (qmc.Qubit).
-            """
+            """Apply the inverse globally phased control-bearing body."""
             return qmc.inverse(gp_body)(a, b, ang)
 
         @qkernel
         def circ(ang: qmc.Float) -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs[0] = qmc.x(qs[0])  # control = |1> so the inner CX fires
             qs[0], qs[1] = gp_body(qs[0], qs[1], ang)
@@ -2532,53 +2049,22 @@ class TestGlobalPhaseRound3Coverage:
 
         @qkernel
         def gp1(q: qmc.Qubit, ang: qmc.Float) -> qmc.Qubit:
-            """Apply the first global-phase wrapper.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the first global-phase wrapper."""
             return qmc.global_phase(_ident, ang)(q)
 
         @qkernel
         def gp2(q: qmc.Qubit, ang: qmc.Float) -> qmc.Qubit:
-            """Apply the inverse global-phase wrapper.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the inverse global-phase wrapper."""
             return qmc.inverse(gp1)(q, ang)
 
         @qkernel
         def gp3(q: qmc.Qubit, ang: qmc.Float) -> qmc.Qubit:
-            """Apply the second inverse global-phase wrapper.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the second inverse global-phase wrapper."""
             return qmc.inverse(gp2)(q, ang)
 
         @qkernel
         def htest(ang: qmc.Float) -> qmc.Bit:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl = qmc.h(ctrl)
@@ -2605,27 +2091,12 @@ class TestGlobalPhaseRound3Coverage:
 
         @qkernel
         def phased_ident(q: qmc.Qubit, ang: qmc.Float) -> qmc.Qubit:
-            """Apply a global phase to an identity body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase to an identity body."""
             return qmc.global_phase(_ident, ang)(q)
 
         @qkernel
         def htest(ang: qmc.Float) -> qmc.Bit:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl = qmc.h(ctrl)
@@ -2661,28 +2132,12 @@ class TestGlobalPhaseRound3Coverage:
 
         @qkernel
         def phased_ident(q: qmc.Qubit, ang: qmc.Float) -> qmc.Qubit:
-            """Apply a global phase to an identity body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase to an identity body."""
             return qmc.global_phase(_ident, ang)(q)
 
         @qkernel
         def htest(obs: qmc.Observable, ang: qmc.Float) -> qmc.Float:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             qs = qmc.qubit_array(3, "qs")
             qs[0] = qmc.h(qs[0])
             qs[1] = qmc.h(qs[1])
@@ -2720,15 +2175,7 @@ class TestGlobalPhaseRound3Coverage:
 
         @qkernel
         def circ(angle: qmc.Float, inner_ang: qmc.Float) -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-                inner_ang (qmc.Float): Rotation angle used by the wrapped body.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             q = qmc.qubit("q")
             q = qmc.x(q)
             q = qmc.global_phase(_rz_body, angle)(q, inner_ang)
@@ -2759,23 +2206,12 @@ class TestGlobalPhaseRound3Coverage:
 
         @qkernel
         def inner(q: qmc.Qubit) -> qmc.Qubit:
-            """Apply the inner globally phased body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the inner globally phased body."""
             return qmc.global_phase(_x_body, beta)(q)
 
         @qkernel
         def circ() -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             q = qmc.qubit("q")
             q = qmc.global_phase(inner, alpha)(q)
             return qmc.measure(q)
@@ -2805,29 +2241,14 @@ class TestGlobalPhaseRound5Coverage:
 
         @qkernel
         def phased_in_if(q: qmc.Qubit, ang: qmc.Float) -> qmc.Qubit:
-            """Apply a global phase in the selected true branch.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase in the selected true branch."""
             if True:
                 q = qmc.global_phase(_ident, ang)(q)
             return q
 
         @qkernel
         def htest(ang: qmc.Float) -> qmc.Bit:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl = qmc.h(ctrl)
@@ -2861,15 +2282,7 @@ class TestGlobalPhaseRound5Coverage:
 
         @qkernel
         def phased_in_else(q: qmc.Qubit, ang: qmc.Float) -> qmc.Qubit:
-            """Apply a global phase in the selected false branch.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase in the selected false branch."""
             if False:
                 q = qmc.x(q)
             else:
@@ -2878,14 +2291,7 @@ class TestGlobalPhaseRound5Coverage:
 
         @qkernel
         def htest(ang: qmc.Float) -> qmc.Bit:
-            """Build the Hadamard-test circuit for phase kickback.
-
-            Args:
-                ang (qmc.Float): Phase angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the Hadamard-test circuit for phase kickback."""
             ctrl = qmc.qubit("ctrl")
             q = qmc.qubit("q")
             ctrl = qmc.h(ctrl)
@@ -2924,14 +2330,7 @@ class TestGlobalPhaseRound5Coverage:
 
         @qkernel
         def inner_true(q: qmc.Qubit) -> qmc.Qubit:
-            """Apply the true-branch body and preserve its output.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the true-branch body and preserve its output."""
             if True:
                 q = qmc.x(q)
             q = qmc.h(q)
@@ -2939,14 +2338,7 @@ class TestGlobalPhaseRound5Coverage:
 
         @qkernel
         def inner_else(q: qmc.Qubit) -> qmc.Qubit:
-            """Apply the false-branch body and preserve its output.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the false-branch body and preserve its output."""
             if False:
                 q = qmc.x(q)
             q = qmc.h(q)
@@ -2956,11 +2348,7 @@ class TestGlobalPhaseRound5Coverage:
 
         @qkernel
         def circ() -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs[0] = qmc.h(qs[0])
             qs[0], qs[1] = qmc.control(body)(qs[0], qs[1])
@@ -2996,14 +2384,7 @@ class TestGlobalPhaseDeepControlRegressions:
 
         @qkernel
         def prepare(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-            """Prepare the controlled-phase test register.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Qubit register to transform.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated qubit register.
-            """
+            """Prepare the controlled-phase test register."""
             qs[0] = qmc.h(qs[0])
             qs[1] = qmc.h(qs[1])
             qs[0], qs[1] = gate(qs[0], qs[1])
@@ -3012,25 +2393,14 @@ class TestGlobalPhaseDeepControlRegressions:
 
         @qkernel
         def sample_circuit() -> qmc.Bit:
-            """Build the sampling circuit used by this test.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the sampling circuit used by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs = prepare(qs)
             return qmc.measure(qs[0])
 
         @qkernel
         def expval_circuit(obs: qmc.Observable) -> qmc.Float:
-            """Build the expectation-value circuit used by this test.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the expectation-value circuit used by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs = prepare(qs)
             return qmc.expval(qs, obs)
@@ -3077,28 +2447,12 @@ class TestGlobalPhaseDeepControlRegressions:
             inner_control: qmc.Qubit,
             target: qmc.Qubit,
         ) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Apply the composite body with its inner control.
-
-            Args:
-                inner_control (qmc.Qubit): Control of the inner transform.
-                target (qmc.Qubit): Target qubit.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
-                    second qubit (qmc.Qubit).
-            """
+            """Apply the composite body with its inner control."""
             return gate(inner_control, target)
 
         @qkernel
         def prepare(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-            """Prepare the controlled-phase test register.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Qubit register to transform.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated qubit register.
-            """
+            """Prepare the controlled-phase test register."""
             qs[0] = qmc.h(qs[0])
             qs[1] = qmc.x(qs[1])
             qs[2] = qmc.h(qs[2])
@@ -3108,25 +2462,14 @@ class TestGlobalPhaseDeepControlRegressions:
 
         @qkernel
         def sample_circuit() -> qmc.Bit:
-            """Build the sampling circuit used by this test.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the sampling circuit used by this test."""
             qs = qmc.qubit_array(3, "qs")
             qs = prepare(qs)
             return qmc.measure(qs[0])
 
         @qkernel
         def expval_circuit(obs: qmc.Observable) -> qmc.Float:
-            """Build the expectation-value circuit used by this test.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the expectation-value circuit used by this test."""
             qs = qmc.qubit_array(3, "qs")
             qs = prepare(qs)
             return qmc.expval(qs, obs)
@@ -3167,15 +2510,7 @@ class TestGlobalPhaseDeepControlRegressions:
 
         @qkernel
         def phased_identity(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply a global phase to an identity body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a global phase to an identity body."""
             return qmc.global_phase(_ident, angle)(q)
 
         @qkernel
@@ -3184,32 +2519,14 @@ class TestGlobalPhaseDeepControlRegressions:
             target: qmc.Qubit,
             angle: qmc.Float,
         ) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Apply the inner controlled phased identity.
-
-            Args:
-                control (qmc.Qubit): Control qubit.
-                target (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
-                    second qubit (qmc.Qubit).
-            """
+            """Apply the inner controlled phased identity."""
             return qmc.control(phased_identity)(control, target, angle)
 
         @qkernel
         def prepare(
             qs: qmc.Vector[qmc.Qubit], angle: qmc.Float
         ) -> qmc.Vector[qmc.Qubit]:
-            """Prepare the controlled-phase test register.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Qubit register to transform.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated qubit register.
-            """
+            """Prepare the controlled-phase test register."""
             qs[0] = qmc.h(qs[0])
             qs[1] = qmc.x(qs[1])
             qs[0], qs[1], qs[2] = qmc.control(inner_control)(qs[0], qs[1], qs[2], angle)
@@ -3218,29 +2535,14 @@ class TestGlobalPhaseDeepControlRegressions:
 
         @qkernel
         def sample_circuit(angle: qmc.Float) -> qmc.Bit:
-            """Build the sampling circuit used by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the sampling circuit used by this test."""
             qs = qmc.qubit_array(3, "qs")
             qs = prepare(qs, angle)
             return qmc.measure(qs[0])
 
         @qkernel
         def expval_circuit(obs: qmc.Observable, angle: qmc.Float) -> qmc.Float:
-            """Build the expectation-value circuit used by this test.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the expectation-value circuit used by this test."""
             qs = qmc.qubit_array(3, "qs")
             qs = prepare(qs, angle)
             return qmc.expval(qs, obs)
@@ -3289,15 +2591,7 @@ class TestGlobalPhaseDeepControlRegressions:
 
         @qkernel
         def phased_loop(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply the phase selected by the loop condition.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the phase selected by the loop condition."""
             for i in qmc.range(2):
                 if i == 0:
                     q = qmc.global_phase(_ident, angle)(q)
@@ -3307,15 +2601,7 @@ class TestGlobalPhaseDeepControlRegressions:
         def prepare(
             qs: qmc.Vector[qmc.Qubit], angle: qmc.Float
         ) -> qmc.Vector[qmc.Qubit]:
-            """Prepare the controlled-phase test register.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Qubit register to transform.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated qubit register.
-            """
+            """Prepare the controlled-phase test register."""
             qs[0] = qmc.h(qs[0])
             qs[0], qs[1] = qmc.control(phased_loop)(qs[0], qs[1], angle)
             qs[0] = qmc.h(qs[0])
@@ -3323,29 +2609,14 @@ class TestGlobalPhaseDeepControlRegressions:
 
         @qkernel
         def sample_circuit(angle: qmc.Float) -> qmc.Bit:
-            """Build the sampling circuit used by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the sampling circuit used by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs = prepare(qs, angle)
             return qmc.measure(qs[0])
 
         @qkernel
         def expval_circuit(obs: qmc.Observable, angle: qmc.Float) -> qmc.Float:
-            """Build the expectation-value circuit used by this test.
-
-            Args:
-                obs (qmc.Observable): Observable to evaluate.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the expectation-value circuit used by this test."""
             qs = qmc.qubit_array(2, "qs")
             qs = prepare(qs, angle)
             return qmc.expval(qs, obs)
@@ -3392,11 +2663,7 @@ class TestGlobalPhaseVisualization:
 
         @qkernel
         def circ() -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             q = qmc.qubit("q")
             q = qmc.global_phase(_hz_body, 0.7)(q)
             return qmc.measure(q)
@@ -3415,11 +2682,7 @@ class TestGlobalPhaseVisualization:
 
         @qkernel
         def circ() -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             q = qmc.qubit("q")
             q = qmc.global_phase(_hz_body, 0.7)(q)
             return qmc.measure(q)
@@ -3437,19 +2700,7 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def bad(q: qmc.Qubit, r: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Build the intentionally invalid kernel used by this test.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                r (qmc.Qubit): Value intentionally supplied to the classical slot.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
-                    second qubit (qmc.Qubit).
-
-            Raises:
-                TypeError: If the quantum handle is bound to the classical slot.
-            """
+            """Build the intentionally invalid kernel used by this test."""
             q2 = qmc.global_phase(_rz_body, 0.1)(q, r)
             return q2, r
 
@@ -3463,18 +2714,7 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def swapped(q: qmc.Qubit, a: qmc.Float) -> qmc.Qubit:
-            """Bind intentionally swapped arguments to the phased body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                a (qmc.Float): First body qubit.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-
-            Raises:
-                TypeError: If the quantum and classical arguments are swapped.
-            """
+            """Bind intentionally swapped arguments to the phased body."""
             return qmc.global_phase(_rz_body, 0.2)(a, q)
 
         with pytest.raises(
@@ -3487,17 +2727,7 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def bad(q: qmc.Qubit) -> qmc.Qubit:
-            """Build the intentionally invalid kernel used by this test.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-
-            Raises:
-                TypeError: If a scalar qubit is bound to the vector slot.
-            """
+            """Build the intentionally invalid kernel used by this test."""
             return qmc.global_phase(_vec_body, 0.3)(q)
 
         with pytest.raises(TypeError, match="declared as a quantum array"):
@@ -3518,26 +2748,12 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def measure_body(q: qmc.Qubit) -> qmc.Bit:
-            """Measure the target inside the intentionally non-unitary body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Measure the target inside the intentionally non-unitary body."""
             return qmc.measure(q)
 
         @qkernel
         def outer(q: qmc.Qubit) -> qmc.Bit:
-            """Build the outer kernel that invokes the measuring body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-
-            Returns:
-                qmc.Bit: Measured result returned by the wrapped qkernel.
-            """
+            """Build the outer kernel that invokes the measuring body."""
             return qmc.global_phase(measure_body, 0.4)(q)
 
         assert outer.block is not None
@@ -3549,26 +2765,12 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def reset_helper(q: qmc.Qubit) -> qmc.Qubit:
-            """Reset the helper input.
-
-            Args:
-                q (qmc.Qubit): Qubit to reset.
-
-            Returns:
-                qmc.Qubit: Reset qubit.
-            """
+            """Reset the helper input."""
             return qmc.reset(q)
 
         @qkernel
         def nested_reset(q: qmc.Qubit) -> qmc.Qubit:
-            """Hide a reset behind an ordinary invoke.
-
-            Args:
-                q (qmc.Qubit): Qubit passed to the helper.
-
-            Returns:
-                qmc.Qubit: Reset helper result.
-            """
+            """Hide a reset behind an ordinary invoke."""
             return reset_helper(q)
 
         with trace() as tracer:
@@ -3583,15 +2785,7 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def classical_out(q: qmc.Qubit, a: qmc.Float) -> tuple[qmc.Qubit, qmc.Float]:
-            """Return a classical value from the intentionally invalid body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                a (qmc.Float): First body qubit.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Float]: Value produced by the local test helper.
-            """
+            """Return a classical value from the intentionally invalid body."""
             return qmc.rz(q, a), a
 
         @qkernel
@@ -3599,15 +2793,7 @@ class TestGlobalPhaseArgumentValidation:
             q: qmc.Qubit,
             a: qmc.Float,
         ) -> tuple[qmc.Qubit, qmc.Float]:
-            """Build the outer kernel that invokes the test body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                a (qmc.Float): First body qubit.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Float]: Wrapped body outputs in order.
-            """
+            """Build the outer kernel that invokes the test body."""
             return qmc.global_phase(classical_out, 0.5)(q, a)
 
         assert outer.block is not None
@@ -3618,28 +2804,12 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def classical_only(a: qmc.Float) -> qmc.Float:
-            """Build the intentionally classical-only body.
-
-            Args:
-                a (qmc.Float): First body qubit.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Build the intentionally classical-only body."""
             return a
 
         @qkernel
         def outer(q: qmc.Qubit, a: qmc.Float) -> qmc.Qubit:
-            """Build the outer kernel that invokes the test body.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                a (qmc.Float): First body qubit.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-
-            """
+            """Build the outer kernel that invokes the test body."""
             qmc.global_phase(classical_only, 0.6)(a)
             return qmc.h(q)
 
@@ -3657,39 +2827,17 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def shift(angle: qmc.Float) -> qmc.Float:
-            """Shift the body angle with a purely classical helper.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Float: Computed classical or expectation value.
-            """
+            """Shift the body angle with a purely classical helper."""
             return angle + 0.125
 
         @qkernel
         def body(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply the local quantum body used by this test.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply the local quantum body used by this test."""
             return qmc.rz(q, shift(angle))
 
         @qkernel
         def circuit(angle: qmc.Float) -> qmc.Bit:
-            """Build the local circuit exercised by this test.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Bit: Measured output bit.
-            """
+            """Build the local circuit exercised by this test."""
             q = qmc.qubit("q")
             q = qmc.x(q)
             q = qmc.global_phase(body, 0.37)(q, angle)
@@ -3726,14 +2874,7 @@ class TestGlobalPhaseArgumentValidation:
         def shape_sensitive(
             qs: qmc.Vector[qmc.Qubit],
         ) -> qmc.Vector[qmc.Qubit]:
-            """Build the shape-specialized body under validation.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Qubit register to transform.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated qubit register.
-            """
+            """Build the shape-specialized body under validation."""
             try:
                 size = get_size(qs)
             except ValueError:
@@ -3803,14 +2944,7 @@ class TestGlobalPhaseArgumentValidation:
         def stateful_body(
             qs: qmc.Vector[qmc.Qubit],
         ) -> qmc.Vector[qmc.Qubit]:
-            """Build the stateful body used to detect retracing.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Qubit register to transform.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated qubit register.
-            """
+            """Build the stateful body used to detect retracing."""
             allocate_only_on_second_trace()
             return qs
 
@@ -3832,32 +2966,13 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def swap_body(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Return the body qubits in intentionally reversed order.
-
-            Args:
-                a (qmc.Qubit): First body qubit.
-                b (qmc.Qubit): Second body qubit.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
-                    second qubit (qmc.Qubit).
-            """
+            """Return the body qubits in intentionally reversed order."""
             a = qmc.x(a)
             return b, a
 
         @qkernel
         def outer(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Build the outer kernel that invokes the test body.
-
-            Args:
-                a (qmc.Qubit): First body qubit.
-                b (qmc.Qubit): Second body qubit.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
-                    second qubit (qmc.Qubit).
-
-            """
+            """Build the outer kernel that invokes the test body."""
             return qmc.global_phase(swap_body, 0.1)(a, b)
 
         assert outer.block is not None
@@ -3868,31 +2983,13 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def keep_order(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Return the body qubits in their declaration order.
-
-            Args:
-                a (qmc.Qubit): First body qubit.
-                b (qmc.Qubit): Second body qubit.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
-                    second qubit (qmc.Qubit).
-            """
+            """Return the body qubits in their declaration order."""
             a = qmc.x(a)
             return a, b
 
         @qkernel
         def outer(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Build the outer kernel that invokes the test body.
-
-            Args:
-                a (qmc.Qubit): First body qubit.
-                b (qmc.Qubit): Second body qubit.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
-                    second qubit (qmc.Qubit).
-            """
+            """Build the outer kernel that invokes the test body."""
             return qmc.global_phase(keep_order, 0.1)(a, b)
 
         assert outer.block is not None
@@ -3902,15 +2999,7 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def conditional_body(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
-            """Apply one of two unitary gates selected by a classical input.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                flag (qmc.Bit): Classical branch selector.
-
-            Returns:
-                qmc.Qubit: The same quantum resource after either branch.
-            """
+            """Apply one of two unitary gates selected by a classical input."""
             if flag:
                 q = qmc.x(q)
             else:
@@ -3922,15 +3011,7 @@ class TestGlobalPhaseArgumentValidation:
             q: qmc.Qubit,
             flag: qmc.Bit,
         ) -> qmc.Qubit:
-            """Wrap the conditional unitary family in a global phase.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                flag (qmc.Bit): Classical branch selector.
-
-            Returns:
-                qmc.Qubit: Phased conditional-body output.
-            """
+            """Wrap the conditional unitary family in a global phase."""
             return qmc.global_phase(conditional_body, 0.1)(q, flag)
 
         assert outer.block is not None
@@ -4019,15 +3100,7 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def nested_body(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
-            """Apply a conditional gate in each static-loop iteration.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                flag (qmc.Bit): Classical branch selector.
-
-            Returns:
-                qmc.Qubit: The original resource after all iterations.
-            """
+            """Apply a conditional gate in each static-loop iteration."""
             for _index in qmc.range(2):
                 if flag:
                     q = qmc.x(q)
@@ -4040,15 +3113,7 @@ class TestGlobalPhaseArgumentValidation:
             q: qmc.Qubit,
             flag: qmc.Bit,
         ) -> qmc.Qubit:
-            """Wrap nested control flow in a global phase.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                flag (qmc.Bit): Classical branch selector.
-
-            Returns:
-                qmc.Qubit: Phased nested-body output.
-            """
+            """Wrap nested control flow in a global phase."""
             return qmc.global_phase(nested_body, 0.2)(q, flag)
 
         assert outer.block is not None
@@ -4058,30 +3123,14 @@ class TestGlobalPhaseArgumentValidation:
 
         @qkernel
         def conditional_helper(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
-            """Apply a conditional X while preserving the input resource.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                flag (qmc.Bit): Classical branch selector.
-
-            Returns:
-                qmc.Qubit: The same resource after the optional gate.
-            """
+            """Apply a conditional X while preserving the input resource."""
             if flag:
                 q = qmc.x(q)
             return q
 
         @qkernel
         def nested_body(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
-            """Delegate the conditional operation to a helper qkernel.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                flag (qmc.Bit): Classical branch selector.
-
-            Returns:
-                qmc.Qubit: Conditional helper output.
-            """
+            """Delegate the conditional operation to a helper qkernel."""
             q = conditional_helper(q, flag)
             return qmc.z(q)
 
@@ -4090,15 +3139,7 @@ class TestGlobalPhaseArgumentValidation:
             q: qmc.Qubit,
             flag: qmc.Bit,
         ) -> qmc.Qubit:
-            """Wrap the delegated conditional unitary in a global phase.
-
-            Args:
-                q (qmc.Qubit): Target qubit.
-                flag (qmc.Bit): Classical branch selector.
-
-            Returns:
-                qmc.Qubit: Phased nested-body output.
-            """
+            """Wrap the delegated conditional unitary in a global phase."""
             return qmc.global_phase(nested_body, 0.3)(q, flag)
 
         assert outer.block is not None
@@ -4111,15 +3152,7 @@ class TestGlobalPhaseArgumentValidation:
             qs: qmc.Vector[qmc.Qubit],
             flag: qmc.Bit,
         ) -> qmc.Vector[qmc.Qubit]:
-            """Apply one conditional register gate and return a full view.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Target register.
-                flag (qmc.Bit): Classical branch selector.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Full view of the original register.
-            """
+            """Apply one conditional register gate and return a full view."""
             if flag:
                 qs = qmc.x(qs)
             else:
@@ -4131,15 +3164,7 @@ class TestGlobalPhaseArgumentValidation:
             qs: qmc.Vector[qmc.Qubit],
             flag: qmc.Bit,
         ) -> qmc.Vector[qmc.Qubit]:
-            """Wrap the conditional register body in a global phase.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Target register.
-                flag (qmc.Bit): Classical branch selector.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Phased full-register view.
-            """
+            """Wrap the conditional register body in a global phase."""
             return qmc.global_phase(conditional_body, 0.4)(qs, flag)
 
         assert outer.block is not None
@@ -4304,23 +3329,12 @@ class TestGlobalPhaseArgumentValidation:
         def full_reslice(
             qs: qmc.Vector[qmc.Qubit],
         ) -> qmc.Vector[qmc.Qubit]:
-            """Return a full ordered view of the input register.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Qubit register to transform.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated qubit register.
-            """
+            """Return a full ordered view of the input register."""
             return qs[:]
 
         @qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
-            """Build the local circuit exercised by this test.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measured output bits.
-            """
+            """Build the local circuit exercised by this test."""
             qs = qmc.qubit_array(3, "qs")
             qs = qmc.global_phase(full_reslice, 0.2)(qs)
             qs[1] = qmc.x(qs[1])
@@ -4450,23 +3464,12 @@ class TestGlobalPhaseEstimatorControlled:
 
         @qmc.composite_gate(name="controlled_gp_composite")
         def phase_box(target: qmc.Qubit) -> qmc.Qubit:
-            """Apply a constant global phase.
-
-            Args:
-                target (qmc.Qubit): Target qubit.
-
-            Returns:
-                qmc.Qubit: Unchanged target with a global phase.
-            """
+            """Apply a constant global phase."""
             return qmc.global_phase(_ident, 0.7)(target)
 
         @qkernel
         def controlled_phase_box() -> tuple[qmc.Qubit, qmc.Qubit]:
-            """Control the composite global phase.
-
-            Returns:
-                tuple[qmc.Qubit, qmc.Qubit]: Updated control and target.
-            """
+            """Control the composite global phase."""
             control = qmc.qubit("control")
             target = qmc.qubit("target")
             return qmc.control(phase_box)(control, target)
@@ -4482,14 +3485,7 @@ class TestGlobalPhaseEstimatorControlled:
 
         @qkernel
         def standalone(angle: qmc.Float) -> qmc.Qubit:
-            """Apply a standalone global phase to one qubit.
-
-            Args:
-                angle (qmc.Float): Phase or rotation angle in radians.
-
-            Returns:
-                qmc.Qubit: Updated target qubit.
-            """
+            """Apply a standalone global phase to one qubit."""
             q = qmc.qubit("q")
             return qmc.global_phase(_ident, angle)(q)
 
