@@ -41,7 +41,6 @@
 
 # %%
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.operation.composite_gate import ResourceMetadata
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -86,10 +85,7 @@ print("GHZ result:", result.results)
 assert result.shots == 128
 assert sum(count for _, count in result.results) == 128
 # 4-qubit GHZ state -> only (0, 0, 0, 0) and (1, 1, 1, 1) outcomes.
-assert all(
-    outcome in {(0, 0, 0, 0), (1, 1, 1, 1)}
-    for outcome, _ in result.results
-)
+assert all(outcome in {(0, 0, 0, 0), (1, 1, 1, 1)} for outcome, _ in result.results)
 
 # %% [markdown]
 # The helper `entangle_once` keeps the call site readable. In the transpiled circuit, it is inlined — you see individual CX gates, not a sub-block.
@@ -168,27 +164,44 @@ ghz_with_composite.draw(n=4, fold_loops=False)
 # | `@composite_gate` | Named box | Domain-level abstraction/advanced settings |
 
 # %% [markdown]
-# ## Pattern 3: Stub Composite Gate for Top-Down Design
+# ## Pattern 3: Opaque Oracle for Top-Down Design
 #
-# Sometimes you want to design an algorithm's structure before implementing every sub-component. A **stub composite gate** has no implementation body — just a name, qubit count, and optional resource metadata.
+# Sometimes you want to design an algorithm's structure before implementing every sub-component. An **opaque oracle** has no implementation body — just a name, qubit count, and optional explicit cost.
 #
 # This lets you estimate the cost of the overall algorithm while the oracle or sub-routine is still under development.
 #
-# To use a stub composite gate, specify `stub=True` in the `@composite_gate` decorator. At the same time, you can also give it resource information as `ResourceMetadata`.
+# Pass a `ResourceEstimate` through `cost=` when you know the oracle's cost but do not want to implement its body yet.
 
 
 # %%
-@qmc.composite_gate(
-    stub=True,
-    name="oracle",
+def fixed_oracle_cost(
+    name: str,
+    *,
+    query_complexity: int = 1,
+    t_gates: int = 0,
+) -> qmc.ResourceEstimate:
+    return qmc.ResourceEstimate(
+        gates=qmc.GateResources(
+            total=t_gates,
+            t=t_gates,
+            non_clifford=t_gates,
+        ),
+        calls=qmc.CallResources(
+            calls_by_name={name: 1},
+            queries_by_name={name: query_complexity},
+        ),
+    )
+
+
+oracle_box = qmc.opaque(
+    "oracle",
     num_qubits=3,
-    resource_metadata=ResourceMetadata(
+    cost=fixed_oracle_cost(
+        "oracle",
         query_complexity=1,
         t_gates=40,
     ),
 )
-def oracle_box():
-    pass
 
 
 @qmc.qkernel
@@ -204,42 +217,41 @@ def algorithm_skeleton() -> qmc.Vector[qmc.Qubit]:
 algorithm_skeleton.draw(fold_loops=False)
 
 # %% [markdown]
-# ### Resource Estimation for QKernels that Include Stub Gates
+# ### Resource Estimation for QKernels that Include Opaque Oracles
 #
-# `estimate_resources()` can analyze a full qkernel even when oracle internals are unknown. Known scaffold gates are counted directly, and stub components are tracked through `est.gates.oracle_calls` / `est.gates.oracle_queries`.
+# `estimate_resources()` can analyze a full qkernel even when oracle internals are unknown. Known scaffold gates are counted directly, and opaque components are tracked through `est.calls.calls_by_name` / `est.calls.queries_by_name`.
 
 # %%
 est = algorithm_skeleton.estimate_resources().simplify()
 print("qubits:", est.qubits)
 assert est.qubits == 3
 print("total gates:", est.gates.total)
-# 3 H gates (broadcast over qubit_array(3)); the stub `oracle_box` is
-# counted via gates.oracle_calls, not gates.total.
-assert est.gates.total == 3
+# 3 H gates (broadcast over qubit_array(3)) plus the explicit oracle cost.
+assert est.gates.total == 43
 
 # %% [markdown]
-# Next, we build a qkernel that mixes ordinary gates with multiple stub oracles.
+# Next, we build a qkernel that mixes ordinary gates with multiple opaque oracles.
 
 
 # %%
-@qmc.composite_gate(
-    stub=True,
-    name="phase_oracle",
+phase_oracle = qmc.opaque(
+    "phase_oracle",
     num_qubits=3,
-    resource_metadata=ResourceMetadata(query_complexity=2),
+    cost=fixed_oracle_cost(
+        "phase_oracle",
+        query_complexity=2,
+    ),
 )
-def phase_oracle():
-    pass
 
 
-@qmc.composite_gate(
-    stub=True,
-    name="mixing_oracle",
+mixing_oracle = qmc.opaque(
+    "mixing_oracle",
     num_qubits=3,
-    resource_metadata=ResourceMetadata(query_complexity=1),
+    cost=fixed_oracle_cost(
+        "mixing_oracle",
+        query_complexity=1,
+    ),
 )
-def mixing_oracle():
-    pass
 
 
 @qmc.qkernel
@@ -273,29 +285,31 @@ print("total gates:", oracle_est.gates.total)
 assert str(oracle_est.gates.total) == "3*rounds + 3"
 print("two-qubit gates:", oracle_est.gates.two_qubit)
 assert str(oracle_est.gates.two_qubit) == "2*rounds + 1"
-print("oracle_calls:", oracle_est.gates.oracle_calls)
-assert {k: str(v) for k, v in oracle_est.gates.oracle_calls.items()} == {
+print("oracle_calls:", oracle_est.calls.calls_by_name)
+assert {k: str(v) for k, v in oracle_est.calls.calls_by_name.items()} == {
     "phase_oracle": "rounds + 1",
     "mixing_oracle": "rounds",
 }
-print("oracle_queries:", oracle_est.gates.oracle_queries)
-assert {k: str(v) for k, v in oracle_est.gates.oracle_queries.items()} == {
+print("oracle_queries:", oracle_est.calls.queries_by_name)
+assert {k: str(v) for k, v in oracle_est.calls.queries_by_name.items()} == {
     "phase_oracle": "2*rounds + 2",
     "mixing_oracle": "rounds",
 }
 
 # %% [markdown]
-# Substitute a concrete value for `rounds` to get numeric counts:
+# Pass a concrete value for `rounds` to get numeric counts directly:
 
 # %%
-oracle_est_4 = oracle_est.substitute(rounds=4)
-print("oracle_calls (rounds=4):", oracle_est_4.gates.oracle_calls)
-assert oracle_est_4.gates.oracle_calls == {"phase_oracle": 5, "mixing_oracle": 4}
-print("oracle_queries (rounds=4):", oracle_est_4.gates.oracle_queries)
-assert oracle_est_4.gates.oracle_queries == {"phase_oracle": 10, "mixing_oracle": 4}
+oracle_est_4 = iterative_oracle_skeleton.estimate_resources(
+    inputs={"rounds": 4}
+).simplify()
+print("oracle_calls (rounds=4):", oracle_est_4.calls.calls_by_name)
+assert oracle_est_4.calls.calls_by_name == {"phase_oracle": 5, "mixing_oracle": 4}
+print("oracle_queries (rounds=4):", oracle_est_4.calls.queries_by_name)
+assert oracle_est_4.calls.queries_by_name == {"phase_oracle": 10, "mixing_oracle": 4}
 
 # %% [markdown]
-# In this example, resource analysis works without oracle internals: known gates contribute to `total` / `two_qubit`, while unknown oracle blocks are tracked as `oracle_calls` (for example, `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`) and `oracle_queries` (weighted by each stub's `query_complexity`).
+# In this example, resource analysis works without oracle internals: known gates contribute to `total` / `two_qubit`, while unknown oracle blocks are tracked as `calls_by_name` (for example, `{'phase_oracle': rounds + 1, 'mixing_oracle': rounds}`) and `queries_by_name` (weighted by each oracle's query complexity).
 
 # %% [markdown]
 # This lets you reason about algorithm-level costs (such as qubit count, oracle queries) before committing to a full decomposition.
@@ -307,8 +321,8 @@ assert oracle_est_4.gates.oracle_queries == {"phase_oracle": 10, "mixing_oracle"
 #   The transpiler inlines the call into a flat circuit.
 # - **`@composite_gate`**: gives a qkernel a named identity visible in
 #   diagrams. Stack `@composite_gate` on top of `@qkernel`.
-# - **Stub composite gate**: `stub=True` with `ResourceMetadata` for top-down
+# - **Opaque oracle**: `qmc.opaque(..., cost=...)` for top-down
 #   design and resource estimation without a full implementation.
-# - **`est.gates.oracle_calls`**: even when oracle internals are unknown, this reports per-oracle call counts as a dict (including symbolic call counts).
+# - **`est.calls.calls_by_name`**: even when oracle internals are unknown, this reports per-oracle call counts as a dict (including symbolic call counts).
 #
 # For controlled gates (`qmc.control`), see [Tutorial 04 — Controlled Gates](04_controlled_gates.ipynb).
