@@ -42,6 +42,49 @@ def _unitary(qc: Any) -> np.ndarray:
     return Operator(qc.remove_final_measurements(inplace=False)).data
 
 
+def _assert_runtime_angle_unitary_preserved(
+    original: Any,
+    restored: Any,
+    qiskit_transpiler: Any,
+) -> None:
+    """Assert runtime-angle semantics survive a serialization round-trip.
+
+    Args:
+        original (Any): Source qkernel.
+        restored (Any): Deserialized qkernel.
+        qiskit_transpiler (Any): Qiskit transpiler used to emit both qkernels.
+
+    Raises:
+        AssertionError: If the bound unitaries differ.
+        ValueError: If either circuit does not expose exactly one parameter.
+    """
+    original_circuit = (
+        qiskit_transpiler.transpile(
+            original,
+            parameters=["angle"],
+        )
+        .compiled_quantum[0]
+        .circuit
+    )
+    restored_circuit = (
+        qiskit_transpiler.transpile(
+            restored,
+            parameters=["angle"],
+        )
+        .compiled_quantum[0]
+        .circuit
+    )
+    (original_parameter,) = original_circuit.parameters
+    (restored_parameter,) = restored_circuit.parameters
+
+    np.testing.assert_allclose(
+        _unitary(restored_circuit.assign_parameters({restored_parameter: 0.731})),
+        _unitary(original_circuit.assign_parameters({original_parameter: 0.731})),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
 def _counts(result: Any) -> dict[Any, int]:
     """Aggregate a SampleResult's ``(value, count)`` list into a dict.
 
@@ -1064,6 +1107,7 @@ class TestGlobalPhaseSerialize:
             kernel_to_dict(restored)["artifact"]["body"]
             == kernel_to_dict(circ)["artifact"]["body"]
         )
+        _assert_runtime_angle_unitary_preserved(circ, restored, qiskit_transpiler)
 
     def test_control_call_phase_roundtrip_preserves_static_body(
         self, qiskit_transpiler
@@ -1095,6 +1139,7 @@ class TestGlobalPhaseSerialize:
             kernel_to_dict(restored)["artifact"]["body"]
             == kernel_to_dict(circ)["artifact"]["body"]
         )
+        _assert_runtime_angle_unitary_preserved(circ, restored, qiskit_transpiler)
 
     def test_roundtrip_preserves_zero_result_phase_operand(self, qiskit_transpiler):
         """A constant phase keeps its angle and zero-result layout on reload."""
@@ -1115,7 +1160,35 @@ class TestGlobalPhaseSerialize:
         ]
         assert len(phase_ops) == 1
         assert phase_ops[0].results == []
-        assert phase_ops[0].phase.get_const() == pytest.approx(0.375)
+        assert phase_ops[0].phase.get_const() == pytest.approx(
+            0.375,
+            rel=0.0,
+            abs=0.0,
+        )
+
+    def test_serialize_rejects_array_phase_operand(self):
+        """The serialization boundary rejects an array-valued phase angle."""
+        from qamomile.circuit.ir.operation import GlobalPhaseOperation
+        from qamomile.circuit.ir.types.primitives import FloatType
+        from qamomile.circuit.ir.value import ArrayValue
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        restored = deserialize(serialize(_phase_call_from_loop_index))
+        phase = next(
+            operation
+            for operation in restored.block.operations
+            if isinstance(operation, GlobalPhaseOperation)
+        )
+        phase.operands[0] = ArrayValue(
+            type=FloatType(),
+            name="phase_array",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"GlobalPhaseOperation.*phase operand must be a scalar Value",
+        ):
+            serialize(restored)
 
 
 # --------------------------------------------------------------------------- #

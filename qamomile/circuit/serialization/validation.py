@@ -67,7 +67,7 @@ from qamomile.circuit.ir.types.primitives import (
     ValueType,
 )
 from qamomile.circuit.ir.types.q_register import QFixedType
-from qamomile.circuit.ir.value import ArrayValue, DictValue, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
 
 _SINGLE_QUBIT_GATES = frozenset(
     {
@@ -331,7 +331,10 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         _require_result_count(operation, 0, location)
     elif isinstance(operation, GlobalPhaseOperation):
         _require_arity(operation, 1, 0, location)
-        _require_types(operation.operands, [FloatType()], location, "operand")
+        phase = operation.operands[0]
+        if not isinstance(phase, Value) or isinstance(phase, ArrayValue):
+            raise ValueError(f"{location} phase operand must be a scalar Value")
+        _require_value_type(phase, FloatType(), location)
     elif isinstance(operation, ExpvalOp):
         _require_arity(operation, 2, 1, location)
         if not operation.operands[0].type.is_quantum():
