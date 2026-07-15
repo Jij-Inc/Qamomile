@@ -384,39 +384,52 @@ class QuriPartsGateEmitter:
         self,
         circuit: "LinearMappedUnboundParametricQuantumCircuit",
         angle: float | Any,
+        carrier: int | None = None,
     ) -> None:
-        """Synthesize ``exp(i * angle) I`` on a dedicated clean carrier.
+        """Synthesize ``exp(i * angle) I`` exactly.
 
-        QURI Parts has no circuit-level phase operation. For a carrier fixed
-        in ``|0>``, ``RZ(-2 * angle)|0> = exp(i * angle)|0>`` realizes the
-        exact scalar unitary without using an invalid empty Pauli string or
-        a converter-specific identity Pauli id.
+        A concrete phase reuses an arbitrary existing qubit through
+        ``U1(2a) RZ(-2a) = exp(ia) I``. Symbolic and zero-qubit phases use the
+        configured clean carrier because QURI Parts has no ParametricU1 or
+        circuit-level phase operation.
 
         Args:
             circuit (LinearMappedUnboundParametricQuantumCircuit): Destination
                 QURI circuit.
             angle (float | Any): Concrete or linear phase in radians.
+            carrier (int | None): Existing arbitrary-state qubit available for
+                concrete two-gate synthesis. Defaults to None.
 
         Raises:
             EmitError: If no valid dedicated phase carrier was configured.
         """
-        carrier = self._phase_carrier
-        if carrier is None:
+        angle_mapping = self._make_angle_dict(angle)
+        if isinstance(angle_mapping, (int, float)) and carrier is not None:
+            if carrier < 0 or carrier >= circuit.qubit_count:
+                raise EmitError(
+                    "QURI Parts phase-carrier index is outside the circuit: "
+                    f"carrier={carrier}, width={circuit.qubit_count}"
+                )
+            circuit.add_U1_gate(carrier, 2.0 * angle_mapping)
+            circuit.add_RZ_gate(carrier, -2.0 * angle_mapping)
+            return
+
+        clean_carrier = self._phase_carrier
+        if clean_carrier is None:
             raise EmitError(
                 "QURI Parts scalar phase emission requires a dedicated "
                 "clean phase-carrier qubit"
             )
-        if carrier < 0 or carrier >= circuit.qubit_count:
+        if clean_carrier < 0 or clean_carrier >= circuit.qubit_count:
             raise EmitError(
                 "QURI Parts phase-carrier index is outside the circuit: "
-                f"carrier={carrier}, width={circuit.qubit_count}"
+                f"carrier={clean_carrier}, width={circuit.qubit_count}"
             )
-        angle_mapping = self._make_angle_dict(angle)
         if isinstance(angle_mapping, (int, float)):
-            circuit.add_RZ_gate(carrier, -2.0 * angle_mapping)
+            circuit.add_RZ_gate(clean_carrier, -2.0 * angle_mapping)
         else:
             circuit.add_ParametricRZ_gate(
-                carrier,
+                clean_carrier,
                 _scale_form(angle_mapping, -2.0),
             )
 

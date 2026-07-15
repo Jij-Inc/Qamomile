@@ -26,7 +26,6 @@ from qamomile.circuit.transpiler.circuit_ir.capability import (
     ScalarAtom,
     ScalarCapabilities,
     ScalarExpressionForm,
-    StandalonePhaseMode,
 )
 from qamomile.circuit.transpiler.circuit_ir.model import (
     BarrierInstruction,
@@ -312,6 +311,8 @@ class _Rewriter:
                         true_outputs=true_outputs,
                         false_outputs=false_outputs,
                         outputs=self._define(operation.outputs, environment),
+                        true_global_phase=operation.true_global_phase,
+                        false_global_phase=operation.false_global_phase,
                     )
                 )
             elif isinstance(operation, WhileInstruction):
@@ -329,6 +330,7 @@ class _Rewriter:
                         body=tuple(body),
                         body_outputs=self._map(operation.body_outputs, environment),
                         outputs=self._define(operation.outputs, environment),
+                        body_global_phase=operation.body_global_phase,
                     )
                 )
             else:  # pragma: no cover - closed union defensive guard
@@ -546,6 +548,7 @@ def _verify_legal_program(
         capabilities,
         inherited_coherent_controls,
         inherited_distributed_controls,
+        phase_support,
     )
 
 
@@ -568,7 +571,36 @@ def _verify_program_phase(
         TargetCapabilityError: If the phase or its scalar expression is not
             supported in the active context.
     """
-    if _is_zero_literal(program.global_phase):
+    _verify_phase(
+        program.global_phase,
+        program.num_qubits,
+        capabilities,
+        inherited_controls,
+        phase_support,
+    )
+
+
+def _verify_phase(
+    phase: ScalarExpr,
+    num_qubits: int,
+    capabilities: CircuitCapabilities,
+    inherited_controls: int,
+    phase_support: CallTransformCapabilities | None,
+) -> None:
+    """Verify one root or structured-region phase.
+
+    Args:
+        phase (ScalarExpr): Phase expression to validate.
+        num_qubits (int): Number of live qubits in the containing program.
+        capabilities (CircuitCapabilities): Target capability declaration.
+        inherited_controls (int): Number of active coherent controls.
+        phase_support (CallTransformCapabilities | None): Call realization
+            responsible for an observable controlled phase.
+
+    Raises:
+        TargetCapabilityError: If the phase cannot be preserved exactly.
+    """
+    if _is_zero_literal(phase):
         return
     if inherited_controls:
         if (
@@ -592,9 +624,7 @@ def _verify_program_phase(
                 target=capabilities.name,
                 operation="global phase",
             )
-        if capabilities.global_phase.standalone_mode is StandalonePhaseMode.DISCARD:
-            return
-        if program.num_qubits < capabilities.global_phase.min_qubits:
+        if num_qubits < capabilities.global_phase.min_qubits:
             raise TargetCapabilityError(
                 f"Target '{capabilities.name}' requires at least "
                 f"{capabilities.global_phase.min_qubits} qubit to preserve a "
@@ -605,7 +635,7 @@ def _verify_program_phase(
         scalar_capabilities = capabilities.global_phase.scalars
         context = "global phase"
     _check_scalar(
-        program.global_phase,
+        phase,
         scalar_capabilities,
         capabilities.name,
         context=context,
@@ -617,6 +647,7 @@ def _verify_legal_region(
     capabilities: CircuitCapabilities,
     inherited_coherent_controls: int = 0,
     inherited_distributed_controls: int = 0,
+    phase_support: CallTransformCapabilities | None = None,
 ) -> None:
     """Verify one structured region against target capabilities.
 
@@ -627,6 +658,8 @@ def _verify_legal_region(
             region. Defaults to zero.
         inherited_distributed_controls (int): Controls physically distributed
             into this region. Defaults to zero.
+        phase_support (CallTransformCapabilities | None): Transform contract
+            responsible for phases under inherited controls. Defaults to None.
 
     Raises:
         TargetCapabilityError: If any nested instruction is illegal for the
@@ -746,17 +779,33 @@ def _verify_legal_region(
                 capabilities.name,
                 context="if predicate",
             )
+            _verify_phase(
+                operation.true_global_phase,
+                len(operation.inputs),
+                capabilities,
+                inherited_coherent_controls,
+                phase_support,
+            )
+            _verify_phase(
+                operation.false_global_phase,
+                len(operation.inputs),
+                capabilities,
+                inherited_coherent_controls,
+                phase_support,
+            )
             _verify_legal_region(
                 operation.true_body,
                 capabilities,
                 inherited_coherent_controls,
                 inherited_distributed_controls,
+                phase_support,
             )
             _verify_legal_region(
                 operation.false_body,
                 capabilities,
                 inherited_coherent_controls,
                 inherited_distributed_controls,
+                phase_support,
             )
         elif isinstance(operation, WhileInstruction):
             if not capabilities.supports_dynamic_while:
@@ -772,11 +821,19 @@ def _verify_legal_region(
                 capabilities.name,
                 context="while predicate",
             )
+            _verify_phase(
+                operation.body_global_phase,
+                len(operation.inputs),
+                capabilities,
+                inherited_coherent_controls,
+                phase_support,
+            )
             _verify_legal_region(
                 operation.body,
                 capabilities,
                 inherited_coherent_controls,
                 inherited_distributed_controls,
+                phase_support,
             )
         elif isinstance(operation, ForInstruction):
             _verify_legal_region(
@@ -784,6 +841,7 @@ def _verify_legal_region(
                 capabilities,
                 inherited_coherent_controls,
                 inherited_distributed_controls,
+                phase_support,
             )
         # Measure and barrier instructions are legal on every circuit target.
 

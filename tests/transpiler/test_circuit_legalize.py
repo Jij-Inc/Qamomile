@@ -27,6 +27,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ClassicalBitExpr,
     CompilationPolicy,
     GlobalPhaseCapabilities,
+    IfInstruction,
     LiteralExpr,
     NativeSemanticOpCapabilities,
     ParameterExpr,
@@ -37,8 +38,8 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ScalarCapabilities,
     ScalarExpressionForm,
     SemanticArguments,
-    StandalonePhaseMode,
     UnaryOperator,
+    WhileInstruction,
     legalize_program,
     verify_circuit,
     verify_target_legal,
@@ -76,10 +77,7 @@ def _capabilities(**overrides: object) -> CircuitCapabilities:
             parameter_form=ScalarExpressionForm.ARBITRARY,
         ),
         pauli_time=numeric,
-        global_phase=GlobalPhaseCapabilities(
-            numeric,
-            StandalonePhaseMode.PRESERVE,
-        ),
+        global_phase=GlobalPhaseCapabilities(numeric),
         generic_calls=CallTransformCapabilities(
             True,
             True,
@@ -711,6 +709,68 @@ class TestTargetLegalityVerification:
         with pytest.raises(TargetCapabilityError, match="supplied through bindings"):
             verify_target_legal(legalized, capabilities)
 
+    def test_legalization_preserves_structured_region_phases(self) -> None:
+        """Rewriting retains phase metadata on every dynamic region."""
+        builder = CircuitBuilder(1, 1)
+        theta = ParameterExpr("theta")
+        branch_context = builder.begin_if(ClassicalBitExpr(0))
+        builder.add_global_phase(theta)
+        loop_context = builder.begin_while(ClassicalBitExpr(0))
+        builder.add_global_phase(0.25)
+        builder.end_while(loop_context)
+        builder.begin_else(branch_context)
+        builder.add_global_phase(0.5)
+        builder.end_if(branch_context)
+
+        legalized = legalize_program(
+            builder.freeze(),
+            _capabilities(),
+            CompilationPolicy(),
+        )
+
+        [branch] = legalized.operations
+        assert isinstance(branch, IfInstruction)
+        assert branch.true_global_phase == theta
+        assert branch.false_global_phase == LiteralExpr(0.5)
+        [loop] = branch.true_body
+        assert isinstance(loop, WhileInstruction)
+        assert loop.body_global_phase == LiteralExpr(0.25)
+        verify_target_legal(legalized, _capabilities())
+
+    def test_structured_phase_requires_target_support(self) -> None:
+        """A target rejects rather than discards an unsupported branch phase."""
+        builder = CircuitBuilder(1, 1)
+        context = builder.begin_if(ClassicalBitExpr(0))
+        builder.add_global_phase(0.25)
+        builder.end_if(context)
+        capabilities = _capabilities(global_phase=None)
+
+        with pytest.raises(TargetCapabilityError, match="standalone global phase"):
+            verify_target_legal(builder.freeze(), capabilities)
+
+    def test_structured_phase_checks_minimum_qubit_width(self) -> None:
+        """Region-local synthesis requirements are checked explicitly."""
+        builder = CircuitBuilder(0, 1)
+        context = builder.begin_while(ClassicalBitExpr(0))
+        builder.add_global_phase(0.25)
+        builder.end_while(context)
+        base = _capabilities()
+        assert base.global_phase is not None
+        capabilities = _capabilities(
+            global_phase=dataclasses.replace(base.global_phase, min_qubits=1)
+        )
+
+        with pytest.raises(TargetCapabilityError, match="at least 1 qubit"):
+            verify_target_legal(builder.freeze(), capabilities)
+
+    def test_measurement_dependent_root_phase_is_rejected_not_discarded(self) -> None:
+        """Unsupported runtime scalar syntax reaches target validation."""
+        builder = CircuitBuilder(1, 1)
+        builder.add_global_phase(0.25 * ClassicalBitExpr(0))
+
+        with pytest.raises(TargetCapabilityError, match="classical-bit"):
+            verify_target_legal(builder.freeze(), _capabilities())
+
     def test_quri_preserves_standalone_phase_and_checks_scalar_form(self):
         """A preserved QURI phase obeys its linear-expression capability."""
         from qamomile.quri_parts.materializer import QuriPartsMaterializer
@@ -726,7 +786,6 @@ class TestTargetLegalityVerification:
         )
 
         assert capabilities.global_phase is not None
-        assert capabilities.global_phase.standalone_mode is StandalonePhaseMode.PRESERVE
         with pytest.raises(TargetCapabilityError, match="non-linear in runtime"):
             verify_target_legal(legalized, capabilities)
 

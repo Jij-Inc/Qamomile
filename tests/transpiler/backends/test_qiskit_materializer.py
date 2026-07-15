@@ -157,6 +157,31 @@ def test_qiskit_materializer_preserves_structured_if() -> None:
     assert isinstance(instruction.operation, IfElseOp)
 
 
+def test_qiskit_materializer_preserves_structured_region_phases() -> None:
+    """Branch and while-body phases remain native block metadata."""
+    builder = CircuitBuilder(1, 1)
+    branch = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(0.25)
+    loop = builder.begin_while(ClassicalBitExpr(0))
+    builder.add_global_phase(0.5)
+    builder.end_while(loop)
+    builder.begin_else(branch)
+    builder.add_global_phase(0.75)
+    builder.end_if(branch)
+
+    circuit = QiskitMaterializer().materialize(builder.freeze()).artifact
+
+    [instruction] = circuit.data
+    assert isinstance(instruction.operation, IfElseOp)
+    true_block, false_block = instruction.operation.blocks
+    assert float(true_block.global_phase) == pytest.approx(0.25)
+    assert float(false_block.global_phase) == pytest.approx(0.75)
+    [while_instruction] = true_block.data
+    assert float(while_instruction.operation.blocks[0].global_phase) == pytest.approx(
+        0.5
+    )
+
+
 def test_qiskit_materializer_materializes_reusable_call() -> None:
     """Reusable circuit calls retain a named gate boundary."""
     body = CircuitBuilder(1, 0, name="helper")

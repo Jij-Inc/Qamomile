@@ -44,7 +44,6 @@ from qamomile.circuit.transpiler.circuit_ir.capability import (
     ScalarAtom,
     ScalarCapabilities,
     ScalarExpressionForm,
-    StandalonePhaseMode,
 )
 from qamomile.circuit.transpiler.circuit_ir.emitter import CircuitGateEmitter
 from qamomile.circuit.transpiler.circuit_ir.legalize import (
@@ -148,7 +147,6 @@ __all__ = [
     "ScalarAtom",
     "ScalarCapabilities",
     "ScalarExpressionForm",
-    "StandalonePhaseMode",
     "UnaryExpr",
     "UnaryOperator",
     "WhileInstruction",

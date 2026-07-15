@@ -269,6 +269,8 @@ def _verify_region(
             live = _advance(live, operation.inputs, operation.outputs, definitions)
         elif isinstance(operation, IfInstruction):
             _verify_expression(operation.condition, num_clbits)
+            _verify_expression(operation.true_global_phase, num_clbits)
+            _verify_expression(operation.false_global_phase, num_clbits)
             _verify_control_inputs(operation.inputs, live)
             true_live = _verify_region(
                 operation.true_body,
@@ -300,6 +302,7 @@ def _verify_region(
             live = _advance(live, operation.inputs, operation.outputs, definitions)
         elif isinstance(operation, WhileInstruction):
             _verify_expression(operation.condition, num_clbits)
+            _verify_expression(operation.body_global_phase, num_clbits)
             _verify_control_inputs(operation.inputs, live)
             body_live = _verify_region(
                 operation.body,

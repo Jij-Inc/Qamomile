@@ -41,7 +41,6 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ScalarCapabilities,
     ScalarExpr,
     ScalarExpressionForm,
-    StandalonePhaseMode,
     UnaryExpr,
     UnaryOperator,
     WhileInstruction,
@@ -254,7 +253,6 @@ class PyQretMaterializer:
             pauli_time=numeric,
             global_phase=GlobalPhaseCapabilities(
                 scalars=numeric,
-                standalone_mode=StandalonePhaseMode.PRESERVE,
             ),
             generic_calls=generic_call,
             supports_dynamic_if=False,

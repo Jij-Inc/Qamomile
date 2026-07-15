@@ -291,8 +291,8 @@ def test_builder_hoists_uncontrolled_call_phase_with_inverse_and_power() -> None
     verify_circuit(program)
 
 
-def test_builder_drops_nested_if_and_while_phase_gauges() -> None:
-    """Dynamic branch and iteration-history phase gauges stay unobservable."""
+def test_builder_preserves_nested_if_and_while_phases() -> None:
+    """Dynamic branch and loop phases remain attached to their regions."""
     builder = CircuitBuilder(1, 1)
     theta = ParameterExpr("theta")
     builder.add_global_phase(0.125)
@@ -309,20 +309,44 @@ def test_builder_drops_nested_if_and_while_phase_gauges() -> None:
     assert program.global_phase == LiteralExpr(0.125)
     [branch] = program.operations
     assert isinstance(branch, IfInstruction)
-    assert isinstance(branch.true_body[0], WhileInstruction)
+    assert branch.true_global_phase == theta
+    assert branch.false_global_phase == LiteralExpr(0.5)
+    [loop] = branch.true_body
+    assert isinstance(loop, WhileInstruction)
+    assert loop.body_global_phase == LiteralExpr(0.25)
     verify_circuit(program)
 
 
-def test_builder_drops_measurement_selected_root_phase_contribution() -> None:
-    """A hoisted classical SELECT phase remains an incoherent branch gauge."""
+def test_builder_preserves_measurement_selected_root_phase_contribution() -> None:
+    """A measurement-dependent phase is retained for target validation."""
     builder = CircuitBuilder(1, 1)
     theta = ParameterExpr("theta")
     builder.add_global_phase(theta)
     builder.add_global_phase(theta * ClassicalBitExpr(0))
     program = builder.freeze()
 
-    assert program.global_phase == theta
+    assert program.global_phase == theta + theta * ClassicalBitExpr(0)
     verify_circuit(program)
+
+
+def test_verifier_checks_structured_region_phase_expressions() -> None:
+    """Nested phases cannot reference classical bits outside the program."""
+    builder = CircuitBuilder(1, 1)
+    context = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(0.25)
+    builder.end_if(context)
+    program = builder.freeze()
+    [branch] = program.operations
+    assert isinstance(branch, IfInstruction)
+    malformed = dataclasses.replace(
+        program,
+        operations=(
+            dataclasses.replace(branch, true_global_phase=ClassicalBitExpr(1)),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="out of range"):
+        verify_circuit(malformed)
 
 
 def test_builder_rejects_loop_dependent_static_for_phase() -> None:

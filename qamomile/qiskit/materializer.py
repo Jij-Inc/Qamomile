@@ -39,7 +39,6 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ScalarCapabilities,
     ScalarExpr,
     ScalarExpressionForm,
-    StandalonePhaseMode,
     UnaryExpr,
     UnaryOperator,
     WhileInstruction,
@@ -177,7 +176,6 @@ class QiskitMaterializer:
             pauli_time=numeric,
             global_phase=GlobalPhaseCapabilities(
                 scalars=numeric,
-                standalone_mode=StandalonePhaseMode.PRESERVE,
             ),
             generic_calls=call_transforms,
             supports_dynamic_if=True,
@@ -656,6 +654,12 @@ def _emit_if(
     )
     branch_inputs = {wire: wires[wire] for wire in operation.inputs}
     with circuit.if_test(condition) as else_context:
+        circuit.global_phase += _materialize_scalar(
+            operation.true_global_phase,
+            circuit,
+            parameters,
+            loop_variables,
+        )
         true_wires = _emit_region(
             operation.true_body,
             circuit,
@@ -665,6 +669,12 @@ def _emit_if(
             preserve_control_flow,
         )
     with else_context:
+        circuit.global_phase += _materialize_scalar(
+            operation.false_global_phase,
+            circuit,
+            parameters,
+            loop_variables,
+        )
         false_wires = _emit_region(
             operation.false_body,
             circuit,
@@ -706,6 +716,12 @@ def _emit_while(
     )
     body_inputs = {wire: wires[wire] for wire in operation.inputs}
     with circuit.while_loop(condition):
+        circuit.global_phase += _materialize_scalar(
+            operation.body_global_phase,
+            circuit,
+            parameters,
+            loop_variables,
+        )
         body_wires = _emit_region(
             operation.body,
             circuit,

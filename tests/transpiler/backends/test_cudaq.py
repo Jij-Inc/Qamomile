@@ -18,6 +18,7 @@ cudaq = pytest.importorskip("cudaq")
 from qamomile.circuit.transpiler.circuit_ir import (  # noqa: E402
     CircuitBuilder,
     CircuitProgram,
+    ClassicalBitExpr,
     ParameterExpr,
     ReusableCircuit,
 )
@@ -93,6 +94,24 @@ class TestCudaqGlobalPhaseMaterialization:
 
         with pytest.raises(EmitError, match="at least 1 qubit"):
             CudaqMaterializer().materialize(builder.freeze())
+
+    def test_runtime_region_phases_are_emitted_inside_their_blocks(self) -> None:
+        """CUDA-Q keeps conditional and loop phases in lexical source blocks."""
+        builder = CircuitBuilder(1, 1)
+        branch = builder.begin_if(ClassicalBitExpr(0))
+        builder.add_global_phase(0.25)
+        loop = builder.begin_while(ClassicalBitExpr(0))
+        builder.add_global_phase(0.5)
+        builder.end_while(loop)
+        builder.begin_else(branch)
+        builder.add_global_phase(0.75)
+        builder.end_if(branch)
+
+        source = CudaqMaterializer().materialize(builder.freeze()).artifact.entry_source
+
+        assert "        r1(0.5, q[0])\n        rz(-0.5, q[0])\n        while " in source
+        assert "\n            r1(1.0, q[0])\n            rz(-1.0, q[0])" in source
+        assert "else:\n        r1(1.5, q[0])\n        rz(-1.5, q[0])" in source
 
     def test_controlled_phase_gate_preserves_the_exact_unitary(self) -> None:
         """CUDA-Q CP emission retains the global factor of its matrix."""

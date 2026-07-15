@@ -39,7 +39,6 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ScalarCapabilities,
     ScalarExpr,
     ScalarExpressionForm,
-    StandalonePhaseMode,
     UnaryExpr,
     UnaryOperator,
     WhileInstruction,
@@ -106,7 +105,6 @@ class QuriPartsMaterializer:
             pauli_time=numeric,
             global_phase=GlobalPhaseCapabilities(
                 scalars=numeric,
-                standalone_mode=StandalonePhaseMode.PRESERVE,
             ),
             generic_calls=CallTransformCapabilities(
                 supports_power=True,
@@ -178,7 +176,11 @@ class QuriPartsMaterializer:
             emitter,
         )
         if not _is_zero(program.global_phase):
-            emitter.emit_global_phase(circuit, phase)
+            emitter.emit_global_phase(
+                circuit,
+                phase,
+                carrier=0 if program.num_qubits else None,
+            )
         _emit_region(
             program.operations,
             circuit,
@@ -552,7 +554,11 @@ def _emit_transformed_call(
                     ancillas,
                 )
             else:
-                emitter.emit_global_phase(circuit, phase)
+                emitter.emit_global_phase(
+                    circuit,
+                    phase,
+                    carrier=targets[0] if targets else None,
+                )
     _publish(call_outputs, [*own_controls, *targets], wires)
 
 
@@ -1334,7 +1340,11 @@ def _requires_phase_carrier(program: CircuitProgram) -> bool:
     Returns:
         bool: True when a dedicated clean phase-carrier qubit is required.
     """
-    return not _is_zero(program.global_phase) or _region_requires_phase_carrier(
+    root_requires_carrier = not _is_zero(program.global_phase) and (
+        program.num_qubits == 0
+        or _contains_runtime_parameter(program.global_phase)
+    )
+    return root_requires_carrier or _region_requires_phase_carrier(
         program.operations,
         inherited_controls=0,
     )
@@ -1364,7 +1374,11 @@ def _region_requires_phase_carrier(
             effective_controls = inherited_controls + operation.callee.controls
             phase = operation.callee.body.global_phase
             if not _is_zero(phase) and (
-                effective_controls == 0 or _contains_runtime_parameter(phase)
+                _contains_runtime_parameter(phase)
+                or (
+                    effective_controls == 0
+                    and operation.callee.body.num_qubits == 0
+                )
             ):
                 return True
             if _region_requires_phase_carrier(

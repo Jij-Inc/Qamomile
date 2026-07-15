@@ -170,10 +170,26 @@ class TestQuriPartsGateEmitter:
             atol=1e-10,
         )
 
-    def test_global_phase_without_configured_carrier_fails(self) -> None:
-        """Scalar phase emission fails closed without a clean carrier."""
+    def test_concrete_global_phase_uses_an_existing_qubit(self) -> None:
+        """A native U1 and RZ pair realizes phase without a clean carrier."""
         emitter = QuriPartsGateEmitter()
         circuit = emitter.create_circuit(1, 0)
+
+        emitter.emit_global_phase(circuit, 0.25, carrier=0)
+
+        assert len(circuit.gates) == 2
+        state = _run_statevector(circuit, [])
+        assert np.allclose(
+            state,
+            np.array([np.exp(0.25j), 0.0], dtype=np.complex128),
+            rtol=0.0,
+            atol=1e-10,
+        )
+
+    def test_global_phase_without_any_carrier_fails(self) -> None:
+        """Scalar phase emission fails closed when no carrier is available."""
+        emitter = QuriPartsGateEmitter()
+        circuit = emitter.create_circuit(0, 0)
 
         with pytest.raises(EmitError, match="phase-carrier"):
             emitter.emit_global_phase(circuit, 0.25)
@@ -340,16 +356,16 @@ class TestQuriPartsTranspiler:
             atol=1e-10,
         )
 
-    def test_standalone_phase_uses_a_dedicated_clean_carrier(self) -> None:
-        """The exact scalar gate is isolated from the logical data qubit."""
+    def test_concrete_standalone_phase_reuses_a_logical_qubit(self) -> None:
+        """Concrete phase avoids a dedicated carrier when data is available."""
         builder = CircuitBuilder(1, 0, name="canonical-identity-phase")
         builder.add_global_phase(0.25)
 
         circuit = QuriPartsMaterializer().materialize(builder.freeze()).artifact
 
-        [gate] = circuit.gates
-        assert circuit.qubit_count == 2
-        assert gate.target_indices == (1,)
+        assert circuit.qubit_count == 1
+        assert len(circuit.gates) == 2
+        assert all(gate.target_indices == (0,) for gate in circuit.gates)
 
     def test_phase_carrier_is_hidden_from_implicit_execution_outputs(self) -> None:
         """QURI sampling and run expose only logical qubits, not the carrier."""

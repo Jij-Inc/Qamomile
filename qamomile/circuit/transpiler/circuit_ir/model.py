@@ -836,6 +836,8 @@ class IfInstruction:
         true_outputs (tuple[WireId, ...]): Wires yielded by the true branch.
         false_outputs (tuple[WireId, ...]): Wires yielded by the false branch.
         outputs (tuple[WireId, ...]): Merged post-branch wires.
+        true_global_phase (ScalarExpr): Phase applied only in the true branch.
+        false_global_phase (ScalarExpr): Phase applied only in the false branch.
     """
 
     condition: ScalarExpr
@@ -845,6 +847,12 @@ class IfInstruction:
     true_outputs: tuple[WireId, ...]
     false_outputs: tuple[WireId, ...]
     outputs: tuple[WireId, ...]
+    true_global_phase: ScalarExpr = dataclasses.field(
+        default_factory=lambda: LiteralExpr(0.0)
+    )
+    false_global_phase: ScalarExpr = dataclasses.field(
+        default_factory=lambda: LiteralExpr(0.0)
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -857,6 +865,7 @@ class WhileInstruction:
         body (tuple[CircuitInstruction, ...]): Loop body.
         body_outputs (tuple[WireId, ...]): Wires yielded to the next iteration.
         outputs (tuple[WireId, ...]): Wires available after loop termination.
+        body_global_phase (ScalarExpr): Phase applied once per loop iteration.
     """
 
     condition: ScalarExpr
@@ -864,6 +873,9 @@ class WhileInstruction:
     body: tuple[CircuitInstruction, ...]
     body_outputs: tuple[WireId, ...]
     outputs: tuple[WireId, ...]
+    body_global_phase: ScalarExpr = dataclasses.field(
+        default_factory=lambda: LiteralExpr(0.0)
+    )
 
 
 CircuitInstruction: TypeAlias = (
@@ -1201,13 +1213,6 @@ class CircuitBuilder:
             phase (ScalarExpr | bool | int | float): Phase contribution.
         """
         expression = as_scalar_expr(phase)
-        # Measurement outcomes label incoherent Kraus branches. A scalar phase
-        # selected by such an outcome is therefore a branch gauge, even when a
-        # classical SELECT has hoisted the expression outside its lexical
-        # If/While region. Discard it just like branch-local phases; coherent
-        # quantum controls never appear as ClassicalBitExpr and remain intact.
-        if _contains_classical_bit(expression):
-            return
         region = self._regions[-1]
         region.global_phase = _add_phase_expression(
             region.global_phase,
@@ -1318,10 +1323,6 @@ class CircuitBuilder:
             true_region = context.true_region
             false_region = current
         parent = self._regions[-1]
-        # Runtime predicates are measurement-derived, so branch-local phases
-        # are independent Kraus gauges rather than a relative phase between
-        # branches. Discard them here; the public parameter manifest preserves
-        # the runtime ABI even when a phase was its only use.
         outputs = {index: self.fresh_wire() for index in range(self.num_qubits)}
         parent.operations.append(
             IfInstruction(
@@ -1332,6 +1333,8 @@ class CircuitBuilder:
                 true_outputs=tuple(true_region.wires.values()),
                 false_outputs=tuple(false_region.wires.values()),
                 outputs=tuple(outputs.values()),
+                true_global_phase=true_region.global_phase,
+                false_global_phase=false_region.global_phase,
             )
         )
         parent.wires = outputs
@@ -1365,9 +1368,6 @@ class CircuitBuilder:
         self._controls.pop()
         body = self._regions.pop()
         parent = self._regions[-1]
-        # Every runtime-loop history is a separate Kraus path, so its phase is
-        # an unobservable gauge. The public parameter manifest retains any
-        # parameter that becomes unused when this phase is discarded.
         outputs = {index: self.fresh_wire() for index in range(self.num_qubits)}
         parent.operations.append(
             WhileInstruction(
@@ -1376,6 +1376,7 @@ class CircuitBuilder:
                 body=tuple(body.operations),
                 body_outputs=tuple(body.wires.values()),
                 outputs=tuple(outputs.values()),
+                body_global_phase=body.global_phase,
             )
         )
         parent.wires = outputs

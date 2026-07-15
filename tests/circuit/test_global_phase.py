@@ -1,12 +1,11 @@
 """Cross-backend tests for the ``qmc.global_phase`` combinator.
 
-``qmc.global_phase(kernel, theta)`` multiplies the wrapped kernel's unitary
-by ``e^{i*theta}``. Standalone the phase is physically unobservable, so the
-tests assert it is a no-op for sampling / expectation values while being
-present in the emitted unitary (Qiskit, where the unitary is exact).
-Controlling the combinator turns the global phase into an observable
-relative phase on the control qubit -- the projector-controlled-phase / QSVT
-building block -- which the Hadamard-test legs verify on every SDK backend.
+``qmc.global_phase(qkernel, theta)`` applies an ordinary qkernel call and then
+records ``e^{i*theta}``, without imposing a separate reversibility contract.
+Standalone phase is physically unobservable, so sampling and expectation
+values do not change, while every target must still preserve it exactly or
+reject it explicitly. Coherently controlling a reversible qkernel containing
+the phase turns it into an observable relative phase on the control subspace.
 
 Backends are exercised through the shared ``sdk_transpiler`` fixture
 (``importorskip``-guarded per backend), so the QURI Parts and CUDA-Q legs
@@ -24,14 +23,6 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit import qkernel
-from qamomile.circuit.ir.operation import MeasureOperation, ResetOperation
-from qamomile.circuit.ir.operation.control_flow import (
-    ForItemsOperation,
-    ForOperation,
-    IfOperation,
-    WhileOperation,
-)
-from qamomile.circuit.ir.operation.operation import QInitOperation
 
 
 # --------------------------------------------------------------------------- #
@@ -65,6 +56,17 @@ def _counts(result: Any) -> dict[Any, int]:
         key = int(value) if not isinstance(value, tuple) else value
         out[key] = out.get(key, 0) + int(count)
     return out
+
+
+def _assert_invoke_followed_by_phase(block: Any) -> None:
+    """Assert that an ordinary qkernel invocation retains its following phase."""
+    from qamomile.circuit.ir.operation import GlobalPhaseOperation, InvokeOperation
+
+    assert any(
+        isinstance(current, InvokeOperation)
+        and isinstance(following, GlobalPhaseOperation)
+        for current, following in zip(block.operations, block.operations[1:])
+    )
 
 
 def _executor(case: Any, seed: int = 901) -> Any:
@@ -382,6 +384,53 @@ class TestGlobalPhaseStandalone:
             rtol=0.0,
             atol=1e-9,
         )
+
+    def test_measuring_qkernel_retains_standalone_phase(self, qiskit_transpiler):
+        """Measurement does not prevent the following phase from materializing."""
+
+        @qkernel
+        def measure_body(q: qmc.Qubit) -> qmc.Bit:
+            """Measure the supplied qubit."""
+            return qmc.measure(q)
+
+        @qkernel
+        def circuit() -> qmc.Bit:
+            """Apply a phase after the measuring qkernel call."""
+            q = qmc.qubit("q")
+            return qmc.global_phase(measure_body, 0.4)(q)
+
+        artifact = qiskit_transpiler.transpile(circuit).get_first_circuit()
+
+        assert float(artifact.global_phase) == pytest.approx(0.4)
+        assert [instruction.operation.name for instruction in artifact.data] == [
+            "measure"
+        ]
+
+    def test_runtime_if_retains_each_branch_phase(self, qiskit_transpiler):
+        """Phases remain on the measured branches where users placed them."""
+        from qiskit.circuit import IfElseOp
+
+        @qkernel
+        def circuit() -> qmc.Bit:
+            """Apply a distinct phase in each measured branch."""
+            selector = qmc.measure(qmc.qubit("selector"))
+            target = qmc.qubit("target")
+            if selector:
+                target = qmc.global_phase(_ident, 0.25)(target)
+            else:
+                target = qmc.global_phase(_ident, 0.75)(target)
+            return qmc.measure(target)
+
+        artifact = qiskit_transpiler.transpile(circuit).get_first_circuit()
+        [branch] = [
+            instruction.operation
+            for instruction in artifact.data
+            if isinstance(instruction.operation, IfElseOp)
+        ]
+        true_block, false_block = branch.blocks
+
+        assert float(true_block.global_phase) == pytest.approx(0.25)
+        assert float(false_block.global_phase) == pytest.approx(0.75)
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_sample_unaffected_by_phase(self, sdk_transpiler, seed):
@@ -3381,12 +3430,7 @@ class TestGlobalPhaseVisualization:
 
 
 class TestGlobalPhaseArgumentValidation:
-    """global_phase rejects mis-typed arguments and non-unitary bodies at trace time.
-
-    Mirrors the shared ``_validate_bound_handles`` contract used by the plain
-    qkernel call, ``control``, and ``inverse``, plus a global-phase-specific
-    qubit-preserving-unitary precondition on the wrapped block.
-    """
+    """global_phase shares qkernel argument validation without requiring unitarity."""
 
     def test_quantum_handle_into_classical_slot_rejected(self):
         """A Qubit bound to a Float parameter fails fast with a clear message."""
@@ -3459,8 +3503,18 @@ class TestGlobalPhaseArgumentValidation:
         with pytest.raises(TypeError, match="declared as a quantum array"):
             _ = bad.block
 
-    def test_measuring_body_rejected(self):
-        """A body that measures (Bit output) is not a unitary and is rejected."""
+    def test_invalid_phase_does_not_consume_quantum_input(self):
+        """Phase validation runs before the ordinary qkernel invocation."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            q = qmc.qubit("q")
+            with pytest.raises(TypeError, match="not bool"):
+                qmc.global_phase(_ident, True)(q)
+            assert not q._consumed
+
+    def test_measuring_body_is_accepted(self):
+        """A standalone phase can follow a measuring qkernel call."""
 
         @qkernel
         def measure_body(q: qmc.Qubit) -> qmc.Bit:
@@ -3475,25 +3529,22 @@ class TestGlobalPhaseArgumentValidation:
             return qmc.measure(q)
 
         @qkernel
-        def outer(q: qmc.Qubit) -> qmc.Qubit:
-            """Build the outer kernel that invokes the test body.
+        def outer(q: qmc.Qubit) -> qmc.Bit:
+            """Build the outer kernel that invokes the measuring body.
 
             Args:
                 q (qmc.Qubit): Target qubit.
 
             Returns:
-                qmc.Qubit: Updated target qubit.
-
-            Raises:
-                TypeError: If the measuring body is wrapped as a unitary.
+                qmc.Bit: Measured result returned by the wrapped qkernel.
             """
             return qmc.global_phase(measure_body, 0.4)(q)
 
-        with pytest.raises(TypeError, match="qubit-preserving unitary"):
-            _ = outer.block
+        assert outer.block is not None
+        _assert_invoke_followed_by_phase(outer.block)
 
-    def test_nested_reset_helper_is_rejected_before_consumption(self):
-        """Invoke traversal rejects a hidden reset without consuming its input."""
+    def test_nested_reset_helper_is_accepted(self):
+        """A standalone phase can follow a qkernel containing reset."""
         from qamomile.circuit.frontend.tracer import trace
 
         @qkernel
@@ -3520,18 +3571,15 @@ class TestGlobalPhaseArgumentValidation:
             """
             return reset_helper(q)
 
-        with trace():
+        with trace() as tracer:
             q = qmc.qubit("q")
-            with pytest.raises(TypeError, match="ResetOperation"):
-                qmc.global_phase(nested_reset, 0.4)(q)
-            assert not q._consumed
+            result = qmc.global_phase(nested_reset, 0.4)(q)
+            assert q._consumed
+            assert not result._consumed
+        _assert_invoke_followed_by_phase(tracer)
 
-    def test_classical_output_body_rejected(self):
-        """A body returning a classical value alongside a qubit is rejected.
-
-        The combinator's results mirror its quantum operands only, so the
-        classical output would otherwise be silently dropped.
-        """
+    def test_classical_output_body_is_preserved(self):
+        """The wrapper preserves mixed quantum and classical qkernel outputs."""
 
         @qkernel
         def classical_out(q: qmc.Qubit, a: qmc.Float) -> tuple[qmc.Qubit, qmc.Float]:
@@ -3547,7 +3595,10 @@ class TestGlobalPhaseArgumentValidation:
             return qmc.rz(q, a), a
 
         @qkernel
-        def outer(q: qmc.Qubit, a: qmc.Float) -> qmc.Qubit:
+        def outer(
+            q: qmc.Qubit,
+            a: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Float]:
             """Build the outer kernel that invokes the test body.
 
             Args:
@@ -3555,18 +3606,15 @@ class TestGlobalPhaseArgumentValidation:
                 a (qmc.Float): First body qubit.
 
             Returns:
-                qmc.Qubit: Updated target qubit.
-
-            Raises:
-                TypeError: If the body returns a classical output.
+                tuple[qmc.Qubit, qmc.Float]: Wrapped body outputs in order.
             """
             return qmc.global_phase(classical_out, 0.5)(q, a)
 
-        with pytest.raises(TypeError, match="qubit-preserving unitary"):
-            _ = outer.block
+        assert outer.block is not None
+        _assert_invoke_followed_by_phase(outer.block)
 
-    def test_classical_only_body_rejected(self):
-        """A body with no quantum I/O has no unitary to phase and is rejected."""
+    def test_classical_only_body_is_accepted(self):
+        """A standalone phase does not impose quantum I/O on the wrapped call."""
 
         @qkernel
         def classical_only(a: qmc.Float) -> qmc.Float:
@@ -3591,134 +3639,12 @@ class TestGlobalPhaseArgumentValidation:
             Returns:
                 qmc.Qubit: Updated target qubit.
 
-            Raises:
-                TypeError: If the wrapped body has no quantum input or output.
             """
             qmc.global_phase(classical_only, 0.6)(a)
             return qmc.h(q)
 
-        with pytest.raises(TypeError, match="qubit-preserving unitary"):
-            _ = outer.block
-
-    @pytest.mark.parametrize(
-        "control_flow_type",
-        [IfOperation, ForOperation, WhileOperation, ForItemsOperation],
-        ids=["if", "for", "while", "for-items"],
-    )
-    @pytest.mark.parametrize(
-        "forbidden_type",
-        [QInitOperation, MeasureOperation, ResetOperation],
-        ids=["allocation", "measurement", "reset"],
-    )
-    def test_nested_control_flow_non_unitary_operation_rejected(
-        self,
-        control_flow_type: type[Any],
-        forbidden_type: type[Any],
-    ) -> None:
-        """Recursive validation finds effects under every control-flow kind."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.types.primitives import (
-            BitType,
-            FloatType,
-            QubitType,
-            UIntType,
-        )
-        from qamomile.circuit.ir.value import DictValue, Value
-
-        q = Value(type=QubitType(), name="q")
-        if forbidden_type is QInitOperation:
-            hidden = Value(type=QubitType(), name="hidden")
-            forbidden = QInitOperation(operands=[], results=[hidden])
-        elif forbidden_type is MeasureOperation:
-            measured = Value(type=BitType(), name="measured")
-            forbidden = MeasureOperation(operands=[q], results=[measured])
-        else:
-            forbidden = ResetOperation(operands=[q], results=[q.next_version()])
-
-        condition = Value(type=BitType(), name="condition").with_const(True)
-        loop_var = Value(type=UIntType(), name="i")
-        zero = Value(type=UIntType(), name="zero").with_const(0)
-        one = Value(type=UIntType(), name="one").with_const(1)
-        iterable = DictValue(name="items").with_dict_runtime_metadata({0: 0.25})
-        if control_flow_type is IfOperation:
-            nested = IfOperation(
-                operands=[condition],
-                results=[],
-                true_operations=[forbidden],
-                false_operations=[],
-            )
-        elif control_flow_type is ForOperation:
-            nested = ForOperation(
-                operands=[zero, one, one],
-                results=[],
-                loop_var="i",
-                loop_var_value=loop_var,
-                operations=[forbidden],
-            )
-        elif control_flow_type is WhileOperation:
-            nested = WhileOperation(
-                operands=[condition],
-                results=[],
-                operations=[forbidden],
-            )
-        else:
-            nested = ForItemsOperation(
-                operands=[iterable],
-                results=[],
-                key_vars=["i"],
-                value_var="angle",
-                key_var_values=(loop_var,),
-                value_var_value=Value(type=FloatType(), name="angle"),
-                operations=[forbidden],
-            )
-
-        block = Block(
-            input_values=[q],
-            output_values=[q],
-            operations=[nested],
-        )
-        with pytest.raises(TypeError, match=forbidden_type.__name__):
-            _validate_unitary_block(block, "nested_control_flow")
-
-    def test_measurement_conditioned_while_is_rejected_even_with_unitary_body(
-        self,
-    ) -> None:
-        """A WhileOperation is non-unitary even when its body contains only H."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.operation.gate import (
-            GateOperation,
-            GateOperationType,
-        )
-        from qamomile.circuit.ir.types.primitives import BitType, QubitType
-        from qamomile.circuit.ir.value import Value
-
-        qubit = Value(type=QubitType(), name="qubit")
-        condition = Value(type=BitType(), name="condition").with_const(True)
-        loop = WhileOperation(
-            operands=[condition],
-            results=[],
-            operations=[
-                GateOperation.fixed(
-                    GateOperationType.H,
-                    [qubit],
-                    [qubit.next_version()],
-                )
-            ],
-        )
-        block = Block(
-            input_values=[qubit],
-            output_values=[qubit],
-            operations=[loop],
-        )
-
-        with pytest.raises(TypeError, match="measurement-conditioned WhileOperation"):
-            _validate_unitary_block(block, "while_body")
+        assert outer.block is not None
+        _assert_invoke_followed_by_phase(outer.block)
 
     @pytest.mark.parametrize("seed", [0, 42])
     def test_classical_only_helper_inside_quantum_body_executes(
@@ -3726,9 +3652,7 @@ class TestGlobalPhaseArgumentValidation:
     ):
         """A classical helper call inside a quantum body remains valid.
 
-        Recursive validation must inspect the helper's operations for forbidden
-        quantum effects without reapplying the top-level quantum-I/O contract
-        to the helper itself.
+        Ordinary invocation preserves helper calls used to compute gate angles.
         """
 
         @qkernel
@@ -3783,17 +3707,19 @@ class TestGlobalPhaseArgumentValidation:
         )
         assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: {counts}"
 
-    def test_specialized_hidden_allocation_rejected_before_consumption(self):
-        """Validate a shape-specialized body before consuming caller handles.
+    def test_specialized_hidden_allocation_is_accepted(self):
+        """The selected specialization may allocate internal qubits.
 
         The cached symbolic block returns before allocating anything because
         its vector width is unknown. At a concrete call site the body is
-        retraced, enters the non-empty branch, and allocates a hidden ancilla.
-        ``global_phase`` must reject that specialized block before recording
-        the ordinary call, leaving the caller's vector live and reusable.
+        retraced, enters the non-empty branch, and allocates an internal qubit.
+        The phase wrapper records that exact ordinary qkernel call without
+        imposing a separate reversibility contract.
         """
         from qamomile.circuit.frontend.handle.utils import get_size
         from qamomile.circuit.frontend.tracer import trace
+        from qamomile.circuit.ir.operation.callable import InvokeOperation
+        from qamomile.circuit.ir.operation.control_flow import HasNestedOps
         from qamomile.circuit.ir.operation.operation import QInitOperation
 
         @qkernel
@@ -3821,16 +3747,26 @@ class TestGlobalPhaseArgumentValidation:
             isinstance(op, QInitOperation) for op in shape_sensitive.block.operations
         )
 
-        with trace():
-            qs = qmc.qubit_array(1, "qs")
-            with pytest.raises(TypeError, match="qubit-preserving unitary"):
-                qmc.global_phase(shape_sensitive, 0.2)(qs)
-            assert not qs._consumed
-            qs = qmc.x(qs)
-            assert not qs._consumed
+        with trace() as tracer:
+            source = qmc.qubit_array(1, "qs")
+            result = qmc.global_phase(shape_sensitive, 0.2)(source)
 
-    def test_specialized_dead_if_branch_is_not_validated(self):
-        """Validation follows the exact statically selected specialization."""
+        calls = [op for op in tracer.operations if isinstance(op, InvokeOperation)]
+        assert len(calls) == 1
+        assert calls[0].body is not None
+        pending = [calls[0].body.operations]
+        found_allocation = False
+        while pending:
+            for operation in pending.pop():
+                found_allocation |= isinstance(operation, QInitOperation)
+                if isinstance(operation, HasNestedOps):
+                    pending.extend(operation.nested_op_lists())
+        assert found_allocation
+        assert source._consumed
+        assert not result._consumed
+
+    def test_specialized_dead_if_branch_is_not_traced(self):
+        """The ordinary call follows the exact statically selected branch."""
 
         @qkernel
         def candidate(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
@@ -3846,73 +3782,10 @@ class TestGlobalPhaseArgumentValidation:
             return qmc.global_phase(candidate, 0.2)(q, False)
 
         assert outer.block is not None
+        _assert_invoke_followed_by_phase(outer.block)
 
-    def test_selected_specialization_is_validated_once_and_reused(self, monkeypatch):
-        """Validate and emit the same call-time-specialized Block exactly once."""
-        import importlib
-
-        from qamomile.circuit.frontend.tracer import trace
-        from qamomile.circuit.ir.operation.callable import InvokeOperation
-
-        global_phase_module = importlib.import_module(
-            "qamomile.circuit.frontend.operation.global_phase"
-        )
-        original_validator = global_phase_module._validate_unitary_block
-        trace_count = 0
-        validated_blocks = []
-
-        def record_trace() -> None:
-            """Record one execution of the QKernel body during tracing."""
-            nonlocal trace_count
-            trace_count += 1
-
-        @qkernel
-        def body(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-            """Apply the local quantum body used by this test.
-
-            Args:
-                qs (qmc.Vector[qmc.Qubit]): Qubit register to transform.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated qubit register.
-            """
-            record_trace()
-            qs = qmc.h(qs)
-            return qs
-
-        def recording_validator(block, kernel_name, visited_blocks=None):
-            """Record and delegate validation of the selected IR block.
-
-            Args:
-                block (Block): Selected IR block to validate.
-                kernel_name (str): Name of the kernel being validated.
-                visited_blocks (set[int] | None): Block identities already traversed, if any.
-
-            Raises:
-                TypeError: If the delegated unitary validation rejects the block.
-            """
-            validated_blocks.append(block)
-            original_validator(block, kernel_name, visited_blocks)
-
-        monkeypatch.setattr(
-            global_phase_module,
-            "_validate_unitary_block",
-            recording_validator,
-        )
-
-        with trace() as tracer:
-            qs = qmc.qubit_array(2, "qs")
-            qs = qmc.global_phase(body, 0.2)(qs)
-
-        calls = [op for op in tracer.operations if isinstance(op, InvokeOperation)]
-        assert trace_count == 1
-        assert len(validated_blocks) == 1
-        assert len(calls) == 1
-        assert validated_blocks[0] is calls[0].body
-        assert not qs._consumed
-
-    def test_stateful_specialization_cannot_change_after_validation(self):
-        """Trace a stateful helper once so validation and emission cannot diverge."""
+    def test_stateful_specialization_is_traced_once(self):
+        """The wrapper does not retrace the ordinary qkernel specialization."""
         from qamomile.circuit.frontend.tracer import trace
         from qamomile.circuit.ir.operation.callable import InvokeOperation
         from qamomile.circuit.ir.operation.operation import QInitOperation
@@ -3954,8 +3827,8 @@ class TestGlobalPhaseArgumentValidation:
         )
         assert not qs._consumed
 
-    def test_qubit_reordering_body_rejected(self):
-        """Reject permutations that control() cannot return safely."""
+    def test_qubit_reordering_body_is_accepted(self):
+        """The wrapper preserves the ordinary qkernel's output permutation."""
 
         @qkernel
         def swap_body(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
@@ -3984,13 +3857,11 @@ class TestGlobalPhaseArgumentValidation:
                 tuple[qmc.Qubit, qmc.Qubit]: Updated first qubit (qmc.Qubit) and
                     second qubit (qmc.Qubit).
 
-            Raises:
-                TypeError: If the wrapped body reorders its quantum outputs.
             """
             return qmc.global_phase(swap_body, 0.1)(a, b)
 
-        with pytest.raises(TypeError, match="reordered qubits"):
-            _ = outer.block
+        assert outer.block is not None
+        _assert_invoke_followed_by_phase(outer.block)
 
     def test_order_preserving_body_accepted(self):
         """A body returning its qubits in declaration order traces cleanly."""
@@ -4272,218 +4143,6 @@ class TestGlobalPhaseArgumentValidation:
             return qmc.global_phase(conditional_body, 0.4)(qs, flag)
 
         assert outer.block is not None
-
-    def test_runtime_if_resource_permutation_is_rejected(self):
-        """An unresolved branch may not select different output resources."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.types.primitives import BitType, QubitType
-        from qamomile.circuit.ir.value import Value
-
-        first = Value(type=QubitType(), name="first")
-        second = Value(type=QubitType(), name="second")
-        condition = Value(type=BitType(), name="condition")
-        first_result = Value(type=QubitType(), name="first_result")
-        second_result = Value(type=QubitType(), name="second_result")
-        branch = IfOperation(operands=[condition])
-        branch.add_merge(first, second, first_result)
-        branch.add_merge(second, first, second_result)
-        block = Block(
-            input_values=[first, second, condition],
-            output_values=[first_result, second_result],
-            operations=[branch],
-        )
-
-        with pytest.raises(TypeError, match="reordered qubits"):
-            _validate_unitary_block(block, "conditional_swap")
-
-    @pytest.mark.parametrize("loop_kind", ["range", "items"])
-    def test_empty_loop_uses_region_initializer(self, loop_kind: str):
-        """A loop that cannot execute returns each RegionArg initializer."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.operation.control_flow import RegionArg
-        from qamomile.circuit.ir.types.primitives import (
-            FloatType,
-            QubitType,
-            UIntType,
-        )
-        from qamomile.circuit.ir.value import DictValue, Value
-
-        first = Value(type=QubitType(), name="first")
-        second = Value(type=QubitType(), name="second")
-        first_arg = Value(type=QubitType(), name="first_arg")
-        second_arg = Value(type=QubitType(), name="second_arg")
-        first_result = Value(type=QubitType(), name="first_result")
-        second_result = Value(type=QubitType(), name="second_result")
-        region_args = (
-            RegionArg("first", first, first_arg, second_arg, first_result),
-            RegionArg("second", second, second_arg, first_arg, second_result),
-        )
-
-        if loop_kind == "range":
-            zero = Value(type=UIntType(), name="zero").with_const(0)
-            one = Value(type=UIntType(), name="one").with_const(1)
-            loop = ForOperation(
-                operands=[zero, zero, one],
-                results=[first_result, second_result],
-                loop_var="index",
-                loop_var_value=Value(type=UIntType(), name="index"),
-                operations=[],
-                region_args=region_args,
-            )
-        else:
-            iterable = DictValue(name="items").with_dict_runtime_metadata({})
-            loop = ForItemsOperation(
-                operands=[iterable],
-                results=[first_result, second_result],
-                key_vars=["index"],
-                value_var="angle",
-                key_var_values=(Value(type=UIntType(), name="index"),),
-                value_var_value=Value(type=FloatType(), name="angle"),
-                operations=[],
-                region_args=region_args,
-            )
-
-        block = Block(
-            input_values=[first, second],
-            output_values=[first_result, second_result],
-            operations=[loop],
-        )
-        _validate_unitary_block(block, f"empty_{loop_kind}")
-
-    def test_huge_static_loop_bound_does_not_overflow_validation(self):
-        """Loop emptiness validation does not call ``len`` on a huge range."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.types.primitives import QubitType, UIntType
-        from qamomile.circuit.ir.value import Value
-
-        qubit = Value(type=QubitType(), name="qubit")
-        zero = Value(type=UIntType(), name="zero").with_const(0)
-        stop = Value(type=UIntType(), name="stop").with_const(10**100)
-        one = Value(type=UIntType(), name="one").with_const(1)
-        loop = ForOperation(
-            operands=[zero, stop, one],
-            loop_var="index",
-            loop_var_value=Value(type=UIntType(), name="index"),
-        )
-        block = Block(
-            input_values=[qubit],
-            output_values=[qubit],
-            operations=[loop],
-        )
-
-        _validate_unitary_block(block, "huge_static_loop")
-
-    def test_non_bit_if_condition_is_rejected(self):
-        """Provenance must not treat a numeric constant as a Bit condition."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.types.primitives import FloatType, QubitType
-        from qamomile.circuit.ir.value import Value
-
-        first = Value(type=QubitType(), name="first")
-        second = Value(type=QubitType(), name="second")
-        condition = Value(type=FloatType(), name="condition").with_const(1.0)
-        first_result = Value(type=QubitType(), name="first_result")
-        second_result = Value(type=QubitType(), name="second_result")
-        branch = IfOperation(operands=[condition])
-        branch.add_merge(first, second, first_result)
-        branch.add_merge(second, first, second_result)
-        block = Block(
-            input_values=[first, second],
-            output_values=[first_result, second_result],
-            operations=[branch],
-        )
-
-        with pytest.raises(TypeError, match="Bit"):
-            _validate_unitary_block(block, "numeric_condition")
-
-    def test_deep_identity_merge_chain_is_accepted(self):
-        """A deep shared merge graph resolves iteratively in linear work."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.types.primitives import BitType, QubitType
-        from qamomile.circuit.ir.value import Value
-
-        qubit = Value(type=QubitType(), name="qubit")
-        condition = Value(type=BitType(), name="condition")
-        current = qubit
-        operations = []
-        for index in range(1200):
-            result = Value(type=QubitType(), name=f"merge_{index}")
-            branch = IfOperation(operands=[condition])
-            branch.add_merge(current, current, result)
-            operations.append(branch)
-            current = result
-        block = Block(
-            input_values=[qubit, condition],
-            output_values=[current],
-            operations=operations,
-        )
-
-        _validate_unitary_block(block, "deep_identity_merges")
-
-    def test_deep_nested_if_tree_is_accepted_without_recursion(self):
-        """Structured nesting depth does not consume the Python call stack."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.types.primitives import BitType, QubitType
-        from qamomile.circuit.ir.value import Value
-
-        qubit = Value(type=QubitType(), name="qubit")
-        condition = Value(type=BitType(), name="condition")
-        nested = IfOperation(operands=[condition])
-        for _ in range(1500):
-            nested = IfOperation(
-                operands=[condition],
-                true_operations=[nested],
-            )
-        block = Block(
-            input_values=[qubit, condition],
-            output_values=[qubit],
-            operations=[nested],
-        )
-
-        _validate_unitary_block(block, "deep_nested_if")
-
-    def test_deep_owned_block_chain_is_accepted_without_recursion(self):
-        """Nested Invoke bodies are validated through an explicit worklist."""
-        from qamomile.circuit.frontend.operation.global_phase import (
-            _validate_unitary_block,
-        )
-        from qamomile.circuit.ir.block import Block
-        from qamomile.circuit.ir.operation import InvokeOperation
-        from qamomile.circuit.ir.types.primitives import QubitType
-        from qamomile.circuit.ir.value import Value
-
-        leaf = Value(type=QubitType(), name="leaf")
-        block = Block(input_values=[leaf], output_values=[leaf])
-        for index in range(1500):
-            qubit = Value(type=QubitType(), name=f"q_{index}")
-            result = qubit.next_version()
-            invoke = InvokeOperation(operands=[qubit], results=[result])
-            invoke.body = block
-            block = Block(
-                input_values=[qubit],
-                output_values=[result],
-                operations=[invoke],
-            )
-
-        _validate_unitary_block(block, "deep_owned_blocks")
 
     def test_whole_vector_control_preserves_register_provenance(self):
         """Expanded scalar control ports reconstruct their returned Vector."""

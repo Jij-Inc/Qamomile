@@ -38,7 +38,6 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ScalarCapabilities,
     ScalarExpr,
     ScalarExpressionForm,
-    StandalonePhaseMode,
     UnaryExpr,
     UnaryOperator,
     WhileInstruction,
@@ -135,7 +134,6 @@ class CudaqMaterializer:
             pauli_time=numeric,
             global_phase=GlobalPhaseCapabilities(
                 scalars=numeric,
-                standalone_mode=StandalonePhaseMode.PRESERVE,
                 min_qubits=1,
             ),
             generic_calls=CallTransformCapabilities(
@@ -300,6 +298,14 @@ def _emit_region(
             branch_start = emitter.begin_source_block(
                 f"if {_predicate(operation.condition, parameters, loop_variables, emitter)}:"
             )
+            _emit_scoped_global_phase(
+                operation.true_global_phase,
+                circuit,
+                next(iter(branch_inputs.values()), None),
+                parameters,
+                loop_variables,
+                emitter,
+            )
             true_wires = _emit_region(
                 operation.true_body,
                 circuit,
@@ -311,6 +317,14 @@ def _emit_region(
             )
             emitter.end_source_block(branch_start)
             branch_start = emitter.begin_source_block("else:")
+            _emit_scoped_global_phase(
+                operation.false_global_phase,
+                circuit,
+                next(iter(branch_inputs.values()), None),
+                parameters,
+                loop_variables,
+                emitter,
+            )
             false_wires = _emit_region(
                 operation.false_body,
                 circuit,
@@ -330,10 +344,19 @@ def _emit_region(
             body_start = emitter.begin_source_block(
                 f"while {_predicate(operation.condition, parameters, loop_variables, emitter)}:"
             )
+            body_inputs = {wire: wires[wire] for wire in operation.inputs}
+            _emit_scoped_global_phase(
+                operation.body_global_phase,
+                circuit,
+                next(iter(body_inputs.values()), None),
+                parameters,
+                loop_variables,
+                emitter,
+            )
             body_wires = _emit_region(
                 operation.body,
                 circuit,
-                {wire: wires[wire] for wire in operation.inputs},
+                body_inputs,
                 parameters,
                 measurements,
                 loop_variables,
@@ -648,6 +671,38 @@ def _program_global_phase(
         Any: Concrete or source-level phase angle omitted by the helper.
     """
     return _scalar(program.global_phase, parameters, loop_variables, emitter)
+
+
+def _emit_scoped_global_phase(
+    expression: ScalarExpr,
+    circuit: Any,
+    carrier: int | None,
+    parameters: dict[str, Any],
+    loop_variables: dict[str, int],
+    emitter: CudaqKernelEmitter,
+) -> None:
+    """Emit a phase inside the active CUDA-Q source block.
+
+    Args:
+        expression (ScalarExpr): Region-local phase expression.
+        circuit (Any): CUDA-Q artifact currently being built.
+        carrier (int | None): Existing qubit slot for the identity sequence.
+        parameters (dict[str, Any]): Runtime parameter cache.
+        loop_variables (dict[str, int]): Active concrete loop values.
+        emitter (CudaqKernelEmitter): CUDA-Q source emitter.
+
+    Raises:
+        EmitError: If a nonzero phase has no existing carrier qubit.
+    """
+    phase = _scalar(expression, parameters, loop_variables, emitter)
+    if _is_materialized_zero(phase):
+        return
+    if carrier is None:
+        raise EmitError(
+            "CUDA-Q requires at least 1 qubit to preserve a nonzero "
+            "structured-region global phase"
+        )
+    emitter.emit_global_phase(circuit, carrier, phase)
 
 
 def _is_materialized_zero(value: Any) -> bool:

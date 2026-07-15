@@ -73,13 +73,6 @@ class CallControlMode(enum.Enum):
     DISTRIBUTE = "distribute"
 
 
-class StandalonePhaseMode(enum.Enum):
-    """Enumerate target treatment of an unconditionally applied phase."""
-
-    PRESERVE = "preserve"
-    DISCARD = "discard"
-
-
 class CallPhaseMode(enum.Enum):
     """Enumerate how a target realizes phase in coherently controlled calls."""
 
@@ -110,12 +103,10 @@ class ScalarCapabilities:
 
 @dataclasses.dataclass(frozen=True)
 class GlobalPhaseCapabilities:
-    """Declare standalone global-phase handling and accepted scalar syntax.
+    """Declare exact standalone global-phase realization requirements.
 
     Args:
         scalars (ScalarCapabilities): Scalar language accepted for the phase.
-        standalone_mode (StandalonePhaseMode): Whether the final artifact
-            preserves the phase or deliberately discards it projectively.
         min_qubits (int): Minimum program width required to preserve a
             nonzero standalone phase. Targets with a native zero-qubit phase
             operation use the default zero; targets that synthesize phase on
@@ -123,7 +114,6 @@ class GlobalPhaseCapabilities:
     """
 
     scalars: ScalarCapabilities
-    standalone_mode: StandalonePhaseMode
     min_qubits: int = 0
 
 
@@ -291,8 +281,8 @@ class CircuitCapabilities:
             ``if`` and ``while`` predicates.
         pauli_time (ScalarCapabilities): Scalar language accepted by Pauli
             evolution time values.
-        global_phase (GlobalPhaseCapabilities | None): Standalone phase mode
-            and accepted scalar language, or ``None`` when unsupported.
+        global_phase (GlobalPhaseCapabilities | None): Exact standalone phase
+            realization requirements, or ``None`` when unsupported.
         generic_calls (CallTransformCapabilities): Reusable-call forms accepted
             after semantic-call legalization.
         supports_dynamic_if (bool): Whether runtime ``if`` regions are
