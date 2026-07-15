@@ -18,6 +18,9 @@ from typing import TYPE_CHECKING, Any
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_support.control_value_emission import (
+    bracket_control_value,
+)
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _bind_and_populate_block_inputs,
     _emitter_supports_reusable_gates,
@@ -169,7 +172,8 @@ def emit_inverse_block_at_indices(
         emit_pass (StandardEmitPass): Active emit pass.
         circuit (Any): Backend circuit being emitted into.
         op (InverseBlockOperation): Inverse block operation to emit.
-        control_indices (list[int]): Physical control qubits.
+        control_indices (list[int]): Physical control qubits in enclosing-first
+            order, followed by this operation's own controls.
         target_indices (list[int]): Physical target qubits.
         bindings (dict[str, Any]): Active emit bindings.
 
@@ -204,6 +208,49 @@ def emit_inverse_block_at_indices(
     # ill-defined and would otherwise leak a raw backend error (Qiskit) or
     # compile silently and crash the simulator (CUDA-Q).
     reject_duplicate_physical_indices("inverse block", control_indices + target_indices)
+
+    # Nested emission prepends enclosing controls. The activation value belongs
+    # only to this operation's own trailing control segment.
+    activation_controls = (
+        control_indices[-op.num_control_qubits :] if op.num_control_qubits else []
+    )
+    with bracket_control_value(
+        emit_pass,
+        circuit,
+        activation_controls,
+        op.control_value,
+    ):
+        _emit_all_ones_inverse_block_at_indices(
+            emit_pass,
+            circuit,
+            op,
+            control_indices,
+            target_indices,
+            bindings,
+        )
+
+
+def _emit_all_ones_inverse_block_at_indices(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: InverseBlockOperation,
+    control_indices: list[int],
+    target_indices: list[int],
+    bindings: dict[str, Any],
+) -> None:
+    """Emit an inverse block after activation controls are normalized.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (InverseBlockOperation): Normalized inverse block operation.
+        control_indices (list[int]): Physical all-ones control qubits.
+        target_indices (list[int]): Physical target qubits.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Returns:
+        None.
+    """
 
     input_operands = [*op.target_qubits, *op.parameters]
     can_build_reusable_gate = _emitter_supports_reusable_gates(emit_pass._emitter)

@@ -15,6 +15,7 @@ from qamomile.circuit.ir.types.primitives import (
 )
 from qamomile.circuit.ir.value import Value, ValueBase
 
+from .control_value import normalize_control_value
 from .operation import Operation, OperationKind, ParamHint, Signature
 
 
@@ -296,9 +297,30 @@ class ConcreteControlledU(ControlledUOperation):
 
     Operand layout: ``[ctrl_0, ..., ctrl_n, tgt_0, ..., tgt_m, params...]``
     Result layout:  ``[ctrl_0', ..., ctrl_n', tgt_0', ..., tgt_m']``
+
+    Attributes:
+        num_controls (int): Number of leading scalar control operands.
+        control_value (int | None): LSB-first computational-basis value that
+            activates the control. ``None`` is the canonical ordinary
+            all-ones state.
     """
 
     num_controls: int = 1
+    control_value: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate and canonicalize concrete control metadata.
+
+        Raises:
+            TypeError: If ``control_value`` is not a Python ``int`` or
+                ``None``.
+            ValueError: If ``num_controls`` is not positive or the activation
+                value does not fit in the control-register width.
+        """
+        self.control_value = normalize_control_value(
+            self.control_value,
+            self.num_controls,
+        )
 
     @property
     def control_operands(self) -> list[Value]:

@@ -25,10 +25,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     validate_region_args,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.operation.select import (
-    SelectOperation,
-    _control_pattern_for_index,
-)
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.circuit_ir.emitter import CircuitGateEmitter
 from qamomile.circuit.transpiler.circuit_ir.model import (
@@ -55,7 +52,6 @@ from qamomile.circuit.transpiler.circuit_ir.verify import verify_circuit
 from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.gate_emitter import GateKind
 from qamomile.circuit.transpiler.passes.emit_support import ClbitMap, QubitMap
 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
     join_runtime_condition_sources,
@@ -65,6 +61,9 @@ from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission impor
     resolve_if_condition,
     restore_runtime_condition_sources,
     snapshot_runtime_condition_sources,
+)
+from qamomile.circuit.transpiler.passes.emit_support.control_value_emission import (
+    bracket_control_value,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _bind_quantum_input_shapes,
@@ -144,8 +143,8 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
         The outer call preserves SELECT identity for target legalization. Its
         fallback body uses local index slots followed by local target slots.
         Each nontrivial case is a reusable body controlled by every index bit;
-        zero-valued bits are represented by explicit X brackets in the fallback
-        rather than by a second public anti-control abstraction.
+        the shared ``control_value`` lowering brackets zero-valued bits with X
+        gates in the portable fallback.
 
         Args:
             circuit (CircuitBuilder): Parent circuit builder.
@@ -222,35 +221,29 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             ):
                 continue
 
-            pattern = _control_pattern_for_index(case_index, index_width)
-            zero_slots = tuple(
-                local_indices[position]
-                for position, required in enumerate(pattern)
-                if required == 0
-            )
-            for slot in zero_slots:
-                fallback.append_gate(GateKind.X, (slot,))
-
             case_callee = ReusableCircuit(
                 body=case_program,
                 name=case_program.name,
                 controls=index_width,
                 operand_widths=(1,) if broadcast else target_widths,
             )
-            if broadcast:
-                for target in local_targets:
+            with bracket_control_value(
+                self,
+                fallback,
+                local_indices,
+                case_index,
+            ):
+                if broadcast:
+                    for target in local_targets:
+                        fallback.append_call(
+                            case_callee,
+                            (*local_indices, target),
+                        )
+                else:
                     fallback.append_call(
                         case_callee,
-                        (*local_indices, target),
+                        (*local_indices, *local_targets),
                     )
-            else:
-                fallback.append_call(
-                    case_callee,
-                    (*local_indices, *local_targets),
-                )
-
-            for slot in reversed(zero_slots):
-                fallback.append_gate(GateKind.X, (slot,))
 
         select_callee = ReusableCircuit(
             body=fallback.freeze(),

@@ -939,11 +939,12 @@ class _BlockInverter:
         target = op.target
         body = op.body
         opaque_cost = op.definition.opaque_cost if op.definition is not None else None
-        transform = (
-            CallTransform.DIRECT
-            if op.transform is CallTransform.INVERSE
-            else CallTransform.INVERSE
-        )
+        if op.transform is CallTransform.CONTROLLED:
+            transform = CallTransform.CONTROLLED
+        elif op.transform is CallTransform.INVERSE:
+            transform = CallTransform.DIRECT
+        else:
+            transform = CallTransform.INVERSE
 
         gate_type_name = str(attrs.get("gate_type", "CUSTOM"))
         source_block = None
@@ -959,7 +960,11 @@ class _BlockInverter:
                 version=op.target.version,
             )
             body = iqft.block
-            transform = CallTransform.DIRECT
+            transform = (
+                CallTransform.CONTROLLED
+                if op.transform is CallTransform.CONTROLLED
+                else CallTransform.DIRECT
+            )
         elif gate_type_name == CompositeGateType.IQFT.name:
             from qamomile.circuit.stdlib.qft import qft
 
@@ -971,7 +976,11 @@ class _BlockInverter:
                 version=op.target.version,
             )
             body = qft.block
-            transform = CallTransform.DIRECT
+            transform = (
+                CallTransform.CONTROLLED
+                if op.transform is CallTransform.CONTROLLED
+                else CallTransform.DIRECT
+            )
         elif op.body is not None:
             source_block = op.body
             body = self.invert_block(op.body)
@@ -1011,6 +1020,11 @@ class _BlockInverter:
                 custom_name=str(attrs.get("custom_name", op.name)),
                 source_block=source_block,
                 implementation_block=body,
+                callable_ref=op.target,
+                callable_attrs=(
+                    dict(op.definition.attrs) if op.definition is not None else {}
+                ),
+                control_value=op.control_value,
             )
         else:
             policy = op.default_policy if body is not None else CallPolicy.PRESERVE_BOX
@@ -1166,6 +1180,7 @@ class _BlockInverter:
             block=op.source_block,
             callable_ref=op.callable_ref,
             callable_attrs=dict(op.callable_attrs),
+            control_value=op.control_value,
         )
 
         self._update_quantum_value_map(value_map, op.control_qubits, new_controls)
@@ -1411,8 +1426,11 @@ class _BlockInverter:
                 operands=operands,
                 results=new_results,
                 num_controls=op.num_controls,
+                control_value=op.control_value,
                 power=power,
                 block=inverse_block,
+                callable_ref=op.callable_ref,
+                callable_attrs=dict(op.callable_attrs),
             )
         else:
             raise NotImplementedError(f"inverse() cannot invert {type(op).__name__}.")

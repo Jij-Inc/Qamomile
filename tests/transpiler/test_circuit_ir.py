@@ -61,6 +61,19 @@ def _vector_measurement() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(qubits)
 
 
+@qmc.qkernel
+def _value_activated_control() -> qmc.Bit:
+    """Control X when two controls hold the LSB-first value two."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        qmc.x,
+        num_controls=2,
+        control_value=2,
+    )(controls, target)
+    return qmc.measure(target)
+
+
 @qmc.composite_gate(name="semantic_helper")
 def _semantic_helper(qubit: qmc.Qubit) -> qmc.Qubit:
     """Provide a user-defined callable identity for lowering tests."""
@@ -771,6 +784,26 @@ def test_lowering_keeps_select_as_one_semantic_call_with_lsb_fallback() -> None:
     assert isinstance(second_case, CallInstruction)
     assert first_case.callee.controls == 2
     assert second_case.callee.controls == 2
+    verify_circuit(program)
+
+
+def test_lowering_brackets_control_value_at_the_circuit_boundary() -> None:
+    """Mixed-polarity control brackets one abstract controlled call."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_value_activated_control)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    opening, controlled_call, closing, _measurement = program.operations
+    assert isinstance(opening, GateInstruction)
+    assert opening.kind is GateKind.X
+    assert opening.inputs == (WireId(0),)
+    assert isinstance(controlled_call, CallInstruction)
+    assert controlled_call.callee.controls == 2
+    assert controlled_call.inputs[:2] == (opening.outputs[0], WireId(1))
+    assert isinstance(closing, GateInstruction)
+    assert closing.kind is GateKind.X
+    assert closing.inputs == (controlled_call.outputs[0],)
     verify_circuit(program)
 
 
