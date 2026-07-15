@@ -47,6 +47,7 @@ from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.block_parameter_binding import (
     block_parameter_binding_keys,
@@ -331,6 +332,8 @@ def _batch_op_weight(
         if block is None:
             return 0
         return _controlled_body_batch_weight(emit_pass, block.operations, bindings)
+    if isinstance(op, SelectOperation):
+        return 1
     # Unsupported op kinds are rejected by the walker further down; if a
     # ladder is emitted before that failure the whole transpile aborts, so
     # counting them as real work here is harmless.
@@ -424,6 +427,7 @@ def _body_has_rotation_like_leaf(operations: list[Operation]) -> bool:
                 InvokeOperation,
                 InverseBlockOperation,
                 PauliEvolveOp,
+                SelectOperation,
             ),
         ):
             return True
@@ -661,6 +665,14 @@ def emit_controlled_operations(
                 op,
                 control_indices,
                 bindings,
+            )
+        elif isinstance(op, SelectOperation):
+            emit_pass._emit_select(
+                circuit,
+                op,
+                qubit_map,
+                bindings,
+                outer_control_indices=control_indices,
             )
         elif isinstance(op, PauliEvolveOp):
             emit_controlled_pauli_evolve(

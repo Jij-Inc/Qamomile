@@ -1271,8 +1271,6 @@ def _encode_concrete_controlled(
     d = _base_op_dict("ConcreteControlledU", op)
     d["num_controls"] = op.num_controls
     d["power"] = _encode_power(op.power)
-    if op.control_values:
-        d["control_values"] = list(op.control_values)
     if op.callable_ref is not None:
         d["callable_ref"] = _encode_callable_ref(op.callable_ref)
     if op.callable_attrs:

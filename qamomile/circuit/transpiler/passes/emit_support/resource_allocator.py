@@ -31,6 +31,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -1047,6 +1048,9 @@ class ResourceAllocator:
             elif isinstance(op, ControlledUOperation):
                 self._allocate_controlled_u(op, qubit_map, bindings)
 
+            elif isinstance(op, SelectOperation):
+                self._allocate_select(op, qubit_map)
+
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
 
@@ -1585,6 +1589,28 @@ class ResourceAllocator:
         target_qubits = [v for v in op.target_operands if v.type.is_quantum()]
         all_qubits = control_qubits + target_qubits
         self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
+
+    def _allocate_select(
+        self,
+        op: SelectOperation,
+        qubit_map: QubitMap,
+    ) -> None:
+        """Alias a SELECT operation's pass-through quantum results.
+
+        SELECT changes amplitudes and relative phases without moving physical
+        qubits. Its index and target outputs therefore reuse the slots of the
+        corresponding inputs, including every element of vector operands.
+
+        Args:
+            op (SelectOperation): Multiplexer operation to allocate.
+            qubit_map (QubitMap): Mutable logical-to-physical slot mapping.
+
+        Returns:
+            None: ``qubit_map`` is updated in place.
+        """
+        quantum_operands = [*op.index_operands, *op.target_operands]
+        quantum_results = [result for result in op.results if result.type.is_quantum()]
+        self._allocate_qubit_list(quantum_operands, quantum_results, qubit_map)
 
     @staticmethod
     def _parse_composite_key(key: str) -> QubitAddress:

@@ -46,6 +46,7 @@ from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types import (
     BitType,
     FloatType,
@@ -579,6 +580,12 @@ def _lower_operation(
             environment[operation.results[0].uuid] = result
         case ReturnOperation():
             return
+        case SelectOperation():
+            raise EmitError(
+                "HUGR target does not support qmc.select in direct "
+                "PreparedModule lowering.",
+                operation="SelectOperation",
+            )
         case _:
             raise EmitError(
                 f"Unsupported direct HUGR lowering for "

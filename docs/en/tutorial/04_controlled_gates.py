@@ -955,42 +955,13 @@ case_controlled_qft_over_uint_slice()
 
 # %% [markdown]
 # (cg-7)=
-# ## 7. Zero-valued controls and `qmc.select`
+# ## 7. Quantum multiplexers with `qmc.select`
 #
-# Concrete controls normally fire on `|1>`. Pass `control_values=` to
-# choose the activation state of each control: `0` creates a
-# zero-control (anti-control), while `1` keeps the normal behavior. A
-# sequence follows control-operand order. An integer mask follows the
-# same convention as Qiskit's `ctrl_state`: bit `j` describes control
-# operand `j`. The width is fixed, so this option requires a concrete
-# `num_controls`; bodyless opaque oracles accept only the all-one
-# pattern.
-
-
-# %%
-@qmc.qkernel
-def zero_control_demo() -> qmc.Bit:
-    c = qmc.qubit(name="c")
-    t = qmc.qubit(name="t")
-    # Fire X while c is |0>.
-    c, t = qmc.control(qmc.x, control_values=(0,))(c, t)
-    return qmc.measure(t)
-
-
-zero_control_counts = dict(
-    transpiler.transpile(zero_control_demo)
-    .sample(transpiler.executor(), shots=256)
-    .result()
-    .results
-)
-assert zero_control_counts == {1: 256}
-
-# %% [markdown]
-# `qmc.select([U_0, U_1, ...])` generalizes this idea into a quantum
-# multiplexer. Its leading argument is an index register, followed by
-# the shared target arguments. If the index reads `i`, case `U_i` is
-# applied. Index order is big-endian (the first index qubit is the most
-# significant bit), and the register needs
+# `qmc.select([U_0, U_1, ...])` constructs a quantum multiplexer. Its
+# leading argument is an index register, followed by the shared target
+# arguments. If the index reads `i`, case `U_i` is applied. Index order
+# is LSB-first: index qubit `j` represents bit `j`, so index qubit zero
+# is the least-significant bit. The register needs
 # `ceil(log2(len(cases)))` qubits. The case count need not be a power of
 # two; unassigned index values act as identity.
 #
@@ -1031,11 +1002,13 @@ select_counts = dict(
 assert select_counts == {1: 256}
 
 # %% [markdown]
-# SELECT remains one high-level IR operation until emission, where it
-# is lowered to the backend's controlled-gate machinery. It can be
-# nested in `qmc.range`, and in measurement-backed `if` / `while`
+# SELECT remains one high-level IR operation until the CircuitProgram
+# boundary. There it becomes one semantic reusable call whose portable
+# fallback controls each case on the corresponding index state. It can
+# be nested in `qmc.range`, and in measurement-backed `if` / `while`
 # control flow when the selected backend supports that runtime control
-# flow. It can also appear under `qmc.control` or `qmc.inverse`.
+# flow. It can also appear under `qmc.control` or `qmc.inverse`; global
+# phase inside a case is preserved as observable relative phase.
 
 # %% [markdown]
 # (cg-8)=
@@ -1046,8 +1019,6 @@ assert select_counts == {1: 256}
 # modes, decided by the type of `num_controls`: a Python `int`
 # gives *concrete* mode, and a `qmc.UInt` (or a `UInt` expression
 # like `n - 1`) gives *symbolic* mode.
-# Concrete mode also supports mixed activation patterns through
-# `control_values`. For indexed families of unitary cases,
-# `qmc.select` provides a single quantum-multiplexer operation with
-# big-endian index semantics and identity behavior for unassigned
-# basis states.
+# For indexed families of unitary cases, `qmc.select` provides a single
+# quantum-multiplexer operation with LSB-first index semantics and
+# identity behavior for unassigned basis states.

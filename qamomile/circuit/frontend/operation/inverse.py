@@ -1413,7 +1413,6 @@ class _BlockInverter:
                 num_controls=op.num_controls,
                 power=power,
                 block=inverse_block,
-                control_values=op.control_values,
             )
         else:
             raise NotImplementedError(f"inverse() cannot invert {type(op).__name__}.")

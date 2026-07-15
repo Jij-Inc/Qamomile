@@ -143,64 +143,6 @@ def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
 _RESERVED_WRAPPER_NAMES: frozenset[str] = frozenset(_wrapper_namespace(None).keys())
 
 
-def _normalize_control_values(
-    control_values: int | Sequence[int] | None,
-    num_controls: int,
-) -> tuple[int, ...]:
-    """Normalize a mixed-control activation pattern.
-
-    The empty tuple is the canonical representation for ordinary all-one
-    controls. Integer masks follow Qiskit's ``ctrl_state`` convention: bit
-    ``j`` describes control operand ``j``.
-
-    Args:
-        control_values (int | Sequence[int] | None): Integer mask, one value
-            per control operand, or ``None`` for ordinary controls.
-        num_controls (int): Number of concrete control qubits.
-
-    Returns:
-        tuple[int, ...]: Empty for all-one controls, otherwise one ``0`` or
-            ``1`` per control operand.
-
-    Raises:
-        TypeError: If the pattern is a bool, string, or contains non-integers.
-        ValueError: If the mask does not fit, the sequence width differs from
-            ``num_controls``, or an entry is not ``0`` or ``1``.
-    """
-    if control_values is None:
-        return ()
-    if isinstance(control_values, bool):
-        raise TypeError("control_values must not be a bool.")
-    if isinstance(control_values, int):
-        if control_values < 0 or control_values >= (1 << num_controls):
-            raise ValueError(
-                f"control_values mask {control_values} does not fit in "
-                f"num_controls={num_controls}."
-            )
-        values = tuple((control_values >> index) & 1 for index in range(num_controls))
-    elif isinstance(control_values, Sequence) and not isinstance(
-        control_values, (str, bytes)
-    ):
-        entries = tuple(control_values)
-        if len(entries) != num_controls:
-            raise ValueError(
-                f"control_values length ({len(entries)}) must match "
-                f"num_controls ({num_controls})."
-            )
-        if any(
-            isinstance(value, bool) or not isinstance(value, int) for value in entries
-        ):
-            raise TypeError("control_values entries must be Python int values 0 or 1.")
-        if any(value not in (0, 1) for value in entries):
-            raise ValueError("control_values entries must be 0 or 1.")
-        values = entries
-    else:
-        raise TypeError(
-            "control_values must be an int mask, a sequence of 0/1 ints, or None."
-        )
-    return () if all(value == 1 for value in values) else values
-
-
 @dataclasses.dataclass
 class _ControlEntry:
     """Bookkeeping for one positional control or sub-quantum handle.
@@ -296,7 +238,6 @@ class ControlledGate:
         qkernel: "QKernel",
         num_controls: int | UInt = 1,
         *,
-        control_values: int | Sequence[int] | None = None,
         callable_ref: CallableRef | None = None,
         callable_attrs: dict[str, Any] | None = None,
     ) -> None:
@@ -314,10 +255,6 @@ class ControlledGate:
                 to emit time. Defaults to 1. A ``bool`` is rejected: it is
                 not a valid control count even though ``bool`` subclasses
                 ``int``.
-            control_values (int | Sequence[int] | None): Per-control
-                activation pattern. A zero entry creates an anti-control.
-                Integer masks use bit ``j`` for control operand ``j``.
-                Defaults to ``None`` (all-one controls).
             callable_ref (CallableRef | None): Optional source callable
                 identity to record on emitted ``ControlledUOperation`` nodes.
                 Defaults to the wrapped qkernel's callable ref.
@@ -325,12 +262,10 @@ class ControlledGate:
                 attrs for the source callable. Defaults to qkernel attrs.
 
         Raises:
-            TypeError: If ``num_controls`` is a ``bool``, ``control_values``
-                has an invalid type, or ``qkernel`` does not expose a dict
-                ``input_types`` / an ``inspect.Signature`` ``signature``.
-            ValueError: If a concrete ``num_controls`` is less than one, a
-                control pattern is malformed, or a symbolic count is combined
-                with ``control_values``.
+            TypeError: If ``num_controls`` is a ``bool``, or if ``qkernel``
+                does not expose a dict ``input_types`` / an
+                ``inspect.Signature`` ``signature``.
+            ValueError: If a concrete ``int`` ``num_controls`` is < 1.
         """
         # Reject bool explicitly (not via is_plain_int): the only numeric guard
         # here is ``isinstance(int) and < 1`` with no else branch, so swapping in
@@ -345,16 +280,6 @@ class ControlledGate:
         if isinstance(num_controls, int) and num_controls < 1:
             raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
         # For UInt (symbolic), validation is deferred to emit time
-        if control_values is not None and isinstance(num_controls, UInt):
-            raise ValueError(
-                "control_values requires a concrete int num_controls; a "
-                "symbolic UInt count has no fixed pattern width."
-            )
-        self._control_values = (
-            _normalize_control_values(control_values, num_controls)
-            if isinstance(num_controls, int)
-            else ()
-        )
 
         # Compose-time validation of the wrapped object's shape.
         # Downstream helpers (``_sub_positional_count_for_symbolic``,
@@ -707,7 +632,6 @@ class ControlledGate:
             is_composite
             and isinstance(num_controls, int)
             and power == 1
-            and not self._control_values
             and not has_call_global_phase
         ):
             attrs = self._callable_attrs()
@@ -739,7 +663,6 @@ class ControlledGate:
                 num_controls=num_controls,
                 power=power,
                 block=block,
-                control_values=self._control_values,
                 callable_ref=self._callable_ref(),
                 callable_attrs=self._callable_attrs(),
             )
@@ -2589,7 +2512,6 @@ def _validate_concrete_control_count(num_controls: int | UInt) -> int:
 def control(
     qkernel: Oracle,
     num_controls: int = 1,
-    control_values: int | Sequence[int] | None = None,
 ) -> _ControlledOracle:
     """Create a controlled wrapper for an opaque Oracle."""
     ...
@@ -2599,7 +2521,6 @@ def control(
 def control(
     qkernel: QKernelLike | Callable[..., Any],
     num_controls: int | UInt = 1,
-    control_values: int | Sequence[int] | None = None,
 ) -> ControlledGate:
     """Create a controlled wrapper for a qkernel or gate callable."""
     ...
@@ -2608,7 +2529,6 @@ def control(
 def control(
     qkernel: Oracle | QKernelLike | Callable[..., Any],
     num_controls: int | UInt = 1,
-    control_values: int | Sequence[int] | None = None,
 ) -> ControlledGate | _ControlledOracle:
     """Create a controlled version of a quantum gate.
 
@@ -2628,11 +2548,6 @@ def control(
             ``Union`` such as ``Union[Qubit, Vector[Qubit]]``).
         num_controls (int | UInt): Number of control qubits (default: 1).
             Can be ``int`` (concrete) or ``UInt`` (symbolic).
-        control_values (int | Sequence[int] | None): Per-control activation
-            pattern. ``None`` means all controls fire on ``|1>``; zero
-            entries fire on ``|0>``. Integer masks use bit ``j`` for control
-            operand ``j``. Opaque oracles do not yet support a pattern
-            containing zero.
 
     Returns:
         For a qkernel or gate callable, a ``ControlledGate`` that can be called
@@ -2647,12 +2562,9 @@ def control(
 
     Raises:
         TypeError: If ``qkernel`` is a callable that cannot be auto-wrapped
-            (missing annotations, unsupported types, or no qubit
-            parameters), if an ``Oracle`` control count is symbolic, or if
-            ``control_values`` has an invalid type.
-        ValueError: If ``num_controls`` is a concrete ``int`` less than 1 or
-            the control pattern has an invalid width or value.
-        NotImplementedError: If an opaque Oracle is given an anti-control.
+            (missing annotations, unsupported types, or no qubit parameters),
+            or if an ``Oracle`` control count is symbolic.
+        ValueError: If ``num_controls`` is a concrete ``int`` less than 1.
 
     Example:
         Built-in gates can be controlled directly, with no wrapper::
@@ -2667,9 +2579,6 @@ def control(
 
             cch = qmc.control(qmc.h, num_controls=2)
             c0, c1, tgt = cch(ctrl0, ctrl1, target)
-
-            anti_cx = qmc.control(qmc.x, control_values=(0,))
-            ctrl, target = anti_cx(ctrl, target)
 
         ``@qmc.qkernel`` arguments are still supported for cases that need
         custom logic::
@@ -2691,15 +2600,6 @@ def control(
 
     if isinstance(qkernel, Oracle):
         concrete_controls = _validate_concrete_control_count(num_controls)
-        normalized_values = _normalize_control_values(
-            control_values,
-            concrete_controls,
-        )
-        if normalized_values:
-            raise NotImplementedError(
-                "control_values containing zero is not supported for opaque "
-                "Oracle values. Wrap a body-backed qkernel instead."
-            )
         return _ControlledOracle(
             qkernel,
             num_controls=concrete_controls,
@@ -2710,7 +2610,6 @@ def control(
     return ControlledGate(
         qkernel_impl,
         num_controls=num_controls,
-        control_values=control_values,
         callable_ref=callable_ref,
         callable_attrs=callable_attrs,
     )

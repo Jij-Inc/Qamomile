@@ -54,6 +54,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -1374,6 +1375,20 @@ class TestLoopAnalyzerGenericValueDependency:
         )
 
         assert self.analyzer.should_unroll(self._loop_with(invoke, loop_idx), {})
+
+    def test_direct_select_parameter_with_loop_var_triggers_unroll(self) -> None:
+        """A SELECT case program cannot capture its caller's loop variable."""
+        loop_idx = _uint_val("i")
+        index = _qubit("index")
+        target = _qubit("target")
+        select = SelectOperation(
+            operands=[index, target, loop_idx],
+            results=[index.next_version(), target.next_version()],
+            num_index_qubits=1,
+            case_blocks=[Block(name="case_0"), Block(name="case_1")],
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(select, loop_idx), {})
 
     def test_nested_region_arg_seeded_from_outer_index_triggers_unroll(self) -> None:
         """A nested carry preserves the outer-index dependency edge."""

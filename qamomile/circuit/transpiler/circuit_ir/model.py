@@ -639,6 +639,15 @@ MULTI_CONTROLLED_X_SEMANTIC_KEY = SemanticOpKey(
 )
 """Semantic key for an arbitrary-width multi-controlled X operation."""
 
+SELECT_SEMANTIC_KEY = SemanticOpKey("qamomile.circuit", "select")
+"""Semantic key for a fallback-defined, index-addressed quantum multiplexer.
+
+SELECT identities include a content fingerprint for every case body. A target
+that registers a native realization for this open key must therefore preserve
+the referenced fallback semantics rather than treating the case count alone as
+a complete operation definition.
+"""
+
 
 SemanticValue: TypeAlias = None | bool | int | float | str | tuple["SemanticValue", ...]
 

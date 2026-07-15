@@ -2915,6 +2915,11 @@ class CircuitAnalyzer:
         for operation in operations:
             if isinstance(operation, GlobalPhaseOperation):
                 return True
+            if isinstance(operation, SelectOperation) and any(
+                CircuitAnalyzer._contains_global_phase(case_block.operations)
+                for case_block in operation.case_blocks
+            ):
+                return True
             if isinstance(operation, HasNestedOps) and any(
                 CircuitAnalyzer._contains_global_phase(body)
                 for body in operation.nested_op_lists()

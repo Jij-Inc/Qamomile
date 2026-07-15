@@ -11,13 +11,13 @@ The leading argument is the index register (a ``Vector[Qubit]`` /
 ``VectorView[Qubit]`` of length ``ceil(log2(len(cases)))``, or that many
 individual ``Qubit`` arguments). Everything after it is forwarded to every
 case unitary, exactly like the target / parameter arguments of
-``qmc.control``. Index bit order is big-endian: the first index qubit is
-the most-significant bit.
+``qmc.control``. Index bit order follows Qamomile's LSB-first convention:
+the first index qubit is bit zero.
 
 The frontend reuses ``qmc.control``'s operand / result machinery (so every
 control-prefix and target handle pattern is supported identically) but emits a
-single :class:`SelectOperation`. The standard emit path lowers that abstract op
-late into per-case controlled unitaries.
+single :class:`SelectOperation`. Circuit-family lowering preserves the SELECT
+identity as a reusable call and keeps each case as a controlled fallback call.
 """
 
 from __future__ import annotations
@@ -352,6 +352,14 @@ class SelectGate:
     Created by :func:`select`. Calling the instance applies case ``i`` to
     the target register controlled on the index register reading ``i``.
 
+    Args:
+        cases (Sequence[QKernel | Callable[..., Any]]): Case unitaries in
+            ascending index order. Every case must expose the same signature.
+
+    Attributes:
+        num_index_qubits (int): Minimal LSB-first index-register width.
+        num_cases (int): Number of selectable unitary cases.
+
     Example:
         >>> import qamomile.circuit as qm
         >>> @qm.qkernel
@@ -425,8 +433,7 @@ class SelectGate:
                 the index (supplied as one ``Vector[Qubit]`` /
                 ``VectorView`` of that length, or that many individual
                 ``Qubit`` arguments); the rest are bound to every case's
-                quantum parameters. The first index qubit is the
-                most-significant bit.
+                quantum parameters. The first index qubit is bit zero (LSB).
             **params (Any): Classical parameters forwarded identically to
                 every case unitary.
 
@@ -499,13 +506,13 @@ def select(cases: Sequence["QKernel | Callable[..., Any]"]) -> SelectGate:
     """Create a quantum multiplexer (SELECT) over a list of unitaries.
 
     The returned gate applies ``cases[i]`` to a shared target register
-    when the index register reads the integer ``i`` (big-endian, first
-    index qubit most-significant). ``len(cases)`` need not be a power of
+    when the index register reads the integer ``i`` with index qubit zero as
+    the least-significant bit. ``len(cases)`` need not be a power of
     two; index values ``>= len(cases)`` apply no operation.
 
-    The standard emit path decomposes the abstract op into one controlled-U
-    per case, each controlled on the index register with a mixed ``0``/``1``
-    (anti-/normal) activation pattern.
+    Circuit-family lowering retains the abstract SELECT identity while its
+    portable fallback invokes each case under the corresponding mixed
+    ``0``/``1`` (anti-/normal) index pattern.
 
     Args:
         cases (Sequence[QKernel | Callable[..., Any]]): The case unitaries

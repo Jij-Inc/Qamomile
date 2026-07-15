@@ -8,10 +8,9 @@ index (control) register::
     SELECT = sum_i |i><i| (x) U_i
 
 Following the project's IR-abstraction principle, the op stays as a single
-high-level box. The standard emit path lowers it gate-by-gate into per-case
-controlled-U operations (each with a mixed ``0``/``1`` control pattern equal
-to the binary expansion of ``i``). A backend-specific implementation can
-replace that late lowering without changing the frontend or IR shape.
+high-level box. Circuit-family lowering preserves that identity as one reusable
+call whose fallback contains controlled case calls. A target can therefore
+select a native realization without changing the frontend or semantic IR.
 """
 
 from __future__ import annotations
@@ -39,9 +38,9 @@ class SelectOperation(Operation):
     targets follow and keep their shapes, and classical parameters (shared
     across every case and forwarded to each case block) come last.
 
-    Index bit order is **big-endian**: ``idx_0`` is the most-significant
-    bit, so case ``i`` is selected when the index register reads the
-    integer ``i`` written most-significant-qubit first. ``len(case_blocks)``
+    Index bit order is **LSB-first**: ``idx_0`` is the least-significant
+    bit, matching Qamomile's qubit-zero convention. Case ``i`` is selected
+    when index qubit ``j`` reads bit ``j`` of ``i``. ``len(case_blocks)``
     need not be a power of two; index values ``>= len(case_blocks)`` apply
     no operation (identity).
 
@@ -181,15 +180,15 @@ class SelectOperation(Operation):
         return OperationKind.QUANTUM
 
 
-def control_values_for_index(
+def _control_pattern_for_index(
     index_value: int, num_index_qubits: int
 ) -> tuple[int, ...]:
-    """Return the big-endian ``0``/``1`` control pattern selecting ``index_value``.
+    """Return the LSB-first control pattern selecting ``index_value``.
 
     The returned tuple aligns positionally with a :class:`SelectOperation`'s
-    ``index_operands`` (and with :attr:`ConcreteControlledU.control_values`):
-    entry ``j`` is the basis state index qubit ``j`` must read for case
-    ``index_value`` to fire. Index qubit ``0`` is the most-significant bit.
+    ``index_operands``: entry ``j`` is the basis state index qubit ``j`` must
+    read for case ``index_value`` to fire. Index qubit ``0`` is the
+    least-significant bit.
 
     Args:
         index_value (int): The case index ``i`` to select. Must satisfy
@@ -198,7 +197,7 @@ def control_values_for_index(
 
     Returns:
         tuple[int, ...]: A length-``num_index_qubits`` tuple of ``0``/``1``
-            ints, most-significant bit first.
+            ints, least-significant bit first.
 
     Raises:
         ValueError: If either argument is not a Python int,
@@ -206,10 +205,10 @@ def control_values_for_index(
             in ``num_index_qubits`` bits.
 
     Example:
-        >>> control_values_for_index(2, 2)
-        (1, 0)
-        >>> control_values_for_index(1, 3)
-        (0, 0, 1)
+        >>> _control_pattern_for_index(2, 2)
+        (0, 1)
+        >>> _control_pattern_for_index(1, 3)
+        (1, 0, 0)
     """
     if not is_plain_int(num_index_qubits):
         raise ValueError(
@@ -226,9 +225,7 @@ def control_values_for_index(
             f"index_value {index_value} does not fit in {num_index_qubits} "
             f"index qubit(s) (valid range 0..{(1 << num_index_qubits) - 1})."
         )
-    return tuple(
-        (index_value >> (num_index_qubits - 1 - j)) & 1 for j in range(num_index_qubits)
-    )
+    return tuple((index_value >> j) & 1 for j in range(num_index_qubits))
 
 
-__all__ = ["SelectOperation", "control_values_for_index"]
+__all__ = ["SelectOperation"]

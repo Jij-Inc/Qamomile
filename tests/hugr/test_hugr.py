@@ -73,6 +73,15 @@ def _hugr_identity(qubit: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _hugr_select() -> tuple[qmc.Bit, qmc.Bit]:
+    """Keep SELECT visible at HUGR's explicit support boundary."""
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    index, target = qmc.select([_hugr_identity, _hugr_helper])(index, target)
+    return qmc.measure(index), qmc.measure(target)
+
+
+@qmc.qkernel
 def _hugr_identity_vector(
     qubits: qmc.Vector[qmc.Qubit],
 ) -> qmc.Vector[qmc.Qubit]:
@@ -1428,6 +1437,14 @@ def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
     assert isinstance(compiled.artifact, Package)
     assert compiled.metadata.target == "hugr"
     assert compiled.metadata.pipeline == "program_graph"
+
+
+def test_hugr_rejects_select_at_prepared_module_boundary() -> None:
+    """SELECT fails explicitly instead of disappearing from direct lowering."""
+    with pytest.raises(EmitError, match=r"does not support qmc\.select") as error:
+        HugrTranspiler().to_hugr(_hugr_select)
+
+    assert error.value.operation == "SelectOperation"
 
 
 @pytest.mark.hugr

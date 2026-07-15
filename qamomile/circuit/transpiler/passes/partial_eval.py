@@ -9,6 +9,10 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    block_parameter_binding_keys,
+    pair_block_parameter_operands,
+)
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.analyze import (
@@ -20,6 +24,9 @@ from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
+from qamomile.circuit.transpiler.value_resolver import (
+    ValueResolver as UnifiedValueResolver,
+)
 
 
 class PartialEvaluationPass(Pass[Block, Block]):
@@ -70,8 +77,9 @@ class PartialEvaluationPass(Pass[Block, Block]):
 
         # SELECT case bodies are operation-owned Blocks with their own formal
         # inputs, rather than same-scope ``HasNestedOps`` lists. Apply the same
-        # partial-evaluation pipeline explicitly so a bound/default parameter
-        # can remove compile-time ``if`` nodes before controlled emission.
+        # partial-evaluation pipeline explicitly with case-local bindings so a
+        # bound/default parameter can remove compile-time ``if`` nodes before
+        # controlled emission without leaking an outer same-named parameter.
         input = dataclasses.replace(
             input,
             operations=self._evaluate_select_case_blocks(input.operations),
@@ -146,13 +154,26 @@ class PartialEvaluationPass(Pass[Block, Block]):
             current = operation
             if isinstance(current, SelectOperation):
                 case_blocks: list[Block] = []
+                resolver = UnifiedValueResolver(bindings=self._bindings)
                 for case_block in current.case_blocks:
                     if case_block.kind == BlockKind.TRACED:
                         case_block = dataclasses.replace(
                             case_block,
                             kind=BlockKind.HIERARCHICAL,
                         )
-                    case_blocks.append(self.run(case_block))
+                    case_bindings: dict[str, Any] = {}
+                    for formal, actual in pair_block_parameter_operands(
+                        case_block,
+                        current.param_operands,
+                    ):
+                        resolved = resolver.resolve(actual)
+                        if resolved is None:
+                            continue
+                        for key in block_parameter_binding_keys(formal):
+                            case_bindings[key] = resolved
+                    case_blocks.append(
+                        PartialEvaluationPass(case_bindings).run(case_block)
+                    )
                 current = dataclasses.replace(current, case_blocks=case_blocks)
             if isinstance(current, HasNestedOps):
                 current = current.rebuild_nested(

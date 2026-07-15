@@ -236,10 +236,11 @@ class Transpiler(ABC, Generic[T]):
         callable invocation and then folds the base-case
         ``IfOperation`` via ``partial_eval``. Terminates when no
         inline callable invocation remains (success), when every residual call
-        is trapped inside an operation-owned block where ``partial_eval``
-        cannot fold it (control / inverse / select over a recursive kernel —
-        raises a targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is reached
-        (genuinely non-terminating top-level recursion — raises).
+        is trapped inside an operation-owned block whose recursive callable
+        contract is unsupported (control / inverse / select over a recursive
+        kernel — raises a targeted error, see below), or when
+        ``MAX_UNROLL_DEPTH`` is reached (genuinely non-terminating top-level
+        recursion — raises).
 
         Args:
             block (Block): The block to unroll. May be ``HIERARCHICAL``
@@ -281,11 +282,12 @@ class Transpiler(ABC, Generic[T]):
             # After a full inline + partial_eval iteration, if calls remain
             # only inside operation-owned blocks (a ControlledUOperation's
             # ``block``, an InverseBlockOperation's nested blocks, or a
-            # SelectOperation case block), no
-            # further iteration can make progress: ``inline`` already
-            # unrolled one layer there, but ``partial_eval`` never descends
-            # into those blocks to fold the base-case ``if``. This is the
-            # signature of a self-recursive @qkernel passed to
+            # SelectOperation case block), the fixed-point loop deliberately
+            # does not treat the operation-owned recursion as safely
+            # re-enterable. SELECT case partial evaluation can fold ordinary
+            # case-local branches, but it does not make a recursively selected
+            # callable a supported contract. This is the signature of a
+            # self-recursive @qkernel passed to
             # ``qmc.control`` / ``qmc.inverse`` / ``qmc.select``; fail fast with a targeted
             # message instead of spinning to ``MAX_UNROLL_DEPTH`` and
             # blaming the bindings.
@@ -294,10 +296,8 @@ class Transpiler(ABC, Generic[T]):
                     "qmc.control / qmc.inverse / qmc.select was given a recursive "
                     "@qkernel: after inlining, an inline callable invocation still "
                     "remains inside the controlled / inverted / selected block, and "
-                    "partial_eval cannot fold its base-case `if` there "
-                    "(constant folding does not descend into a "
-                    "ControlledUOperation.block, an InverseBlockOperation "
-                    "block, or a SelectOperation case block). Controlling, "
+                    "the fixed-point loop cannot safely re-enter that "
+                    "operation-owned recursive body. Controlling, "
                     "inverting, or selecting a self-recursive "
                     "kernel is not supported. Rewrite the kernel "
                     "non-recursively (manually unrolled to the required "

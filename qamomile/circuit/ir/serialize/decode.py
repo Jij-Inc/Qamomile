@@ -1661,27 +1661,12 @@ def _decode_concrete_controlled(
         else None
     )
     callable_attrs = _decode_callable_attrs(d.get("callable_attrs"))
-    raw_num_controls = d.get("num_controls", 1)
-    if not is_plain_int(raw_num_controls) or raw_num_controls < 1:
-        raise ValueError(
-            "ConcreteControlledU.num_controls must be a positive Python "
-            f"int, got {raw_num_controls!r}."
-        )
-    raw_control_values = d.get("control_values", ())
-    if not isinstance(raw_control_values, (list, tuple)) or not all(
-        is_plain_int(value) for value in raw_control_values
-    ):
-        raise ValueError(
-            "ConcreteControlledU.control_values must be a list of Python "
-            f"int values, got {raw_control_values!r}."
-        )
     return ConcreteControlledU(
         operands=operands,
         results=results,
-        num_controls=cast(int, raw_num_controls),
+        num_controls=int(d.get("num_controls", 1)),
         power=_decode_power(d.get("power", 1), ctx),
         block=block,
-        control_values=tuple(raw_control_values),
         callable_ref=(
             _decode_callable_ref(d.get("callable_ref"))
             if d.get("callable_ref") is not None
