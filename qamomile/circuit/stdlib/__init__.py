@@ -27,6 +27,10 @@ from .arithmetic import (
 )
 from .grover import grover_iteration_count, grover_search
 from .multi_controlled_x import mcx, multi_controlled_x
+from .pauli_lcu_block_encoding import (
+    pauli_lcu_block_encoding,
+    pauli_lcu_num_selection_qubits,
+)
 from .qft import iqft, qft
 from .qpe import qpe
 from .shor import shor_order_finding
@@ -42,6 +46,8 @@ __all__ = [
     "qpe",
     "mcx",
     "multi_controlled_x",
+    "pauli_lcu_block_encoding",
+    "pauli_lcu_num_selection_qubits",
     "computational_basis_state",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",

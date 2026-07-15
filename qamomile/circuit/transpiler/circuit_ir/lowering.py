@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 from typing import Any
 
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.canonical import content_hash
+from qamomile.circuit.ir.canonical import _token
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CompOpKind,
@@ -36,9 +38,13 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     BinaryExpr,
     BinaryOperator,
     CallableIdentity,
+    CallInstruction,
     CircuitBuilder,
+    CircuitInstruction,
     CircuitProgram,
     ClassicalBitExpr,
+    ForInstruction,
+    IfInstruction,
     LiteralExpr,
     LoopVariableExpr,
     ParameterExpr,
@@ -48,6 +54,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     SemanticOpKey,
     UnaryExpr,
     UnaryOperator,
+    WhileInstruction,
     _contains_classical_bit,
     _is_zero_scalar,
 )
@@ -98,6 +105,111 @@ _RUNTIME_BINARY_OPERATORS = {
     RuntimeOpKind.MOD: BinaryOperator.MOD,
     RuntimeOpKind.POW: BinaryOperator.POW,
 }
+
+
+def _circuit_program_fingerprint(program: CircuitProgram) -> str:
+    """Return a deterministic content fingerprint for lowered circuit IR.
+
+    Display-only circuit, reusable-call, and identity symbols are removed
+    before the shared canonical IR token encoder hashes the lowered body. This
+    lets SELECT identify cases by behavior rather than Python function name,
+    including bodies carried by boxed inverse composites that do not pass
+    through the entrypoint's affine canonicalization pipeline.
+
+    Args:
+        program (CircuitProgram): Lowered reusable case body.
+
+    Returns:
+        str: Hexadecimal SHA-256 content digest.
+    """
+    normalized = _without_circuit_display_names(program)
+    return hashlib.sha256(_token(normalized).encode("utf-8")).hexdigest()
+
+
+def _without_circuit_display_names(program: CircuitProgram) -> CircuitProgram:
+    """Return a circuit program with non-semantic display names removed.
+
+    Args:
+        program (CircuitProgram): Circuit program to normalize recursively.
+
+    Returns:
+        CircuitProgram: Equivalent program with display-only names blanked.
+    """
+    return dataclasses.replace(
+        program,
+        name="",
+        operations=tuple(
+            _without_instruction_display_names(operation)
+            for operation in program.operations
+        ),
+    )
+
+
+def _without_instruction_display_names(
+    instruction: CircuitInstruction,
+) -> CircuitInstruction:
+    """Remove display names from reusable bodies nested in an instruction.
+
+    Args:
+        instruction (CircuitInstruction): Instruction to normalize.
+
+    Returns:
+        CircuitInstruction: Semantically equivalent normalized instruction.
+    """
+    if isinstance(instruction, CallInstruction):
+        return dataclasses.replace(
+            instruction,
+            callee=_without_reusable_display_names(instruction.callee),
+        )
+    if isinstance(instruction, ForInstruction):
+        return dataclasses.replace(
+            instruction,
+            body=tuple(
+                _without_instruction_display_names(operation)
+                for operation in instruction.body
+            ),
+        )
+    if isinstance(instruction, IfInstruction):
+        return dataclasses.replace(
+            instruction,
+            true_body=tuple(
+                _without_instruction_display_names(operation)
+                for operation in instruction.true_body
+            ),
+            false_body=tuple(
+                _without_instruction_display_names(operation)
+                for operation in instruction.false_body
+            ),
+        )
+    if isinstance(instruction, WhileInstruction):
+        return dataclasses.replace(
+            instruction,
+            body=tuple(
+                _without_instruction_display_names(operation)
+                for operation in instruction.body
+            ),
+        )
+    return instruction
+
+
+def _without_reusable_display_names(callee: ReusableCircuit) -> ReusableCircuit:
+    """Remove display-only names from one reusable circuit tree.
+
+    Args:
+        callee (ReusableCircuit): Reusable circuit to normalize.
+
+    Returns:
+        ReusableCircuit: Equivalent reusable circuit with blank display names.
+    """
+    identity = callee.identity
+    if identity is not None:
+        identity = dataclasses.replace(identity, symbol="")
+    return dataclasses.replace(
+        callee,
+        body=_without_circuit_display_names(callee.body),
+        name="",
+        identity=identity,
+    )
 
 
 class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
@@ -207,6 +319,7 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
         )
         local_indices = tuple(range(index_width))
         local_targets = tuple(range(index_width, index_width + len(target_indices)))
+        case_fingerprints: list[str] = []
 
         for case_index, case_block in enumerate(op.case_blocks):
             case_program, broadcast = self._lower_select_case(
@@ -217,6 +330,7 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 bindings,
                 case_index,
             )
+            case_fingerprints.append(_circuit_program_fingerprint(case_program))
             if not case_program.operations and _is_zero_scalar(
                 case_program.global_phase
             ):
@@ -261,9 +375,7 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 symbol="select",
                 arguments=SemanticArguments.from_mapping(
                     {
-                        "case_fingerprints": tuple(
-                            content_hash(case_block) for case_block in op.case_blocks
-                        ),
+                        "case_fingerprints": tuple(case_fingerprints),
                         "index_order": "lsb0",
                         "num_cases": op.num_cases,
                         "num_index_qubits": index_width,
