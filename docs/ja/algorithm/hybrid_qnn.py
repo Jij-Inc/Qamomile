@@ -141,7 +141,7 @@ executables = [
 ]
 
 est = variational_ansatz.estimate_resources(
-    bindings={"n_qubits": N_QUBITS, "n_layers": N_LAYERS},
+    inputs={"n_qubits": N_QUBITS, "n_layers": N_LAYERS},
 )
 print(est)
 assert est.qubits == 4

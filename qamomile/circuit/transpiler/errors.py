@@ -395,9 +395,12 @@ class QubitBorrowConflictError(AffineTypeError):
     Raised when a qubit slot cannot be accessed because another live
     handle currently borrows it — a slice view that has not been
     returned, an outstanding element borrow, or any future borrow form
-    Qamomile may add.  Unlike :class:`QubitConsumedError`, the slot is
-    not destroyed: releasing the borrowing handle (slice assignment,
-    element write-back, etc.) restores access.
+    Qamomile may add. The same error is used whether the conflict is
+    discovered while tracing concrete indices or after symbolic slice
+    bounds are resolved during transpilation. Unlike
+    :class:`QubitConsumedError`, the slot is not destroyed: releasing the
+    borrowing handle (slice assignment, element write-back, etc.) restores
+    access.
 
     Example of incorrect code (overlapping slice views)::
 
@@ -461,28 +464,6 @@ class UnreturnedBorrowError(AffineTypeError):
         q0 = qmc.h(q0)
         qubits[0] = q0  # Return the borrowed element
         q1 = qubits[1]  # Now safe to borrow another
-    """
-
-    pass
-
-
-class SliceBorrowViolationError(AffineTypeError):
-    """Aliasing detected between a slice view and a direct parent access.
-
-    Raised by :class:`SliceBorrowCheckPass` at transpile time when
-    a parent array slot is simultaneously held by a ``VectorView`` and
-    accessed directly, or when two overlapping views cover the same
-    slot.  For slices with constant bounds this is normally caught at
-    trace time; this error covers the post-fold case when slice bounds
-    were symbolic UInt parameters resolved by bindings.
-
-    Example of incorrect code (detected only after bindings resolve
-    ``lo``/``hi`` to concrete values)::
-
-        region = q[lo:hi]     # bindings give lo=0, hi=4 → covers {0,1,2,3}
-        qa = region[0]        # borrows parent slot 0 via the view
-        qb = q[0]             # borrows parent slot 0 directly
-        # SliceBorrowViolationError: slot 0 is held by a slice view
     """
 
     pass

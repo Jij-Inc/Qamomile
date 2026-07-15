@@ -30,7 +30,7 @@
 # algorithm that consumes classical data as a quantum state — including
 # HHL-style linear-system solvers, kernel methods, and many quantum
 # simulation protocols. Qamomile ships a quantum-SDK-portable implementation
-# under `qamomile.circuit.algorithm.state_preparation`, based on the
+# in Qamomile's standard library, based on the
 # uniformly controlled rotation construction of Möttönen, Vartiainen,
 # Bergholm and Salomaa {cite:p}`10.48550/arXiv.quant-ph/0407010` (the
 # paper covers the more general arbitrary-state $|a\rangle \to |b\rangle$
@@ -79,7 +79,7 @@ from qiskit.quantum_info import Statevector
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm import (
+from qamomile.circuit.stdlib import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
 )
