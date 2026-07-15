@@ -398,11 +398,13 @@ assert phase_counts == {1: 256}
 #
 # Native standalone phase does not by itself imply that a quantum
 # SDK/Engine/representation can transform every reusable call. Quration/PyQret
-# has no generic call-transform API, so Qamomile inlines a bounded fallback for
-# inverse, power, and at most one coherent control. That fallback accepts its
-# declared primitive gates, one-control Pauli evolution, and nested static
-# `for` loops with compile-time bounds. HUGR uses the same kind of inline
-# fallback for its accepted body operations. Its global-phase correction
+# has no generic call-transform API. A power-only reusable call stays native and
+# is repeated the requested number of times. For control or inverse, Qamomile
+# instead inlines a bounded fallback; a combined power repeats the inlined body.
+# That fallback accepts at most one coherent control, its declared primitive
+# gates, one-control Pauli evolution, and nested static `for` loops with
+# compile-time bounds. HUGR uses the same kind of inline fallback for its
+# accepted body operations. Its global-phase correction
 # supports any positive control count: three or more controls use clean
 # auxiliary qubits and a Toffoli conjunction that is uncomputed before those
 # qubits are freed. Runtime-bounded loops, loop-carried values, and runtime

@@ -38,12 +38,17 @@ def measure(
     The quantum resource is consumed by this operation and cannot be used afterwards.
 
     Args:
-        target: The quantum resource to measure.
+        target (Qubit | QFixed | Vector[Qubit]): Quantum resource to measure.
             - Qubit: Returns a classical Bit
             - QFixed: Returns a Float (decoded from measured bits)
 
     Returns:
-        Bit for Qubit input, Float for QFixed input.
+        Bit | Float | Vector[Bit]: Classical result matching the input shape.
+
+    Raises:
+        TypeError: If ``target`` is not a supported quantum handle.
+        QubitConsumedError: If the quantum resource was already consumed.
+        RuntimeError: If no tracer is active.
 
     Example:
         ```python
@@ -75,24 +80,22 @@ def _measure_qubit(qubit: Qubit) -> Bit:
     """Measure a single qubit.
 
     Args:
-        qubit: The qubit to measure.
+        qubit (Qubit): Qubit to measure destructively.
 
     Returns:
-        Bit containing the measurement result.
-    """
-    # Consume the input handle (enforces affine type - measurement is destructive)
-    qubit = qubit.consume(operation_name="measure")
+        Bit: Measurement result.
 
-    # Create output bit value
+    Raises:
+        QubitConsumedError: If ``qubit`` was already consumed.
+        RuntimeError: If no tracer is active.
+    """
+    tracer = get_current_tracer()
+    qubit.validate_consumable("measure")
     bit_out_value = Value(type=BitType(), name=f"{qubit.value.name}_measured")
     bit_out = Bit(value=bit_out_value)
-
-    # Create IR MeasureOperation
     measure_op = IRMeasureOperation(operands=[qubit.value], results=[bit_out_value])
-
-    tracer = get_current_tracer()
+    qubit.consume(operation_name="measure")
     tracer.add_operation(measure_op)
-
     return bit_out
 
 
@@ -100,12 +103,17 @@ def project_z(qubit: Qubit) -> tuple[Qubit, Bit]:
     """Project a qubit in the Z basis and keep the projected state.
 
     Args:
-        qubit: The qubit to project. The input handle is consumed.
+        qubit (Qubit): Qubit to project. The input handle is consumed.
 
     Returns:
-        A pair of the projected qubit handle and the measurement bit.
+        tuple[Qubit, Bit]: Projected qubit handle and measurement bit.
+
+    Raises:
+        QubitConsumedError: If ``qubit`` was already consumed.
+        RuntimeError: If no tracer is active.
     """
-    qubit = qubit.consume(operation_name="project_z")
+    tracer = get_current_tracer()
+    qubit.validate_consumable("project_z")
     qubit_out_value = qubit.value.next_version()
     bit_out_value = Value(type=BitType(), name=f"{qubit.value.name}_projected")
     qubit_out = Qubit(
@@ -120,8 +128,9 @@ def project_z(qubit: Qubit) -> tuple[Qubit, Bit]:
         results=[qubit_out_value, bit_out_value],
         axis="z",
     )
-    tracer = get_current_tracer()
+    qubit = qubit.consume(operation_name="project_z")
     tracer.add_operation(project_op)
+    qubit._handoff_direct_borrow_to(qubit_out)
     return qubit_out, bit_out
 
 
@@ -129,10 +138,14 @@ def project_x(qubit: Qubit) -> tuple[Qubit, Bit]:
     """Project a qubit in the X basis and keep the projected state.
 
     Args:
-        qubit: The qubit to project. The input handle is consumed.
+        qubit (Qubit): Qubit to project. The input handle is consumed.
 
     Returns:
-        A pair of the projected qubit handle and the measurement bit.
+        tuple[Qubit, Bit]: Projected qubit handle and measurement bit.
+
+    Raises:
+        QubitConsumedError: If ``qubit`` was already consumed.
+        RuntimeError: If no tracer is active.
     """
     from qamomile.circuit.frontend.operation.qubit_gates import h
 
@@ -146,10 +159,14 @@ def project_y(qubit: Qubit) -> tuple[Qubit, Bit]:
     """Project a qubit in the Y basis and keep the projected state.
 
     Args:
-        qubit: The qubit to project. The input handle is consumed.
+        qubit (Qubit): Qubit to project. The input handle is consumed.
 
     Returns:
-        A pair of the projected qubit handle and the measurement bit.
+        tuple[Qubit, Bit]: Projected qubit handle and measurement bit.
+
+    Raises:
+        QubitConsumedError: If ``qubit`` was already consumed.
+        RuntimeError: If no tracer is active.
     """
     from qamomile.circuit.frontend.operation.qubit_gates import h, s, sdg
 
@@ -165,12 +182,17 @@ def reset(qubit: Qubit) -> Qubit:
     """Reset a qubit to the |0> state.
 
     Args:
-        qubit: The qubit to reset. The input handle is consumed.
+        qubit (Qubit): Qubit to reset. The input handle is consumed.
 
     Returns:
-        A fresh handle for the reset qubit.
+        Qubit: Fresh handle for the reset qubit.
+
+    Raises:
+        QubitConsumedError: If ``qubit`` was already consumed.
+        RuntimeError: If no tracer is active.
     """
-    qubit = qubit.consume(operation_name="reset")
+    tracer = get_current_tracer()
+    qubit.validate_consumable("reset")
     qubit_out_value = qubit.value.next_version()
     qubit_out = Qubit(
         value=qubit_out_value,
@@ -178,8 +200,9 @@ def reset(qubit: Qubit) -> Qubit:
         indices=qubit.indices,
     )
     reset_op = ResetOperation(operands=[qubit.value], results=[qubit_out_value])
-    tracer = get_current_tracer()
+    qubit = qubit.consume(operation_name="reset")
     tracer.add_operation(reset_op)
+    qubit._handoff_direct_borrow_to(qubit_out)
     return qubit_out
 
 
@@ -187,10 +210,14 @@ def measure_reset(qubit: Qubit) -> tuple[Qubit, Bit]:
     """Measure a qubit in the Z basis and reset it to |0>.
 
     Args:
-        qubit: The qubit to measure and reset. The input handle is consumed.
+        qubit (Qubit): Qubit to measure and reset.
 
     Returns:
-        A pair of the reset qubit handle and the measurement bit.
+        tuple[Qubit, Bit]: Reset qubit handle and measurement bit.
+
+    Raises:
+        QubitConsumedError: If ``qubit`` was already consumed.
+        RuntimeError: If no tracer is active.
     """
     qubit, bit = project_z(qubit)
     qubit = reset(qubit)
@@ -207,19 +234,19 @@ def _measure_qfixed(qfixed: QFixed) -> Float:
         float_value = 0.b0b1b2... = b0*0.5 + b1*0.25 + b2*0.125 + ...
 
     Args:
-        qfixed: The QFixed to measure.
+        qfixed (QFixed): Fixed-point quantum register to measure.
 
     Returns:
-        Float containing the decoded measurement result.
-    """
-    # Consume the input handle (enforces affine type - measurement is destructive)
-    qfixed = qfixed.consume(operation_name="measure")
+        Float: Decoded measurement result.
 
-    # Create Float output value
+    Raises:
+        QubitConsumedError: If ``qfixed`` was already consumed.
+        RuntimeError: If no tracer is active.
+    """
+    tracer = get_current_tracer()
+    qfixed.validate_consumable("measure")
     float_out_value = Value(type=FloatType(), name="qfixed_measured")
     float_out = Float(value=float_out_value)
-
-    # Extract QFixed parameters
     qubit_values = qfixed.value.get_qfixed_qubit_uuids()
     num_bits = qfixed.value.get_qfixed_num_bits() or len(qubit_values)
     int_bits = qfixed.value.get_qfixed_int_bits() or 0
@@ -231,10 +258,8 @@ def _measure_qfixed(qfixed: QFixed) -> Float:
         num_bits=num_bits,
         int_bits=int_bits,
     )
-
-    tracer = get_current_tracer()
+    qfixed.consume(operation_name="measure")
     tracer.add_operation(measure_op)
-
     return float_out
 
 
@@ -242,18 +267,18 @@ def _measure_vector_qubit(qubits: Vector[Qubit]) -> Vector[Bit]:
     """Measure a vector of qubits.
 
     Args:
-        qubits: The Vector[Qubit] to measure.
+        qubits (Vector[Qubit]): Qubit register to measure destructively.
 
     Returns:
-        Vector[Bit] containing the measurement results.
+        Vector[Bit]: Measurement bits with the same shape.
+
+    Raises:
+        QubitConsumedError: If the register or a covered slot was consumed.
+        UnreturnedBorrowError: If a register borrow remains outstanding.
+        RuntimeError: If no tracer is active.
     """
-    # Ensure all borrowed elements have been returned before measuring
-    qubits.validate_all_returned()
-
-    # Consume the input handle (enforces affine type - measurement is destructive)
-    qubits = qubits.consume(operation_name="measure")
-
-    # Get shape values - prefer IR shape from ArrayValue, fallback to frontend shape
+    tracer = get_current_tracer()
+    qubits.validate_consumable("measure")
     if isinstance(qubits.value, ArrayValue) and qubits.value.shape:
         shape_values = qubits.value.shape
     else:
@@ -277,8 +302,7 @@ def _measure_vector_qubit(qubits: Vector[Qubit]) -> Vector[Bit]:
         operands=[qubits.value],
         results=[bits_value],
     )
-
-    tracer = get_current_tracer()
+    qubits = qubits.consume(operation_name="measure")
     tracer.add_operation(measure_op)
 
     # Create and return Vector[Bit] using _create_from_value

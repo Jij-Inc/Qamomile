@@ -1,5 +1,6 @@
 """Tests for affine type enforcement in the circuit frontend."""
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qm
@@ -81,6 +82,57 @@ class TestDoubleUseDetection:
         with pytest.raises(QubitConsumedError):
             # Use parameters to mark theta as a parameter
             bad_circuit.build(parameters=["theta"])
+
+
+class TestOperationExceptionSafety:
+    """Primitive operations avoid partial affine ownership commits."""
+
+    @pytest.mark.parametrize(
+        "operation",
+        [qm.h, qm.project_z, qm.reset, qm.measure],
+        ids=["gate", "project", "reset", "measure"],
+    )
+    def test_missing_tracer_leaves_scalar_input_unconsumed(self, operation):
+        """A missing tracer is diagnosed before scalar ownership moves."""
+        from qamomile.circuit.ir.types.primitives import QubitType
+        from qamomile.circuit.ir.value import Value
+
+        qubit = Qubit(value=Value(type=QubitType(), name="q"))
+
+        with pytest.raises(RuntimeError, match="No active tracer"):
+            operation(qubit)
+
+        assert not qubit._consumed
+
+    def test_late_multi_gate_validation_leaves_earlier_input_unconsumed(self):
+        """A consumed second operand cannot partially consume the first."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            control = qm.qubit("control")
+            target = qm.qubit("target")
+            _target_successor = qm.h(target)
+
+            with pytest.raises(QubitConsumedError):
+                qm.cx(control, target)
+
+            assert not control._consumed
+
+    def test_missing_tracer_leaves_vector_input_unconsumed(self):
+        """Broadcast and vector measurement preflight the tracer."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            gate_register = qubit_array(2, "gate_register")
+            measure_register = qubit_array(2, "measure_register")
+
+        with pytest.raises(RuntimeError, match="No active tracer"):
+            qm.h(gate_register)
+        with pytest.raises(RuntimeError, match="No active tracer"):
+            qm.measure(measure_register)
+
+        assert not gate_register._consumed
+        assert not measure_register._consumed
 
 
 class TestProperReassignment:
@@ -175,6 +227,48 @@ class TestProperReassignment:
 
 class TestQubitAliasDetection:
     """Test that aliasing errors are detected (same qubit in both positions)."""
+
+    @pytest.mark.parametrize(
+        ("left", "right", "expected"),
+        [
+            ((0, 2, 4), (1, 2, 4), False),
+            ((0, 2, 4), (4, 3, 2), True),
+            ((10, 5, 1_000_000_000), (12, 7, 1_000_000_000), True),
+            ((0, 1, 0), (0, 1, 1), False),
+            (None, (0, 1, 1), False),
+        ],
+    )
+    def test_affine_region_overlap_is_exact_and_size_independent(
+        self,
+        left: tuple[int, int, int] | None,
+        right: tuple[int, int, int] | None,
+        expected: bool,
+    ):
+        """Finite strided regions intersect without enumerating their slots."""
+        from qamomile.circuit.frontend.qkernel_utils import _regions_may_overlap
+
+        assert _regions_may_overlap(left, right) is expected
+
+    def test_affine_region_overlap_matches_random_explicit_sets(self):
+        """Modular overlap agrees with enumerated finite regions for seed 8421."""
+        from qamomile.circuit.frontend.qkernel_utils import _regions_may_overlap
+
+        rng = np.random.default_rng(8421)
+        for _ in range(1_000):
+            left = (
+                int(rng.integers(0, 30)),
+                int(rng.integers(1, 9)),
+                int(rng.integers(0, 15)),
+            )
+            right = (
+                int(rng.integers(0, 30)),
+                int(rng.integers(1, 9)),
+                int(rng.integers(0, 15)),
+            )
+            left_slots = {left[0] + left[1] * index for index in range(left[2])}
+            right_slots = {right[0] + right[1] * index for index in range(right[2])}
+
+            assert _regions_may_overlap(left, right) is bool(left_slots & right_slots)
 
     def test_distinct_fresh_subkernel_qubits_do_not_alias(self):
         """Fresh allocations returned by separate calls have distinct logical IDs."""
@@ -3315,6 +3409,83 @@ class TestDuplicateQuantumCallArgs:
         ):
             circuit.build()
 
+    @pytest.mark.parametrize("use_phase_wrapper", [False, True])
+    def test_parent_vector_and_borrowed_element_raise_without_consuming(
+        self,
+        use_phase_wrapper: bool,
+    ):
+        """A whole register and one of its elements cannot cross one call."""
+
+        @qkernel
+        def mixed(
+            register: qm.Vector[qm.Qubit],
+            element: qm.Qubit,
+        ) -> tuple[qm.Vector[qm.Qubit], qm.Qubit]:
+            """Return a register and scalar argument unchanged.
+
+            Args:
+                register (qm.Vector[qm.Qubit]): Register argument.
+                element (qm.Qubit): Scalar argument.
+
+            Returns:
+                tuple[qm.Vector[qm.Qubit], qm.Qubit]: Original arguments.
+            """
+            return register, element
+
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            register = qubit_array(2, "q")
+            element = register[0]
+            callable_ = qm.global_phase(mixed, 0.25) if use_phase_wrapper else mixed
+            with pytest.raises(
+                QubitConsumedError,
+                match="overlapping physical region",
+            ):
+                callable_(register, element)
+            assert not register._consumed
+            assert not element._consumed
+
+    def test_specialization_failure_does_not_consume_input(self, monkeypatch):
+        """A failed call-site specialization leaves affine ownership intact."""
+        from qamomile.circuit.frontend import qkernel_invocation
+        from qamomile.circuit.frontend.tracer import trace
+
+        @qkernel
+        def identity(q: qm.Qubit) -> qm.Qubit:
+            """Return one qubit unchanged.
+
+            Args:
+                q (qm.Qubit): Input qubit.
+
+            Returns:
+                qm.Qubit: Original input qubit.
+            """
+            return q
+
+        def fail_specialization(*_args, **_kwargs):
+            """Raise the synthetic specialization failure.
+
+            Args:
+                *_args (object): Ignored positional arguments.
+                **_kwargs (object): Ignored keyword arguments.
+
+            Raises:
+                RuntimeError: Always, to exercise pre-consume validation.
+            """
+            raise RuntimeError("specialization failed")
+
+        monkeypatch.setattr(
+            qkernel_invocation,
+            "select_specialized_block",
+            fail_specialization,
+        )
+        with trace():
+            q = qm.qubit("q")
+            with pytest.raises(RuntimeError, match="specialization failed"):
+                qm.global_phase(identity, 0.25)(q)
+            assert not q._consumed
+
     def test_disjoint_views_accepted(self):
         """Disjoint views of one array remain a valid argument pair."""
         pair = self._pair_kernel()
@@ -3367,3 +3538,25 @@ class TestDuplicateQuantumCallArgs:
 
         with pytest.raises(QubitConsumedError, match="binds the same quantum value"):
             InlinePass().run(block)
+
+
+class TestDirectElementBorrowHandoff:
+    """Operation results remain the owner of a directly borrowed slot."""
+
+    @pytest.mark.parametrize("operation", ["gate", "project", "reset"])
+    def test_destructive_followup_marks_the_slot_destroyed(self, operation: str):
+        """A returned scalar can be measured without leaving a stale owner."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            register = qubit_array(1, "q")
+            element = register[0]
+            if operation == "gate":
+                element = qm.h(element)
+            elif operation == "project":
+                element, _ = qm.project_z(element)
+            else:
+                element = qm.reset(element)
+            qm.measure(element)
+            with pytest.raises(QubitConsumedError, match="destructive"):
+                _ = register[0]

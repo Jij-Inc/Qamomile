@@ -47,6 +47,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
     ResetInstruction,
+    ReusableCircuit,
     ScalarExpr,
     UnaryExpr,
     UnaryOperator,
@@ -411,10 +412,10 @@ class _Rewriter:
             self._policy.prefer_native_semantic_ops
             and native_declaration is not None
             and native_declaration.accepts(callee, inherited_distributed_controls)
-            and (
-                _is_zero_literal(callee.body.global_phase)
-                or native_declaration.call_transforms.phase_mode
-                is not CallPhaseMode.UNSUPPORTED
+            and _native_call_phase_is_accepted(
+                callee,
+                native_declaration.call_transforms,
+                self._capabilities.name,
             )
         )
         if native:
@@ -510,6 +511,42 @@ def _is_zero_literal(expression: ScalarExpr) -> bool:
         bool: True when the expression is ``LiteralExpr(0)`` up to type.
     """
     return isinstance(expression, LiteralExpr) and not float(expression.value)
+
+
+def _native_call_phase_is_accepted(
+    callee: ReusableCircuit,
+    support: CallTransformCapabilities,
+    target_name: str,
+) -> bool:
+    """Return whether a native candidate accepts its actual body phase.
+
+    Args:
+        callee (ReusableCircuit): Native semantic-call candidate.
+        support (CallTransformCapabilities): Candidate transform declaration.
+        target_name (str): Target name used while checking scalar vocabulary.
+
+    Returns:
+        bool: Whether the phase can stay on the native realization. A false
+            result demotes the call to its generic fallback body.
+    """
+    phase = callee.body.global_phase
+    if _is_zero_literal(phase):
+        return True
+    if (
+        support.phase_mode is CallPhaseMode.UNSUPPORTED
+        or support.controlled_phase_scalars is None
+    ):
+        return False
+    try:
+        _check_scalar(
+            phase,
+            support.controlled_phase_scalars,
+            target_name,
+            context="native controlled reusable global phase",
+        )
+    except TargetCapabilityError:
+        return False
+    return True
 
 
 def _verify_legal_program(
@@ -617,22 +654,23 @@ def _verify_phase(
         scalar_capabilities = phase_support.controlled_phase_scalars
         context = "controlled reusable global phase"
     else:
-        if capabilities.global_phase is None:
+        standalone_phase = capabilities.normalized_global_phase
+        if standalone_phase is None:
             raise TargetCapabilityError(
                 f"Target '{capabilities.name}' cannot accept a nonzero "
                 "standalone global phase",
                 target=capabilities.name,
                 operation="global phase",
             )
-        if num_qubits < capabilities.global_phase.min_qubits:
+        if num_qubits < standalone_phase.min_qubits:
             raise TargetCapabilityError(
                 f"Target '{capabilities.name}' requires at least "
-                f"{capabilities.global_phase.min_qubits} qubit to preserve a "
+                f"{standalone_phase.min_qubits} qubit to preserve a "
                 "nonzero standalone global phase",
                 target=capabilities.name,
                 operation="global phase",
             )
-        scalar_capabilities = capabilities.global_phase.scalars
+        scalar_capabilities = standalone_phase.scalars
         context = "global phase"
     _check_scalar(
         phase,

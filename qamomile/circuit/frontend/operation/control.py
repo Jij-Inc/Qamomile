@@ -40,6 +40,7 @@ from qamomile.circuit.frontend.qkernel_callable import (
 from qamomile.circuit.frontend.qkernel_specialization import (
     select_specialized_block,
 )
+from qamomile.circuit.frontend.qkernel_utils import reject_aliased_quantum_args
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
@@ -147,13 +148,10 @@ _RESERVED_WRAPPER_NAMES: frozenset[str] = frozenset(_wrapper_namespace(None).key
 class _ControlEntry:
     """Bookkeeping for one positional control or sub-quantum handle.
 
-    The new ``ControlledGate.__call__`` concrete path consumes handles
-    in two stages: scalar ``Qubit`` and whole-``Vector`` arguments are
-    consumed eagerly via :meth:`Handle.consume`, while ``VectorView``
-    arguments defer the consume until ``_wrap_results_by_input_kind``
-    can build the fresh result view and rebind the parent's bulk-borrow
-    through :meth:`VectorView._transfer_borrow_to` (same pattern as
-    ``QKernel.__call__``).
+    Every entry starts as a side-effect-free preview. Scalar ``Qubit`` and
+    whole-``Vector`` ownership is committed only after operation construction
+    succeeds. ``VectorView`` ownership remains deferred until result wrapping
+    can transfer the parent borrow directly to the fresh result view.
 
     Attributes:
         original (Any): The handle as it was passed in by the caller
@@ -161,11 +159,9 @@ class _ControlEntry:
             ``_wrap_results_by_input_kind`` can rebuild an output handle
             of the same kind and, for ``VectorView``, perform the
             deferred borrow transfer.
-        consumed (Any | None): The post-consume handle for ``Qubit`` and
-            ``Vector`` (whose consume is eager).  ``None`` for
-            ``VectorView``, signalling that the consume is deferred and
-            ``original`` should still be used to read the current
-            ``ArrayValue``.
+        consumed (Any | None): Preview or committed successor for ``Qubit``
+            and ``Vector``. ``None`` for ``VectorView``, signalling deferred
+            borrow transfer.
         result_array (ArrayValue | None): For a whole-``Vector`` /
             ``VectorView`` control entry, the freshly-versioned result
             ``ArrayValue`` that the per-element scalar control results
@@ -185,8 +181,14 @@ class _ControlEntry:
 
     @property
     def is_deferred_view(self) -> bool:
-        """Whether this entry represents a ``VectorView`` whose consume is deferred."""
-        return self.consumed is None
+        """Return whether this entry defers ``VectorView`` ownership transfer.
+
+        Returns:
+            bool: Whether the original handle is a ``VectorView``.
+        """
+        from qamomile.circuit.frontend.handle.array import VectorView
+
+        return isinstance(self.original, VectorView)
 
 
 class ControlledGate:
@@ -567,7 +569,7 @@ class ControlledGate:
             )
         return output
 
-    def _build_and_emit_op(
+    def _build_op(
         self,
         operands: list[Any],
         results: list[Value],
@@ -577,7 +579,7 @@ class ControlledGate:
         *,
         has_call_global_phase: bool = False,
     ) -> ControlledUOperation | InvokeOperation:
-        """Create the controlled operation and add it to the tracer.
+        """Create a controlled operation without mutating tracer state.
 
         Composite qkernels remain callable invocations under control, so their
         body, implementation candidates, and resource models stay attached to
@@ -598,8 +600,8 @@ class ControlledGate:
                 identity. Defaults to False.
 
         Returns:
-            ControlledUOperation | InvokeOperation: Emitted controlled
-            operation.
+            ControlledUOperation | InvokeOperation: Validated controlled
+                operation ready to emit after ownership commit.
         """
         block = self._qkernel.block if block is None else block
         is_composite = getattr(self._qkernel, "_callable_kind", None) == "composite"
@@ -640,8 +642,6 @@ class ControlledGate:
                 callable_ref=self._callable_ref(),
                 callable_attrs=self._callable_attrs(),
             )
-        tracer = get_current_tracer()
-        tracer.add_operation(op)
         return op
 
     def _callable_ref(self) -> Any:
@@ -690,7 +690,7 @@ class ControlledGate:
     #
     # Each helper has a narrow contract so ``_call_concrete`` and
     # ``_call_symbolic`` can read top-to-bottom as a small choreography
-    # (split → partition → validate → consume → emit → wrap).
+    # (split → partition → validate → build → commit → emit → wrap).
     # ------------------------------------------------------------------
 
     def _split_controls_by_count(
@@ -808,32 +808,17 @@ class ControlledGate:
         """
         return [h for h in sub_args_resolved.values() if _is_quantum_handle(h)]
 
-    # ``_validate_no_alias_or_overlap`` used to live here as an entry-
-    # point alias / overlap check, mirroring the
-    # ``_check_qubit_alias`` helper in ``qubit_gates.py``.  In practice
-    # every adversarial call shape (``cg(q, q)``, ``cg(qs[0:3], qs[2])``,
-    # ``cg(qs[0:3], qs[0:3])``, ``cg(qs[0:3], qs[1:4])``) is already
-    # rejected by the linear-type / borrow-tracking layer one step
-    # earlier — by ``Handle.consume()`` (scalar duplicates →
-    # ``QubitConsumedError``) or by ``ArrayBase._get_element`` /
-    # ``Vector._make_slice_view`` 's borrow table (view-touching
-    # overlaps → ``QubitBorrowConflictError``).  The bespoke check was
-    # therefore pure duplication and was removed; the underlying
-    # safety guarantees are unchanged, only the error class on the
-    # ``cg(q, q)`` shape moved from ``QubitAliasError`` to
-    # ``QubitConsumedError``.
-
     @staticmethod
-    def _consume_with_borrow_transfer(
+    def _prepare_control_entries(
         handles: list[Any],
         operation_name: str,
     ) -> list[_ControlEntry]:
-        """Consume *handles*, deferring the consume for ``VectorView`` inputs.
+        """Validate handles and prepare entries without consuming ownership.
 
-        Scalar ``Qubit`` and whole ``Vector`` handles take the
-        straightforward :meth:`Handle.consume` path so the affine /
-        consumed-slot bookkeeping fires immediately.  ``VectorView``
-        handles have their consume **deferred** to
+        Scalar ``Qubit`` and whole ``Vector`` entries temporarily reference
+        their original handle so all IR construction can finish before affine
+        ownership is committed. ``VectorView`` handles keep their consume
+        **deferred** to
         :meth:`_wrap_results_by_input_kind`, mirroring
         ``QKernel.__call__``'s VectorView handling: the deferred
         consume lets the caller build a fresh result view wrapping the
@@ -847,35 +832,55 @@ class ControlledGate:
 
         Args:
             handles (list[Any]): Quantum handles to consume in order.
-            operation_name (str): Operation name passed through to
-                :meth:`Handle.consume` for the eager-consume branch
-                (currently ``"ControlledU[control]"`` or
-                ``"ControlledU[target]"``).
+            operation_name (str): Prospective consume operation name used by
+                side-effect-free validation.
 
         Returns:
-            list[_ControlEntry]: One entry per input handle, in order.
-                Scalar ``Qubit`` / ``Vector`` entries have both
-                ``original`` and ``consumed`` populated; ``VectorView``
-                entries have ``consumed`` set to ``None`` (deferred).
+            list[_ControlEntry]: One entry per input handle, in order. Scalar
+                ``Qubit`` / whole ``Vector`` entries use the original as a
+                preview value; ``VectorView`` entries use ``None`` to signal
+                deferred transfer.
 
         Raises:
-            QubitConsumedError: Surfaced from :meth:`Handle.consume`
-                when a non-view handle has already been consumed.
+            QubitConsumedError: If any handle or covered slot was consumed.
+            UnreturnedBorrowError: If an array has a live borrow.
         """
         from qamomile.circuit.frontend.handle.array import VectorView
 
         entries: list[_ControlEntry] = []
         for handle in handles:
+            if handle._should_enforce_linear():
+                handle.validate_consumable(operation_name)
             if isinstance(handle, VectorView):
                 entries.append(_ControlEntry(original=handle, consumed=None))
                 continue
-            consumed = (
+            entries.append(_ControlEntry(original=handle, consumed=handle))
+        return entries
+
+    @staticmethod
+    def _commit_control_entries(
+        entries: list[_ControlEntry],
+        operation_name: str,
+    ) -> None:
+        """Commit previously validated non-view control entries.
+
+        Args:
+            entries (list[_ControlEntry]): Preview entries created by
+                :meth:`_prepare_control_entries`.
+            operation_name (str): Operation name recorded on consumed handles.
+
+        Returns:
+            None.
+        """
+        for entry in entries:
+            if entry.is_deferred_view:
+                continue
+            handle = entry.original
+            entry.consumed = (
                 handle.consume(operation_name=operation_name)
                 if handle._should_enforce_linear()
                 else handle
             )
-            entries.append(_ControlEntry(original=handle, consumed=consumed))
-        return entries
 
     def _bind_to_sub_signature(
         self,
@@ -1309,11 +1314,14 @@ class ControlledGate:
         original = entry.original
         if isinstance(original, Qubit):
             (result_value,) = entry_results
-            return Qubit(
+            output = Qubit(
                 value=result_value,
                 parent=original.parent,
                 indices=original.indices,
             )
+            assert entry.consumed is not None
+            entry.consumed._handoff_direct_borrow_to(output)
+            return output
 
         assert isinstance(original, ArrayBase)
         # Discriminate the shapes.  A control entry with a recorded
@@ -1362,11 +1370,12 @@ class ControlledGate:
         sub_kwargs: dict[str, Any],
         power: int | Value,
         global_phase: Value | None,
+        tracer: Any,
     ) -> tuple[Any, ...]:
         """Concrete-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
-        Chains the helpers (split → bind → validate → consume →
-        operands/results → emit → wrap) so the body of ``__call__``
+        Chains the helpers (split → bind → validate → build → commit →
+        emit → wrap) so the body of ``__call__``
         stays a thin dispatcher.  The symbolic counterpart lives in
         :meth:`_call_symbolic`.
 
@@ -1379,6 +1388,7 @@ class ControlledGate:
                 :meth:`_normalize_power`).
             global_phase (Value | None): Normalized target-global phase for
                 this controlled call.
+            tracer (Any): Active tracer obtained before ownership validation.
 
         Returns:
             tuple[Any, ...]: One output handle per input handle, in the
@@ -1387,10 +1397,8 @@ class ControlledGate:
         Raises:
             ValueError: From :meth:`_split_controls_by_count` when the
                 control boundary can't be honoured by the args.
-            QubitConsumedError / QubitBorrowConflictError: From the
-                ``Handle.consume()`` / array borrow-tracker layer when
-                an argument duplicates a slot that another argument
-                also touches.
+            QubitConsumedError / QubitBorrowConflictError: If an argument is
+                consumed or overlaps another physical input region.
             TypeError: From :meth:`_bind_to_sub_signature` or
                 :meth:`_params_to_operands` on unknown/typoed kwargs
                 or unsupported classical parameter types.
@@ -1422,28 +1430,37 @@ class ControlledGate:
             if id(value) not in quantum_ids
         }
 
-        # Alias / overlap checking is delegated entirely to the
-        # ``Handle.consume()`` / array borrow-tracker layer below:
-        # scalar duplicates raise ``QubitConsumedError`` on the
-        # second consume, and view-touching overlaps raise
-        # ``QubitBorrowConflictError`` at element / slice access time.
-        consumed_controls = self._consume_with_borrow_transfer(
+        overlap_arguments = {
+            **{f"control[{index}]": handle for index, handle in enumerate(controls)},
+            **{
+                f"target[{name}]": handle
+                for name, handle in sub_args_resolved.items()
+                if id(handle) in quantum_ids
+            },
+        }
+        reject_aliased_quantum_args(
+            self._qkernel.name,
+            overlap_arguments,
+            caller="control()",
+        )
+
+        control_entries = self._prepare_control_entries(
             controls, "ControlledU[control]"
         )
-        consumed_sub_quantum = self._consume_with_borrow_transfer(
+        target_entries = self._prepare_control_entries(
             sub_quantum_args, "ControlledU[target]"
         )
 
         operands = self._build_operands(
-            consumed_controls, consumed_sub_quantum, sub_classical_dict
+            control_entries, target_entries, sub_classical_dict
         )
-        results = self._build_results(consumed_controls, consumed_sub_quantum)
+        results = self._build_results(control_entries, target_entries)
         block = self._block_for_sub_call(sub_args_resolved)
         block = self._with_global_phase(block, global_phase)
         if global_phase is not None:
             operands.append(global_phase)
 
-        self._build_and_emit_op(
+        operation = self._build_op(
             operands,
             results,
             num_controls,
@@ -1451,9 +1468,12 @@ class ControlledGate:
             block=block,
             has_call_global_phase=global_phase is not None,
         )
+        self._commit_control_entries(control_entries, "ControlledU[control]")
+        self._commit_control_entries(target_entries, "ControlledU[target]")
+        tracer.add_operation(operation)
 
         return self._wrap_results_by_input_kind(
-            consumed_controls, consumed_sub_quantum, results
+            control_entries, target_entries, results
         )
 
     def __call__(
@@ -1529,6 +1549,7 @@ class ControlledGate:
                 ``Vector`` → ``Vector``).
 
         Raises:
+            RuntimeError: If no qkernel tracer is active.
             ValueError: ``control_indices`` is non-``None`` in
                 concrete mode, or the qubit-count split in concrete
                 mode falls inside an argument.
@@ -1538,13 +1559,13 @@ class ControlledGate:
                 sub-kernel kwarg does not match the wrapped kernel's
                 signature.
             QubitConsumedError / QubitBorrowConflictError: Duplicate
-                physical qubits across the control + sub-kernel args
-                (caught by the ``Handle.consume()`` / array
-                borrow-tracker layer), or a quantum arg that was
-                already consumed before the call.
+                physical qubits across the control and sub-kernel arguments,
+                or a quantum argument that was already consumed. Overlap is
+                validated before ownership commit.
         """
         normalized_power = self._normalize_power(power)
         normalized_global_phase = self._normalize_global_phase(global_phase)
+        tracer = get_current_tracer()
         num_controls = self._num_controls
 
         if isinstance(num_controls, UInt):
@@ -1554,6 +1575,7 @@ class ControlledGate:
                 normalized_global_phase,
                 params,
                 control_indices,
+                tracer,
             )
 
         if control_indices is not None:
@@ -1568,6 +1590,7 @@ class ControlledGate:
             params,
             normalized_power,
             normalized_global_phase,
+            tracer,
         )
 
     def _normalize_control_indices(
@@ -1648,6 +1671,7 @@ class ControlledGate:
         global_phase: Value | None,
         sub_kwargs: dict[str, Any],
         control_indices: Sequence[int | UInt] | None,
+        tracer: Any,
     ) -> tuple[Any, ...]:
         """Symbolic-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
@@ -1668,6 +1692,7 @@ class ControlledGate:
             control_indices (Sequence[int | UInt] | None): The
                 caller-supplied selection (or ``None`` to use the
                 entire pool).
+            tracer (Any): Active tracer obtained before ownership validation.
 
         Returns:
             tuple[Any, ...]: One output handle per input handle, in
@@ -1763,13 +1788,26 @@ class ControlledGate:
             if id(value) not in quantum_ids
         }
 
-        # Alias / overlap checking is delegated to the
-        # ``Handle.consume()`` / array borrow-tracker layer below
-        # (same rationale as in ``_call_concrete``).
-        consumed_controls = self._consume_with_borrow_transfer(
+        overlap_arguments = {
+            **{
+                f"control[{index}]": handle for index, handle in enumerate(control_args)
+            },
+            **{
+                f"target[{name}]": handle
+                for name, handle in sub_args_resolved.items()
+                if id(handle) in quantum_ids
+            },
+        }
+        reject_aliased_quantum_args(
+            self._qkernel.name,
+            overlap_arguments,
+            caller="control()",
+        )
+
+        control_entries = self._prepare_control_entries(
             control_args, "ControlledU[control]"
         )
-        consumed_sub_quantum = self._consume_with_borrow_transfer(
+        target_entries = self._prepare_control_entries(
             sub_quantum_args, "ControlledU[target]"
         )
 
@@ -1783,13 +1821,13 @@ class ControlledGate:
         # qubit control set.
         operands: list[Any] = []
         control_results: list[Value] = []
-        for entry in consumed_controls:
+        for entry in control_entries:
             op_value = self._sub_quantum_operand_value(entry)
             operands.append(op_value)
             control_results.append(op_value.next_version())
 
         sub_quantum_results: list[Value] = []
-        for entry in consumed_sub_quantum:
+        for entry in target_entries:
             op_value = self._sub_quantum_operand_value(entry)
             operands.append(op_value)
             sub_quantum_results.append(op_value.next_version())
@@ -1808,14 +1846,16 @@ class ControlledGate:
             control_indices=ci_values,
             power=power,
             block=block,
-            num_control_args=len(consumed_controls),
+            num_control_args=len(control_entries),
             callable_ref=self._callable_ref(),
             callable_attrs=self._callable_attrs(),
         )
-        get_current_tracer().add_operation(op)
+        self._commit_control_entries(control_entries, "ControlledU[control]")
+        self._commit_control_entries(target_entries, "ControlledU[target]")
+        tracer.add_operation(op)
 
         wrapped: list[Any] = []
-        for entry, result_value in zip(consumed_controls, control_results):
+        for entry, result_value in zip(control_entries, control_results):
             wrapped.append(
                 self._wrap_entry_output(
                     entry,
@@ -1823,7 +1863,7 @@ class ControlledGate:
                     operation_name="ControlledU[control]",
                 )
             )
-        for entry, result_value in zip(consumed_sub_quantum, sub_quantum_results):
+        for entry, result_value in zip(target_entries, sub_quantum_results):
             wrapped.append(
                 self._wrap_entry_output(
                     entry,

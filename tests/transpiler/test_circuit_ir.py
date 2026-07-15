@@ -596,6 +596,43 @@ def test_materialization_rejects_positional_parameter_order_drift() -> None:
         materialize_executable(lowered, _ReorderedMaterializer())
 
 
+def test_materialization_accepts_legacy_one_argument_materializer() -> None:
+    """A public materializer with the former signature remains callable."""
+    transpiler = QiskitTranspiler()
+    parameter_names = ["alpha", "beta"]
+    prepared = transpiler.prepare(
+        _two_parameter_rotation,
+        parameters=parameter_names,
+    )
+    lowered = lower_circuit_plan(
+        transpiler.plan_circuit(prepared),
+        parameters=parameter_names,
+    )
+    artifact = object()
+
+    class _LegacyMaterializer:
+        """Implement the public pre-parameter-order materializer protocol."""
+
+        def materialize(self, program: object) -> MaterializedCircuit[object]:
+            """Materialize without accepting the new ABI-order keyword.
+
+            Args:
+                program (object): Circuit program accepted by the legacy API.
+
+            Returns:
+                MaterializedCircuit[object]: Fake materialized artifact.
+            """
+            del program
+            return MaterializedCircuit(
+                artifact=artifact,
+                parameters={name: object() for name in parameter_names},
+            )
+
+    executable = materialize_executable(lowered, _LegacyMaterializer())
+
+    assert executable.compiled_quantum[0].circuit is artifact
+
+
 def test_qamomile_plan_lowers_to_backend_neutral_circuit_ir() -> None:
     """The full semantic circuit path produces verified circuit IR."""
     transpiler = QiskitTranspiler()

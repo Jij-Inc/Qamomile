@@ -86,6 +86,7 @@ _DESTRUCTIVE_CONSUME_OPS: frozenset[str] = frozenset(
         # consumed-slot markers, matching the semantics that the qubits
         # passed to the callee can no longer be reused by the caller.
         "qkernel call (view dropped)",
+        "qkernel call (scalar dropped)",
     }
 )
 _BORROW_RELEASING_CONSUME_OPS: frozenset[str] = frozenset({"slice assignment"})
@@ -391,8 +392,8 @@ class ArrayBase(Handle, Generic[T]):
                     operation_name=operation_name,
                 )
 
-    def consume(self, operation_name: str = "unknown") -> typing.Self:
-        """Consume the array, enforcing borrow-return contract for quantum arrays.
+    def validate_consumable(self, operation_name: str = "unknown") -> None:
+        """Validate an array consume without changing ownership state.
 
         For quantum arrays, all borrowed elements must be returned before the
         array can be consumed. This ensures that no unreturned borrows are
@@ -403,24 +404,34 @@ class ArrayBase(Handle, Generic[T]):
         (``measure(q[0])`` or ``measure(q[1::2])`` followed by
         ``measure(q)``), this raises ``QubitConsumedError`` rather than
         silently re-consuming those slots.
+
+        Args:
+            operation_name (str): Name of the prospective consuming operation.
+                Defaults to ``"unknown"``.
+
+        Raises:
+            QubitConsumedError: If this handle or any covered slot was already
+                consumed.
+            UnreturnedBorrowError: If a live element or slice borrow remains.
         """
         self.validate_all_returned()
-        if self.value.type.is_quantum():
-            consumed_slots = sorted(
-                int(k[0].split(":", 1)[1])
-                for k, owner in self._borrowed_indices.items()
-                if _is_destroyed_slot_owner(owner)
-                and len(k) == 1
-                and k[0].startswith("const:")
-            )
-            if consumed_slots:
-                raise QubitConsumedError(
-                    f"Cannot consume '{self.value.name}' via '{operation_name}': "
-                    f"slot(s) {consumed_slots} were already destroyed by a "
-                    f"prior destructive element or view operation.",
-                    handle_name=self.value.name or "array",
-                    operation_name=operation_name,
-                )
+        self._check_no_consumed_slots(operation_name)
+        super().validate_consumable(operation_name)
+
+    def consume(self, operation_name: str = "unknown") -> typing.Self:
+        """Consume the array after validating its affine ownership state.
+
+        Args:
+            operation_name (str): Name of the consuming operation. Defaults to
+                ``"unknown"``.
+
+        Returns:
+            typing.Self: Fresh handle carrying the consumed array value.
+
+        Raises:
+            QubitConsumedError: If this handle or a covered slot was consumed.
+            UnreturnedBorrowError: If a live element or slice borrow remains.
+        """
         return super().consume(operation_name)  # type: ignore[return-value]
 
     @property
@@ -735,6 +746,26 @@ class ArrayBase(Handle, Generic[T]):
             if _classify_consume(operation_name) is ConsumeMode.DESTRUCTIVE
             else successor
         )
+
+    def _handoff_direct_borrow_owner(
+        self,
+        intermediate: Handle,
+        successor: Handle,
+    ) -> None:
+        """Replace an intermediate direct-element owner with a real result.
+
+        Args:
+            intermediate (Handle): Successor created by ``Handle.consume``.
+            successor (Handle): Actual operation result that owns the slot.
+
+        Returns:
+            None.
+        """
+        if intermediate.parent is not self or not intermediate.indices:
+            return
+        key = self._make_indices_key(intermediate.indices)
+        if self._borrowed_indices.get(key) is intermediate:
+            self._borrowed_indices[key] = successor
 
     def _return_element(self, indices: tuple[UInt, ...], value: T) -> None:
         """Write an element back into the array at the given indices.

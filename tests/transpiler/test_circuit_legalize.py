@@ -311,6 +311,59 @@ class TestSemanticLegalization:
         verify_circuit(legalized)
         verify_target_legal(legalized, capabilities)
 
+    def test_native_phase_scalar_mismatch_uses_generic_fallback(self):
+        """A native phase vocabulary mismatch demotes to a legal fallback."""
+        program = _semantic_program(controls=1)
+        call = program.operations[0]
+        assert isinstance(call, CallInstruction)
+        phased_call = dataclasses.replace(
+            call,
+            callee=dataclasses.replace(
+                call.callee,
+                body=dataclasses.replace(
+                    call.callee.body,
+                    global_phase=ParameterExpr("theta"),
+                ),
+            ),
+        )
+        literal_only = ScalarCapabilities(
+            atoms=frozenset({ScalarAtom.LITERAL}),
+            unary_operators=frozenset(),
+            binary_operators=frozenset(),
+            parameter_form=ScalarExpressionForm.CONCRETE_ONLY,
+        )
+        capabilities = _capabilities(
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.qft",
+                    CallTransformCapabilities(
+                        True,
+                        True,
+                        None,
+                        phase_mode=CallPhaseMode.EXPLICIT_CORRECTION,
+                        controlled_phase_scalars=literal_only,
+                    ),
+                ),
+            ),
+        )
+
+        legalized = legalize_program(
+            dataclasses.replace(
+                program,
+                operations=(phased_call, *program.operations[1:]),
+            ),
+            capabilities,
+            CompilationPolicy(),
+        )
+
+        legalized_call = legalized.operations[0]
+        assert isinstance(legalized_call, CallInstruction)
+        assert legalized_call.callee.native_realization is None
+        assert legalized_call.callee.body.global_phase == ParameterExpr("theta")
+        verify_circuit(legalized)
+        verify_target_legal(legalized, capabilities)
+
     @pytest.mark.parametrize(
         ("control_mode", "expected_native"),
         [
@@ -795,6 +848,57 @@ class TestTargetLegalityVerification:
 
         with pytest.raises(TargetCapabilityError, match="standalone global phase"):
             verify_target_legal(builder.freeze(), capabilities)
+
+    def test_legacy_scalar_global_phase_capability_remains_compatible(self) -> None:
+        """The former scalar-only declaration remains readable and legal."""
+        scalar_capabilities = _capabilities().gate_parameters
+        capabilities = _capabilities(global_phase=scalar_capabilities)
+        builder = CircuitBuilder(1, 0)
+        builder.add_global_phase(ParameterExpr("theta"))
+
+        assert capabilities.global_phase is scalar_capabilities
+        assert capabilities.global_phase.atoms == scalar_capabilities.atoms
+        assert isinstance(
+            capabilities.normalized_global_phase,
+            GlobalPhaseCapabilities,
+        )
+        verify_target_legal(builder.freeze(), capabilities)
+
+    def test_builtin_targets_keep_scalar_global_phase_runtime_type(self) -> None:
+        """Built-in declarations preserve the legacy scalar runtime API."""
+        from qamomile.cudaq.materializer import CudaqMaterializer
+        from qamomile.qiskit.materializer import QiskitMaterializer
+        from qamomile.quration.materializer import PyQretMaterializer
+        from qamomile.quri_parts.materializer import QuriPartsMaterializer
+
+        materializers = (
+            QiskitMaterializer(),
+            QuriPartsMaterializer(),
+            CudaqMaterializer(),
+            PyQretMaterializer(),
+        )
+
+        for materializer in materializers:
+            phase = materializer.capabilities.global_phase
+            assert isinstance(phase, ScalarCapabilities)
+            replaced = dataclasses.replace(
+                phase,
+                atoms=frozenset({ScalarAtom.LITERAL}),
+            )
+            assert replaced.atoms == frozenset({ScalarAtom.LITERAL})
+
+    def test_extended_global_phase_capability_exposes_legacy_scalar_fields(
+        self,
+    ) -> None:
+        """The extended declaration preserves legacy scalar field reads."""
+        capabilities = _capabilities()
+        phase = capabilities.global_phase
+
+        assert isinstance(phase, GlobalPhaseCapabilities)
+        assert phase.atoms == phase.scalars.atoms
+        assert phase.unary_operators == phase.scalars.unary_operators
+        assert phase.binary_operators == phase.scalars.binary_operators
+        assert phase.parameter_form is phase.scalars.parameter_form
 
     def test_structured_phase_checks_minimum_qubit_width(self) -> None:
         """Region-local synthesis requirements are checked explicitly."""
