@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -451,14 +452,14 @@ print("if_else condition:", if_op.condition)
 
 # %% [markdown]
 # Qiskit's classical expression system currently covers the logical, comparison, and arithmetic operations that Qamomile uses in dynamic conditions.
-# However, `FLOORDIV` and `POW` do not have matching Qiskit classical expressions, so Qamomile raises `NotImplementedError` during circuit generation if either one remains in a runtime condition.
+# However, `FLOORDIV` and `POW` do not have matching Qiskit classical expressions, so target-legality verification raises `TargetCapabilityError` before Qiskit circuit construction if either one remains in a runtime condition.
 # If you need those operations, make sure their values are fixed before transpilation.
 
 # %% [markdown]
 # ### Native `PauliEvolutionGate`
 #
 # `qmc.pauli_evolve(q, H, gamma)` represents the time evolution $e^{-i\gamma H}$.
-# The Qiskit integration writes that operation as a `PauliEvolutionGate` when `use_native_composite=True` (the default).
+# The Qiskit integration writes that operation as a `PauliEvolutionGate` when `use_native_pauli_evolution=True` (the default).
 # An unbound `gamma` becomes a Qiskit `Parameter`, so the same circuit can be reused while trying different variational parameters.
 
 # %%
@@ -492,15 +493,15 @@ assert "PauliEvolution" in evolution_ops
 assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 
 # %% [markdown]
-# Pass `QiskitTranspiler(use_native_composite=False)` when you want a gate-by-gate decomposition instead.
-# The same flag also disables native QFT/IQFT output, which is useful for debugging or for comparing gate counts across quantum SDKs.
+# Pass `QiskitTranspiler(use_native_pauli_evolution=False)` when you want a gate-by-gate decomposition instead.
+# This flag controls only Pauli evolution. Native QFT/IQFT output is controlled independently by `use_native_composite`.
 
 # %% [markdown]
 # ### Native `QFTGate`
 #
 # Qamomile provides high-level operations for QFT and inverse QFT through `qmc.qft(...)` / `qmc.iqft(...)`.
 # The Qiskit integration can translate these qkernels directly to Qiskit's native `QFTGate`, without decomposing them into elementary quantum gates.
-# If you need a decomposed circuit, pass `use_native_composite=False` to expand the operation into H/controlled-phase/SWAP gates.
+# With `use_native_composite=False`, Qamomile keeps a named Qiskit gate backed by the portable fallback body. Call Qiskit's `decompose()` when you need to inspect its H/controlled-phase/SWAP implementation.
 
 # %%
 # Compare Qiskit's native QFT gate with a decomposed circuit.
@@ -520,12 +521,14 @@ qft_decomposed = QiskitTranspiler(use_native_composite=False).to_circuit(
     bindings={"n": 3},
 )
 native_ops = [inst.operation.name for inst in qft_native.data]
-decomposed_ops = [inst.operation.name for inst in qft_decomposed.data]
+decomposed_ops = [
+    inst.operation.name for inst in qft_decomposed.decompose(reps=1).data
+]
 print("native QFT ops    :", native_ops)
 print("decomposed QFT ops:", decomposed_ops)
 assert any("qft" in name.lower() for name in native_ops)
 assert "cp" in decomposed_ops
-assert len(qft_native.data) < len(qft_decomposed.data)
+assert len(qft_native.data) < len(decomposed_ops)
 
 # %% [markdown]
 # ## Using other Qiskit execution targets
