@@ -47,6 +47,7 @@ from qamomile.circuit.ir.operation.callable import (
     CallTransform,
     InvokeOperation,
 )
+from qamomile.circuit.ir.operation.control_value import normalize_control_value
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     ControlledUOperation,
@@ -238,6 +239,7 @@ class ControlledGate:
         qkernel: "QKernel",
         num_controls: int | UInt = 1,
         *,
+        control_value: int | None = None,
         callable_ref: CallableRef | None = None,
         callable_attrs: dict[str, Any] | None = None,
     ) -> None:
@@ -255,6 +257,11 @@ class ControlledGate:
                 to emit time. Defaults to 1. A ``bool`` is rejected: it is
                 not a valid control count even though ``bool`` subclasses
                 ``int``.
+            control_value (int | None): Computational-basis value that
+                activates the control. Bit zero describes the first flattened
+                control qubit, following Qamomile's LSB-first convention.
+                ``None`` uses the ordinary all-ones state. Only supported with
+                a concrete ``num_controls``. Defaults to ``None``.
             callable_ref (CallableRef | None): Optional source callable
                 identity to record on emitted ``ControlledUOperation`` nodes.
                 Defaults to the wrapped qkernel's callable ref.
@@ -262,10 +269,13 @@ class ControlledGate:
                 attrs for the source callable. Defaults to qkernel attrs.
 
         Raises:
-            TypeError: If ``num_controls`` is a ``bool``, or if ``qkernel``
-                does not expose a dict ``input_types`` / an
-                ``inspect.Signature`` ``signature``.
-            ValueError: If a concrete ``int`` ``num_controls`` is < 1.
+            TypeError: If ``num_controls`` is a ``bool``, ``control_value`` is
+                not a Python ``int`` or ``None``, or ``qkernel`` does not
+                expose a dict ``input_types`` / an ``inspect.Signature``
+                ``signature``.
+            ValueError: If a concrete ``num_controls`` is less than one,
+                ``control_value`` does not fit its width, or a non-default
+                value is combined with symbolic ``num_controls``.
         """
         # Reject bool explicitly (not via is_plain_int): the only numeric guard
         # here is ``isinstance(int) and < 1`` with no else branch, so swapping in
@@ -280,6 +290,19 @@ class ControlledGate:
         if isinstance(num_controls, int) and num_controls < 1:
             raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
         # For UInt (symbolic), validation is deferred to emit time
+        if isinstance(num_controls, UInt):
+            if control_value is not None:
+                raise ValueError(
+                    "control_value requires a concrete int num_controls; "
+                    "symbolic UInt widths cannot define a fixed activation "
+                    "state at compose time."
+                )
+            normalized_control_value = None
+        else:
+            normalized_control_value = normalize_control_value(
+                control_value,
+                num_controls,
+            )
 
         # Compose-time validation of the wrapped object's shape.
         # Downstream helpers (``_sub_positional_count_for_symbolic``,
@@ -318,6 +341,7 @@ class ControlledGate:
 
         self._qkernel = qkernel
         self._num_controls = num_controls
+        self._control_value = normalized_control_value
         self._target_callable_ref = callable_ref
         self._target_callable_attrs = (
             dict(callable_attrs) if callable_attrs is not None else None
@@ -605,6 +629,8 @@ class ControlledGate:
         the same ``CallableDef``. Generic qkernels and powered calls continue to
         use ``ControlledUOperation`` because they represent structural control
         over an inline program rather than a named callable transform.
+        ``control_value`` is retained on either representation until circuit
+        lowering resolves physical control slots.
 
         Args:
             operands (list[Any]): Control, target, and classical operands.
@@ -636,6 +662,8 @@ class ControlledGate:
         ):
             attrs = self._callable_attrs()
             attrs["num_control_qubits"] = num_controls
+            if self._control_value is not None:
+                attrs["control_value"] = self._control_value
             if num_target_qubits is not None:
                 attrs["num_target_qubits"] = num_target_qubits
             op: ControlledUOperation | InvokeOperation = InvokeOperation(
@@ -661,6 +689,7 @@ class ControlledGate:
                 operands=operands,
                 results=results,
                 num_controls=num_controls,
+                control_value=self._control_value,
                 power=power,
                 block=block,
                 callable_ref=self._callable_ref(),
@@ -2432,25 +2461,36 @@ class _ControlledOracle:
     Args:
         oracle (Any): Source ``Oracle`` object to control.
         num_controls (int): Number of new leading control qubits.
+        control_value (int | None): LSB-first activation value for the new
+            controls. ``None`` uses all ones.
 
     Raises:
-        TypeError: If the source oracle only supports vector calls.
+        TypeError: If the source oracle only supports vector calls or
+            ``control_value`` is not a Python ``int`` or ``None``.
+        ValueError: If ``control_value`` does not fit ``num_controls``.
     """
 
     oracle: Any
     num_controls: int
+    control_value: int | None = None
 
     def __post_init__(self) -> None:
         """Validate that the wrapped oracle supports scalar controls.
 
         Raises:
-            TypeError: If the oracle has no fixed scalar target arity.
+            TypeError: If the oracle has no fixed scalar target arity or
+                ``control_value`` is not a Python ``int`` or ``None``.
+            ValueError: If ``control_value`` does not fit ``num_controls``.
         """
         if self.oracle.num_qubits is None:
             raise TypeError(
                 "control(Oracle) supports fixed-width scalar oracles only. "
                 "Vector-signature oracles should be called directly."
             )
+        self.control_value = normalize_control_value(
+            self.control_value,
+            self.num_controls,
+        )
 
     def __call__(self, *qubits: Qubit) -> tuple[Qubit, ...]:
         """Apply the controlled oracle.
@@ -2481,7 +2521,21 @@ class _ControlledOracle:
             signature=self.oracle.signature,
             cost=self.oracle.cost,
         )
-        return cast(tuple[Qubit, ...], controlled(*targets, controls=controls))
+        existing_controls = self.oracle.num_control_qubits
+        combined_control_value = (
+            None
+            if self.control_value is None
+            else self.control_value
+            | (((1 << existing_controls) - 1) << self.num_controls)
+        )
+        return cast(
+            tuple[Qubit, ...],
+            controlled(
+                *targets,
+                controls=controls,
+                control_value=combined_control_value,
+            ),
+        )
 
 
 def _validate_concrete_control_count(num_controls: int | UInt) -> int:
@@ -2512,6 +2566,8 @@ def _validate_concrete_control_count(num_controls: int | UInt) -> int:
 def control(
     qkernel: Oracle,
     num_controls: int = 1,
+    *,
+    control_value: int | None = None,
 ) -> _ControlledOracle:
     """Create a controlled wrapper for an opaque Oracle."""
     ...
@@ -2521,6 +2577,8 @@ def control(
 def control(
     qkernel: QKernelLike | Callable[..., Any],
     num_controls: int | UInt = 1,
+    *,
+    control_value: int | None = None,
 ) -> ControlledGate:
     """Create a controlled wrapper for a qkernel or gate callable."""
     ...
@@ -2529,6 +2587,8 @@ def control(
 def control(
     qkernel: Oracle | QKernelLike | Callable[..., Any],
     num_controls: int | UInt = 1,
+    *,
+    control_value: int | None = None,
 ) -> ControlledGate | _ControlledOracle:
     """Create a controlled version of a quantum gate.
 
@@ -2548,6 +2608,12 @@ def control(
             ``Union`` such as ``Union[Qubit, Vector[Qubit]]``).
         num_controls (int | UInt): Number of control qubits (default: 1).
             Can be ``int`` (concrete) or ``UInt`` (symbolic).
+        control_value (int | None): Computational-basis value that activates
+            the controlled unitary. Controls are flattened in call order, with
+            ``Vector`` / ``VectorView`` elements taken from index zero upward;
+            the first flattened control is bit zero. ``None`` preserves the
+            ordinary all-ones behavior. Only concrete ``num_controls`` is
+            supported. Defaults to ``None``.
 
     Returns:
         For a qkernel or gate callable, a ``ControlledGate`` that can be called
@@ -2563,8 +2629,11 @@ def control(
     Raises:
         TypeError: If ``qkernel`` is a callable that cannot be auto-wrapped
             (missing annotations, unsupported types, or no qubit parameters),
-            or if an ``Oracle`` control count is symbolic.
-        ValueError: If ``num_controls`` is a concrete ``int`` less than 1.
+            ``control_value`` is not a Python ``int`` or ``None``, or an
+            ``Oracle`` control count is symbolic.
+        ValueError: If ``num_controls`` is a concrete ``int`` less than one,
+            ``control_value`` is out of range, or a non-default value is used
+            with symbolic ``num_controls``.
 
     Example:
         Built-in gates can be controlled directly, with no wrapper::
@@ -2579,6 +2648,11 @@ def control(
 
             cch = qmc.control(qmc.h, num_controls=2)
             c0, c1, tgt = cch(ctrl0, ctrl1, target)
+
+            # Fire only when (ctrl0, ctrl1) represents integer 2. The first
+            # control is bit zero, so the required pattern is (0, 1).
+            on_two = qmc.control(qmc.x, num_controls=2, control_value=2)
+            ctrl0, ctrl1, target = on_two(ctrl0, ctrl1, target)
 
         ``@qmc.qkernel`` arguments are still supported for cases that need
         custom logic::
@@ -2603,6 +2677,7 @@ def control(
         return _ControlledOracle(
             qkernel,
             num_controls=concrete_controls,
+            control_value=control_value,
         )
 
     qkernel_impl = _qkernel_for_callable(qkernel)
@@ -2610,6 +2685,7 @@ def control(
     return ControlledGate(
         qkernel_impl,
         num_controls=num_controls,
+        control_value=control_value,
         callable_ref=callable_ref,
         callable_attrs=callable_attrs,
     )

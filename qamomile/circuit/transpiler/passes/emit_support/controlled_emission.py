@@ -67,6 +67,9 @@ from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission impor
     register_classical_merge_aliases,
     resolve_loop_bounds,
 )
+from qamomile.circuit.transpiler.passes.emit_support.control_value_emission import (
+    bracket_control_value,
+)
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
     reject_duplicate_physical_indices,
 )
@@ -1216,35 +1219,42 @@ def _emit_nested_controlled_u(
     block = _prepare_nested_block_for_emit(resolved.block, resolved.local_bindings)
     power = resolve_power(emit_pass, op, bindings)
 
-    unitary_gate = emit_pass._blockvalue_to_gate(
-        block, len(resolved.target_phys), resolved.local_bindings
-    )
-    if unitary_gate is not None:
-        if power > 1:
-            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power)
-        controlled_gate = emit_pass._emitter.gate_controlled(
-            unitary_gate, len(composed_controls)
+    control_value = op.control_value if isinstance(op, ConcreteControlledU) else None
+    with bracket_control_value(
+        emit_pass,
+        circuit,
+        resolved.control_phys,
+        control_value,
+    ):
+        unitary_gate = emit_pass._blockvalue_to_gate(
+            block, len(resolved.target_phys), resolved.local_bindings
         )
-        _checked_append_gate(
-            emit_pass,
-            circuit,
-            controlled_gate,
-            composed_controls + resolved.target_phys,
-            "controlled gate",
-        )
-    else:
-        inner_map = build_controlled_block_qubit_map(
-            emit_pass, block, resolved.target_phys, resolved.local_bindings
-        )
-        for _ in range(power):
-            emit_controlled_operations(
+        if unitary_gate is not None:
+            if power > 1:
+                unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power)
+            controlled_gate = emit_pass._emitter.gate_controlled(
+                unitary_gate, len(composed_controls)
+            )
+            _checked_append_gate(
                 emit_pass,
                 circuit,
-                block.operations,
-                composed_controls,
-                inner_map,
-                resolved.local_bindings,
+                controlled_gate,
+                composed_controls + resolved.target_phys,
+                "controlled gate",
             )
+        else:
+            inner_map = build_controlled_block_qubit_map(
+                emit_pass, block, resolved.target_phys, resolved.local_bindings
+            )
+            for _ in range(power):
+                emit_controlled_operations(
+                    emit_pass,
+                    circuit,
+                    block.operations,
+                    composed_controls,
+                    inner_map,
+                    resolved.local_bindings,
+                )
 
     map_nested_controlled_u_results(op, resolved, qubit_map)
 
@@ -2636,55 +2646,54 @@ def emit_controlled_u(
     block_value = _prepare_nested_block_for_emit(block_value, local_bindings)
 
     power_value = resolve_power(emit_pass, op, bindings)
-    if _should_emit_single_target_block_per_vector_element(
-        block_value, target_qubit_operands, target_indices
+    with bracket_control_value(
+        emit_pass,
+        circuit,
+        control_indices,
+        op.control_value,
     ):
-        _emit_single_target_block_per_vector_element(
-            emit_pass,
-            circuit,
-            block_value,
-            nc,
-            control_indices,
-            target_indices,
-            power_value,
-            local_bindings,
-        )
-        _map_controlled_u_results(
-            op,
-            nc,
-            control_indices,
-            target_qubit_operands,
-            target_index_groups,
-            qubit_map,
-        )
-        return
+        if _should_emit_single_target_block_per_vector_element(
+            block_value, target_qubit_operands, target_indices
+        ):
+            _emit_single_target_block_per_vector_element(
+                emit_pass,
+                circuit,
+                block_value,
+                nc,
+                control_indices,
+                target_indices,
+                power_value,
+                local_bindings,
+            )
+        else:
+            num_targets = len(target_indices)
+            unitary_gate = emit_pass._blockvalue_to_gate(
+                block_value, num_targets, local_bindings
+            )
 
-    num_targets = len(target_indices)
-    unitary_gate = emit_pass._blockvalue_to_gate(
-        block_value, num_targets, local_bindings
-    )
-
-    if unitary_gate is not None:
-        if power_value > 1:
-            unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power_value)
-        controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
-        _checked_append_gate(
-            emit_pass,
-            circuit,
-            controlled_gate,
-            control_indices + target_indices,
-            "controlled gate",
-        )
-    else:
-        emit_pass._emit_controlled_fallback(
-            circuit,
-            block_value,
-            nc,
-            control_indices,
-            target_indices,
-            power_value,
-            local_bindings,
-        )
+            if unitary_gate is not None:
+                if power_value > 1:
+                    unitary_gate = emit_pass._emitter.gate_power(
+                        unitary_gate, power_value
+                    )
+                controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, nc)
+                _checked_append_gate(
+                    emit_pass,
+                    circuit,
+                    controlled_gate,
+                    control_indices + target_indices,
+                    "controlled gate",
+                )
+            else:
+                emit_pass._emit_controlled_fallback(
+                    circuit,
+                    block_value,
+                    nc,
+                    control_indices,
+                    target_indices,
+                    power_value,
+                    local_bindings,
+                )
 
     _map_controlled_u_results(
         op, nc, control_indices, target_qubit_operands, target_index_groups, qubit_map
@@ -2932,6 +2941,11 @@ def emit_controlled_composite_at_indices(
 ) -> None:
     """Emit a composite gate under already-resolved outer controls.
 
+    A non-default activation value applies only to the invocation's own
+    leading controls. Enclosing controls remain ordinary all-ones controls;
+    bracketing the inner controls around the complete call composes correctly
+    even when the enclosing control is inactive.
+
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
         circuit (Any): Backend circuit being emitted into.
@@ -2939,6 +2953,49 @@ def emit_controlled_composite_at_indices(
         control_indices (list[int]): Physical outer control qubits.
         qubit_indices (list[int]): Physical qubits occupied by ``op``'s
             own control and target operands.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Returns:
+        None.
+
+    Raises:
+        EmitError: If the composite has no implementation block or the
+            fallback cannot represent the controlled composite.
+    """
+    own_controls = qubit_indices[: op.num_control_qubits]
+    with bracket_control_value(
+        emit_pass,
+        circuit,
+        own_controls,
+        op.control_value,
+    ):
+        _emit_all_ones_controlled_composite_at_indices(
+            emit_pass,
+            circuit,
+            op,
+            control_indices,
+            qubit_indices,
+            bindings,
+        )
+
+
+def _emit_all_ones_controlled_composite_at_indices(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: InvokeOperation,
+    control_indices: list[int],
+    qubit_indices: list[int],
+    bindings: dict[str, Any],
+) -> None:
+    """Emit an invocation after activation controls have been normalized.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (InvokeOperation): Composite or oracle invocation to emit.
+        control_indices (list[int]): Physical outer control qubits.
+        qubit_indices (list[int]): Physical qubits occupied by ``op``'s own
+            control and target operands.
         bindings (dict[str, Any]): Active emit bindings.
 
     Returns:

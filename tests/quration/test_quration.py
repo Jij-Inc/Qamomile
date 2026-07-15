@@ -167,6 +167,10 @@ def _quration_phased_identity(qubit: qmc.Qubit) -> qmc.Qubit:
 
 
 _quration_controlled_phase = qmc.control(_quration_phased_identity)
+_quration_zero_controlled_phase = qmc.control(
+    _quration_phased_identity,
+    control_value=0,
+)
 
 
 @qmc.qkernel
@@ -175,6 +179,25 @@ def _quration_phase_kickback() -> qmc.Bit:
     control = qmc.h(qmc.qubit("control"))
     target = qmc.qubit("target")
     control, target = _quration_controlled_phase(control, target)
+    control = qmc.h(control)
+    return qmc.measure(control)
+
+
+@qmc.qkernel
+def _quration_zero_control_x() -> qmc.Bit:
+    """Apply X when one control remains in its zero state."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(qmc.x, control_value=0)(control, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _quration_zero_control_phase_kickback() -> qmc.Bit:
+    """Turn a control-zero phase into a deterministic measured bit."""
+    control = qmc.h(qmc.qubit("control"))
+    target = qmc.qubit("target")
+    control, target = _quration_zero_controlled_phase(control, target)
     control = qmc.h(control)
     return qmc.measure(control)
 
@@ -781,6 +804,25 @@ def test_quration_executes_controlled_global_phase_kickback() -> None:
     executable = transpiler.transpile(_quration_phase_kickback)
 
     result = executable.sample(transpiler.executor(seed=9), shots=16).result()
+    assert dict(result.results) == {1: 16}
+
+
+@pytest.mark.quration
+@pytest.mark.parametrize(
+    "kernel",
+    [_quration_zero_control_x, _quration_zero_control_phase_kickback],
+)
+def test_quration_executes_zero_activated_controls(kernel: qmc.QKernel) -> None:
+    """Quration executes X brackets around gate and phase bodies.
+
+    Args:
+        kernel (qmc.QKernel): Zero-activated controlled program.
+    """
+    pytest.importorskip("pyqret")
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(kernel)
+
+    result = executable.sample(transpiler.executor(seed=12), shots=16).result()
     assert dict(result.results) == {1: 16}
 
 
