@@ -335,6 +335,12 @@ class Handle(abc.ABC):
         new_handle._consumed_at = None
         new_handle._consumed_pre_branch = False
         self._copy_subclass_state_to(new_handle)
+        if self.parent is not None and self.indices and self._should_enforce_linear():
+            self.parent._update_direct_borrow_after_consume(
+                self,
+                new_handle,
+                operation_name,
+            )
         return new_handle
 
     def _copy_subclass_state_to(self, new_handle: "Handle") -> None:

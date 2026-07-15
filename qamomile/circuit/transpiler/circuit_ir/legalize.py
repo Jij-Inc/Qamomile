@@ -17,9 +17,9 @@ from __future__ import annotations
 import dataclasses
 import enum
 
-from qamomile._utils import is_close_zero
 from qamomile.circuit.transpiler.circuit_ir.capability import (
     CallControlMode,
+    CallPhaseMode,
     CallTransformCapabilities,
     CircuitCapabilities,
     CompilationPolicy,
@@ -120,11 +120,20 @@ class _Rewriter:
         self._policy = policy
         self._next_wire = 0
 
-    def rewrite_program(self, program: CircuitProgram) -> CircuitProgram:
+    def rewrite_program(
+        self,
+        program: CircuitProgram,
+        inherited_coherent_controls: int = 0,
+        inherited_distributed_controls: int = 0,
+    ) -> CircuitProgram:
         """Rebuild one program with fresh wires and applied decisions.
 
         Args:
             program (CircuitProgram): Program to rewrite.
+            inherited_coherent_controls (int): Enclosing controls that make
+                program phase observable. Defaults to zero.
+            inherited_distributed_controls (int): Enclosing controls that are
+                physically distributed into this program. Defaults to zero.
 
         Returns:
             CircuitProgram: Rebuilt immutable program.
@@ -133,7 +142,12 @@ class _Rewriter:
         input_wires = tuple(self._fresh() for _ in program.input_wires)
         for old, new in zip(program.input_wires, input_wires, strict=True):
             environment[old] = new
-        operations = self._rewrite_region(program.operations, environment)
+        operations = self._rewrite_region(
+            program.operations,
+            environment,
+            inherited_coherent_controls,
+            inherited_distributed_controls,
+        )
         return CircuitProgram(
             name=program.name,
             num_qubits=program.num_qubits,
@@ -177,6 +191,8 @@ class _Rewriter:
         self,
         operations: tuple[CircuitInstruction, ...],
         environment: dict[WireId, WireId],
+        inherited_coherent_controls: int,
+        inherited_distributed_controls: int,
     ) -> list[CircuitInstruction]:
         """Rewrite one structured region.
 
@@ -185,6 +201,9 @@ class _Rewriter:
             environment (dict[WireId, WireId]): Original-to-rebuilt mapping,
                 shared across the whole program because original wires are
                 SSA-unique.
+            inherited_coherent_controls (int): Enclosing coherent controls.
+            inherited_distributed_controls (int): Enclosing controls being
+                distributed into operations in this region.
 
         Returns:
             list[CircuitInstruction]: Rebuilt region instructions.
@@ -242,10 +261,21 @@ class _Rewriter:
                     )
                 )
             elif isinstance(operation, CallInstruction):
-                self._rewrite_call(operation, environment, result)
+                self._rewrite_call(
+                    operation,
+                    environment,
+                    result,
+                    inherited_coherent_controls,
+                    inherited_distributed_controls,
+                )
             elif isinstance(operation, ForInstruction):
                 inputs = self._map(operation.inputs, environment)
-                body = self._rewrite_region(operation.body, environment)
+                body = self._rewrite_region(
+                    operation.body,
+                    environment,
+                    inherited_coherent_controls,
+                    inherited_distributed_controls,
+                )
                 result.append(
                     ForInstruction(
                         indexset=operation.indexset,
@@ -258,9 +288,19 @@ class _Rewriter:
                 )
             elif isinstance(operation, IfInstruction):
                 inputs = self._map(operation.inputs, environment)
-                true_body = self._rewrite_region(operation.true_body, environment)
+                true_body = self._rewrite_region(
+                    operation.true_body,
+                    environment,
+                    inherited_coherent_controls,
+                    inherited_distributed_controls,
+                )
                 true_outputs = self._map(operation.true_outputs, environment)
-                false_body = self._rewrite_region(operation.false_body, environment)
+                false_body = self._rewrite_region(
+                    operation.false_body,
+                    environment,
+                    inherited_coherent_controls,
+                    inherited_distributed_controls,
+                )
                 false_outputs = self._map(operation.false_outputs, environment)
                 result.append(
                     IfInstruction(
@@ -271,11 +311,18 @@ class _Rewriter:
                         true_outputs=true_outputs,
                         false_outputs=false_outputs,
                         outputs=self._define(operation.outputs, environment),
+                        true_global_phase=operation.true_global_phase,
+                        false_global_phase=operation.false_global_phase,
                     )
                 )
             elif isinstance(operation, WhileInstruction):
                 inputs = self._map(operation.inputs, environment)
-                body = self._rewrite_region(operation.body, environment)
+                body = self._rewrite_region(
+                    operation.body,
+                    environment,
+                    inherited_coherent_controls,
+                    inherited_distributed_controls,
+                )
                 result.append(
                     WhileInstruction(
                         condition=operation.condition,
@@ -283,6 +330,7 @@ class _Rewriter:
                         body=tuple(body),
                         body_outputs=self._map(operation.body_outputs, environment),
                         outputs=self._define(operation.outputs, environment),
+                        body_global_phase=operation.body_global_phase,
                     )
                 )
             else:  # pragma: no cover - closed union defensive guard
@@ -339,6 +387,8 @@ class _Rewriter:
         operation: CallInstruction,
         environment: dict[WireId, WireId],
         result: list[CircuitInstruction],
+        inherited_coherent_controls: int,
+        inherited_distributed_controls: int,
     ) -> None:
         """Select a native realization while preserving the call boundary.
 
@@ -346,6 +396,9 @@ class _Rewriter:
             operation (CallInstruction): Original call instruction.
             environment (dict[WireId, WireId]): Original-to-rebuilt mapping.
             result (list[CircuitInstruction]): Region being rebuilt.
+            inherited_coherent_controls (int): Enclosing coherent controls.
+            inherited_distributed_controls (int): Enclosing controls being
+                distributed into this call.
         """
         callee = operation.callee
         identity = callee.identity
@@ -357,7 +410,12 @@ class _Rewriter:
         native = (
             self._policy.prefer_native_semantic_ops
             and native_declaration is not None
-            and native_declaration.accepts(callee)
+            and native_declaration.accepts(callee, inherited_distributed_controls)
+            and (
+                _is_zero_literal(callee.body.global_phase)
+                or native_declaration.call_transforms.phase_mode
+                is not CallPhaseMode.UNSUPPORTED
+            )
         )
         if native:
             assert native_declaration is not None
@@ -368,8 +426,14 @@ class _Rewriter:
                 identity,
                 legalize_body=False,
                 native_realization=native_declaration.realization,
+                inherited_coherent_controls=0,
+                inherited_distributed_controls=0,
             )
             return
+        body_coherent_controls = inherited_coherent_controls + callee.controls
+        body_distributed_controls = 0
+        if self._capabilities.generic_calls.control_mode is CallControlMode.DISTRIBUTE:
+            body_distributed_controls = inherited_distributed_controls + callee.controls
         self._keep_call(
             operation,
             environment,
@@ -377,6 +441,8 @@ class _Rewriter:
             identity,
             legalize_body=True,
             native_realization=None,
+            inherited_coherent_controls=body_coherent_controls,
+            inherited_distributed_controls=body_distributed_controls,
         )
 
     def _keep_call(
@@ -387,6 +453,8 @@ class _Rewriter:
         identity: CallableIdentity | None,
         legalize_body: bool,
         native_realization: str | None,
+        inherited_coherent_controls: int,
+        inherited_distributed_controls: int,
     ) -> None:
         """Retain a call while legalizing its body recursively.
 
@@ -400,13 +468,21 @@ class _Rewriter:
                 this target and therefore requires recursive legalization.
             native_realization (str | None): Selected target realization, or
                 ``None`` to retain the reusable fallback body.
+            inherited_coherent_controls (int): Controls inherited by the
+                fallback body for phase semantics.
+            inherited_distributed_controls (int): Controls physically
+                distributed into the fallback body.
         """
         callee = operation.callee
         rebuilt_body = (
             _Rewriter(
                 self._capabilities,
                 self._policy,
-            ).rewrite_program(callee.body)
+            ).rewrite_program(
+                callee.body,
+                inherited_coherent_controls,
+                inherited_distributed_controls,
+            )
             if legalize_body
             else callee.body
         )
@@ -433,14 +509,15 @@ def _is_zero_literal(expression: ScalarExpr) -> bool:
     Returns:
         bool: True when the expression is ``LiteralExpr(0)`` up to type.
     """
-    return isinstance(expression, LiteralExpr) and is_close_zero(
-        float(expression.value)
-    )
+    return isinstance(expression, LiteralExpr) and not float(expression.value)
 
 
 def _verify_legal_program(
     program: CircuitProgram,
     capabilities: CircuitCapabilities,
+    inherited_coherent_controls: int = 0,
+    inherited_distributed_controls: int = 0,
+    phase_support: CallTransformCapabilities | None = None,
 ) -> None:
     """Verify one complete program against target capabilities.
 
@@ -448,37 +525,141 @@ def _verify_legal_program(
         program (CircuitProgram): Program whose global phase and operations are
             target-legalized.
         capabilities (CircuitCapabilities): Declared target capabilities.
+        inherited_coherent_controls (int): Coherent controls accumulated from
+            enclosing reusable calls. Defaults to zero.
+        inherited_distributed_controls (int): Enclosing controls physically
+            distributed into this program. Defaults to zero.
+        phase_support (CallTransformCapabilities | None): Transform contract
+            responsible for a phase made observable by inherited controls.
+            Defaults to ``None`` at the entrypoint.
 
     Raises:
         TargetCapabilityError: If global phase or any nested instruction lies
             outside the declared target language.
     """
-    if not _is_zero_literal(program.global_phase):
+    _verify_program_phase(
+        program,
+        capabilities,
+        inherited_coherent_controls,
+        phase_support,
+    )
+    _verify_legal_region(
+        program.operations,
+        capabilities,
+        inherited_coherent_controls,
+        inherited_distributed_controls,
+        phase_support,
+    )
+
+
+def _verify_program_phase(
+    program: CircuitProgram,
+    capabilities: CircuitCapabilities,
+    inherited_controls: int,
+    phase_support: CallTransformCapabilities | None,
+) -> None:
+    """Verify one program phase in standalone or coherent-control context.
+
+    Args:
+        program (CircuitProgram): Program whose phase is inspected.
+        capabilities (CircuitCapabilities): Target capability declaration.
+        inherited_controls (int): Number of active coherent controls.
+        phase_support (CallTransformCapabilities | None): Call realization
+            responsible for an observable controlled phase.
+
+    Raises:
+        TargetCapabilityError: If the phase or its scalar expression is not
+            supported in the active context.
+    """
+    _verify_phase(
+        program.global_phase,
+        program.num_qubits,
+        capabilities,
+        inherited_controls,
+        phase_support,
+    )
+
+
+def _verify_phase(
+    phase: ScalarExpr,
+    num_qubits: int,
+    capabilities: CircuitCapabilities,
+    inherited_controls: int,
+    phase_support: CallTransformCapabilities | None,
+) -> None:
+    """Verify one root or structured-region phase.
+
+    Args:
+        phase (ScalarExpr): Phase expression to validate.
+        num_qubits (int): Number of live qubits in the containing program.
+        capabilities (CircuitCapabilities): Target capability declaration.
+        inherited_controls (int): Number of active coherent controls.
+        phase_support (CallTransformCapabilities | None): Call realization
+            responsible for an observable controlled phase.
+
+    Raises:
+        TargetCapabilityError: If the phase cannot be preserved exactly.
+    """
+    if _is_zero_literal(phase):
+        return
+    if inherited_controls:
+        if (
+            phase_support is None
+            or phase_support.phase_mode is CallPhaseMode.UNSUPPORTED
+            or phase_support.controlled_phase_scalars is None
+        ):
+            raise TargetCapabilityError(
+                f"Target '{capabilities.name}' cannot preserve a reusable "
+                "global phase under coherent controls",
+                target=capabilities.name,
+                operation="controlled global phase",
+            )
+        scalar_capabilities = phase_support.controlled_phase_scalars
+        context = "controlled reusable global phase"
+    else:
         if capabilities.global_phase is None:
             raise TargetCapabilityError(
-                f"Target '{capabilities.name}' cannot represent a nonzero "
-                "program-level global phase",
+                f"Target '{capabilities.name}' cannot accept a nonzero "
+                "standalone global phase",
                 target=capabilities.name,
                 operation="global phase",
             )
-        _check_scalar(
-            program.global_phase,
-            capabilities.global_phase,
-            capabilities.name,
-            context="global phase",
-        )
-    _verify_legal_region(program.operations, capabilities)
+        if num_qubits < capabilities.global_phase.min_qubits:
+            raise TargetCapabilityError(
+                f"Target '{capabilities.name}' requires at least "
+                f"{capabilities.global_phase.min_qubits} qubit to preserve a "
+                "nonzero standalone global phase",
+                target=capabilities.name,
+                operation="global phase",
+            )
+        scalar_capabilities = capabilities.global_phase.scalars
+        context = "global phase"
+    _check_scalar(
+        phase,
+        scalar_capabilities,
+        capabilities.name,
+        context=context,
+    )
 
 
 def _verify_legal_region(
     operations: tuple[CircuitInstruction, ...],
     capabilities: CircuitCapabilities,
+    inherited_coherent_controls: int = 0,
+    inherited_distributed_controls: int = 0,
+    phase_support: CallTransformCapabilities | None = None,
 ) -> None:
     """Verify one structured region against target capabilities.
 
     Args:
         operations (tuple[CircuitInstruction, ...]): Region instructions.
         capabilities (CircuitCapabilities): Declared target capabilities.
+        inherited_coherent_controls (int): Coherent controls inherited by this
+            region. Defaults to zero.
+        inherited_distributed_controls (int): Controls physically distributed
+            into this region. Defaults to zero.
+        phase_support (CallTransformCapabilities | None): Transform contract
+            responsible for phases under inherited controls. Defaults to None.
 
     Raises:
         TargetCapabilityError: If any nested instruction is illegal for the
@@ -540,7 +721,10 @@ def _verify_legal_region(
                 if (
                     declaration is None
                     or declaration.realization != realization
-                    or not declaration.accepts(operation.callee)
+                    or not declaration.accepts(
+                        operation.callee,
+                        inherited_distributed_controls,
+                    )
                 ):
                     raise TargetCapabilityError(
                         f"Native realization {realization!r} survived legalization "
@@ -552,9 +736,35 @@ def _verify_legal_region(
                 # The fallback body is retained for other targets but is not
                 # executed by this target's native realization. Structural
                 # verification already recursed into it via verify_circuit().
+                assert declaration is not None
+                effective_controls = (
+                    inherited_coherent_controls + operation.callee.controls
+                )
+                _verify_program_phase(
+                    operation.callee.body,
+                    capabilities,
+                    effective_controls,
+                    declaration.call_transforms,
+                )
                 continue
-            _verify_call(operation, capabilities)
-            _verify_legal_program(operation.callee.body, capabilities)
+            _verify_call(
+                operation,
+                capabilities,
+                inherited_distributed_controls,
+            )
+            effective_controls = inherited_coherent_controls + operation.callee.controls
+            distributed_controls = 0
+            if capabilities.generic_calls.control_mode is CallControlMode.DISTRIBUTE:
+                distributed_controls = (
+                    inherited_distributed_controls + operation.callee.controls
+                )
+            _verify_legal_program(
+                operation.callee.body,
+                capabilities,
+                inherited_coherent_controls=effective_controls,
+                inherited_distributed_controls=distributed_controls,
+                phase_support=capabilities.generic_calls,
+            )
         elif isinstance(operation, IfInstruction):
             if not capabilities.supports_dynamic_if:
                 raise TargetCapabilityError(
@@ -569,8 +779,34 @@ def _verify_legal_region(
                 capabilities.name,
                 context="if predicate",
             )
-            _verify_legal_region(operation.true_body, capabilities)
-            _verify_legal_region(operation.false_body, capabilities)
+            _verify_phase(
+                operation.true_global_phase,
+                len(operation.inputs),
+                capabilities,
+                inherited_coherent_controls,
+                phase_support,
+            )
+            _verify_phase(
+                operation.false_global_phase,
+                len(operation.inputs),
+                capabilities,
+                inherited_coherent_controls,
+                phase_support,
+            )
+            _verify_legal_region(
+                operation.true_body,
+                capabilities,
+                inherited_coherent_controls,
+                inherited_distributed_controls,
+                phase_support,
+            )
+            _verify_legal_region(
+                operation.false_body,
+                capabilities,
+                inherited_coherent_controls,
+                inherited_distributed_controls,
+                phase_support,
+            )
         elif isinstance(operation, WhileInstruction):
             if not capabilities.supports_dynamic_while:
                 raise TargetCapabilityError(
@@ -585,21 +821,43 @@ def _verify_legal_region(
                 capabilities.name,
                 context="while predicate",
             )
-            _verify_legal_region(operation.body, capabilities)
+            _verify_phase(
+                operation.body_global_phase,
+                len(operation.inputs),
+                capabilities,
+                inherited_coherent_controls,
+                phase_support,
+            )
+            _verify_legal_region(
+                operation.body,
+                capabilities,
+                inherited_coherent_controls,
+                inherited_distributed_controls,
+                phase_support,
+            )
         elif isinstance(operation, ForInstruction):
-            _verify_legal_region(operation.body, capabilities)
+            _verify_legal_region(
+                operation.body,
+                capabilities,
+                inherited_coherent_controls,
+                inherited_distributed_controls,
+                phase_support,
+            )
         # Measure and barrier instructions are legal on every circuit target.
 
 
 def _verify_call(
     operation: CallInstruction,
     capabilities: CircuitCapabilities,
+    inherited_distributed_controls: int,
 ) -> None:
     """Verify a generic reusable call against target call capabilities.
 
     Args:
         operation (CallInstruction): Generic call to inspect.
         capabilities (CircuitCapabilities): Declared target capabilities.
+        inherited_distributed_controls (int): Controls physically distributed
+            from enclosing calls.
 
     Raises:
         TargetCapabilityError: If transforms or a nonunitary body are not
@@ -607,7 +865,7 @@ def _verify_call(
     """
     callee = operation.callee
     support = capabilities.generic_calls
-    if not support.accepts(callee):
+    if not support.accepts(callee, inherited_distributed_controls):
         raise TargetCapabilityError(
             f"Target '{capabilities.name}' cannot realize reusable call "
             f"transforms (power={callee.power}, inverse={callee.inverse}, "
@@ -631,7 +889,8 @@ def _verify_call(
             target=capabilities.name,
             operation="CallInstruction",
         )
-    if callee.controls and support.control_mode is CallControlMode.DISTRIBUTE:
+    effective_controls = inherited_distributed_controls + callee.controls
+    if effective_controls and support.control_mode is CallControlMode.DISTRIBUTE:
         _verify_distributed_control_region(
             callee.body.operations,
             support,
@@ -727,12 +986,6 @@ def _verify_distributed_control_region(
             )
         elif isinstance(operation, ForInstruction):
             _verify_distributed_control_region(operation.body, support, target_name)
-        elif isinstance(operation, CallInstruction):
-            _verify_distributed_control_region(
-                operation.callee.body.operations,
-                support,
-                target_name,
-            )
 
 
 class _ParameterForm(enum.Enum):

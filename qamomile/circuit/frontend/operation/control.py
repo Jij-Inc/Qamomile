@@ -41,6 +41,7 @@ from qamomile.circuit.frontend.qkernel_specialization import (
     select_specialized_block,
 )
 from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
     CallableRef,
     CallTransform,
@@ -51,6 +52,8 @@ from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
@@ -278,6 +281,11 @@ class ControlledGate:
         controlled_phase = qmc.control(phase_gate)
         ctrl_out, tgt_out = controlled_phase(ctrl, target, theta=0.5)
 
+        # Add a call-site target phase. Under control this is observable.
+        ctrl_out, tgt_out = controlled_phase(
+            ctrl, target, theta=0.5, global_phase=phi
+        )
+
         # Double-controlled
         cc_phase = qmc.control(phase_gate, num_controls=2)
         c0, c1, tgt = cc_phase(ctrl0, ctrl1, target, theta=0.5)
@@ -423,6 +431,96 @@ class ControlledGate:
                 )
             return power
         raise TypeError(f"power must be int or UInt, got {type(power).__name__}.")
+
+    @staticmethod
+    def _normalize_global_phase(
+        global_phase: float | int | Float,
+    ) -> Value | None:
+        """Normalize a controlled target's call-site global phase.
+
+        The returned value is appended as a classical operand of a private
+        phase-augmented block. Literal zero is the only value omitted here;
+        symbolic expressions, including expressions that may later fold to
+        zero, remain visible to the ordinary compiler pipeline.
+
+        Args:
+            global_phase (float | int | Float): Target-global phase in radians.
+
+        Returns:
+            Value | None: Scalar phase value, or ``None`` for exact literal
+            zero.
+
+        Raises:
+            TypeError: If ``global_phase`` is not a Python number or Qamomile
+            ``Float`` handle.
+        """
+        # Import lazily because ``global_phase`` reuses this module's callable
+        # adapter. The dependency is acyclic once both modules are initialized.
+        from qamomile.circuit.frontend.operation.global_phase import _phase_to_value
+
+        phase = _phase_to_value(
+            global_phase,
+            caller="control(): global_phase",
+        )
+        if phase.is_constant():
+            concrete = phase.get_const()
+            if concrete is not None and not float(concrete):
+                return None
+        return phase
+
+    @staticmethod
+    def _with_global_phase(block: Block, phase: Value | None) -> Block:
+        """Return a call-site block whose target unitary includes ``phase``.
+
+        The source qkernel and its cached block must remain immutable because
+        one controlled wrapper may be called repeatedly with different phase
+        values. A fresh internal Float formal closes the derived block, while
+        the caller supplies the actual phase as the final classical operand.
+
+        Args:
+            block (Block): Specialized target block for this call site.
+            phase (Value | None): Actual caller-side phase, or ``None`` when
+                no phase augmentation is needed.
+
+        Returns:
+            Block: ``block`` unchanged for no phase, otherwise a shallow
+            structural clone with one phase formal and one trailing
+            ``GlobalPhaseOperation``. Existing operations are shared but never
+            mutated.
+        """
+        if phase is None:
+            return block
+
+        base_label = "__qamomile_global_phase"
+        occupied = {
+            *block.label_args,
+            *(value.name for value in block.input_values if value.name),
+        }
+        label = base_label
+        suffix = 2
+        while label in occupied:
+            label = f"{base_label}_{suffix}"
+            suffix += 1
+
+        formal = Value(type=FloatType(), name=label)
+        label_args = [*block.label_args, label] if block.label_args else []
+        operations = list(block.operations)
+        insert_at = (
+            len(operations) - 1
+            if operations and isinstance(operations[-1], ReturnOperation)
+            else len(operations)
+        )
+        operations.insert(
+            insert_at,
+            GlobalPhaseOperation(operands=[formal], results=[]),
+        )
+        return dataclasses.replace(
+            block,
+            name=f"{block.name}_global_phase" if block.name else "global_phase",
+            label_args=label_args,
+            input_values=[*block.input_values, formal],
+            operations=operations,
+        )
 
     def _params_to_operands(
         self,
@@ -572,6 +670,8 @@ class ControlledGate:
         power: int | Value,
         num_target_qubits: int | None = None,
         block: Any | None = None,
+        *,
+        has_call_global_phase: bool = False,
     ) -> ControlledUOperation | InvokeOperation:
         """Create the controlled operation and add it to the tracer.
 
@@ -592,6 +692,10 @@ class ControlledGate:
                 identity. Defaults to ``None``.
             block (Any | None): Specialized source body. Defaults to the wrapped
                 qkernel block.
+            has_call_global_phase (bool): Whether ``block`` is a call-site
+                phase augmentation. Such calls remain structural ControlledU
+                operations instead of claiming the source composite's native
+                identity. Defaults to False.
 
         Returns:
             ControlledUOperation | InvokeOperation: Emitted controlled
@@ -604,6 +708,7 @@ class ControlledGate:
             and isinstance(num_controls, int)
             and power == 1
             and not self._control_values
+            and not has_call_global_phase
         ):
             attrs = self._callable_attrs()
             attrs["num_control_qubits"] = num_controls
@@ -1367,6 +1472,7 @@ class ControlledGate:
         args: tuple[Any, ...],
         sub_kwargs: dict[str, Any],
         power: int | Value,
+        global_phase: Value | None,
     ) -> tuple[Any, ...]:
         """Concrete-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
@@ -1382,6 +1488,8 @@ class ControlledGate:
                 the reserved ``power`` and ``control_indices`` keys.
             power (int | Value): Normalised power (output of
                 :meth:`_normalize_power`).
+            global_phase (Value | None): Normalized target-global phase for
+                this controlled call.
 
         Returns:
             tuple[Any, ...]: One output handle per input handle, in the
@@ -1401,6 +1509,9 @@ class ControlledGate:
         num_controls = cast(int, self._num_controls)
         prep = self._prepare_concrete(args, sub_kwargs, num_controls)
         block = self._block_for_sub_call(prep.sub_args_resolved)
+        block = self._with_global_phase(block, global_phase)
+        if global_phase is not None:
+            prep.operands.append(global_phase)
         target_widths = [
             self._try_entry_qubit_count(entry) for entry in prep.consumed_sub_quantum
         ]
@@ -1417,6 +1528,7 @@ class ControlledGate:
             power,
             num_target_qubits=num_target_qubits,
             block=block,
+            has_call_global_phase=global_phase is not None,
         )
 
         return self._wrap_results_by_input_kind(
@@ -1540,6 +1652,7 @@ class ControlledGate:
         self,
         *args: Any,
         power: int | UInt = 1,
+        global_phase: float | int | Float = 0.0,
         control_indices: Sequence[int | UInt] | None = None,
         **params: ParamValue,
     ) -> tuple[Any, ...]:
@@ -1584,13 +1697,20 @@ class ControlledGate:
                 be a strictly positive integer (``UInt`` handles are
                 accepted for symbolic powers, e.g. ``2 ** k`` in QPE).
                 Defaults to ``1``.
+            global_phase (float | int | Float): Global phase attached to the
+                target unitary before power and control. The exact semantics
+                are ``control((exp(i * global_phase) * U) ** power)``; under
+                control this becomes an observable relative phase on the
+                all-active control subspace. Defaults to ``0.0``.
             control_indices (Sequence[int | UInt] | None): Symbolic
                 mode only — see above.  Defaults to ``None`` which
                 means "use the entire control pool".  Passing a
                 non-``None`` value in concrete mode raises
                 :class:`ValueError`.
             **params (ParamValue): Sub-kernel classical parameters
-                (``theta=...``, etc.).
+                (``theta=...``, etc.). The names ``power``, ``global_phase``,
+                and ``control_indices`` are reserved by this controlled-call
+                protocol; pass a same-named sub-kernel parameter positionally.
 
         Returns:
             tuple[Any, ...]: One output handle per input handle, in
@@ -1605,9 +1725,10 @@ class ControlledGate:
                 concrete mode, or the qubit-count split in concrete
                 mode falls inside an argument.
             TypeError: ``power`` is not a positive integer / ``UInt``,
-                a ``control_indices`` entry is not ``int`` / ``UInt``,
-                or a sub-kernel kwarg does not match the wrapped
-                kernel's signature.
+                ``global_phase`` is not a number / ``Float``, a
+                ``control_indices`` entry is not ``int`` / ``UInt``, or a
+                sub-kernel kwarg does not match the wrapped kernel's
+                signature.
             QubitConsumedError / QubitBorrowConflictError: Duplicate
                 physical qubits across the control + sub-kernel args
                 (caught by the ``Handle.consume()`` / array
@@ -1615,10 +1736,17 @@ class ControlledGate:
                 already consumed before the call.
         """
         normalized_power = self._normalize_power(power)
+        normalized_global_phase = self._normalize_global_phase(global_phase)
         num_controls = self._num_controls
 
         if isinstance(num_controls, UInt):
-            return self._call_symbolic(args, normalized_power, params, control_indices)
+            return self._call_symbolic(
+                args,
+                normalized_power,
+                normalized_global_phase,
+                params,
+                control_indices,
+            )
 
         if control_indices is not None:
             raise ValueError(
@@ -1627,7 +1755,12 @@ class ControlledGate:
                 "concrete-mode controls are positional and have no "
                 "selection step (see design §1.1)."
             )
-        return self._call_concrete(args, params, normalized_power)
+        return self._call_concrete(
+            args,
+            params,
+            normalized_power,
+            normalized_global_phase,
+        )
 
     def _normalize_control_indices(
         self,
@@ -1704,6 +1837,7 @@ class ControlledGate:
         self,
         args: tuple[Any, ...],
         power: int | Value,
+        global_phase: Value | None,
         sub_kwargs: dict[str, Any],
         control_indices: Sequence[int | UInt] | None,
     ) -> tuple[Any, ...]:
@@ -1718,8 +1852,11 @@ class ControlledGate:
             args (tuple[Any, ...]): Positional arguments to ``cg(...)``.
             power (int | Value): Normalised power (output of
                 :meth:`_normalize_power`).
+            global_phase (Value | None): Normalized target-global phase for
+                this controlled call.
             sub_kwargs (dict[str, Any]): Caller kwargs after stripping
-                the reserved ``power`` and ``control_indices`` keys.
+                the reserved ``power``, ``global_phase``, and
+                ``control_indices`` keys.
             control_indices (Sequence[int | UInt] | None): The
                 caller-supplied selection (or ``None`` to use the
                 entire pool).
@@ -1849,6 +1986,10 @@ class ControlledGate:
             operands.append(op_value)
             sub_quantum_results.append(op_value.next_version())
         self._params_to_operands(sub_classical_dict, operands)
+        block = self._block_for_sub_call(sub_args_resolved)
+        block = self._with_global_phase(block, global_phase)
+        if global_phase is not None:
+            operands.append(global_phase)
 
         results: list[Value] = control_results + sub_quantum_results
 
@@ -1858,7 +1999,7 @@ class ControlledGate:
             num_controls=num_controls.value,
             control_indices=ci_values,
             power=power,
-            block=self._block_for_sub_call(sub_args_resolved),
+            block=block,
             num_control_args=len(consumed_controls),
             callable_ref=self._callable_ref(),
             callable_attrs=self._callable_attrs(),
@@ -2494,8 +2635,15 @@ def control(
             containing zero.
 
     Returns:
-        A ``ControlledGate`` that can be called with
-        ``(*controls, *targets, **params)``.
+        For a qkernel or gate callable, a ``ControlledGate`` that can be called
+        with ``(*controls, *targets, power=..., global_phase=..., **params)``.
+        The call-site phase has semantics
+        ``control((exp(i * global_phase) * U) ** power)`` and therefore becomes
+        relative phase on the all-active control subspace. ``power``,
+        ``global_phase``, and ``control_indices`` are reserved keyword names;
+        a same-named target parameter can still be supplied positionally. For
+        an ``Oracle``, an opaque qubit-only controlled wrapper is returned;
+        these call-site modifiers are not supported by that wrapper.
 
     Raises:
         TypeError: If ``qkernel`` is a callable that cannot be auto-wrapped
@@ -2511,6 +2659,11 @@ def control(
 
             crx = qmc.control(qmc.rx)
             ctrl_out, tgt_out = crx(ctrl, target, angle=0.5)
+
+            # Target-global phase becomes observable after control.
+            ctrl_out, tgt_out = crx(
+                ctrl, target, angle=0.5, global_phase=theta
+            )
 
             cch = qmc.control(qmc.h, num_controls=2)
             c0, c1, tgt = cch(ctrl0, ctrl1, target)

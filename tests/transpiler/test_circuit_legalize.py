@@ -17,13 +17,17 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ARITHMETIC_BINARY_OPERATORS,
     QFT_SEMANTIC_KEY,
     CallableIdentity,
+    CallControlMode,
     CallInstruction,
+    CallPhaseMode,
     CallTransformCapabilities,
     CircuitBuilder,
     CircuitCapabilities,
     CircuitProgram,
     ClassicalBitExpr,
     CompilationPolicy,
+    GlobalPhaseCapabilities,
+    IfInstruction,
     LiteralExpr,
     NativeSemanticOpCapabilities,
     ParameterExpr,
@@ -35,6 +39,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ScalarExpressionForm,
     SemanticArguments,
     UnaryOperator,
+    WhileInstruction,
     legalize_program,
     verify_circuit,
     verify_target_legal,
@@ -72,8 +77,14 @@ def _capabilities(**overrides: object) -> CircuitCapabilities:
             parameter_form=ScalarExpressionForm.ARBITRARY,
         ),
         pauli_time=numeric,
-        global_phase=numeric,
-        generic_calls=CallTransformCapabilities(True, True, None),
+        global_phase=GlobalPhaseCapabilities(numeric),
+        generic_calls=CallTransformCapabilities(
+            True,
+            True,
+            None,
+            phase_mode=CallPhaseMode.NATIVE_BODY,
+            controlled_phase_scalars=numeric,
+        ),
         supports_dynamic_if=True,
         supports_dynamic_while=True,
         supports_reset=True,
@@ -126,6 +137,41 @@ def _semantic_program(controls: int = 0) -> CircuitProgram:
     return builder.freeze()
 
 
+def _nested_call_program(
+    *,
+    outer_controls: int,
+    inner_controls: int,
+    semantic_inner: bool = False,
+) -> CircuitProgram:
+    """Build two nested reusable calls with independently added controls."""
+    inner_body = CircuitBuilder(1, 0, name="inner-body")
+    inner_body.append_gate(GateKind.H, (0,))
+    inner = ReusableCircuit(
+        inner_body.freeze(),
+        "inner",
+        controls=inner_controls,
+        identity=(
+            CallableIdentity(key=QFT_SEMANTIC_KEY, symbol="inner")
+            if semantic_inner
+            else None
+        ),
+        operand_widths=(1,),
+    )
+    outer_body = CircuitBuilder(1 + inner_controls, 0, name="outer-body")
+    outer_body.append_call(inner, tuple(range(1 + inner_controls)))
+    outer = ReusableCircuit(
+        outer_body.freeze(),
+        "outer",
+        controls=outer_controls,
+    )
+    caller = CircuitBuilder(1 + inner_controls + outer_controls, 0)
+    caller.append_call(
+        outer,
+        tuple(range(1 + inner_controls + outer_controls)),
+    )
+    return caller.freeze()
+
+
 class TestSemanticLegalization:
     """Legalization decisions for semantic-tagged calls."""
 
@@ -175,6 +221,165 @@ class TestSemanticLegalization:
 
         verify_circuit(legalized)
         verify_target_legal(legalized, capabilities)
+
+    def test_native_semantic_op_with_fallback_phase_is_demoted(self):
+        """A native form without phase semantics retains the phased fallback."""
+        program = _semantic_program(controls=1)
+        call = program.operations[0]
+        assert isinstance(call, CallInstruction)
+        phased_call = dataclasses.replace(
+            call,
+            callee=dataclasses.replace(
+                call.callee,
+                body=dataclasses.replace(
+                    call.callee.body,
+                    global_phase=LiteralExpr(1e-16),
+                ),
+            ),
+        )
+        phased_program = dataclasses.replace(
+            program,
+            operations=(phased_call, *program.operations[1:]),
+        )
+        capabilities = _capabilities(
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.qft",
+                    CallTransformCapabilities(True, True, None),
+                ),
+            ),
+        )
+
+        legalized = legalize_program(
+            phased_program,
+            capabilities,
+            CompilationPolicy(),
+        )
+        legalized_call = legalized.operations[0]
+        assert isinstance(legalized_call, CallInstruction)
+        assert legalized_call.callee.native_realization is None
+        assert legalized_call.callee.body.global_phase == LiteralExpr(1e-16)
+        verify_circuit(legalized)
+        verify_target_legal(legalized, capabilities)
+
+    def test_native_semantic_op_with_explicit_phase_correction_is_preserved(self):
+        """A native materializer may retain a phase via explicit correction."""
+        program = _semantic_program(controls=1)
+        call = program.operations[0]
+        assert isinstance(call, CallInstruction)
+        phased_call = dataclasses.replace(
+            call,
+            callee=dataclasses.replace(
+                call.callee,
+                body=dataclasses.replace(
+                    call.callee.body,
+                    global_phase=ParameterExpr("theta"),
+                ),
+            ),
+        )
+        phased_program = dataclasses.replace(
+            program,
+            operations=(phased_call, *program.operations[1:]),
+        )
+        numeric = _capabilities().gate_parameters
+        capabilities = _capabilities(
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.qft",
+                    CallTransformCapabilities(
+                        True,
+                        True,
+                        None,
+                        phase_mode=CallPhaseMode.EXPLICIT_CORRECTION,
+                        controlled_phase_scalars=numeric,
+                    ),
+                ),
+            ),
+        )
+
+        legalized = legalize_program(
+            phased_program,
+            capabilities,
+            CompilationPolicy(),
+        )
+        legalized_call = legalized.operations[0]
+        assert isinstance(legalized_call, CallInstruction)
+        assert legalized_call.callee.native_realization == "test.qft"
+        assert legalized_call.callee.body.global_phase == ParameterExpr("theta")
+        verify_circuit(legalized)
+        verify_target_legal(legalized, capabilities)
+
+    @pytest.mark.parametrize(
+        ("control_mode", "expected_native"),
+        [
+            (CallControlMode.WHOLE_CALL, "test.inner"),
+            (CallControlMode.DISTRIBUTE, None),
+        ],
+    )
+    def test_native_selection_uses_only_physically_distributed_controls(
+        self,
+        control_mode: CallControlMode,
+        expected_native: str | None,
+    ) -> None:
+        """Whole-call controls do not leak into nested native call shapes."""
+        generic = dataclasses.replace(
+            _capabilities().generic_calls,
+            max_controls=1,
+            control_mode=control_mode,
+            controlled_gate_kinds=ALL_PRIMITIVE_GATES,
+        )
+        capabilities = _capabilities(
+            generic_calls=generic,
+            native_semantic_ops=(
+                NativeSemanticOpCapabilities(
+                    QFT_SEMANTIC_KEY,
+                    "test.inner",
+                    CallTransformCapabilities(
+                        supports_power=True,
+                        supports_inverse=True,
+                        max_controls=0,
+                    ),
+                    operand_widths=(1,),
+                ),
+            ),
+        )
+
+        legalized = legalize_program(
+            _nested_call_program(
+                outer_controls=1,
+                inner_controls=0,
+                semantic_inner=True,
+            ),
+            capabilities,
+            CompilationPolicy(),
+        )
+        [outer] = legalized.operations
+        assert isinstance(outer, CallInstruction)
+        [inner] = outer.callee.body.operations
+        assert isinstance(inner, CallInstruction)
+        assert inner.callee.native_realization == expected_native
+        verify_circuit(legalized)
+        verify_target_legal(legalized, capabilities)
+
+    def test_distributed_nested_controls_respect_effective_limit(self) -> None:
+        """Nested distributed calls cannot exceed the cumulative control cap."""
+        generic = dataclasses.replace(
+            _capabilities().generic_calls,
+            max_controls=1,
+            control_mode=CallControlMode.DISTRIBUTE,
+            controlled_gate_kinds=ALL_PRIMITIVE_GATES,
+        )
+        capabilities = _capabilities(generic_calls=generic)
+        legalized = legalize_program(
+            _nested_call_program(outer_controls=1, inner_controls=1),
+            capabilities,
+            CompilationPolicy(),
+        )
+
+        with pytest.raises(TargetCapabilityError, match="reusable call transforms"):
+            verify_target_legal(legalized, capabilities)
 
     def test_native_semantic_op_rejects_incompatible_operand_grouping(self):
         """A backend vector API is not selected for two scalar operands."""
@@ -356,6 +561,49 @@ class TestSemanticLegalization:
 class TestTargetLegalityVerification:
     """Target verification proves programs against declared capabilities."""
 
+    def test_outer_control_preserves_phase_in_nested_reusable_body(self):
+        """Inherited controls make a deeply nested reusable phase observable."""
+        phase_body = CircuitBuilder(1, 0, name="phase-body")
+        phase_body.add_global_phase(ParameterExpr("theta"))
+        middle_body = CircuitBuilder(1, 0, name="middle-body")
+        middle_body.append_call(
+            ReusableCircuit(phase_body.freeze(), "phase-body"),
+            (0,),
+        )
+        caller = CircuitBuilder(2, 0)
+        caller.append_call(
+            ReusableCircuit(middle_body.freeze(), "outer", controls=1),
+            (0, 1),
+        )
+        program = caller.freeze()
+        permissive = _capabilities()
+        explicit_phase = dataclasses.replace(
+            permissive.generic_calls,
+            phase_mode=CallPhaseMode.EXPLICIT_CORRECTION,
+        )
+        capabilities = _capabilities(generic_calls=explicit_phase)
+        legalized = legalize_program(
+            program,
+            capabilities,
+            CompilationPolicy(),
+        )
+
+        verify_circuit(legalized)
+        verify_target_legal(legalized, capabilities)
+
+        unsupported = _capabilities(
+            generic_calls=dataclasses.replace(
+                explicit_phase,
+                phase_mode=CallPhaseMode.UNSUPPORTED,
+                controlled_phase_scalars=None,
+            )
+        )
+        with pytest.raises(
+            TargetCapabilityError,
+            match="global phase under coherent controls",
+        ):
+            verify_target_legal(legalized, unsupported)
+
     def test_rejects_dynamic_if(self):
         """Measurement-conditioned branching fails on a static target."""
         builder = CircuitBuilder(1, 1)
@@ -453,8 +701,8 @@ class TestTargetLegalityVerification:
         with pytest.raises(TargetCapabilityError, match="classical-bit"):
             verify_target_legal(legalized, capabilities)
 
-    def test_rejects_quration_controlled_reusable_call(self):
-        """Quration rejects controlled calls before PyQret materialization."""
+    def test_rejects_undeclared_quration_controlled_body_gate(self):
+        """Quration rejects undeclared controlled gates before PyQret use."""
         from qamomile.quration.materializer import PyQretMaterializer
 
         capabilities = PyQretMaterializer().capabilities
@@ -464,7 +712,7 @@ class TestTargetLegalityVerification:
             CompilationPolicy(),
         )
 
-        with pytest.raises(TargetCapabilityError, match="reusable call transforms"):
+        with pytest.raises(TargetCapabilityError, match="onto CP"):
             verify_target_legal(legalized, capabilities)
 
     def test_rejects_unsupported_distributed_control_gate(self):
@@ -509,12 +757,75 @@ class TestTargetLegalityVerification:
         with pytest.raises(TargetCapabilityError, match="supplied through bindings"):
             verify_target_legal(legalized, capabilities)
 
-    def test_rejects_unsupported_program_global_phase(self):
-        """A target without global phase support rejects it before materialization."""
+    def test_legalization_preserves_structured_region_phases(self) -> None:
+        """Rewriting retains phase metadata on every dynamic region."""
+        builder = CircuitBuilder(1, 1)
+        theta = ParameterExpr("theta")
+        branch_context = builder.begin_if(ClassicalBitExpr(0))
+        builder.add_global_phase(theta)
+        loop_context = builder.begin_while(ClassicalBitExpr(0))
+        builder.add_global_phase(0.25)
+        builder.end_while(loop_context)
+        builder.begin_else(branch_context)
+        builder.add_global_phase(0.5)
+        builder.end_if(branch_context)
+
+        legalized = legalize_program(
+            builder.freeze(),
+            _capabilities(),
+            CompilationPolicy(),
+        )
+
+        [branch] = legalized.operations
+        assert isinstance(branch, IfInstruction)
+        assert branch.true_global_phase == theta
+        assert branch.false_global_phase == LiteralExpr(0.5)
+        [loop] = branch.true_body
+        assert isinstance(loop, WhileInstruction)
+        assert loop.body_global_phase == LiteralExpr(0.25)
+        verify_target_legal(legalized, _capabilities())
+
+    def test_structured_phase_requires_target_support(self) -> None:
+        """A target rejects rather than discards an unsupported branch phase."""
+        builder = CircuitBuilder(1, 1)
+        context = builder.begin_if(ClassicalBitExpr(0))
+        builder.add_global_phase(0.25)
+        builder.end_if(context)
+        capabilities = _capabilities(global_phase=None)
+
+        with pytest.raises(TargetCapabilityError, match="standalone global phase"):
+            verify_target_legal(builder.freeze(), capabilities)
+
+    def test_structured_phase_checks_minimum_qubit_width(self) -> None:
+        """Region-local synthesis requirements are checked explicitly."""
+        builder = CircuitBuilder(0, 1)
+        context = builder.begin_while(ClassicalBitExpr(0))
+        builder.add_global_phase(0.25)
+        builder.end_while(context)
+        base = _capabilities()
+        assert base.global_phase is not None
+        capabilities = _capabilities(
+            global_phase=dataclasses.replace(base.global_phase, min_qubits=1)
+        )
+
+        with pytest.raises(TargetCapabilityError, match="at least 1 qubit"):
+            verify_target_legal(builder.freeze(), capabilities)
+
+    def test_measurement_dependent_root_phase_is_rejected_not_discarded(self) -> None:
+        """Unsupported runtime scalar syntax reaches target validation."""
+        builder = CircuitBuilder(1, 1)
+        builder.add_global_phase(0.25 * ClassicalBitExpr(0))
+
+        with pytest.raises(TargetCapabilityError, match="classical-bit"):
+            verify_target_legal(builder.freeze(), _capabilities())
+
+    def test_quri_preserves_standalone_phase_and_checks_scalar_form(self):
+        """A preserved QURI phase obeys its linear-expression capability."""
         from qamomile.quri_parts.materializer import QuriPartsMaterializer
 
         builder = CircuitBuilder(1, 0)
-        builder.add_global_phase(0.5)
+        theta = ParameterExpr("theta")
+        builder.add_global_phase(theta * theta)
         capabilities = QuriPartsMaterializer().capabilities
         legalized = legalize_program(
             builder.freeze(),
@@ -522,8 +833,22 @@ class TestTargetLegalityVerification:
             CompilationPolicy(),
         )
 
-        with pytest.raises(TargetCapabilityError, match="global phase"):
+        assert capabilities.global_phase is not None
+        with pytest.raises(TargetCapabilityError, match="non-linear in runtime"):
             verify_target_legal(legalized, capabilities)
+
+    def test_preserved_phase_can_require_a_physical_carrier_qubit(self):
+        """A target rejects a phase when its exact synthesis lacks a carrier."""
+        builder = CircuitBuilder(0, 0)
+        builder.add_global_phase(0.25)
+        base = _capabilities()
+        assert base.global_phase is not None
+        capabilities = _capabilities(
+            global_phase=dataclasses.replace(base.global_phase, min_qubits=1)
+        )
+
+        with pytest.raises(TargetCapabilityError, match="at least 1 qubit"):
+            verify_target_legal(builder.freeze(), capabilities)
 
     def test_pauli_realization_is_selected_by_policy(self):
         """Legalization fixes native versus gadget Pauli realization."""

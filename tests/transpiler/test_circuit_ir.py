@@ -7,15 +7,21 @@ import dataclasses
 import pytest
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.circuit_ir import (
     CallInstruction,
     CircuitBuilder,
+    CircuitLoweringPass,
     ClassicalBitExpr,
+    ForInstruction,
     GateInstruction,
     IfInstruction,
+    LiteralExpr,
+    LoopVariableExpr,
     MaterializedCircuit,
     MeasureVectorInstruction,
     ParameterExpr,
+    PauliEvolutionInstruction,
     ReusableCircuit,
     WhileInstruction,
     WireId,
@@ -66,6 +72,33 @@ def _semantic_helper_caller() -> qmc.Bit:
     qubit = qmc.qubit("qubit")
     qubit = _semantic_helper(qubit)
     return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _controlled_pauli_body(
+    qubits: qmc.Vector[qmc.Qubit],
+    hamiltonian: qmc.Observable,
+    time: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a Pauli evolution inside a controlled reusable body."""
+    return qmc.pauli_evolve(qubits, hamiltonian, time)
+
+
+@qmc.qkernel
+def _controlled_pauli_entrypoint(
+    hamiltonian: qmc.Observable,
+    time: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Expose a controlled Pauli identity term to circuit lowering."""
+    qubits = qmc.qubit_array(2, "qubits")
+    qubits[0], target = qmc.control(_controlled_pauli_body)(
+        qubits[0],
+        qubits[1:2],
+        hamiltonian=hamiltonian,
+        time=time,
+    )
+    qubits[1:2] = target
+    return qmc.measure(qubits)
 
 
 @qmc.qkernel
@@ -150,6 +183,262 @@ def test_builder_encodes_structured_loops() -> None:
     assert len(program.operations) == 2
 
 
+def test_builder_accumulates_phase_across_nested_static_for_loops() -> None:
+    """Static loop phases scale by each concrete trip count at the root."""
+    builder = CircuitBuilder(1, 0)
+    theta = ParameterExpr("theta")
+    builder.add_global_phase(0.125)
+    builder.begin_for(range(2))
+    builder.add_global_phase(0.25)
+    builder.begin_for(range(1, 7, 2))
+    builder.add_global_phase(theta)
+    builder.end_for()
+    builder.end_for()
+    program = builder.freeze()
+
+    assert program.global_phase == LiteralExpr(0.125) + 2 * (
+        LiteralExpr(0.25) + 3 * theta
+    )
+    [outer_loop] = program.operations
+    assert isinstance(outer_loop, ForInstruction)
+    assert isinstance(outer_loop.body[0], ForInstruction)
+    verify_circuit(program)
+
+
+@pytest.mark.parametrize(
+    ("indexset", "expected"),
+    [
+        (range(0), LiteralExpr(0.0)),
+        (range(5, 1, -2), 2 * ParameterExpr("theta")),
+    ],
+)
+def test_builder_scales_phase_for_empty_and_descending_static_loops(
+    indexset: range,
+    expected: object,
+) -> None:
+    """Static phase accumulation follows the concrete Python range length."""
+    builder = CircuitBuilder(1, 0)
+    builder.begin_for(indexset)
+    builder.add_global_phase(ParameterExpr("theta"))
+    builder.end_for()
+    program = builder.freeze()
+
+    assert program.global_phase == expected
+    verify_circuit(program)
+
+
+def test_builder_aggregates_pauli_identity_term_into_program_phase() -> None:
+    """Hamiltonian identity terms use the canonical program-phase channel."""
+    builder = CircuitBuilder(1, 0)
+    theta = ParameterExpr("theta")
+    builder.append_pauli_evolution((0,), qm_o.Z(0) + 1.5, theta)
+    program = builder.freeze()
+
+    [evolution] = program.operations
+    assert isinstance(evolution, PauliEvolutionInstruction)
+    assert evolution.hamiltonian.constant == 0
+    assert program.global_phase == -1.5 * theta
+    verify_circuit(program)
+
+
+def test_builder_preserves_tiny_pauli_identity_phase_exactly() -> None:
+    """Canonicalization never treats a nonzero identity phase as tolerance."""
+    builder = CircuitBuilder(1, 0)
+    theta = ParameterExpr("theta")
+    builder.append_pauli_evolution((0,), qm_o.Z(0) + 1e-16, theta)
+    program = builder.freeze()
+
+    [evolution] = program.operations
+    assert isinstance(evolution, PauliEvolutionInstruction)
+    assert evolution.hamiltonian.constant == 0
+    assert program.global_phase == -1e-16 * theta
+    verify_circuit(program)
+
+
+def test_builder_reduces_constant_only_pauli_evolution_to_phase() -> None:
+    """A constant-only Hamiltonian leaves no empty evolution instruction."""
+    builder = CircuitBuilder(1, 0)
+    theta = ParameterExpr("theta")
+    builder.append_pauli_evolution((0,), qm_o.Hamiltonian.identity(2.0), theta)
+    program = builder.freeze()
+
+    assert program.operations == ()
+    assert program.output_wires == program.input_wires
+    assert program.global_phase == -2.0 * theta
+    verify_circuit(program)
+
+
+def test_builder_hoists_uncontrolled_call_phase_with_inverse_and_power() -> None:
+    """An unconditional call contributes one canonical enclosing phase."""
+    theta = ParameterExpr("theta")
+    body = CircuitBuilder(1, 0, name="phased-body")
+    body.add_global_phase(theta)
+    caller = CircuitBuilder(1, 0)
+    caller.append_call(
+        ReusableCircuit(
+            body.freeze(),
+            "phased-body",
+            inverse=True,
+            power=3,
+        ),
+        (0,),
+    )
+    program = caller.freeze()
+
+    [call] = program.operations
+    assert isinstance(call, CallInstruction)
+    assert program.global_phase == -3 * theta
+    assert call.callee.body.global_phase == LiteralExpr(0.0)
+    verify_circuit(program)
+
+
+def test_builder_preserves_nested_if_and_while_phases() -> None:
+    """Dynamic branch and loop phases remain attached to their regions."""
+    builder = CircuitBuilder(1, 1)
+    theta = ParameterExpr("theta")
+    builder.add_global_phase(0.125)
+    conditional = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(theta)
+    loop = builder.begin_while(ClassicalBitExpr(0))
+    builder.add_global_phase(0.25)
+    builder.end_while(loop)
+    builder.begin_else(conditional)
+    builder.add_global_phase(0.5)
+    builder.end_if(conditional)
+    program = builder.freeze()
+
+    assert program.global_phase == LiteralExpr(0.125)
+    [branch] = program.operations
+    assert isinstance(branch, IfInstruction)
+    assert branch.true_global_phase == theta
+    assert branch.false_global_phase == LiteralExpr(0.5)
+    [loop] = branch.true_body
+    assert isinstance(loop, WhileInstruction)
+    assert loop.body_global_phase == LiteralExpr(0.25)
+    verify_circuit(program)
+
+
+def test_builder_preserves_measurement_selected_root_phase_contribution() -> None:
+    """A measurement-dependent phase is retained for target validation."""
+    builder = CircuitBuilder(1, 1)
+    theta = ParameterExpr("theta")
+    builder.add_global_phase(theta)
+    builder.add_global_phase(theta * ClassicalBitExpr(0))
+    program = builder.freeze()
+
+    assert program.global_phase == theta + theta * ClassicalBitExpr(0)
+    verify_circuit(program)
+
+
+def test_verifier_checks_structured_region_phase_expressions() -> None:
+    """Nested phases cannot reference classical bits outside the program."""
+    builder = CircuitBuilder(1, 1)
+    context = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(0.25)
+    builder.end_if(context)
+    program = builder.freeze()
+    [branch] = program.operations
+    assert isinstance(branch, IfInstruction)
+    malformed = dataclasses.replace(
+        program,
+        operations=(
+            dataclasses.replace(branch, true_global_phase=ClassicalBitExpr(1)),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="out of range"):
+        verify_circuit(malformed)
+
+
+def test_builder_rejects_loop_dependent_static_for_phase() -> None:
+    """An induction-dependent phase must be unrolled before circuit IR."""
+    builder = CircuitBuilder(1, 0)
+    variable = builder.begin_for(range(3))
+    builder.add_global_phase(variable)
+
+    with pytest.raises(RuntimeError, match="cannot depend on its induction variable"):
+        builder.end_for()
+
+
+def test_builder_rejects_dangling_loop_variable_in_root_phase() -> None:
+    """A loop variable cannot escape its owning structured region."""
+    builder = CircuitBuilder(1, 0)
+    variable = builder.begin_for(range(1))
+    builder.end_for()
+    builder.add_global_phase(variable)
+
+    with pytest.raises(RuntimeError, match="outside its owning structured region"):
+        builder.freeze()
+
+
+def test_verifier_rejects_unbound_loop_variable_in_root_phase() -> None:
+    """Structural verification rejects a root phase with no owning loop."""
+    program = dataclasses.replace(
+        CircuitBuilder(0, 0).freeze(),
+        global_phase=LoopVariableExpr("missing"),
+    )
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
+        verify_circuit(program)
+
+
+@pytest.mark.parametrize("branch", ["true", "false"])
+def test_verifier_rejects_unbound_loop_variable_in_if_phase(branch: str) -> None:
+    """Both conditional phase fields reject a loop variable with no owner."""
+    builder = CircuitBuilder(1, 1)
+    context = builder.begin_if(ClassicalBitExpr(0))
+    if branch == "false":
+        builder.begin_else(context)
+    builder.add_global_phase(LoopVariableExpr("missing"))
+    builder.end_if(context)
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
+        verify_circuit(builder.freeze())
+
+
+def test_verifier_rejects_unbound_loop_variable_in_while_phase() -> None:
+    """A while-body phase cannot reference a loop variable outside a for."""
+    builder = CircuitBuilder(1, 1)
+    context = builder.begin_while(ClassicalBitExpr(0))
+    builder.add_global_phase(LoopVariableExpr("missing"))
+    builder.end_while(context)
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
+        verify_circuit(builder.freeze())
+
+
+def test_verifier_rejects_phase_using_completed_inner_loop_variable() -> None:
+    """A phase outside an inner for cannot reuse its completed induction value."""
+    builder = CircuitBuilder(1, 1)
+    builder.begin_for(range(1))
+    inner_variable = builder.begin_for(range(1))
+    builder.end_for()
+    context = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(inner_variable)
+    builder.end_if(context)
+    builder.end_for()
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
+        verify_circuit(builder.freeze())
+
+
+def test_verifier_accepts_nested_for_variables_in_scoped_phases() -> None:
+    """Nested conditional and while phases may use both active for variables."""
+    builder = CircuitBuilder(1, 1)
+    outer_variable = builder.begin_for(range(2))
+    inner_variable = builder.begin_for(range(3))
+    branch = builder.begin_if(ClassicalBitExpr(0))
+    builder.add_global_phase(outer_variable + inner_variable)
+    builder.end_if(branch)
+    loop = builder.begin_while(ClassicalBitExpr(0))
+    builder.add_global_phase(outer_variable - inner_variable)
+    builder.end_while(loop)
+    builder.end_for()
+    builder.end_for()
+
+    verify_circuit(builder.freeze())
+
+
 def test_verifier_rejects_reused_output_wire_definition() -> None:
     """A malformed program cannot define one virtual wire twice."""
     builder = CircuitBuilder(1, 0)
@@ -230,6 +519,19 @@ def test_verifier_recurses_into_reusable_circuit_bodies() -> None:
         verify_circuit(caller.freeze())
 
 
+def test_verifier_rejects_reusable_body_capturing_enclosing_loop_variable() -> None:
+    """Reusable bodies cannot capture an enclosing loop's induction value."""
+    caller = CircuitBuilder(1, 0)
+    induction = caller.begin_for(range(2))
+    body = CircuitBuilder(1, 0, name="capturing-body")
+    body.append_gate(GateKind.RZ, (0,), (induction,))
+    caller.append_call(ReusableCircuit(body.freeze(), "capturing-body"), (0,))
+    caller.end_for()
+
+    with pytest.raises(ValueError, match="outside its owning structured for-loop"):
+        verify_circuit(caller.freeze())
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
@@ -277,9 +579,13 @@ def test_materialization_rejects_positional_parameter_order_drift() -> None:
     class _ReorderedMaterializer:
         """Return a deliberately reversed positional parameter ABI."""
 
-        def materialize(self, program: object) -> MaterializedCircuit[object]:
+        def materialize(
+            self,
+            program: object,
+            parameter_names: tuple[str, ...] = (),
+        ) -> MaterializedCircuit[object]:
             """Materialize a fake artifact with the wrong positional order."""
-            del program
+            del program, parameter_names
             return MaterializedCircuit(
                 artifact=object(),
                 parameters={"beta": object(), "alpha": object()},
@@ -304,6 +610,40 @@ def test_qamomile_plan_lowers_to_backend_neutral_circuit_ir() -> None:
     assert isinstance(gates[0].parameters[0], ParameterExpr)
     assert program.num_qubits == 2
     assert program.num_clbits == 2
+
+
+def test_lowering_preserves_tiny_controlled_pauli_identity_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact nonzero identity coefficient reaches CircuitProgram as phase."""
+    monkeypatch.setattr(
+        CircuitLoweringPass,
+        "_blockvalue_to_gate",
+        lambda self, *args, **kwargs: None,
+    )
+    transpiler = QiskitTranspiler()
+    bindings = {
+        "hamiltonian": qm_o.Hamiltonian.identity(1e-16),
+        "time": 1.0,
+    }
+    prepared = transpiler.prepare(
+        _controlled_pauli_entrypoint,
+        bindings=bindings,
+    )
+    lowered = lower_circuit_plan(
+        transpiler.plan_circuit(prepared),
+        bindings=bindings,
+    )
+    program = lowered.quantum_circuit
+
+    phase_gates = [
+        operation
+        for operation in program.operations
+        if isinstance(operation, GateInstruction) and operation.kind is GateKind.P
+    ]
+    assert len(phase_gates) == 1
+    assert phase_gates[0].parameters == (LiteralExpr(-1e-16),)
+    verify_circuit(program)
 
 
 def test_lowering_keeps_semantic_vector_measurement_grouped() -> None:

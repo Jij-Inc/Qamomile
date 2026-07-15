@@ -81,6 +81,7 @@ from .frontend.operation.cast import cast
 from .frontend.operation.control import control
 from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.expval import expval
+from .frontend.operation.global_phase import global_phase
 from .frontend.operation.inverse import inverse
 from .frontend.operation.measurement import (
     measure,
@@ -193,6 +194,7 @@ __all__ = [
     "control",
     "select",
     "inverse",
+    "global_phase",
     "cast",
     "bit",
     "float_",

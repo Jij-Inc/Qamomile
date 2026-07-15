@@ -59,6 +59,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import (
     Operation,
@@ -773,6 +774,12 @@ class _BlockInverter:
             return self._invert_inverse_block(op, value_map)
         if isinstance(op, InvokeOperation):
             return self._invert_invoke(op, value_map)
+        if isinstance(op, GlobalPhaseOperation):
+            operations, phase = self._negate_angle(op.phase, value_map)
+            return [
+                *operations,
+                GlobalPhaseOperation(operands=[phase], results=[]),
+            ]
         if isinstance(op, PauliEvolveOp):
             return self._invert_pauli_evolve(op, value_map)
         if isinstance(op, ControlledUOperation):

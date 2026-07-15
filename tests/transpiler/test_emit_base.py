@@ -34,10 +34,12 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CompOpKind,
 )
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
@@ -51,6 +53,8 @@ from qamomile.circuit.ir.operation.gate import (
     SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
@@ -786,6 +790,39 @@ class TestLoopAnalyzerBinOp:
 
         assert self.analyzer.should_unroll(for_op, {}) is True
 
+    def test_direct_pauli_time_dependency_triggers_unroll(self) -> None:
+        """Pauli identity phase extraction needs a concrete loop time."""
+        loop_var = _uint_val("i")
+        qubits = _make_array_value(
+            "qubits",
+            (_uint_val("size", const=1),),
+        )
+        evolution = PauliEvolveOp(
+            operands=[
+                qubits,
+                Value(type=ObservableType(), name="hamiltonian"),
+                loop_var,
+            ],
+            results=[
+                _make_array_value(
+                    "evolved",
+                    (_uint_val("result_size", const=1),),
+                )
+            ],
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=3),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[evolution],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
     def test_controlled_body_parameter_from_loop_var_triggers_unroll(self) -> None:
         """A controlled fresh scope receives a concrete iteration value."""
         loop_var = _uint_val("i")
@@ -1326,6 +1363,45 @@ class TestLoopAnalyzerGenericValueDependency:
         )
 
         assert self.analyzer.should_unroll(self._loop_with(controlled, loop_idx), {})
+
+    def test_direct_invoke_parameter_with_loop_var_triggers_unroll(self) -> None:
+        """A boxed callee cannot capture its caller's native loop parameter."""
+        loop_idx = _uint_val("i")
+        target = _qubit("target")
+        invoke = InvokeOperation(
+            operands=[target, loop_idx],
+            results=[target.next_version()],
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(invoke, loop_idx), {})
+
+    def test_nested_region_arg_seeded_from_outer_index_triggers_unroll(self) -> None:
+        """A nested carry preserves the outer-index dependency edge."""
+        outer_index = _uint_val("outer_index")
+        block_arg = _uint_val("block_arg")
+        result = _uint_val("result")
+        inner = ForOperation(
+            operands=[
+                _uint_val("inner_start", const=0),
+                _uint_val("inner_stop", const=2),
+                _uint_val("inner_step", const=1),
+            ],
+            results=[result],
+            loop_var="inner_index",
+            loop_var_value=_uint_val("inner_index"),
+            operations=[],
+            region_args=(
+                RegionArg(
+                    "carry",
+                    outer_index,
+                    block_arg,
+                    block_arg,
+                    result,
+                ),
+            ),
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(inner, outer_index), {})
 
 
 # ===========================================================================

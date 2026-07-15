@@ -24,6 +24,7 @@ import math
 from collections.abc import Callable, Hashable
 from typing import Any
 
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
 
 
@@ -123,6 +124,17 @@ class CudaqExpr:
         """
         return CudaqExpr(f"({self._expr}) / ({_to_expr(other)})")
 
+    def __mod__(self, other: Any) -> "CudaqExpr":
+        """Build a modulo expression.
+
+        Args:
+            other (Any): Right operand.
+
+        Returns:
+            CudaqExpr: Parenthesized modulo expression.
+        """
+        return CudaqExpr(f"({self._expr}) % ({_to_expr(other)})")
+
     def __pow__(self, other: Any) -> "CudaqExpr":
         """Build an exponentiation expression.
 
@@ -178,6 +190,17 @@ class CudaqExpr:
             CudaqExpr: Parenthesized division expression.
         """
         return CudaqExpr(f"({_to_expr(other)}) / ({self._expr})")
+
+    def __rmod__(self, other: Any) -> "CudaqExpr":
+        """Build a reflected modulo expression.
+
+        Args:
+            other (Any): Left operand.
+
+        Returns:
+            CudaqExpr: Parenthesized modulo expression.
+        """
+        return CudaqExpr(f"({_to_expr(other)}) % ({self._expr})")
 
     def __rpow__(self, other: Any) -> "CudaqExpr":
         """Build a reflected exponentiation expression.
@@ -738,6 +761,71 @@ class CudaqKernelEmitter:
         """Emit phase gate (R1)."""
         self._emit(f"r1({self._angle_expr(angle)}, {self._qref(qubit)})")
 
+    def emit_global_phase(
+        self,
+        circuit: CudaqKernelArtifact,
+        angle: float | Any,
+        carrier: int | None = None,
+    ) -> None:
+        """Synthesize ``exp(i * angle) I`` on an existing CUDA-Q qubit.
+
+        The exact identity is ``R1(2a) RZ(-2a) = exp(ia) I``; it preserves an
+        arbitrary state of the selected carrier qubit.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            angle (float | Any): Concrete or source-level phase in radians.
+            carrier (int | None): Existing qubit used by the identity
+                sequence. Defaults to qubit zero when the artifact is
+                nonempty.
+
+        Raises:
+            EmitError: If the artifact has no qubit or ``carrier`` is outside
+                its physical width.
+        """
+        if carrier is None:
+            if circuit.num_qubits == 0:
+                raise EmitError(
+                    "CUDA-Q standalone global phase requires an existing "
+                    "qubit or an explicitly allocated clean carrier"
+                )
+            carrier = 0
+        if carrier < 0 or carrier >= circuit.num_qubits:
+            raise EmitError(
+                "CUDA-Q phase-carrier index is outside the circuit: "
+                f"carrier={carrier}, width={circuit.num_qubits}"
+            )
+        self.emit_p(circuit, carrier, 2.0 * angle)
+        self.emit_rz(circuit, carrier, -2.0 * angle)
+
+    def emit_global_phase_on_clean_carrier(
+        self,
+        circuit: CudaqKernelArtifact,
+        angle: float | Any,
+        carrier: int,
+    ) -> None:
+        """Synthesize ``exp(i * angle)`` on a dedicated clean carrier.
+
+        Because the carrier is known to remain in ``|0>``, the single gate
+        ``RZ(-2a)`` produces ``exp(ia)|0>`` exactly. This specialized form is
+        not valid for an arbitrary-state logical qubit.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            angle (float | Any): Concrete or source-level phase in radians.
+            carrier (int): Internal qubit known to be initialized in ``|0>``.
+
+        Raises:
+            EmitError: If ``carrier`` is outside the artifact's physical
+                width.
+        """
+        if carrier < 0 or carrier >= circuit.num_qubits:
+            raise EmitError(
+                "CUDA-Q clean phase-carrier index is outside the circuit: "
+                f"carrier={carrier}, width={circuit.num_qubits}"
+            )
+        self.emit_rz(circuit, carrier, -2.0 * angle)
+
     # ------------------------------------------------------------------
     # Two-qubit gates
     # ------------------------------------------------------------------
@@ -765,24 +853,9 @@ class CudaqKernelEmitter:
         target: int,
         angle: float | Any,
     ) -> None:
-        """Emit controlled-Phase via decomposition.
-
-        Follows the shared CP_DECOMPOSITION recipe from
-        ``qamomile.circuit.transpiler.decompositions``.
-        Inlined here because CudaqExpr angles require string-based codegen.
-        """
+        """Emit controlled phase through CUDA-Q's exact controlled R1."""
         a = self._angle_expr(angle)
-        if isinstance(angle, (int, float)):
-            half = repr(angle / 2.0)
-            neg_half = repr(-angle / 2.0)
-        else:
-            half = f"({a}) * 0.5"
-            neg_half = f"({a}) * (-0.5)"
-        self._emit(f"rz({half}, {self._qref(target)})")
-        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
-        self._emit(f"rz({neg_half}, {self._qref(target)})")
-        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
-        self._emit(f"rz({half}, {self._qref(control)})")
+        self._emit(f"r1.ctrl({a}, {self._qref(control)}, {self._qref(target)})")
 
     def emit_rzz(
         self,

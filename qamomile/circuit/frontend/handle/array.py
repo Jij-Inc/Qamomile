@@ -116,29 +116,27 @@ def _is_destroyed_slot_owner(owner: object) -> bool:
     """Return ``True`` iff ``owner`` represents a destroyed-qubit slot.
 
     A destroyed slot is a parent ``_borrowed_indices`` entry whose
-    owner is a ``VectorView`` that has been destructively consumed
-    (``view._consumed`` is ``True`` and the recorded
-    ``_consumed_by`` operation name classifies as
-    :attr:`ConsumeMode.DESTRUCTIVE`).  The destructively consumed
-    view is parked in the parent's borrow table as the slot's owner
-    until it goes out of scope; that persistence is what lets
-    subsequent direct parent access at the same slot index fail
-    loudly with ``QubitConsumedError`` rather than silently
-    overwriting the destroyed qubit.
+    owner is a quantum handle that has been destructively consumed
+    (``owner._consumed`` is ``True`` and the recorded ``_consumed_by``
+    operation name classifies as :attr:`ConsumeMode.DESTRUCTIVE`).  Both
+    direct element handles and ``VectorView`` owners stay parked in the
+    parent's borrow table after destruction. That persistence lets later
+    access to the same physical slot fail loudly with
+    ``QubitConsumedError`` rather than silently reuse the qubit.
 
     Args:
         owner (object): A value from ``ArrayBase._borrowed_indices``
-            (any of ``tuple[UInt, ...]`` for direct element borrows,
-            ``ArrayBase[T]`` for slice-view ownership, or ``None``
-            when the slot is absent).
+            (a direct element ``Handle``, an ``ArrayBase[T]`` slice owner,
+            a classical-element index tuple, or ``None`` when absent).
 
     Returns:
         bool: ``True`` if the slot's recorded owner is a destructively
-            consumed ``ArrayBase``; ``False`` otherwise (including
-            for live views, direct element borrows, and ``None``).
+            consumed quantum ``Handle``; ``False`` otherwise (including
+            for live handles, classical index tuples, and ``None``).
     """
     return (
-        isinstance(owner, ArrayBase)
+        isinstance(owner, Handle)
+        and owner.value.type.is_quantum()
         and owner._consumed
         and _classify_consume(owner._consumed_by) is ConsumeMode.DESTRUCTIVE
     )
@@ -158,24 +156,23 @@ class ArrayBase(Handle, Generic[T]):
     # element borrows and slice (view) borrows live here because they
     # encode the same invariant: "this slot has an outstanding return
     # obligation, so the parent can't touch it directly".  The owner
-    # has two runtime variants distinguished by ``isinstance``:
-    #   * ``tuple[UInt, ...]`` — direct element borrow (the index handles
-    #     borrowed).
-    #   * ``ArrayBase[T]`` — slice view ownership (the ``VectorView``
-    #     itself).  For slice borrows only constant indices are
-    #     registered; symbolic slices skip registration (best-effort
-    #     linearity).
+    # has three runtime variants distinguished by ``isinstance``:
+    #   * scalar ``Handle`` — direct quantum-element ownership. The owner
+    #     advances when a gate returns a successor handle and remains parked
+    #     when a destructive operation consumes the element.
+    #   * ``ArrayBase[T]`` — slice view ownership (the ``VectorView`` itself).
+    #     For slice borrows only constant indices are registered; symbolic
+    #     slices skip registration (best-effort linearity).
+    #   * ``tuple[UInt, ...]`` — classical element bookkeeping, which has no
+    #     affine ownership semantics.
     #
-    # A "destroyed slot" (set by a destructive view consume such as
-    # ``measure(view)`` or ``cast(view, ...)``) is encoded by leaving
-    # the destructively consumed ``VectorView`` in this dict as the
-    # slot's owner — ``view._consumed`` is ``True`` and
-    # ``view._consumed_by`` records the destroying operation name.
-    # The :func:`_is_destroyed_slot_owner` helper centralises the
-    # check.
+    # A "destroyed slot" is encoded by leaving its destructively consumed
+    # scalar element or ``VectorView`` in this dict as the owner. The owner's
+    # consumed state and operation name distinguish it from a live borrow;
+    # :func:`_is_destroyed_slot_owner` centralises that check.
     _borrowed_indices: dict[
         tuple[str, ...],
-        "tuple[UInt, ...] | ArrayBase[T]",
+        "tuple[UInt, ...] | Handle",
     ] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -314,12 +311,11 @@ class ArrayBase(Handle, Generic[T]):
         return type(self)._create_from_value(value=value, shape=self._shape)
 
     def _check_no_consumed_slots(self, operation_name: str) -> None:
-        """Raise if any slot has been destroyed by a prior destructive view op.
+        """Raise if any slot has been destroyed by a prior destructive op.
 
-        Destructive view operations (``measure(q[1::2])``, etc.) park the
-        destructively-consumed view in ``_borrowed_indices`` for every
-        slot they cover; see :func:`_is_destroyed_slot_owner` for how
-        the destroyed-slot signal is encoded on the view's own state.
+        Destructive element or view operations park their consumed owner in
+        ``_borrowed_indices`` for every slot they cover; see
+        :func:`_is_destroyed_slot_owner` for the marker representation.
         Operations that subsequently use the
         whole array (e.g. ``expval(q, H)`` after
         ``measure(q[1::2])``) must call this guard before emitting IR
@@ -361,7 +357,7 @@ class ArrayBase(Handle, Generic[T]):
             raise QubitConsumedError(
                 f"Cannot use '{self.value.name}' in '{operation_name}': "
                 f"slot(s) {slots} were already destroyed by a prior "
-                f"destructive view operation (e.g. measure/cast on a view).\n\n"
+                f"destructive operation (e.g. measure/cast on an element or view).\n\n"
                 f"Fix: Do not reuse an array whose physical qubits have been "
                 f"consumed.  Disjoint views on non-overlapping slots are "
                 f"allowed.",
@@ -387,8 +383,8 @@ class ArrayBase(Handle, Generic[T]):
                 raise QubitConsumedError(
                     f"Cannot use view of '{slice_parent.value.name}' in "
                     f"'{operation_name}': slot(s) {parent_consumed} were "
-                    f"already destroyed by a prior destructive view operation "
-                    f"(e.g. measure/cast on an overlapping view).\n\n"
+                    f"already destroyed by a prior destructive operation "
+                    f"(e.g. measure/cast on an overlapping element or view).\n\n"
                     f"Fix: Do not slice the same physical qubits twice when "
                     f"one view will be consumed destructively.",
                     handle_name=slice_parent.value.name or "array",
@@ -403,9 +399,10 @@ class ArrayBase(Handle, Generic[T]):
         silently discarded by operations like qkernel calls or controlled gates.
 
         When any slot of the array has already been physically consumed
-        by an earlier destructive view operation (``measure(q[1::2])``
-        then ``measure(q)``), this raises ``QubitConsumedError`` rather
-        than silently re-consuming those slots.
+        by an earlier destructive element or view operation
+        (``measure(q[0])`` or ``measure(q[1::2])`` followed by
+        ``measure(q)``), this raises ``QubitConsumedError`` rather than
+        silently re-consuming those slots.
         """
         self.validate_all_returned()
         if self.value.type.is_quantum():
@@ -420,7 +417,7 @@ class ArrayBase(Handle, Generic[T]):
                 raise QubitConsumedError(
                     f"Cannot consume '{self.value.name}' via '{operation_name}': "
                     f"slot(s) {consumed_slots} were already destroyed by a "
-                    f"prior destructive view operation.",
+                    f"prior destructive element or view operation.",
                     handle_name=self.value.name or "array",
                     operation_name=operation_name,
                 )
@@ -605,20 +602,17 @@ class ArrayBase(Handle, Generic[T]):
                 first_use_location=consumed_at or self._consumed_by,
             )
 
-        # Check if already borrowed — same dict covers direct element
-        # borrows and slice-held slots; a destructively consumed view
-        # also stays in the dict (with ``view._consumed`` and
-        # ``view._consumed_by`` set), so a single ``ArrayBase`` branch
-        # below covers both "view active" and "view destroyed" by
-        # querying the helper.  The owner object tells us which one
-        # so we can surface a tailored message.
+        # Check if already borrowed — same dict covers direct elements and
+        # slice-held slots. A destructively consumed scalar or view also stays
+        # in the dict, so the helper distinguishes a live owner from a
+        # physically destroyed slot.
         if indices_key in self._borrowed_indices and self.value.type.is_quantum():
             owner = self._borrowed_indices[indices_key]
             if _is_destroyed_slot_owner(owner):
                 raise QubitConsumedError(
                     f"Physical qubit '{self.value.name}[{index_str}]' was already "
-                    f"consumed by a destructive operation (e.g. measure / cast) "
-                    f"on a view covering this slot.",
+                    f"consumed by a prior destructive operation "
+                    f"(e.g. measure / cast) on this element or a view covering it.",
                     handle_name=f"{self.value.name}[{index_str}]",
                     operation_name="array element access",
                 )
@@ -659,6 +653,18 @@ class ArrayBase(Handle, Generic[T]):
             if local_idx is not None and 0 <= local_idx < len(
                 self._slice_covered_indices
             ):
+                if getattr(self, "_slice_divergent_merge", False):
+                    raise QubitBorrowConflictError(
+                        f"View element '{self.value.name}[{index_str}]' "
+                        f"cannot be accessed: this view merges different "
+                        f"slices across if/else branches, so it has no "
+                        f"single set of physical slots after the if. "
+                        f"Apply gates inside each branch and write the "
+                        f"slice back (``parent[a:b] = view``), or slice "
+                        f"identically in both branches.",
+                        handle_name=f"{self.value.name}[{index_str}]",
+                        operation_name="array element access",
+                    )
                 root_idx = self._slice_covered_indices[local_idx]
                 root_key = (f"const:{root_idx}",)
                 root_owner = self._slice_parent._borrowed_indices.get(root_key)
@@ -668,18 +674,6 @@ class ArrayBase(Handle, Generic[T]):
                     and not _is_destroyed_slot_owner(root_owner)
                 ):
                     root_name = self._slice_parent.value.name or "array"
-                    if getattr(self, "_slice_divergent_merge", False):
-                        raise QubitBorrowConflictError(
-                            f"View element '{self.value.name}[{index_str}]' "
-                            f"cannot be accessed: this view merges different "
-                            f"slices across if/else branches, so it has no "
-                            f"single set of physical slots after the if. "
-                            f"Apply gates inside each branch and write the "
-                            f"slice back (``parent[a:b] = view``), or slice "
-                            f"identically in both branches.",
-                            handle_name=f"{self.value.name}[{index_str}]",
-                            operation_name="array element access",
-                        )
                     raise QubitBorrowConflictError(
                         f"View element '{self.value.name}[{index_str}]' "
                         f"resolves to '{root_name}[{root_idx}]', which is "
@@ -692,8 +686,6 @@ class ArrayBase(Handle, Generic[T]):
                         operation_name="array element access",
                     )
 
-        self._borrowed_indices[indices_key] = indices
-
         element_value = Value(
             type=self.value.type,
             name=f"{self.value.name}[{index_str}]",
@@ -704,7 +696,45 @@ class ArrayBase(Handle, Generic[T]):
             param_name = self.value.parameter_name()
             element_param_name = f"{param_name}[{index_str}]"
             element_value = element_value.with_parameter(element_param_name)
-        return self.element_type(value=element_value, parent=self, indices=indices)
+        element = self.element_type(value=element_value, parent=self, indices=indices)
+        self._borrowed_indices[indices_key] = (
+            element if self.value.type.is_quantum() else indices
+        )
+        return element
+
+    def _update_direct_borrow_after_consume(
+        self,
+        previous: Handle,
+        successor: Handle,
+        operation_name: str,
+    ) -> None:
+        """Advance or destroy the owner of a directly borrowed element.
+
+        Direct quantum-element borrows store the current scalar handle in the
+        parent table. A resource-preserving operation transfers ownership to
+        its returned successor; a destructive operation leaves the consumed
+        predecessor parked as a destroyed-slot marker. Slice owners use their
+        own transfer machinery and never enter this helper.
+
+        Args:
+            previous (Handle): Scalar element handle being consumed.
+            successor (Handle): Fresh handle returned by ``Handle.consume``.
+            operation_name (str): Operation responsible for the consume.
+
+        Returns:
+            None.
+        """
+        if previous.parent is not self or not previous.indices:
+            return
+        key = self._make_indices_key(previous.indices)
+        current = self._borrowed_indices.get(key)
+        if current is not previous and not isinstance(current, tuple):
+            return
+        self._borrowed_indices[key] = (
+            previous
+            if _classify_consume(operation_name) is ConsumeMode.DESTRUCTIVE
+            else successor
+        )
 
     def _return_element(self, indices: tuple[UInt, ...], value: T) -> None:
         """Write an element back into the array at the given indices.
@@ -1028,11 +1058,10 @@ class ArrayBase(Handle, Generic[T]):
         unreturned borrow even if the view itself has no outstanding
         element borrows.  The caller must perform an explicit slice
         assignment (``parent[a:b:c] = view``) to release the view's
-        bulk-borrow before consuming the parent.  Destructively
-        consumed views (parked in the dict with ``view._consumed`` set
-        and ``view._consumed_by`` classified as
-        :attr:`ConsumeMode.DESTRUCTIVE`) record physically-destroyed
-        slots and are not outstanding borrows; they survive
+        bulk-borrow before consuming the parent. Destructively consumed
+        scalar or view owners (parked in the dict with ``_consumed`` set and
+        ``_consumed_by`` classified as :attr:`ConsumeMode.DESTRUCTIVE`)
+        record physically-destroyed slots and are not outstanding borrows; they survive
         end-of-block so a later whole-array consume can detect and
         reject the destroyed slots.
 
@@ -1044,8 +1073,8 @@ class ArrayBase(Handle, Generic[T]):
         if not self.value.type.is_quantum():
             return
 
-        # Destroyed-slot owners (destructively consumed views parked
-        # in the dict) are not outstanding borrows — they record
+        # Destroyed-slot owners parked in the dict are not outstanding
+        # borrows — they record
         # physically-destroyed slots — so they must be excluded from
         # the "unreturned borrows" report and from the "any entries
         # left?" check.
@@ -1068,6 +1097,9 @@ class ArrayBase(Handle, Generic[T]):
                     f"{self.value.name}[{idx_str}] (held by slice view)"
                 )
                 view_held.add(owner.value.name or "view")
+            elif isinstance(owner, Handle):
+                index_str = self._format_index(owner.indices)
+                borrowed_strs.append(f"{self.value.name}[{index_str}]")
             else:
                 index_str = self._format_index(owner)
                 borrowed_strs.append(f"{self.value.name}[{index_str}]")
@@ -1131,7 +1163,7 @@ class Vector(ArrayBase[T]):
     _shape: tuple[int | UInt] = dataclasses.field(default=(0,))
     _borrowed_indices: dict[
         tuple[str, ...],
-        "tuple[UInt, ...] | ArrayBase[T]",
+        "tuple[UInt, ...] | Handle",
     ] = dataclasses.field(default_factory=dict)
 
     @overload
@@ -1867,7 +1899,7 @@ class Matrix(ArrayBase[T]):
     _shape: tuple[int | UInt, int | UInt] = dataclasses.field(default=(0, 0))
     _borrowed_indices: dict[
         tuple[str, ...],
-        "tuple[UInt, ...] | ArrayBase[T]",
+        "tuple[UInt, ...] | Handle",
     ] = dataclasses.field(default_factory=dict)
 
     def __getitem__(self, index: tuple[int | UInt, int | UInt]) -> T:
@@ -1928,7 +1960,7 @@ class Tensor(ArrayBase[T]):
     _shape: tuple[int | UInt, ...] = dataclasses.field(default_factory=tuple)
     _borrowed_indices: dict[
         tuple[str, ...],
-        "tuple[UInt, ...] | ArrayBase[T]",
+        "tuple[UInt, ...] | Handle",
     ] = dataclasses.field(default_factory=dict)
 
     def __getitem__(self, index: tuple[int | UInt, ...]) -> T:
@@ -1994,6 +2026,13 @@ def _compute_slice_length(
         if stop_int <= start_int:
             return 0
         return (stop_int - start_int + step_int - 1) // step_int
+
+    # Reuse a symbolic stop handle for an exact full-prefix slice. Besides
+    # avoiding redundant arithmetic IR, this gives downstream provenance
+    # checks an exact extent-identity witness when ``qs[:]`` reaches a length
+    # that is not bound until specialization.
+    if start_int == 0 and step_int == 1:
+        return stop
 
     return ((stop - start) + (step - 1)) // step
 
@@ -2301,7 +2340,7 @@ class VectorView(Vector[T]):
                 key = (f"const:{idx}",)
                 existing = parent._borrowed_indices.get(key)
                 if existing is not None:
-                    # A destructively-consumed view stays in
+                    # A destructively consumed element or view stays in
                     # ``_borrowed_indices`` with ``_consumed=True`` to
                     # leave a breadcrumb on its covered slots; touching
                     # those slots later is a permanent-loss event, not
@@ -2313,8 +2352,8 @@ class VectorView(Vector[T]):
                             f"Cannot slice across "
                             f"'{parent.value.name}[{idx}]' — it was "
                             f"already destroyed by a prior destructive "
-                            f"view operation (e.g. measure / cast / "
-                            f"expval) on an overlapping view.",
+                            f"operation (e.g. measure / cast / expval) "
+                            f"on an overlapping element or view.",
                             handle_name=f"{parent.value.name}[{idx}]",
                             operation_name="array slicing",
                         )
@@ -2420,7 +2459,9 @@ class VectorView(Vector[T]):
         )
         view._slice_covered_indices = self._slice_covered_indices
         view._slice_outer_view = self._slice_outer_view
-        view._slice_divergent_merge = self._merge_diverges_from(counterpart)
+        view._slice_divergent_merge = (
+            self._slice_divergent_merge or self._merge_diverges_from(counterpart)
+        )
         return view
 
     def _merge_diverges_from(self, counterpart: Value) -> bool:
@@ -2665,14 +2706,13 @@ class VectorView(Vector[T]):
             for the covered slots is finalised.
 
         Raises:
-            QubitConsumedError: If any covered slot was already
-                destroyed by a prior destructive view consume on an
-                overlapping view that has since gone out of scope.
+            QubitConsumedError: If any covered slot was already destroyed by
+                a prior destructive consume on an overlapping element or view.
         """
         self.validate_all_returned()
         mode = _classify_consume(operation_name)
 
-        # A prior destructive view consume can leave a destroyed-slot
+        # A prior destructive consume can leave a destroyed-slot
         # breadcrumb in the parent's borrow table; reject the consume
         # up-front when any of our covered slots are in that state.
         # Reachable only when the destructively consumed predecessor
@@ -2691,8 +2731,8 @@ class VectorView(Vector[T]):
                 raise QubitConsumedError(
                     f"Cannot consume view of '{self._slice_parent.value.name}' "
                     f"via '{operation_name}': slot(s) {already_destroyed} were "
-                    f"already destroyed by a prior destructive view operation "
-                    f"on overlapping slots.",
+                    f"already destroyed by a prior destructive operation on "
+                    f"overlapping slots.",
                     handle_name=self._slice_parent.value.name or "array",
                     operation_name=operation_name,
                 )
@@ -2706,6 +2746,10 @@ class VectorView(Vector[T]):
         # where ``b`` was a nested slice off ``a`` keeps requiring
         # ``a[range] = view`` rather than ``root[range] = view``).
         new_view._slice_outer_view = self._slice_outer_view
+        # A branch-dependent physical region remains divergent after any
+        # ownership-preserving operation. Dropping this marker would let a
+        # broadcast gate launder the merge before a later element access.
+        new_view._slice_divergent_merge = self._slice_divergent_merge
 
         if self._slice_covered_indices is not None:
             for idx in self._slice_covered_indices:
@@ -2771,9 +2815,8 @@ class VectorView(Vector[T]):
                 (recorded on ``self._consumed_by`` for error messages).
 
         Raises:
-            QubitConsumedError: If any covered slot was already
-                destroyed by a prior destructive view consume on an
-                overlapping view that has since gone out of scope.
+            QubitConsumedError: If any covered slot was already destroyed by
+                a prior destructive consume on an overlapping element or view.
         """
         self.validate_all_returned()
         if self._slice_covered_indices is not None:
@@ -2788,8 +2831,8 @@ class VectorView(Vector[T]):
                 raise QubitConsumedError(
                     f"Cannot consume view of '{self._slice_parent.value.name}' "
                     f"via '{operation_name}': slot(s) {already_destroyed} were "
-                    f"already destroyed by a prior destructive view operation "
-                    f"on overlapping slots.",
+                    f"already destroyed by a prior destructive operation on "
+                    f"overlapping slots.",
                     handle_name=self._slice_parent.value.name or "array",
                     operation_name=operation_name,
                 )
@@ -2811,6 +2854,7 @@ class VectorView(Vector[T]):
         # return still demands the same outer→root return chain on the
         # post-transfer handle.
         new_owner._slice_outer_view = self._slice_outer_view
+        new_owner._slice_divergent_merge = self._slice_divergent_merge
 
     def _nested_slice(self, s: slice) -> "VectorView[T]":
         """Compose a nested slice into a single view over the same parent.
@@ -2883,6 +2927,21 @@ class VectorView(Vector[T]):
         new_step: UInt = self._slice_step * inner_step
         new_length = _compute_slice_length(raw_start, raw_stop, raw_step)
         new_length_value = self._slice_parent._to_length_value(new_length)
+        outer_length_value = self.value.shape[0]
+        new_length_const = new_length_value.get_const()
+        outer_length_const = outer_length_value.get_const()
+        is_full_reslice = (
+            _as_int_const(raw_start) == 0
+            and _as_int_const(raw_step) == 1
+            and (
+                new_length_value.uuid == outer_length_value.uuid
+                or (
+                    isinstance(new_length_const, int)
+                    and not isinstance(new_length_const, bool)
+                    and new_length_const == outer_length_const
+                )
+            )
+        )
 
         # For compile-time-known nested views, enumerate the covered
         # root-space indices so the bulk-borrow tracker can reject
@@ -2910,6 +2969,10 @@ class VectorView(Vector[T]):
         new_sliced_av = ArrayValue(
             type=self._slice_parent.value.type,
             name=f"{self._slice_parent.value.name}[slice]",
+            version=self.value.version + 1 if is_full_reslice else 0,
+            logical_id=(
+                self.value.logical_id if is_full_reslice else str(uuid.uuid4())
+            ),
             shape=(new_length_value,),
             slice_of=self._slice_parent.value,
             slice_start=new_start.value,
@@ -2947,4 +3010,5 @@ class VectorView(Vector[T]):
         # ``outer[range] = inner`` (and then ``root[range] = outer``)
         # rather than skipping straight back to the root.
         new_view._slice_outer_view = self
+        new_view._slice_divergent_merge = self._slice_divergent_merge
         return new_view

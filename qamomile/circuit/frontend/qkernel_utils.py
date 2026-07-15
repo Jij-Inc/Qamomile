@@ -10,6 +10,7 @@ from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.handle.array import Vector
 from qamomile.circuit.frontend.handle.handle import _describe_consume_sites
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
+from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import QubitConsumedError
 
@@ -144,17 +145,141 @@ def const_int(value: Value | None) -> int | None:
         value (Value | None): IR value that may carry a constant.
 
     Returns:
-        int | None: Coerced integer constant, or ``None`` when unavailable.
+        int | None: Plain integer constant, or ``None`` when unavailable.
     """
     if value is None:
         return None
     const = value.get_const()
-    if const is None:
+    if isinstance(const, bool) or not isinstance(const, int):
         return None
-    try:
-        return int(const)
-    except (TypeError, ValueError):
-        return None
+    return const
+
+
+def is_valid_array_extent(value: Value | None) -> bool:
+    """Return whether a value is a well-formed array extent.
+
+    Args:
+        value (Value | None): Candidate scalar extent value.
+
+    Returns:
+        bool: ``True`` for a scalar ``UInt`` whose constant payload, when
+        present, is a non-negative plain integer.
+    """
+    if (
+        not isinstance(value, Value)
+        or isinstance(value, ArrayValue)
+        or not isinstance(value.type, UIntType)
+    ):
+        return False
+    if not value.is_constant():
+        return True
+    extent = const_int(value)
+    return extent is not None and extent >= 0
+
+
+def array_extents_equal(left: Value, right: Value) -> bool:
+    """Return whether two well-formed array extents are statically equal.
+
+    Args:
+        left (Value): First scalar ``UInt`` extent.
+        right (Value): Second scalar ``UInt`` extent.
+
+    Returns:
+        bool: ``True`` for one SSA extent or equal non-negative constants.
+    """
+    if not is_valid_array_extent(left) or not is_valid_array_extent(right):
+        return False
+    if left.uuid == right.uuid:
+        return True
+    left_value = const_int(left)
+    right_value = const_int(right)
+    return left_value is not None and left_value == right_value
+
+
+def _full_reslice_terminal(value: ArrayValue) -> tuple[ArrayValue, bool] | None:
+    """Return the resource reached through a prefix of exact full slices.
+
+    Args:
+        value (ArrayValue): Array value whose full-slice ancestry is inspected.
+
+    Returns:
+        tuple[ArrayValue, bool] | None: Terminal array and whether at least one
+            exact full slice was traversed, or ``None`` for a cyclic chain.
+    """
+    current = value
+    saw_slice = False
+    seen: set[int] = set()
+    while current.slice_of is not None:
+        current_id = id(current)
+        if current_id in seen:
+            return None
+        seen.add(current_id)
+        parent = current.slice_of
+        if (
+            current.type != parent.type
+            or len(current.shape) != 1
+            or len(parent.shape) != 1
+            or const_int(current.slice_start) != 0
+            or const_int(current.slice_step) != 1
+            or not is_valid_array_extent(current.slice_start)
+            or not is_valid_array_extent(current.slice_step)
+            or not array_extents_equal(current.shape[0], parent.shape[0])
+        ):
+            break
+        saw_slice = True
+        current = parent
+    return current, saw_slice
+
+
+def array_resource_identity(value: ArrayValue) -> str | None:
+    """Return the canonical logical identity of an array resource.
+
+    Args:
+        value (ArrayValue): Array whose exact full-slice prefix is ignored.
+
+    Returns:
+        str | None: Terminal logical identity, or None for a cyclic chain.
+    """
+    terminal = _full_reslice_terminal(value)
+    return terminal[0].logical_id if terminal is not None else None
+
+
+def array_resources_equal(left: ArrayValue, right: ArrayValue) -> bool:
+    """Return whether arrays denote the same whole logical resource.
+
+    Exact full re-slices are transparent, while partial or strided views are
+    distinct resources. This lets control-flow merges preserve identity for a
+    direct value and ``value[:]`` as well as for two sibling full re-slices.
+
+    Args:
+        left (ArrayValue): First array resource.
+        right (ArrayValue): Second array resource.
+
+    Returns:
+        bool: True when both arrays reach one compatible logical resource.
+    """
+    if (
+        left.type != right.type
+        or len(left.shape) != len(right.shape)
+        or len(left.shape) != 1
+        or not array_extents_equal(left.shape[0], right.shape[0])
+    ):
+        return False
+    left_terminal = _full_reslice_terminal(left)
+    right_terminal = _full_reslice_terminal(right)
+    if left_terminal is None or right_terminal is None:
+        return False
+    left_resource = left_terminal[0]
+    right_resource = right_terminal[0]
+    return (
+        left_resource.logical_id == right_resource.logical_id
+        and left_resource.type == right_resource.type
+        and len(left_resource.shape) == len(right_resource.shape) == 1
+        and array_extents_equal(
+            left_resource.shape[0],
+            right_resource.shape[0],
+        )
+    )
 
 
 def is_full_reslice_of_input(
@@ -169,28 +294,21 @@ def is_full_reslice_of_input(
 
     Returns:
         bool: ``True`` when every slice from ``output`` back to
-        ``formal_input`` is ``0:len:1`` with matching concrete lengths.
+        ``formal_input`` is ``0:len:1`` with equal concrete lengths or the
+        same symbolic length identity.
     """
-    current = output
-    saw_slice = False
-    while current.slice_of is not None:
-        saw_slice = True
-        parent = current.slice_of
-        start = const_int(current.slice_start)
-        step = const_int(current.slice_step)
-        length = const_int(current.shape[0] if current.shape else None)
-        parent_length = const_int(parent.shape[0] if parent.shape else None)
-        if (
-            start != 0
-            or step != 1
-            or length is None
-            or parent_length is None
-            or length != parent_length
-        ):
-            return False
-        current = parent
-
-    return saw_slice and current.logical_id == formal_input.logical_id
+    if (
+        output.type != formal_input.type
+        or len(output.shape) != 1
+        or len(formal_input.shape) != 1
+    ):
+        return False
+    terminal = _full_reslice_terminal(output)
+    return (
+        terminal is not None
+        and terminal[1]
+        and array_resources_equal(terminal[0], formal_input)
+    )
 
 
 def view_result_value_for_full_reslice(

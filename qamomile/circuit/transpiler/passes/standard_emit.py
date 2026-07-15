@@ -52,6 +52,7 @@ from qamomile.circuit.ir.operation.gate import (
     ProjectOperation,
     ResetOperation,
 )
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
@@ -95,6 +96,9 @@ from qamomile.circuit.transpiler.passes.emit_support.counting_emitter import (
     CountingEmitter,
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import emit_gate
+from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
+    emit_global_phase,
+)
 from qamomile.circuit.transpiler.passes.emit_support.inverse_emission import (
     emit_inverse_block,
 )
@@ -655,6 +659,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 emit_invoke_operation(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, InverseBlockOperation):
                 self._emit_inverse_block(circuit, op, qubit_map, bindings)
+            elif isinstance(op, GlobalPhaseOperation):
+                self._emit_global_phase(circuit, op, bindings)
             elif isinstance(op, ControlledUOperation):
                 emit_controlled_u(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, PauliEvolveOp):
@@ -1006,6 +1012,28 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 fallback implementation can be emitted.
         """
         emit_inverse_block(self, circuit, op, qubit_map, bindings)
+
+    def _emit_global_phase(
+        self,
+        circuit: T,
+        op: GlobalPhaseOperation,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Emit a zero-qubit global-phase operation.
+
+        CircuitProgram lowering collects this in the current lexical region.
+        Adapters without the structural hook fail explicitly; observable
+        controlled phases use ordinary gates.
+
+        Args:
+            circuit (T): Circuit representation being built.
+            op (GlobalPhaseOperation): Global-phase operation to emit.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Raises:
+            EmitError: If the adapter cannot preserve or resolve the phase.
+        """
+        emit_global_phase(self, circuit, op, bindings)
 
     def _emit_runtime_classical_expr(
         self,
