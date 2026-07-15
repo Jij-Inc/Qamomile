@@ -104,6 +104,7 @@ def evaluate_binop(
     parameters — that's the path that lets ``rx(q, gamma * 2)`` produce
     a circuit with a single ``Parameter("gamma") * 2`` expression rather
     than baking in a placeholder.
+
     """
     parameters = emit_pass._resolver.parameters
 

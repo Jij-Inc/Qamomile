@@ -144,7 +144,6 @@ def _select_call_operation(
         invoke_block_factory (Any | None): Optional callable used to create
             the invocation for a selected block. Defaults to a qkernel
             ``InvokeOperation`` factory.
-
     Returns:
         tuple[Any, Block | None, dict[str, tuple[ArrayValue, Any]]]: Invocation
         operation, selected block if available, and caller view metadata for

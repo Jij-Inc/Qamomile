@@ -22,6 +22,7 @@ from qamomile.circuit.estimator.resource_estimator import (
 )
 from qamomile.circuit.frontend.callable_signature import CallableSignature
 from qamomile.circuit.frontend.composite_gate import composite_gate
+from qamomile.circuit.frontend.operation.global_phase import global_phase
 from qamomile.circuit.frontend.operation.measurement import (
     measure_reset,
     project_x,
@@ -97,6 +98,12 @@ def test_callable_helpers_are_publicly_reexported():
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"
         )
+
+
+def test_global_phase_is_publicly_reexported() -> None:
+    """The global-phase combinator is part of the curated circuit API."""
+    assert qmc.global_phase is global_phase
+    assert "global_phase" in qmc.__all__
 
 
 def test_measurement_helpers_are_publicly_reexported():

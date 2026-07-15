@@ -32,6 +32,7 @@ class VGateKind(enum.Enum):
     """Classification of VGate nodes for rendering dispatch."""
 
     GATE = enum.auto()
+    GLOBAL_PHASE = enum.auto()
     MEASURE = enum.auto()
     MEASURE_VECTOR = enum.auto()
     BLOCK_BOX = enum.auto()
@@ -59,7 +60,7 @@ class VUnfoldedKind(enum.Enum):
 
 @dataclass
 class VGate:
-    """Pre-resolved gate, measurement, block-box, or expval node.
+    """Pre-resolved gate, annotation, measurement, block-box, or expval node.
 
     Carries all information needed for layout and rendering:
     - label: TeX-formatted display text (e.g. "$R_x(0.5)$")
@@ -68,6 +69,31 @@ class VGate:
     - kind: determines rendering strategy
     - gate_type: for CX/SWAP/TOFFOLI special drawing
     - terminates_wire: whether a measurement node ends its measured wires
+
+    For ``GLOBAL_PHASE``, ``qubit_indices`` names the quantum scope whose
+    horizontal position must stay synchronized. The renderer draws one
+    floating annotation above the scope's top wire; it does not draw a gate on
+    any of those wires.
+
+    Args:
+        node_key (tuple): Stable identifier used to associate the node with
+            layout coordinates.
+        label (str): TeX-formatted display label.
+        qubit_indices (list[int]): Resolved wire indices participating in the
+            node.
+        estimated_width (float): Width reserved for layout.
+        kind (VGateKind): Rendering strategy for the node.
+        gate_type (GateOperationType | None): Primitive gate type used for
+            specialized drawing, or None. Defaults to None.
+        has_param (bool): Whether the displayed gate has a parameter. Defaults
+            to False.
+        box_width (float | None): Explicit width for block-style nodes, or
+            None. Defaults to None.
+        control_count (int): Number of leading control wires for a controlled
+            block. Defaults to 0.
+        power (int): Exponent displayed for a controlled block. Defaults to 1.
+        terminates_wire (bool): Whether a measurement ends its measured wire.
+            Defaults to True.
     """
 
     node_key: tuple

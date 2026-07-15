@@ -236,10 +236,11 @@ class Transpiler(ABC, Generic[T]):
         callable invocation and then folds the base-case
         ``IfOperation`` via ``partial_eval``. Terminates when no
         inline callable invocation remains (success), when every residual call
-        is trapped inside an operation-owned block where ``partial_eval``
-        cannot fold it (control / inverse of a recursive kernel — raises a
-        targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is reached
-        (genuinely non-terminating top-level recursion — raises).
+        is trapped inside an operation-owned block whose recursive callable
+        contract is unsupported (control / inverse / select over a recursive
+        kernel — raises a targeted error, see below), or when
+        ``MAX_UNROLL_DEPTH`` is reached (genuinely non-terminating top-level
+        recursion — raises).
 
         Args:
             block (Block): The block to unroll. May be ``HIERARCHICAL``
@@ -256,9 +257,11 @@ class Transpiler(ABC, Generic[T]):
 
         Raises:
             FrontendTransformError: If every remaining inline callable invocation
-                is trapped inside a ``ControlledUOperation.block`` /
-                ``InverseBlockOperation`` block (a self-recursive kernel was
-                passed to ``qmc.control`` / ``qmc.inverse``), or if a
+                is trapped inside a ``ControlledUOperation.block``, an
+                ``InverseBlockOperation`` block, or a
+                ``SelectOperation.case_blocks`` entry (a self-recursive kernel
+                was passed to ``qmc.control``, ``qmc.inverse``, or
+                ``qmc.select``), or if a
                 genuinely non-terminating top-level recursion does not
                 converge within ``MAX_UNROLL_DEPTH`` iterations. The two
                 cases carry distinct, cause-specific messages.
@@ -278,26 +281,28 @@ class Transpiler(ABC, Generic[T]):
                 return self.inline(block)
             # After a full inline + partial_eval iteration, if calls remain
             # only inside operation-owned blocks (a ControlledUOperation's
-            # ``block`` or an InverseBlockOperation's nested blocks), no
-            # further iteration can make progress: ``inline`` already
-            # unrolled one layer there, but ``partial_eval`` never descends
-            # into those blocks to fold the base-case ``if``. This is the
-            # signature of a self-recursive @qkernel passed to
-            # ``qmc.control`` / ``qmc.inverse``; fail fast with a targeted
+            # ``block``, an InverseBlockOperation's nested blocks, or a
+            # SelectOperation case block), the fixed-point loop deliberately
+            # does not treat the operation-owned recursion as safely
+            # re-enterable. SELECT case partial evaluation can fold ordinary
+            # case-local branches, but it does not make a recursively selected
+            # callable a supported contract. This is the signature of a
+            # self-recursive @qkernel passed to
+            # ``qmc.control`` / ``qmc.inverse`` / ``qmc.select``; fail fast with a targeted
             # message instead of spinning to ``MAX_UNROLL_DEPTH`` and
             # blaming the bindings.
             if count_unrollable_inline_invokes(block.operations) == 0:
                 raise FrontendTransformError(
-                    "qmc.control / qmc.inverse was given a recursive "
+                    "qmc.control / qmc.inverse / qmc.select was given a recursive "
                     "@qkernel: after inlining, an inline callable invocation still "
-                    "remains inside the controlled / inverted block, and "
-                    "partial_eval cannot fold its base-case `if` there "
-                    "(constant folding does not descend into a "
-                    "ControlledUOperation.block or an InverseBlockOperation "
-                    "block). Controlling or inverting a self-recursive "
+                    "remains inside the controlled / inverted / selected block, and "
+                    "the fixed-point loop cannot safely re-enter that "
+                    "operation-owned recursive body. Controlling, "
+                    "inverting, or selecting a self-recursive "
                     "kernel is not supported. Rewrite the kernel "
                     "non-recursively (manually unrolled to the required "
-                    "depth) before passing it to qmc.control / qmc.inverse."
+                    "depth) before passing it to qmc.control / qmc.inverse / "
+                    "qmc.select."
                 )
 
         raise FrontendTransformError(
@@ -385,19 +390,35 @@ class Transpiler(ABC, Generic[T]):
         1. A view whose newly-concrete coverage overlaps another live
            view of the same root parent.
         2. A view whose newly-concrete coverage hits a slot that was
-           consumed by a destructive view operation earlier in the
+           consumed by a destructive operation earlier in the
            block.
-        3. A view that reaches the end of the block while still
-           recorded as the owner of the parent's slots (i.e. it was
-           never used or never released).
+        3. Slice ownership changes that cannot be represented safely across
+           control-flow boundaries.
 
-        Direct element borrows (``q[i]``) emit no IR operation, so the
-        IR-level pass cannot observe them; the trace-time validation
-        in :func:`func_to_block._validate_returned_arrays` covers that
-        path.
+        Creating a direct element borrow (``q[i]``) emits no IR operation,
+        so this pass cannot observe the borrow site itself. Later uses of
+        that element do appear as operation operands and are checked for
+        conflicts with live slice views. Trace-time validation in
+        :func:`qamomile.circuit.frontend.func_to_block._validate_returned_arrays`
+        covers unreturned direct-element borrows that have no observable
+        operand use.
 
         The pass is a pass-through for the IR — it only raises on
         violations and leaves the block unchanged on success.
+
+        Args:
+            block (Block): Post-fold affine or hierarchical block to validate.
+
+        Returns:
+            Block: The input block unchanged after successful validation.
+
+        Raises:
+            QubitBorrowConflictError: If live slice ownership conflicts with
+                another view or direct access.
+            QubitConsumedError: If a slice or operand accesses a slot already
+                destroyed by a destructive operation.
+            ValidationError: If the block kind is invalid or ownership cannot
+                be propagated safely through control flow.
         """
         return SliceBorrowCheckPass().run(block)
 

@@ -436,6 +436,19 @@ class CircuitGateEmitter:
         """
         circuit.append_barrier(tuple(qubits))
 
+    def emit_global_phase(
+        self,
+        circuit: CircuitBuilder,
+        angle: ScalarExpr | float,
+    ) -> None:
+        """Accumulate a phase in the builder's current lexical region.
+
+        Args:
+            circuit (CircuitBuilder): Destination builder.
+            angle (ScalarExpr | float): Phase angle in radians.
+        """
+        circuit.add_global_phase(angle)
+
     def circuit_to_gate(
         self,
         circuit: CircuitBuilder | CircuitProgram,

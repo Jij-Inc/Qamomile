@@ -42,12 +42,17 @@ class MaterializedCircuit(Generic[ArtifactT]):
             explicit override.
         parameter_order (tuple[str, ...] | None): Artifact ABI order for
             positional parameters. ``None`` denotes name-based binding.
+        implicit_output_qubit_indices (tuple[int, ...] | None): Physical qubit
+            indices exposed when a qkernel has no explicit return value.
+            ``None`` preserves the executor's full raw bitstring; an empty
+            tuple explicitly exposes no qubits.
     """
 
     artifact: ArtifactT
     parameters: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     measurement_qubit_map: Mapping[int, int] | None = None
     parameter_order: tuple[str, ...] | None = None
+    implicit_output_qubit_indices: tuple[int, ...] | None = None
 
 
 class CircuitMaterializer(Protocol[ArtifactT]):
@@ -70,11 +75,17 @@ class CircuitMaterializer(Protocol[ArtifactT]):
         """
         ...
 
-    def materialize(self, program: CircuitProgram) -> MaterializedCircuit[ArtifactT]:
+    def materialize(
+        self,
+        program: CircuitProgram,
+        parameter_names: tuple[str, ...] = (),
+    ) -> MaterializedCircuit[ArtifactT]:
         """Materialize one circuit program.
 
         Args:
             program (CircuitProgram): Target-legal circuit-family program.
+            parameter_names (tuple[str, ...]): Public runtime-parameter ABI in
+                its required positional order. Defaults to an empty tuple.
 
         Returns:
             MaterializedCircuit: Artifact plus backend binding metadata.
@@ -197,9 +208,12 @@ def materialize_executable(
     """
     quantum_segments = []
     for segment in executable.compiled_quantum:
-        materialized = materializer.materialize(segment.circuit)
         metadata_names = tuple(
             parameter.name for parameter in segment.parameter_metadata.parameters
+        )
+        materialized = materializer.materialize(
+            segment.circuit,
+            parameter_names=metadata_names,
         )
         materialized_names = tuple(materialized.parameters)
         if set(materialized_names) != set(metadata_names):
@@ -239,6 +253,11 @@ def materialize_executable(
                     segment.measurement_qubit_map
                     if materialized.measurement_qubit_map is None
                     else dict(materialized.measurement_qubit_map)
+                ),
+                implicit_output_qubit_indices=(
+                    segment.implicit_output_qubit_indices
+                    if materialized.implicit_output_qubit_indices is None
+                    else materialized.implicit_output_qubit_indices
                 ),
                 parameter_metadata=parameter_metadata,
             )

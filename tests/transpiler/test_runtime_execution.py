@@ -250,6 +250,80 @@ class TestClassicalExecutorControlFlow:
 
 
 class TestExecutableProgramRuntime:
+    def test_sample_projects_implicit_outputs_and_aggregates_hidden_bits(self) -> None:
+        """Internal ancilla states do not leak into implicit sample outputs."""
+        quantum_segment = QuantumSegment()
+        executable = ExecutableProgram[str](
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=quantum_segment,
+                    circuit="quantum",
+                    implicit_output_qubit_indices=(0, 1),
+                )
+            ]
+        )
+
+        result = executable.sample(
+            _FakeExecutor(counts={"000": 2, "100": 3}),
+            shots=5,
+        ).result()
+
+        assert result.results == [((0, 0), 5)]
+
+    def test_run_projects_implicit_outputs_in_declared_order(self) -> None:
+        """Implicit run outputs follow declared physical-index order."""
+        quantum_segment = QuantumSegment()
+        executable = ExecutableProgram[str](
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=quantum_segment,
+                    circuit="quantum",
+                    implicit_output_qubit_indices=(2, 0),
+                )
+            ]
+        )
+
+        result = executable.run(_FakeExecutor(counts={"101": 1})).result()
+
+        assert result == (1, 1)
+
+    def test_empty_implicit_output_mapping_hides_every_physical_qubit(self) -> None:
+        """An explicit empty map distinguishes zero logical qubits from unknown."""
+        quantum_segment = QuantumSegment()
+        executable = ExecutableProgram[str](
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=quantum_segment,
+                    circuit="quantum",
+                    implicit_output_qubit_indices=(),
+                )
+            ]
+        )
+
+        result = executable.run(_FakeExecutor(counts={"0": 1})).result()
+
+        assert result == ()
+
+    @pytest.mark.parametrize("invalid_index", [-1, 2])
+    def test_invalid_implicit_output_index_is_rejected(
+        self,
+        invalid_index: int,
+    ) -> None:
+        """Malformed implicit-output metadata fails instead of exposing a bit."""
+        quantum_segment = QuantumSegment()
+        executable = ExecutableProgram[str](
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=quantum_segment,
+                    circuit="quantum",
+                    implicit_output_qubit_indices=(invalid_index,),
+                )
+            ]
+        )
+
+        with pytest.raises(ExecutionError, match="outside the backend bitstring"):
+            executable.run(_FakeExecutor(counts={"0": 1})).result()
+
     def test_sample_rejects_unresolved_typed_output(self) -> None:
         """Typed output provenance gaps fail instead of sampling ``None``."""
         output = Value(type=UIntType(), name="missing_output")

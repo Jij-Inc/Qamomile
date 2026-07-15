@@ -311,6 +311,107 @@ def power_demo_concrete() -> qmc.Bit:
 power_demo_concrete.draw()
 
 # %% [markdown]
+# (cg-3-4-phase)=
+# #### Global phase becomes observable under coherent control
+#
+# Multiplying an otherwise standalone operation by `exp(1j * phi)` does not
+# change ordinary measurement probabilities. Qamomile nevertheless keeps the
+# phase as part of the current lexical circuit region. When a reversible
+# region is coherently controlled, the same factor becomes a relative phase on
+# the all-active control subspace. This is particularly important for SELECT
+# circuits, where even an identity Pauli term may carry a complex coefficient.
+#
+# Qamomile provides two related ways to attach this phase:
+#
+# - `qmc.global_phase(fn, phi)` invokes `fn` normally, preserves all of its
+#   outputs, and then attaches `exp(1j * phi)` to the surrounding region.
+# - `qmc.control(fn)(..., global_phase=phi)` attaches the phase at that
+#   controlled call site.
+#
+# The ordinary `qmc.global_phase` wrapper does not require `fn` to be
+# reversible: `fn` may measure, reset, allocate qubits, return classical
+# values, or be entirely classical. Reversibility is checked only if a
+# containing qkernel is later compiled through `qmc.control`, `qmc.inverse`, or
+# another reversible transform. For a reversible operation `U`, the precise
+# controlled-call meaning is `control((exp(1j * phi) * U) ** power)`.
+# Therefore `power=k` repeats the phase `k` times, while an inverse negates the
+# phase together with inverting `U`. `global_phase` is a reserved call-site
+# keyword; if the target callable also has an ordinary parameter named
+# `global_phase`, pass that parameter positionally.
+#
+# A phase attached inside a runtime `if` branch or `while` body stays in that
+# branch or iteration. It is not moved to the top-level circuit or discarded.
+# A target that cannot preserve the requested scoped or standalone phase fails
+# explicitly during capability verification or materialization.
+
+
+# %%
+@qmc.qkernel
+def _identity_for_phase(q: qmc.Qubit) -> qmc.Qubit:
+    return q
+
+
+controlled_phased_identity = qmc.control(_identity_for_phase)
+
+
+@qmc.qkernel
+def phase_kickback_demo() -> qmc.Bit:
+    control = qmc.h(qmc.qubit("control"))
+    target = qmc.qubit("target")
+    control, target = controlled_phased_identity(
+        control,
+        target,
+        global_phase=math.pi,
+    )
+    control = qmc.h(control)
+    return qmc.measure(control)
+
+
+phase_counts = dict(
+    transpiler.transpile(phase_kickback_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+assert phase_counts == {1: 256}
+
+# %% [markdown]
+# :::{note}
+# Qamomile keeps one target-neutral phase meaning, then verifies the selected
+# quantum SDK/Engine/representation before materialization. Qiskit stores the
+# phase in `QuantumCircuit.global_phase` on the top-level circuit or the
+# relevant control-flow block. Quration/PyQret uses its native `global_phase`
+# intrinsic, and HUGR uses `tket_exts.global_phase()`. CUDA-Q has no
+# circuit-level phase API, so Qamomile emits the exact identity
+# `R1(2 phi) RZ(-2 phi)` on an existing logical qubit. For a zero-qubit
+# program, Qamomile internally adds one auxiliary qubit initialized to `|0>`
+# (a clean carrier) and applies only `RZ(-2 phi)`, which produces
+# `exp(i phi)|0>` exactly. Qamomile excludes that qubit from measurements and
+# implicit qkernel outputs, so CUDA-Q preserves the phase without changing the
+# logical result ABI. QURI Parts likewise has no circuit-level phase API. For a
+# concrete phase with an existing logical qubit, Qamomile emits the exact
+# identity `U1(2 phi) RZ(-2 phi)` on that qubit.
+# A symbolic phase, or a phase in a zero-qubit program, instead uses the same
+# kind of clean carrier and applies `RZ(-2 phi)`, producing
+# `exp(i phi)|0>` exactly. Phase carriers are separate from auxiliary qubits
+# used to synthesize multi-control gates.
+#
+# Native standalone phase does not by itself imply that a quantum
+# SDK/Engine/representation can transform every reusable call. Quration/PyQret
+# has no generic call-transform API, so Qamomile inlines a bounded fallback for
+# inverse, power, and at most one coherent control. That fallback accepts its
+# declared primitive gates, one-control Pauli evolution, and nested static
+# `for` loops with compile-time bounds. HUGR uses the same kind of inline
+# fallback for its accepted body operations. Its global-phase correction
+# supports any positive control count: three or more controls use clean
+# auxiliary qubits and a Toffoli conjunction that is uncomputed before those
+# qubits are freed. Runtime-bounded loops, loop-carried values, and runtime
+# `if` / `while` inside either transformed body fail explicitly. HUGR's
+# `power` must resolve to a positive compile-time integer. Shapes outside a
+# declared capability fail rather than losing their phase.
+# :::
+
+# %% [markdown]
 # (cg-3-5)=
 # ### 3.5 Multiple separate positional control args (CCX style)
 #
@@ -854,10 +955,70 @@ case_controlled_qft_over_uint_slice()
 
 # %% [markdown]
 # (cg-7)=
-# ## 7. Summary
+# ## 7. Quantum multiplexers with `qmc.select`
+#
+# `qmc.select([U_0, U_1, ...])` constructs a quantum multiplexer. Its
+# leading argument is an index register, followed by the shared target
+# arguments. If the index reads `i`, case `U_i` is applied. Index order
+# is LSB-first: index qubit `j` represents bit `j`, so index qubit zero
+# is the least-significant bit. The register needs
+# `ceil(log2(len(cases)))` qubits. The case count need not be a power of
+# two; unassigned index values act as identity.
+#
+# Every case must have the same argument signature and must return
+# exactly the quantum target wires it receives. Cases are unitary:
+# measurement, projection, reset, internal ancilla allocation, and extra
+# classical outputs are not accepted. Shared classical parameters may be
+# forwarded by keyword; bound/default branches inside a case are resolved at
+# transpile time.
+
+
+# %%
+@qmc.qkernel
+def keep_target(q: qmc.Qubit) -> qmc.Qubit:
+    return q
+
+
+@qmc.qkernel
+def flip_target(q: qmc.Qubit) -> qmc.Qubit:
+    return qmc.x(q)
+
+
+@qmc.qkernel
+def select_demo() -> qmc.Bit:
+    index = qmc.qubit_array(1, name="index")
+    index[0] = qmc.x(index[0])  # Select case 1.
+    target = qmc.qubit(name="target")
+    index, target = qmc.select([keep_target, flip_target])(index, target)
+    return qmc.measure(target)
+
+
+select_counts = dict(
+    transpiler.transpile(select_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+assert select_counts == {1: 256}
+
+# %% [markdown]
+# SELECT remains one high-level IR operation until the CircuitProgram
+# boundary. There it becomes one semantic reusable call whose portable
+# fallback controls each case on the corresponding index state. It can
+# be nested in `qmc.range`, and in measurement-backed `if` / `while`
+# control flow when the selected backend supports that runtime control
+# flow. It can also appear under `qmc.control` or `qmc.inverse`; global
+# phase inside a case is preserved as observable relative phase.
+
+# %% [markdown]
+# (cg-8)=
+# ## 8. Summary
 #
 # `qmc.control(fn, num_controls=...)` makes a controlled version
 # of any Qamomile built-in gate or user-defined kernel. It has two
 # modes, decided by the type of `num_controls`: a Python `int`
 # gives *concrete* mode, and a `qmc.UInt` (or a `UInt` expression
 # like `n - 1`) gives *symbolic* mode.
+# For indexed families of unitary cases, `qmc.select` provides a single
+# quantum-multiplexer operation with LSB-first index semantics and
+# identity behavior for unassigned basis states.

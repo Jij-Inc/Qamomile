@@ -30,6 +30,7 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 
@@ -239,6 +240,18 @@ class SubstitutionPass(Pass[Block, Block]):
         """
         if isinstance(op, InvokeOperation):
             return self._transform_invoke(op)
+
+        if isinstance(op, SelectOperation):
+            return dataclasses.replace(
+                op,
+                case_blocks=[
+                    dataclasses.replace(
+                        case_block,
+                        operations=self._transform_operations(case_block.operations),
+                    )
+                    for case_block in op.case_blocks
+                ],
+            )
 
         if isinstance(op, HasNestedOps):
             # Recursively transform all nested operation lists

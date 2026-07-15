@@ -19,15 +19,18 @@ import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit
 from qamomile.circuit.frontend.operation.control import ControlledGate, control
 from qamomile.circuit.frontend.tracer import trace
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.operation import OperationKind
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import (
     EmitError,
+    QubitBorrowConflictError,
     QubitConsumedError,
-    SliceBorrowViolationError,
 )
 from tests.transpiler.gate_test_specs import (
     all_zeros_state,
@@ -288,6 +291,22 @@ class TestControlledGateCall:
         assert op.operands[2].get_const() == 1.0
         assert op.operands[3].get_const() == 2.0
 
+    def test_reserved_global_phase_target_param_can_be_positional(self):
+        """A target parameter named global_phase remains positionally callable."""
+        qkernel = _mock_qkernel(classical_params=(("global_phase", Float),))
+        controlled = ControlledGate(qkernel, num_controls=1)
+
+        with trace() as tracer:
+            controlled(
+                _make_qubit("ctrl"),
+                _make_qubit("tgt"),
+                0.25,
+            )
+
+        [operation] = tracer.operations
+        assert operation.block is qkernel.block
+        assert operation.operands[-1].get_const() == 0.25
+
     @pytest.mark.parametrize("power", [1, 2, 3, 5])
     def test_power_parameter_forwarded(self, power):
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
@@ -300,6 +319,75 @@ class TestControlledGateCall:
         with trace() as tracer:
             cg(_make_qubit("ctrl"), _make_qubit("tgt"))
         assert tracer.operations[0].power == 1
+
+    def test_call_global_phase_augments_only_the_private_controlled_block(self):
+        """A call-site phase closes over a formal without mutating the qkernel."""
+        formal_qubit = Value(type=QubitType(), name="q")
+        source_block = Block(
+            name="identity",
+            label_args=["q"],
+            input_values=[formal_qubit],
+            output_values=[formal_qubit],
+            output_names=["q"],
+            operations=[ReturnOperation(operands=[formal_qubit], results=[])],
+        )
+        qkernel = _mock_qkernel()
+        qkernel.block = source_block
+        qkernel._specializing = True
+        controlled = ControlledGate(qkernel, num_controls=1)
+        phase = _make_float_handle("theta")
+
+        with trace() as tracer:
+            controlled(
+                _make_qubit("ctrl"),
+                _make_qubit("tgt"),
+                global_phase=phase,
+            )
+
+        [operation] = tracer.operations
+        assert isinstance(operation, ControlledUOperation)
+        assert operation.block is not source_block
+        [source_return] = source_block.operations
+        assert isinstance(source_return, ReturnOperation)
+        assert len(operation.block.input_values) == 2
+        assert operation.operands[-1] is phase.value
+        phase_formal = operation.block.input_values[-1]
+        phase_operation, cloned_return = operation.block.operations
+        assert isinstance(phase_operation, GlobalPhaseOperation)
+        assert phase_operation.phase is phase_formal
+        assert cloned_return is source_return
+
+    def test_literal_zero_global_phase_keeps_original_block(self):
+        """The default/exact-zero modifier leaves the ordinary call path intact."""
+        qkernel = _mock_qkernel()
+        controlled = ControlledGate(qkernel, num_controls=1)
+
+        with trace() as tracer:
+            controlled(
+                _make_qubit("ctrl"),
+                _make_qubit("tgt"),
+                global_phase=-0.0,
+            )
+
+        assert tracer.operations[0].block is qkernel.block
+        assert len(tracer.operations[0].operands) == 2
+
+    def test_invalid_global_phase_does_not_consume_quantum_inputs(self):
+        """Phase validation runs before affine handles are consumed."""
+        controlled = ControlledGate(_mock_qkernel(), num_controls=1)
+        control_qubit = _make_qubit("ctrl")
+        target_qubit = _make_qubit("tgt")
+
+        with trace():
+            with pytest.raises(TypeError, match="global_phase.*bool"):
+                controlled(
+                    control_qubit,
+                    target_qubit,
+                    global_phase=True,
+                )
+            result = controlled(control_qubit, target_qubit)
+
+        assert len(result) == 2
 
     def test_no_tracer_raises_runtime_error(self):
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
@@ -1162,6 +1250,71 @@ class TestControlledAcceptsBuiltinGate:
         assert op.attrs["default_policy"] == "PRESERVE_BOX"
         assert op.definition is not None
         assert op.definition.body is boxed_h.block
+
+    def test_controlled_composite_counts_vector_target_width(self):
+        """Controlled composite attrs count scalar qubits inside a Vector."""
+
+        @qmc.composite_gate(name="boxed_vector_x")
+        def boxed_vector_x(
+            targets: qmc.Vector[qmc.Qubit],
+        ) -> qmc.Vector[qmc.Qubit]:
+            return qmc.x(targets)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            control = qmc.qubit(name="control")
+            targets = qmc.qubit_array(3, name="targets")
+            control, targets = qmc.control(boxed_vector_x)(control, targets)
+            return qmc.measure(targets)
+
+        block = circuit.build()
+        op = next(
+            operation
+            for operation in block.operations
+            if isinstance(operation, InvokeOperation)
+        )
+
+        assert op.num_control_qubits == 1
+        assert op.num_target_qubits == 3
+
+    def test_composite_call_global_phase_uses_structural_controlled_u(self):
+        """A call-site phase cannot be hidden by an unphased native identity."""
+
+        @qmc.composite_gate(name="phase_augmented_boxed_h")
+        def boxed_h(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.h(q)
+
+        @qmc.qkernel
+        def circuit(
+            ctrl: qmc.Qubit,
+            target: qmc.Qubit,
+            angle: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            ctrl, target = qmc.control(boxed_h)(
+                ctrl,
+                target,
+                global_phase=angle,
+            )
+            return ctrl, target
+
+        block = circuit.build()
+        controlled_ops = [
+            operation
+            for operation in block.operations
+            if isinstance(operation, ControlledUOperation)
+        ]
+
+        assert len(controlled_ops) == 1
+        [operation] = controlled_ops
+        assert operation.block is not boxed_h.block
+        assert any(
+            isinstance(nested, GlobalPhaseOperation)
+            for nested in operation.block.operations
+        )
+        assert not any(
+            isinstance(nested, GlobalPhaseOperation)
+            for nested in boxed_h.block.operations
+        )
 
 
 class TestControlledOracle:
@@ -2133,7 +2286,10 @@ class TestControlledBuiltinSymbolicNumControls:
     upstream of this PR.
     """
 
-    def test_symbolic_num_controls_runs_end_to_end(self, qiskit_transpiler):
+    def test_symbolic_num_controls_with_global_phase_runs_end_to_end(
+        self,
+        qiskit_transpiler,
+    ):
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> qmc.Bit:
             controls = qmc.qubit_array(n, "c")
@@ -2141,7 +2297,12 @@ class TestControlledBuiltinSymbolicNumControls:
             for i in qmc.range(n):
                 controls[i] = qmc.x(controls[i])
             crx = qmc.control(qmc.rx, num_controls=n)
-            controls, target = crx(controls, target, angle=math.pi)
+            controls, target = crx(
+                controls,
+                target,
+                angle=math.pi,
+                global_phase=math.pi / 7,
+            )
             return qmc.measure(target)
 
         exe = qiskit_transpiler.transpile(circuit, bindings={"n": 2})
@@ -4171,7 +4332,7 @@ class TestControlledVectorSubArgFollowUpOps:
             region[0] = qmc.x(region[0])
             return q
 
-        with pytest.raises(SliceBorrowViolationError):
+        with pytest.raises(QubitBorrowConflictError):
             _prepare_nested_block_for_emit(bad_sliced_block.block, {"lo": 0, "hi": 2})
 
     def test_controlled_slice_fallback_strips_markers(self, monkeypatch):

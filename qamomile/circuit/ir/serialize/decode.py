@@ -30,6 +30,7 @@ from qamomile.circuit.ir.operation import (
     ForItemsOperation,
     GateOperation,
     GateOperationType,
+    GlobalPhaseOperation,
     InverseBlockOperation,
     InvokeOperation,
     MeasureOperation,
@@ -39,6 +40,7 @@ from qamomile.circuit.ir.operation import (
     ProjectOperation,
     ResetOperation,
     ReturnOperation,
+    SelectOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -1674,6 +1676,37 @@ def _decode_concrete_controlled(
     )
 
 
+def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
+    """Decode a quantum multiplexer and its callable bodies.
+
+    Args:
+        d (dict[str, Any]): Encoded operation payload.
+        ctx (_DecodeContext): Active decode context.
+
+    Returns:
+        SelectOperation: Reconstructed operation.
+
+    Raises:
+        ValueError: If the index width or case list is malformed.
+    """
+    operands, results = _operands_results(d, ctx)
+    num_index_qubits = d.get("num_index_qubits")
+    if not is_plain_int(num_index_qubits):
+        raise ValueError(
+            "SelectOperation.num_index_qubits must be a Python int, "
+            f"got {num_index_qubits!r}."
+        )
+    raw_case_blocks = d.get("case_blocks")
+    if not isinstance(raw_case_blocks, list):
+        raise ValueError("SelectOperation.case_blocks must be a list.")
+    return SelectOperation(
+        operands=operands,
+        results=results,
+        num_index_qubits=cast(int, num_index_qubits),
+        case_blocks=[_decode_block(block) for block in raw_case_blocks],
+    )
+
+
 def _decode_symbolic_controlled(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> SymbolicControlledU:
@@ -2016,6 +2049,22 @@ def _decode_inverse_block(
     )
 
 
+def _decode_global_phase_operation(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> GlobalPhaseOperation:
+    """Decode a zero-qubit global-phase operation.
+
+    Args:
+        d (dict[str, Any]): Serialized operation dictionary.
+        ctx (_DecodeContext): Active decode context.
+
+    Returns:
+        GlobalPhaseOperation: Reconstructed operation.
+    """
+    operands, results = _operands_results(d, ctx)
+    return GlobalPhaseOperation(operands=operands, results=results)
+
+
 _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] = {
     "GateOperation": _decode_gate_operation,
     "MeasureOperation": _decode_measure,
@@ -2045,6 +2094,8 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "IfOperation": _decode_if,
     "ConcreteControlledU": _decode_concrete_controlled,
     "SymbolicControlledU": _decode_symbolic_controlled,
+    "SelectOperation": _decode_select,
     "InvokeOperation": _decode_invoke_operation,
     "InverseBlockOperation": _decode_inverse_block,
+    "GlobalPhaseOperation": _decode_global_phase_operation,
 }

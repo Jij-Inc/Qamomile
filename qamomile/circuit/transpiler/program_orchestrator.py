@@ -99,7 +99,7 @@ class ProgramOrchestrator(Generic[T]):
                 if program.output_values:
                     value = self._resolve_outputs(shot_context)
                 else:
-                    value = bits
+                    value = self._resolve_implicit_outputs(bits)
                 results.append((value, count))
             return results
 
@@ -135,7 +135,7 @@ class ProgramOrchestrator(Generic[T]):
 
             if program.output_values:
                 return self._resolve_outputs(run_context)
-            return bits
+            return self._resolve_implicit_outputs(bits)
 
         return RunJob(raw_counts, convert_result)
 
@@ -440,6 +440,36 @@ class ProgramOrchestrator(Generic[T]):
             bit_idx = meas_map.get(clbit_idx, clbit_idx)
             if bit_idx < len(bits):
                 context.set(str(addr), bits[bit_idx])
+
+    def _resolve_implicit_outputs(
+        self,
+        bits: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        """Project a raw backend bitstring onto logical implicit outputs.
+
+        Args:
+            bits (tuple[int, ...]): Full little-endian backend bitstring.
+
+        Returns:
+            tuple[int, ...]: Logical qubit values in the materializer-declared
+                order, or the unchanged raw values when no mapping is declared.
+
+        Raises:
+            ExecutionError: If materializer metadata references a missing
+                physical qubit.
+        """
+        compiled_quantum = self._program.compiled_quantum
+        if not compiled_quantum:
+            return bits
+        indices = compiled_quantum[0].implicit_output_qubit_indices
+        if indices is None:
+            return bits
+        if any(index < 0 or index >= len(bits) for index in indices):
+            raise ExecutionError(
+                "Implicit output metadata references a qubit outside the "
+                f"backend bitstring: indices={indices}, width={len(bits)}"
+            )
+        return tuple(bits[index] for index in indices)
 
     # ------------------------------------------------------------------
     # Quantum execution preparation

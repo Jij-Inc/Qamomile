@@ -43,9 +43,11 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.block_parameter_binding import (
     block_parameter_binding_keys,
@@ -67,6 +69,9 @@ from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission impor
 )
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
     reject_duplicate_physical_indices,
+)
+from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
+    emit_controlled_global_phase_operation,
 )
 from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
     map_array_result_group,
@@ -327,6 +332,8 @@ def _batch_op_weight(
         if block is None:
             return 0
         return _controlled_body_batch_weight(emit_pass, block.operations, bindings)
+    if isinstance(op, SelectOperation):
+        return 1
     # Unsupported op kinds are rejected by the walker further down; if a
     # ladder is emitted before that failure the whole transpile aborts, so
     # counting them as real work here is harmless.
@@ -420,6 +427,7 @@ def _body_has_rotation_like_leaf(operations: list[Operation]) -> bool:
                 InvokeOperation,
                 InverseBlockOperation,
                 PauliEvolveOp,
+                SelectOperation,
             ),
         ):
             return True
@@ -649,6 +657,22 @@ def emit_controlled_operations(
             )
             _map_inverse_block_results(
                 op, inverse_control_groups, inverse_target_groups, qubit_map
+            )
+        elif isinstance(op, GlobalPhaseOperation):
+            emit_controlled_global_phase_operation(
+                emit_pass,
+                circuit,
+                op,
+                control_indices,
+                bindings,
+            )
+        elif isinstance(op, SelectOperation):
+            emit_pass._emit_select(
+                circuit,
+                op,
+                qubit_map,
+                bindings,
+                outer_control_indices=control_indices,
             )
         elif isinstance(op, PauliEvolveOp):
             emit_controlled_pauli_evolve(
@@ -1095,7 +1119,10 @@ def resolve_controlled_u_call(
     target_phys = [i for group in target_index_groups for i in group]
 
     local_bindings = emit_pass._resolver.bind_block_params(
-        op.block, param_operands, bindings
+        op.block,
+        param_operands,
+        bindings,
+        parameter_factory=emit_pass._get_or_create_parameter,
     )
     _bind_quantum_input_shapes(
         emit_pass._resolver, op.block, target_qubit_operands, bindings, local_bindings
@@ -1865,15 +1892,14 @@ def emit_controlled_pauli_evolve(
     to ``emit_crz`` for a single control and to the backend's
     ``_emit_irreducible_multi_controlled_gate`` hook for two or more.
 
-    A constant (identity) Hamiltonian term ``c * I`` is a global phase
-    ``exp(-i * gamma * c)`` for the uncontrolled evolution (correctly
-    dropped by :func:`emit_pauli_evolve`), but under controls it becomes
-    an *observable* relative phase on the all-controls-on subspace, so it
-    MUST be emitted here. It is realized as a ``P(-gamma * c)`` on one
-    control conditioned on the remaining controls (``emit_p`` for a single
-    control, a multi-controlled ``P`` for more), matching Qiskit's
-    native ``PauliEvolutionGate`` whose ``SparsePauliOp`` carries the
-    constant.
+    A constant (identity) Hamiltonian term ``c * I`` is the standalone phase
+    ``exp(-i * gamma * c)`` for an uncontrolled evolution and is retained by
+    :func:`emit_pauli_evolve`. Under controls it becomes an *observable*
+    relative phase on the all-controls-on subspace, so it is realized here as
+    a ``P(-gamma * c)`` on one control conditioned on the remaining controls
+    (``emit_p`` for a single control, a multi-controlled ``P`` for more),
+    matching Qiskit's native ``PauliEvolutionGate`` whose ``SparsePauliOp``
+    carries the constant.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass; provides the
@@ -1925,13 +1951,6 @@ def emit_controlled_pauli_evolve(
         )
 
     gamma = _resolve_gamma(emit_pass, op, bindings)
-    if gamma is None:
-        raise EmitError(
-            "Cannot resolve gamma parameter for PauliEvolveOp. "
-            "gamma must be a concrete float binding or a declared "
-            "parameter (scalar or array element).",
-            operation="PauliEvolveOp",
-        )
 
     def scaled_gamma(factor: float) -> Any:
         """Scale ``gamma`` by a real ``factor`` for a controlled rotation angle.
@@ -2059,13 +2078,13 @@ def emit_controlled_pauli_evolve(
     # this is a direct phase, not an RZ). It is applied to one control,
     # conditioned on the rest.
     constant = hamiltonian.constant
-    if abs(constant) > PAULI_TERM_ZERO_ATOL:
-        if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
-            raise EmitError(
-                f"PauliEvolveOp requires a Hermitian Hamiltonian (real "
-                f"coefficients), but found a complex constant {constant}.",
-                operation="PauliEvolveOp",
-            )
+    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
+        raise EmitError(
+            f"PauliEvolveOp requires a Hermitian Hamiltonian (real "
+            f"coefficients), but found a complex constant {constant}.",
+            operation="PauliEvolveOp",
+        )
+    if constant.real:
         # exp(-i*gamma*c*I) -> e^{-i*gamma*c} on the all-controls-on subspace,
         # i.e. P(lambda) with lambda = -gamma*c (no factor of two: a direct
         # phase, not an RZ).
@@ -2279,7 +2298,10 @@ def emit_controlled_u_with_symbolic_indices(
 
     block_value = op.block
     local_bindings = emit_pass._resolver.bind_block_params(
-        block_value, param_operands, bindings
+        block_value,
+        param_operands,
+        bindings,
+        parameter_factory=emit_pass._get_or_create_parameter,
     )
     _bind_quantum_input_shapes(
         emit_pass._resolver,
@@ -2440,7 +2462,10 @@ def emit_controlled_u_multi_arg(
 
     block_value = op.block
     local_bindings = emit_pass._resolver.bind_block_params(
-        block_value, param_operands, bindings
+        block_value,
+        param_operands,
+        bindings,
+        parameter_factory=emit_pass._get_or_create_parameter,
     )
     _bind_quantum_input_shapes(
         emit_pass._resolver,
@@ -2596,7 +2621,10 @@ def emit_controlled_u(
         target_indices.extend(indices)
 
     local_bindings = emit_pass._resolver.bind_block_params(
-        block_value, param_operands, bindings
+        block_value,
+        param_operands,
+        bindings,
+        parameter_factory=emit_pass._get_or_create_parameter,
     )
     _bind_quantum_input_shapes(
         emit_pass._resolver,
@@ -3168,7 +3196,7 @@ def _bind_block_inputs(
     Returns:
         dict[str, Any]: Local bindings for nested emission.
     """
-    local_bindings = dict(bindings)
+    local_bindings = bindings.copy()
     if input_operands is None or not hasattr(block_value, "input_values"):
         return local_bindings
 
@@ -3433,10 +3461,12 @@ def _prepare_nested_block_for_emit(
     Raises:
         EmitError: If the marker-bearing block is already past the stages
             that can be safely checked.
-        ValidationError: If ``SliceBorrowCheckPass`` rejects the block
-            stage.
-        SliceBorrowViolationError: If nested slice borrows violate the
-            same linearity rules enforced for top-level blocks.
+        ValidationError: If ``SliceBorrowCheckPass`` rejects the block stage
+            or cannot represent nested ownership across control flow.
+        QubitBorrowConflictError: If nested slice views have overlapping live
+            ownership.
+        QubitConsumedError: If the nested block accesses a qubit slot after a
+            destructive operation consumed it.
     """
     if not isinstance(block_value, Block):
         return block_value

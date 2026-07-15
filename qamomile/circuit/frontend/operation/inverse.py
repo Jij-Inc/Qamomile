@@ -59,6 +59,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     SymbolicControlledU,
 )
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import (
     Operation,
@@ -67,6 +68,7 @@ from qamomile.circuit.ir.operation.operation import (
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase, ValueLike
 from qamomile.circuit.ir.value_mapping import ValueSubstitutor
@@ -772,10 +774,18 @@ class _BlockInverter:
             return self._invert_inverse_block(op, value_map)
         if isinstance(op, InvokeOperation):
             return self._invert_invoke(op, value_map)
+        if isinstance(op, GlobalPhaseOperation):
+            operations, phase = self._negate_angle(op.phase, value_map)
+            return [
+                *operations,
+                GlobalPhaseOperation(operands=[phase], results=[]),
+            ]
         if isinstance(op, PauliEvolveOp):
             return self._invert_pauli_evolve(op, value_map)
         if isinstance(op, ControlledUOperation):
             return self._invert_controlled_u(op, value_map)
+        if isinstance(op, SelectOperation):
+            return self._invert_select(op, value_map)
         if isinstance(op, ForOperation):
             return self._invert_for(op, value_map)
         if isinstance(op, (IfOperation, WhileOperation, ForItemsOperation)):
@@ -1410,6 +1420,43 @@ class _BlockInverter:
         self._update_quantum_value_map(
             value_map,
             op.control_operands + op.target_operands,
+            new_results,
+        )
+        return [inverse_op]
+
+    def _invert_select(
+        self,
+        op: SelectOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert every callable body selected by a multiplexer.
+
+        Args:
+            op (SelectOperation): SELECT operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: One SELECT whose cases are the inverse bodies.
+        """
+        inverse_blocks = [self.invert_block(block) for block in op.case_blocks]
+        current_results = [
+            _as_value(_substitute_value(result, value_map), "Select result")
+            for result in op.results
+        ]
+        new_results = [result.next_version() for result in current_results]
+        mapped_params = [
+            _as_value(_substitute_value(param, value_map), "Select parameter")
+            for param in op.param_operands
+        ]
+        inverse_op = SelectOperation(
+            operands=[*current_results, *mapped_params],
+            results=new_results,
+            num_index_qubits=op.num_index_qubits,
+            case_blocks=inverse_blocks,
+        )
+        self._update_quantum_value_map(
+            value_map,
+            op.index_operands + op.target_operands,
             new_results,
         )
         return [inverse_op]

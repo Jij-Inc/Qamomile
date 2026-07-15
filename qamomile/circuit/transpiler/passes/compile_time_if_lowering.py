@@ -48,6 +48,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -590,6 +591,24 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     merge_subst.update(static_subst)
                     if eliminate_loop:
                         continue
+
+            elif isinstance(op, SelectOperation):
+                # A SELECT case owns a fresh formal namespace just like a
+                # controlled or boxed callable body. Bind only the case's
+                # declared classical/object inputs from this SELECT's actual
+                # operands; never apply outer UUID/name maps directly to the
+                # case Block.
+                op = dataclasses.replace(
+                    op,
+                    case_blocks=[
+                        self._lower_operation_owned_block(
+                            case_block,
+                            op.param_operands,
+                            concrete_values,
+                        )
+                        for case_block in op.case_blocks
+                    ],
+                )
 
             elif isinstance(op, ControlledUOperation) and op.block is not None:
                 # A controlled-U carries its unitary as a nested ``block``

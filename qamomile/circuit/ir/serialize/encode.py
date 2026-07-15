@@ -23,10 +23,10 @@ from qamomile.circuit.ir.operation import (
     CallableDef,
     CallableImplementation,
     CallableRef,
-    ControlledUOperation,
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
+    GlobalPhaseOperation,
     InverseBlockOperation,
     InvokeOperation,
     MeasureOperation,
@@ -36,6 +36,7 @@ from qamomile.circuit.ir.operation import (
     ProjectOperation,
     ResetOperation,
     ReturnOperation,
+    SelectOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -222,14 +223,32 @@ def _encode_block(block: Block, ctx: _EncodeContext) -> dict[str, Any]:
     }
 
 
+def _encode_nested_block(block: Block) -> dict[str, Any]:
+    """Encode an operation-owned Block with a block-local value table.
+
+    Operation-owned Blocks have independent formal inputs and value scopes.
+    Giving each one a fresh context avoids copying the parent's full value
+    table into every SELECT case, controlled body, inverse body, and callable
+    implementation while matching the decoder's existing per-Block contexts.
+
+    Args:
+        block (Block): Nested Block to encode.
+
+    Returns:
+        dict[str, Any]: Encoded Block with a value table containing only values
+            reachable from that Block.
+    """
+    return _encode_block(block, _EncodeContext())
+
+
 def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
     """Recursively register every Value referenced by ``op``.
 
     Covers operands, results, subclass-extra Value fields (via
     ``all_input_values``), nested control-flow op bodies, and nested
-    Blocks inside ``InvokeOperation`` /
-    ``InverseBlockOperation`` /
-    ``ControlledUOperation``.
+    Ordinary nested control-flow bodies share the parent Block's value scope
+    and are walked recursively. Operation-owned Blocks use their own value
+    tables and are registered when encoded by :func:`_encode_nested_block`.
 
     Args:
         op (Operation): The op to walk.
@@ -246,50 +265,6 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _walk_op_values(child, ctx)
-    if isinstance(op, InvokeOperation):
-        _walk_callable_def_values(op.definition, ctx)
-    if isinstance(op, InverseBlockOperation):
-        if op.source_block is not None:
-            _walk_block_values(op.source_block, ctx)
-        if op.implementation_block is not None:
-            _walk_block_values(op.implementation_block, ctx)
-    if isinstance(op, ControlledUOperation) and op.block is not None:
-        _walk_block_values(op.block, ctx)
-
-
-def _walk_block_values(sub: Block, ctx: _EncodeContext) -> None:
-    """Walk Values inside a nested Block embedded in an Operation.
-
-    Args:
-        sub (Block): The nested Block.
-        ctx (_EncodeContext): The active encoding context.
-    """
-    for v in sub.input_values:
-        ctx.register_value(v)
-    for v in sub.parameters.values():
-        ctx.register_value(v)
-    for op in sub.operations:
-        _walk_op_values(op, ctx)
-    for v in sub.output_values:
-        ctx.register_value(v)
-
-
-def _walk_callable_def_values(
-    definition: CallableDef | None, ctx: _EncodeContext
-) -> None:
-    """Walk Values inside a callable definition.
-
-    Args:
-        definition (CallableDef | None): Definition embedded in an invocation.
-        ctx (_EncodeContext): The active encoding context.
-    """
-    if definition is None:
-        return
-    if definition.body is not None:
-        _walk_block_values(definition.body, ctx)
-    for impl in definition.implementations:
-        if impl.body is not None:
-            _walk_block_values(impl.body, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -1300,8 +1275,26 @@ def _encode_concrete_controlled(
         d["callable_ref"] = _encode_callable_ref(op.callable_ref)
     if op.callable_attrs:
         d["callable_attrs"] = _encode_payload(op.callable_attrs)
-    d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
+    d["unitary_block"] = (
+        _encode_nested_block(op.block) if op.block is not None else None
+    )
     return d
+
+
+def _encode_select(op: SelectOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode a quantum multiplexer and its callable bodies.
+
+    Args:
+        op (SelectOperation): SELECT operation to encode.
+        ctx (_EncodeContext): Active encoding context.
+
+    Returns:
+        dict[str, Any]: Encoded operation payload.
+    """
+    payload = _base_op_dict("SelectOperation", op)
+    payload["num_index_qubits"] = op.num_index_qubits
+    payload["case_blocks"] = [_encode_nested_block(block) for block in op.case_blocks]
+    return payload
 
 
 def _encode_symbolic_controlled(
@@ -1346,7 +1339,9 @@ def _encode_symbolic_controlled(
     # default of 1 so existing v1 payloads stay readable.
     if op.num_control_args != 1:
         d["num_control_args"] = op.num_control_args
-    d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
+    d["unitary_block"] = (
+        _encode_nested_block(op.block) if op.block is not None else None
+    )
     return d
 
 
@@ -1411,14 +1406,11 @@ def _encode_callable_body_ref(
 
 def _encode_callable_implementation(
     impl: CallableImplementation,
-    ctx: _EncodeContext,
 ) -> dict[str, Any]:
     """Encode a callable implementation candidate.
 
     Args:
         impl (CallableImplementation): Implementation to encode.
-        ctx (_EncodeContext): The active encoding context.
-
     Returns:
         dict[str, Any]: Serialized implementation.
     """
@@ -1426,7 +1418,7 @@ def _encode_callable_implementation(
         "transform": impl.transform.name,
         "backend": impl.backend,
         "strategy": impl.strategy,
-        "body": _encode_block(impl.body, ctx) if impl.body is not None else None,
+        "body": (_encode_nested_block(impl.body) if impl.body is not None else None),
         "body_ref": _encode_callable_body_ref(impl.body_ref),
         "attrs": _encode_payload(impl.attrs),
     }
@@ -1465,14 +1457,11 @@ def _encode_signature(signature: Signature | None) -> dict[str, Any] | None:
 
 def _encode_callable_def(
     definition: CallableDef | None,
-    ctx: _EncodeContext,
 ) -> dict[str, Any] | None:
     """Encode a callable definition.
 
     Args:
         definition (CallableDef | None): Definition to encode.
-        ctx (_EncodeContext): The active encoding context.
-
     Returns:
         dict[str, Any] | None: Serialized definition, or ``None``.
     """
@@ -1482,12 +1471,13 @@ def _encode_callable_def(
         "ref": _encode_callable_ref(definition.ref),
         "signature": _encode_signature(definition.signature),
         "body": (
-            _encode_block(definition.body, ctx) if definition.body is not None else None
+            _encode_nested_block(definition.body)
+            if definition.body is not None
+            else None
         ),
         "body_ref": _encode_callable_body_ref(definition.body_ref),
         "implementations": [
-            _encode_callable_implementation(impl, ctx)
-            for impl in definition.implementations
+            _encode_callable_implementation(impl) for impl in definition.implementations
         ],
         "default_policy": definition.default_policy.name,
         "attrs": _encode_payload(definition.attrs),
@@ -1511,7 +1501,7 @@ def _encode_invoke_operation(
     d["target"] = _encode_callable_ref(op.target)
     d["transform"] = op.transform.name
     d["attrs"] = _encode_payload(op.attrs)
-    d["definition"] = _encode_callable_def(op.definition, ctx)
+    d["definition"] = _encode_callable_def(op.definition)
     return d
 
 
@@ -1537,14 +1527,30 @@ def _encode_inverse_block(
     if op.callable_attrs:
         d["callable_attrs"] = _encode_payload(op.callable_attrs)
     d["source_block"] = (
-        _encode_block(op.source_block, ctx) if op.source_block is not None else None
+        _encode_nested_block(op.source_block) if op.source_block is not None else None
     )
     d["implementation_block"] = (
-        _encode_block(op.implementation_block, ctx)
+        _encode_nested_block(op.implementation_block)
         if op.implementation_block is not None
         else None
     )
     return d
+
+
+def _encode_global_phase_operation(
+    op: GlobalPhaseOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode a zero-qubit global-phase operation.
+
+    Args:
+        op (GlobalPhaseOperation): Operation to encode.
+        ctx (_EncodeContext): Active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary containing the phase operand.
+    """
+    del ctx
+    return _base_op_dict("GlobalPhaseOperation", op)
 
 
 _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
@@ -1576,6 +1582,8 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     IfOperation: _encode_if,
     ConcreteControlledU: _encode_concrete_controlled,
     SymbolicControlledU: _encode_symbolic_controlled,
+    SelectOperation: _encode_select,
     InvokeOperation: _encode_invoke_operation,
     InverseBlockOperation: _encode_inverse_block,
+    GlobalPhaseOperation: _encode_global_phase_operation,
 }

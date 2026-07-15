@@ -150,18 +150,7 @@ class _ExpectedCudaqSourceBuilder:
             return
         if kind == "cp":
             control, target, angle = args
-            angle_expr = _angle_expr(angle)
-            if isinstance(angle, (int, float)):
-                half = repr(angle / 2.0)
-                neg_half = repr(-angle / 2.0)
-            else:
-                half = f"({angle_expr}) * 0.5"
-                neg_half = f"({angle_expr}) * (-0.5)"
-            self._emit(f"rz({half}, q[{target}])")
-            self._emit(f"x.ctrl(q[{control}], q[{target}])")
-            self._emit(f"rz({neg_half}, q[{target}])")
-            self._emit(f"x.ctrl(q[{control}], q[{target}])")
-            self._emit(f"rz({half}, q[{control}])")
+            self._emit(f"r1.ctrl({_angle_expr(angle)}, q[{control}], q[{target}])")
             return
         if kind == "rzz":
             qubit1, qubit2, angle = args

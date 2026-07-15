@@ -27,16 +27,20 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
 )
-from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.classical_ops import DictGetItemOperation
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
     ForOperation,
     HasNestedOps,
     IfOperation,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.value import Value
@@ -107,14 +111,14 @@ class LoopAnalyzer:
     ) -> bool:
         """Return whether a loop body needs a concrete Python index.
 
-        Preserve native backend-loop parameters for ordinary gate angles and
-        direct boxed-call parameters, while forcing unrolling for structural
+        Preserve native backend-loop parameters for ordinary gate angles,
+        while forcing unrolling for boxed-call parameters and structural
         decisions: classical expression evaluation, runtime conditions,
-        dictionary lookup, operation-owned controlled/inverse bodies, and any
-        array/slice/container address derived from the induction value. The
-        generic ``all_input_values`` scan is retained for structural ancestry so
-        subclass-specific fields such as symbolic control indices cannot be
-        omitted.
+        dictionary lookup, operation-owned controlled/inverse bodies, phase
+        normalization, and any array/slice/container address derived from the
+        induction value. The generic ``all_input_values`` scan is retained for
+        structural ancestry so subclass-specific fields such as symbolic
+        control indices cannot be omitted.
 
         Args:
             operations (list[Operation]): Loop-body operations to scan.
@@ -164,6 +168,19 @@ class LoopAnalyzer:
                 self._value_depends_on_loop_var(value, loop_var_uuid)
                 for value in op.operands
             )
+            requires_direct = requires_direct or any(
+                self._value_depends_on_loop_var(arg.init, loop_var_uuid)
+                for arg in op.region_args
+            )
+        elif isinstance(op, (ForOperation, ForItemsOperation)):
+            # A nested carry seeded from the outer induction value may feed any
+            # downstream operation through its distinct block-argument UUID.
+            # Unroll at the seed edge instead of attempting partial dataflow
+            # analysis through every carried-value consumer.
+            requires_direct = any(
+                self._value_depends_on_loop_var(arg.init, loop_var_uuid)
+                for arg in op.region_args
+            )
         elif isinstance(op, DictGetItemOperation):
             requires_direct = any(
                 self._value_depends_on_loop_var(value, loop_var_uuid)
@@ -179,20 +196,39 @@ class LoopAnalyzer:
                 self._value_depends_on_loop_var(value, loop_var_uuid)
                 for value in op.parameters
             )
-        elif (
-            isinstance(op, InvokeOperation) and op.transform is CallTransform.CONTROLLED
-        ):
+        elif isinstance(op, GlobalPhaseOperation):
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.operands
+            )
+        elif isinstance(op, PauliEvolveOp):
+            requires_direct = self._value_depends_on_loop_var(
+                op.gamma,
+                loop_var_uuid,
+            )
+        elif isinstance(op, InvokeOperation):
             requires_direct = any(
                 self._value_depends_on_loop_var(value, loop_var_uuid)
                 for value in op.parameters
             )
+        elif isinstance(op, SelectOperation):
+            # SELECT case bodies become independent reusable circuits at the
+            # CircuitProgram boundary and therefore cannot capture a caller's
+            # native loop variable. Materialize a concrete body per iteration
+            # whenever a shared case parameter depends on that variable.
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in op.param_operands
+            )
         if requires_direct:
             return True
 
-        # Ordinary gate operands and direct boxed-call parameters may consume a
-        # backend-native loop parameter directly. Only structural descendants
-        # (array indices, slice bounds, shapes, tuple/dict members) force a
-        # concrete Python iteration value for these operations.
+        # Ordinary gate operands may consume a backend-native loop parameter
+        # directly. Boxed callable bodies are materialized independently and
+        # cannot capture the caller's loop-variable scope, so their direct
+        # parameters were handled above. Structural descendants (array
+        # indices, slice bounds, shapes, tuple/dict members) always force a
+        # concrete Python iteration value.
         return any(
             self._value_depends_on_loop_var(
                 value,

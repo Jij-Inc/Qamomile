@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.canonical import content_hash
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CompOpKind,
@@ -23,9 +25,14 @@ from qamomile.circuit.ir.operation.control_flow import (
     validate_region_args,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import (
+    SelectOperation,
+    _control_pattern_for_index,
+)
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.circuit_ir.emitter import CircuitGateEmitter
 from qamomile.circuit.transpiler.circuit_ir.model import (
+    SELECT_SEMANTIC_KEY,
     BinaryExpr,
     BinaryOperator,
     CallableIdentity,
@@ -41,11 +48,14 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     SemanticOpKey,
     UnaryExpr,
     UnaryOperator,
+    _contains_classical_bit,
+    _is_zero_scalar,
 )
 from qamomile.circuit.transpiler.circuit_ir.verify import verify_circuit
 from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
+from qamomile.circuit.transpiler.gate_emitter import GateKind
 from qamomile.circuit.transpiler.passes.emit_support import ClbitMap, QubitMap
 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
     join_runtime_condition_sources,
@@ -55,6 +65,17 @@ from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission impor
     resolve_if_condition,
     restore_runtime_condition_sources,
     snapshot_runtime_condition_sources,
+)
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    _bind_quantum_input_shapes,
+    _expand_quantum_operands_to_phys,
+    _map_operand_result_groups,
+    _prepare_nested_block_for_emit,
+    _should_emit_single_target_block_per_vector_element,
+    build_controlled_block_qubit_map,
+)
+from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
+    reject_duplicate_physical_indices,
 )
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import QubitAddress
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
@@ -109,6 +130,250 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             backend_name="circuit_ir",
         )
         self._composite_emitters.append(_SemanticCompositeEmitter(self))
+
+    def _emit_select(
+        self,
+        circuit: CircuitBuilder,
+        op: SelectOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+        outer_control_indices: list[int] | None = None,
+    ) -> None:
+        """Lower SELECT as one semantic call with controlled case calls.
+
+        The outer call preserves SELECT identity for target legalization. Its
+        fallback body uses local index slots followed by local target slots.
+        Each nontrivial case is a reusable body controlled by every index bit;
+        zero-valued bits are represented by explicit X brackets in the fallback
+        rather than by a second public anti-control abstraction.
+
+        Args:
+            circuit (CircuitBuilder): Parent circuit builder.
+            op (SelectOperation): Semantic multiplexer operation.
+            qubit_map (QubitMap): Current semantic-value to physical-slot map.
+            bindings (dict[str, Any]): Active compile-time and loop bindings.
+            outer_control_indices (list[int] | None): Controls inherited from
+                an enclosing controlled call. Defaults to ``None``.
+
+        Returns:
+            None: The semantic call is appended to ``circuit`` in place.
+
+        Raises:
+            EmitError: If an operand cannot be resolved, physical operands
+                alias, or a case cannot be lowered as a unitary reusable body.
+        """
+        inherited_controls = list(outer_control_indices or ())
+        index_indices: list[int] = []
+        for operand in op.index_operands:
+            physical = self._resolver.resolve_qubit_index(
+                operand,
+                qubit_map,
+                bindings,
+            )
+            if physical is None:
+                raise EmitError(
+                    f"Cannot resolve SELECT index operand {operand.name!r}.",
+                    operation="SelectOperation",
+                )
+            index_indices.append(physical)
+
+        target_groups = [
+            _expand_quantum_operands_to_phys(
+                self,
+                operand,
+                qubit_map,
+                bindings,
+                operation="SelectOperation",
+            )
+            for operand in op.target_operands
+        ]
+        target_indices = [physical for group in target_groups for physical in group]
+        if not target_indices:
+            raise EmitError(
+                "SelectOperation requires at least one target qubit.",
+                operation="SelectOperation",
+            )
+        reject_duplicate_physical_indices(
+            "SelectOperation",
+            [*inherited_controls, *index_indices, *target_indices],
+        )
+
+        index_width = op.num_index_qubits
+        target_widths = tuple(len(group) for group in target_groups)
+        fallback = CircuitBuilder(
+            index_width + len(target_indices),
+            0,
+            name="select",
+        )
+        local_indices = tuple(range(index_width))
+        local_targets = tuple(range(index_width, index_width + len(target_indices)))
+
+        for case_index, case_block in enumerate(op.case_blocks):
+            case_program, broadcast = self._lower_select_case(
+                case_block,
+                op.target_operands,
+                op.param_operands,
+                target_indices,
+                bindings,
+                case_index,
+            )
+            if not case_program.operations and _is_zero_scalar(
+                case_program.global_phase
+            ):
+                continue
+
+            pattern = _control_pattern_for_index(case_index, index_width)
+            zero_slots = tuple(
+                local_indices[position]
+                for position, required in enumerate(pattern)
+                if required == 0
+            )
+            for slot in zero_slots:
+                fallback.append_gate(GateKind.X, (slot,))
+
+            case_callee = ReusableCircuit(
+                body=case_program,
+                name=case_program.name,
+                controls=index_width,
+                operand_widths=(1,) if broadcast else target_widths,
+            )
+            if broadcast:
+                for target in local_targets:
+                    fallback.append_call(
+                        case_callee,
+                        (*local_indices, target),
+                    )
+            else:
+                fallback.append_call(
+                    case_callee,
+                    (*local_indices, *local_targets),
+                )
+
+            for slot in reversed(zero_slots):
+                fallback.append_gate(GateKind.X, (slot,))
+
+        select_callee = ReusableCircuit(
+            body=fallback.freeze(),
+            name="select",
+            controls=len(inherited_controls),
+            identity=CallableIdentity(
+                key=SELECT_SEMANTIC_KEY,
+                symbol="select",
+                arguments=SemanticArguments.from_mapping(
+                    {
+                        "case_fingerprints": tuple(
+                            content_hash(case_block) for case_block in op.case_blocks
+                        ),
+                        "index_order": "lsb0",
+                        "num_cases": op.num_cases,
+                        "num_index_qubits": index_width,
+                    }
+                ),
+            ),
+            operand_widths=(index_width, *target_widths),
+        )
+        circuit.append_call(
+            select_callee,
+            (*inherited_controls, *index_indices, *target_indices),
+        )
+
+        _map_operand_result_groups(
+            op.results[:index_width],
+            [[physical] for physical in index_indices],
+            qubit_map,
+        )
+        target_results = [
+            result for result in op.results[index_width:] if result.type.is_quantum()
+        ]
+        _map_operand_result_groups(target_results, target_groups, qubit_map)
+
+    def _lower_select_case(
+        self,
+        case_block: Block,
+        target_operands: list[Value],
+        parameter_operands: list[Value],
+        target_indices: list[int],
+        bindings: dict[str, Any],
+        case_index: int,
+    ) -> tuple[CircuitProgram, bool]:
+        """Lower one SELECT case into an independent reusable program.
+
+        Args:
+            case_block (Block): Specialized semantic case block.
+            target_operands (list[Value]): Shared quantum operands supplied at
+                the SELECT call site.
+            parameter_operands (list[Value]): Shared classical operands.
+            target_indices (list[int]): Flattened parent target slots, used only
+                to determine scalar-to-vector broadcast shape.
+            bindings (dict[str, Any]): Parent compile-time and loop bindings.
+            case_index (int): Case position used in names and diagnostics.
+
+        Returns:
+            tuple[CircuitProgram, bool]: Lowered body and whether it represents
+            a scalar case broadcast over every target element.
+
+        Raises:
+            EmitError: If the case allocates hidden quantum/classical resources
+                or cannot be lowered into its declared target width.
+        """
+        local_bindings = self._resolver.bind_block_params(
+            case_block,
+            parameter_operands,
+            bindings,
+            parameter_factory=self._get_or_create_parameter,
+        )
+        _bind_quantum_input_shapes(
+            self._resolver,
+            case_block,
+            target_operands,
+            bindings,
+            local_bindings,
+        )
+        prepared = _prepare_nested_block_for_emit(case_block, local_bindings)
+        broadcast = _should_emit_single_target_block_per_vector_element(
+            prepared,
+            target_operands,
+            target_indices,
+        )
+        case_width = 1 if broadcast else len(target_indices)
+        local_map = build_controlled_block_qubit_map(
+            self,
+            prepared,
+            list(range(case_width)),
+            local_bindings,
+        )
+        with self._allocator.preserving_analysis_state():
+            local_map, local_clbits = self._allocator.allocate(
+                prepared.operations,
+                local_bindings,
+                initial_qubit_map=local_map,
+                initial_clbit_map={},
+            )
+        allocated_qubits = max(local_map.values(), default=-1) + 1
+        if allocated_qubits > case_width or local_clbits:
+            raise EmitError(
+                f"SELECT case {case_index} requires hidden quantum or "
+                f"classical resources; cases must be unitary on exactly the "
+                f"shared target register.",
+                operation="SelectOperation",
+            )
+
+        builder = CircuitBuilder(
+            case_width,
+            0,
+            name=prepared.name or f"select_case_{case_index}",
+        )
+        self._emit_operations(
+            builder,
+            prepared.operations,
+            local_map,
+            local_clbits,
+            local_bindings,
+            force_unroll=True,
+        )
+        program = builder.freeze()
+        verify_circuit(program)
+        return program, broadcast
 
     def _runtime_operand(
         self,
@@ -436,8 +701,6 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 operation="PauliEvolveOp",
             )
         gamma = _resolve_gamma(self, op, bindings)
-        if gamma is None:
-            raise EmitError("Cannot resolve Pauli evolution time")
         for operators, coefficient in hamiltonian:
             if abs(coefficient.imag) > HERMITIAN_IMAG_ATOL:
                 raise EmitError(
@@ -632,26 +895,6 @@ _SCALAR_EXPR_TYPES = (
     BinaryExpr,
     UnaryExpr,
 )
-
-
-def _contains_classical_bit(expression: ScalarExpr) -> bool:
-    """Return whether an expression depends on a measured classical bit.
-
-    Args:
-        expression (ScalarExpr): Expression to inspect.
-
-    Returns:
-        bool: True when a :class:`ClassicalBitExpr` occurs recursively.
-    """
-    if isinstance(expression, ClassicalBitExpr):
-        return True
-    if isinstance(expression, BinaryExpr):
-        return _contains_classical_bit(expression.left) or _contains_classical_bit(
-            expression.right
-        )
-    if isinstance(expression, UnaryExpr):
-        return _contains_classical_bit(expression.operand)
-    return False
 
 
 def lower_circuit_plan(
