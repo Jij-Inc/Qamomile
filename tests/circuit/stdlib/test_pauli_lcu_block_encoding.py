@@ -514,6 +514,104 @@ def test_outer_control_executes_multi_term_prepare_select_path(
     assert zero_probability == pytest.approx(expected, abs=tolerance)
 
 
+@pytest.mark.parametrize(
+    ("invert", "expected_y"),
+    [(False, -2.0 / 3.0), (True, 2.0 / 3.0)],
+    ids=["forward", "inverse"],
+)
+def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
+    sdk_transpiler: Any,
+    invert: bool,
+    expected_y: float,
+) -> None:
+    """An LSB-first zero control composes with the phase-bearing inner SELECT.
+
+    With ``alpha = 3 / 2``, the active branch has selection-zero amplitude
+    ``2j / 3`` and success probability ``5 / 9``. The inactive identity branch
+    succeeds with probability one, so their equal superposition succeeds with
+    probability ``7 / 9`` and has control-Y expectation ``-2 / 3`` (conjugated
+    by inverse).
+    """
+    lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
+    gate = qmc.pauli_lcu_block_encoding(lcu)
+
+    @qmc.qkernel
+    def forward_lcu(
+        selection: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Expose the forward composite through a fixed qkernel signature."""
+        return gate(selection, system)
+
+    @qmc.qkernel
+    def inverse_lcu(
+        selection: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Expose the inverse composite through a fixed qkernel signature."""
+        return qmc.inverse(gate)(selection, system)
+
+    applied_gate = inverse_lcu if invert else forward_lcu
+    controlled_gate = qmc.control(
+        applied_gate,
+        num_controls=2,
+        control_value=2,
+    )
+
+    @qmc.qkernel
+    def sample_kernel() -> qmc.Vector[qmc.Bit]:
+        """Measure LCU success across active and inactive control branches."""
+        controls = qmc.qubit_array(2, "controls")
+        controls[0] = qmc.h(controls[0])
+        controls[1] = qmc.x(controls[1])
+        selection = qmc.qubit_array(1, "selection")
+        system = qmc.qubit_array(1, "system")
+        controls, selection, system = controlled_gate(
+            controls,
+            selection,
+            system,
+        )
+        return qmc.measure(selection)
+
+    @qmc.qkernel
+    def expval_kernel(observable: qmc.Observable) -> qmc.Float:
+        """Estimate the phase kickback on the zero-activated control qubit."""
+        controls = qmc.qubit_array(2, "controls")
+        controls[0] = qmc.h(controls[0])
+        controls[1] = qmc.x(controls[1])
+        selection = qmc.qubit_array(1, "selection")
+        system = qmc.qubit_array(1, "system")
+        controls, selection, system = controlled_gate(
+            controls,
+            selection,
+            system,
+        )
+        return qmc.expval(controls[0], observable)
+
+    shots = 4096
+    sample_executable = sdk_transpiler.transpiler.transpile(sample_kernel)
+    sample_result = sample_executable.sample(
+        _executor(sdk_transpiler),
+        shots=shots,
+    ).result()
+    expected_success = 7.0 / 9.0
+    sampling_tolerance = (
+        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+    )
+    assert _zero_probability(sample_result.results) == pytest.approx(
+        expected_success,
+        abs=sampling_tolerance,
+    )
+
+    expval_executable = sdk_transpiler.transpiler.transpile(
+        expval_kernel,
+        bindings={"observable": qm_o.Y(0)},
+    )
+    observed_y = float(expval_executable.run(_executor(sdk_transpiler)).result())
+    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed_y == pytest.approx(expected_y, abs=expval_tolerance)
+
+
 def test_zero_operator_path_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
