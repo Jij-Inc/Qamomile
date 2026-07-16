@@ -708,7 +708,7 @@ def _token(obj: Any) -> str:
         # potentially large array is allocated; ``ascontiguousarray``
         # already guarantees a C-contiguous buffer.
         digest = hashlib.sha256(memoryview(data.reshape(-1)).cast("B")).hexdigest()
-        return f"ndarray<dtype={data.dtype.str},shape={data.shape},sha256={digest}>"
+        return f"ndarray<dtype={data.dtype.str},shape={obj.shape},sha256={digest}>"
     if isinstance(obj, Hamiltonian):
         return _hamiltonian_token(obj)
     if isinstance(obj, Block):

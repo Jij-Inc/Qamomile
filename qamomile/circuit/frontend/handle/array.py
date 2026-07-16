@@ -510,14 +510,68 @@ class ArrayBase(Handle, Generic[T]):
                 )
 
     def _format_index(self, indices: tuple[UInt, ...]) -> str:
-        """Format indices for element naming and parameter tracking."""
-        parts = []
-        for idx in indices:
-            if idx.value.is_constant():
-                parts.append(str(int(idx.value.get_const())))
-            else:
-                parts.append(idx.value.name)
-        return ",".join(parts)
+        """Format indices for element naming and diagnostics.
+
+        Args:
+            indices (tuple[UInt, ...]): Index handles to render.
+
+        Returns:
+            str: Comma-separated constants, names, or symbolic expressions.
+        """
+        return ",".join(self._format_index_value(idx.value) for idx in indices)
+
+    def _format_index_value(
+        self,
+        value: Value,
+        visiting: frozenset[str] = frozenset(),
+    ) -> str:
+        """Render one index value without dropping computed expressions.
+
+        Args:
+            value (Value): Index value to render.
+            visiting (frozenset[str]): Result UUIDs already traversed while
+                following arithmetic producers. Defaults to an empty set.
+
+        Returns:
+            str: A readable constant, symbol, or arithmetic expression.
+        """
+        if value.is_constant():
+            return str(int(value.get_const()))
+        if value.is_parameter():
+            parameter_name = value.parameter_name()
+            return parameter_name or value.name or f"symbolic:{value.uuid[:8]}"
+        if value.uuid in visiting:
+            return value.name or f"symbolic:{value.uuid[:8]}"
+
+        try:
+            operations = get_current_tracer().operations
+        except RuntimeError:
+            return value.name or f"symbolic:{value.uuid[:8]}"
+
+        for operation in reversed(operations):
+            if not isinstance(operation, BinOp) or operation.output.uuid != value.uuid:
+                continue
+            next_visiting = visiting | {value.uuid}
+            lhs = self._format_index_value(operation.lhs, next_visiting)
+            rhs = self._format_index_value(operation.rhs, next_visiting)
+            kind = operation.kind
+            if kind is None:
+                break
+            if kind is BinOpKind.MIN:
+                return f"min({lhs}, {rhs})"
+            operator = {
+                BinOpKind.ADD: "+",
+                BinOpKind.SUB: "-",
+                BinOpKind.MUL: "*",
+                BinOpKind.DIV: "/",
+                BinOpKind.FLOORDIV: "//",
+                BinOpKind.MOD: "%",
+                BinOpKind.POW: "**",
+            }.get(kind)
+            if operator is not None:
+                return f"({lhs} {operator} {rhs})"
+            break
+        return value.name or f"symbolic:{value.uuid[:8]}"
 
     def _make_indices_key(self, indices: tuple[UInt, ...]) -> tuple[str, ...]:
         """Create a key for tracking borrowed indices.
@@ -992,7 +1046,7 @@ class ArrayBase(Handle, Generic[T]):
                 if self._indices_definitely_different(indices, value.indices):
                     reason = "the target is a different index"
                 else:
-                    reason = "equivalence of the symbolic indices cannot be proven"
+                    reason = "the target uses a different symbolic index expression"
                 raise AffineTypeError(
                     f"Cannot return borrowed element "
                     f"'{self.value.name}[{source_index_str}]' to "

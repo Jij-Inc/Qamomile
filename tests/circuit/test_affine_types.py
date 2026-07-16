@@ -924,8 +924,14 @@ class TestComputedIndexBorrowReturn:
                 qubits[i + 2] = qm.x(qubits[i])
             return qm.measure(qubits)
 
-        with pytest.raises(AffineTypeError, match="symbolic indices cannot be proven"):
+        with pytest.raises(
+            AffineTypeError, match="different symbolic index expression"
+        ) as exc_info:
             bad_cross_index.build(n=4)
+
+        message = str(exc_info.value)
+        assert "'q[i]'" in message
+        assert "'q[(i + 2)]'" in message
 
 
 class TestAllSingleQubitGatesDoubleUse:

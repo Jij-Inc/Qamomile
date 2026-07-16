@@ -30,6 +30,13 @@
 # # !pip install "qamomile[cudaq-cu12,visualization]"  # CUDA 12.x, Linux
 # # !pip install "qamomile[cudaq-cu13,visualization]"  # CUDA 13.x, Linux or macOS ARM64
 
+# %% [markdown]
+# :::{warning}
+# On macOS ARM64, do not run CUDA-Q kernels and Qiskit Aer in the same Python process.
+# Their native dependencies can load incompatible OpenMP runtimes, which may terminate the process instead of raising a Python exception.
+# Use separate notebook kernels or separate Python processes when comparing the two simulators.
+# :::
+
 # %%
 import os
 import platform

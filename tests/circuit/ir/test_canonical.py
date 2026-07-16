@@ -1253,6 +1253,15 @@ class TestParamSlotsHashParticipation:
         hash_b = content_hash(_block_with_bound_slot(np.array([0.1, 0.2, 0.3])))
         assert hash_a == hash_b
 
+    def test_numpy_bound_value_shape_changes_hash(self):
+        """A scalar array and a length-one array have distinct identities."""
+        scalar = np.array(0.5)
+        vector = np.array([0.5])
+        assert scalar.tobytes() == vector.tobytes()
+        assert content_hash(_block_with_bound_slot(scalar)) != content_hash(
+            _block_with_bound_slot(vector)
+        )
+
     def test_large_numpy_bound_values_hash_by_content(self):
         """Arrays indistinguishable under truncated ``repr`` still hash apart."""
         base = np.zeros(2048)
