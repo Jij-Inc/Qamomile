@@ -23,6 +23,8 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit import qkernel
+from qamomile.circuit.ir.types.primitives import FloatType
+from qamomile.circuit.ir.value import ArrayValue, TupleValue
 
 
 # --------------------------------------------------------------------------- #
@@ -40,6 +42,49 @@ def _unitary(qc: Any) -> np.ndarray:
     from qiskit.quantum_info import Operator
 
     return Operator(qc.remove_final_measurements(inplace=False)).data
+
+
+def _assert_runtime_angle_unitary_preserved(
+    original: Any,
+    restored: Any,
+    qiskit_transpiler: Any,
+) -> None:
+    """Assert runtime-angle semantics survive a serialization round-trip.
+
+    Args:
+        original (Any): Source qkernel.
+        restored (Any): Deserialized qkernel.
+        qiskit_transpiler (Any): Qiskit transpiler used to emit both qkernels.
+
+    Raises:
+        AssertionError: If the bound unitaries differ.
+        ValueError: If either circuit does not expose exactly one parameter.
+    """
+    original_circuit = (
+        qiskit_transpiler.transpile(
+            original,
+            parameters=["angle"],
+        )
+        .compiled_quantum[0]
+        .circuit
+    )
+    restored_circuit = (
+        qiskit_transpiler.transpile(
+            restored,
+            parameters=["angle"],
+        )
+        .compiled_quantum[0]
+        .circuit
+    )
+    (original_parameter,) = original_circuit.parameters
+    (restored_parameter,) = restored_circuit.parameters
+
+    np.testing.assert_allclose(
+        _unitary(restored_circuit.assign_parameters({restored_parameter: 0.731})),
+        _unitary(original_circuit.assign_parameters({original_parameter: 0.731})),
+        rtol=0.0,
+        atol=1e-12,
+    )
 
 
 def _counts(result: Any) -> dict[Any, int]:
@@ -291,6 +336,51 @@ def _phase_call_from_loop_index(q: qmc.Qubit, index: qmc.UInt) -> qmc.Qubit:
         qmc.Qubit: Unchanged qubit with phase ``0.2 * index``.
     """
     return qmc.global_phase(_ident, 0.2 * index)(q)
+
+
+def _nested_phase_roundtrip_kernel() -> Any:
+    """Build a controlled qkernel whose callable body owns the phase.
+
+    Returns:
+        Any: qkernel-like object used to test nested-body phase serialization.
+    """
+
+    @qkernel
+    def phased_body(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
+        """Apply the test body with a global phase."""
+        return qmc.global_phase(_x_body, angle)(q)
+
+    @qkernel
+    def circ(angle: qmc.Float) -> qmc.Bit:
+        """Build a controlled call to the phased body."""
+        control = qmc.qubit("control")
+        target = qmc.qubit("target")
+        control, target = qmc.control(phased_body)(control, target, angle)
+        return qmc.measure(control)
+
+    return circ
+
+
+def _call_site_phase_roundtrip_kernel() -> Any:
+    """Build a controlled qkernel whose call site supplies the phase.
+
+    Returns:
+        Any: qkernel-like object used to test call-site phase serialization.
+    """
+
+    @qkernel
+    def circ(angle: qmc.Float) -> qmc.Bit:
+        """Build a directly phase-augmented controlled identity."""
+        control = qmc.qubit("control")
+        target = qmc.qubit("target")
+        control, target = qmc.control(_ident)(
+            control,
+            target,
+            global_phase=angle,
+        )
+        return qmc.measure(control)
+
+    return circ
 
 
 # --------------------------------------------------------------------------- #
@@ -1024,63 +1114,168 @@ class TestGlobalPhaseHandleTypes:
 
 
 # --------------------------------------------------------------------------- #
-# IR plumbing: serialization round-trip and content hashing
+# IR plumbing: qkernel serialization round-trip
 # --------------------------------------------------------------------------- #
 class TestGlobalPhaseSerialize:
-    """The op survives canonicalization, serialization, and content hashing."""
+    """The op survives a qkernel protobuf round-trip.
 
-    def test_serialize_roundtrip_preserves_structure(self):
-        """QKernel protobuf round-trip preserves global-phase structure."""
+    ``param_slots`` are rebuilt from the qkernel interface rather than carried
+    on the wire, so a reloaded body is compared through its encoded static IR
+    instead of ``content_hash``. Canonical content hashing of the op itself is
+    covered by ``tests/transpiler/test_global_phase_pipeline.py``.
+    """
+
+    @pytest.mark.parametrize(
+        "kernel_factory",
+        [
+            pytest.param(_nested_phase_roundtrip_kernel, id="nested-body"),
+            pytest.param(_call_site_phase_roundtrip_kernel, id="call-site"),
+        ],
+    )
+    def test_serialize_roundtrip_preserves_runtime_phase(
+        self,
+        qiskit_transpiler,
+        kernel_factory,
+    ):
+        """Both runtime-phase layouts survive a semantic protobuf round-trip."""
         from qamomile.circuit.serialization import deserialize, serialize
-        from qamomile.circuit.transpiler.passes.inline import InlinePass
+        from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
 
-        @qkernel
-        def phased_body(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply the test body with a global phase."""
-            return qmc.global_phase(_x_body, angle)(q)
-
-        @qkernel
-        def circ(angle: qmc.Float) -> qmc.Bit:
-            """Build the local circuit exercised by this test."""
-            ctrl = qmc.qubit("ctrl")
-            q = qmc.qubit("q")
-            ctrl, q = qmc.control(phased_body)(ctrl, q, angle)
-            return qmc.measure(ctrl)
-
-        payload = serialize(circ)
-        restored_kernel = deserialize(payload)
-        block = InlinePass().run(circ.block)
-        restored = InlinePass().run(restored_kernel.block)
-        assert [type(o).__name__ for o in block.operations] == [
-            type(o).__name__ for o in restored.operations
-        ]
-        assert serialize(restored_kernel) == payload
-
-    def test_control_call_phase_roundtrip_and_content_hash(self):
-        """QKernel persistence retains a controlled call-site phase."""
-        from qamomile.circuit.ir.canonical import content_hash
-        from qamomile.circuit.serialization import deserialize, serialize
-        from qamomile.circuit.transpiler.passes.inline import InlinePass
-
-        @qkernel
-        def circ(angle: qmc.Float) -> qmc.Bit:
-            """Build a directly phase-augmented controlled identity."""
-            control = qmc.qubit("control")
-            target = qmc.qubit("target")
-            control, target = qmc.control(_ident)(
-                control,
-                target,
-                global_phase=angle,
-            )
-            return qmc.measure(control)
-
-        block = InlinePass().run(circ.block)
-        restored = InlinePass().run(deserialize(serialize(circ)).block)
+        circ = kernel_factory()
+        restored = deserialize(serialize(circ))
+        block = qiskit_transpiler.inline(circ.block)
+        restored_block = qiskit_transpiler.inline(restored.block)
 
         assert [type(operation).__name__ for operation in block.operations] == [
-            type(operation).__name__ for operation in restored.operations
+            type(operation).__name__ for operation in restored_block.operations
         ]
-        assert content_hash(block) == content_hash(restored)
+        assert (
+            kernel_to_dict(restored)["artifact"]["body"]
+            == kernel_to_dict(circ)["artifact"]["body"]
+        )
+        _assert_runtime_angle_unitary_preserved(circ, restored, qiskit_transpiler)
+
+    def test_roundtrip_preserves_zero_result_phase_operand(self, qiskit_transpiler):
+        """A constant phase keeps its angle and zero-result layout on reload."""
+        from qamomile.circuit.ir.operation import GlobalPhaseOperation
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        @qkernel
+        def circ() -> qmc.Bit:
+            """Apply a constant global phase to an otherwise plain body."""
+            q = qmc.qubit("q")
+            q = qmc.global_phase(_x_body, 0.1)(q)
+            return qmc.measure(q)
+
+        restored = qiskit_transpiler.inline(deserialize(serialize(circ)).block)
+
+        phase_ops = [
+            op for op in restored.operations if isinstance(op, GlobalPhaseOperation)
+        ]
+        assert len(phase_ops) == 1
+        assert phase_ops[0].results == []
+        assert phase_ops[0].phase.get_const() == pytest.approx(
+            0.1,
+            rel=0.0,
+            abs=0.0,
+        )
+
+    @pytest.mark.parametrize(
+        "invalid_phase",
+        [
+            pytest.param(
+                ArrayValue(type=FloatType(), name="phase_array"),
+                id="array",
+            ),
+            pytest.param(TupleValue(name="phase_tuple"), id="tuple"),
+        ],
+    )
+    def test_serialize_rejects_non_scalar_phase_operand(self, invalid_phase):
+        """The serialization boundary rejects every non-scalar phase value."""
+        from qamomile.circuit.ir.operation import GlobalPhaseOperation
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        @qkernel
+        def circ(angle: qmc.Float) -> qmc.Bit:
+            """Apply a runtime phase to a one-qubit identity body."""
+            q = qmc.qubit("q")
+            q = qmc.global_phase(_ident, angle)(q)
+            return qmc.measure(q)
+
+        restored = deserialize(serialize(circ))
+        phase = next(
+            operation
+            for operation in restored.block.operations
+            if isinstance(operation, GlobalPhaseOperation)
+        )
+        phase.operands[0] = invalid_phase
+
+        with pytest.raises(
+            ValueError,
+            match=r"GlobalPhaseOperation.*phase operand requires a scalar FloatType",
+        ):
+            serialize(restored)
+
+    def test_serialize_rejects_array_rotation_angle(self):
+        """A rotation gate cannot reference an array-valued angle."""
+        from qamomile.circuit.ir.operation import GateOperation, GateOperationType
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        @qkernel
+        def circ(angle: qmc.Float) -> qmc.Bit:
+            """Apply an RX gate with a runtime angle."""
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angle)
+            return qmc.measure(q)
+
+        restored = deserialize(serialize(circ))
+        rotation = next(
+            operation
+            for operation in restored.block.operations
+            if isinstance(operation, GateOperation)
+            and operation.gate_type is GateOperationType.RX
+        )
+        rotation.operands[-1] = ArrayValue(
+            type=FloatType(),
+            name="angle_array",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"GateOperation.*angle operand requires a scalar FloatType",
+        ):
+            serialize(restored)
+
+    def test_serialize_rejects_array_pauli_evolve_angle(self):
+        """Pauli evolution cannot reference an array-valued angle."""
+        from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        @qkernel
+        def circ(
+            q: qmc.Vector[qmc.Qubit],
+            observable: qmc.Observable,
+            angle: qmc.Float,
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Apply Pauli evolution with scalar observable and angle inputs."""
+            return qmc.pauli_evolve(q, observable, angle)
+
+        restored = deserialize(serialize(circ))
+        evolution = next(
+            operation
+            for operation in restored.block.operations
+            if isinstance(operation, PauliEvolveOp)
+        )
+        evolution.operands[2] = ArrayValue(
+            type=FloatType(),
+            name="angle_array",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"PauliEvolveOp.*angle operand requires a scalar FloatType",
+        ):
+            serialize(restored)
 
 
 # --------------------------------------------------------------------------- #
