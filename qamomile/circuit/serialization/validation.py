@@ -331,10 +331,11 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         _require_result_count(operation, 0, location)
     elif isinstance(operation, GlobalPhaseOperation):
         _require_arity(operation, 1, 0, location)
-        phase = operation.operands[0]
-        if not isinstance(phase, Value) or isinstance(phase, ArrayValue):
-            raise ValueError(f"{location} phase operand must be a scalar Value")
-        _require_value_type(phase, FloatType(), location)
+        _require_scalar_type(
+            operation.operands[0],
+            FloatType(),
+            f"{location} phase operand",
+        )
     elif isinstance(operation, ExpvalOp):
         _require_arity(operation, 2, 1, location)
         if not operation.operands[0].type.is_quantum():
@@ -346,10 +347,15 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         if not operation.operands[0].type.is_quantum():
             raise ValueError(f"{location} first operand must be quantum")
         _require_types(
-            operation.operands[1:],
-            [ObservableType(), FloatType()],
+            operation.operands[1:2],
+            [ObservableType()],
             location,
             "operand",
+        )
+        _require_scalar_type(
+            operation.operands[2],
+            FloatType(),
+            f"{location} angle operand",
         )
         if operation.results[0].type != operation.operands[0].type:
             raise ValueError(f"{location} result type must match its quantum input")
@@ -439,7 +445,11 @@ def _validate_gate(operation: GateOperation, location: str) -> None:
         "operand",
     )
     if has_angle:
-        _require_value_type(operation.operands[-1], FloatType(), location)
+        _require_scalar_type(
+            operation.operands[-1],
+            FloatType(),
+            f"{location} angle operand",
+        )
     _require_types(
         operation.results,
         [QubitType()] * qubits,
@@ -1005,6 +1015,29 @@ def _require_value_type(
             f"{location} value has type {value.type.label()}, "
             f"expected {expected.label()}"
         )
+
+
+def _require_scalar_type(
+    value: ValueBase,
+    expected: ValueType,
+    location: str,
+) -> None:
+    """Require a scalar Value with a specific IR type.
+
+    Args:
+        value (ValueBase): Value to inspect.
+        expected (ValueType): Expected IR type object.
+        location (str): Human-readable value location.
+
+    Raises:
+        ValueError: If the value is not a matching scalar.
+    """
+    if (
+        not isinstance(value, Value)
+        or isinstance(value, ArrayValue)
+        or value.type != expected
+    ):
+        raise ValueError(f"{location} requires a scalar {expected.label()}")
 
 
 def _require_array_type(
