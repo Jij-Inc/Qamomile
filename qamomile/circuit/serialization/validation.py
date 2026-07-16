@@ -536,6 +536,12 @@ def _supports_comparison_operands(
     return numeric_comparison or bit_equality
 
 
+_COMPARISON_OPERANDS_ERROR = (
+    "operands must be numeric scalars (each UIntType or FloatType); equality and "
+    "inequality additionally allow each operand to be BitType or UIntType"
+)
+
+
 def _validate_comparison(operation: CompOp, location: str) -> None:
     """Validate a scalar comparison.
 
@@ -553,10 +559,7 @@ def _validate_comparison(operation: CompOp, location: str) -> None:
         operand_types,
         equality=operation.kind in {CompOpKind.EQ, CompOpKind.NEQ},
     ):
-        raise ValueError(
-            f"{location} operands must be numeric scalars, or BitType and "
-            "UIntType for equality"
-        )
+        raise ValueError(f"{location} {_COMPARISON_OPERANDS_ERROR}")
     _require_types(operation.results, [BitType()], location, "result")
 
 
@@ -621,10 +624,7 @@ def _validate_runtime_expression(
             operand_types,
             equality=operation.kind in {RuntimeOpKind.EQ, RuntimeOpKind.NEQ},
         ):
-            raise ValueError(
-                f"{location} operands must be numeric scalars, or BitType and "
-                "UIntType for equality"
-            )
+            raise ValueError(f"{location} {_COMPARISON_OPERANDS_ERROR}")
         _require_types(operation.results, [BitType()], location, "result")
         return
     if operation.kind in {RuntimeOpKind.AND, RuntimeOpKind.OR}:
