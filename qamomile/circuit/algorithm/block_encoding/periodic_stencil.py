@@ -533,7 +533,7 @@ def periodic_stencil_block_encoding(
     if required_signal_qubits != num_signal_qubits:
         raise AssertionError("state-preparation width disagrees with SELECT width")
     unprepare = qmc.inverse(prepare)
-    select_gate = qmc.select(cases)
+    select_gate = qmc.select(cases, num_index_qubits=num_signal_qubits)
 
     @qmc.qkernel
     def kernel(
