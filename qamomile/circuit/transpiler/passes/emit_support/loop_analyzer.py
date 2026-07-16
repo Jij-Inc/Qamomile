@@ -40,6 +40,7 @@ from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.value import Value
@@ -209,6 +210,16 @@ class LoopAnalyzer:
             requires_direct = any(
                 self._value_depends_on_loop_var(value, loop_var_uuid)
                 for value in op.parameters
+            )
+        elif isinstance(op, SelectOperation):
+            # SELECT case bodies become independent reusable circuits at the
+            # CircuitProgram boundary and therefore cannot capture a caller's
+            # native loop variable. Its index width also fixes reusable-circuit
+            # arity. Materialize a concrete body per iteration whenever either
+            # the width or a shared case parameter depends on that variable.
+            requires_direct = any(
+                self._value_depends_on_loop_var(value, loop_var_uuid)
+                for value in [*op.param_operands, op.num_index_qubits]
             )
         if requires_direct:
             return True

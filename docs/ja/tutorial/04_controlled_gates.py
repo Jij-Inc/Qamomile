@@ -17,9 +17,10 @@
 # tags: [tutorial]
 # ---
 #
-# # `qmc.control`によるゲートと量子カーネルの制御
+# # `qmc.control`によるcoherent制御
 #
 # `qmc.control`を使うと、Qamomileの任意のゲート(`qmc.rx`のようなビルトイン関数や、ユーザが書いた`@qmc.qkernel`)の制御版を作れます。
+# このチュートリアルでは、単一制御から値を指定する制御、symbolicな制御幅、再利用可能な量子カーネルまで、このAPIを段階的に説明します。
 #
 # `qmc.control`には2つのモードがあります。*concrete mode*は制御量子ビットの数をPythonの`int`で与え、*symbolic mode*は`qmc.UInt`の量子カーネルパラメータ(あるいはそれを含む式)で与えてtranspile時に解決します。`power=`、デフォルト引数、`Vector[Qubit]`を取る量子カーネル、古典kwargの並び替えなど大半の機能は両モードで同じ挙動です。モードによって違うのは制御引数の渡し方と一部の追加機能だけで、以降のセクションで分けて扱います。
 
@@ -113,9 +114,10 @@ assert on_counts == {1: 256}
 # | `num_controls=` | Pythonの`int`(デフォルト`1`) | `qmc.UInt`ハンドル、または`UInt`式 |
 # | 制御引数 | 合計量子ビット数が`num_controls`に一致する1つ以上のpositional引数(`Qubit`、`VectorView`、`Vector[Qubit]`) | 1つのpositionalな`Vector[Qubit]` / `VectorView`の*pool*(single-pool形、任意で`control_indices`)、**または**`Qubit` / `VectorView` / `Vector[Qubit]`を混ぜた複数のpositional引数 |
 # | `control_indices` | 受け付けない | 任意。poolのどの量子ビットがactiveかを指定 |
+# | `control_value` | 任意のPython `int`。LSB-firstでそのregister値のときにactive | デフォルトの`None`のみ。その他の値にはPythonの`int`で具体幅を指定して`qmc.control`を構築 |
 # | 制御数が解決される時点 | `qmc.control(...)`が評価された時(module load時かtracing時) | transpile時(`bindings`から) |
 #
-# `qmc.control`のほとんどの機能(`power=`、デフォルト値、古典kwargの並び替え、`Vector[Qubit]`を受け取る量子カーネル、multi-argの制御引数形など)は両モードで同じ挙動を示します。これらは[](#cg-3)でまとめます。[](#cg-4)はconcrete modeを必要とする唯一の形を、[](#cg-5)はsymbolic mode固有の機能を扱います。
+# `qmc.control`のほとんどの機能(`power=`、デフォルト値、古典kwargの並び替え、`Vector[Qubit]`を受け取る量子カーネル、multi-argの制御引数形など)は両モードで同じ挙動を示します。これらは[](#cg-3)でまとめます。[](#cg-4)はconcrete modeを必要とする機能を、[](#cg-5)はsymbolic mode固有の機能を扱います。
 
 # %% [markdown]
 # (cg-3)=
@@ -241,7 +243,7 @@ default_arg_demo_symbolic.draw(n=3, fold_loops=False)
 # (cg-3-4)=
 # ### 3.4 `power=`で`U^k`を制御
 #
-# `power=k`を渡すと、`U`そのものではなく*k乗*の`U^k`が制御されます。`power`はPythonの`int`(コンパイル時に解決)も`qmc.UInt`ハンドル(`bindings`からtranspile時に解決)も受け取り、`num_controls`がconcreteかsymbolicかに関係なく動作します。
+# `power=k`を渡すと、`U`そのものではなく*k乗*の`U^k`が制御されます。`power`はPythonの`int`(コンパイル時に解決)も`qmc.UInt`ハンドル(`bindings`からtranspile時に解決)も受け取り、`num_controls`がconcreteかsymbolicかに関係なく動作します。解決後の値は正のintegerである必要があり、0、負数、`bool`は拒否されます。symbolicな`power`は回路構造を変えるため、runtimeの`parameters`ではなく`bindings`で指定します。
 
 
 # %%
@@ -269,8 +271,8 @@ power_demo_concrete.draw()
 # 枝、`while`の本体など）の一部として保持します。ここで量子的な制御とは、制御
 # 量子ビットを`|0>`と`|1>`の重ね合わせのまま使う制御です。可逆な領域をこの方法で
 # 制御すると、位相はすべての制御量子ビットが`|1>`である成分だけに掛かる相対位相に
-# なります。identity Pauli項にも複素係数を持たせられるSELECT回路では、特に重要な
-# 性質です。
+# なります。これは、測定確率だけでなく量子カーネルの位相に情報を持たせる
+# アルゴリズムで重要な性質です。
 #
 # Qamomileでは、次の関連する2通りで位相を付加できます。
 #
@@ -288,6 +290,8 @@ power_demo_concrete.draw()
 # 反復され、inverseでは`U`の反転と一緒に位相の符号も反転します。
 # `global_phase`は呼び出し側の予約キーワードです。制御対象のcallableが同名の通常
 # パラメータを持つ場合は、そのパラメータを位置引数で渡してください。
+#
+# 仮引数がscalarの`Qubit`である本体に`Vector[Qubit]`または`VectorView[Qubit]`を渡すと、Qamomileは完全なscalar unitaryを各要素へbroadcastします。これは明示的なループと同じ意味です。`U = exp(1j * phi) * V`を`N`要素へ適用すると、結果は`U`の`N`重tensor積となり、位相は`exp(1j * N * phi)`です。`power=k`では、この位相もさらに`k`倍されます。レジスタ全体へ位相を1回だけ付ける場合は、`Vector[Qubit]`を仮引数に持つ量子カーネルを定義し、そのvector本体へ位相を付けて1回の論理呼び出しとして表現します。
 #
 # 測定結果など実行時に条件が決まる`if`の枝や`while`の本体で付加した位相は、
 # その枝または反復内にとどまります。回路全体へ移動したり破棄したりはしません。
@@ -415,9 +419,15 @@ mixed_controls_demo.draw()
 
 # %% [markdown]
 # (cg-4)=
-# ## 4. concrete専用: 単一のscalar制御
+# ## 4. concrete mode専用のパターン
 #
-# 制御引数の形はほぼすべて両モードで動き([](#cg-3))、symbolic modeはさらに固有の機能を持ちます([](#cg-5))。concrete modeを*必要とする*唯一の形は、単一のscalar `Qubit`を制御にするケースです。symbolic modeでは単一の制御引数はpoolの形と解釈され`Vector` / `VectorView`が要求されます。そもそも制御数が1に固定されている制御をsymbolicにする理由がないためです。これは[](#cg-1)の最小controlled-RXとまったく同じ形で、以下のcontrolled-X(CNOT)も同じ単一scalar制御の形です。
+# 制御引数の形はほぼすべて両モードで動き([](#cg-3))、symbolic modeはさらに固有の機能を持ちます([](#cg-5))。concrete modeではこれに加え、単一scalar制御と、指定した計算基底値を条件にする制御を利用できます。
+
+# %% [markdown]
+# (cg-4-1)=
+# ### 4.1 単一のscalar制御
+#
+# 単一のscalar `Qubit`を唯一の制御にする形はconcrete modeを必要とします。symbolic modeでは単一の制御引数はpoolの形と解釈され`Vector` / `VectorView`が要求されます。そもそも制御数が1に固定されている制御をsymbolicにする理由がないためです。これは[](#cg-1)の最小controlled-RXとまったく同じ形で、以下のcontrolled-X(CNOT)も同じ単一scalar制御の形です。
 
 
 # %%
@@ -435,6 +445,67 @@ def cnot_demo() -> qmc.Bit:
 
 
 cnot_demo.draw()
+
+# %% [markdown]
+# (cg-4-2)=
+# ### 4.2 control registerの値を指定してactiveにする
+#
+# 通常の量子的な制御は、すべての制御量子ビットが`1`のときにactiveになります。
+# `control_value=v`を指定すると、代わりにflatten後のcontrol registerが具体的な整数
+# `v`を表すときにactiveになります。flattenは呼び出し順で行われ、各`Vector` /
+# `VectorView`はindex 0から昇順に要素を加えます。最初にflattenされた制御がbit 0
+# (LSB)です。そのため2制御で`control_value=2`なら
+# `(bit_0, bit_1) = (0, 1)`を意味します。
+#
+# Qamomileはこれを1つの値指定付き制御演算として表現します。portable loweringは、
+# 値が0の各制御bitについて制御の前後にXを適用することと等価で、これらの一時的な
+# Xは打ち消し合うため、返される制御量子ビットは保存されます。以下の例ではflatten順を
+# 明確にするため、scalar制御と要素数1の`VectorView`を意図的に混在させます。
+
+
+# %%
+control_on_two = qmc.control(qmc.x, num_controls=2, control_value=2)
+control_on_zero = qmc.control(qmc.x, num_controls=1, control_value=0)
+
+
+# %%
+@qmc.qkernel
+def control_value_two_demo() -> qmc.Bit:
+    qs = qmc.qubit_array(3, "qs")
+    qs[1] = qmc.x(qs[1])  # flatten後の制御は(qs[0], qs[1]) = (0, 1)
+    qs[0], qs[1:2], qs[2] = control_on_two(qs[0], qs[1:2], qs[2])
+    return qmc.measure(qs[2])
+
+
+@qmc.qkernel
+def control_value_zero_demo() -> qmc.Bit:
+    control = qmc.qubit("control")  # |0>のまま
+    target = qmc.qubit("target")
+    control, target = control_on_zero(control, target)
+    return qmc.measure(target)
+
+
+# %%
+control_value_two_counts = dict(
+    transpiler.transpile(control_value_two_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+control_value_zero_counts = dict(
+    transpiler.transpile(control_value_zero_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+assert control_value_two_counts == {1: 256}
+assert control_value_zero_counts == {1: 256}
+
+# %% [markdown]
+# `control_value=None`はデフォルトのall-ones制御です。all-onesを明示する
+# `2**num_controls - 1`を与えても、同じデフォルト表現へcanonicalizeされます。
+# その他の値は`0 <= control_value < 2**num_controls`を満たす必要があります。
+# デフォルト以外の`control_value`はconcrete mode専用です。all-ones以外の値でactiveにする場合は、`qmc.UInt`ではなくPythonの`int`で具体幅を指定して`qmc.control`を構築します。これにより、演算を作る時点でactiveにするbit patternが一意に決まります。
 
 # %% [markdown]
 # (cg-5)=
@@ -576,7 +647,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | --- | --- | --- |
 # | 6.1 制御量子ビット数が引数境界をまたぐ | concrete | `ValueError` |
 # | 6.2 concrete modeで`control_indices` | concrete | `ValueError` |
-# | 6.3 concrete modeでsymbolic長の`VectorView` | concrete | `NotImplementedError` |
+# | 6.3 concrete modeでsymbolic長の`VectorView` | concrete | `ValueError` |
 # | 6.4 同じpool量子ビットをtargetに再利用 | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg制御prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 symbolic modeで単一scalar制御 | symbolic | `ValueError` |
@@ -654,7 +725,7 @@ expect_error(
 # (cg-6-3)=
 # ### 6.3 concrete modeでsymbolic長の`VectorView` (concrete)
 #
-# concrete modeは各制御引数の量子ビット数をコンパイル時に決定する必要があります。長さが`UInt`に依存するスライスはconcrete modeでは未対応で、`NotImplementedError`になります。
+# concrete modeは各制御引数の量子ビット数をコンパイル時に決定する必要があります。長さが`UInt`に依存するスライスはconcrete modeでは未対応で、ownershipを移す前に`ValueError`になります。
 
 
 # %%
@@ -673,7 +744,7 @@ def case_symbolic_view_in_concrete() -> None:
 
 expect_error(
     "symbolic-length VectorView in concrete mode",
-    NotImplementedError,
+    ValueError,
     case_symbolic_view_in_concrete,
 )
 
@@ -801,4 +872,4 @@ case_controlled_qft_over_uint_slice()
 # (cg-7)=
 # ## 7. まとめ
 #
-# `qmc.control(fn, num_controls=...)`を使うことでQamomileのビルトインゲートやユーザ定義の量子カーネルを制御化することができます。`qmc.control`には二つのモードがあり、そのモードは`num_controls`の型で決まります。Pythonの`int`であれば*concrete mode*、`qmc.UInt`(または`n - 1`のような`UInt`式)なら*symbolic mode*です。
+# `qmc.control(fn, num_controls=...)`を使うと、Qamomileのビルトインゲートやユーザ定義の量子カーネルを制御化できます。`qmc.control`には2つのモードがあり、`num_controls`の型で決まります。Pythonの`int`なら*concrete mode*、`qmc.UInt`または`n - 1`のような`UInt`式なら*symbolic mode*です。concrete modeでは、LSB-firstでflattenした制御引数の値を`control_value`で指定でき、0-controlも表現できます。どちらのモードでも、`power`、global phase、scalarからVectorへのbroadcast、inverse、nested controlは完全なcontrolled unitaryを保持します。幅が一致しない場合、controlとtargetの量子ビットが重複する場合、可逆変換に対応しない本体を指定した場合は明示的にエラーになります。

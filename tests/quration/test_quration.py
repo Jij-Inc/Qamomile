@@ -15,15 +15,20 @@ import qamomile.observable as qm_o
 from qamomile.circuit.stdlib import amplitude_encoding
 from qamomile.circuit.transpiler.circuit_ir import (
     DEFAULT_POLICY,
+    SELECT_SEMANTIC_KEY,
     BinaryExpr,
     BinaryOperator,
+    CallableIdentity,
     CircuitBuilder,
+    CircuitProgram,
     GateInstruction,
     LiteralExpr,
     LoopVariableExpr,
     ParameterExpr,
     ReusableCircuit,
+    SemanticArguments,
     legalize_program,
+    lower_circuit_plan,
     verify_target_legal,
 )
 from qamomile.circuit.transpiler.errors import EmitError, TargetCapabilityError
@@ -160,6 +165,10 @@ def _quration_phased_identity(qubit: qmc.Qubit) -> qmc.Qubit:
 
 
 _quration_controlled_phase = qmc.control(_quration_phased_identity)
+_quration_zero_controlled_phase = qmc.control(
+    _quration_phased_identity,
+    control_value=0,
+)
 
 
 @qmc.qkernel
@@ -170,6 +179,174 @@ def _quration_phase_kickback() -> qmc.Bit:
     control, target = _quration_controlled_phase(control, target)
     control = qmc.h(control)
     return qmc.measure(control)
+
+
+@qmc.qkernel
+def _quration_zero_control_x() -> qmc.Bit:
+    """Apply X when one control remains in its zero state."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(qmc.x, control_value=0)(control, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _quration_zero_control_phase_kickback() -> qmc.Bit:
+    """Turn a control-zero phase into a deterministic measured bit."""
+    control = qmc.h(qmc.qubit("control"))
+    target = qmc.qubit("target")
+    control, target = _quration_zero_controlled_phase(control, target)
+    control = qmc.h(control)
+    return qmc.measure(control)
+
+
+@qmc.qkernel
+def _quration_select_phase_kickback() -> qmc.Bit:
+    """Observe an identity-case phase through a two-case SELECT."""
+    index = qmc.h(qmc.qubit("index"))
+    target = qmc.qubit("target")
+    index, target = qmc.select([_quration_identity, _quration_phased_identity])(
+        index, target
+    )
+    index = qmc.h(index)
+    return qmc.measure(index)
+
+
+@qmc.qkernel
+def _quration_wide_select() -> qmc.Bit:
+    """Build a four-case SELECT beyond Quration's control capability."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [
+            _quration_identity,
+            _quration_phased_identity,
+            _quration_identity,
+            _quration_phased_identity,
+        ]
+    )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _quration_explicit_overwide_select() -> qmc.Bit:
+    """Keep an explicit two-bit SELECT width beyond Quration's capability."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_quration_identity, _quration_phased_identity],
+        num_index_qubits=2,
+    )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _quration_symbolic_width_select(width: qmc.UInt) -> qmc.Bit:
+    """Resolve a symbolic SELECT width before Quration capability checks."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_quration_identity, _quration_phased_identity],
+        num_index_qubits=width,
+    )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _quration_select_body(
+    index: qmc.Qubit,
+    target: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Apply the supported two-case SELECT as a controllable body."""
+    return qmc.select([_quration_identity, _quration_phased_identity])(
+        index,
+        target,
+    )
+
+
+@qmc.qkernel
+def _quration_outer_controlled_select() -> qmc.Bit:
+    """Add an outer control beyond Quration's SELECT fallback limit."""
+    outer = qmc.qubit("outer")
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    outer, index, target = qmc.control(_quration_select_body)(
+        outer,
+        index,
+        target,
+    )
+    return qmc.measure(target)
+
+
+def _quration_select_program(
+    index_width: int,
+    outer_controls: int = 0,
+) -> CircuitProgram:
+    """Build a representative semantic SELECT fallback for capability tests.
+
+    The case body deliberately includes both a primitive gate and a global
+    phase so Quration must validate its distributed-control and relative-phase
+    contracts together.
+
+    Args:
+        index_width (int): Number of controls on each SELECT case call.
+        outer_controls (int): Controls on the complete SELECT call. Defaults
+            to zero.
+
+    Returns:
+        CircuitProgram: Caller containing one semantic SELECT call.
+    """
+    num_cases = 1 << index_width
+    case = CircuitBuilder(1, 0, name="select-case")
+    case.append_gate(GateKind.X, (0,))
+    case.add_global_phase(0.25)
+    case_callee = ReusableCircuit(
+        case.freeze(),
+        "select-case",
+        controls=index_width,
+        operand_widths=(1,),
+    )
+
+    fallback = CircuitBuilder(index_width + 1, 0, name="select")
+    index_slots = tuple(range(index_width))
+    target_slot = index_width
+    for case_index in range(num_cases):
+        zero_slots = tuple(
+            slot for slot in index_slots if ((case_index >> slot) & 1) == 0
+        )
+        for slot in zero_slots:
+            fallback.append_gate(GateKind.X, (slot,))
+        fallback.append_call(case_callee, (*index_slots, target_slot))
+        for slot in reversed(zero_slots):
+            fallback.append_gate(GateKind.X, (slot,))
+
+    select_callee = ReusableCircuit(
+        fallback.freeze(),
+        "select",
+        controls=outer_controls,
+        identity=CallableIdentity(
+            SELECT_SEMANTIC_KEY,
+            "select",
+            SemanticArguments.from_mapping(
+                {
+                    "index_order": "lsb0",
+                    "num_cases": num_cases,
+                    "num_index_qubits": index_width,
+                }
+            ),
+        ),
+        operand_widths=(index_width, 1),
+    )
+    caller = CircuitBuilder(
+        outer_controls + index_width + 1,
+        0,
+        name="select-caller",
+    )
+    caller.append_call(
+        select_callee,
+        tuple(range(outer_controls + index_width + 1)),
+    )
+    return caller.freeze()
 
 
 def test_quration_scalar_evaluator_handles_literals_loops_and_arithmetic() -> None:
@@ -289,6 +466,73 @@ def test_quration_accepts_bounded_transformed_phase_calls(
     legalized = legalize_program(caller.freeze(), capabilities, DEFAULT_POLICY)
 
     verify_target_legal(legalized, capabilities)
+
+
+def test_quration_accepts_two_case_select_fallback() -> None:
+    """One index control fits Quration's distributed-control profile."""
+    capabilities = PyQretMaterializer().capabilities
+    legalized = legalize_program(
+        _quration_select_program(index_width=1),
+        capabilities,
+        DEFAULT_POLICY,
+    )
+
+    verify_target_legal(legalized, capabilities)
+
+
+@pytest.mark.parametrize("index_width", [2, 3])
+def test_quration_rejects_wide_select_fallback(index_width: int) -> None:
+    """Four- and eight-case SELECT exceed Quration's control bound."""
+    capabilities = PyQretMaterializer().capabilities
+    legalized = legalize_program(
+        _quration_select_program(index_width=index_width),
+        capabilities,
+        DEFAULT_POLICY,
+    )
+
+    with pytest.raises(TargetCapabilityError, match="reusable call transforms"):
+        verify_target_legal(legalized, capabilities)
+
+
+@pytest.mark.parametrize(
+    ("kernel", "bindings"),
+    [
+        (_quration_explicit_overwide_select, None),
+        (_quration_symbolic_width_select, {"width": 2}),
+    ],
+)
+def test_quration_checks_resolved_declared_select_width(
+    kernel: qmc.QKernel,
+    bindings: dict[str, int] | None,
+) -> None:
+    """Quration validates the declared width, not the case-count minimum.
+
+    Args:
+        kernel (qmc.QKernel): Two-case SELECT with a declared two-bit index.
+        bindings (dict[str, int] | None): Compile-time width bindings.
+    """
+    transpiler = QurationTranspiler()
+    prepared = transpiler.prepare(kernel, bindings=bindings)
+    plan = transpiler.plan_circuit(prepared, bindings=bindings)
+    [segment] = lower_circuit_plan(plan, bindings=bindings).compiled_quantum
+    capabilities = PyQretMaterializer().capabilities
+    legalized = legalize_program(segment.circuit, capabilities, DEFAULT_POLICY)
+
+    with pytest.raises(TargetCapabilityError, match="reusable call transforms"):
+        verify_target_legal(legalized, capabilities)
+
+
+def test_quration_rejects_outer_controlled_select_fallback() -> None:
+    """An outer control plus the SELECT index exceeds Quration's bound."""
+    capabilities = PyQretMaterializer().capabilities
+    legalized = legalize_program(
+        _quration_select_program(index_width=1, outer_controls=1),
+        capabilities,
+        DEFAULT_POLICY,
+    )
+
+    with pytest.raises(TargetCapabilityError, match="reusable call transforms"):
+        verify_target_legal(legalized, capabilities)
 
 
 def test_quration_rejects_multiple_distributed_controls() -> None:
@@ -499,6 +743,63 @@ def test_quration_executes_controlled_global_phase_kickback() -> None:
 
     result = executable.sample(transpiler.executor(seed=9), shots=16).result()
     assert dict(result.results) == {1: 16}
+
+
+@pytest.mark.quration
+@pytest.mark.parametrize(
+    "kernel",
+    [_quration_zero_control_x, _quration_zero_control_phase_kickback],
+)
+def test_quration_executes_zero_activated_controls(kernel: qmc.QKernel) -> None:
+    """Quration executes X brackets around gate and phase bodies.
+
+    Args:
+        kernel (qmc.QKernel): Zero-activated controlled program.
+    """
+    pytest.importorskip("pyqret")
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(kernel)
+
+    result = executable.sample(transpiler.executor(seed=12), shots=16).result()
+    assert dict(result.results) == {1: 16}
+
+
+@pytest.mark.quration
+def test_quration_executes_two_case_select_phase_kickback() -> None:
+    """The public Quration path executes its supported SELECT fallback."""
+    pytest.importorskip("pyqret")
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(_quration_select_phase_kickback)
+
+    result = executable.sample(transpiler.executor(seed=10), shots=16).result()
+    assert dict(result.results) == {1: 16}
+
+
+@pytest.mark.quration
+@pytest.mark.parametrize(
+    ("kernel", "bindings"),
+    [
+        (_quration_wide_select, None),
+        (_quration_explicit_overwide_select, None),
+        (_quration_symbolic_width_select, {"width": 2}),
+        (_quration_outer_controlled_select, None),
+    ],
+)
+def test_quration_public_select_rejects_unsupported_controls(
+    kernel: qmc.QKernel,
+    bindings: dict[str, int] | None,
+) -> None:
+    """Public SELECT lowering uses the resolved declared index width.
+
+    Args:
+        kernel (qmc.QKernel): SELECT program expected to exceed Quration's
+            distributed-control bound.
+        bindings (dict[str, int] | None): Compile-time width bindings.
+    """
+    pytest.importorskip("pyqret")
+
+    with pytest.raises(TargetCapabilityError, match="reusable call transforms"):
+        QurationTranspiler().transpile(kernel, bindings=bindings)
 
 
 @pytest.mark.quration

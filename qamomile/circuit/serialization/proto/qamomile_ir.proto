@@ -224,6 +224,7 @@ enum OperationType {
   INVOKE_OPERATION = 29;
   INVERSE_BLOCK_OPERATION = 30;
   GLOBAL_PHASE_OPERATION = 31;
+  SELECT_OPERATION = 32;
 }
 
 message Operation {
@@ -268,6 +269,7 @@ message Operation {
   optional Block unitary_block = 66;
   optional CallableRef callable_ref = 67;
   optional Payload callable_attrs = 68;
+  optional BigInteger control_value = 69;
 
   optional CallableRef target = 80;
   optional string transform = 81;
@@ -279,6 +281,11 @@ message Operation {
   optional string custom_name = 92;
   optional Block source_block = 93;
   optional Block implementation_block = 94;
+
+  optional sint64 num_index_qubits = 100;
+  repeated Block case_blocks = 101;
+  optional string num_index_qubits_ref = 102;
+  optional sint64 num_index_args = 103;
 }
 
 message IntegerOrReference {

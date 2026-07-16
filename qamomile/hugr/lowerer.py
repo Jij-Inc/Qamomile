@@ -32,7 +32,9 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
     validate_region_args,
 )
+from qamomile.circuit.ir.operation.control_value import control_pattern_for_value
 from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
     ControlledUOperation,
     GateOperation,
     GateOperationType,
@@ -46,6 +48,7 @@ from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types import (
     BitType,
     FloatType,
@@ -600,6 +603,12 @@ def _lower_operation(
             environment[operation.results[0].uuid] = result
         case ReturnOperation():
             return
+        case SelectOperation():
+            raise EmitError(
+                "HUGR target does not support qmc.select in direct "
+                "PreparedModule lowering.",
+                operation="SelectOperation",
+            )
         case _:
             raise EmitError(
                 f"Unsupported direct HUGR lowering for "
@@ -3094,6 +3103,13 @@ def _lower_transformed_call(
     for value in controls:
         resolved = _resolve_wire(value, environment)
         control_wires.extend(resolved if isinstance(resolved, list) else [resolved])
+    control_value = _transformed_control_value(operation)
+    if control_value is not None:
+        control_wires = _toggle_zero_controls(
+            builder,
+            control_wires,
+            control_value,
+        )
     for _ in range(power):
         control_wires = _lower_transformed_operations(
             body.operations,
@@ -3101,6 +3117,13 @@ def _lower_transformed_call(
             local,
             control_wires,
             inverse,
+        )
+    if control_value is not None:
+        control_wires = _toggle_zero_controls(
+            builder,
+            control_wires,
+            control_value,
+            reverse=True,
         )
 
     quantum_exit = body_quantum_inputs if inverse else body_quantum_outputs
@@ -3136,6 +3159,72 @@ def _lower_transformed_call(
             wire = local[entry.uuid]
             local[formal.uuid] = wire
         _publish_transformed_result(source, result, wire, environment, live_qubits)
+
+
+def _transformed_control_value(
+    operation: InvokeOperation | ControlledUOperation | InverseBlockOperation,
+) -> int | None:
+    """Return the activation value carried by a transformed call.
+
+    Args:
+        operation (InvokeOperation | ControlledUOperation |
+            InverseBlockOperation): Transformed operation being lowered.
+
+    Returns:
+        int | None: LSB-first activation value, or ``None`` for all-ones.
+    """
+    if isinstance(operation, (ConcreteControlledU, InverseBlockOperation)):
+        return operation.control_value
+    if (
+        isinstance(operation, InvokeOperation)
+        and operation.transform is CallTransform.CONTROLLED
+    ):
+        return operation.control_value
+    return None
+
+
+def _toggle_zero_controls(
+    builder: Any,
+    control_wires: list[Any],
+    control_value: int,
+    *,
+    reverse: bool = False,
+) -> list[Any]:
+    """Apply X to control wires whose required activation bit is zero.
+
+    HUGR quantum wires are linear, so each X result replaces the consumed
+    wire. The returned list must be used both for the transformed body and for
+    the closing bracket.
+
+    Args:
+        builder (Any): HUGR dataflow builder.
+        control_wires (list[Any]): Current control wires in LSB-first order.
+        control_value (int): Required computational-basis value.
+        reverse (bool): Whether to visit bracket positions in reverse order.
+            Defaults to ``False``.
+
+    Returns:
+        list[Any]: Updated linear control wires after the X gates.
+
+    Raises:
+        EmitError: If no physical controls are available for the value.
+        TypeError: If ``control_value`` is not a Python ``int``.
+        ValueError: If the activation value does not fit the control width.
+    """
+    if not control_wires:
+        raise EmitError(
+            "HUGR transformed control_value requires physical control wires."
+        )
+    from tket_exts import quantum
+
+    pattern = control_pattern_for_value(control_value, len(control_wires))
+    positions = [index for index, required in enumerate(pattern) if required == 0]
+    if reverse:
+        positions.reverse()
+    updated = list(control_wires)
+    for position in positions:
+        [updated[position]] = builder.add_op(quantum.X, updated[position])
+    return updated
 
 
 def _lower_transformed_operations(

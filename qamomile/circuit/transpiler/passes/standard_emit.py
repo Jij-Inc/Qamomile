@@ -54,10 +54,12 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
-from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.emit_context import EmitContext
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
 from qamomile.circuit.transpiler.passes.emit import CompositeGateEmitter, EmitPass
@@ -661,6 +663,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 self._emit_inverse_block(circuit, op, qubit_map, bindings)
             elif isinstance(op, GlobalPhaseOperation):
                 self._emit_global_phase(circuit, op, bindings)
+            elif isinstance(op, SelectOperation):
+                self._emit_select(circuit, op, qubit_map, bindings)
             elif isinstance(op, ControlledUOperation):
                 emit_controlled_u(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, PauliEvolveOp):
@@ -671,8 +675,6 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 # One reaching a quantum segment means the stored contents
                 # feed a quantum op without being compile-time resolvable;
                 # silently skipping it would emit stale gate parameters.
-                from qamomile.circuit.transpiler.errors import EmitError
-
                 raise EmitError(
                     f"Classical array element store into "
                     f"'{op.array.name or 'array'}' reached the quantum "
@@ -718,6 +720,13 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             elif isinstance(op, HasNestedOps):
                 raise NotImplementedError(
                     f"Unhandled control flow: {type(op).__name__}"
+                )
+            elif op.operation_kind is OperationKind.QUANTUM:
+                raise EmitError(
+                    f"Circuit lowering does not handle quantum operation "
+                    f"{type(op).__name__}; dropping it would change program "
+                    f"semantics.",
+                    operation=type(op).__name__,
                 )
 
     def _emit_qinit_reset(
@@ -1034,6 +1043,37 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             EmitError: If the adapter cannot preserve or resolve the phase.
         """
         emit_global_phase(self, circuit, op, bindings)
+
+    def _emit_select(
+        self,
+        circuit: T,
+        op: SelectOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+        outer_control_indices: list[int] | None = None,
+    ) -> None:
+        """Lower a semantic SELECT through the circuit-family implementation.
+
+        Args:
+            circuit (T): Circuit representation being built.
+            op (SelectOperation): Quantum multiplexer operation to lower.
+            qubit_map (QubitMap): Current quantum value to physical slot map.
+            bindings (dict[str, Any]): Active compile-time bindings.
+            outer_control_indices (list[int] | None): Physical controls inherited
+                from an enclosing controlled callable. Defaults to ``None``.
+
+        Returns:
+            None: Subclasses append the lowered SELECT to ``circuit``.
+
+        Raises:
+            EmitError: Always in the shared base; ``CircuitLoweringPass`` must
+                provide the backend-neutral reusable-call implementation.
+        """
+        del circuit, op, qubit_map, bindings, outer_control_indices
+        raise EmitError(
+            "SelectOperation requires CircuitProgram reusable-call lowering.",
+            operation="SelectOperation",
+        )
 
     def _emit_runtime_classical_expr(
         self,

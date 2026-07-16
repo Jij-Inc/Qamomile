@@ -248,6 +248,38 @@ class TestRuntimeParameterLoopBound:
         assert "Cannot unroll loop: bounds could not be resolved at compile time" in msg
         assert "'n'" in msg
 
+    def test_runtime_parameter_select_width_raises_actionable_error(self):
+        """A runtime SELECT width fails before semantic lowering."""
+
+        @qmc.qkernel
+        def identity(target: qmc.Qubit) -> qmc.Qubit:
+            """Return a SELECT target unchanged."""
+            return target
+
+        @qmc.qkernel
+        def flipped(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply X to a SELECT target."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def kernel(width: qmc.UInt) -> qmc.Bit:
+            """Use a runtime parameter as SELECT's structural width."""
+            index = qmc.qubit_array(2, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(kernel, parameters=["width"])
+
+        msg = str(exc_info.value)
+        assert "Cannot resolve SELECT index width at compile time" in msg
+        assert "runtime parameter 'width'" in msg
+        assert "bindings={'width': <int>}" in msg
+
     def test_runtime_parameter_array_element_bound_raises(self):
         """A bound indexing a runtime parameter array names the array.
 
@@ -409,3 +441,33 @@ class TestAcceptance:
         # 2 H (init) + 2 * 2 = 4 Rx from x_mixer(2*beta) unrolled for 2 layers
         assert circuit.size() >= 2
         assert circuit.num_qubits == H.num_qubits
+
+    def test_compile_time_bound_select_width_passes(self):
+        """A UInt SELECT width supplied in bindings reaches lowering."""
+
+        @qmc.qkernel
+        def identity(target: qmc.Qubit) -> qmc.Qubit:
+            """Return a SELECT target unchanged."""
+            return target
+
+        @qmc.qkernel
+        def flipped(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply X to a SELECT target."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def kernel(width: qmc.UInt) -> qmc.Bit:
+            """Apply SELECT with a compile-time-bound structural width."""
+            index = qmc.qubit_array(2, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        executable = QiskitTranspiler().transpile(
+            kernel,
+            bindings={"width": 2},
+        )
+        assert executable.get_first_circuit() is not None

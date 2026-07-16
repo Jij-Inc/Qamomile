@@ -9,6 +9,7 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.circuit_ir import (
+    SELECT_SEMANTIC_KEY,
     CallInstruction,
     CircuitBuilder,
     CircuitLoweringPass,
@@ -60,6 +61,19 @@ def _vector_measurement() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(qubits)
 
 
+@qmc.qkernel
+def _value_activated_control() -> qmc.Bit:
+    """Control X when two controls hold the LSB-first value two."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        qmc.x,
+        num_controls=2,
+        control_value=2,
+    )(controls, target)
+    return qmc.measure(target)
+
+
 @qmc.composite_gate(name="semantic_helper")
 def _semantic_helper(qubit: qmc.Qubit) -> qmc.Qubit:
     """Provide a user-defined callable identity for lowering tests."""
@@ -72,6 +86,74 @@ def _semantic_helper_caller() -> qmc.Bit:
     qubit = qmc.qubit("qubit")
     qubit = _semantic_helper(qubit)
     return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _select_identity(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Return one SELECT target unchanged."""
+    return qubit
+
+
+@qmc.qkernel
+def _select_x(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Apply X to one SELECT target."""
+    return qmc.x(qubit)
+
+
+@qmc.qkernel
+def _select_phased_identity(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Apply a nonzero phase to an identity SELECT case."""
+    return qmc.global_phase(_select_identity, 0.25)(qubit)
+
+
+@qmc.qkernel
+def _select_phased_x(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Apply a nonzero phase to an X SELECT case."""
+    return qmc.global_phase(qmc.x, 0.25)(qubit)
+
+
+@qmc.qkernel
+def _four_case_select() -> qmc.Bit:
+    """Build a four-case SELECT for circuit-IR structure tests."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_select_identity, _select_x, _select_identity, _select_x]
+    )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _phase_only_select() -> qmc.Bit:
+    """Build a SELECT whose selected case contains only global phase."""
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    index, target = qmc.select([_select_identity, _select_phased_identity])(
+        index,
+        target,
+    )
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _broadcast_phase_select() -> qmc.Vector[qmc.Bit]:
+    """Broadcast a phased scalar SELECT case over three target qubits."""
+    index = qmc.qubit("index")
+    targets = qmc.qubit_array(3, "targets")
+    index, targets = qmc.select([_select_identity, _select_phased_x])(
+        index,
+        targets,
+    )
+    return qmc.measure(targets)
+
+
+@qmc.qkernel
+def _controlled_broadcast_phase() -> qmc.Vector[qmc.Bit]:
+    """Broadcast a phased scalar controlled body over three targets."""
+    control = qmc.qubit("control")
+    targets = qmc.qubit_array(3, "targets")
+    control, targets = qmc.control(_select_phased_x)(control, targets)
+    return qmc.measure(targets)
 
 
 @qmc.qkernel
@@ -719,6 +801,160 @@ def test_lowering_keeps_open_user_composite_identity() -> None:
     assert identity.key.name == "semantic_helper"
     assert calls[0].callee.operand_widths == (1,)
     assert calls[0].callee.body.operations
+
+
+def test_lowering_keeps_select_as_one_semantic_call_with_lsb_fallback() -> None:
+    """SELECT stays abstract while its fallback uses LSB-first X brackets."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_four_case_select)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    calls = [
+        operation
+        for operation in program.operations
+        if isinstance(operation, CallInstruction)
+    ]
+    assert len(calls) == 1
+    select_call = calls[0]
+    identity = select_call.callee.identity
+    assert identity is not None
+    assert identity.key == SELECT_SEMANTIC_KEY
+    case_fingerprints = identity.arguments.get("case_fingerprints")
+    assert isinstance(case_fingerprints, tuple)
+    assert len(case_fingerprints) == 4
+    assert case_fingerprints[0] == case_fingerprints[2]
+    assert case_fingerprints[1] == case_fingerprints[3]
+    assert case_fingerprints[0] != case_fingerprints[1]
+    assert identity.arguments.get("index_order") == "lsb0"
+    assert identity.arguments.get("num_cases") == 4
+    assert identity.arguments.get("num_index_qubits") == 2
+    assert select_call.callee.operand_widths == (2, 1)
+
+    fallback = select_call.callee.body
+    assert [type(operation) for operation in fallback.operations] == [
+        GateInstruction,
+        CallInstruction,
+        GateInstruction,
+        CallInstruction,
+    ]
+    first_bracket, first_case, second_bracket, second_case = fallback.operations
+    assert isinstance(first_bracket, GateInstruction)
+    assert first_bracket.kind is GateKind.X
+    assert first_bracket.inputs == (WireId(1),)
+    assert isinstance(second_bracket, GateInstruction)
+    assert second_bracket.kind is GateKind.X
+    assert isinstance(first_case, CallInstruction)
+    assert isinstance(second_case, CallInstruction)
+    assert first_case.callee.controls == 2
+    assert second_case.callee.controls == 2
+    verify_circuit(program)
+
+
+def test_lowering_brackets_control_value_at_the_circuit_boundary() -> None:
+    """Mixed-polarity control brackets one abstract controlled call."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_value_activated_control)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    opening, controlled_call, closing, _measurement = program.operations
+    assert isinstance(opening, GateInstruction)
+    assert opening.kind is GateKind.X
+    assert opening.inputs == (WireId(0),)
+    assert isinstance(controlled_call, CallInstruction)
+    assert controlled_call.callee.controls == 2
+    assert controlled_call.inputs[:2] == (opening.outputs[0], WireId(1))
+    assert isinstance(closing, GateInstruction)
+    assert closing.kind is GateKind.X
+    assert closing.inputs == (controlled_call.outputs[0],)
+    verify_circuit(program)
+
+
+def test_lowering_keeps_phase_only_identity_case_under_index_control() -> None:
+    """A case program's global phase remains inside its controlled call."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_phase_only_select)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    select_call = next(
+        operation
+        for operation in program.operations
+        if isinstance(operation, CallInstruction)
+    )
+    [phase_case] = select_call.callee.body.operations
+    assert isinstance(phase_case, CallInstruction)
+    assert phase_case.callee.controls == 1
+    assert all(
+        isinstance(operation, CallInstruction)
+        for operation in phase_case.callee.body.operations
+    )
+    assert phase_case.callee.body.global_phase == LiteralExpr(0.25)
+    assert select_call.callee.body.global_phase == LiteralExpr(0.0)
+    verify_circuit(program)
+
+
+@pytest.mark.parametrize(
+    "kernel",
+    [_broadcast_phase_select, _controlled_broadcast_phase],
+)
+def test_scalar_broadcast_repeats_complete_case_on_each_lane(kernel) -> None:
+    """SELECT and control preserve each scalar case's phase per target lane."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(kernel)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    if kernel is _broadcast_phase_select:
+        outer_call = next(
+            operation
+            for operation in program.operations
+            if isinstance(operation, CallInstruction)
+        )
+        operations = outer_call.callee.body.operations
+    else:
+        operations = program.operations
+
+    calls = [
+        operation for operation in operations if isinstance(operation, CallInstruction)
+    ]
+    assert len(calls) == 3
+    assert all(call.callee.body.operations for call in calls)
+    assert all(call.callee.body.global_phase == LiteralExpr(0.25) for call in calls)
+    verify_circuit(program)
+
+
+def test_lowering_rejects_unknown_quantum_operation() -> None:
+    """Circuit lowering fails closed instead of silently changing semantics."""
+    from qamomile.circuit.ir.operation.operation import (
+        Operation,
+        OperationKind,
+        Signature,
+    )
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    class UnknownQuantumOperation(Operation):
+        """Represent a quantum operation with no registered lowering."""
+
+        @property
+        def signature(self) -> Signature:
+            """Return an empty test signature."""
+            return Signature(operands=[], results=[])
+
+        @property
+        def operation_kind(self) -> OperationKind:
+            """Classify this test operation as quantum."""
+            return OperationKind.QUANTUM
+
+    with pytest.raises(EmitError, match="dropping it would change program semantics"):
+        CircuitLoweringPass()._emit_operations(
+            CircuitBuilder(0, 0),
+            [UnknownQuantumOperation()],
+            {},
+            {},
+            {},
+        )
 
 
 def test_lowering_isolates_while_snapshot_overwrites_between_if_branches() -> None:

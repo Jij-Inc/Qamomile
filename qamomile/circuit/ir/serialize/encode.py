@@ -40,6 +40,7 @@ from qamomile.circuit.ir.operation import (
     ProjectOperation,
     ResetOperation,
     ReturnOperation,
+    SelectOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -243,10 +244,8 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
     """Recursively register every Value referenced by ``op``.
 
     Covers operands, results, subclass-extra Value fields (via
-    ``all_input_values``), nested control-flow op bodies, and nested
-    Blocks inside ``InvokeOperation`` /
-    ``InverseBlockOperation`` /
-    ``ControlledUOperation``.
+    ``all_input_values``), nested control-flow op bodies, and operation-owned
+    Blocks inside call, inverse, controlled, and SELECT operations.
 
     Args:
         op (Operation): The op to walk.
@@ -272,6 +271,9 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
             _walk_block_values(op.implementation_block, ctx)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _walk_block_values(op.block, ctx)
+    if isinstance(op, SelectOperation):
+        for case_block in op.case_blocks:
+            _walk_block_values(case_block, ctx)
 
 
 def _walk_block_values(sub: Block, ctx: _EncodeContext) -> None:
@@ -1282,11 +1284,14 @@ def _encode_concrete_controlled(
 
     Returns:
         dict[str, Any]: Base op dict plus ``num_controls`` (concrete
-            int), ``power`` (int or value-ref), and a nested
+            int), optional ``control_value`` (a non-default LSB-first
+            activation state), ``power`` (int or value-ref), and a nested
             ``unitary_block`` dict.
     """
     d = _base_op_dict("ConcreteControlledU", op)
     d["num_controls"] = op.num_controls
+    if op.control_value is not None:
+        d["control_value"] = op.control_value
     d["power"] = _encode_power(op.power)
     if op.callable_ref is not None:
         d["callable_ref"] = _encode_callable_ref(op.callable_ref)
@@ -1294,6 +1299,27 @@ def _encode_concrete_controlled(
         d["callable_attrs"] = _encode_payload(op.callable_attrs)
     d["unitary_block"] = _encode_block(op.block, ctx) if op.block is not None else None
     return d
+
+
+def _encode_select(op: SelectOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode a quantum multiplexer and its callable bodies.
+
+    Args:
+        op (SelectOperation): SELECT operation to encode.
+        ctx (_EncodeContext): Active encoding context.
+
+    Returns:
+        dict[str, Any]: Encoded operation payload.
+    """
+    payload = _base_op_dict("SelectOperation", op)
+    if isinstance(op.num_index_qubits, Value):
+        ctx.register_value(op.num_index_qubits)
+        payload["num_index_qubits_ref"] = op.num_index_qubits.uuid
+        payload["num_index_args"] = op.num_index_args
+    else:
+        payload["num_index_qubits"] = op.num_index_qubits
+    payload["case_blocks"] = [_encode_block(block, ctx) for block in op.case_blocks]
+    return payload
 
 
 def _encode_symbolic_controlled(
@@ -1519,6 +1545,8 @@ def _encode_inverse_block(
     d["num_control_qubits"] = op.num_control_qubits
     d["num_target_qubits"] = op.num_target_qubits
     d["custom_name"] = op.custom_name
+    if op.control_value is not None:
+        d["control_value"] = op.control_value
     if op.callable_ref is not None:
         d["callable_ref"] = _encode_callable_ref(op.callable_ref)
     if op.callable_attrs:
@@ -1579,6 +1607,7 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     IfOperation: _encode_if,
     ConcreteControlledU: _encode_concrete_controlled,
     SymbolicControlledU: _encode_symbolic_controlled,
+    SelectOperation: _encode_select,
     InvokeOperation: _encode_invoke_operation,
     InverseBlockOperation: _encode_inverse_block,
     GlobalPhaseOperation: _encode_global_phase_operation,

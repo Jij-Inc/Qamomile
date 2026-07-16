@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable
+from typing import Iterable, cast
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import (
     ExpvalOp,
@@ -20,6 +21,7 @@ from qamomile.circuit.ir.operation import (
     ProjectOperation,
     ResetOperation,
     ReturnOperation,
+    SelectOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -45,6 +47,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     RegionArg,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.control_value import normalize_control_value
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     SymbolicControlledU,
@@ -200,6 +203,13 @@ def _validate_operation(
                 operation.implementation_block,
                 state,
                 f"{location} implementation block",
+            )
+    if isinstance(operation, SelectOperation):
+        for case_index, case_block in enumerate(operation.case_blocks):
+            _validate_block(
+                case_block,
+                state,
+                f"{location} case block {case_index}",
             )
 
 
@@ -411,6 +421,8 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         _validate_invoke(operation, location)
     elif isinstance(operation, InverseBlockOperation):
         _validate_inverse_block(operation, location)
+    elif isinstance(operation, SelectOperation):
+        _validate_select(operation, location)
     else:
         raise ValueError(f"{location} has unsupported operation type")
 
@@ -781,7 +793,43 @@ def _validate_concrete_controlled(
         for operand in operation.operands[: operation.num_controls]
     ):
         raise ValueError(f"{location} controls must be quantum values")
+    _validate_control_activation(
+        operation.control_value,
+        operation.num_controls,
+        location,
+    )
     _validate_controlled_results(operation, location)
+
+
+def _validate_control_activation(
+    control_value: object,
+    num_controls: int,
+    location: str,
+) -> None:
+    """Validate a canonical coherent-control activation value.
+
+    Args:
+        control_value (object): Candidate LSB-first activation integer or null.
+        num_controls (int): Concrete width of the control register.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the value is malformed, does not fit the control width,
+            or uses the non-canonical explicit all-ones representation.
+    """
+    if num_controls == 0:
+        if control_value is not None:
+            raise ValueError(f"{location} control_value requires a control qubit")
+        return
+    try:
+        normalized = normalize_control_value(
+            cast("int | None", control_value),
+            num_controls,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{location} has an invalid control_value") from exc
+    if normalized != control_value:
+        raise ValueError(f"{location} has a non-canonical control_value")
 
 
 def _validate_symbolic_controlled(
@@ -880,6 +928,18 @@ def _validate_invoke(operation: InvokeOperation, location: str) -> None:
             + operation.results[:control_count]
         ):
             raise ValueError(f"{location} control inputs and results must be quantum")
+        if (
+            "control_value" in operation.attrs
+            and operation.attrs["control_value"] is None
+        ):
+            raise ValueError(f"{location} has a non-canonical null control_value")
+        _validate_control_activation(
+            operation.attrs.get("control_value"),
+            control_count,
+            location,
+        )
+    elif "control_value" in operation.attrs:
+        raise ValueError(f"{location} has control_value on a non-controlled invocation")
     signature = operation.definition.signature
     if signature is None:
         return
@@ -921,6 +981,100 @@ def _validate_inverse_block(
     """
     if operation.source_block is None and operation.implementation_block is None:
         raise ValueError(f"{location} requires a source or implementation block")
+    _validate_control_activation(
+        operation.control_value,
+        operation.num_control_qubits,
+        location,
+    )
+
+
+def _validate_select(operation: SelectOperation, location: str) -> None:
+    """Validate a SELECT operation and every case interface.
+
+    Args:
+        operation (SelectOperation): Multiplexer operation to validate.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the index width, argument grouping, quantum result
+            layout, or case block interfaces are inconsistent.
+    """
+    width = operation.num_index_qubits
+    num_index_args = operation.num_index_args
+    if num_index_args < 1 or num_index_args >= len(operation.operands):
+        raise ValueError(f"{location} has an invalid num_index_args")
+
+    if is_plain_int(width):
+        concrete_width = cast(int, width)
+        if concrete_width < 1 or num_index_args != concrete_width:
+            raise ValueError(f"{location} has an invalid num_index_qubits")
+        minimum_width = (len(operation.case_blocks) - 1).bit_length()
+        if len(operation.case_blocks) < 2 or concrete_width < minimum_width:
+            raise ValueError(f"{location} has an invalid number of case blocks")
+    else:
+        if not isinstance(width, Value) or isinstance(width, ArrayValue):
+            raise ValueError(f"{location} has an invalid num_index_qubits")
+        _require_value_type(width, UIntType(), location)
+        if len(operation.case_blocks) < 2:
+            raise ValueError(f"{location} has an invalid number of case blocks")
+
+    index_operands = operation.operands[:num_index_args]
+    if not all(value.type.is_quantum() for value in index_operands):
+        raise ValueError(f"{location} index arguments must be quantum values")
+    _require_types(
+        index_operands,
+        [QubitType()] * num_index_args,
+        location,
+        "index argument",
+    )
+    if is_plain_int(width):
+        if any(isinstance(value, ArrayValue) for value in index_operands):
+            raise ValueError(
+                f"{location} concrete index operands must be scalar qubits"
+            )
+
+    target_operands = [
+        value
+        for value in operation.operands[num_index_args:]
+        if value.type.is_quantum()
+    ]
+    if not target_operands:
+        raise ValueError(f"{location} requires at least one quantum target")
+    quantum_operands = [*index_operands, *target_operands]
+    if len(operation.results) != len(quantum_operands):
+        raise ValueError(f"{location} results must mirror quantum operands")
+    if any(
+        isinstance(operand, ArrayValue) != isinstance(result, ArrayValue)
+        for operand, result in zip(
+            quantum_operands,
+            operation.results,
+            strict=True,
+        )
+    ):
+        raise ValueError(f"{location} results must preserve quantum argument grouping")
+    _require_types(
+        operation.results,
+        [value.type for value in quantum_operands],
+        location,
+        "result",
+    )
+
+    case_inputs = operation.operands[num_index_args:]
+    case_outputs = target_operands
+    for case_index, case_block in enumerate(operation.case_blocks):
+        case_location = f"{location} case block {case_index}"
+        _require_types(
+            case_block.input_values,
+            [value.type for value in case_inputs],
+            case_location,
+            "input",
+        )
+        _require_types(
+            case_block.output_values,
+            [value.type for value in case_outputs],
+            case_location,
+            "output",
+        )
 
 
 def _validate_quantum_operand_uniqueness(

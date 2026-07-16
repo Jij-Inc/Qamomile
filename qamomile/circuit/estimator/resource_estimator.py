@@ -38,6 +38,7 @@ from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
@@ -1372,6 +1373,8 @@ class ResourceInterpreter:
                 return self.eval_for_items(operation, resolver, controls=controls)
             case InvokeOperation():
                 return self.eval_invoke(operation, resolver, controls=controls)
+            case SelectOperation():
+                return self.eval_select(operation, resolver, controls=controls)
             case GlobalPhaseOperation():
                 return self.eval_global_phase(operation, controls=controls)
             case ControlledUOperation():
@@ -2819,6 +2822,67 @@ class ResourceInterpreter:
                 "opaque",
                 summary=f"controlled power={power}",
             ),
+        )
+
+    def eval_select(
+        self,
+        operation: SelectOperation,
+        resolver: ExprResolver,
+        *,
+        controls: ResourceExpr | int = 0,
+    ) -> ResourceEstimate:
+        """Evaluate every controlled case body of a SELECT operation.
+
+        SELECT lowering emits one controlled case for every addressable case,
+        so logical resource estimation composes all case bodies sequentially.
+        The index register contributes one coherent control per index qubit,
+        in addition to controls surrounding the SELECT itself. Control-value
+        polarity and LSB-first case addressing do not change the logical cost.
+
+        Args:
+            operation (SelectOperation): SELECT operation to evaluate.
+            resolver (ExprResolver): Resolver for the SELECT call site.
+            controls (ResourceExpr | int): Surrounding controls. Defaults to
+                zero.
+
+        Returns:
+            ResourceEstimate: Sequential estimate of all controlled case
+            bodies, including scalar-case broadcast over vector targets.
+        """
+        index_controls = (
+            resolver.resolve(operation.num_index_qubits)
+            if isinstance(operation.num_index_qubits, Value)
+            else _expr(operation.num_index_qubits)
+        )
+        total_controls = _expr(controls) + index_controls
+        estimate = ResourceEstimate.zero()
+        for case_index, case_block in enumerate(operation.case_blocks):
+            child = _select_case_child_resolver(operation, case_block, resolver)
+            broadcast = _select_case_broadcast_factor(
+                case_block,
+                operation.target_operands,
+                resolver,
+            )
+            case_estimate = self.eval_operations(
+                case_block.operations,
+                child,
+                controls=total_controls,
+            ).repeat(broadcast)
+            case_estimate = dataclasses.replace(
+                case_estimate,
+                trace=_wrap_trace(
+                    f"select[{case_index}]",
+                    case_estimate.trace,
+                    source_kind="body",
+                ),
+            )
+            estimate = estimate.seq(case_estimate)
+        return _namespace_allocation_sites(
+            dataclasses.replace(
+                estimate,
+                trace=_wrap_trace("select", estimate.trace, source_kind="body"),
+            ),
+            operation,
         )
 
     def eval_inverse_block(
@@ -5438,6 +5502,67 @@ def _controlled_u_child_resolver(
         loop_var_names=resolver.loop_var_names,
         parent_blocks=[],
     )
+
+
+def _select_case_child_resolver(
+    operation: SelectOperation,
+    case_block: Block,
+    resolver: ExprResolver,
+) -> ExprResolver:
+    """Build an independent resolver for one SELECT case body.
+
+    Args:
+        operation (SelectOperation): SELECT operation owning the case.
+        case_block (Block): Case block whose formal inputs are mapped.
+        resolver (ExprResolver): Resolver for the SELECT call site.
+
+    Returns:
+        ExprResolver: Resolver scoped exclusively to ``case_block`` with
+        target, parameter, and array-shape formals bound to actual operands.
+    """
+    actual_operands = [*operation.target_operands, *operation.param_operands]
+    extra: dict[str, ResourceExpr] = {}
+    for formal, actual in pair_block_operands(case_block, actual_operands):
+        extra[formal.uuid] = resolver.resolve(actual)
+        if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
+            for formal_dim, actual_dim in zip(formal.shape, actual.shape):
+                extra[formal_dim.uuid] = resolver.resolve(actual_dim)
+
+    context = resolver.context
+    context.update(extra)
+    return ExprResolver(
+        block=case_block,
+        context=context,
+        loop_var_names=resolver.loop_var_names,
+        parent_blocks=[],
+    )
+
+
+def _select_case_broadcast_factor(
+    case_block: Block,
+    target_operands: Sequence[Value],
+    resolver: ExprResolver,
+) -> ResourceExpr:
+    """Return the scalar-case broadcast count for one SELECT case.
+
+    Args:
+        case_block (Block): SELECT case body being evaluated.
+        target_operands (Sequence[Value]): Actual quantum targets supplied to
+            the SELECT operation.
+        resolver (ExprResolver): Resolver for symbolic target dimensions.
+
+    Returns:
+        ResourceExpr: Vector width when one scalar formal target is applied to
+        one vector actual target, otherwise one.
+    """
+    if len(target_operands) != 1 or not isinstance(target_operands[0], ArrayValue):
+        return _ONE
+    quantum_inputs = [
+        value for value in case_block.input_values if value.type.is_quantum()
+    ]
+    if len(quantum_inputs) != 1 or isinstance(quantum_inputs[0], ArrayValue):
+        return _ONE
+    return _qubit_value_size(target_operands[0], resolver)
 
 
 def _inverse_block_child_resolver(

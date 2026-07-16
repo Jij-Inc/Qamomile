@@ -112,6 +112,7 @@ from .frontend.operation.qubit_gates import (
     y,
     z,
 )
+from .frontend.operation.select import select
 from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 
@@ -191,6 +192,7 @@ __all__ = [
     "WidthResources",
     "estimate_resources",
     "control",
+    "select",
     "inverse",
     "global_phase",
     "cast",

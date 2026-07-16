@@ -1121,6 +1121,7 @@ _OPERATION_TO_PROTO: dict[str, pb.OperationType] = {
     "InvokeOperation": pb.INVOKE_OPERATION,
     "InverseBlockOperation": pb.INVERSE_BLOCK_OPERATION,
     "GlobalPhaseOperation": pb.GLOBAL_PHASE_OPERATION,
+    "SelectOperation": pb.SELECT_OPERATION,
 }
 _OPERATION_FROM_PROTO: dict[pb.OperationType, str] = {
     value: key for key, value in _OPERATION_TO_PROTO.items()
@@ -1184,7 +1185,14 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
         }
     ),
     pb.CONCRETE_CONTROLLED_OPERATION: frozenset(
-        {"num_controls", "power", "unitary_block", "callable_ref", "callable_attrs"}
+        {
+            "num_controls",
+            "power",
+            "unitary_block",
+            "callable_ref",
+            "callable_attrs",
+            "control_value",
+        }
     ),
     pb.SYMBOLIC_CONTROLLED_OPERATION: frozenset(
         {
@@ -1208,9 +1216,18 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
             "implementation_block",
             "callable_ref",
             "callable_attrs",
+            "control_value",
         }
     ),
     pb.GLOBAL_PHASE_OPERATION: frozenset(),
+    pb.SELECT_OPERATION: frozenset(
+        {
+            "num_index_qubits",
+            "case_blocks",
+            "num_index_qubits_ref",
+            "num_index_args",
+        }
+    ),
 }
 
 _OPERATION_REQUIRED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
@@ -1233,6 +1250,8 @@ _OPERATION_REQUIRED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
     ),
     pb.INVOKE_OPERATION: frozenset({"target", "transform", "attrs", "definition_ref"}),
     pb.INVERSE_BLOCK_OPERATION: frozenset({"num_control_qubits", "num_target_qubits"}),
+    pb.GLOBAL_PHASE_OPERATION: frozenset(),
+    pb.SELECT_OPERATION: frozenset(),
 }
 
 
@@ -1269,6 +1288,16 @@ def _validate_operation_fields(message: pb.Operation) -> None:
     if message.operation_type == pb.SYMBOLIC_CONTROLLED_OPERATION:
         if message.control_index_refs and not message.has_control_index_refs:
             raise ValueError("control_index_refs contradict their presence marker")
+    if message.operation_type == pb.SELECT_OPERATION:
+        has_concrete_width = message.HasField("num_index_qubits")
+        has_symbolic_width = message.HasField("num_index_qubits_ref")
+        if has_concrete_width == has_symbolic_width:
+            raise ValueError(
+                "SELECT_OPERATION requires exactly one of num_index_qubits "
+                "and num_index_qubits_ref"
+            )
+        if has_symbolic_width and not message.HasField("num_index_args"):
+            raise ValueError("symbolic SELECT_OPERATION requires num_index_args")
 
 
 def _operation_to_proto(value: dict[str, Any]) -> pb.Operation:
@@ -1305,6 +1334,8 @@ def _operation_to_proto(value: dict[str, Any]) -> pb.Operation:
         "num_control_args",
         "num_control_qubits",
         "num_target_qubits",
+        "num_index_qubits",
+        "num_index_args",
     ):
         if field in value and value[field] is not None:
             setattr(message, field, value[field])
@@ -1316,6 +1347,7 @@ def _operation_to_proto(value: dict[str, Any]) -> pb.Operation:
         "loop_var_value_ref",
         "value_var_value_ref",
         "num_controls_ref",
+        "num_index_qubits_ref",
         "definition_ref",
         "custom_name",
     ):
@@ -1371,9 +1403,15 @@ def _operation_to_proto(value: dict[str, Any]) -> pb.Operation:
 
     if "power" in value:
         message.power.CopyFrom(_integer_or_reference_to_proto(value["power"]))
+    if "control_value" in value:
+        message.control_value.CopyFrom(_integer_to_proto(value["control_value"]))
     for field in ("unitary_block", "source_block", "implementation_block"):
         if value.get(field) is not None:
             getattr(message, field).CopyFrom(_block_to_proto(value[field]))
+    if "case_blocks" in value:
+        message.case_blocks.extend(
+            _block_to_proto(item) for item in value["case_blocks"]
+        )
     for field in ("callable_ref", "target"):
         if value.get(field) is not None:
             getattr(message, field).CopyFrom(_callable_ref_to_proto(value[field]))
@@ -1446,6 +1484,9 @@ def _decode_operation_scalars(
         "num_control_qubits",
         "num_target_qubits",
         "custom_name",
+        "num_index_qubits",
+        "num_index_qubits_ref",
+        "num_index_args",
     ):
         if message.HasField(field):
             result[field] = getattr(message, field)
@@ -1528,6 +1569,8 @@ def _decode_operation_structures(
             ]
     if message.HasField("power"):
         result["power"] = _integer_or_reference_from_proto(message.power)
+    if message.HasField("control_value"):
+        result["control_value"] = _integer_from_proto(message.control_value)
     for field in ("unitary_block", "source_block", "implementation_block"):
         if message.HasField(field):
             result[field] = _block_from_proto(getattr(message, field))
@@ -1537,6 +1580,10 @@ def _decode_operation_structures(
             pb.INVERSE_BLOCK_OPERATION,
         }:
             result[field] = None
+    if message.operation_type == pb.SELECT_OPERATION:
+        result["case_blocks"] = [
+            _block_from_proto(item) for item in message.case_blocks
+        ]
     for field in ("callable_ref", "target"):
         if message.HasField(field):
             result[field] = _callable_ref_from_proto(getattr(message, field))

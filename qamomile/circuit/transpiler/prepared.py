@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.transpiler.segments import ProgramABI
 
 
@@ -110,9 +111,10 @@ def prepare_module(
 ) -> PreparedModule:
     """Collect a hierarchical block into an immutable program-level view.
 
-    The collector follows calls in nested control-flow regions and in every
-    body carried by a callable definition. Definitions remain Qamomile
-    semantic IR; this function does not inline, clone, or lower operations.
+    The collector follows calls in nested control-flow regions, SELECT case
+    Blocks, and every body carried by a callable definition. Definitions
+    remain Qamomile semantic IR; this function does not inline, clone, or
+    lower operations.
 
     Args:
         entrypoint (Block): Hierarchical entrypoint after target-independent
@@ -169,7 +171,7 @@ def prepare_module(
                 visit_block(definition.ref, implementation.body)
 
     def visit_operations(owner: CallableRef, operations: list[Operation]) -> None:
-        """Visit operations, nested regions, and callable definitions.
+        """Visit operations, owned Blocks, and callable definitions.
 
         Args:
             owner (CallableRef): Symbol containing ``operations``.
@@ -183,6 +185,12 @@ def prepare_module(
             if isinstance(operation, HasNestedOps):
                 for nested in operation.nested_op_lists():
                     visit_operations(owner, nested)
+            if isinstance(operation, SelectOperation):
+                for case_block in operation.case_blocks:
+                    # A case is a fresh-namespace callable region, but calls
+                    # inside it are still owned by the surrounding program
+                    # symbol for call-graph purposes.
+                    visit_block(owner, case_block)
 
     visit_block(entrypoint_ref, entrypoint)
     abi = ProgramABI(

@@ -26,7 +26,11 @@ from qamomile.circuit.ir.operation.callable import (
     CallTransform,
     CompositeGateType,
 )
+from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.serialize.encode import _OP_ENCODERS
+from qamomile.circuit.ir.types.primitives import FloatType, QubitType
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import (
     QAMOMILE_VERSION,
     SerializedQKernel,
@@ -37,6 +41,7 @@ from qamomile.circuit.serialization.decode import from_dict as kernel_from_dict
 from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
 from qamomile.circuit.serialization.graph_protobuf import _OPERATION_TO_PROTO
 from qamomile.circuit.serialization.proto import qamomile_ir_pb2 as pb
+from qamomile.circuit.serialization.validation import validate_qkernel_ir
 from qamomile.qiskit import QiskitTranspiler
 from tests.circuit.qkernel_catalog import QKERNEL_BY_ID
 
@@ -152,6 +157,138 @@ def _calls_controlled_composite(theta: qmc.Float) -> qmc.Bit:
     control = qmc.qubit("control")
     target = qmc.qubit("target")
     control, target = qmc.control(_custom_composite)(control, target, theta)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _value_controlled_x(
+    control_0: qmc.Qubit,
+    control_1: qmc.Qubit,
+    target: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    """Apply X for the LSB-first control value two."""
+    return qmc.control(qmc.x, num_controls=2, control_value=2)(
+        control_0,
+        control_1,
+        target,
+    )
+
+
+@qmc.qkernel
+def _ordinary_controlled_x(
+    control_0: qmc.Qubit,
+    control_1: qmc.Qubit,
+    target: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    """Apply X for the canonical all-ones control value."""
+    return qmc.control(qmc.x, num_controls=2)(
+        control_0,
+        control_1,
+        target,
+    )
+
+
+@qmc.qkernel
+def _zero_value_controlled_x(
+    control: qmc.Qubit,
+    target: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Apply X when one control qubit is zero."""
+    return qmc.control(qmc.x, control_value=0)(control, target)
+
+
+@qmc.qkernel
+def _wide_value_controlled_x() -> qmc.Bit:
+    """Apply X under an activation value wider than 64 bits."""
+    controls = qmc.qubit_array(70, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        qmc.x,
+        num_controls=70,
+        control_value=1 << 69,
+    )(controls, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _serialization_identity(target: qmc.Qubit) -> qmc.Qubit:
+    """Return one serialization-test target unchanged."""
+    return target
+
+
+@qmc.qkernel
+def _global_phase_program(
+    target: qmc.Qubit,
+    angle: qmc.Float,
+) -> qmc.Qubit:
+    """Apply a serializable global phase to an identity body."""
+    return qmc.global_phase(_serialization_identity, angle)(target)
+
+
+@qmc.qkernel
+def _select_program(
+    index: qmc.Qubit,
+    target: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Select identity or X from one index qubit."""
+    return qmc.select([_serialization_identity, qmc.x])(index, target)
+
+
+@qmc.qkernel
+def _wide_select_program() -> qmc.Bit:
+    """Preserve a concrete SELECT index width greater than 64."""
+    index = qmc.qubit_array(70, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_serialization_identity, qmc.x],
+        num_index_qubits=70,
+    )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _select_pair_identity(
+    scalar: qmc.Qubit,
+    vector: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
+    """Return a scalar and vector SELECT target unchanged."""
+    return scalar, vector
+
+
+@qmc.qkernel
+def _select_pair_x(
+    scalar: qmc.Qubit,
+    vector: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
+    """Apply X to the scalar while retaining a vector SELECT target."""
+    return qmc.x(scalar), vector
+
+
+@qmc.qkernel
+def _symbolic_select_program(width: qmc.UInt) -> qmc.Bit:
+    """Use a symbolic width across scalar and array index arguments."""
+    index_scalar = qmc.qubit("index_scalar")
+    index_array = qmc.qubit_array(width - 1, "index_array")
+    target_scalar = qmc.qubit("target_scalar")
+    target_array = qmc.qubit_array(2, "target_array")
+    index_scalar, index_array, target_scalar, target_array = qmc.select(
+        [_select_pair_identity, _select_pair_x],
+        num_index_qubits=width,
+    )(
+        index_scalar,
+        index_array,
+        target_scalar,
+        target_array,
+    )
+    return qmc.measure(target_scalar)
+
+
+@qmc.qkernel
+def _ordered_select_program() -> qmc.Bit:
+    """Select four distinct gates in ascending index order."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select([qmc.x, qmc.y, qmc.z, qmc.h])(index, target)
     return qmc.measure(target)
 
 
@@ -452,6 +589,277 @@ def test_controlled_callable_transform_round_trips_at_high_level() -> None:
     round_tripped = _circuit(restored, parameters=["theta"])
 
     assert original.count_ops() == round_tripped.count_ops()
+
+
+def test_control_value_uses_an_optional_arbitrary_integer_field() -> None:
+    """A non-default control value uses the typed BigInteger wire field."""
+    patterned = _message(_value_controlled_x)
+    patterned_operation = next(
+        operation
+        for operation in patterned.body.operations
+        if operation.operation_type == pb.CONCRETE_CONTROLLED_OPERATION
+    )
+    ordinary = _message(_ordinary_controlled_x)
+    ordinary_operation = next(
+        operation
+        for operation in ordinary.body.operations
+        if operation.operation_type == pb.CONCRETE_CONTROLLED_OPERATION
+    )
+
+    assert patterned_operation.HasField("control_value")
+    assert not patterned_operation.control_value.negative
+    assert int.from_bytes(patterned_operation.control_value.magnitude, "big") == 2
+    assert not ordinary_operation.HasField("control_value")
+
+    restored = _restore(patterned)
+    controlled = next(
+        operation
+        for operation in restored.block.operations
+        if operation.__class__.__name__ == "ConcreteControlledU"
+    )
+    assert controlled.control_value == 2
+
+
+@pytest.mark.parametrize(
+    ("kernel", "expected"),
+    [
+        pytest.param(_zero_value_controlled_x, 0, id="zero"),
+        pytest.param(_wide_value_controlled_x, 1 << 69, id="wider-than-64-bits"),
+    ],
+)
+def test_control_value_big_integer_boundaries_round_trip(
+    kernel: object,
+    expected: int,
+) -> None:
+    """Zero and values wider than 64 bits retain field presence and value."""
+    message = _message(kernel)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.CONCRETE_CONTROLLED_OPERATION
+    )
+
+    assert encoded.HasField("control_value")
+    assert int.from_bytes(encoded.control_value.magnitude, "big") == expected
+    if expected == 0:
+        assert encoded.control_value.magnitude == b""
+
+    restored = _restore(message)
+    controlled = next(
+        operation
+        for operation in restored.block.operations
+        if operation.__class__.__name__ == "ConcreteControlledU"
+    )
+    assert controlled.control_value == expected
+
+
+def test_out_of_range_control_value_is_rejected_during_deserialize() -> None:
+    """A forged activation integer cannot exceed its declared control width."""
+    message = _message(_value_controlled_x)
+    operation = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.CONCRETE_CONTROLLED_OPERATION
+    )
+    operation.control_value.negative = False
+    operation.control_value.magnitude = b"\x04"
+
+    with pytest.raises(ValueError, match="control_value 4 does not fit"):
+        _restore(message)
+
+
+def test_select_without_a_quantum_target_is_rejected() -> None:
+    """Serialized SELECT requires a target beyond its index and parameters."""
+    index = Value(type=QubitType(), name="index")
+    parameter = Value(type=FloatType(), name="parameter")
+    index_result = index.next_version()
+    cases = [
+        Block(input_values=[parameter], output_values=[]),
+        Block(input_values=[parameter], output_values=[]),
+    ]
+    operation = SelectOperation(
+        operands=[index, parameter],
+        results=[index_result],
+        num_index_qubits=1,
+        case_blocks=cases,
+    )
+    block = Block(
+        input_values=[index, parameter],
+        output_values=[index_result],
+        operations=[operation],
+    )
+
+    with pytest.raises(ValueError, match="requires at least one quantum target"):
+        validate_qkernel_ir(block)
+
+
+def test_concrete_select_width_greater_than_64_round_trips() -> None:
+    """The original concrete-width field preserves a large overwide SELECT."""
+    message = _message(_wide_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+
+    assert encoded.HasField("num_index_qubits")
+    assert encoded.num_index_qubits == 70
+    assert not encoded.HasField("num_index_qubits_ref")
+    assert not encoded.HasField("num_index_args")
+
+    restored = _restore(message)
+    select = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, SelectOperation)
+    )
+    assert select.num_index_qubits == 70
+    assert select.num_index_args == 70
+
+
+def test_symbolic_select_width_and_argument_groups_round_trip() -> None:
+    """A UInt width references its Value and retains mixed index groups."""
+    message = _message(_symbolic_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+
+    assert not encoded.HasField("num_index_qubits")
+    assert encoded.HasField("num_index_qubits_ref")
+    assert encoded.num_index_args == 2
+    assert encoded.num_index_qubits_ref in {value.uuid for value in message.value_table}
+
+    restored = _restore(message)
+    select = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, SelectOperation)
+    )
+    assert isinstance(select.num_index_qubits, Value)
+    assert select.num_index_qubits.name == "width"
+    assert select.num_index_args == 2
+    assert not isinstance(select.index_operands[0], ArrayValue)
+    assert isinstance(select.index_operands[1], ArrayValue)
+    assert not isinstance(select.target_operands[0], ArrayValue)
+    assert isinstance(select.target_operands[1], ArrayValue)
+
+    original_circuit = _circuit(_symbolic_select_program, bindings={"width": 3})
+    restored_circuit = _circuit(restored, bindings={"width": 3})
+    assert original_circuit.num_qubits == restored_circuit.num_qubits
+    assert original_circuit.count_ops() == restored_circuit.count_ops()
+
+
+def test_select_case_order_round_trips() -> None:
+    """SELECT case blocks remain in ascending index order."""
+    restored = _restore(_message(_ordered_select_program))
+    select = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, SelectOperation)
+    )
+    gate_types = [
+        next(
+            operation.gate_type
+            for operation in case.operations
+            if isinstance(operation, GateOperation)
+        )
+        for case in select.case_blocks
+    ]
+
+    assert gate_types == [
+        GateOperationType.X,
+        GateOperationType.Y,
+        GateOperationType.Z,
+        GateOperationType.H,
+    ]
+
+
+@pytest.mark.parametrize("retain_concrete", [False, True])
+def test_select_width_union_rejects_missing_or_mutually_present_fields(
+    retain_concrete: bool,
+) -> None:
+    """SELECT requires exactly one concrete or symbolic width field."""
+    message = _message(_wide_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+    if retain_concrete:
+        encoded.num_index_qubits_ref = encoded.operand_refs[0]
+    else:
+        encoded.ClearField("num_index_qubits")
+
+    with pytest.raises(ValueError, match="requires exactly one"):
+        _restore(message)
+
+
+def test_symbolic_select_rejects_a_missing_width_reference() -> None:
+    """A symbolic SELECT width must resolve through the Value table."""
+    message = _message(_symbolic_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+    encoded.num_index_qubits_ref = "missing-width-value"
+
+    with pytest.raises(ValueError, match="value_table is missing entry"):
+        _restore(message)
+
+
+def test_symbolic_select_requires_its_index_argument_count() -> None:
+    """A symbolic SELECT cannot infer its operand-slot boundary on load."""
+    message = _message(_symbolic_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+    encoded.ClearField("num_index_args")
+
+    with pytest.raises(ValueError, match="requires num_index_args"):
+        _restore(message)
+
+
+def test_symbolic_select_rejects_changed_result_grouping() -> None:
+    """Scalar and array index result slots cannot be interchanged."""
+    message = _message(_symbolic_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+    result_refs = list(encoded.result_refs)
+    result_refs[0], result_refs[1] = result_refs[1], result_refs[0]
+    del encoded.result_refs[:]
+    encoded.result_refs.extend(result_refs)
+
+    with pytest.raises(ValueError, match="preserve quantum argument grouping"):
+        _restore(message)
+
+
+@pytest.mark.parametrize(
+    ("kernel", "operation_type"),
+    [
+        (_global_phase_program, pb.GLOBAL_PHASE_OPERATION),
+        (_select_program, pb.SELECT_OPERATION),
+    ],
+)
+def test_semantic_quantum_operations_round_trip_as_typed_wire_nodes(
+    kernel: object,
+    operation_type: int,
+) -> None:
+    """Global phase and SELECT retain dedicated protobuf operation types."""
+    message = _message(kernel)
+
+    assert any(
+        operation.operation_type == operation_type
+        for operation in message.body.operations
+    )
+    assert serialize(_restore(message)) == serialize(kernel)  # type: ignore[arg-type]
 
 
 def test_controlled_oracle_signature_includes_controls() -> None:

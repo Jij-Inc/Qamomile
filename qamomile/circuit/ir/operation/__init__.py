@@ -88,6 +88,7 @@ from .global_phase import GlobalPhaseOperation
 from .inverse_block import InverseBlockOperation
 from .operation import Operation
 from .return_operation import ReturnOperation
+from .select import SelectOperation
 from .slice_array import ReleaseSliceViewOperation, SliceArrayOperation
 
 __all__ = [
@@ -113,6 +114,7 @@ __all__ = [
     "ControlledUOperation",
     "ConcreteControlledU",
     "SymbolicControlledU",
+    "SelectOperation",
     "DecodeQFixedOperation",
     "DictGetItemOperation",
     "StoreArrayElementOperation",
