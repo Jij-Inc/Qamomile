@@ -23,7 +23,6 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ClassicalBitExpr,
     ForInstruction,
     GateInstruction,
-    GlobalPhaseCapabilities,
     IfInstruction,
     LiteralExpr,
     LoopVariableExpr,
@@ -179,9 +178,7 @@ class QiskitMaterializer:
             gate_parameters=numeric,
             predicates=predicates,
             pauli_time=numeric,
-            global_phase=GlobalPhaseCapabilities(
-                scalars=numeric,
-            ),
+            global_phase=numeric,
             generic_calls=call_transforms,
             supports_dynamic_if=True,
             supports_dynamic_while=True,

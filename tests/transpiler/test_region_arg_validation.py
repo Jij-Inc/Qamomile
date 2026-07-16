@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.canonical import canonicalize
+from qamomile.circuit.ir.canonical import canonicalize, to_canonical_bytes
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -13,9 +14,10 @@ from qamomile.circuit.ir.operation.control_flow import (
     RegionArg,
     validate_region_args,
 )
-from qamomile.circuit.ir.serialize import from_dict, to_dict
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import DictValue, Value
+from qamomile.circuit.serialization import deserialize, serialize
+from qamomile.circuit.serialization.proto import qamomile_ir_pb2 as pb
 from qamomile.circuit.transpiler.classical_executor import ClassicalExecutor
 from qamomile.circuit.transpiler.emit_context import EmitContext
 from qamomile.circuit.transpiler.errors import (
@@ -128,8 +130,6 @@ def test_loop_variable_region_collision_rejected_at_every_consumer() -> None:
     with pytest.raises(ValueError, match="disjoint from loop-variable"):
         validate_region_args(loop)
     with pytest.raises(ValueError, match="disjoint from loop-variable"):
-        to_dict(block)
-    with pytest.raises(ValueError, match="disjoint from loop-variable"):
         canonicalize(block)
     with pytest.raises(ValidationError, match="disjoint from loop-variable"):
         ConstantFoldingPass().run(block)
@@ -144,12 +144,24 @@ def test_loop_variable_region_collision_rejected_at_every_consumer() -> None:
 
 def test_decoder_rejects_loop_variable_region_collision() -> None:
     """Wire decoding rejects a RegionArg block ref changed to the loop var."""
-    payload = to_dict(_range_carry_block(collide_with_loop_var=False))
-    loop_payload = payload["block"]["operations"][0]
-    loop_payload["region_args"][0]["block_arg_ref"] = loop_payload["loop_var_value_ref"]
+
+    @qmc.qkernel
+    def kernel(n: qmc.UInt) -> qmc.UInt:
+        """Carry one UInt through a range loop."""
+        total = qmc.uint(0)
+        for i in qmc.range(n):
+            total = total + i
+        return total
+
+    message = pb.QKernel()
+    message.ParseFromString(serialize(kernel))
+    loop = next(
+        operation for operation in message.body.operations if operation.region_args
+    )
+    loop.region_args[0].block_arg_ref = loop.loop_var_value_ref
 
     with pytest.raises(ValueError, match="disjoint from loop-variable"):
-        from_dict(payload)
+        deserialize(message.SerializeToString(deterministic=True))
 
 
 @pytest.mark.parametrize(
@@ -190,7 +202,7 @@ def test_for_items_formals_are_disjoint_from_region_slots(
 
 
 def test_constant_fold_region_loop_is_wire_idempotent() -> None:
-    """Repeated region-loop folding preserves UUID and logical-id identity."""
+    """Repeated region-loop folding preserves canonical IR and logical identity."""
     block = _range_carry_block(collide_with_loop_var=False)
     folding = ConstantFoldingPass()
 
@@ -198,5 +210,5 @@ def test_constant_fold_region_loop_is_wire_idempotent() -> None:
     twice = folding.run(once)
 
     assert once.output_values[0].get_const() == 12
-    assert to_dict(once) == to_dict(twice)
+    assert to_canonical_bytes(once) == to_canonical_bytes(twice)
     assert once.output_values[0].logical_id == twice.output_values[0].logical_id

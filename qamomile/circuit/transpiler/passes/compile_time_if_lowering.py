@@ -44,7 +44,6 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     MeasureVectorOperation,
-    SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
@@ -1889,7 +1888,14 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         op: Operation,
         subst: dict[str, ValueBase],
     ) -> Operation:
-        """Apply merge substitution map to an operation's operands and results.
+        """Apply a substitution map to every input field of an operation.
+
+        Operand and selected structural-result handling remains explicit
+        because produced SSA identities must not be replaced accidentally.
+        Subclass-owned input fields are rewritten through the generic
+        ``all_input_values()`` / ``replace_values()`` protocol. This keeps
+        structural values such as controlled powers and symbolic SELECT
+        widths consistent with their substituted operands.
 
         Args:
             op (Operation): Operation to rewrite through ``subst``.
@@ -2002,36 +2008,25 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 )
             return rebuilt
 
-        result_op = op
-        if changed:
+        input_subst: dict[str, ValueBase] = {}
+        for value in op.all_input_values():
+            substituted = substitutor.substitute_value(value)
+            if substituted is not value:
+                input_subst[value.uuid] = substituted
+
+        result_op = op.replace_values(input_subst) if input_subst else op
+        if changed or input_subst:
+            # ``replace_values`` also rewrites results when a mapping happens
+            # to share their UUID. Restore the deliberately conservative
+            # result policy above while retaining subclass-field updates.
             result_op = dataclasses.replace(
-                op, operands=new_operands, results=new_results
+                result_op,
+                operands=new_operands,
+                results=new_results,
             )
 
         # theta is now part of operands, handled by the operands
         # substitution above.
-
-        # Handle ControlledUOperation non-operand fields per subclass.
-        if isinstance(result_op, ControlledUOperation):
-            extra_kwargs: dict[str, Any] = {}
-            # power is shared across all subclasses.
-            if isinstance(result_op.power, Value):
-                new_power = substitutor.substitute_value(result_op.power)
-                if new_power is not result_op.power:
-                    extra_kwargs["power"] = new_power
-            if isinstance(result_op, SymbolicControlledU):
-                new_nc = substitutor.substitute_value(result_op.num_controls)
-                if new_nc is not result_op.num_controls:
-                    extra_kwargs["num_controls"] = new_nc
-                if result_op.control_indices is not None:
-                    new_ci = self._substitute_value_list(
-                        list(result_op.control_indices), substitutor
-                    )
-                    if new_ci is not None:
-                        extra_kwargs["control_indices"] = tuple(new_ci)
-            # ConcreteControlledU: num_controls is int, nothing to substitute.
-            if extra_kwargs:
-                result_op = dataclasses.replace(result_op, **extra_kwargs)
 
         # Handle CastOperation source provenance sync.
         if isinstance(result_op, CastOperation) and changed:
@@ -2121,23 +2116,6 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                     subst[result_val.uuid] = new_result
 
         return result_op
-
-    def _substitute_value_list(
-        self,
-        values: list[Value],
-        substitutor: ValueSubstitutor,
-    ) -> list[Value] | None:
-        """Substitute values in a list, returning new list if changed, None otherwise."""
-        new_values: list[Value] = []
-        changed = False
-        for v in values:
-            new_v = substitutor.substitute_value(v)
-            if new_v is not v and isinstance(new_v, Value):
-                new_values.append(new_v)
-                changed = True
-            else:
-                new_values.append(v)
-        return new_values if changed else None
 
     def _substitute_output_values(
         self,

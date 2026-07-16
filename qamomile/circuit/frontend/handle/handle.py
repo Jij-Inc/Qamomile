@@ -279,23 +279,15 @@ class Handle(abc.ABC):
         """
         return self.value.type.is_quantum()
 
-    def consume(self, operation_name: str = "unknown") -> typing.Self:
-        """Mark this handle as consumed and return a fresh handle.
-
-        Records the user-code source location (``file:line``) of the
-        consuming call so a later affine violation can point at both the
-        first-use and the reuse site.
+    def validate_consumable(self, operation_name: str = "unknown") -> None:
+        """Validate a consume without changing affine ownership state.
 
         Args:
-            operation_name: Name of the operation consuming this handle,
-                           used for error messages.
-
-        Returns:
-            A new handle pointing to the same underlying value.
+            operation_name (str): Name of the prospective consuming operation,
+                used in diagnostics. Defaults to ``"unknown"``.
 
         Raises:
-            QubitConsumedError: If this handle was already consumed
-                               and is a quantum type.
+            QubitConsumedError: If this quantum handle was already consumed.
         """
         if self._consumed and self._should_enforce_linear():
             display_name = self.name or f"qubit_{self.id[:8]}"
@@ -314,6 +306,25 @@ class Handle(abc.ABC):
                 operation_name=operation_name,
                 first_use_location=consumed_at or self._consumed_by,
             )
+
+    def consume(self, operation_name: str = "unknown") -> typing.Self:
+        """Mark this handle as consumed and return a fresh handle.
+
+        Records the user-code source location (``file:line``) of the
+        consuming call so a later affine violation can point at both the
+        first-use and the reuse site.
+
+        Args:
+            operation_name (str): Name of the operation consuming this handle,
+                used for error messages. Defaults to ``"unknown"``.
+
+        Returns:
+            typing.Self: New handle pointing to the same underlying value.
+
+        Raises:
+            QubitConsumedError: If this quantum handle was already consumed.
+        """
+        self.validate_consumable(operation_name)
         self._consumed = True
         self._consumed_by = operation_name
         if self._should_enforce_linear():
@@ -342,6 +353,23 @@ class Handle(abc.ABC):
                 operation_name,
             )
         return new_handle
+
+    def _handoff_direct_borrow_to(self, successor: "Handle") -> None:
+        """Move a direct array-element borrow to an actual operation result.
+
+        ``consume`` creates an intermediate successor around the input IR
+        value. Operations then create their real output handle around a fresh
+        SSA value. This helper replaces the intermediate owner in the parent
+        array's borrow table with that real output handle.
+
+        Args:
+            successor (Handle): Actual result handle that continues ownership.
+
+        Returns:
+            None.
+        """
+        if self.parent is not None and self.indices and self._should_enforce_linear():
+            self.parent._handoff_direct_borrow_owner(self, successor)
 
     def _copy_subclass_state_to(self, new_handle: "Handle") -> None:
         """Hook for subclasses to copy additional state during consume()."""

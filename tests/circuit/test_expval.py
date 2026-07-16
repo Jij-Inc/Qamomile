@@ -28,6 +28,42 @@ from __future__ import annotations
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.frontend.tracer import trace
+from qamomile.circuit.ir.types import ObservableType, QubitType
+from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+
+def _standalone_expval_inputs() -> tuple[qmc.Qubit, qmc.Observable]:
+    """Create frontend handles for direct expval ownership tests.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Observable]: Standalone qubit and observable.
+    """
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    observable = qmc.Observable(value=Value(type=ObservableType(), name="observable"))
+    return qubit, observable
+
+
+def test_tuple_expval_alias_failure_leaves_qubit_unconsumed() -> None:
+    """Duplicate tuple operands fail before destructive ownership commit."""
+    qubit, observable = _standalone_expval_inputs()
+
+    with trace():
+        with pytest.raises(QubitConsumedError, match="overlapping physical"):
+            qmc.expval((qubit, qubit), observable)
+
+    assert not qubit._consumed
+
+
+def test_expval_missing_tracer_leaves_qubit_unconsumed() -> None:
+    """Tracer validation precedes expval's destructive consume."""
+    qubit, observable = _standalone_expval_inputs()
+
+    with pytest.raises(RuntimeError, match="No active tracer"):
+        qmc.expval(qubit, observable)
+
+    assert not qubit._consumed
 
 
 class TestExpvalIsDestructiveConsume:

@@ -24,7 +24,6 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ClassicalBitExpr,
     ForInstruction,
     GateInstruction,
-    GlobalPhaseCapabilities,
     IfInstruction,
     LiteralExpr,
     LoopVariableExpr,
@@ -103,9 +102,7 @@ class QuriPartsMaterializer:
                 parameter_form=ScalarExpressionForm.CONCRETE_ONLY,
             ),
             pauli_time=numeric,
-            global_phase=GlobalPhaseCapabilities(
-                scalars=numeric,
-            ),
+            global_phase=numeric,
             generic_calls=CallTransformCapabilities(
                 supports_power=True,
                 supports_inverse=True,

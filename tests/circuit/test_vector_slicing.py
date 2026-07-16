@@ -19,6 +19,8 @@ import qamomile.observable as qm_o
 from qamomile.circuit.frontend.handle import VectorView
 from qamomile.circuit.frontend.qkernel_invocation import _wrap_array_result
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.control_flow import IfMerge
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import (
@@ -54,7 +56,7 @@ def _slice_array(
 ) -> ArrayValue:
     """Create a sliced ArrayValue for slice-borrow synthetic tests."""
     return ArrayValue(
-        type=QubitType(),
+        type=root.type,
         name=name,
         shape=(length,),
         slice_of=root,
@@ -1380,6 +1382,144 @@ class TestSameSliceVersionRefresh:
             return q
 
         assert circuit.block is not None
+
+    @pytest.mark.parametrize("reslice_in_true_branch", [True, False])
+    def test_runtime_if_root_full_slice_merge_releases_alias_borrow(
+        self,
+        reslice_in_true_branch: bool,
+    ) -> None:
+        """A root/full-slice merge leaves the merged root directly usable."""
+
+        if reslice_in_true_branch:
+
+            @qmc.qkernel
+            def circuit(flag: qmc.Bit) -> qmc.Vector[qmc.Qubit]:
+                q = qmc.qubit_array(4, "q")
+                if flag:
+                    q = q[:]
+                q[0] = qmc.h(q[0])
+                return q
+
+        else:
+
+            @qmc.qkernel
+            def circuit(flag: qmc.Bit) -> qmc.Vector[qmc.Qubit]:
+                q = qmc.qubit_array(4, "q")
+                if flag:
+                    q = q
+                else:
+                    q = q[:]
+                q[0] = qmc.h(q[0])
+                return q
+
+        SliceBorrowCheckPass().run(circuit.block)
+
+    def test_nested_runtime_if_root_full_slice_merge_releases_alias_borrow(self):
+        """Nested root/full-slice merges leave the outer merged root usable."""
+
+        @qmc.qkernel
+        def circuit(
+            outer_flag: qmc.Bit,
+            inner_flag: qmc.Bit,
+        ) -> qmc.Vector[qmc.Qubit]:
+            q = qmc.qubit_array(4, "q")
+            if outer_flag:
+                if inner_flag:
+                    q = q[:]
+            q[1] = qmc.h(q[1])
+            return q
+
+        SliceBorrowCheckPass().run(circuit.block)
+
+    def test_root_full_slice_merge_preserves_prebranch_owner(self):
+        """Alias cleanup never retires a borrow live before the runtime If."""
+        checker = SliceBorrowCheckPass()
+        length = _uint_value("length", 4)
+        root = _qubit_array("q", length)
+        full_view = _slice_array(
+            root,
+            "full",
+            _uint_value("start", 0),
+            _uint_value("step", 1),
+            length,
+        )
+        merge = IfMerge(0, root, full_view, root.next_version())
+        key = (root.logical_id, "const:0")
+        state = {key: full_view}
+
+        assert checker._record_if_representation_alias(merge)
+        checker._retire_if_root_representation_borrows(
+            merge,
+            state,
+            dict(state),
+        )
+
+        assert state == {key: full_view}
+
+    @pytest.mark.parametrize(
+        ("start", "step", "view_length"),
+        [(0, 1, 3), (0, 2, 2), (3, -1, 4)],
+        ids=["partial", "strided", "reordered"],
+    )
+    def test_root_non_full_slice_merge_is_not_representation_alias(
+        self,
+        start: int,
+        step: int,
+        view_length: int,
+    ) -> None:
+        """Partial, strided, and reordered slices remain distinct resources."""
+        checker = SliceBorrowCheckPass()
+        length = _uint_value("length", 4)
+        root = _qubit_array("q", length)
+        view = _slice_array(
+            root,
+            "view",
+            _uint_value("start", start),
+            _uint_value("step", step),
+            _uint_value("view_length", view_length),
+        )
+        merge = IfMerge(0, root, view, root.next_version())
+
+        assert not checker._record_if_representation_alias(merge)
+
+    def test_malformed_reslice_merge_is_not_representation_alias(self) -> None:
+        """Malformed non-vector metadata is rejected without indexing shape."""
+        checker = SliceBorrowCheckPass()
+        length = _uint_value("length", 4)
+        root = _qubit_array("q", length)
+        malformed = dataclasses.replace(
+            _slice_array(
+                root,
+                "malformed",
+                _uint_value("start", 0),
+                _uint_value("step", 1),
+                length,
+            ),
+            shape=(),
+        )
+        merge = IfMerge(0, root, malformed, root.next_version())
+
+        assert not checker._record_if_representation_alias(merge)
+
+    def test_unhashable_type_full_slice_merge_is_representation_alias(self) -> None:
+        """Resource equality never requires an IR element type to be hashable."""
+        checker = SliceBorrowCheckPass()
+        length = _uint_value("length", 4)
+        root = ArrayValue(
+            type=ObservableType(),
+            name="observables",
+            shape=(length,),
+        )
+        full_view = _slice_array(
+            root,
+            "full",
+            _uint_value("start", 0),
+            _uint_value("step", 1),
+            length,
+        )
+        merge = IfMerge(0, root, full_view, root.next_version())
+
+        assert checker._record_if_representation_alias(merge)
 
     def test_runtime_if_reslices_existing_partial_view(self):
         """A branch-local full reslice retains the pre-branch borrow owner."""

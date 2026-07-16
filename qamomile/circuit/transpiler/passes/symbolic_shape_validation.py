@@ -1,10 +1,10 @@
-"""Validation pass: reject unresolvable ``ForOperation`` loop bounds.
+"""Reject unresolved values that determine compile-time circuit structure.
 
-Qamomile circuits are fixed-structure at compile time: loop bounds
-determine how many gates are emitted, so every ``ForOperation`` bound
-must be resolvable before emit. This pass catches two failure families
-early — right before segmentation — with an actionable diagnostic,
-instead of letting them surface downstream as inconsistent errors:
+Qamomile circuits are fixed-structure at compile time: loop bounds determine
+how many gates are emitted, and SELECT index widths determine reusable-call
+arity. These values must be resolvable before emit. This pass catches two
+failure families early — right before segmentation — with an actionable
+diagnostic, instead of letting them surface downstream as inconsistent errors:
 
 1. **Unresolved parameter shape dims** (e.g. ``gamma_dim0``): a loop
    bound reads a parameter array's length, but no concrete binding was
@@ -44,6 +44,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
 )
 from qamomile.circuit.ir.operation.operation import OperationKind
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import Value, ValueBase
 from qamomile.circuit.transpiler.errors import QamomileCompileError
 from qamomile.circuit.transpiler.passes import Pass
@@ -262,11 +263,31 @@ def _format_runtime_parameter_bound_error(
     )
 
 
-class SymbolicShapeValidationPass(Pass[Block, Block]):
-    """Reject unresolvable compile-time-structure values in loop bounds.
+def _format_runtime_parameter_select_width_error(param_name: str) -> str:
+    """Build the diagnostic for a runtime-parameter SELECT width.
 
-    Runs two checks on every ``ForOperation`` bound (start / stop / step),
-    walking nested control flow recursively:
+    Args:
+        param_name (str): Runtime parameter that determines the index width.
+
+    Returns:
+        str: Actionable error explaining the compile-time binding requirement.
+    """
+    return (
+        f"Cannot resolve SELECT index width at compile time because "
+        f"num_index_qubits depends on runtime parameter '{param_name}'.\n\n"
+        f"Qamomile circuits have fixed wire arity before execution, so a "
+        f"SELECT index width cannot be supplied as a runtime parameter. "
+        f"Bind it during transpilation (and remove it from parameters=[...] "
+        f"if present):\n"
+        f"    transpiler.transpile(..., bindings={{'{param_name}': <int>}})"
+    )
+
+
+class SymbolicShapeValidationPass(Pass[Block, Block]):
+    """Reject unresolvable values that determine emitted circuit structure.
+
+    Runs two checks on every ``ForOperation`` bound and symbolic SELECT index
+    width, walking nested control flow recursively:
 
     1. Unresolved parameter array shape dims, recognized by the
        ``{array}_dim{i}`` naming convention.
@@ -289,7 +310,7 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         return "symbolic_shape_validation"
 
     def run(self, input: Block) -> Block:
-        """Validate every ``ForOperation`` bound in the block.
+        """Validate structural loop bounds and SELECT widths in the block.
 
         Args:
             input (Block): The block to validate. Must be
@@ -388,6 +409,47 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         """
         if isinstance(op, ForOperation):
             self._check_for_operation(op, enclosing_loop_vars)
+        elif isinstance(op, SelectOperation):
+            self._check_select_operation(op, enclosing_loop_vars)
+
+    def _check_select_operation(
+        self,
+        op: SelectOperation,
+        enclosing_loop_vars: frozenset[str],
+    ) -> None:
+        """Validate one symbolic SELECT index width.
+
+        Args:
+            op (SelectOperation): SELECT operation whose width is checked.
+            enclosing_loop_vars (frozenset[str]): UUIDs of loop variables in
+                scope. Widths derived solely from these remain resolvable
+                during emit-time unrolling.
+
+        Returns:
+            None: Raises on violation, otherwise returns nothing.
+
+        Raises:
+            QamomileCompileError: If the width is an unresolved parameter
+                shape or depends on a runtime parameter.
+        """
+        width = op.num_index_qubits
+        if not isinstance(width, Value) or width.is_constant():
+            return
+        shape_info = _looks_like_parameter_shape_dim(width)
+        if shape_info is not None:
+            array_name, dim_index = shape_info
+            raise QamomileCompileError(
+                _format_actionable_error(
+                    array_name,
+                    dim_index,
+                    "a SELECT num_index_qubits value",
+                )
+            )
+        param_name = self._runtime_parameter_source(width, enclosing_loop_vars)
+        if param_name is not None:
+            raise QamomileCompileError(
+                _format_runtime_parameter_select_width_error(param_name)
+            )
 
     def _check_for_operation(
         self,

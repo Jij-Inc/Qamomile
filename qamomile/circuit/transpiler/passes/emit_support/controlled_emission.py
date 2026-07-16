@@ -2157,13 +2157,13 @@ def emit_controlled_u_with_symbolic_indices(
     pass has left the op as ``SymbolicControlledU`` because
     ``control_indices`` carries pass-through semantics that the
     ``ConcreteControlledU`` promotion cannot represent in its scalar
-    control-operand layout (see §12.5 of the design).
+    control-operand layout.
 
     The function resolves the symbolic ``num_controls`` and every
     ``control_indices`` entry to concrete ints, walks the control
     pool's ``slice_of`` chain to look up physical qubits per element,
     builds ``control_phys`` from the selected pool slots, expands the
-    sub-kernel quantum operands via the §12.1 helper
+    sub-kernel quantum operands via
     ``_expand_quantum_operands_to_phys`` for the target side, and
     threads the rest through the standard ``gate_controlled`` +
     ``append_gate`` pipeline (with the per-gate fallback for backends
@@ -2398,7 +2398,7 @@ def emit_controlled_u_multi_arg(
     it survives intact and lands here.
 
     The function expands every control operand into physical qubit
-    indices via the §12.1 helper, asserts the resulting count
+    indices via ``_expand_quantum_operands_to_phys``, asserts the resulting count
     matches the resolved ``num_controls``, expands the target side
     the same way, and threads the rest through the standard
     ``gate_controlled`` + ``append_gate`` pipeline (with the
@@ -2581,21 +2581,10 @@ def emit_controlled_u(
     ]
     param_operands = op.param_operands
 
-    # Resolve controls via ``resolve_qubit_index``: frontend Step 2.a
-    # normalises ``operands[:num_controls]`` to one scalar per physical
+    # The frontend normalises ``operands[:num_controls]`` to one scalar per physical
     # control qubit, so each control operand maps to a single physical
     # index.  ``Vector[Qubit]`` / ``VectorView`` controls are already
     # expanded into per-element scalars upstream.
-    #
-    # Historical note: total-failure previously took a silent-return
-    # path because the ``SymbolicControlledU`` → ``ConcreteControlledU``
-    # promotion in ``ConstantFoldingPass`` can produce an inconsistent
-    # operand layout (the control Vector is not expanded to individual
-    # qubits, so ``operands[:num_controls]`` picks up a target Value
-    # rather than each control individually).  That promotion bug is
-    # tracked separately; if it triggers post-this-change, the
-    # ``EmitError`` here surfaces it instead of silently dropping the
-    # gate.
     control_indices: list[int] = []
     for q in control_operands:
         idx = emit_pass._resolver.resolve_qubit_index(q, qubit_map, bindings)
@@ -2619,7 +2608,7 @@ def emit_controlled_u(
     # Resolve sub-kernel quantum (target) operands.  Each operand may
     # be either a scalar ``Value`` (one physical qubit) or an
     # ``ArrayValue`` of quantum element type (a ``Vector[Qubit]`` arg
-    # that contributes ``length`` physical qubits).  The shared §12.1
+    # that contributes ``length`` physical qubits).  The shared expansion
     # helper handles both cases uniformly; ``target_index_groups``
     # records the per-operand grouping so result-side bookkeeping can
     # re-attach the physical indices to each result UUID below.
@@ -3867,8 +3856,7 @@ def _expand_quantum_operands_to_phys(
     the affine map ``root_idx = slice_start + slice_step * i``.
 
     Centralising the expansion lets ``emit_controlled_u`` accept
-    ``Vector[Qubit]`` sub-kernel arguments (Step 2.b of the
-    controlled-API redesign) without copy/pasting the
+    ``Vector[Qubit]`` sub-kernel arguments without duplicating the
     length-resolution + slice-walk + per-element-lookup sequence into
     every controlled emit path.
 
@@ -4017,8 +4005,7 @@ def _map_controlled_u_results(
 ) -> None:
     """Map a ``ConcreteControlledU``'s result ``Value`` UUIDs to physical qubits.
 
-    Result layout (set up by the Step 2.a frontend, mirroring the
-    operand layout):
+    The frontend result layout mirrors the operand layout:
 
     - ``op.results[:num_controls]`` — one scalar ``Value`` per physical
       control qubit; maps 1:1 to ``control_indices``.

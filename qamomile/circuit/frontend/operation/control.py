@@ -40,6 +40,7 @@ from qamomile.circuit.frontend.qkernel_callable import (
 from qamomile.circuit.frontend.qkernel_specialization import (
     select_specialized_block,
 )
+from qamomile.circuit.frontend.qkernel_utils import reject_aliased_quantum_args
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
@@ -148,13 +149,10 @@ _RESERVED_WRAPPER_NAMES: frozenset[str] = frozenset(_wrapper_namespace(None).key
 class _ControlEntry:
     """Bookkeeping for one positional control or sub-quantum handle.
 
-    The new ``ControlledGate.__call__`` concrete path consumes handles
-    in two stages: scalar ``Qubit`` and whole-``Vector`` arguments are
-    consumed eagerly via :meth:`Handle.consume`, while ``VectorView``
-    arguments defer the consume until ``_wrap_results_by_input_kind``
-    can build the fresh result view and rebind the parent's bulk-borrow
-    through :meth:`VectorView._transfer_borrow_to` (same pattern as
-    ``QKernel.__call__``).
+    Every entry starts as a side-effect-free preview. Scalar ``Qubit`` and
+    whole-``Vector`` ownership is committed only after operation construction
+    succeeds. ``VectorView`` ownership remains deferred until result wrapping
+    can transfer the parent borrow directly to the fresh result view.
 
     Attributes:
         original (Any): The handle as it was passed in by the caller
@@ -162,11 +160,9 @@ class _ControlEntry:
             ``_wrap_results_by_input_kind`` can rebuild an output handle
             of the same kind and, for ``VectorView``, perform the
             deferred borrow transfer.
-        consumed (Any | None): The post-consume handle for ``Qubit`` and
-            ``Vector`` (whose consume is eager).  ``None`` for
-            ``VectorView``, signalling that the consume is deferred and
-            ``original`` should still be used to read the current
-            ``ArrayValue``.
+        consumed (Any | None): Preview or committed successor for ``Qubit``
+            and ``Vector``. ``None`` for ``VectorView``, signalling deferred
+            borrow transfer.
         result_array (ArrayValue | None): For a whole-``Vector`` /
             ``VectorView`` control entry, the freshly-versioned result
             ``ArrayValue`` that the per-element scalar control results
@@ -186,8 +182,14 @@ class _ControlEntry:
 
     @property
     def is_deferred_view(self) -> bool:
-        """Whether this entry represents a ``VectorView`` whose consume is deferred."""
-        return self.consumed is None
+        """Return whether this entry defers ``VectorView`` ownership transfer.
+
+        Returns:
+            bool: Whether the original handle is a ``VectorView``.
+        """
+        from qamomile.circuit.frontend.handle.array import VectorView
+
+        return isinstance(self.original, VectorView)
 
 
 @dataclasses.dataclass
@@ -195,19 +197,63 @@ class _ConcreteCallPrep:
     """Store the shared concrete-call preparation for control and SELECT.
 
     Attributes:
-        consumed_controls (list[_ControlEntry]): Consumed control entries.
-        consumed_sub_quantum (list[_ControlEntry]): Consumed target entries.
+        control_entries (list[_ControlEntry]): Prepared control entries whose
+            ownership has not yet been committed.
+        target_entries (list[_ControlEntry]): Prepared target entries whose
+            ownership has not yet been committed.
         operands (list[Any]): Flat IR operands in control-target-parameter order.
         results (list[Value]): Quantum result values.
         sub_args_resolved (dict[str, Any]): Bound arguments for specializing the
             selected unitary body.
     """
 
-    consumed_controls: list[_ControlEntry]
-    consumed_sub_quantum: list[_ControlEntry]
+    control_entries: list[_ControlEntry]
+    target_entries: list[_ControlEntry]
     operands: list[Any]
     results: list[Value]
     sub_args_resolved: dict[str, Any]
+
+
+@dataclasses.dataclass
+class _SymbolicCallPrep:
+    """Store shared symbolic-prefix preparation for control and SELECT.
+
+    The prefix stays grouped by caller argument: a scalar ``Qubit`` produces
+    one scalar operand/result, while a ``Vector`` or ``VectorView`` produces
+    one array operand/result. The resolved symbolic width is checked later by
+    the transpiler against the flattened size of these groups.
+
+    Args:
+        prefix_entries (list[_ControlEntry]): Prepared leading quantum
+            arguments whose ownership has not yet been committed.
+        target_entries (list[_ControlEntry]): Prepared target arguments whose
+            ownership has not yet been committed.
+        operands (list[Any]): Grouped prefix operands followed by target and
+            classical operands.
+        prefix_results (list[Value]): One quantum result per prefix argument.
+        target_results (list[Value]): One quantum result per target argument.
+        sub_args_resolved (dict[str, Any]): Bound arguments for specializing
+            the wrapped qkernel body.
+        control_indices (tuple[Value, ...] | None): Normalized pool-selection
+            indices used only by symbolic ``qmc.control``.
+    """
+
+    prefix_entries: list[_ControlEntry]
+    target_entries: list[_ControlEntry]
+    operands: list[Any]
+    prefix_results: list[Value]
+    target_results: list[Value]
+    sub_args_resolved: dict[str, Any]
+    control_indices: tuple[Value, ...] | None = None
+
+    @property
+    def results(self) -> list[Value]:
+        """Return quantum results in prefix-then-target order.
+
+        Returns:
+            list[Value]: Concatenated prefix and target results.
+        """
+        return [*self.prefix_results, *self.target_results]
 
 
 class ControlledGate:
@@ -611,7 +657,7 @@ class ControlledGate:
             )
         return output
 
-    def _build_and_emit_op(
+    def _build_op(
         self,
         operands: list[Any],
         results: list[Value],
@@ -622,7 +668,7 @@ class ControlledGate:
         *,
         has_call_global_phase: bool = False,
     ) -> ControlledUOperation | InvokeOperation:
-        """Create the controlled operation and add it to the tracer.
+        """Create a controlled operation without mutating tracer state.
 
         Composite qkernels remain callable invocations under control, so their
         body, implementation candidates, and resource models stay attached to
@@ -649,8 +695,8 @@ class ControlledGate:
                 identity. Defaults to False.
 
         Returns:
-            ControlledUOperation | InvokeOperation: Emitted controlled
-            operation.
+            ControlledUOperation | InvokeOperation: Validated controlled
+                operation ready to emit after ownership commit.
         """
         block = self._qkernel.block if block is None else block
         is_composite = getattr(self._qkernel, "_callable_kind", None) == "composite"
@@ -695,8 +741,6 @@ class ControlledGate:
                 callable_ref=self._callable_ref(),
                 callable_attrs=self._callable_attrs(),
             )
-        tracer = get_current_tracer()
-        tracer.add_operation(op)
         return op
 
     def _callable_ref(self) -> Any:
@@ -745,7 +789,7 @@ class ControlledGate:
     #
     # Each helper has a narrow contract so ``_call_concrete`` and
     # ``_call_symbolic`` can read top-to-bottom as a small choreography
-    # (split → partition → validate → consume → emit → wrap).
+    # (split → partition → validate → build → commit → emit → wrap).
     # ------------------------------------------------------------------
 
     def _split_controls_by_count(
@@ -763,7 +807,7 @@ class ControlledGate:
         reaches ``num_controls``.  The boundary between control and
         sub-kernel arguments **must fall on an argument boundary** —
         splitting an argument in the middle is rejected with
-        :class:`ValueError` (see the table in §2.1 of the design doc).
+        :class:`ValueError`.
 
         Args:
             args (tuple[Any, ...]): Positional arguments handed to
@@ -786,9 +830,9 @@ class ControlledGate:
             ValueError: If *args* runs out of qubits before reaching
                 ``num_controls``, or if the boundary falls inside a
                 single ``Vector``/``VectorView`` argument (i.e. the
-                running count would jump past ``num_controls``), or if
-                a symbolic-length ``VectorView`` is mixed with other
-                positional args in the control region (decision #16).
+                running count would jump past ``num_controls``), or if a
+                control array has symbolic length and therefore cannot be
+                expanded into the concrete control layout at compose time.
         """
         from qamomile.circuit.frontend.handle.array import (
             ArrayBase,
@@ -811,21 +855,13 @@ class ControlledGate:
                 length = arg._shape[0] if arg._shape else None
                 length_int = _as_int_const(length) if length is not None else None
                 if length_int is None:
-                    # Symbolic-length view/vector in the control region:
-                    # only acceptable when it stands alone as the
-                    # entire control prefix (decision #16).
-                    if controls or running != 0:
-                        raise ValueError(
-                            "concrete num_controls: a symbolic-length "
-                            "Vector / VectorView can only appear as the "
-                            "first positional argument when it represents "
-                            "the entire control prefix; mixing it with "
-                            "other positional control args is ambiguous "
-                            "(see design decision #16)."
-                        )
-                    # Defer the count vs. num_controls check to emit time.
-                    controls.append(arg)
-                    return controls, list(args[idx + 1 :])
+                    raise ValueError(
+                        f"concrete num_controls={num_controls}: positional "
+                        f"{control_role} argument #{idx} has symbolic length. "
+                        f"Concrete control mode requires every {control_role} "
+                        f"array length at compose time; use symbolic "
+                        f"num_controls for a runtime-sized control register."
+                    )
                 next_running = running + length_int
             elif isinstance(arg, Qubit):
                 next_running = running + 1
@@ -871,32 +907,17 @@ class ControlledGate:
         """
         return [h for h in sub_args_resolved.values() if _is_quantum_handle(h)]
 
-    # ``_validate_no_alias_or_overlap`` used to live here as an entry-
-    # point alias / overlap check, mirroring the
-    # ``_check_qubit_alias`` helper in ``qubit_gates.py``.  In practice
-    # every adversarial call shape (``cg(q, q)``, ``cg(qs[0:3], qs[2])``,
-    # ``cg(qs[0:3], qs[0:3])``, ``cg(qs[0:3], qs[1:4])``) is already
-    # rejected by the linear-type / borrow-tracking layer one step
-    # earlier — by ``Handle.consume()`` (scalar duplicates →
-    # ``QubitConsumedError``) or by ``ArrayBase._get_element`` /
-    # ``Vector._make_slice_view`` 's borrow table (view-touching
-    # overlaps → ``QubitBorrowConflictError``).  The bespoke check was
-    # therefore pure duplication and was removed; the underlying
-    # safety guarantees are unchanged, only the error class on the
-    # ``cg(q, q)`` shape moved from ``QubitAliasError`` to
-    # ``QubitConsumedError``.
-
     @staticmethod
-    def _consume_with_borrow_transfer(
+    def _prepare_control_entries(
         handles: list[Any],
         operation_name: str,
     ) -> list[_ControlEntry]:
-        """Consume *handles*, deferring the consume for ``VectorView`` inputs.
+        """Validate handles and prepare entries without consuming ownership.
 
-        Scalar ``Qubit`` and whole ``Vector`` handles take the
-        straightforward :meth:`Handle.consume` path so the affine /
-        consumed-slot bookkeeping fires immediately.  ``VectorView``
-        handles have their consume **deferred** to
+        Scalar ``Qubit`` and whole ``Vector`` entries temporarily reference
+        their original handle so all IR construction can finish before affine
+        ownership is committed. ``VectorView`` handles keep their consume
+        **deferred** to
         :meth:`_wrap_results_by_input_kind`, mirroring
         ``QKernel.__call__``'s VectorView handling: the deferred
         consume lets the caller build a fresh result view wrapping the
@@ -910,40 +931,62 @@ class ControlledGate:
 
         Args:
             handles (list[Any]): Quantum handles to consume in order.
-            operation_name (str): Operation name passed through to
-                :meth:`Handle.consume` for the eager-consume branch
-                (currently ``"ControlledU[control]"`` or
-                ``"ControlledU[target]"``).
+            operation_name (str): Prospective consume operation name used by
+                side-effect-free validation.
 
         Returns:
-            list[_ControlEntry]: One entry per input handle, in order.
-                Scalar ``Qubit`` / ``Vector`` entries have both
-                ``original`` and ``consumed`` populated; ``VectorView``
-                entries have ``consumed`` set to ``None`` (deferred).
+            list[_ControlEntry]: One entry per input handle, in order. Scalar
+                ``Qubit`` / whole ``Vector`` entries use the original as a
+                preview value; ``VectorView`` entries use ``None`` to signal
+                deferred transfer.
 
         Raises:
-            QubitConsumedError: Surfaced from :meth:`Handle.consume`
-                when a non-view handle has already been consumed.
+            QubitConsumedError: If any handle or covered slot was consumed.
+            UnreturnedBorrowError: If an array has a live borrow.
         """
         from qamomile.circuit.frontend.handle.array import VectorView
 
         entries: list[_ControlEntry] = []
         for handle in handles:
+            if handle._should_enforce_linear():
+                handle.validate_consumable(operation_name)
             if isinstance(handle, VectorView):
                 entries.append(_ControlEntry(original=handle, consumed=None))
                 continue
-            consumed = (
+            entries.append(_ControlEntry(original=handle, consumed=handle))
+        return entries
+
+    @staticmethod
+    def _commit_control_entries(
+        entries: list[_ControlEntry],
+        operation_name: str,
+    ) -> None:
+        """Commit previously validated non-view control entries.
+
+        Args:
+            entries (list[_ControlEntry]): Preview entries created by
+                :meth:`_prepare_control_entries`.
+            operation_name (str): Operation name recorded on consumed handles.
+
+        Returns:
+            None.
+        """
+        for entry in entries:
+            if entry.is_deferred_view:
+                continue
+            handle = entry.original
+            entry.consumed = (
                 handle.consume(operation_name=operation_name)
                 if handle._should_enforce_linear()
                 else handle
             )
-            entries.append(_ControlEntry(original=handle, consumed=consumed))
-        return entries
 
     def _bind_to_sub_signature(
         self,
         sub_positional_args: Sequence[Any],
         sub_kwargs: dict[str, Any],
+        *,
+        caller: str = "control()",
     ) -> dict[str, Any]:
         """Bind sub-kernel arguments to the wrapped kernel's signature.
 
@@ -965,6 +1008,8 @@ class ControlledGate:
             sub_kwargs (dict[str, Any]): Keyword arguments passed to
                 ``cg(...)`` after stripping the reserved ``power`` and
                 ``control_indices`` kwargs.
+            caller (str): Public API name used in diagnostics. Defaults to
+                ``"control()"``.
 
         Returns:
             dict[str, Any]: An ordered dict mapping parameter name to
@@ -997,7 +1042,7 @@ class ControlledGate:
                 n for n, decl in input_types.items() if _is_classical_param_decl(decl)
             ]
             raise TypeError(
-                f"control(): unknown parameter(s) {extras!r}. "
+                f"{caller}: unknown parameter(s) {extras!r}. "
                 f"The wrapped kernel's classical parameters are "
                 f"{classical_names!r}."
             )
@@ -1008,8 +1053,8 @@ class ControlledGate:
 
     def _build_operands(
         self,
-        consumed_controls: list[_ControlEntry],
-        consumed_sub_quantum: list[_ControlEntry],
+        control_entries: list[_ControlEntry],
+        target_entries: list[_ControlEntry],
         sub_classical_dict: dict[str, Any],
     ) -> list[Any]:
         """Lay out the IR operand list for a ``ConcreteControlledU``.
@@ -1027,16 +1072,16 @@ class ControlledGate:
           sub-kernel quantum operands.  Kept as ``ArrayValue`` or
           scalar ``Value`` unchanged; the per-element expansion for
           sub-kernel ``Vector[Qubit]`` arguments is performed at emit
-          time (see design §12.1).
+          time so the IR can retain whole-array shape and alias information.
         - ``operands[…:]`` — classical parameter operands, appended by
           the existing :meth:`_params_to_operands` so type-coercion
           and unknown-kwarg rejection stay in one place.
 
         Args:
-            consumed_controls (list[_ControlEntry]): Per-control entries
-                from :meth:`_consume_with_borrow_transfer`.
-            consumed_sub_quantum (list[_ControlEntry]): Per-sub-quantum
-                entries from :meth:`_consume_with_borrow_transfer`.
+            control_entries (list[_ControlEntry]): Per-control entries
+                from :meth:`_prepare_control_entries`.
+            target_entries (list[_ControlEntry]): Per-sub-quantum
+                entries from :meth:`_prepare_control_entries`.
             sub_classical_dict (dict[str, Any]): The classical-only
                 slice of the bound sub-kernel arguments (param name →
                 value, in signature order for real qkernels).
@@ -1046,17 +1091,17 @@ class ControlledGate:
                 ``ConcreteControlledU(operands=...)``.
         """
         operands: list[Any] = []
-        for entry in consumed_controls:
+        for entry in control_entries:
             operands.extend(self._expand_control_to_scalars(entry))
-        for entry in consumed_sub_quantum:
+        for entry in target_entries:
             operands.append(self._sub_quantum_operand_value(entry))
         self._params_to_operands(sub_classical_dict, operands)
         return operands
 
     def _build_results(
         self,
-        consumed_controls: list[_ControlEntry],
-        consumed_sub_quantum: list[_ControlEntry],
+        control_entries: list[_ControlEntry],
+        target_entries: list[_ControlEntry],
     ) -> list[Value]:
         """Build the IR result list paired one-to-one with operands.
 
@@ -1067,10 +1112,10 @@ class ControlledGate:
         kind (``ArrayValue`` → ``ArrayValue``, scalar → scalar).
 
         Args:
-            consumed_controls (list[_ControlEntry]): The same entries
+            control_entries (list[_ControlEntry]): The same entries
                 that were handed to :meth:`_build_operands` for the
                 control region.
-            consumed_sub_quantum (list[_ControlEntry]): The same entries
+            target_entries (list[_ControlEntry]): The same entries
                 that were handed to :meth:`_build_operands` for the
                 sub-quantum region.
 
@@ -1081,9 +1126,9 @@ class ControlledGate:
                 classical outputs.
         """
         results: list[Value] = []
-        for entry in consumed_controls:
+        for entry in control_entries:
             results.extend(self._build_control_results(entry))
-        for entry in consumed_sub_quantum:
+        for entry in target_entries:
             results.append(self._sub_quantum_operand_value(entry).next_version())
         return results
 
@@ -1112,7 +1157,7 @@ class ControlledGate:
 
         Args:
             entry (_ControlEntry): One control entry from
-                :meth:`_consume_with_borrow_transfer`.
+                :meth:`_prepare_control_entries`.
 
         Returns:
             list[Value]: One result ``Value`` per covered qubit, in
@@ -1147,7 +1192,7 @@ class ControlledGate:
 
         Args:
             entry (_ControlEntry): One bookkeeping entry produced by
-                :meth:`_consume_with_borrow_transfer`.
+                :meth:`_prepare_control_entries`.
 
         Returns:
             list[Value]: A list whose length equals the qubit count
@@ -1155,10 +1200,8 @@ class ControlledGate:
 
         Raises:
             NotImplementedError: For symbolic-length ``Vector`` /
-                ``VectorView`` controls — the per-element expansion
-                needs a concrete length at compose time.  The fix is
-                tracked under Step 2.b (emit-side handling of
-                symbolic-length controls).
+                ``VectorView`` controls because per-element expansion requires
+                a concrete length at compose time.
         """
         from qamomile.circuit.frontend.handle.array import (
             ArrayBase,
@@ -1174,8 +1217,8 @@ class ControlledGate:
         if length_int is None:
             raise NotImplementedError(
                 "concrete num_controls with a symbolic-length Vector / "
-                "VectorView control is not yet implemented in the frontend "
-                "(tracked under Step 2.b of the controlled-API redesign)."
+                "VectorView control cannot be expanded into scalar controls "
+                "at compose time."
             )
         array_value = source.value
         scalars: list[Value] = []
@@ -1200,9 +1243,9 @@ class ControlledGate:
         Scalar ``Qubit`` inputs hand back their consumed ``.value``;
         ``Vector`` / ``VectorView`` inputs hand back their *current*
         ``ArrayValue`` (the slice ``ArrayValue`` for views).  The
-        per-element expansion of sub-kernel array operands is the
-        emit-time helper added by Step 2.b — at the IR level we keep
-        the whole-array shape to preserve aliasing information.
+        per-element expansion of sub-kernel array operands happens at emit
+        time; at the IR level we keep the whole-array shape to preserve
+        aliasing information.
 
         Args:
             entry (_ControlEntry): A sub-quantum bookkeeping entry.
@@ -1218,10 +1261,11 @@ class ControlledGate:
 
     def _wrap_results_by_input_kind(
         self,
-        consumed_controls: list[_ControlEntry],
-        consumed_sub_quantum: list[_ControlEntry],
+        control_entries: list[_ControlEntry],
+        target_entries: list[_ControlEntry],
         results: list[Value],
         operation_name: str = "ControlledU",
+        control_role: str = "control",
     ) -> tuple[Any, ...]:
         """Aggregate per-element results back into input-kind handles.
 
@@ -1239,9 +1283,9 @@ class ControlledGate:
           consume completes here.
 
         Args:
-            consumed_controls (list[_ControlEntry]): Bookkeeping entries
+            control_entries (list[_ControlEntry]): Bookkeeping entries
                 for the control region, in operand order.
-            consumed_sub_quantum (list[_ControlEntry]): Bookkeeping
+            target_entries (list[_ControlEntry]): Bookkeeping
                 entries for the sub-quantum region, in operand order.
             results (list[Value]): The full IR result list — controls
                 first (one scalar ``Value`` per covered qubit), then
@@ -1249,6 +1293,8 @@ class ControlledGate:
             operation_name (str): Name used as the
                 ``_transfer_borrow_to`` operation tag for deferred
                 ``VectorView`` consumes.  Defaults to ``"ControlledU"``.
+            control_role (str): Role name used for the leading controlled
+                inputs. Defaults to ``"control"``; SELECT passes ``"index"``.
 
         Returns:
             tuple[Any, ...]: One output handle per input handle, in the
@@ -1257,7 +1303,7 @@ class ControlledGate:
         """
         wrapped: list[Any] = []
         cursor = 0
-        for entry in consumed_controls:
+        for entry in control_entries:
             count = self._entry_qubit_count(entry)
             entry_results = results[cursor : cursor + count]
             cursor += count
@@ -1265,10 +1311,10 @@ class ControlledGate:
                 self._wrap_entry_output(
                     entry,
                     entry_results,
-                    operation_name=f"{operation_name}[control]",
+                    operation_name=f"{operation_name}[{control_role}]",
                 )
             )
-        for entry in consumed_sub_quantum:
+        for entry in target_entries:
             wrapped.append(
                 self._wrap_entry_output(
                     entry,
@@ -1372,11 +1418,14 @@ class ControlledGate:
         original = entry.original
         if isinstance(original, Qubit):
             (result_value,) = entry_results
-            return Qubit(
+            output = Qubit(
                 value=result_value,
                 parent=original.parent,
                 indices=original.indices,
             )
+            assert entry.consumed is not None
+            entry.consumed._handoff_direct_borrow_to(output)
+            return output
 
         assert isinstance(original, ArrayBase)
         # Discriminate the shapes.  A control entry with a recorded
@@ -1425,11 +1474,12 @@ class ControlledGate:
         sub_kwargs: dict[str, Any],
         power: int | Value,
         global_phase: Value | None,
+        tracer: Any,
     ) -> tuple[Any, ...]:
         """Concrete-``num_controls`` path for :meth:`ControlledGate.__call__`.
 
-        Chains the helpers (split → bind → validate → consume →
-        operands/results → emit → wrap) so the body of ``__call__``
+        Chains the helpers (split → bind → validate → build → commit →
+        emit → wrap) so the body of ``__call__``
         stays a thin dispatcher.  The symbolic counterpart lives in
         :meth:`_call_symbolic`.
 
@@ -1442,6 +1492,7 @@ class ControlledGate:
                 :meth:`_normalize_power`).
             global_phase (Value | None): Normalized target-global phase for
                 this controlled call.
+            tracer (Any): Active tracer obtained before ownership validation.
 
         Returns:
             tuple[Any, ...]: One output handle per input handle, in the
@@ -1450,10 +1501,8 @@ class ControlledGate:
         Raises:
             ValueError: From :meth:`_split_controls_by_count` when the
                 control boundary can't be honoured by the args.
-            QubitConsumedError / QubitBorrowConflictError: From the
-                ``Handle.consume()`` / array borrow-tracker layer when
-                an argument duplicates a slot that another argument
-                also touches.
+            QubitConsumedError / QubitBorrowConflictError: If an argument is
+                consumed or overlaps another physical input region.
             TypeError: From :meth:`_bind_to_sub_signature` or
                 :meth:`_params_to_operands` on unknown/typoed kwargs
                 or unsupported classical parameter types.
@@ -1465,7 +1514,7 @@ class ControlledGate:
         if global_phase is not None:
             prep.operands.append(global_phase)
         target_widths = [
-            self._try_entry_qubit_count(entry) for entry in prep.consumed_sub_quantum
+            self._try_entry_qubit_count(entry) for entry in prep.target_entries
         ]
         num_target_qubits = (
             sum(width for width in target_widths if width is not None)
@@ -1473,7 +1522,7 @@ class ControlledGate:
             else None
         )
 
-        self._build_and_emit_op(
+        operation = self._build_op(
             prep.operands,
             prep.results,
             num_controls,
@@ -1482,10 +1531,19 @@ class ControlledGate:
             block=block,
             has_call_global_phase=global_phase is not None,
         )
+        self._commit_control_entries(
+            prep.control_entries,
+            "ControlledU[control]",
+        )
+        self._commit_control_entries(
+            prep.target_entries,
+            "ControlledU[target]",
+        )
+        tracer.add_operation(operation)
 
         return self._wrap_results_by_input_kind(
-            prep.consumed_controls,
-            prep.consumed_sub_quantum,
+            prep.control_entries,
+            prep.target_entries,
             prep.results,
         )
 
@@ -1516,7 +1574,7 @@ class ControlledGate:
         """Prepare a concrete controlled call without emitting an operation.
 
         SELECT uses the same control-prefix split, signature binding, handle
-        validation, consumption, and result construction as a controlled
+        validation, ownership preview, and result construction as a controlled
         unitary. Keeping that choreography here prevents the two frontends
         from drifting while allowing each to emit its own abstract IR node.
 
@@ -1532,8 +1590,8 @@ class ControlledGate:
                 qubits (``"control"`` here, ``"index"`` for SELECT).
 
         Returns:
-            _ConcreteCallPrep: Prepared operands, results, consumed handles,
-                and bound unitary arguments.
+            _ConcreteCallPrep: Prepared operands, results, uncommitted handle
+                entries, and bound unitary arguments.
 
         Raises:
             ValueError: If the control boundary is invalid or no quantum
@@ -1545,7 +1603,11 @@ class ControlledGate:
         controls, sub_positional = self._split_controls_by_count(
             args, num_controls, operation_label, control_role
         )
-        sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        sub_args_resolved = self._bind_to_sub_signature(
+            sub_positional,
+            sub_kwargs,
+            caller=("control()" if operation_label == "ControlledU" else "select()"),
+        )
         _validate_bound_handles(
             self._qkernel.input_types,
             sub_args_resolved,
@@ -1558,7 +1620,7 @@ class ControlledGate:
                 raise ValueError(
                     f"ControlledU requires at least one quantum sub-kernel "
                     f"argument (target).  Got {num_controls} control(s) and "
-                    f"no sub-kernel quantum arg (see design decision #9)."
+                    f"no sub-kernel quantum argument."
                 )
             raise ValueError(
                 f"{operation_label} requires at least one quantum target "
@@ -1576,25 +1638,41 @@ class ControlledGate:
             if id(value) not in quantum_ids
         }
 
-        # Alias / overlap checking is delegated entirely to the
-        # ``Handle.consume()`` / array borrow-tracker layer below:
-        # scalar duplicates raise ``QubitConsumedError`` on the
-        # second consume, and view-touching overlaps raise
-        # ``QubitBorrowConflictError`` at element / slice access time.
-        consumed_controls = self._consume_with_borrow_transfer(
-            controls, f"{operation_label}[{control_role}]"
+        overlap_arguments = {
+            **{
+                f"{control_role}[{index}]": handle
+                for index, handle in enumerate(controls)
+            },
+            **{
+                f"target[{name}]": handle
+                for name, handle in sub_args_resolved.items()
+                if id(handle) in quantum_ids
+            },
+        }
+        reject_aliased_quantum_args(
+            self._qkernel.name,
+            overlap_arguments,
+            caller=("control()" if operation_label == "ControlledU" else "select()"),
         )
-        consumed_sub_quantum = self._consume_with_borrow_transfer(
-            sub_quantum_args, f"{operation_label}[target]"
+
+        control_entries = self._prepare_control_entries(
+            controls,
+            f"{operation_label}[{control_role}]",
+        )
+        target_entries = self._prepare_control_entries(
+            sub_quantum_args,
+            f"{operation_label}[target]",
         )
 
         operands = self._build_operands(
-            consumed_controls, consumed_sub_quantum, sub_classical_dict
+            control_entries,
+            target_entries,
+            sub_classical_dict,
         )
-        results = self._build_results(consumed_controls, consumed_sub_quantum)
+        results = self._build_results(control_entries, target_entries)
         return _ConcreteCallPrep(
-            consumed_controls=consumed_controls,
-            consumed_sub_quantum=consumed_sub_quantum,
+            control_entries=control_entries,
+            target_entries=target_entries,
             operands=operands,
             results=results,
             sub_args_resolved=sub_args_resolved,
@@ -1673,6 +1751,7 @@ class ControlledGate:
                 ``Vector`` → ``Vector``).
 
         Raises:
+            RuntimeError: If no qkernel tracer is active.
             ValueError: ``control_indices`` is non-``None`` in
                 concrete mode, or the qubit-count split in concrete
                 mode falls inside an argument.
@@ -1682,13 +1761,13 @@ class ControlledGate:
                 sub-kernel kwarg does not match the wrapped kernel's
                 signature.
             QubitConsumedError / QubitBorrowConflictError: Duplicate
-                physical qubits across the control + sub-kernel args
-                (caught by the ``Handle.consume()`` / array
-                borrow-tracker layer), or a quantum arg that was
-                already consumed before the call.
+                physical qubits across the control and sub-kernel arguments,
+                or a quantum argument that was already consumed. Overlap is
+                validated before ownership commit.
         """
         normalized_power = self._normalize_power(power)
         normalized_global_phase = self._normalize_global_phase(global_phase)
+        tracer = get_current_tracer()
         num_controls = self._num_controls
 
         if isinstance(num_controls, UInt):
@@ -1698,6 +1777,7 @@ class ControlledGate:
                 normalized_global_phase,
                 params,
                 control_indices,
+                tracer,
             )
 
         if control_indices is not None:
@@ -1705,13 +1785,14 @@ class ControlledGate:
                 "control_indices is only valid in symbolic mode "
                 "(num_controls=UInt).  Got concrete num_controls; "
                 "concrete-mode controls are positional and have no "
-                "selection step (see design §1.1)."
+                "selection step."
             )
         return self._call_concrete(
             args,
             params,
             normalized_power,
             normalized_global_phase,
+            tracer,
         )
 
     def _normalize_control_indices(
@@ -1785,53 +1866,55 @@ class ControlledGate:
                 )
         return tuple(normalized)
 
-    def _call_symbolic(
+    def _prepare_symbolic(
         self,
         args: tuple[Any, ...],
-        power: int | Value,
-        global_phase: Value | None,
         sub_kwargs: dict[str, Any],
         control_indices: Sequence[int | UInt] | None,
-    ) -> tuple[Any, ...]:
-        """Symbolic-``num_controls`` path for :meth:`ControlledGate.__call__`.
+        *,
+        operation_label: str = "ControlledU",
+        control_role: str = "control",
+        allow_single_scalar_prefix: bool = False,
+    ) -> _SymbolicCallPrep:
+        """Prepare a symbolic-width quantum prefix without consuming inputs.
 
-        Mirrors :meth:`_call_concrete`'s structure but expects a
-        ``Vector[Qubit]`` / ``VectorView[Qubit]`` as ``args[0]`` —
-        the control *pool* — and routes ``control_indices`` into
-        the new ``SymbolicControlledU.control_indices`` field.
+        The wrapped qkernel signature identifies the trailing target and
+        classical arguments. Every preceding positional quantum argument is
+        retained as one grouped prefix operand, so scalar ``Qubit`` values and
+        array handles can be mixed without flattening symbolic-length arrays.
 
         Args:
-            args (tuple[Any, ...]): Positional arguments to ``cg(...)``.
-            power (int | Value): Normalised power (output of
-                :meth:`_normalize_power`).
-            global_phase (Value | None): Normalized target-global phase for
-                this controlled call.
-            sub_kwargs (dict[str, Any]): Caller kwargs after stripping
-                the reserved ``power``, ``global_phase``, and
-                ``control_indices`` keys.
-            control_indices (Sequence[int | UInt] | None): The
-                caller-supplied selection (or ``None`` to use the
-                entire pool).
+            args (tuple[Any, ...]): Positional prefix and qkernel arguments.
+            sub_kwargs (dict[str, Any]): Keyword arguments forwarded to the
+                wrapped qkernel.
+            control_indices (Sequence[int | UInt] | None): Optional indices
+                selecting controls from a single array pool. SELECT passes
+                ``None`` because every index-prefix qubit participates.
+            operation_label (str): Operation name used in diagnostics and
+                ownership tags. Defaults to ``"ControlledU"``.
+            control_role (str): Name of the leading quantum role. Defaults to
+                ``"control"``; SELECT uses ``"index"``.
+            allow_single_scalar_prefix (bool): Whether a lone scalar ``Qubit``
+                may form a symbolic prefix. Defaults to ``False`` for
+                ``qmc.control``; SELECT enables it because a symbolic width may
+                later resolve to one.
 
         Returns:
-            tuple[Any, ...]: One output handle per input handle, in
-                the concatenation order ``(c_qs_out, sub_kernel_quantum_out)``.
+            _SymbolicCallPrep: Grouped operands/results and ownership previews.
 
         Raises:
-            ValueError: ``args[0]`` is not a ``Vector`` / ``VectorView``,
-                or the sub-kernel has no quantum arguments.
-            TypeError / QubitConsumedError / QubitBorrowConflictError:
-                As documented on :meth:`__call__`.
+            ValueError: If the prefix is missing, contains a non-quantum
+                argument, violates pool-selection rules, or has no target.
+            TypeError: If qkernel arguments or control indices are invalid.
+            QubitConsumedError: If a prefix or target handle is consumed.
+            QubitBorrowConflictError: If quantum argument regions overlap.
         """
         from qamomile.circuit.frontend.handle.array import ArrayBase
 
-        num_controls = self._num_controls
-        assert isinstance(num_controls, UInt)
-
         if not args:
             raise ValueError(
-                "When num_controls is symbolic (UInt), at least one "
-                "positional control argument is required."
+                f"When {control_role} width is symbolic (UInt), at least one "
+                f"positional {control_role} argument is required."
             )
 
         # Split args into (control prefix, sub-kernel positional).
@@ -1846,19 +1929,31 @@ class ControlledGate:
         sub_positional_count = self._sub_positional_count_for_symbolic(args, sub_kwargs)
         if sub_positional_count > len(args):
             raise ValueError(
-                f"ControlledU: not enough positional args.  The wrapped "
+                f"{operation_label}: not enough positional args.  The wrapped "
                 f"sub-kernel expects {sub_positional_count} positional "
                 f"arg(s) after kwargs, got {len(args)} total."
             )
-        control_args = list(args[: len(args) - sub_positional_count])
+        prefix_args = list(args[: len(args) - sub_positional_count])
         sub_positional = list(args[len(args) - sub_positional_count :])
-        if not control_args:
+        if not prefix_args:
             raise ValueError(
-                "When num_controls is symbolic (UInt), at least one "
-                "positional control argument is required."
+                f"When {control_role} width is symbolic (UInt), at least one "
+                f"positional {control_role} argument is required."
             )
 
-        if len(control_args) == 1 and not isinstance(control_args[0], ArrayBase):
+        for position, prefix_arg in enumerate(prefix_args):
+            if not _is_quantum_handle(prefix_arg):
+                raise ValueError(
+                    f"{operation_label}: positional {control_role} argument "
+                    f"#{position} must be a Qubit, Vector[Qubit], or "
+                    f"VectorView[Qubit]; got {type(prefix_arg).__name__}."
+                )
+
+        if (
+            not allow_single_scalar_prefix
+            and len(prefix_args) == 1
+            and not isinstance(prefix_args[0], ArrayBase)
+        ):
             raise ValueError(
                 "When num_controls is symbolic (UInt), a single control "
                 "argument must be a Vector[Qubit] / VectorView pool, not a "
@@ -1869,8 +1964,8 @@ class ControlledGate:
                 "at least one more control argument (the multi-arg form)."
             )
 
-        is_legacy_pool_form = len(control_args) == 1 and isinstance(
-            control_args[0], ArrayBase
+        is_legacy_pool_form = len(prefix_args) == 1 and isinstance(
+            prefix_args[0], ArrayBase
         )
         if not is_legacy_pool_form and control_indices is not None:
             raise ValueError(
@@ -1886,19 +1981,29 @@ class ControlledGate:
             else None
         )
 
-        sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        caller = "control()" if operation_label == "ControlledU" else "select()"
+        sub_args_resolved = self._bind_to_sub_signature(
+            sub_positional,
+            sub_kwargs,
+            caller=caller,
+        )
         _validate_bound_handles(
             self._qkernel.input_types,
             sub_args_resolved,
-            context="control()",
+            context=caller,
             allow_broadcast=True,
         )
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
+            if operation_label == "ControlledU":
+                raise ValueError(
+                    "ControlledU requires at least one quantum sub-kernel "
+                    "argument (target); got the control prefix and no "
+                    "sub-kernel quantum argument."
+                )
             raise ValueError(
-                "ControlledU requires at least one quantum sub-kernel "
-                "argument (target); got the control prefix and no "
-                "sub-kernel quantum arg (see design decision #9)."
+                f"{operation_label} requires at least one quantum target "
+                f"argument after the {control_role} prefix."
             )
         quantum_ids = {id(h) for h in sub_quantum_args}
         sub_classical_dict = {
@@ -1907,14 +2012,30 @@ class ControlledGate:
             if id(value) not in quantum_ids
         }
 
-        # Alias / overlap checking is delegated to the
-        # ``Handle.consume()`` / array borrow-tracker layer below
-        # (same rationale as in ``_call_concrete``).
-        consumed_controls = self._consume_with_borrow_transfer(
-            control_args, "ControlledU[control]"
+        overlap_arguments = {
+            **{
+                f"{control_role}[{index}]": handle
+                for index, handle in enumerate(prefix_args)
+            },
+            **{
+                f"target[{name}]": handle
+                for name, handle in sub_args_resolved.items()
+                if id(handle) in quantum_ids
+            },
+        }
+        reject_aliased_quantum_args(
+            self._qkernel.name,
+            overlap_arguments,
+            caller=caller,
         )
-        consumed_sub_quantum = self._consume_with_borrow_transfer(
-            sub_quantum_args, "ControlledU[target]"
+
+        prefix_entries = self._prepare_control_entries(
+            prefix_args,
+            f"{operation_label}[{control_role}]",
+        )
+        target_entries = self._prepare_control_entries(
+            sub_quantum_args,
+            f"{operation_label}[target]",
         )
 
         # Build per-control-arg operand + result.  For the legacy
@@ -1926,56 +2047,135 @@ class ControlledGate:
         # ``operands[:num_control_args]`` to recover the per-physical
         # qubit control set.
         operands: list[Any] = []
-        control_results: list[Value] = []
-        for entry in consumed_controls:
+        prefix_results: list[Value] = []
+        for entry in prefix_entries:
             op_value = self._sub_quantum_operand_value(entry)
             operands.append(op_value)
-            control_results.append(op_value.next_version())
+            prefix_results.append(op_value.next_version())
 
         sub_quantum_results: list[Value] = []
-        for entry in consumed_sub_quantum:
+        for entry in target_entries:
             op_value = self._sub_quantum_operand_value(entry)
             operands.append(op_value)
             sub_quantum_results.append(op_value.next_version())
         self._params_to_operands(sub_classical_dict, operands)
-        block = self._block_for_sub_call(sub_args_resolved)
-        block = self._with_global_phase(block, global_phase)
-        if global_phase is not None:
-            operands.append(global_phase)
-
-        results: list[Value] = control_results + sub_quantum_results
-
-        op = SymbolicControlledU(
+        return _SymbolicCallPrep(
+            prefix_entries=prefix_entries,
+            target_entries=target_entries,
             operands=operands,
-            results=results,
-            num_controls=num_controls.value,
+            prefix_results=prefix_results,
+            target_results=sub_quantum_results,
+            sub_args_resolved=sub_args_resolved,
             control_indices=ci_values,
-            power=power,
-            block=block,
-            num_control_args=len(consumed_controls),
-            callable_ref=self._callable_ref(),
-            callable_attrs=self._callable_attrs(),
         )
-        get_current_tracer().add_operation(op)
 
+    def _wrap_symbolic_results_by_input_kind(
+        self,
+        prep: _SymbolicCallPrep,
+        *,
+        operation_label: str = "ControlledU",
+        control_role: str = "control",
+    ) -> tuple[Any, ...]:
+        """Wrap grouped symbolic-prefix results as caller-facing handles.
+
+        Args:
+            prep (_SymbolicCallPrep): Prepared entries and one grouped result
+                per prefix and target argument.
+            operation_label (str): Operation name used for ownership-transfer
+                tags. Defaults to ``"ControlledU"``.
+            control_role (str): Name of the leading quantum role. Defaults to
+                ``"control"``; SELECT uses ``"index"``.
+
+        Returns:
+            tuple[Any, ...]: Prefix outputs followed by target outputs, each
+            preserving the corresponding input handle kind.
+        """
         wrapped: list[Any] = []
-        for entry, result_value in zip(consumed_controls, control_results):
+        for entry, result_value in zip(
+            prep.prefix_entries,
+            prep.prefix_results,
+            strict=True,
+        ):
             wrapped.append(
                 self._wrap_entry_output(
                     entry,
                     [result_value],
-                    operation_name="ControlledU[control]",
+                    operation_name=f"{operation_label}[{control_role}]",
                 )
             )
-        for entry, result_value in zip(consumed_sub_quantum, sub_quantum_results):
+        for entry, result_value in zip(
+            prep.target_entries,
+            prep.target_results,
+            strict=True,
+        ):
             wrapped.append(
                 self._wrap_entry_output(
                     entry,
                     [result_value],
-                    operation_name="ControlledU[target]",
+                    operation_name=f"{operation_label}[target]",
                 )
             )
         return tuple(wrapped)
+
+    def _call_symbolic(
+        self,
+        args: tuple[Any, ...],
+        power: int | Value,
+        global_phase: Value | None,
+        sub_kwargs: dict[str, Any],
+        control_indices: Sequence[int | UInt] | None,
+        tracer: Any,
+    ) -> tuple[Any, ...]:
+        """Apply a controlled gate with a symbolic-width control prefix.
+
+        Args:
+            args (tuple[Any, ...]): Positional control and qkernel arguments.
+            power (int | Value): Normalized positive application count.
+            global_phase (Value | None): Normalized target-global phase.
+            sub_kwargs (dict[str, Any]): Keyword arguments for the qkernel.
+            control_indices (Sequence[int | UInt] | None): Optional selected
+                positions from a single control pool.
+            tracer (Any): Active frontend tracer.
+
+        Returns:
+            tuple[Any, ...]: Control outputs followed by target outputs.
+
+        Raises:
+            ValueError: If symbolic-prefix preparation fails.
+            TypeError: If a qkernel argument or control index is invalid.
+            QubitConsumedError: If a quantum input is already consumed.
+            QubitBorrowConflictError: If quantum argument regions overlap.
+        """
+        num_controls = self._num_controls
+        assert isinstance(num_controls, UInt)
+
+        prep = self._prepare_symbolic(args, sub_kwargs, control_indices)
+        block = self._block_for_sub_call(prep.sub_args_resolved)
+        block = self._with_global_phase(block, global_phase)
+        if global_phase is not None:
+            prep.operands.append(global_phase)
+
+        op = SymbolicControlledU(
+            operands=prep.operands,
+            results=prep.results,
+            num_controls=num_controls.value,
+            control_indices=prep.control_indices,
+            power=power,
+            block=block,
+            num_control_args=len(prep.prefix_entries),
+            callable_ref=self._callable_ref(),
+            callable_attrs=self._callable_attrs(),
+        )
+        self._commit_control_entries(
+            prep.prefix_entries,
+            "ControlledU[control]",
+        )
+        self._commit_control_entries(
+            prep.target_entries,
+            "ControlledU[target]",
+        )
+        tracer.add_operation(op)
+        return self._wrap_symbolic_results_by_input_kind(prep)
 
     def _sub_positional_count_for_symbolic(
         self, args: tuple[Any, ...], sub_kwargs: dict[str, Any]

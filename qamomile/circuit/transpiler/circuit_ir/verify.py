@@ -101,7 +101,14 @@ def _verify_expression(
 
 
 def _is_zero_literal(expression: ScalarExpr) -> bool:
-    """Return whether an expression is the canonical literal zero."""
+    """Return whether an expression is the canonical literal zero.
+
+    Args:
+        expression (ScalarExpr): Expression to inspect.
+
+    Returns:
+        bool: Whether the expression is a zero-valued literal.
+    """
     return isinstance(expression, LiteralExpr) and not float(expression.value)
 
 

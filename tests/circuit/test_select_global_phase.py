@@ -206,6 +206,32 @@ def test_identity_case_phase_becomes_relative_phase(sdk_transpiler: Any) -> None
     assert _only_outcome(sdk_transpiler, circuit) == 1
 
 
+def test_symbolic_wide_index_preserves_identity_case_phase(
+    sdk_transpiler: Any,
+) -> None:
+    """A bound over-wide register keeps a phase-only case coherent."""
+
+    @qmc.qkernel
+    def circuit(width: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+        index = qmc.qubit_array(3, "index")
+        index[0] = qmc.h(index[0])
+        target = qmc.qubit("target")
+        index, target = qmc.select(
+            [_identity, _phase_pi_identity],
+            num_index_qubits=width,
+        )(index, target)
+        index[0] = qmc.h(index[0])
+        return qmc.measure(index)
+
+    executable = sdk_transpiler.transpiler.transpile(
+        circuit,
+        bindings={"width": 3},
+    )
+    result = executable.sample(_executor(sdk_transpiler), shots=128).result()
+    counts = {bits: count for bits, count in result.results}
+    assert set(counts) == {(1, 0, 0)}, f"{sdk_transpiler.backend_name}: got {counts}"
+
+
 def test_eight_case_phase_select_uses_lsb_zero(sdk_transpiler: Any) -> None:
     """Three-index SELECT preserves phases and treats index qubit zero as LSB."""
 

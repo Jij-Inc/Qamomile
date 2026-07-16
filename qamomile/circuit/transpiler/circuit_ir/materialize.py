@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from collections.abc import Mapping
 from typing import Any, Generic, Protocol, TypeVar
 
@@ -78,14 +79,11 @@ class CircuitMaterializer(Protocol[ArtifactT]):
     def materialize(
         self,
         program: CircuitProgram,
-        parameter_names: tuple[str, ...] = (),
     ) -> MaterializedCircuit[ArtifactT]:
         """Materialize one circuit program.
 
         Args:
             program (CircuitProgram): Target-legal circuit-family program.
-            parameter_names (tuple[str, ...]): Public runtime-parameter ABI in
-                its required positional order. Defaults to an empty tuple.
 
         Returns:
             MaterializedCircuit: Artifact plus backend binding metadata.
@@ -211,9 +209,10 @@ def materialize_executable(
         metadata_names = tuple(
             parameter.name for parameter in segment.parameter_metadata.parameters
         )
-        materialized = materializer.materialize(
+        materialized = _materialize_segment(
+            materializer,
             segment.circuit,
-            parameter_names=metadata_names,
+            metadata_names,
         )
         materialized_names = tuple(materialized.parameters)
         if set(materialized_names) != set(metadata_names):
@@ -269,3 +268,33 @@ def materialize_executable(
         compiled_expval=executable.compiled_expval,
         output_values=list(executable.output_values),
     )
+
+
+def _materialize_segment(
+    materializer: CircuitMaterializer[ArtifactT],
+    program: CircuitProgram,
+    parameter_names: tuple[str, ...],
+) -> MaterializedCircuit[ArtifactT]:
+    """Call a current or legacy circuit-materializer signature.
+
+    Args:
+        materializer (CircuitMaterializer[ArtifactT]): Target materializer.
+        program (CircuitProgram): Verified target-legal program.
+        parameter_names (tuple[str, ...]): Runtime parameter ABI order.
+
+    Returns:
+        MaterializedCircuit[ArtifactT]: Materialized artifact and metadata.
+    """
+    method = materializer.materialize
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    supports_parameter_names = any(
+        parameter.name == "parameter_names"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if supports_parameter_names:
+        return method(program, parameter_names=parameter_names)  # type: ignore[call-arg]
+    return method(program)
