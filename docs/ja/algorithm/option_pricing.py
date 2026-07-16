@@ -645,7 +645,6 @@ axes[1].legend()
 plt.tight_layout()
 plt.show()
 
-
 # %% [markdown]
 # 今回の実装が、理論値に近い結果を得られていることがわかります。
 
@@ -655,131 +654,7 @@ plt.show()
 # ここでは、[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/) で提案されたオプションプライシングアルゴリズムを Qamomile で実装する方法をご紹介しました。
 # 以下にこのページで紹介した重要な情報をまとめます。
 #
-# * 対数正規分布を Möttönen の符号化手法により量子状態に符号化し、一様な制御回転を用いてコールオプションのペイオフをペイオフ量子ビット振幅に符号化しました。
+# * 対数正規分布を Möttönen の符号化手法により量子状態に符号化、一様な制御回転を用いてコールオプションのペイオフをペイオフ量子ビット振幅に符号化しました。状態の読み込みには、Qamomile の `amplitude_encoding` を用いることができます。
 # * Grover 演算子 $\mathcal{Q}$ を $k$ 回適用した回路を様々な $k$ で測定し、最尤推定から振幅角を推定することで、期待ペイオフを求めました。
-
-# %%
-def build_Ak_kernel(k: int):
-    n_anc = max(0, n_qubits - 2)
-
-    if n_anc == 0:
-        # n_qubits <= 2: アンシラ不要
-        @qmc.qkernel
-        def Ak() -> qmc.Bit:
-            q_S = qmc.qubit_array(n_qubits, "q_S")
-            q_p = qmc.qubit(name="q_p")
-
-            # ── A = P_X · F ──
-            q_S = load_distribution(q_S)
-            q_S, q_p = apply_payoff_ucr(q_S, q_p)
-
-            # ── Q を k 回適用 ──
-            for _ in range(k):
-
-                # S_χ: payoff qubit が |1⟩ のとき位相 -1
-                q_p = qmc.z(q_p)
-
-                # A† = F† · P_X†
-                q_S, q_p = apply_payoff_ucr_inv(q_S, q_p)
-                q_S = load_distribution_inv(q_S)
-
-                # S₀: |0…0⟩ のとき位相 -1
-                q_S = qmc.x(q_S)
-                q_p = qmc.x(q_p)
-                if n_qubits == 1:
-                    q_S[0], q_p = qmc.cz(q_S[0], q_p)
-                elif n_qubits == 2:
-                    q_p = qmc.h(q_p)
-                    q_S[0], q_S[1], q_p = qmc.ccx(q_S[0], q_S[1], q_p)
-                    q_p = qmc.h(q_p)
-                q_S = qmc.x(q_S)
-                q_p = qmc.x(q_p)
-
-                # A
-                q_S = load_distribution(q_S)
-                q_S, q_p = apply_payoff_ucr(q_S, q_p)
-
-            _ = qmc.measure(q_S)
-            return qmc.measure(q_p)
-
-    else:
-        # n_qubits >= 3: S₀ の MCZ に Toffoli ラダーとアンシラを使用
-        @qmc.qkernel
-        def Ak() -> qmc.Bit:
-            q_S = qmc.qubit_array(n_qubits, "q_S")
-            q_p = qmc.qubit(name="q_p")
-            anc = qmc.qubit_array(n_anc, "anc")
-
-            # ── A = P_X · F ──
-            q_S = load_distribution(q_S)
-            q_S, q_p = apply_payoff_ucr(q_S, q_p)
-
-            # ── Q を k 回適用 ──
-            for _ in range(k):
-
-                # S_χ
-                q_p = qmc.z(q_p)
-
-                # A† = F† · P_X†
-                q_S, q_p = apply_payoff_ucr_inv(q_S, q_p)
-                q_S = load_distribution_inv(q_S)
-
-                # S₀: Toffoli ラダー(n_qubits >= 3)
-                # アンシラに桁上がりを伝播(前半) → 最終段 → アンシラをゼロ戻し(後半)
-                q_S = qmc.x(q_S)
-                q_p = qmc.x(q_p)
-                q_p = qmc.h(q_p)
-                # 前半
-                q_S[0], q_S[1], anc[0] = qmc.ccx(q_S[0], q_S[1], anc[0])
-                for i in qmc.range(1, n_qubits - 2):
-                    anc[i-1], q_S[i+1], anc[i] = qmc.ccx(
-                        anc[i-1], q_S[i+1], anc[i])
-                # 最終段
-                anc[n_qubits-3], q_S[n_qubits-1], q_p = qmc.ccx(
-                    anc[n_qubits-3], q_S[n_qubits-1], q_p)
-                # 後半(uncompute): 逆順
-                for i in range(n_qubits - 3, 0, -1):
-                    anc[i-1], q_S[i+1], anc[i] = qmc.ccx(
-                        anc[i-1], q_S[i+1], anc[i])
-                q_S[0], q_S[1], anc[0] = qmc.ccx(q_S[0], q_S[1], anc[0])
-                q_p = qmc.h(q_p)
-                q_S = qmc.x(q_S)
-                q_p = qmc.x(q_p)
-
-                # A
-                q_S = load_distribution(q_S)
-                q_S, q_p = apply_payoff_ucr(q_S, q_p)
-
-            _ = qmc.measure(anc)
-            _ = qmc.measure(q_S)
-            return qmc.measure(q_p)
-
-    return Ak
-
-# ── どこでクラッシュするか特定する ──
-for k in [0, 1, 2]:
-    print(f"\n--- k={k} 開始 ---")
-    kernel = build_Ak_kernel(k)
-    print(f"  カーネル定義: OK")
-
-    try:
-        exe = transpiler_q.transpile(kernel)
-        print(f"  transpile: OK")
-        # 回路情報を表示
-        qc = exe.circuit if hasattr(exe, 'circuit') else None
-        if qc is not None:
-            print(f"  qubit数={qc.num_qubits}, "
-                  f"depth={qc.depth()}, "
-                  f"ゲート数={qc.size()}")
-    except Exception as e:
-        print(f"  transpile エラー: {type(e).__name__}: {e}")
-        break
-
-    try:
-        result = exe.sample(transpiler_q.executor(), shots=100).result()
-        print(f"  sample: OK")
-    except Exception as e:
-        print(f"  sample エラー: {type(e).__name__}: {e}")
-        break
 
 # %%
