@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 from typing import Any
 
 from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.canonical import _token
+from qamomile.circuit.ir.canonical import content_fingerprint
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CompOpKind,
@@ -123,7 +122,7 @@ def _circuit_program_fingerprint(program: CircuitProgram) -> str:
         str: Hexadecimal SHA-256 content digest.
     """
     normalized = _without_circuit_display_names(program)
-    return hashlib.sha256(_token(normalized).encode("utf-8")).hexdigest()
+    return content_fingerprint(normalized)
 
 
 def _without_circuit_display_names(program: CircuitProgram) -> CircuitProgram:

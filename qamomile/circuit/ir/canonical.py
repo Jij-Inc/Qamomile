@@ -239,6 +239,24 @@ def content_hash(block: Block) -> str:
     return hashlib.sha256(to_canonical_bytes(block)).hexdigest()
 
 
+def content_fingerprint(obj: Any) -> str:
+    """Compute a deterministic fingerprint for supported IR content.
+
+    The token format is internal and may change between Qamomile versions.
+    It supports the same structural values used by canonical IR metadata,
+    including dataclasses such as lowered circuit programs. Unknown object
+    types fall back to ``repr`` and therefore require a stable representation.
+
+    Args:
+        obj (Any): IR content composed of values supported by the canonical
+            token encoder.
+
+    Returns:
+        str: SHA-256 hexadecimal digest of the structural content token.
+    """
+    return hashlib.sha256(_token(obj).encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
@@ -643,7 +661,7 @@ class _Canonicalizer:
 
 
 # ---------------------------------------------------------------------------
-# Deterministic byte serialization (for content_hash only)
+# Deterministic serialization for content hashes and fingerprints
 # ---------------------------------------------------------------------------
 
 
