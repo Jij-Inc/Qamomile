@@ -992,6 +992,29 @@ class _WhileContext:
     inputs: dict[int, WireId]
 
 
+@dataclasses.dataclass(frozen=True)
+class _CircuitBuilderSnapshot:
+    """Capture append-only state for one circuit-builder transaction.
+
+    Args:
+        region (_RegionState): Region that was current at the checkpoint.
+        operation_count (int): Number of instructions already in the region.
+        wires (dict[int, WireId]): Wire state at the checkpoint.
+        global_phase (ScalarExpr): Region-local phase at the checkpoint.
+        next_wire (int): Next virtual-wire identifier at the checkpoint.
+        region_depth (int): Structured-region stack depth at the checkpoint.
+        control_depth (int): Structured-control stack depth at the checkpoint.
+    """
+
+    region: _RegionState
+    operation_count: int
+    wires: dict[int, WireId]
+    global_phase: ScalarExpr
+    next_wire: int
+    region_depth: int
+    control_depth: int
+
+
 class CircuitBuilder:
     """Build immutable circuit IR while assigning fresh wire versions.
 
@@ -1031,6 +1054,60 @@ class CircuitBuilder:
             list[CircuitInstruction]: Mutable list used only during lowering.
         """
         return self._regions[-1].operations
+
+    def snapshot_state(self) -> _CircuitBuilderSnapshot:
+        """Capture state that can be restored after declined emission.
+
+        Returns:
+            _CircuitBuilderSnapshot: Append-only builder checkpoint for the
+                current structured region.
+        """
+        region = self._regions[-1]
+        return _CircuitBuilderSnapshot(
+            region=region,
+            operation_count=len(region.operations),
+            wires=dict(region.wires),
+            global_phase=region.global_phase,
+            next_wire=self._next_wire,
+            region_depth=len(self._regions),
+            control_depth=len(self._controls),
+        )
+
+    def restore_state(self, snapshot: _CircuitBuilderSnapshot) -> None:
+        """Restore a checkpoint after an append-only emission attempt.
+
+        Args:
+            snapshot (_CircuitBuilderSnapshot): Checkpoint returned by
+                :meth:`snapshot_state` for this builder.
+
+        Raises:
+            RuntimeError: If emission removed or replaced state that existed
+                before the checkpoint instead of only appending new state.
+        """
+        if (
+            len(self._regions) < snapshot.region_depth
+            or len(self._controls) < snapshot.control_depth
+        ):
+            raise RuntimeError(
+                "Cannot restore circuit builder after pre-existing structured "
+                "state was removed"
+            )
+        del self._regions[snapshot.region_depth :]
+        del self._controls[snapshot.control_depth :]
+        region = self._regions[-1]
+        if (
+            region is not snapshot.region
+            or len(region.operations) < snapshot.operation_count
+        ):
+            raise RuntimeError(
+                "Cannot restore circuit builder after pre-existing region "
+                "state was replaced"
+            )
+        del region.operations[snapshot.operation_count :]
+        region.wires.clear()
+        region.wires.update(snapshot.wires)
+        region.global_phase = snapshot.global_phase
+        self._next_wire = snapshot.next_wire
 
     def current_wire(self, qubit: int) -> WireId:
         """Return the current wire version for a qubit slot.
