@@ -2728,6 +2728,100 @@ def _should_emit_single_target_block_per_vector_element(
     return len(quantum_inputs) == 1 and not isinstance(quantum_inputs[0], ArrayValue)
 
 
+def _split_broadcast_reusable_global_phase(
+    gate: Any,
+) -> tuple[Any | None, Any | None]:
+    """Split a CircuitProgram gate into lane and one-shot phase callees.
+
+    Args:
+        gate (Any): Controlled reusable gate prepared for scalar broadcast.
+
+    Returns:
+        tuple[Any | None, Any | None]: The phase-free gate repeated on each
+            target lane and a phase-only gate applied to one carrier. For
+            non-CircuitProgram emitters, ``gate`` is returned unchanged with
+            no phase-only gate.
+    """
+    from qamomile.circuit.transpiler.circuit_ir.model import (
+        ReusableCircuit,
+        _split_broadcast_global_phase,
+    )
+
+    if not isinstance(gate, ReusableCircuit):
+        return gate, None
+
+    phase_free, phase_only = _split_broadcast_global_phase(gate.body)
+    if phase_only is None:
+        return gate, None
+
+    lane_gate = (
+        dataclasses.replace(gate, body=phase_free) if phase_free.operations else None
+    )
+    phase_gate = dataclasses.replace(
+        gate,
+        body=phase_only,
+        name=phase_only.name,
+        identity=None,
+        native_realization=None,
+        operand_widths=(1,),
+    )
+    return lane_gate, phase_gate
+
+
+def _contains_global_phase_operation(
+    operations: Iterable[Operation],
+    _seen: set[int] | None = None,
+) -> bool:
+    """Return whether an operation tree explicitly contains a global phase.
+
+    Args:
+        operations (Iterable[Operation]): Operations to inspect recursively.
+        _seen (set[int] | None): Block identities already visited. Defaults
+            to ``None``.
+
+    Returns:
+        bool: Whether any reachable operation is a ``GlobalPhaseOperation``.
+    """
+    seen = _seen if _seen is not None else set()
+    for operation in operations:
+        if isinstance(operation, GlobalPhaseOperation):
+            return True
+        if isinstance(operation, HasNestedOps) and any(
+            _contains_global_phase_operation(nested, seen)
+            for nested in operation.nested_op_lists()
+        ):
+            return True
+        if isinstance(operation, SelectOperation):
+            for case_block in operation.case_blocks:
+                block_id = id(case_block)
+                if block_id not in seen:
+                    seen.add(block_id)
+                    if _contains_global_phase_operation(case_block.operations, seen):
+                        return True
+        for attribute in ("block", "source_block", "implementation_block"):
+            nested_block = getattr(operation, attribute, None)
+            if isinstance(nested_block, Block):
+                block_id = id(nested_block)
+                if block_id not in seen:
+                    seen.add(block_id)
+                    if _contains_global_phase_operation(nested_block.operations, seen):
+                        return True
+        definition = getattr(operation, "definition", None)
+        definition_blocks = [getattr(definition, "body", None)]
+        definition_blocks.extend(
+            getattr(implementation, "body", None)
+            for implementation in getattr(definition, "implementations", ())
+        )
+        for nested_block in definition_blocks:
+            if isinstance(nested_block, Block):
+                block_id = id(nested_block)
+                if block_id not in seen:
+                    seen.add(block_id)
+                    if _contains_global_phase_operation(nested_block.operations, seen):
+                        return True
+    return False
+
+
 def _emit_single_target_block_per_vector_element(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -2761,15 +2855,34 @@ def _emit_single_target_block_per_vector_element(
         if power > 1:
             unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power)
         controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, num_controls)
-        for target_idx in target_indices:
+        lane_gate, phase_gate = _split_broadcast_reusable_global_phase(controlled_gate)
+        if lane_gate is not None:
+            for target_idx in target_indices:
+                _checked_append_gate(
+                    emit_pass,
+                    circuit,
+                    lane_gate,
+                    control_indices + [target_idx],
+                    "controlled gate",
+                )
+        if phase_gate is not None:
             _checked_append_gate(
                 emit_pass,
                 circuit,
-                controlled_gate,
-                control_indices + [target_idx],
-                "controlled gate",
+                phase_gate,
+                control_indices + [target_indices[0]],
+                "controlled broadcast global phase",
             )
         return
+
+    if _contains_global_phase_operation(block_value.operations):
+        raise EmitError(
+            "A phase-bearing scalar controlled body could not be converted "
+            "to a reusable gate for Vector broadcast. Repeating its fallback "
+            "per target would multiply an observable controlled global phase, "
+            "so emission was rejected instead of silently changing semantics.",
+            operation="ControlledUOperation",
+        )
 
     for target_idx in target_indices:
         emit_pass._emit_controlled_fallback(

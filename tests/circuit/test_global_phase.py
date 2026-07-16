@@ -2046,6 +2046,84 @@ class TestGlobalPhaseControlledCompositions:
             f"{sdk_transpiler.backend_name} θ={theta}: <Z>={val} vs {np.cos(theta)}"
         )
 
+    @pytest.mark.parametrize(
+        ("power", "expected_y"),
+        [(1, 1.0), (3, -1.0)],
+    )
+    @pytest.mark.parametrize("target_width", [1, 2, 3])
+    def test_controlled_scalar_phase_broadcasts_once(
+        self,
+        sdk_transpiler,
+        target_width,
+        power,
+        expected_y,
+    ):
+        """A powered scalar phase is independent of broadcast width."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def phased_ident(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply a half-pi phase to an identity body."""
+            return qmc.global_phase(_ident, np.pi / 2.0)(q)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Expose one logical broadcast call's phase on its control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_ident)(
+                control,
+                targets,
+                power=power,
+            )
+            return qmc.expval(control, obs)
+
+        transpiler = sdk_transpiler.transpiler
+        value = (
+            transpiler.transpile(htest, bindings={"obs": qm_o.Y(0)})
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        assert value == pytest.approx(expected_y, abs=1e-6), (
+            f"{sdk_transpiler.backend_name} width={target_width} "
+            f"power={power}: <Y>={value}"
+        )
+
+    @pytest.mark.parametrize("target_width", [1, 2, 3])
+    def test_controlled_phased_x_broadcasts_body_and_phase(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """A phased-X broadcast applies every X but only one phase."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def phased_x(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply a half-pi phase to an X body."""
+            return qmc.global_phase(_x_body, np.pi / 2.0)(q)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Uncompute broadcast X gates and expose the remaining phase."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_x)(control, targets)
+            control, targets = qmc.control(_x_body)(control, targets)
+            return qmc.expval(control, obs)
+
+        value = (
+            sdk_transpiler.transpiler.transpile(
+                htest,
+                bindings={"obs": qm_o.Y(0)},
+            )
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        assert value == pytest.approx(1.0, abs=1e-6), (
+            f"{sdk_transpiler.backend_name} width={target_width}: <Y>={value}"
+        )
+
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_controlled_gate_bearing_body_is_applied(self, sdk_transpiler, seed):
         """A controlled gate-bearing global-phase body applies its gates.

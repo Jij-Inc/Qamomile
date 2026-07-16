@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from qamomile._utils import is_plain_int
@@ -48,6 +49,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     UnaryOperator,
     _contains_classical_bit,
     _is_zero_scalar,
+    _split_broadcast_global_phase,
 )
 from qamomile.circuit.transpiler.circuit_ir.verify import verify_circuit
 from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
@@ -234,6 +236,19 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 controls=index_width,
                 operand_widths=(1,) if broadcast else target_widths,
             )
+            phase_callee: ReusableCircuit | None = None
+            if broadcast:
+                phase_free, phase_only = _split_broadcast_global_phase(case_program)
+                case_callee = dataclasses.replace(case_callee, body=phase_free)
+                if phase_only is not None:
+                    phase_callee = dataclasses.replace(
+                        case_callee,
+                        body=phase_only,
+                        name=phase_only.name,
+                        identity=None,
+                        native_realization=None,
+                        operand_widths=(1,),
+                    )
             with bracket_control_value(
                 self,
                 fallback,
@@ -241,10 +256,16 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 case_index,
             ):
                 if broadcast:
-                    for target in local_targets:
+                    if case_callee.body.operations:
+                        for target in local_targets:
+                            fallback.append_call(
+                                case_callee,
+                                (*local_indices, target),
+                            )
+                    if phase_callee is not None:
                         fallback.append_call(
-                            case_callee,
-                            (*local_indices, target),
+                            phase_callee,
+                            (*local_indices, local_targets[0]),
                         )
                 else:
                     fallback.append_call(

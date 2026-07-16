@@ -19,6 +19,12 @@ def _identity(q: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _x(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply Pauli X to one target."""
+    return qmc.x(q)
+
+
+@qmc.qkernel
 def _phase_pi_identity(q: qmc.Qubit) -> qmc.Qubit:
     """Apply phase pi to an identity Pauli case."""
     return qmc.global_phase(_identity, math.pi)(q)
@@ -142,6 +148,34 @@ def _nested_phase_case(
     return qmc.select([_identity, _phase_pi_identity])(index, target)
 
 
+@qmc.qkernel
+def _broadcast_phase_only_select(
+    target_size: qmc.UInt,
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Broadcast a scalar phase-only SELECT case over a vector target."""
+    index = qmc.h(qmc.qubit("index"))
+    target = qmc.qubit_array(target_size, "target")
+    index, target = qmc.select([_identity, _phase_half_pi_identity])(
+        index,
+        target,
+    )
+    return qmc.expval(index, observable)
+
+
+@qmc.qkernel
+def _broadcast_phased_x_select(
+    target_size: qmc.UInt,
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Broadcast a phased X case and coherently uncompute its X operations."""
+    index = qmc.h(qmc.qubit("index"))
+    target = qmc.qubit_array(target_size, "target")
+    index, target = qmc.select([_identity, _phase_half_pi_x])(index, target)
+    index, target = qmc.select([_identity, _x])(index, target)
+    return qmc.expval(index, observable)
+
+
 def _executor(case: Any, *, runtime_control: bool = False) -> Any:
     """Return a simulator executor for one SDK backend case.
 
@@ -204,6 +238,36 @@ def test_identity_case_phase_becomes_relative_phase(sdk_transpiler: Any) -> None
         return qmc.measure(index)
 
     assert _only_outcome(sdk_transpiler, circuit) == 1
+
+
+@pytest.mark.parametrize("target_size", [1, 2, 3])
+def test_broadcast_phase_only_case_applies_phase_once(
+    sdk_transpiler: Any,
+    target_size: int,
+) -> None:
+    """A broadcast case's relative phase is independent of target length."""
+    executable = sdk_transpiler.transpiler.transpile(
+        _broadcast_phase_only_select,
+        bindings={"target_size": target_size, "observable": qm_o.Y(0)},
+    )
+    value = executable.run(_executor(sdk_transpiler)).result()
+
+    assert value == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("target_size", [1, 2, 3])
+def test_broadcast_phased_x_case_applies_phase_once(
+    sdk_transpiler: Any,
+    target_size: int,
+) -> None:
+    """A broadcast phased-X case preserves one phase and every X operation."""
+    executable = sdk_transpiler.transpiler.transpile(
+        _broadcast_phased_x_select,
+        bindings={"target_size": target_size, "observable": qm_o.Y(0)},
+    )
+    value = executable.run(_executor(sdk_transpiler)).result()
+
+    assert value == pytest.approx(1.0, abs=1e-6)
 
 
 def test_symbolic_wide_index_preserves_identity_case_phase(
