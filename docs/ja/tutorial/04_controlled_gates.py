@@ -17,10 +17,10 @@
 # tags: [tutorial]
 # ---
 #
-# # `qmc.control`と`qmc.select`によるcoherent制御
+# # `qmc.control`によるcoherent制御
 #
 # `qmc.control`を使うと、Qamomileの任意のゲート(`qmc.rx`のようなビルトイン関数や、ユーザが書いた`@qmc.qkernel`)の制御版を作れます。
-# このチュートリアルでは、まずそのAPIを詳しく説明し、最後に複数のunitary caseから1つをcoherentに選ぶ`qmc.select`を紹介します。
+# このチュートリアルでは、単一制御から値を指定する制御、symbolicな制御幅、再利用可能な量子カーネルまで、このAPIを段階的に説明します。
 #
 # `qmc.control`には2つのモードがあります。*concrete mode*は制御量子ビットの数をPythonの`int`で与え、*symbolic mode*は`qmc.UInt`の量子カーネルパラメータ(あるいはそれを含む式)で与えてtranspile時に解決します。`power=`、デフォルト引数、`Vector[Qubit]`を取る量子カーネル、古典kwargの並び替えなど大半の機能は両モードで同じ挙動です。モードによって違うのは制御引数の渡し方と一部の追加機能だけで、以降のセクションで分けて扱います。
 
@@ -114,7 +114,7 @@ assert on_counts == {1: 256}
 # | `num_controls=` | Pythonの`int`(デフォルト`1`) | `qmc.UInt`ハンドル、または`UInt`式 |
 # | 制御引数 | 合計量子ビット数が`num_controls`に一致する1つ以上のpositional引数(`Qubit`、`VectorView`、`Vector[Qubit]`) | 1つのpositionalな`Vector[Qubit]` / `VectorView`の*pool*(single-pool形、任意で`control_indices`)、**または**`Qubit` / `VectorView` / `Vector[Qubit]`を混ぜた複数のpositional引数 |
 # | `control_indices` | 受け付けない | 任意。poolのどの量子ビットがactiveかを指定 |
-# | `control_value` | 任意のPython `int`。LSB-firstでそのregister値のときにactive | 非対応。`num_controls`をbindしてconcrete modeを使う |
+# | `control_value` | 任意のPython `int`。LSB-firstでそのregister値のときにactive | デフォルトの`None`のみ。その他の値にはPythonの`int`で具体幅を指定して`qmc.control`を構築 |
 # | 制御数が解決される時点 | `qmc.control(...)`が評価された時(module load時かtracing時) | transpile時(`bindings`から) |
 #
 # `qmc.control`のほとんどの機能(`power=`、デフォルト値、古典kwargの並び替え、`Vector[Qubit]`を受け取る量子カーネル、multi-argの制御引数形など)は両モードで同じ挙動を示します。これらは[](#cg-3)でまとめます。[](#cg-4)はconcrete modeを必要とする機能を、[](#cg-5)はsymbolic mode固有の機能を扱います。
@@ -243,7 +243,7 @@ default_arg_demo_symbolic.draw(n=3, fold_loops=False)
 # (cg-3-4)=
 # ### 3.4 `power=`で`U^k`を制御
 #
-# `power=k`を渡すと、`U`そのものではなく*k乗*の`U^k`が制御されます。`power`はPythonの`int`(コンパイル時に解決)も`qmc.UInt`ハンドル(`bindings`からtranspile時に解決)も受け取り、`num_controls`がconcreteかsymbolicかに関係なく動作します。
+# `power=k`を渡すと、`U`そのものではなく*k乗*の`U^k`が制御されます。`power`はPythonの`int`(コンパイル時に解決)も`qmc.UInt`ハンドル(`bindings`からtranspile時に解決)も受け取り、`num_controls`がconcreteかsymbolicかに関係なく動作します。解決後の値は正のintegerである必要があり、0、負数、`bool`は拒否されます。symbolicな`power`は回路構造を変えるため、runtimeの`parameters`ではなく`bindings`で指定します。
 
 
 # %%
@@ -271,8 +271,8 @@ power_demo_concrete.draw()
 # 枝、`while`の本体など）の一部として保持します。ここで量子的な制御とは、制御
 # 量子ビットを`|0>`と`|1>`の重ね合わせのまま使う制御です。可逆な領域をこの方法で
 # 制御すると、位相はすべての制御量子ビットが`|1>`である成分だけに掛かる相対位相に
-# なります。identity Pauli項にも複素係数を持たせられるSELECT回路では、特に重要な
-# 性質です。
+# なります。これは、測定確率だけでなく量子カーネルの位相に情報を持たせる
+# アルゴリズムで重要な性質です。
 #
 # Qamomileでは、次の関連する2通りで位相を付加できます。
 #
@@ -290,6 +290,8 @@ power_demo_concrete.draw()
 # 反復され、inverseでは`U`の反転と一緒に位相の符号も反転します。
 # `global_phase`は呼び出し側の予約キーワードです。制御対象のcallableが同名の通常
 # パラメータを持つ場合は、そのパラメータを位置引数で渡してください。
+#
+# 仮引数がscalarの`Qubit`である本体に`Vector[Qubit]`または`VectorView[Qubit]`を渡すと、Qamomileは完全なscalar unitaryを各要素へbroadcastします。これは明示的なループと同じ意味です。`U = exp(1j * phi) * V`を`N`要素へ適用すると、結果は`U`の`N`重tensor積となり、位相は`exp(1j * N * phi)`です。`power=k`では、この位相もさらに`k`倍されます。レジスタ全体へ位相を1回だけ付ける場合は、`Vector[Qubit]`を仮引数に持つ量子カーネルを定義し、そのvector本体へ位相を付けて1回の論理呼び出しとして表現します。
 #
 # 測定結果など実行時に条件が決まる`if`の枝や`while`の本体で付加した位相は、
 # その枝または反復内にとどまります。回路全体へ移動したり破棄したりはしません。
@@ -503,9 +505,7 @@ assert control_value_zero_counts == {1: 256}
 # `control_value=None`はデフォルトのall-ones制御です。all-onesを明示する
 # `2**num_controls - 1`を与えても、同じデフォルト表現へcanonicalizeされます。
 # その他の値は`0 <= control_value < 2**num_controls`を満たす必要があります。
-# `control_value`は意図的にconcrete mode専用です。`num_controls`が`qmc.UInt`の
-# 場合は、まず幅をbindし、対応するconcreteな制御ゲートを構築してください。これに
-# より、演算を作る時点でactiveにするbit patternが一意に決まります。
+# デフォルト以外の`control_value`はconcrete mode専用です。all-ones以外の値でactiveにする場合は、`qmc.UInt`ではなくPythonの`int`で具体幅を指定して`qmc.control`を構築します。これにより、演算を作る時点でactiveにするbit patternが一意に決まります。
 
 # %% [markdown]
 # (cg-5)=
@@ -870,48 +870,6 @@ case_controlled_qft_over_uint_slice()
 
 # %% [markdown]
 # (cg-7)=
-# ## 7. `qmc.select`による量子multiplexer
+# ## 7. まとめ
 #
-# `qmc.select([U_0, U_1, ...], num_index_qubits=...)`は量子multiplexerを構築します。先頭側の量子引数群がindex prefixとなり、その後ろに各caseで共有するtarget引数を並べます。indexが`i`を表すとき、case `U_i`が適用されます。デフォルトの`num_index_qubits=None`では、Qamomileが最小の幅`ceil(log2(len(cases)))`を推論します。Pythonの`int`で明示する幅はこの最小値より大きくても構いません。対応するcaseがないすべてのindex値ではidentityとして動作します。`qmc.UInt`の値（または式）を与えると、幅はtranspile時までsymbolicに保たれ、その時点で幅とindex prefixの大きさが検査されます。
-#
-# index prefixとtargetには、それぞれscalarの`Qubit`、`Vector[Qubit]`、`VectorView[Qubit]`を混在させられます。Qamomileはindex引数を左から右へ、各arrayの要素を0番から昇順にflattenします。flatten後の最初の量子ビットがbit 0になるため、integerの規約はLSB-firstです。indexとtargetの境界は必ず引数と引数の間に置かれます。要求した幅を満たすためにSELECTがarrayの先頭要素だけをindexとして切り出すことはありません。したがって、index prefixに含める各引数を丸ごとflattenした個数は`num_index_qubits`と一致する必要があります。
-#
-# すべてのcaseは引数signatureが同じで、受け取った量子target wireを過不足なく返す必要があります。caseはunitaryであり、測定、射影、reset、内部ancillaの割り当て、追加の古典出力は利用できません。共有する古典parameterはkeywordで渡せます。case内のbound/default分岐はトランスパイル時に解決されます。
-
-
-# %%
-@qmc.qkernel
-def keep_target(q: qmc.Qubit) -> qmc.Qubit:
-    return q
-
-
-@qmc.qkernel
-def flip_target(q: qmc.Qubit) -> qmc.Qubit:
-    return qmc.x(q)
-
-
-@qmc.qkernel
-def select_demo() -> qmc.Bit:
-    index = qmc.qubit_array(1, name="index")
-    index[0] = qmc.x(index[0])  # case 1を選択します。
-    target = qmc.qubit(name="target")
-    index, target = qmc.select([keep_target, flip_target])(index, target)
-    return qmc.measure(target)
-
-
-select_counts = dict(
-    transpiler.transpile(select_demo)
-    .sample(transpiler.executor(), shots=256)
-    .result()
-    .results
-)
-assert select_counts == {1: 256}
-
-# %% [markdown]
-# CircuitProgramを使うEngine経路では、SELECTはCircuitProgram loweringまで単一の高レベルoperationとして保たれます。そこで単一のsemantic reusable callとなり、portable fallbackが対応するindex状態で各caseを制御します。別のlowering経路を使うEngineは、SELECTを明示的に実装するか、非対応として報告する必要があります。SELECTは`qmc.range`内にネストできるほか、選択したEngineがruntime制御フローをサポートする場合は、測定結果を使う`if` / `while`内でも利用できます。`qmc.control`や`qmc.inverse`の内側にも配置でき、case内のglobal phaseは観測可能なrelative phaseとして保持されます。
-
-# %% [markdown]
-# (cg-8)=
-# ## 8. まとめ
-#
-# `qmc.control(fn, num_controls=...)`を使うことでQamomileのビルトインゲートやユーザ定義の量子カーネルを制御化することができます。`qmc.control`には二つのモードがあり、そのモードは`num_controls`の型で決まります。Pythonの`int`であれば*concrete mode*、`qmc.UInt`(または`n - 1`のような`UInt`式)なら*symbolic mode*です。indexでunitary case群を選択する場合は、`qmc.select`を使うと、推論・明示・symbolicのいずれかで指定したindex幅、LSB-firstの規約、未割り当てbasis stateでのidentity動作を単一の量子multiplexer operationとして表現できます。
+# `qmc.control(fn, num_controls=...)`を使うと、Qamomileのビルトインゲートやユーザ定義の量子カーネルを制御化できます。`qmc.control`には2つのモードがあり、`num_controls`の型で決まります。Pythonの`int`なら*concrete mode*、`qmc.UInt`または`n - 1`のような`UInt`式なら*symbolic mode*です。concrete modeでは、LSB-firstでflattenした制御引数の値を`control_value`で指定でき、0-controlも表現できます。どちらのモードでも、`power`、global phase、scalarからVectorへのbroadcast、inverse、nested controlは完全なcontrolled unitaryを保持します。幅が一致しない場合、controlとtargetの量子ビットが重複する場合、可逆変換に対応しない本体を指定した場合は明示的にエラーになります。
