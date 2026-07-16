@@ -235,6 +235,55 @@ def _select_program(
 
 
 @qmc.qkernel
+def _select_rx_parameter_first(
+    angle: qmc.Float,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Apply an X rotation with a parameter-first case signature.
+
+    Args:
+        angle (qmc.Float): Rotation angle in radians.
+        target (qmc.Qubit): Qubit to rotate.
+
+    Returns:
+        qmc.Qubit: Rotated target qubit.
+    """
+    return qmc.rx(target, angle)
+
+
+@qmc.qkernel
+def _select_rz_parameter_first(
+    angle: qmc.Float,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Apply a Z rotation with a parameter-first case signature.
+
+    Args:
+        angle (qmc.Float): Rotation angle in radians.
+        target (qmc.Qubit): Qubit to rotate.
+
+    Returns:
+        qmc.Qubit: Rotated target qubit.
+    """
+    return qmc.rz(target, angle)
+
+
+@qmc.qkernel
+def _parameter_before_target_select_program() -> qmc.Bit:
+    """Select between parameter-first rotation cases.
+
+    Returns:
+        qmc.Bit: Measurement of the selected rotation target.
+    """
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_select_rx_parameter_first, _select_rz_parameter_first]
+    )(index, 0.5, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
 def _wide_select_program() -> qmc.Bit:
     """Preserve a concrete SELECT index width greater than 64."""
     index = qmc.qubit_array(70, "index")
@@ -691,6 +740,15 @@ def test_select_without_a_quantum_target_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="requires at least one quantum target"):
         validate_qkernel_ir(block)
+
+
+def test_select_parameter_before_target_round_trips_through_dict() -> None:
+    """SELECT case declaration order survives dict encoding and decoding."""
+    payload = kernel_to_dict(_parameter_before_target_select_program)
+
+    restored = kernel_from_dict(payload)
+
+    assert kernel_to_dict(restored) == payload
 
 
 def test_concrete_select_width_greater_than_64_round_trips() -> None:
