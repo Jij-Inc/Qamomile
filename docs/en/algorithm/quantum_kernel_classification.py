@@ -47,7 +47,7 @@
 # classifier such as an SVM.
 
 # %%
-# # !pip install qamomile scikit-learn
+# # !pip install "qamomile[qiskit,visualization]" scikit-learn
 
 # %% [markdown]
 # ## Hyperparameters

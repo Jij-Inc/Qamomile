@@ -231,7 +231,8 @@ def _measure_qfixed(qfixed: QFixed) -> Float:
     This operation measures all qubits and decodes the bitstring to a float.
 
     For QPE phase (int_bits=0):
-        float_value = 0.b0b1b2... = b0*0.5 + b1*0.25 + b2*0.125 + ...
+        Bits are ordered least-significant first. For ``n`` bits,
+        ``float_value = b0*2**(-n) + ... + b[n-1]*2**(-1)``.
 
     Args:
         qfixed (QFixed): Fixed-point quantum register to measure.

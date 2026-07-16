@@ -95,6 +95,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     UnaryOperator,
     WhileInstruction,
     WireId,
+    has_mid_circuit_measurement,
 )
 from qamomile.circuit.transpiler.circuit_ir.verify import verify_circuit
 
@@ -154,6 +155,7 @@ __all__ = [
     "WhileInstruction",
     "WireId",
     "legalize_program",
+    "has_mid_circuit_measurement",
     "verify_circuit",
     "verify_target_legal",
     "lower_circuit_plan",

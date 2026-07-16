@@ -11,8 +11,16 @@ from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet, Var
 
 def normalize_problem_input(
     instance: ommx.v1.Instance | BinaryModel,
-) -> tuple[ommx.v1.Instance | None, VarType, BinaryModel]:
-    """Normalize a problem input into ``(stored_instance, original_vartype, spin_model)``.
+    *,
+    uniform_penalty_weight: float | None = None,
+    penalty_weights: dict[int, float] | None = None,
+) -> tuple[
+    ommx.v1.Instance | None,
+    ommx.v1.Instance | None,
+    VarType,
+    BinaryModel,
+]:
+    """Normalize a problem into evaluation, transformed, and spin forms.
 
     Shared canonical entry point used by every converter that consumes a
     combinatorial optimization problem expressed either as an OMMX
@@ -27,13 +35,10 @@ def normalize_problem_input(
     called on (it appends slack decision variables for non-binary vars
     and absorbs constraints into the objective via the penalty method).
     Mutating the caller's instance silently is surprising; copying first
-    leaves the caller's view untouched. The deep copy retains
-    original-constraint metadata internally, so downstream
-    ``evaluate_samples`` reports feasibility against the user's
-    *original* constraints, and slack bits added by ``to_hubo`` are
-    reconstructed back into the original decision variables (e.g.,
-    integers rebuilt from log-encoded slack bits) by ``evaluate_samples``
-    automatically.
+    leaves the caller's view untouched. Separate original and transformed
+    copies let downstream decoding reconstruct substituted variables with the
+    transformed instance, then evaluate the untouched objective and
+    constraints with the original instance.
 
     ``to_hubo`` is used instead of ``to_qubo`` so that both purely
     quadratic (QUBO) and higher-order (HUBO) instances are handled
@@ -46,32 +51,90 @@ def normalize_problem_input(
             deep-copied and converted via ``to_hubo()``; ``BinaryModel``
             inputs retain their declared vartype as the target output
             vartype.
+        uniform_penalty_weight (float | None): Uniform weight passed to
+            :meth:`ommx.v1.Instance.to_hubo`. ``None`` delegates weight
+            selection to OMMX. Ignored for :class:`BinaryModel` inputs only
+            when left at its default.
+        penalty_weights (dict[int, float] | None): Per-constraint penalty
+            weights passed to :meth:`ommx.v1.Instance.to_hubo`. Keys are
+            constraint IDs. Defaults to no explicit overrides.
 
     Returns:
-        tuple[ommx.v1.Instance | None, VarType, BinaryModel]: A triple
-        ``(stored_instance, original_vartype, spin_model)``.
-
-        * ``stored_instance``: the deep-copied ``Instance`` for OMMX
-          inputs (post ``to_hubo``), or ``None`` for ``BinaryModel``
-          inputs.
-        * ``original_vartype``: the declared vartype of the input — used
-          by converters' ``decode`` paths to return results in the
-          caller's preferred representation.
-        * ``spin_model``: the problem rewritten in SPIN form, which is
-          the natural domain for sign rounding and Pauli encoding.
+        tuple[ommx.v1.Instance | None, ommx.v1.Instance | None, VarType,
+        BinaryModel]: A tuple ``(original_instance, transformed_instance,
+        original_vartype, spin_model)``. The two instances are ``None`` for a
+        :class:`BinaryModel` input. The original copy is reserved for
+        unpenalized result evaluation; the transformed copy owns the binary
+        substitutions and penalty metadata needed to reconstruct samples.
 
     Raises:
         TypeError: If ``instance`` is neither an :class:`ommx.v1.Instance`
             nor a :class:`BinaryModel`.
+        ValueError: If penalty options are supplied for a
+            :class:`BinaryModel`, which has no OMMX constraints to absorb.
     """
     if isinstance(instance, BinaryModel):
-        return None, instance.vartype, instance.change_vartype(VarType.SPIN)
+        if uniform_penalty_weight is not None or penalty_weights:
+            raise ValueError(
+                "Penalty weights can only be used with an ommx.v1.Instance"
+            )
+        return (
+            None,
+            None,
+            instance.vartype,
+            instance.change_vartype(VarType.SPIN),
+        )
     if isinstance(instance, ommx.v1.Instance):
-        stored = ommx.v1.Instance.from_bytes(instance.to_bytes())
-        hubo, constant = stored.to_hubo()
+        original = ommx.v1.Instance.from_bytes(instance.to_bytes())
+        transformed = ommx.v1.Instance.from_bytes(instance.to_bytes())
+        hubo, constant = transformed.to_hubo(
+            uniform_penalty_weight=uniform_penalty_weight,
+            penalty_weights=dict(penalty_weights or {}),
+        )
         spin_model = BinaryModel.from_hubo(hubo, constant).change_vartype(VarType.SPIN)
-        return stored, VarType.BINARY, spin_model
+        return original, transformed, VarType.BINARY, spin_model
     raise TypeError("instance must be ommx.v1.Instance or BinaryModel")
+
+
+def evaluate_original_instance(
+    original_instance: ommx.v1.Instance,
+    transformed_instance: ommx.v1.Instance,
+    samples: ommx.v1.Samples,
+) -> ommx.v1.SampleSet:
+    """Evaluate transformed binary samples against the original problem.
+
+    The transformed instance first reconstructs substituted integer and slack
+    variables. Only the caller's original decision-variable IDs are then
+    copied into a new sample container and evaluated against the untouched
+    original instance. This keeps feasibility and objective values free of
+    penalty terms while retaining OMMX's binary-substitution semantics.
+
+    Args:
+        original_instance (ommx.v1.Instance): Untouched problem copy used for
+            objective and constraint evaluation.
+        transformed_instance (ommx.v1.Instance): Post-``to_hubo`` problem copy
+            used to reconstruct original decision-variable values.
+        samples (ommx.v1.Samples): Binary samples in the transformed problem's
+            variable space.
+
+    Returns:
+        ommx.v1.SampleSet: Samples evaluated against the original objective
+        and constraints.
+    """
+    reconstructed = transformed_instance.evaluate_samples(samples)
+    original_samples = ommx.v1.Samples({})
+    original_ids = [variable.id for variable in original_instance.decision_variables]
+    for sample_id in reconstructed.sample_ids:
+        solution = reconstructed.get(sample_id)
+        values = solution.decision_variables_df["value"]
+        state = ommx.v1.State(
+            {
+                variable_id: float(values.loc[variable_id])
+                for variable_id in original_ids
+            }
+        )
+        original_samples.append([sample_id], state)
+    return original_instance.evaluate_samples(original_samples)
 
 
 def binary_sampleset_to_ommx_samples(
@@ -153,9 +216,28 @@ class MathematicalProblemConverter(abc.ABC):
     def __init__(
         self,
         instance: ommx.v1.Instance | BinaryModel,
+        *,
+        uniform_penalty_weight: float | None = None,
+        penalty_weights: dict[int, float] | None = None,
     ) -> None:
-        self.instance, self.original_vartype, self.spin_model = normalize_problem_input(
-            instance
+        """Initialize a converter from an OMMX instance or binary model.
+
+        Args:
+            instance (ommx.v1.Instance | BinaryModel): Optimization problem.
+            uniform_penalty_weight (float | None): Uniform constraint penalty
+                passed to OMMX. ``None`` delegates selection to OMMX.
+            penalty_weights (dict[int, float] | None): Optional per-constraint
+                penalty weights keyed by constraint ID.
+        """
+        (
+            self.original_instance,
+            self.instance,
+            self.original_vartype,
+            self.spin_model,
+        ) = normalize_problem_input(
+            instance,
+            uniform_penalty_weight=uniform_penalty_weight,
+            penalty_weights=penalty_weights,
         )
         self.__post_init__()
 
@@ -236,8 +318,13 @@ class MathematicalProblemConverter(abc.ABC):
         """
         binary_sampleset = self.decode_to_binary_sampleset(samples)
         if self.instance is not None:
+            assert self.original_instance is not None
             ommx_samples = binary_sampleset_to_ommx_samples(binary_sampleset)
-            return self.instance.evaluate_samples(ommx_samples)
+            return evaluate_original_instance(
+                self.original_instance,
+                self.instance,
+                ommx_samples,
+            )
         return binary_sampleset
 
     def decode_to_binary_sampleset(

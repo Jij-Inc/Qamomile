@@ -3,10 +3,36 @@
 from __future__ import annotations
 
 import math
+import typing
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.stdlib.arithmetic import _modmul_const_body
+
+
+def _validate_work_register_width(n: qmc.UInt, modulus: int) -> qmc.UInt:
+    """Validate a concrete Shor work-register width during tracing.
+
+    Args:
+        n (qmc.UInt): Concrete or symbolic work-register width.
+        modulus (int): Problem modulus whose bit length must fit.
+
+    Returns:
+        qmc.UInt: The original width handle.
+
+    Raises:
+        ValueError: If a concrete width is smaller than
+            ``modulus.bit_length()``.
+    """
+    if n.value.is_constant():
+        width = int(n.value.get_const())
+        required = modulus.bit_length()
+        if width < required:
+            raise ValueError(
+                f"Shor work-register width n={width} is too small for "
+                f"modulus={modulus}; require n >= {required}."
+            )
+    return n
 
 
 def shor_order_finding(
@@ -98,10 +124,9 @@ def shor_order_finding(
             qmc.Qubit, qmc.Qubit]: Updated counting/work handles and restored
                 workspace.
         """
+        multiplier = qmc.uint(base % modulus)
+        inverse_multiplier = qmc.uint(inverse_base % modulus)
         for control_index in qmc.range(counting.shape[0]):
-            exponent = 2**control_index
-            multiplier = (base**exponent) % modulus
-            inverse_multiplier = (inverse_base**exponent) % modulus
             (
                 control,
                 work,
@@ -129,6 +154,8 @@ def shor_order_finding(
                 modulus,
             )
             counting[control_index] = control
+            multiplier = (multiplier * multiplier) % modulus
+            inverse_multiplier = (inverse_multiplier * inverse_multiplier) % modulus
         return (
             counting,
             work,
@@ -227,16 +254,19 @@ def shor_order_finding(
         )
 
     @qmc.qkernel
-    def entrypoint(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    def entrypoint(
+        n: qmc.UInt = typing.cast(qmc.UInt, modulus.bit_length()),
+    ) -> qmc.Vector[qmc.Bit]:
         """Invoke the executable body-backed order-finding composite.
 
         Args:
-            n (qmc.UInt): Work-register width. Bind this to
-                ``modulus.bit_length()`` for execution.
+            n (qmc.UInt): Work-register width. Defaults to
+                ``modulus.bit_length()`` and must not be smaller.
 
         Returns:
             qmc.Vector[qmc.Bit]: Measured phase-estimation register.
         """
+        n = _validate_work_register_width(n, modulus)
         counting = qmc.qubit_array(2 * n, name="counting")
         work = qmc.qubit_array(n, name="work")
         accumulator = qmc.qubit_array(n, name="accumulator")

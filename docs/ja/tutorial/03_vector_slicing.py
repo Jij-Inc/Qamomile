@@ -23,7 +23,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします。
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import qamomile.circuit as qmc

@@ -21,6 +21,7 @@ import enum
 import itertools
 import linecache
 import math
+import re
 from collections.abc import Callable, Hashable
 from typing import Any
 
@@ -623,10 +624,11 @@ class CudaqKernelEmitter:
             else:
                 sig = "def _qamomile_kernel():"
 
+        helper_bodies, entry_lines = self._collapse_passthrough_helpers()
         parameter_signature = ", thetas: list[float]" if self._parametric else ""
         parameter_argument = ", thetas" if self._parametric else ""
         helper_sources = []
-        for name, num_qubits, helper_body in self._helper_bodies:
+        for name, num_qubits, helper_body in helper_bodies:
             qubit_signature = ", ".join(
                 f"q{index}: cudaq.qubit" for index in range(num_qubits)
             )
@@ -639,7 +641,7 @@ class CudaqKernelEmitter:
                 f"@cudaq.kernel\ndef {name}({signature}):\n{rendered_body}\n"
             )
 
-        body = "\n".join(self._lines).replace(
+        body = "\n".join(entry_lines).replace(
             self._parameter_argument_marker,
             parameter_argument,
         )
@@ -669,6 +671,86 @@ class CudaqKernelEmitter:
         circuit.execution_mode = mode
         circuit.param_count = self._param_count
         return circuit
+
+    def _collapse_passthrough_helpers(
+        self,
+    ) -> tuple[
+        list[tuple[str, int, tuple[str, ...]]],
+        list[str],
+    ]:
+        """Remove helper kernels that only forward their quantum arguments.
+
+        CUDA-Q's argument-synthesis pass can fail on deeply nested chains of
+        decorator kernels even when every wrapper merely forwards the same
+        qubits to another helper.  Qamomile produces such wrappers naturally
+        when nested qkernels and reusable operations are lowered.  Replacing
+        each transparent wrapper at its call sites preserves the circuit while
+        keeping the generated helper graph shallow enough for CUDA-Q.
+
+        Returns:
+            tuple[list[tuple[str, int, tuple[str, ...]]], list[str]]: Retained
+            helper definitions and rewritten entry-kernel source lines.
+        """
+        widths = {name: width for name, width, _ in self._helper_bodies}
+        aliases: dict[str, str] = {}
+        direct_call = re.compile(r"^\s+(_qamomile_[A-Za-z0-9_]+)\((.*)\)$")
+        for name, width, helper_body in self._helper_bodies:
+            if len(helper_body) != 1:
+                continue
+            match = direct_call.fullmatch(helper_body[0])
+            if match is None:
+                continue
+            callee, arguments = match.groups()
+            expected_arguments = (
+                ", ".join(f"q{index}" for index in range(width))
+                + self._parameter_argument_marker
+            )
+            if arguments == expected_arguments and widths.get(callee) == width:
+                aliases[name] = callee
+
+        def resolve(name: str) -> str:
+            """Resolve a transparent-helper alias to its retained callee.
+
+            Args:
+                name (str): Generated helper name.
+
+            Returns:
+                str: Final nontransparent helper name.
+            """
+            visited: set[str] = set()
+            while name in aliases and name not in visited:
+                visited.add(name)
+                name = aliases[name]
+            return name
+
+        resolved = {name: resolve(name) for name in aliases}
+        if not resolved:
+            return list(self._helper_bodies), list(self._lines)
+        names = "|".join(
+            re.escape(name) for name in sorted(resolved, key=len, reverse=True)
+        )
+        alias_pattern = re.compile(rf"(?<![A-Za-z0-9_])(?:{names})(?![A-Za-z0-9_])")
+
+        def rewrite(lines: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+            """Rewrite transparent-helper references in source lines.
+
+            Args:
+                lines (tuple[str, ...] | list[str]): Generated source lines.
+
+            Returns:
+                tuple[str, ...]: Lines with aliases replaced by their callees.
+            """
+            return tuple(
+                alias_pattern.sub(lambda match: resolved[match.group(0)], line)
+                for line in lines
+            )
+
+        helpers = [
+            (name, width, rewrite(body))
+            for name, width, body in self._helper_bodies
+            if name not in resolved
+        ]
+        return helpers, list(rewrite(self._lines))
 
     def create_parameter(self, name: str) -> CudaqExpr:
         """Return a ``CudaqExpr`` referencing ``thetas[i]``.
@@ -1027,8 +1109,8 @@ class CudaqKernelEmitter:
             self.emit_rx(circuit, target_idx, angle)
             return
         a = self._angle_expr(angle)
-        controls = ", ".join(f"q[{i}]" for i in control_indices)
-        self._emit(f"rx.ctrl({a}, {controls}, q[{target_idx}])")
+        controls = ", ".join(self._qref(index) for index in control_indices)
+        self._emit(f"rx.ctrl({a}, {controls}, {self._qref(target_idx)})")
 
     def emit_multi_controlled_ry(
         self,
@@ -1050,8 +1132,8 @@ class CudaqKernelEmitter:
             self.emit_ry(circuit, target_idx, angle)
             return
         a = self._angle_expr(angle)
-        controls = ", ".join(f"q[{i}]" for i in control_indices)
-        self._emit(f"ry.ctrl({a}, {controls}, q[{target_idx}])")
+        controls = ", ".join(self._qref(index) for index in control_indices)
+        self._emit(f"ry.ctrl({a}, {controls}, {self._qref(target_idx)})")
 
     def emit_multi_controlled_rz(
         self,
@@ -1073,8 +1155,8 @@ class CudaqKernelEmitter:
             self.emit_rz(circuit, target_idx, angle)
             return
         a = self._angle_expr(angle)
-        controls = ", ".join(f"q[{i}]" for i in control_indices)
-        self._emit(f"rz.ctrl({a}, {controls}, q[{target_idx}])")
+        controls = ", ".join(self._qref(index) for index in control_indices)
+        self._emit(f"rz.ctrl({a}, {controls}, {self._qref(target_idx)})")
 
     # ------------------------------------------------------------------
     # Measurement

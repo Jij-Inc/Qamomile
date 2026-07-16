@@ -125,6 +125,33 @@ def builtin_qpe(n: int, phase: float) -> qmc.Float:
 
 
 @qmc.qkernel
+def _mul_two_mod_three(work: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply multiplication by two modulo three using private workspace.
+
+    Args:
+        work (qmc.Vector[qmc.Qubit]): Two-qubit modular value register.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated modular value register.
+    """
+    return qmc.modmul_const(work, multiplier=2, modulus=3)
+
+
+@qmc.qkernel
+def qpe_with_private_workspace_unitary() -> qmc.Float:
+    """Estimate the order-two phase of a workspace-allocating unitary.
+
+    Returns:
+        qmc.Float: Two-bit phase estimate, either zero or one half.
+    """
+    counting = qmc.qubit_array(2, name="counting")
+    work = qmc.qubit_array(2, name="work")
+    work[0] = qmc.x(work[0])
+    phase = qmc.qpe(work, counting, _mul_two_mod_three)
+    return qmc.measure(phase)
+
+
+@qmc.qkernel
 def builtin_qpe_with_composite_unitary(n: int, phase: float) -> qmc.Float:
     """Run QPE with a qkernel-backed composite gate callable as U."""
     q_phase = qmc.qubit_array(n, name="phase_reg")
@@ -435,6 +462,15 @@ class TestQPEBuiltin:
             assert value == pytest.approx(0.125), (
                 f"Built-in QPE: expected 0.125, got {value} (count={count})"
             )
+
+    def test_qpe_controls_unitary_with_private_workspace(self, qiskit_transpiler):
+        """QPE reserves and controls a unitary's internal ancilla wires."""
+        executable = qiskit_transpiler.transpile(qpe_with_private_workspace_unitary)
+        result = executable.sample(qiskit_transpiler.executor(), shots=64).result()
+
+        phases = {value for value, _ in result.results}
+        assert phases <= {0.0, 0.5}
+        assert phases == {0.0, 0.5}
 
 
 class TestQPEFallbackVectorViewPhase:

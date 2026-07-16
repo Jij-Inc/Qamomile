@@ -28,6 +28,7 @@ from __future__ import annotations
 import pytest
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
 from qamomile.circuit.frontend.tracer import trace
 from qamomile.circuit.ir.types import ObservableType, QubitType
 from qamomile.circuit.ir.value import Value
@@ -64,6 +65,24 @@ def test_expval_missing_tracer_leaves_qubit_unconsumed() -> None:
         qmc.expval(qubit, observable)
 
     assert not qubit._consumed
+
+
+def test_expval_rejects_observable_index_outside_view() -> None:
+    """Observable indices are logical positions within the expval operand."""
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    @qmc.qkernel
+    def kernel(observable: qmc.Observable) -> qmc.Float:
+        """Evaluate an observable over a two-qubit view."""
+        q = qmc.qubit_array(4, name="q")
+        return qmc.expval(q[2:4], observable)
+
+    with pytest.raises(ValueError, match="outside the register passed to expval"):
+        QiskitTranspiler().transpile(
+            kernel,
+            bindings={"observable": qm_o.Z(2)},
+        )
 
 
 class TestExpvalIsDestructiveConsume:
