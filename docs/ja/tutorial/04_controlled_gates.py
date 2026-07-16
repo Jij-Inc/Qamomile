@@ -17,9 +17,10 @@
 # tags: [tutorial]
 # ---
 #
-# # `qmc.control`によるゲートと量子カーネルの制御
+# # `qmc.control`と`qmc.select`によるcoherent制御
 #
 # `qmc.control`を使うと、Qamomileの任意のゲート(`qmc.rx`のようなビルトイン関数や、ユーザが書いた`@qmc.qkernel`)の制御版を作れます。
+# このチュートリアルでは、まずそのAPIを詳しく説明し、最後に複数のunitary caseから1つをcoherentに選ぶ`qmc.select`を紹介します。
 #
 # `qmc.control`には2つのモードがあります。*concrete mode*は制御量子ビットの数をPythonの`int`で与え、*symbolic mode*は`qmc.UInt`の量子カーネルパラメータ(あるいはそれを含む式)で与えてtranspile時に解決します。`power=`、デフォルト引数、`Vector[Qubit]`を取る量子カーネル、古典kwargの並び替えなど大半の機能は両モードで同じ挙動です。モードによって違うのは制御引数の渡し方と一部の追加機能だけで、以降のセクションで分けて扱います。
 
@@ -349,14 +350,17 @@ assert phase_counts == {1: 256}
 #
 # SDK自身が単独のglobal phaseを表現できても、再利用可能な量子カーネル全体へ
 # `control`や`inverse`を適用できるとは限りません。Quration/PyQretには一般的な
-# 呼び出し変換APIがないため、Qamomileが対応範囲を限定して本体を展開します。
-# 現在はinverse、power、最大1個の量子制御、対応する基本ゲート、1制御のPauli
-# evolution、および定数範囲のstatic `For`（ネストを含む）を扱います。HUGRも、
-# 対応する本体操作を同様に展開します。global phase自体は任意個の制御量子ビットに
-# 対応し、3個以上の場合は、途中結果を保存する`|0>`の補助量子ビットとToffoliで
-# 全制御が1である条件を計算し、位相を付けた後に計算を逆順で戻して補助量子ビットを
-# 解放します。実行時に範囲が決まる`For`、前の反復で計算した値を次の反復へ渡す処理、
-# 実行時の`If` / `While`を含む変換対象の本体は、現在は明示的なエラーになります。
+# 呼び出し変換APIがありません。`power`だけを指定した再利用可能呼び出しはnative
+# callのまま保たれ、指定回数だけ反復されます。`control`または`inverse`を適用する
+# 場合は、Qamomileが対応範囲を限定して本体を展開します。`power`を併用すると、展開
+# した本体を指定回数だけ反復します。このfallbackは最大1個の量子制御、対応する基本
+# ゲート、1制御のPauli evolution、および定数範囲のstatic `For`（ネストを含む）を
+# 扱います。HUGRも、対応する本体操作を同様に展開します。global phase自体は任意個の
+# 制御量子ビットに対応し、3個以上の場合は、途中結果を保存する`|0>`の補助量子ビットと
+# Toffoliで全制御が1である条件を計算し、位相を付けた後に計算を逆順で戻して補助量子
+# ビットを解放します。実行時に範囲が決まる`For`、前の反復で計算した値を次の反復へ
+# 渡す処理、実行時の`If` / `While`を含む変換対象の本体は、現在は明示的なエラーに
+# なります。
 # またHUGRの`power`は変換時に正の整数へ確定する必要があります。
 # 対応範囲外の構造でも、位相だけを失って処理を続けることはありません。
 # :::
@@ -573,7 +577,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | --- | --- | --- |
 # | 6.1 制御量子ビット数が引数境界をまたぐ | concrete | `ValueError` |
 # | 6.2 concrete modeで`control_indices` | concrete | `ValueError` |
-# | 6.3 concrete modeでsymbolic長の`VectorView` | concrete | `NotImplementedError` |
+# | 6.3 concrete modeでsymbolic長の`VectorView` | concrete | `ValueError` |
 # | 6.4 同じpool量子ビットをtargetに再利用 | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg制御prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 symbolic modeで単一scalar制御 | symbolic | `ValueError` |
@@ -651,7 +655,7 @@ expect_error(
 # (cg-6-3)=
 # ### 6.3 concrete modeでsymbolic長の`VectorView` (concrete)
 #
-# concrete modeは各制御引数の量子ビット数をコンパイル時に決定する必要があります。長さが`UInt`に依存するスライスはconcrete modeでは未対応で、`NotImplementedError`になります。
+# concrete modeは各制御引数の量子ビット数をコンパイル時に決定する必要があります。長さが`UInt`に依存するスライスはconcrete modeでは未対応で、ownershipを移す前に`ValueError`になります。
 
 
 # %%
@@ -670,7 +674,7 @@ def case_symbolic_view_in_concrete() -> None:
 
 expect_error(
     "symbolic-length VectorView in concrete mode",
-    NotImplementedError,
+    ValueError,
     case_symbolic_view_in_concrete,
 )
 
@@ -832,7 +836,7 @@ select_counts = dict(
 assert select_counts == {1: 256}
 
 # %% [markdown]
-# SELECTはCircuitProgramとの境界まで単一の高レベルIR operationとして保たれます。その境界で単一のsemantic reusable callとなり、portable fallbackが対応するindex状態で各caseを制御します。`qmc.range`内にネストできるほか、選択したbackendがruntime制御フローをサポートする場合は、測定結果を使う`if` / `while`内でも利用できます。`qmc.control`や`qmc.inverse`の内側にも配置でき、case内のglobal phaseは観測可能なrelative phaseとして保持されます。
+# CircuitProgramを使うEngine経路では、SELECTはCircuitProgram loweringまで単一の高レベルoperationとして保たれます。そこで単一のsemantic reusable callとなり、portable fallbackが対応するindex状態で各caseを制御します。別のlowering経路を使うEngineは、SELECTを明示的に実装するか、非対応として報告する必要があります。SELECTは`qmc.range`内にネストできるほか、選択したEngineがruntime制御フローをサポートする場合は、測定結果を使う`if` / `while`内でも利用できます。`qmc.control`や`qmc.inverse`の内側にも配置でき、case内のglobal phaseは観測可能なrelative phaseとして保持されます。
 
 # %% [markdown]
 # (cg-8)=

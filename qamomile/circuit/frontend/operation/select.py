@@ -405,6 +405,10 @@ class SelectGate:
                     f"arguments, so their signatures must match."
                 )
         self._cases = wrapped
+        self._driver = ControlledGate(
+            wrapped[0],
+            num_controls=self._num_index_qubits,
+        )
 
     @property
     def num_index_qubits(self) -> int:
@@ -444,6 +448,7 @@ class SelectGate:
                 ``Vector`` -> ``Vector``, ``VectorView`` -> ``VectorView``).
 
         Raises:
+            RuntimeError: If no qkernel tracer is active.
             ValueError: If the leading qubits cannot supply exactly
                 ``num_index_qubits`` index qubits on an argument boundary,
                 no target argument is given, or a specialized case is not a
@@ -454,12 +459,14 @@ class SelectGate:
             QubitBorrowConflictError: If index and target array views overlap
                 or otherwise conflict in the borrow tracker.
         """
+        tracer = get_current_tracer()
+
         # Reuse ``qmc.control``'s concrete prepare choreography: the index
         # register plays the role of the control prefix and the targets /
         # params play the role of the sub-kernel arguments. The Select /
         # index labels flow into consume tags and boundary errors so misuse
         # diagnostics name the API the caller actually used.
-        driver = ControlledGate(self._cases[0], num_controls=self._num_index_qubits)
+        driver = self._driver
         prep = driver._prepare_concrete(
             args,
             params,
@@ -492,13 +499,22 @@ class SelectGate:
             num_index_qubits=self._num_index_qubits,
             case_blocks=case_blocks,
         )
-        get_current_tracer().add_operation(op)
+        driver._commit_control_entries(
+            prep.control_entries,
+            "Select[index]",
+        )
+        driver._commit_control_entries(
+            prep.target_entries,
+            "Select[target]",
+        )
+        tracer.add_operation(op)
 
         return driver._wrap_results_by_input_kind(
-            prep.consumed_controls,
-            prep.consumed_sub_quantum,
+            prep.control_entries,
+            prep.target_entries,
             prep.results,
             operation_name="Select",
+            control_role="index",
         )
 
 

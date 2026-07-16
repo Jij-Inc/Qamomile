@@ -18,7 +18,22 @@ from qamomile.circuit.frontend.handle import (
     UInt,
     Vector,
 )
+from qamomile.circuit.frontend.tracer import trace
+from qamomile.circuit.ir.types.primitives import QubitType
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+
+def _make_qubit(name: str) -> Qubit:
+    """Create a standalone qubit handle for frontend transaction tests.
+
+    Args:
+        name (str): Diagnostic value name.
+
+    Returns:
+        Qubit: Fresh unconsumed qubit handle.
+    """
+    return Qubit(value=Value(type=QubitType(), name=name))
 
 
 @qkernel
@@ -539,16 +554,42 @@ class TestSelectValidation:
         assert qmc.select([_identity] * case_count).num_index_qubits == width
 
     def test_aliased_index_and_target_are_rejected(self) -> None:
-        """The same physical qubit cannot be both index and target."""
+        """An aliased SELECT fails before committing index ownership."""
+        qubit = _make_qubit("qubit")
+
+        with trace():
+            with pytest.raises(QubitConsumedError, match="overlapping physical"):
+                qmc.select([_identity, _x])(qubit, qubit)
+
+        assert not qubit._consumed
+
+    def test_missing_tracer_does_not_consume_inputs(self) -> None:
+        """SELECT validates tracer availability before ownership transfer."""
+        index = _make_qubit("index")
+        target = _make_qubit("target")
+
+        with pytest.raises(RuntimeError, match="No active tracer"):
+            qmc.select([_identity, _x])(index, target)
+
+        assert not index._consumed
+        assert not target._consumed
+
+    def test_case_validation_failure_does_not_consume_inputs(self) -> None:
+        """SELECT validates every case before committing input ownership."""
 
         @qkernel
-        def circuit() -> Bit:
-            qubit = qmc.qubit("qubit")
-            qubit, qubit = qmc.select([_identity, _x])(qubit, qubit)
-            return qmc.measure(qubit)
+        def reset_case(q: Qubit) -> Qubit:
+            return qmc.reset(q)
 
-        with pytest.raises(QubitConsumedError, match="already consumed"):
-            _ = circuit.block
+        index = _make_qubit("index")
+        target = _make_qubit("target")
+
+        with trace():
+            with pytest.raises(ValueError, match="non-unitary ResetOperation"):
+                qmc.select([_identity, reset_case])(index, target)
+
+        assert not index._consumed
+        assert not target._consumed
 
     def test_output_permutation_requires_explicit_swap(self) -> None:
         """A case cannot conditionally relabel handles without a gate."""
@@ -640,7 +681,7 @@ class TestSelectValidation:
 
 
 class TestSelectSerialization:
-    """Preserve SELECT-owned case blocks across persistent IR boundaries."""
+    """Preserve SELECT-owned case blocks across qkernel persistence."""
 
     @staticmethod
     def _affine(kernel: Any) -> Any:
@@ -656,17 +697,11 @@ class TestSelectSerialization:
 
         return InlinePass().run(kernel.block)
 
-    @pytest.mark.parametrize("encode_decode", ["json", "msgpack"])
-    def test_round_trip_preserves_case_order(self, encode_decode: str) -> None:
-        """JSON and msgpack retain the case list and its LSB ordering."""
+    def test_round_trip_preserves_case_order(self) -> None:
+        """QKernel protobuf persistence retains the case list and LSB ordering."""
         from qamomile.circuit.ir.canonical import content_hash
         from qamomile.circuit.ir.operation.select import SelectOperation
-        from qamomile.circuit.ir.serialize import (
-            dump_json,
-            dump_msgpack,
-            load_json,
-            load_msgpack,
-        )
+        from qamomile.circuit.serialization import deserialize, serialize
 
         @qkernel
         def circuit() -> Bit:
@@ -679,10 +714,7 @@ class TestSelectSerialization:
             return qmc.measure(target)
 
         block = self._affine(circuit)
-        if encode_decode == "json":
-            restored = load_json(dump_json(block))
-        else:
-            restored = load_msgpack(dump_msgpack(block))
+        restored = self._affine(deserialize(serialize(circuit)))
         [select] = [
             operation
             for operation in restored.operations
@@ -692,9 +724,10 @@ class TestSelectSerialization:
         assert len(select.case_blocks) == 4
         assert content_hash(restored) == content_hash(block)
 
-    def test_case_blocks_use_independent_value_tables(self) -> None:
-        """Serialized case-local UUID tables stay disjoint and linear-sized."""
-        from qamomile.circuit.ir.serialize import to_dict
+    def test_round_trip_keeps_case_values_independent(self) -> None:
+        """QKernel persistence does not alias values between SELECT cases."""
+        from qamomile.circuit.ir.operation.select import SelectOperation
+        from qamomile.circuit.serialization import deserialize, serialize
 
         @qkernel
         def circuit() -> Bit:
@@ -703,42 +736,16 @@ class TestSelectSerialization:
             index, target = qmc.select([_identity, _x])(index, target)
             return qmc.measure(target)
 
-        payload = to_dict(self._affine(circuit))["block"]
-        select_payload = next(
+        restored = deserialize(serialize(circuit)).block
+        select = next(
             operation
-            for operation in payload["operations"]
-            if operation["$type"] == "SelectOperation"
+            for operation in restored.operations
+            if isinstance(operation, SelectOperation)
         )
-        tables = [payload["value_table"]] + [
-            case["value_table"] for case in select_payload["case_blocks"]
-        ]
-        uuid_sets = [{entry["uuid"] for entry in table} for table in tables]
-
-        for position, left in enumerate(uuid_sets):
-            for right in uuid_sets[position + 1 :]:
-                assert left.isdisjoint(right)
-
-    def test_decoder_rejects_non_integer_index_width(self) -> None:
-        """Wire decoding rejects a coercible string SELECT width."""
-        from qamomile.circuit.ir.serialize import from_dict, to_dict
-
-        @qkernel
-        def circuit() -> Bit:
-            index = qmc.qubit("index")
-            target = qmc.qubit("target")
-            index, target = qmc.select([_identity, _x])(index, target)
-            return qmc.measure(target)
-
-        payload = to_dict(self._affine(circuit))
-        select_payload = next(
-            operation
-            for operation in payload["block"]["operations"]
-            if operation["$type"] == "SelectOperation"
-        )
-        select_payload["num_index_qubits"] = "1"
-
-        with pytest.raises(ValueError, match="must be a Python int"):
-            from_dict(payload)
+        left_case, right_case = select.case_blocks
+        assert left_case is not right_case
+        assert left_case.input_values[0].uuid != right_case.input_values[0].uuid
+        assert left_case.output_values[0].uuid != right_case.output_values[0].uuid
 
     def test_content_hash_distinguishes_case_order(self) -> None:
         """Changing case order changes the semantic content hash."""

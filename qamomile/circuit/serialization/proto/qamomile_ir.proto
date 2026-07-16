@@ -1,0 +1,443 @@
+syntax = "proto3";
+
+package qamomile.circuit.serialization;
+
+// Canonical target-neutral serialization for one static Qamomile qkernel.
+// Value UUID and logical-ID fields are canonical graph-local identities, not
+// the random process-local spellings assigned during Python tracing.
+// Invocation bindings, prepared compiler state, resource estimates, and
+// process-local emitter objects are intentionally not part of this schema.
+message QKernel {
+  string qamomile_version = 1;
+  string name = 2;
+  repeated KernelParameter parameters = 3;
+  repeated KernelType results = 4;
+  Block body = 5;
+  repeated ValueNode value_table = 6;
+  repeated CallableEntry callable_table = 7;
+  CallableDefinition callable_definition = 8;
+  FrontendAnnotation return_annotation = 9;
+}
+
+message KernelParameter {
+  string name = 1;
+  KernelType type = 2;
+  ParameterKind kind = 3;
+  bool has_default = 4;
+  Payload default = 5;
+  bool differentiable = 6;
+}
+
+enum ParameterKind {
+  PARAMETER_KIND_UNSPECIFIED = 0;
+  POSITIONAL_ONLY = 1;
+  POSITIONAL_OR_KEYWORD = 2;
+  VAR_POSITIONAL = 3;
+  KEYWORD_ONLY = 4;
+  VAR_KEYWORD = 5;
+}
+
+message KernelType {
+  ValueType value_type = 1;
+  uint32 ndim = 2;
+  FrontendAnnotation annotation = 3;
+}
+
+enum FrontendAnnotationKind {
+  FRONTEND_ANNOTATION_KIND_UNSPECIFIED = 0;
+  QAMOMILE_UINT = 1;
+  PYTHON_INT = 2;
+  QAMOMILE_FLOAT = 3;
+  PYTHON_FLOAT = 4;
+  QAMOMILE_BIT = 5;
+  PYTHON_BOOL = 6;
+  QAMOMILE_QUBIT = 7;
+  QAMOMILE_QFIXED = 8;
+  QAMOMILE_OBSERVABLE = 9;
+  QAMOMILE_VECTOR = 10;
+  QAMOMILE_MATRIX = 11;
+  QAMOMILE_TENSOR = 12;
+  QAMOMILE_TUPLE = 13;
+  QAMOMILE_DICT = 14;
+  PYTHON_TUPLE = 15;
+}
+
+message FrontendAnnotation {
+  FrontendAnnotationKind kind = 1;
+  repeated FrontendAnnotation arguments = 2;
+}
+
+message Block {
+  string kind = 1;
+  string name = 2;
+  repeated Payload label_args = 3;
+  repeated string input_value_refs = 4;
+  repeated string output_value_refs = 5;
+  repeated string output_names = 6;
+  repeated NamedReference parameters = 7;
+  repeated Operation operations = 9;
+}
+
+message NamedReference {
+  string name = 1;
+  string value_ref = 2;
+}
+
+enum ValueKind {
+  VALUE_KIND_UNSPECIFIED = 0;
+  VALUE = 1;
+  ARRAY_VALUE = 2;
+  TUPLE_VALUE = 3;
+  DICT_VALUE = 4;
+}
+
+message ValueNode {
+  ValueKind value_kind = 1;
+  string uuid = 2;
+  string logical_id = 3;
+  string name = 4;
+  sint64 version = 5;
+  ValueType value_type = 6;
+  ValueMetadata metadata = 7;
+  optional string parent_array_ref = 8;
+  repeated string element_index_refs = 9;
+  repeated string shape_refs = 10;
+  optional string slice_of_ref = 11;
+  optional string slice_start_ref = 12;
+  optional string slice_step_ref = 13;
+  repeated string element_refs = 14;
+  repeated ReferencePair entry_refs = 15;
+}
+
+message ReferencePair {
+  string key_ref = 1;
+  string value_ref = 2;
+}
+
+message ValueMetadata {
+  optional ScalarMetadata scalar = 1;
+  optional CastMetadata cast = 2;
+  optional QFixedMetadata qfixed = 3;
+  optional ArrayRuntimeMetadata array_runtime = 4;
+  optional DictRuntimeMetadata dict_runtime = 5;
+}
+
+message ScalarMetadata {
+  Payload const_value = 1;
+  optional string parameter_name = 2;
+}
+
+message CastMetadata {
+  string source_uuid = 1;
+  repeated string qubit_uuids = 2;
+  optional string source_logical_id = 3;
+  repeated string qubit_logical_ids = 4;
+}
+
+message QFixedMetadata {
+  repeated string qubit_uuids = 1;
+  sint64 num_bits = 2;
+  sint64 int_bits = 3;
+}
+
+message ArrayRuntimeMetadata {
+  Payload const_array = 1;
+  repeated string element_uuids = 2;
+  repeated string element_logical_ids = 3;
+  repeated OptionalString element_parent_uuids = 4;
+  repeated OptionalInteger element_parent_indices = 5;
+}
+
+message DictRuntimeMetadata {
+  repeated PayloadEntry bound_data = 1;
+}
+
+message OptionalString {
+  optional string value = 1;
+}
+
+message OptionalInteger {
+  optional sint64 value = 1;
+}
+
+enum ValueTypeKind {
+  VALUE_TYPE_KIND_UNSPECIFIED = 0;
+  UINT_TYPE = 1;
+  FLOAT_TYPE = 2;
+  BIT_TYPE = 3;
+  QUBIT_TYPE = 4;
+  BLOCK_TYPE = 5;
+  OBSERVABLE_TYPE = 6;
+  TUPLE_TYPE = 7;
+  DICT_TYPE = 8;
+  QFIXED_TYPE = 9;
+  QUINT_TYPE = 10;
+}
+
+message ValueType {
+  ValueTypeKind kind = 1;
+  repeated ValueType element_types = 2;
+  optional ValueType key_type = 3;
+  optional ValueType value_type = 4;
+  optional RegisterWidth integer_bits = 5;
+  optional RegisterWidth fractional_bits = 6;
+  optional RegisterWidth width = 7;
+}
+
+message RegisterWidth {
+  oneof value {
+    sint64 concrete = 1;
+    string value_ref = 2;
+  }
+}
+
+enum OperationType {
+  OPERATION_TYPE_UNSPECIFIED = 0;
+  GATE_OPERATION = 1;
+  MEASURE_OPERATION = 2;
+  PROJECT_OPERATION = 3;
+  RESET_OPERATION = 4;
+  MEASURE_VECTOR_OPERATION = 5;
+  MEASURE_QFIXED_OPERATION = 6;
+  DECODE_QFIXED_OPERATION = 7;
+  STORE_ARRAY_ELEMENT_OPERATION = 8;
+  DICT_GET_ITEM_OPERATION = 9;
+  CAST_OPERATION = 10;
+  QINIT_OPERATION = 11;
+  CINIT_OPERATION = 12;
+  SLICE_ARRAY_OPERATION = 13;
+  RELEASE_SLICE_VIEW_OPERATION = 14;
+  RETURN_OPERATION = 15;
+  EXPVAL_OPERATION = 16;
+  PAULI_EVOLVE_OPERATION = 17;
+  BIN_OPERATION = 18;
+  COMP_OPERATION = 19;
+  COND_OPERATION = 20;
+  NOT_OPERATION = 21;
+  RUNTIME_CLASSICAL_OPERATION = 22;
+  FOR_OPERATION = 23;
+  FOR_ITEMS_OPERATION = 24;
+  WHILE_OPERATION = 25;
+  IF_OPERATION = 26;
+  CONCRETE_CONTROLLED_OPERATION = 27;
+  SYMBOLIC_CONTROLLED_OPERATION = 28;
+  INVOKE_OPERATION = 29;
+  INVERSE_BLOCK_OPERATION = 30;
+  GLOBAL_PHASE_OPERATION = 31;
+  SELECT_OPERATION = 32;
+}
+
+message Operation {
+  OperationType operation_type = 1;
+  repeated string operand_refs = 2;
+  repeated string result_refs = 3;
+
+  optional string gate_type = 10;
+  optional string axis = 11;
+  optional sint64 num_bits = 12;
+  optional sint64 int_bits = 13;
+  optional sint64 key_arity = 14;
+  optional ValueType source_type = 15;
+  optional ValueType target_type = 16;
+  repeated string qubit_mapping = 17;
+  optional string expression_kind = 18;
+
+  optional string loop_var = 30;
+  optional string loop_var_value_ref = 31;
+  repeated string key_vars = 32;
+  optional string value_var = 33;
+  optional bool key_is_vector = 34;
+  repeated string key_var_value_refs = 35;
+  optional bool has_key_var_value_refs = 36;
+  optional string value_var_value_ref = 37;
+  optional sint64 max_iterations = 38;
+  repeated LoopCarriedRebind loop_carried_rebinds = 39;
+  repeated RegionArg region_args = 40;
+  repeated Operation body = 41;
+  repeated Operation true_body = 42;
+  repeated Operation false_body = 43;
+  repeated string true_yield_refs = 44;
+  repeated string false_yield_refs = 45;
+  repeated BranchRebind branch_rebinds = 46;
+
+  optional sint64 num_controls = 60;
+  optional string num_controls_ref = 61;
+  optional IntegerOrReference power = 62;
+  repeated string control_index_refs = 63;
+  optional bool has_control_index_refs = 64;
+  optional sint64 num_control_args = 65;
+  optional Block unitary_block = 66;
+  optional CallableRef callable_ref = 67;
+  optional Payload callable_attrs = 68;
+  optional BigInteger control_value = 69;
+
+  optional CallableRef target = 80;
+  optional string transform = 81;
+  optional Payload attrs = 82;
+  optional string definition_ref = 83;
+
+  optional sint64 num_control_qubits = 90;
+  optional sint64 num_target_qubits = 91;
+  optional string custom_name = 92;
+  optional Block source_block = 93;
+  optional Block implementation_block = 94;
+
+  optional sint64 num_index_qubits = 100;
+  repeated Block case_blocks = 101;
+}
+
+message IntegerOrReference {
+  oneof value {
+    BigInteger integer = 1;
+    string value_ref = 2;
+  }
+}
+
+message LoopCarriedRebind {
+  string var_name = 1;
+  string before_ref = 2;
+  string after_ref = 3;
+  bool before_synthesized = 4;
+}
+
+message RegionArg {
+  string var_name = 1;
+  string init_ref = 2;
+  string block_arg_ref = 3;
+  string yielded_ref = 4;
+  string result_ref = 5;
+}
+
+message BranchRebind {
+  string var_name = 1;
+  string before_ref = 2;
+  bool rebound_in_true = 3;
+  bool rebound_in_false = 4;
+}
+
+message CallableEntry {
+  string id = 1;
+  CallableDefinition definition = 2;
+}
+
+message CallableDefinition {
+  CallableRef ref = 1;
+  optional Signature signature = 2;
+  optional Block body = 3;
+  optional CallableBodyRef body_ref = 4;
+  repeated CallableImplementation implementations = 5;
+  string default_policy = 6;
+  Payload attrs = 7;
+}
+
+message CallableRef {
+  string namespace = 1;
+  string name = 2;
+  string version = 3;
+}
+
+message CallableBodyRef {
+  CallableRef ref = 1;
+  string kind = 2;
+  Payload attrs = 3;
+}
+
+message CallableImplementation {
+  string transform = 1;
+  optional string backend = 2;
+  optional string strategy = 3;
+  optional Block body = 4;
+  optional CallableBodyRef body_ref = 5;
+  Payload attrs = 6;
+}
+
+message Signature {
+  repeated ParamHint operands = 1;
+  repeated ParamHint results = 2;
+}
+
+message ParamHint {
+  bool present = 1;
+  string name = 2;
+  ValueType type = 3;
+}
+
+// Lossless closed union for semantic constants and metadata.
+message Payload {
+  oneof value {
+    NullValue null_value = 1;
+    bool bool_value = 2;
+    BigInteger integer_value = 3;
+    Float64 float_value = 4;
+    string string_value = 5;
+    bytes bytes_value = 6;
+    PayloadList list_value = 7;
+    PayloadList tuple_value = 8;
+    PayloadList set_value = 9;
+    PayloadList frozenset_value = 10;
+    PayloadMap map_value = 11;
+    Complex64 complex_value = 12;
+    NumpyValue numpy_array = 13;
+    NumpyValue numpy_scalar = 14;
+    Hamiltonian hamiltonian = 15;
+  }
+}
+
+message NullValue {}
+
+message BigInteger {
+  bool negative = 1;
+  bytes magnitude = 2;
+}
+
+message Float64 {
+  fixed64 bits = 1;
+}
+
+message Complex64 {
+  fixed64 real_bits = 1;
+  fixed64 imag_bits = 2;
+}
+
+message PayloadList {
+  repeated Payload items = 1;
+}
+
+message PayloadMap {
+  repeated PayloadEntry entries = 1;
+}
+
+message PayloadEntry {
+  Payload key = 1;
+  Payload value = 2;
+}
+
+message NumpyValue {
+  string dtype = 1;
+  repeated sint64 shape = 2;
+  bytes data = 3;
+}
+
+message Hamiltonian {
+  repeated HamiltonianTerm terms = 1;
+  Number constant = 2;
+  optional sint64 num_qubits = 3;
+}
+
+message HamiltonianTerm {
+  repeated PauliOperator operators = 1;
+  Number coefficient = 2;
+}
+
+message PauliOperator {
+  string pauli = 1;
+  sint64 index = 2;
+}
+
+message Number {
+  oneof value {
+    BigInteger integer = 1;
+    Float64 floating = 2;
+    Complex64 complex = 3;
+  }
+}

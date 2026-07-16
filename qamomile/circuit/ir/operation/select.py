@@ -46,7 +46,9 @@ class SelectOperation(Operation):
 
     Attributes:
         num_index_qubits (int): Number of physical index (select) qubits.
-            Equals ``ceil(log2(len(case_blocks)))`` (at least ``1``).
+            Must be positive and wide enough to address every case. The
+            frontend chooses ``ceil(log2(len(case_blocks)))``; hand-built IR
+            may use a wider register, whose unassigned states act as identity.
         case_blocks (list[Block]): One unitary ``Block`` per index value,
             in ascending index order. Every block shares the same quantum
             target arity and classical-parameter signature.

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 import pytest
 
+import qamomile.circuit as qmc
 from qamomile.circuit.ir import content_hash, pretty_print_block
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
@@ -18,13 +18,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.serialize import (
-    dump_json,
-    dump_msgpack,
-    load_json,
-    load_msgpack,
-    to_dict,
-)
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -33,6 +26,7 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
 )
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler.errors import DependencyError, EmitError
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
@@ -83,6 +77,32 @@ def _phase_only_block(angle: float) -> Block:
         kind=BlockKind.AFFINE,
         operations=[GlobalPhaseOperation(operands=[phase], results=[])],
     )
+
+
+@qmc.qkernel
+def _serialized_identity(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Return one qubit unchanged for qkernel persistence coverage.
+
+    Args:
+        qubit (qmc.Qubit): Input qubit.
+
+    Returns:
+        qmc.Qubit: Unchanged input qubit.
+    """
+    return qubit
+
+
+@qmc.qkernel
+def _serialized_phase(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Append a constant global phase to an identity qkernel call.
+
+    Args:
+        qubit (qmc.Qubit): Input qubit.
+
+    Returns:
+        qmc.Qubit: Unchanged input qubit with a global phase.
+    """
+    return qmc.global_phase(_serialized_identity, 0.375)(qubit)
 
 
 class _EmitterWithoutGlobalPhaseHook:
@@ -240,23 +260,21 @@ def test_content_hash_includes_global_phase_operand() -> None:
     assert content_hash(first) != content_hash(different)
 
 
-@pytest.mark.parametrize(
-    ("dump", "load"),
-    [(dump_json, load_json), (dump_msgpack, load_msgpack)],
-    ids=["json", "msgpack"],
-)
-def test_global_phase_round_trip_preserves_zero_result_operand(
-    dump: Callable[[Block], bytes],
-    load: Callable[[bytes], Block],
-) -> None:
-    """JSON and msgpack preserve phase data and the zero-result layout."""
-    block = _phase_only_block(0.375)
-    restored = load(dump(block))
+def test_global_phase_qkernel_round_trip_preserves_zero_result_operand() -> None:
+    """QKernel protobuf persistence preserves phase and zero-result layout."""
+    block = _serialized_phase.block
+    restored_kernel = deserialize(serialize(_serialized_phase))
+    restored = restored_kernel.block
 
-    assert to_dict(restored) == to_dict(block)
-    assert content_hash(restored) == content_hash(block)
-    assert len(restored.operations) == 1
-    phase_op = restored.operations[0]
+    assert serialize(restored_kernel) == serialize(_serialized_phase)
+    assert [type(operation) for operation in restored.operations] == [
+        type(operation) for operation in block.operations
+    ]
+    [phase_op] = [
+        operation
+        for operation in restored.operations
+        if isinstance(operation, GlobalPhaseOperation)
+    ]
     assert isinstance(phase_op, GlobalPhaseOperation)
     assert phase_op.results == []
     assert phase_op.phase.get_const() == pytest.approx(0.375)

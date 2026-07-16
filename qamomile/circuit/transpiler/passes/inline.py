@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -184,41 +184,47 @@ def _substitute_output_values(
     ]
 
 
-def _has_any_inline_call(operations: list[Operation]) -> bool:
-    """Return whether any operation (or nested operation) is a call.
+def _iter_inline_invokes(operations: list[Operation]) -> Iterator[InvokeOperation]:
+    """Yield every inlineable invocation reachable from an operation list.
 
     Recurses into the nested blocks of ``InverseBlockOperation``,
     ``ControlledUOperation``, and ``SelectOperation`` and into
-    ``HasNestedOps`` bodies, so a call hidden inside a control-flow body or
-    an operation-owned block is still detected. ``InlinePass`` uses this to
-    decide whether its output block is ``AFFINE`` (no calls remain) or stays
-    ``HIERARCHICAL``.
+    ``HasNestedOps`` bodies so detection and counting share one traversal.
+
+    Args:
+        operations (list[Operation]): Operations to scan.
+
+    Yields:
+        InvokeOperation: Each reachable invocation with an inline body.
+    """
+    for op in operations:
+        if isinstance(op, InvokeOperation) and _invoke_inline_body(op) is not None:
+            yield op
+        if isinstance(op, InverseBlockOperation):
+            for block in (op.source_block, op.implementation_block):
+                if block is not None:
+                    yield from _iter_inline_invokes(block.operations)
+        if isinstance(op, ControlledUOperation):
+            if op.block is not None:
+                yield from _iter_inline_invokes(op.block.operations)
+        if isinstance(op, SelectOperation):
+            for block in op.case_blocks:
+                yield from _iter_inline_invokes(block.operations)
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                yield from _iter_inline_invokes(body)
+
+
+def _has_any_inline_call(operations: list[Operation]) -> bool:
+    """Return whether any inlineable call is reachable from operations.
 
     Args:
         operations (list[Operation]): Operations to scan.
 
     Returns:
-        bool: ``True`` if at least one inlineable call is reachable
-            from *operations*, otherwise ``False``.
+        bool: Whether at least one inlineable invocation is reachable.
     """
-    for op in operations:
-        if isinstance(op, InvokeOperation) and _invoke_inline_body(op) is not None:
-            return True
-        if isinstance(op, InverseBlockOperation):
-            for block in (op.source_block, op.implementation_block):
-                if block is not None and _has_any_inline_call(block.operations):
-                    return True
-        if isinstance(op, ControlledUOperation):
-            if op.block is not None and _has_any_inline_call(op.block.operations):
-                return True
-        if isinstance(op, SelectOperation):
-            if any(_has_any_inline_call(block.operations) for block in op.case_blocks):
-                return True
-        if isinstance(op, HasNestedOps):
-            for body in op.nested_op_lists():
-                if _has_any_inline_call(body):
-                    return True
-    return False
+    return next(_iter_inline_invokes(operations), None) is not None
 
 
 def count_inline_invokes(operations: list[Operation]) -> int:
@@ -236,24 +242,7 @@ def count_inline_invokes(operations: list[Operation]) -> int:
     Returns:
         int: Total number of inlineable calls reachable from *operations*.
     """
-    count = 0
-    for op in operations:
-        if isinstance(op, InvokeOperation) and _invoke_inline_body(op) is not None:
-            count += 1
-        if isinstance(op, InverseBlockOperation):
-            for block in (op.source_block, op.implementation_block):
-                if block is not None:
-                    count += count_inline_invokes(block.operations)
-        if isinstance(op, ControlledUOperation):
-            if op.block is not None:
-                count += count_inline_invokes(op.block.operations)
-        if isinstance(op, SelectOperation):
-            for block in op.case_blocks:
-                count += count_inline_invokes(block.operations)
-        if isinstance(op, HasNestedOps):
-            for body in op.nested_op_lists():
-                count += count_inline_invokes(body)
-    return count
+    return sum(1 for _ in _iter_inline_invokes(operations))
 
 
 def count_unrollable_inline_invokes(operations: list[Operation]) -> int:

@@ -1632,18 +1632,9 @@ class CircuitAnalyzer:
             # unchanged so ``_phase`` stays ``_phase``.
             u_name = _BUILTIN_TEX_LABELS.get(raw_name, raw_name)
             power_val = self._resolve_controlled_u_power(op, param_values)
-            # Combine the two recent improvements to the controlled-U box:
-            # main (PR #409) now recognises a small set of wrapped gates
-            # (X/Z/CX/CZ/SWAP/TOFFOLI with power=1) and renders them with
-            # a dedicated native symbol instead of a labelled box; this
-            # branch added a parameter-suffix label (``_phase($\theta$=...)``,
-            # ``$R_x$(angle=...)``) and a separate ``VGate.power`` field
-            # so the renderer can draw an outer ``pow=N`` wrapper box for
-            # ``power > 1``.  Both behaviours coexist: when the dedicated
-            # symbol applies the label is unused (the wrapped primitives
-            # have no classical parameters so ``param_suffix`` is empty
-            # anyway), and otherwise the label keeps its full callable
-            # name + bound classical parameters.
+            # A small set of unit-power wrapped gates use dedicated native
+            # symbols. Other controlled calls retain their full callable name,
+            # bound-parameter suffix, and an outer power wrapper when needed.
             controlled_gate_type = self._controlled_u_single_gate_type(op, power_val)
             # Append a parameter suffix when the wrapped block has
             # classical parameters bound at the call site.  Each entry

@@ -17,10 +17,12 @@
 # tags: [tutorial]
 # ---
 #
-# # Controlling Gates and Sub-Kernels with `qmc.control`
+# # Coherent Control with `qmc.control` and `qmc.select`
 #
 # `qmc.control` turns any Qamomile gate (a built-in like `qmc.rx`,
 # or a user-defined `@qmc.qkernel`) into its *controlled* version.
+# This tutorial first develops that API in detail, then introduces
+# `qmc.select` for coherently choosing among several unitary cases.
 #
 # `qmc.control` has two modes: *concrete* (the number of control
 # qubits is a Python `int`) and *symbolic* (the number is a
@@ -398,11 +400,13 @@ assert phase_counts == {1: 256}
 #
 # Native standalone phase does not by itself imply that a quantum
 # SDK/Engine/representation can transform every reusable call. Quration/PyQret
-# has no generic call-transform API, so Qamomile inlines a bounded fallback for
-# inverse, power, and at most one coherent control. That fallback accepts its
-# declared primitive gates, one-control Pauli evolution, and nested static
-# `for` loops with compile-time bounds. HUGR uses the same kind of inline
-# fallback for its accepted body operations. Its global-phase correction
+# has no generic call-transform API. A power-only reusable call stays native and
+# is repeated the requested number of times. For control or inverse, Qamomile
+# instead inlines a bounded fallback; a combined power repeats the inlined body.
+# That fallback accepts at most one coherent control, its declared primitive
+# gates, one-control Pauli evolution, and nested static `for` loops with
+# compile-time bounds. HUGR uses the same kind of inline fallback for its
+# accepted body operations. Its global-phase correction
 # supports any positive control count: three or more controls use clean
 # auxiliary qubits and a Toffoli conjunction that is uncomputed before those
 # qubits are freed. Runtime-bounded loops, loop-carried values, and runtime
@@ -693,7 +697,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | --- | --- | --- |
 # | 6.1 control qubit count crosses an argument boundary | concrete | `ValueError` |
 # | 6.2 `control_indices` in concrete mode | concrete | `ValueError` |
-# | 6.3 symbolic-length `VectorView` in concrete | concrete | `NotImplementedError` |
+# | 6.3 symbolic-length `VectorView` in concrete | concrete | `ValueError` |
 # | 6.4 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg control prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 single scalar control in symbolic mode | symbolic | `ValueError` |
@@ -780,7 +784,7 @@ expect_error(
 #
 # Concrete mode must determine each control argument's qubit count
 # at compile time. A slice whose length depends on a `UInt` is not
-# supported in concrete mode and raises `NotImplementedError`.
+# supported in concrete mode and raises `ValueError` before ownership moves.
 
 
 # %%
@@ -799,7 +803,7 @@ def case_symbolic_view_in_concrete() -> None:
 
 expect_error(
     "symbolic-length VectorView in concrete mode",
-    NotImplementedError,
+    ValueError,
     case_symbolic_view_in_concrete,
 )
 
@@ -1002,13 +1006,15 @@ select_counts = dict(
 assert select_counts == {1: 256}
 
 # %% [markdown]
-# SELECT remains one high-level IR operation until the CircuitProgram
-# boundary. There it becomes one semantic reusable call whose portable
-# fallback controls each case on the corresponding index state. It can
-# be nested in `qmc.range`, and in measurement-backed `if` / `while`
-# control flow when the selected backend supports that runtime control
-# flow. It can also appear under `qmc.control` or `qmc.inverse`; global
-# phase inside a case is preserved as observable relative phase.
+# On the CircuitProgram-based Engine path, SELECT remains one high-level
+# operation until CircuitProgram lowering. There it becomes one semantic
+# reusable call whose portable fallback controls each case on the
+# corresponding index state. Engines with a different lowering path must
+# implement SELECT explicitly or report it as unsupported. SELECT can be
+# nested in `qmc.range`, and in measurement-backed `if` / `while` control
+# flow when the selected Engine supports that runtime control flow. It can
+# also appear under `qmc.control` or `qmc.inverse`; global phase inside a
+# case is preserved as observable relative phase.
 
 # %% [markdown]
 # (cg-8)=

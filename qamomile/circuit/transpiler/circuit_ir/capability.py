@@ -123,6 +123,42 @@ class GlobalPhaseCapabilities:
     scalars: ScalarCapabilities
     min_qubits: int = 0
 
+    @property
+    def atoms(self) -> frozenset[ScalarAtom]:
+        """Return the legacy scalar-atom declaration.
+
+        Returns:
+            frozenset[ScalarAtom]: Accepted scalar leaf kinds.
+        """
+        return self.scalars.atoms
+
+    @property
+    def unary_operators(self) -> frozenset[UnaryOperator]:
+        """Return the legacy unary-operator declaration.
+
+        Returns:
+            frozenset[UnaryOperator]: Accepted unary operators.
+        """
+        return self.scalars.unary_operators
+
+    @property
+    def binary_operators(self) -> frozenset[BinaryOperator]:
+        """Return the legacy binary-operator declaration.
+
+        Returns:
+            frozenset[BinaryOperator]: Accepted binary operators.
+        """
+        return self.scalars.binary_operators
+
+    @property
+    def parameter_form(self) -> ScalarExpressionForm:
+        """Return the legacy runtime-parameter expression form.
+
+        Returns:
+            ScalarExpressionForm: Maximum accepted parameter expression form.
+        """
+        return self.scalars.parameter_form
+
 
 @dataclasses.dataclass(frozen=True)
 class CallTransformCapabilities:
@@ -291,8 +327,10 @@ class CircuitCapabilities:
             ``if`` and ``while`` predicates.
         pauli_time (ScalarCapabilities): Scalar language accepted by Pauli
             evolution time values.
-        global_phase (GlobalPhaseCapabilities | None): Exact standalone phase
-            realization requirements, or ``None`` when unsupported.
+        global_phase (GlobalPhaseCapabilities | ScalarCapabilities | None):
+            Exact standalone phase realization requirements, or ``None`` when
+            unsupported. The former ``ScalarCapabilities`` value remains
+            accepted and readable for source compatibility.
         generic_calls (CallTransformCapabilities): Reusable-call forms accepted
             after semantic-call legalization.
         supports_dynamic_if (bool): Whether runtime ``if`` regions are
@@ -310,12 +348,25 @@ class CircuitCapabilities:
     gate_parameters: ScalarCapabilities
     predicates: ScalarCapabilities
     pauli_time: ScalarCapabilities
-    global_phase: GlobalPhaseCapabilities | None
+    global_phase: GlobalPhaseCapabilities | ScalarCapabilities | None
     generic_calls: CallTransformCapabilities
     supports_dynamic_if: bool
     supports_dynamic_while: bool
     supports_reset: bool
     pauli_realizations: frozenset[PauliEvolutionRealization]
+
+    @property
+    def normalized_global_phase(self) -> GlobalPhaseCapabilities | None:
+        """Return standalone phase requirements in the extended form.
+
+        Returns:
+            GlobalPhaseCapabilities | None: Normalized declaration, or
+                ``None`` when standalone phase is unsupported.
+        """
+        value = self.global_phase
+        if isinstance(value, ScalarCapabilities):
+            return GlobalPhaseCapabilities(value)
+        return value
 
     def native_semantic_op(
         self,
