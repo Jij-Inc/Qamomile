@@ -2800,6 +2800,13 @@ def control(
     signature, so users no longer need to write a one-line wrapper just to
     control a primitive gate.
 
+    When a wrapped scalar ``Qubit`` parameter receives a ``Vector[Qubit]`` or
+    ``VectorView[Qubit]``, the complete scalar unitary is applied independently
+    to every element. This is the tensor-product operation produced by an
+    explicit per-element loop, so a scalar body's global phase accumulates once
+    per element. To attach one phase to the whole register instead, wrap a
+    qkernel whose parameter itself is ``Vector[Qubit]``.
+
     Args:
         qkernel (Oracle | QKernelLike | Callable[..., Any]): A qkernel-like
             object defining the gate to control, an ``Oracle``, or a built-in

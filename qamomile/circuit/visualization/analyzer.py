@@ -1421,6 +1421,41 @@ class CircuitAnalyzer:
             isinstance(part, str) and part in _IF_BRANCH_SCOPE_KEYS for part in node_key
         )
 
+    @staticmethod
+    def _control_pattern_for_resolved_wires(
+        control_value: int | None,
+        expected_width: int,
+        resolved_width: int,
+    ) -> tuple[int, ...]:
+        """Build a control pattern aligned with the resolved visual wires.
+
+        A partially resolved operation no longer has enough information to
+        associate the declared activation bits with the surviving visual
+        wires. In that case, fall back to ordinary filled controls instead of
+        interpreting ``control_value`` at the smaller, incorrect width.
+
+        Args:
+            control_value (int | None): LSB-first activation value declared by
+                the controlled operation, or ``None`` for all-one controls.
+            expected_width (int): Declared scalar width of the control register.
+            resolved_width (int): Number of control wires resolved for drawing.
+
+        Returns:
+            tuple[int, ...]: Activation bits aligned one-to-one with the
+                resolved control wires, or an empty tuple when none resolve.
+
+        Raises:
+            TypeError: If ``control_value`` is invalid and every declared
+                control wire resolved.
+            ValueError: If the activation metadata is invalid and every
+                declared control wire resolved.
+        """
+        if resolved_width == 0:
+            return ()
+        if resolved_width != expected_width:
+            return (1,) * resolved_width
+        return control_pattern_for_value(control_value, expected_width)
+
     def _build_vgate(
         self,
         op: Operation,
@@ -1564,10 +1599,10 @@ class CircuitAnalyzer:
                         if indices is not None:
                             qubit_indices.extend(indices)
             is_controlled = op.transform is CallTransform.CONTROLLED
-            control_pattern = (
-                control_pattern_for_value(op.control_value, len(control_indices))
-                if control_indices
-                else ()
+            control_pattern = self._control_pattern_for_resolved_wires(
+                op.control_value,
+                op.num_control_qubits,
+                len(control_indices),
             )
             return VGate(
                 node_key=node_key,
@@ -1603,10 +1638,10 @@ class CircuitAnalyzer:
                 if indices is not None:
                     target_indices.extend(indices)
             qubit_indices = [*control_indices, *target_indices]
-            control_pattern = (
-                control_pattern_for_value(op.control_value, len(control_indices))
-                if control_indices
-                else ()
+            control_pattern = self._control_pattern_for_resolved_wires(
+                op.control_value,
+                op.num_control_qubits,
+                len(control_indices),
             )
             return VGate(
                 node_key=node_key,
@@ -1705,17 +1740,14 @@ class CircuitAnalyzer:
                 gate_type=controlled_gate_type,
                 box_width=box_width,
                 control_count=len(control_indices),
-                control_pattern=(
-                    control_pattern_for_value(
-                        (
-                            op.control_value
-                            if isinstance(op, ConcreteControlledU)
-                            else None
-                        ),
-                        len(control_indices),
-                    )
-                    if control_indices
-                    else ()
+                control_pattern=self._control_pattern_for_resolved_wires(
+                    (op.control_value if isinstance(op, ConcreteControlledU) else None),
+                    (
+                        op.num_controls
+                        if isinstance(op, ConcreteControlledU)
+                        else len(control_indices)
+                    ),
+                    len(control_indices),
                 ),
                 power=power_val,
             )
@@ -1847,6 +1879,7 @@ class CircuitAnalyzer:
         """
         # Extract block_value, affected_qubits, and actual_inputs based on op type
         control_value: int | None = None
+        expected_control_width = 0
         if isinstance(op, ControlledUOperation):
             block_value = op.block
             assert isinstance(block_value, Block)
@@ -1859,6 +1892,9 @@ class CircuitAnalyzer:
                     control_qubit_indices.extend(indices)
             if isinstance(op, ConcreteControlledU):
                 control_value = op.control_value
+                expected_control_width = op.num_controls
+            else:
+                expected_control_width = len(control_qubit_indices)
             affected_qubits = list(control_qubit_indices)
             for operand in op.target_operands:
                 indices = self._resolve_operand_to_qubit_indices(
@@ -1892,6 +1928,7 @@ class CircuitAnalyzer:
             control_qubit_indices = []
             if op.transform is CallTransform.CONTROLLED:
                 control_value = op.control_value
+                expected_control_width = op.num_control_qubits
                 for operand in op.control_qubits:
                     indices = self._resolve_operand_to_qubit_indices(
                         operand, qubit_map, logical_id_remap, param_values
@@ -1911,6 +1948,7 @@ class CircuitAnalyzer:
             block_value = op.implementation_block
             assert isinstance(block_value, Block)
             control_value = op.control_value
+            expected_control_width = op.num_control_qubits
             control_qubit_indices = []
             for operand in op.control_qubits:
                 indices = self._resolve_operand_to_qubit_indices(
@@ -2008,10 +2046,10 @@ class CircuitAnalyzer:
         else:
             final_width = max(label_width, content_width)
 
-        control_pattern = (
-            control_pattern_for_value(control_value, len(control_qubit_indices))
-            if control_qubit_indices
-            else ()
+        control_pattern = self._control_pattern_for_resolved_wires(
+            control_value,
+            expected_control_width,
+            len(control_qubit_indices),
         )
         return VInlineBlock(
             node_key=node_key,

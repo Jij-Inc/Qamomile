@@ -19,6 +19,12 @@ def _identity(q: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _x(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply Pauli X to one target."""
+    return qmc.x(q)
+
+
+@qmc.qkernel
 def _phase_pi_identity(q: qmc.Qubit) -> qmc.Qubit:
     """Apply phase pi to an identity Pauli case."""
     return qmc.global_phase(_identity, math.pi)(q)
@@ -34,6 +40,34 @@ def _phase_half_pi_identity(q: qmc.Qubit) -> qmc.Qubit:
 def _phase_half_pi_x(q: qmc.Qubit) -> qmc.Qubit:
     """Apply Pauli X with phase pi/2."""
     return qmc.global_phase(qmc.x, math.pi / 2.0)(q)
+
+
+@qmc.qkernel
+def _rx_pi(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply RX(pi), which equals minus i times X."""
+    return qmc.rx(q, math.pi)
+
+
+@qmc.qkernel
+def _phase_half_pi_rx_pi(q: qmc.Qubit) -> qmc.Qubit:
+    """Represent X exactly as exp(i*pi/2) times RX(pi)."""
+    return qmc.global_phase(_rx_pi, math.pi / 2.0)(q)
+
+
+@qmc.qkernel
+def _identity_vector(
+    targets: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Return a complete target register unchanged."""
+    return targets
+
+
+@qmc.qkernel
+def _phase_half_pi_identity_vector(
+    targets: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply one phase pi/2 to a complete target register."""
+    return qmc.global_phase(_identity_vector, math.pi / 2.0)(targets)
 
 
 @qmc.qkernel
@@ -142,6 +176,62 @@ def _nested_phase_case(
     return qmc.select([_identity, _phase_pi_identity])(index, target)
 
 
+@qmc.qkernel
+def _broadcast_phase_only_select(
+    target_size: qmc.UInt,
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Broadcast a scalar phase-only SELECT case over a vector target."""
+    index = qmc.h(qmc.qubit("index"))
+    target = qmc.qubit_array(target_size, "target")
+    index, target = qmc.select([_identity, _phase_half_pi_identity])(
+        index,
+        target,
+    )
+    return qmc.expval(index, observable)
+
+
+@qmc.qkernel
+def _broadcast_phased_x_select(
+    target_size: qmc.UInt,
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Broadcast a phased X case and coherently uncompute its X operations."""
+    index = qmc.h(qmc.qubit("index"))
+    target = qmc.qubit_array(target_size, "target")
+    index, target = qmc.select([_identity, _phase_half_pi_x])(index, target)
+    index, target = qmc.select([_identity, _x])(index, target)
+    return qmc.expval(index, observable)
+
+
+@qmc.qkernel
+def _vector_phase_only_select(
+    target_size: qmc.UInt,
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Select one phase attached to a complete vector case."""
+    index = qmc.h(qmc.qubit("index"))
+    target = qmc.qubit_array(target_size, "target")
+    index, target = qmc.select([_identity_vector, _phase_half_pi_identity_vector])(
+        index,
+        target,
+    )
+    return qmc.expval(index, observable)
+
+
+@qmc.qkernel
+def _equivalent_representation_broadcast_select(
+    target_size: qmc.UInt,
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Compose equivalent X representations selected over a vector target."""
+    index = qmc.h(qmc.qubit("index"))
+    target = qmc.qubit_array(target_size, "target")
+    index, target = qmc.select([_identity, _x])(index, target)
+    index, target = qmc.select([_identity, _phase_half_pi_rx_pi])(index, target)
+    return qmc.expval(index, observable)
+
+
 def _executor(case: Any, *, runtime_control: bool = False) -> Any:
     """Return a simulator executor for one SDK backend case.
 
@@ -204,6 +294,140 @@ def test_identity_case_phase_becomes_relative_phase(sdk_transpiler: Any) -> None
         return qmc.measure(index)
 
     assert _only_outcome(sdk_transpiler, circuit) == 1
+
+
+@pytest.mark.parametrize("target_size", [1, 2, 3])
+def test_broadcast_phase_only_case_matches_tensor_product(
+    sdk_transpiler: Any,
+    target_size: int,
+) -> None:
+    """A scalar broadcast accumulates one case phase per target element."""
+    executable = sdk_transpiler.transpiler.transpile(
+        _broadcast_phase_only_select,
+        bindings={"target_size": target_size, "observable": qm_o.Y(0)},
+    )
+    value = executable.run(_executor(sdk_transpiler)).result()
+
+    # The selected branch gets N copies of pi/2, hence <Y>=sin(N*pi/2).
+    expected_y = np.sin(target_size * math.pi / 2.0)
+    assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6)
+
+
+@pytest.mark.parametrize("target_size", [2, 3])
+def test_scalar_case_broadcast_matches_explicit_loop_case(
+    sdk_transpiler: Any,
+    target_size: int,
+) -> None:
+    """A scalar SELECT broadcast equals a Vector case's explicit loop."""
+    theta = 0.37
+
+    @qmc.qkernel
+    def scalar_identity(target: qmc.Qubit) -> qmc.Qubit:
+        """Return one target element unchanged."""
+        return target
+
+    @qmc.qkernel
+    def scalar_phase(target: qmc.Qubit) -> qmc.Qubit:
+        """Apply a fixed phase to one target element."""
+        return qmc.global_phase(scalar_identity, theta)(target)
+
+    @qmc.qkernel
+    def vector_identity(
+        targets: qmc.Vector[qmc.Qubit],
+    ) -> qmc.Vector[qmc.Qubit]:
+        """Return a complete target register unchanged."""
+        return targets
+
+    @qmc.qkernel
+    def explicit_loop_phase(
+        targets: qmc.Vector[qmc.Qubit],
+    ) -> qmc.Vector[qmc.Qubit]:
+        """Apply the scalar phased case to every target explicitly."""
+        for i in qmc.range(target_size):
+            targets[i] = scalar_phase(targets[i])
+        return targets
+
+    @qmc.qkernel
+    def broadcast_test(obs: qmc.Observable) -> qmc.Float:
+        """Expose the scalar case's broadcast phase on the index."""
+        index = qmc.h(qmc.qubit("index"))
+        targets = qmc.qubit_array(target_size, "targets")
+        index, targets = qmc.select([scalar_identity, scalar_phase])(index, targets)
+        return qmc.expval(index, obs)
+
+    @qmc.qkernel
+    def loop_test(obs: qmc.Observable) -> qmc.Float:
+        """Expose the Vector case's explicit-loop phase on the index."""
+        index = qmc.h(qmc.qubit("index"))
+        targets = qmc.qubit_array(target_size, "targets")
+        index, targets = qmc.select([vector_identity, explicit_loop_phase])(
+            index,
+            targets,
+        )
+        return qmc.expval(index, obs)
+
+    bindings = {"obs": qm_o.Y(0)}
+    broadcast_value = (
+        sdk_transpiler.transpiler.transpile(broadcast_test, bindings=bindings)
+        .run(_executor(sdk_transpiler))
+        .result()
+    )
+    loop_value = (
+        sdk_transpiler.transpiler.transpile(loop_test, bindings=bindings)
+        .run(_executor(sdk_transpiler))
+        .result()
+    )
+    # N explicit scalar phases give relative phase N*theta and <Y>=sin(N*theta).
+    expected_y = np.sin(target_size * theta)
+    assert np.isclose(broadcast_value, expected_y, rtol=0.0, atol=1e-6)
+    assert np.isclose(loop_value, broadcast_value, rtol=0.0, atol=1e-6)
+
+
+@pytest.mark.parametrize("target_size", [1, 2, 3])
+def test_broadcast_phased_x_case_matches_tensor_product(
+    sdk_transpiler: Any,
+    target_size: int,
+) -> None:
+    """A scalar phased-X case applies its complete unitary per target."""
+    executable = sdk_transpiler.transpiler.transpile(
+        _broadcast_phased_x_select,
+        bindings={"target_size": target_size, "observable": qm_o.Y(0)},
+    )
+    value = executable.run(_executor(sdk_transpiler)).result()
+
+    # Coherent X uncomputation leaves relative phase N*pi/2 on the index.
+    expected_y = np.sin(target_size * math.pi / 2.0)
+    assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6)
+
+
+@pytest.mark.parametrize("target_size", [1, 2, 3])
+def test_scalar_case_broadcast_preserves_unitary_equivalence(
+    sdk_transpiler: Any,
+    target_size: int,
+) -> None:
+    """Equivalent scalar case representations stay equal after broadcast."""
+    executable = sdk_transpiler.transpiler.transpile(
+        _equivalent_representation_broadcast_select,
+        bindings={"target_size": target_size, "observable": qm_o.X(0)},
+    )
+    value = executable.run(_executor(sdk_transpiler)).result()
+
+    assert np.isclose(value, 1.0, rtol=0.0, atol=1e-6)
+
+
+@pytest.mark.parametrize("target_size", [2, 3])
+def test_vector_case_global_phase_applies_once(
+    sdk_transpiler: Any,
+    target_size: int,
+) -> None:
+    """A phase on a Vector-signature case applies once to the full register."""
+    executable = sdk_transpiler.transpiler.transpile(
+        _vector_phase_only_select,
+        bindings={"target_size": target_size, "observable": qm_o.Y(0)},
+    )
+    value = executable.run(_executor(sdk_transpiler)).result()
+
+    assert np.isclose(value, 1.0, rtol=0.0, atol=1e-6)
 
 
 def test_symbolic_wide_index_preserves_identity_case_phase(

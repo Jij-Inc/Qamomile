@@ -198,6 +198,31 @@ class TestSyntheticBinaryExprDispatch:
         # Right operand should still represent 5, not True.
         assert getattr(result.right, "value", None) == 5
 
+    @pytest.mark.parametrize("operator_name", ["EQ", "NEQ"])
+    @pytest.mark.parametrize(
+        "bool_first", [True, False], ids=["bool-uint", "uint-bool"]
+    )
+    def test_mixed_bool_uint_equality_materializes_at_qiskit_boundary(
+        self,
+        operator_name: str,
+        bool_first: bool,
+        expr_module,
+    ) -> None:
+        """Qiskit expands mixed Bool and Uint equality only at materialization."""
+        from qamomile.circuit.transpiler.circuit_ir import BinaryOperator
+        from qamomile.qiskit.materializer import _materialize_binary
+
+        expr, types = expr_module
+        bit = expr.lift(True)
+        integer = expr.lift(2, types.Uint(8))
+        left, right = (bit, integer) if bool_first else (integer, bit)
+
+        result = _materialize_binary(BinaryOperator[operator_name], left, right)
+
+        assert isinstance(result.type, types.Bool)
+        expected_root = "LOGIC_OR" if operator_name == "EQ" else "LOGIC_NOT"
+        assert result.op.name == expected_root
+
 
 class TestSyntheticRuntimeClassicalExprConstruction:
     """The IR constructor accepts every kind without complaint, and the

@@ -2046,6 +2046,255 @@ class TestGlobalPhaseControlledCompositions:
             f"{sdk_transpiler.backend_name} θ={theta}: <Z>={val} vs {np.cos(theta)}"
         )
 
+    @pytest.mark.parametrize("power", [1, 3])
+    @pytest.mark.parametrize("target_width", [1, 2, 3])
+    def test_controlled_scalar_phase_broadcast_matches_tensor_power(
+        self,
+        sdk_transpiler,
+        target_width,
+        power,
+    ):
+        """A scalar phase broadcast matches ``(exp(iφ) I) ** tensor N``."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def phased_ident(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply a half-pi phase to an identity body."""
+            return qmc.global_phase(_ident, np.pi / 2.0)(q)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Expose the element-wise broadcast phase on its control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_ident)(
+                control,
+                targets,
+                power=power,
+            )
+            return qmc.expval(control, obs)
+
+        transpiler = sdk_transpiler.transpiler
+        value = (
+            transpiler.transpile(htest, bindings={"obs": qm_o.Y(0)})
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        # The control state is (|0> + exp(i*N*p*pi/2)|1>)/sqrt(2), so
+        # its Y expectation is sin(N*p*pi/2).
+        expected_y = np.sin(target_width * power * np.pi / 2.0)
+        assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6), (
+            f"{sdk_transpiler.backend_name} width={target_width} "
+            f"power={power}: <Y>={value}"
+        )
+
+    @pytest.mark.parametrize("target_width", [2, 3])
+    def test_control_call_phase_keyword_broadcasts_per_element(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """The call-site phase is part of each broadcast scalar unitary."""
+        import qamomile.observable as qm_o
+
+        theta = 0.37
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Expose a call-site phase broadcast on one control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(_ident)(
+                control,
+                targets,
+                global_phase=theta,
+            )
+            return qmc.expval(control, obs)
+
+        value = (
+            sdk_transpiler.transpiler.transpile(
+                htest,
+                bindings={"obs": qm_o.Y(0)},
+            )
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        expected_y = np.sin(target_width * theta)
+        assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6)
+
+    @pytest.mark.parametrize("target_width", [2, 3])
+    def test_controlled_scalar_phase_broadcast_matches_explicit_loop(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """Scalar broadcast and a Vector body's explicit loop are equivalent."""
+        import qamomile.observable as qm_o
+
+        theta = 0.37
+
+        @qkernel
+        def phased_ident(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply a fixed phase to one target element."""
+            return qmc.global_phase(_ident, theta)(q)
+
+        @qkernel
+        def explicit_loop(
+            targets: qmc.Vector[qmc.Qubit],
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Apply the scalar phased body to every target explicitly."""
+            for i in qmc.range(target_width):
+                targets[i] = phased_ident(targets[i])
+            return targets
+
+        @qkernel
+        def broadcast_test(obs: qmc.Observable) -> qmc.Float:
+            """Expose the scalar-broadcast phase on one control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_ident)(control, targets)
+            return qmc.expval(control, obs)
+
+        @qkernel
+        def loop_test(obs: qmc.Observable) -> qmc.Float:
+            """Expose the explicit-loop phase on one control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(explicit_loop)(control, targets)
+            return qmc.expval(control, obs)
+
+        bindings = {"obs": qm_o.Y(0)}
+        broadcast_value = (
+            sdk_transpiler.transpiler.transpile(broadcast_test, bindings=bindings)
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        loop_value = (
+            sdk_transpiler.transpiler.transpile(loop_test, bindings=bindings)
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        # N explicit scalar phases give relative phase N*theta and <Y>=sin(N*theta).
+        expected_y = np.sin(target_width * theta)
+        assert np.isclose(broadcast_value, expected_y, rtol=0.0, atol=1e-6)
+        assert np.isclose(loop_value, broadcast_value, rtol=0.0, atol=1e-6)
+
+    @pytest.mark.parametrize("target_width", [1, 2, 3])
+    def test_controlled_phased_x_broadcasts_body_and_phase(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """A phased-X broadcast applies its complete unitary per element."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def phased_x(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply a half-pi phase to an X body."""
+            return qmc.global_phase(_x_body, np.pi / 2.0)(q)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Uncompute broadcast X gates and expose the remaining phase."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_x)(control, targets)
+            control, targets = qmc.control(_x_body)(control, targets)
+            return qmc.expval(control, obs)
+
+        value = (
+            sdk_transpiler.transpiler.transpile(
+                htest,
+                bindings={"obs": qm_o.Y(0)},
+            )
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        # Coherent X uncomputation leaves relative phase N*pi/2 on the control.
+        expected_y = np.sin(target_width * np.pi / 2.0)
+        assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6), (
+            f"{sdk_transpiler.backend_name} width={target_width}: <Y>={value}"
+        )
+
+    @pytest.mark.parametrize("target_width", [1, 2, 3])
+    def test_controlled_scalar_broadcast_preserves_unitary_equivalence(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """Equivalent scalar representations remain equal after broadcast."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def rx_pi(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply RX(pi), which equals minus i times X."""
+            return qmc.rx(q, np.pi)
+
+        @qkernel
+        def phased_rx_pi(q: qmc.Qubit) -> qmc.Qubit:
+            """Represent X exactly as exp(i*pi/2) times RX(pi)."""
+            return qmc.global_phase(rx_pi, np.pi / 2.0)(q)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Compose two equivalent controlled broadcasts to identity."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(_x_body)(control, targets)
+            control, targets = qmc.control(phased_rx_pi)(control, targets)
+            return qmc.expval(control, obs)
+
+        value = (
+            sdk_transpiler.transpiler.transpile(
+                htest,
+                bindings={"obs": qm_o.X(0)},
+            )
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        assert np.isclose(value, 1.0, rtol=0.0, atol=1e-6)
+
+    @pytest.mark.parametrize("target_width", [2, 3])
+    def test_controlled_vector_body_phase_applies_once(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """A phase attached to a Vector body belongs to the whole register."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def vector_ident(
+            targets: qmc.Vector[qmc.Qubit],
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Return a complete target register unchanged."""
+            return targets
+
+        @qkernel
+        def phased_vector_ident(
+            targets: qmc.Vector[qmc.Qubit],
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Apply one half-pi phase to a complete target register."""
+            return qmc.global_phase(vector_ident, np.pi / 2.0)(targets)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Expose one Vector-body phase on its control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_vector_ident)(control, targets)
+            return qmc.expval(control, obs)
+
+        value = (
+            sdk_transpiler.transpiler.transpile(
+                htest,
+                bindings={"obs": qm_o.Y(0)},
+            )
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        assert np.isclose(value, 1.0, rtol=0.0, atol=1e-6)
+
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_controlled_gate_bearing_body_is_applied(self, sdk_transpiler, seed):
         """A controlled gate-bearing global-phase body applies its gates.

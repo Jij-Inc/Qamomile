@@ -10,8 +10,12 @@ import matplotlib.patches as mpatches
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
 from qamomile.circuit.ir.operation.gate import GateOperationType
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.types.primitives import QubitType
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.drawer import MatplotlibDrawer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
@@ -343,6 +347,52 @@ def test_patterned_inverse_visual_ir_retains_control_pattern():
     assert len(controlled) == 1
     assert controlled[0].control_count == 2
     assert controlled[0].control_pattern == (0, 1)
+
+
+@pytest.mark.parametrize("operation_kind", ["invoke", "inverse"])
+def test_patterned_control_falls_back_when_a_control_wire_is_unresolved(
+    operation_kind,
+):
+    """Partially resolved controls draw filled dots without width errors."""
+    control_0 = Value(type=QubitType(), name="control_0")
+    control_1 = Value(type=QubitType(), name="control_1")
+    target = Value(type=QubitType(), name="target")
+    operands = [control_0, control_1, target]
+    results = [operand.next_version() for operand in operands]
+
+    if operation_kind == "invoke":
+        operation = InvokeOperation(
+            operands=operands,
+            results=results,
+            transform=CallTransform.CONTROLLED,
+            attrs={
+                "num_control_qubits": 2,
+                "num_target_qubits": 1,
+                "control_value": 2,
+            },
+        )
+    else:
+        operation = InverseBlockOperation(
+            operands=operands,
+            results=results,
+            num_control_qubits=2,
+            num_target_qubits=1,
+            custom_name="patterned_inverse",
+            control_value=2,
+        )
+
+    analyzer = CircuitAnalyzer(Block(), DEFAULT_STYLE)
+    node = analyzer._build_vgate(
+        operation,
+        node_key=("partial-control", operation_kind),
+        qubit_map={control_0.logical_id: 0, target.logical_id: 1},
+        logical_id_remap={},
+        param_values={},
+    )
+
+    assert node.control_count == 1
+    assert node.qubit_indices == [0, 1]
+    assert node.control_pattern == (1,)
 
 
 def test_patterned_control_renderer_uses_open_then_filled_circle():
