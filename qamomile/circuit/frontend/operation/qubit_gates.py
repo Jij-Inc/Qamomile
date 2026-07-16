@@ -41,19 +41,52 @@ def _to_theta_value(angle: float | Float) -> Value:
     return Value(type=FloatType(), name="theta").with_const(angle)
 
 
-def _apply_single_qubit_gate(qubit: Qubit, gate_type: GateOperationType) -> Qubit:
-    """Apply a single-qubit gate and return the output qubit."""
-    # Consume the input handle (enforces affine type)
-    qubit = qubit.consume(operation_name=gate_type.name)
+def _validate_gate_inputs(
+    qubits: Sequence[Qubit],
+    operation_name: str,
+) -> Any:
+    """Validate every gate input without changing affine ownership.
 
+    Args:
+        qubits (Sequence[Qubit]): Gate inputs to validate together.
+        operation_name (str): Operation name used in consumed-handle errors.
+
+    Returns:
+        Any: Active tracer to use after operation construction and commit.
+
+    Raises:
+        QubitConsumedError: If any input was already consumed.
+        RuntimeError: If no tracer is active.
+    """
+    tracer = get_current_tracer()
+    for qubit in qubits:
+        qubit.validate_consumable(operation_name)
+    return tracer
+
+
+def _apply_single_qubit_gate(qubit: Qubit, gate_type: GateOperationType) -> Qubit:
+    """Apply a single-qubit gate and return its affine successor.
+
+    Args:
+        qubit (Qubit): Input qubit handle to consume.
+        gate_type (GateOperationType): Primitive gate kind to emit.
+
+    Returns:
+        Qubit: Fresh output handle carrying the next IR value.
+
+    Raises:
+        QubitConsumedError: If ``qubit`` was already consumed.
+        RuntimeError: If no tracer is active.
+    """
+    tracer = _validate_gate_inputs((qubit,), gate_type.name)
     output_value = qubit.value.next_version()
     output_qubit = Qubit(value=output_value, parent=qubit.parent, indices=qubit.indices)
-
     gate_op = IRGateOperation(
         gate_type=gate_type, operands=[qubit.value], results=[output_value]
     )
-    tracer = get_current_tracer()
+    qubit = qubit.consume(operation_name=gate_type.name)
     tracer.add_operation(gate_op)
+    qubit._handoff_direct_borrow_to(output_qubit)
     return output_qubit
 
 
@@ -96,6 +129,8 @@ def _broadcast_single_qubit_gate(
     # Local import to avoid a frontend.operation circular import chain.
     from qamomile.circuit.frontend.operation.control_flow import for_loop
 
+    get_current_tracer()
+    qubits.validate_consumable(gate_type.name)
     # Consume the input handle up-front, mirroring `_measure_vector_qubit`
     # and `pauli_evolve`. `ArrayBase.consume` runs `validate_all_returned`
     # internally, so we drop the redundant explicit call.
@@ -144,6 +179,8 @@ def _broadcast_rotation_gate(
     """
     from qamomile.circuit.frontend.operation.control_flow import for_loop
 
+    get_current_tracer()
+    qubits.validate_consumable(gate_type.name)
     qubits = qubits.consume(operation_name=gate_type.name)
     n = qubits.shape[0]
     with for_loop(0, n, var_name="i") as i:
@@ -154,16 +191,25 @@ def _broadcast_rotation_gate(
 def _apply_two_qubit_gate(
     control: Qubit, target: Qubit, gate_type: GateOperationType
 ) -> tuple[Qubit, Qubit]:
-    """Apply a two-qubit gate and return the output qubits."""
+    """Apply a two-qubit gate and return both affine successors.
+
+    Args:
+        control (Qubit): Control-side input qubit.
+        target (Qubit): Target-side input qubit.
+        gate_type (GateOperationType): Primitive gate kind to emit.
+
+    Returns:
+        tuple[Qubit, Qubit]: Fresh control and target handles.
+
+    Raises:
+        QubitAliasError: If both roles refer to the same logical qubit.
+        QubitConsumedError: If either input was already consumed.
+        RuntimeError: If no tracer is active.
+    """
     _check_qubit_alias([(control, "control"), (target, "target")], gate_type.name)
-
-    # Consume both input handles (enforces affine type)
-    control = control.consume(operation_name=f"{gate_type.name}[control]")
-    target = target.consume(operation_name=f"{gate_type.name}[target]")
-
+    tracer = _validate_gate_inputs((control, target), gate_type.name)
     ctrl_out_value = control.value.next_version()
     tgt_out_value = target.value.next_version()
-
     ctrl_out = Qubit(
         value=ctrl_out_value, parent=control.parent, indices=control.indices
     )
@@ -174,25 +220,38 @@ def _apply_two_qubit_gate(
         operands=[control.value, target.value],
         results=[ctrl_out_value, tgt_out_value],
     )
-    tracer = get_current_tracer()
+    control = control.consume(operation_name=f"{gate_type.name}[control]")
+    target = target.consume(operation_name=f"{gate_type.name}[target]")
     tracer.add_operation(gate_op)
+    control._handoff_direct_borrow_to(ctrl_out)
+    target._handoff_direct_borrow_to(tgt_out)
     return ctrl_out, tgt_out
 
 
 def _apply_three_qubit_gate(
     control1: Qubit, control2: Qubit, target: Qubit, gate_type: GateOperationType
 ) -> tuple[Qubit, Qubit, Qubit]:
-    """Apply a three-qubit gate and return the output qubits."""
+    """Apply a three-qubit gate and return all affine successors.
+
+    Args:
+        control1 (Qubit): First control input.
+        control2 (Qubit): Second control input.
+        target (Qubit): Target input.
+        gate_type (GateOperationType): Primitive gate kind to emit.
+
+    Returns:
+        tuple[Qubit, Qubit, Qubit]: Fresh handles in input-role order.
+
+    Raises:
+        QubitAliasError: If any two roles refer to the same logical qubit.
+        QubitConsumedError: If any input was already consumed.
+        RuntimeError: If no tracer is active.
+    """
     _check_qubit_alias(
         [(control1, "control1"), (control2, "control2"), (target, "target")],
         gate_type.name,
     )
-
-    # Consume all three input handles (enforces affine type)
-    control1 = control1.consume(operation_name=f"{gate_type.name}[control1]")
-    control2 = control2.consume(operation_name=f"{gate_type.name}[control2]")
-    target = target.consume(operation_name=f"{gate_type.name}[target]")
-
+    tracer = _validate_gate_inputs((control1, control2, target), gate_type.name)
     ctrl1_out_value = control1.value.next_version()
     ctrl2_out_value = control2.value.next_version()
     tgt_out_value = target.value.next_version()
@@ -210,8 +269,13 @@ def _apply_three_qubit_gate(
         operands=[control1.value, control2.value, target.value],
         results=[ctrl1_out_value, ctrl2_out_value, tgt_out_value],
     )
-    tracer = get_current_tracer()
+    control1 = control1.consume(operation_name=f"{gate_type.name}[control1]")
+    control2 = control2.consume(operation_name=f"{gate_type.name}[control2]")
+    target = target.consume(operation_name=f"{gate_type.name}[target]")
     tracer.add_operation(gate_op)
+    control1._handoff_direct_borrow_to(ctrl1_out)
+    control2._handoff_direct_borrow_to(ctrl2_out)
+    target._handoff_direct_borrow_to(tgt_out)
     return ctrl1_out, ctrl2_out, tgt_out
 
 
@@ -447,15 +511,17 @@ def _apply_phase_gate(qubit: Qubit, theta: float | Float) -> Qubit:
     """Apply the phase gate ``P(theta)`` to a single qubit.
 
     Args:
-        qubit: The qubit to apply the phase to.
-        theta: Phase angle in radians, as a Python float or a `Float` handle.
+        qubit (Qubit): Qubit to consume and phase.
+        theta (float | Float): Phase angle in radians.
 
     Returns:
-        The output qubit handle after the phase rotation.
-    """
-    # Consume the input handle (enforces affine type)
-    qubit = qubit.consume(operation_name="P")
+        Qubit: Fresh output qubit handle after the phase rotation.
 
+    Raises:
+        QubitConsumedError: If ``qubit`` was already consumed.
+        RuntimeError: If no tracer is active.
+    """
+    tracer = _validate_gate_inputs((qubit,), "P")
     output_value = qubit.value.next_version()
     output_qubit = Qubit(value=output_value, parent=qubit.parent, indices=qubit.indices)
 
@@ -467,9 +533,9 @@ def _apply_phase_gate(qubit: Qubit, theta: float | Float) -> Qubit:
         theta=theta_value,
         results=[output_value],
     )
-
-    tracer = get_current_tracer()
+    qubit = qubit.consume(operation_name="P")
     tracer.add_operation(p_op)
+    qubit._handoff_direct_borrow_to(output_qubit)
     return output_qubit
 
 
@@ -501,6 +567,8 @@ def _broadcast_phase_gate(qubits: Vector[Qubit], theta: float | Float) -> Vector
     """
     from qamomile.circuit.frontend.operation.control_flow import for_loop
 
+    get_current_tracer()
+    qubits.validate_consumable("P")
     qubits = qubits.consume(operation_name="P")
     n = qubits.shape[0]
     with for_loop(0, n, var_name="i") as i:
@@ -543,13 +611,23 @@ def p(
 
 
 def cp(control: Qubit, target: Qubit, theta: float | Float) -> tuple[Qubit, Qubit]:
-    """Controlled-Phase gate."""
+    """Apply a controlled phase gate.
+
+    Args:
+        control (Qubit): Control input qubit.
+        target (Qubit): Target input qubit.
+        theta (float | Float): Phase angle in radians.
+
+    Returns:
+        tuple[Qubit, Qubit]: Fresh control and target handles.
+
+    Raises:
+        QubitAliasError: If control and target are the same logical qubit.
+        QubitConsumedError: If either input was already consumed.
+        RuntimeError: If no tracer is active.
+    """
     _check_qubit_alias([(control, "control"), (target, "target")], "CP")
-
-    # Consume both input handles (enforces affine type)
-    control = control.consume(operation_name="CP[control]")
-    target = target.consume(operation_name="CP[target]")
-
+    tracer = _validate_gate_inputs((control, target), "CP")
     ctrl_out_value = control.value.next_version()
     tgt_out_value = target.value.next_version()
 
@@ -566,19 +644,32 @@ def cp(control: Qubit, target: Qubit, theta: float | Float) -> tuple[Qubit, Qubi
         theta=theta_value,
         results=[ctrl_out_value, tgt_out_value],
     )
-
-    tracer = get_current_tracer()
+    control = control.consume(operation_name="CP[control]")
+    target = target.consume(operation_name="CP[target]")
     tracer.add_operation(cp_op)
+    control._handoff_direct_borrow_to(ctrl_out)
+    target._handoff_direct_borrow_to(tgt_out)
     return ctrl_out, tgt_out
 
 
 def _apply_rotation_gate(
     qubit: Qubit, angle: float | Float, gate_type: GateOperationType
 ) -> Qubit:
-    """Apply a rotation gate with angle."""
-    # Consume the input handle (enforces affine type)
-    qubit = qubit.consume(operation_name=gate_type.name)
+    """Apply a parameterized single-qubit rotation.
 
+    Args:
+        qubit (Qubit): Input qubit handle to consume.
+        angle (float | Float): Rotation angle in radians.
+        gate_type (GateOperationType): Rotation gate kind to emit.
+
+    Returns:
+        Qubit: Fresh output qubit handle.
+
+    Raises:
+        QubitConsumedError: If ``qubit`` was already consumed.
+        RuntimeError: If no tracer is active.
+    """
+    tracer = _validate_gate_inputs((qubit,), gate_type.name)
     output_value = qubit.value.next_version()
     output_qubit = Qubit(value=output_value, parent=qubit.parent, indices=qubit.indices)
 
@@ -590,9 +681,9 @@ def _apply_rotation_gate(
         theta=theta_value,
         results=[output_value],
     )
-
-    tracer = get_current_tracer()
+    qubit = qubit.consume(operation_name=gate_type.name)
     tracer.add_operation(gate_op)
+    qubit._handoff_direct_borrow_to(output_qubit)
     return output_qubit
 
 
@@ -717,19 +808,20 @@ def rzz(qubit_0: Qubit, qubit_1: Qubit, angle: float | Float) -> tuple[Qubit, Qu
     The RZZ gate applies a rotation around the ZZ axis on two qubits.
 
     Args:
-        qubit_0: First qubit.
-        qubit_1: Second qubit.
-        angle: Rotation angle in radians.
+        qubit_0 (Qubit): First input qubit.
+        qubit_1 (Qubit): Second input qubit.
+        angle (float | Float): Rotation angle in radians.
 
     Returns:
-        Tuple of (qubit_0_out, qubit_1_out) after RZZ.
+        tuple[Qubit, Qubit]: Fresh handles after the RZZ operation.
+
+    Raises:
+        QubitAliasError: If both inputs are the same logical qubit.
+        QubitConsumedError: If either input was already consumed.
+        RuntimeError: If no tracer is active.
     """
     _check_qubit_alias([(qubit_0, "qubit_0"), (qubit_1, "qubit_1")], "RZZ")
-
-    # Consume both input handles (enforces affine type)
-    qubit_0 = qubit_0.consume(operation_name="RZZ[0]")
-    qubit_1 = qubit_1.consume(operation_name="RZZ[1]")
-
+    tracer = _validate_gate_inputs((qubit_0, qubit_1), "RZZ")
     q0_out_value = qubit_0.value.next_version()
     q1_out_value = qubit_1.value.next_version()
 
@@ -744,9 +836,11 @@ def rzz(qubit_0: Qubit, qubit_1: Qubit, angle: float | Float) -> tuple[Qubit, Qu
         theta=theta_value,
         results=[q0_out_value, q1_out_value],
     )
-
-    tracer = get_current_tracer()
+    qubit_0 = qubit_0.consume(operation_name="RZZ[0]")
+    qubit_1 = qubit_1.consume(operation_name="RZZ[1]")
     tracer.add_operation(rzz_op)
+    qubit_0._handoff_direct_borrow_to(q0_out)
+    qubit_1._handoff_direct_borrow_to(q1_out)
     return q0_out, q1_out
 
 

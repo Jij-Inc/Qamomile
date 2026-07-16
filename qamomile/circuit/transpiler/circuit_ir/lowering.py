@@ -6,6 +6,7 @@ import dataclasses
 import hashlib
 from typing import Any
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.canonical import _token
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -274,19 +275,26 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 alias, or a case cannot be lowered as a unitary reusable body.
         """
         inherited_controls = list(outer_control_indices or ())
-        index_indices: list[int] = []
-        for operand in op.index_operands:
-            physical = self._resolver.resolve_qubit_index(
+        index_width = self._resolve_select_index_width(op, bindings)
+        index_groups = [
+            _expand_quantum_operands_to_phys(
+                self,
                 operand,
                 qubit_map,
                 bindings,
+                operation="SelectOperation",
             )
-            if physical is None:
-                raise EmitError(
-                    f"Cannot resolve SELECT index operand {operand.name!r}.",
-                    operation="SelectOperation",
-                )
-            index_indices.append(physical)
+            for operand in op.index_operands
+        ]
+        index_indices = [physical for group in index_groups for physical in group]
+        if len(index_indices) != index_width:
+            raise EmitError(
+                f"SelectOperation index arguments expanded to "
+                f"{len(index_indices)} qubit(s), but num_index_qubits "
+                f"resolves to {index_width}. The flattened index prefix must "
+                f"match the declared width exactly.",
+                operation="SelectOperation",
+            )
 
         target_groups = [
             _expand_quantum_operands_to_phys(
@@ -309,7 +317,6 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             [*inherited_controls, *index_indices, *target_indices],
         )
 
-        index_width = op.num_index_qubits
         target_widths = tuple(len(group) for group in target_groups)
         fallback = CircuitBuilder(
             index_width + len(target_indices),
@@ -383,14 +390,70 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
         )
 
         _map_operand_result_groups(
-            op.results[:index_width],
-            [[physical] for physical in index_indices],
+            op.results[: op.num_index_args],
+            index_groups,
             qubit_map,
         )
         target_results = [
-            result for result in op.results[index_width:] if result.type.is_quantum()
+            result
+            for result in op.results[op.num_index_args :]
+            if result.type.is_quantum()
         ]
         _map_operand_result_groups(target_results, target_groups, qubit_map)
+
+    def _resolve_select_index_width(
+        self,
+        operation: SelectOperation,
+        bindings: dict[str, Any],
+    ) -> int:
+        """Resolve and validate a SELECT index-register width.
+
+        Args:
+            operation (SelectOperation): SELECT operation whose concrete or
+                symbolic width is required.
+            bindings (dict[str, Any]): Active compile-time and loop bindings.
+
+        Returns:
+            int: Positive concrete index width able to address every case.
+
+        Raises:
+            EmitError: If a symbolic width cannot be resolved, is not positive,
+                or cannot address all case blocks.
+        """
+        width = operation.num_index_qubits
+        if isinstance(width, Value):
+            resolved = self._resolver.resolve_classical_value(width, bindings)
+            if resolved is None:
+                raise EmitError(
+                    f"Cannot resolve num_index_qubits Value {width.name!r} "
+                    f"for SELECT lowering.",
+                    operation="SelectOperation",
+                )
+            if not is_plain_int(resolved):
+                raise EmitError(
+                    "SelectOperation num_index_qubits must resolve to a "
+                    f"Python int, got {resolved!r}.",
+                    operation="SelectOperation",
+                )
+            assert isinstance(resolved, int)
+            concrete_width = resolved
+        else:
+            concrete_width = width
+        if concrete_width < 1:
+            raise EmitError(
+                f"SelectOperation resolved num_index_qubits={concrete_width}; "
+                f"the width must be a strictly positive integer.",
+                operation="SelectOperation",
+            )
+        minimum_width = (operation.num_cases - 1).bit_length()
+        if concrete_width < minimum_width:
+            raise EmitError(
+                f"SelectOperation has {operation.num_cases} case blocks, but "
+                f"num_index_qubits={concrete_width}; at least {minimum_width} "
+                f"index qubit(s) are required to address every case.",
+                operation="SelectOperation",
+            )
+        return concrete_width
 
     def _lower_select_case(
         self,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -82,6 +83,32 @@ def _hugr_select() -> tuple[qmc.Bit, qmc.Bit]:
 
 
 @qmc.qkernel
+def _hugr_explicit_overwide_select() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Keep an explicit over-wide SELECT visible at HUGR's boundary."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_hugr_identity, _hugr_helper],
+        num_index_qubits=2,
+    )(index, target)
+    return qmc.measure(index), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_symbolic_width_select(
+    width: qmc.UInt,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Resolve a symbolic SELECT width before HUGR's support boundary."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_hugr_identity, _hugr_helper],
+        num_index_qubits=width,
+    )(index, target)
+    return qmc.measure(index), qmc.measure(target)
+
+
+@qmc.qkernel
 def _hugr_identity_vector(
     qubits: qmc.Vector[qmc.Qubit],
 ) -> qmc.Vector[qmc.Qubit]:
@@ -116,6 +143,27 @@ def _hugr_controlled_global_phase(theta: qmc.Float) -> tuple[qmc.Bit, qmc.Bit]:
     target = qmc.qubit("target")
     control, target = qmc.control(_hugr_phased_helper)(control, target, theta)
     return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_global_phase_kickback(theta: qmc.Float) -> qmc.Bit:
+    """Expose a controlled global phase through Hadamard interference.
+
+    Args:
+        theta (qmc.Float): Phase applied on the active control branch.
+
+    Returns:
+        qmc.Bit: Measurement of the interfered control qubit.
+    """
+    control = qmc.h(qmc.qubit("control"))
+    target = qmc.qubit("target")
+    control, target = qmc.control(_hugr_identity)(
+        control,
+        target,
+        global_phase=theta,
+    )
+    control = qmc.h(control)
+    return qmc.measure(control)
 
 
 @qmc.qkernel
@@ -1480,10 +1528,26 @@ def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
     assert compiled.metadata.pipeline == "program_graph"
 
 
-def test_hugr_rejects_select_at_prepared_module_boundary() -> None:
-    """SELECT fails explicitly instead of disappearing from direct lowering."""
+@pytest.mark.parametrize(
+    ("kernel", "bindings"),
+    [
+        (_hugr_select, None),
+        (_hugr_explicit_overwide_select, None),
+        (_hugr_symbolic_width_select, {"width": 2}),
+    ],
+)
+def test_hugr_rejects_select_at_prepared_module_boundary(
+    kernel: qmc.QKernel,
+    bindings: dict[str, int] | None,
+) -> None:
+    """SELECT fails explicitly instead of disappearing from direct lowering.
+
+    Args:
+        kernel (qmc.QKernel): SELECT program reaching direct HUGR lowering.
+        bindings (dict[str, int] | None): Compile-time width bindings.
+    """
     with pytest.raises(EmitError, match=r"does not support qmc\.select") as error:
-        HugrTranspiler().to_hugr(_hugr_select)
+        HugrTranspiler().to_hugr(kernel, bindings=bindings)
 
     assert error.value.operation == "SelectOperation"
 
@@ -1536,6 +1600,50 @@ def test_hugr_preserves_transformed_global_phase(
         rel=0.0,
         abs=1e-15,
     )
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("theta", "expected_measurement"),
+    [(0.0, 0), (math.pi, 1)],
+)
+def test_hugr_executes_controlled_global_phase_kickback_on_selene(
+    tmp_path: Path,
+    theta: float,
+    expected_measurement: int,
+) -> None:
+    """Selene observes the relative phase produced by coherent control.
+
+    The sequence H-control(exp(i*theta)I)-H returns zero for theta=0 and one
+    for theta=pi, so both parametrized outcomes are deterministic.
+    """
+    selene = pytest.importorskip("selene_sim")
+    package = HugrTranspiler().to_hugr(
+        _hugr_global_phase_kickback,
+        bindings={"theta": theta},
+    )
+    runner = selene.build(
+        package,
+        name="qamomile_hugr_global_phase_kickback",
+        build_dir=tmp_path,
+    )
+    measurements = selene.MeasurementExtractor()
+
+    results = list(
+        runner.run(
+            selene.Quest(),
+            n_qubits=2,
+            event_hook=measurements,
+            random_seed=1,
+            timeout=15.0,
+        )
+    )
+
+    assert results == []
+    assert len(measurements.log_entries) == 1
+    assert [entry.result_value for entry in measurements.log_entries[0]] == [
+        expected_measurement
+    ]
 
 
 @pytest.mark.hugr

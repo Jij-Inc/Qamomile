@@ -22,6 +22,7 @@ structure decision, so they are harmless.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Sequence, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -40,6 +41,13 @@ def _extract_concrete_shape(binding: Any) -> tuple[int, ...] | None:
     Supports numpy arrays (``.shape``) and Python sequences (``len()``).
     Returns ``None`` for scalars, dicts, ``None``, etc. so the caller can
     leave the symbolic shape untouched.
+
+    Args:
+        binding (Any): Candidate compile-time array binding.
+
+    Returns:
+        tuple[int, ...] | None: Concrete dimensions, or ``None`` when the
+            binding is not array-like.
     """
     if binding is None:
         return None
@@ -61,13 +69,36 @@ class ParameterShapeResolutionPass(Pass[Block, Block]):
     """
 
     def __init__(self, bindings: dict[str, Any] | None = None) -> None:
+        """Initialize parameter-shape resolution.
+
+        Args:
+            bindings (dict[str, Any] | None): Compile-time bindings keyed by
+                entrypoint argument name. Defaults to ``None``.
+        """
         self._bindings = bindings or {}
 
     @property
     def name(self) -> str:
+        """Return the pass name.
+
+        Returns:
+            str: Stable diagnostic pass name.
+        """
         return "parameter_shape_resolution"
 
     def run(self, input: Block) -> Block:
+        """Replace resolvable symbolic array dimensions with constants.
+
+        Args:
+            input (Block): Hierarchical semantic block to rewrite.
+
+        Returns:
+            Block: Rewritten block preserving all display, ABI, parameter, and
+                stage metadata.
+
+        Raises:
+            ValidationError: If ``input`` is not hierarchical.
+        """
         if input.kind != BlockKind.HIERARCHICAL:
             raise ValidationError(
                 f"ParameterShapeResolutionPass expects HIERARCHICAL block, "
@@ -94,22 +125,34 @@ class ParameterShapeResolutionPass(Pass[Block, Block]):
             cast(ValueLike, substitutor.substitute_value(v))
             for v in input.output_values
         ]
+        new_parameters = cast(
+            "dict[str, Value]",
+            {
+                name: substitutor.substitute_value(value)
+                for name, value in input.parameters.items()
+            },
+        )
 
-        return Block(
-            name=input.name,
-            label_args=input.label_args,
+        return dataclasses.replace(
+            input,
             input_values=new_input_values,
             output_values=new_output_values,
             operations=new_operations,
-            kind=input.kind,
-            parameters=input.parameters,
-            param_slots=input.param_slots,
+            parameters=new_parameters,
         )
 
     def _build_substitutions(
         self, input_values: Sequence[ValueBase]
     ) -> dict[str, ValueBase]:
-        """Return uuid -> concrete Value map for every resolvable shape dim."""
+        """Build replacements for every resolvable shape dimension.
+
+        Args:
+            input_values (Sequence[ValueBase]): Entrypoint inputs whose array
+                shapes may depend on bindings.
+
+        Returns:
+            dict[str, ValueBase]: Symbolic UUID to concrete dimension Value.
+        """
         substitutions: dict[str, ValueBase] = {}
         for v in input_values:
             if not isinstance(v, ArrayValue):
@@ -140,7 +183,15 @@ class ParameterShapeResolutionPass(Pass[Block, Block]):
         operations: list[Operation],
         substitutor: ValueSubstitutor,
     ) -> list[Operation]:
-        """Apply substitution to each op and recurse into nested op lists."""
+        """Apply substitutions recursively to an operation region.
+
+        Args:
+            operations (list[Operation]): Operations in the current region.
+            substitutor (ValueSubstitutor): Value-rewrite engine.
+
+        Returns:
+            list[Operation]: Rewritten operations preserving region structure.
+        """
         result: list[Operation] = []
         for op in operations:
             substituted = substitutor.substitute_operation(op)

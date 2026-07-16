@@ -120,3 +120,25 @@ def test_select_estimator_accumulates_outer_controls() -> None:
     assert estimate.gates.multi_qubit == 1
     assert estimate.width.allocated_qubits == 3
     assert estimate.width.peak_qubits == 3
+
+
+def test_select_estimator_resolves_symbolic_index_width() -> None:
+    """A bound UInt controls SELECT gate arity and allocated register width."""
+
+    @qm.qkernel
+    def circuit(width: qm.UInt) -> qm.Bit:
+        """Apply identity-or-X SELECT over a symbolic-size index array."""
+        index = qm.qubit_array(width, name="index")
+        target = qm.qubit("target")
+        index, target = qm.select(
+            [_identity_case, _x_case],
+            num_index_qubits=width,
+        )(index, target)
+        return qm.measure(target)
+
+    estimate = circuit.estimate_resources(inputs={"width": 3})
+
+    assert estimate.gates.total == 1
+    assert estimate.gates.multi_qubit == 1
+    assert estimate.width.allocated_qubits == 4
+    assert estimate.width.peak_qubits == 4

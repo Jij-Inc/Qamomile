@@ -35,7 +35,6 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
-from qamomile.circuit.ir.serialize import dump_json, load_json
 from qamomile.circuit.ir.types.primitives import (
     FloatType,
     QubitType,
@@ -478,10 +477,10 @@ class TestCanonicalizeDeterminism:
     def test_select_boxed_implementation_twins_have_same_hash(self):
         """Callable implementation bodies inside SELECT canonicalize fully.
 
-        PR #571 stores transform-specific bodies under
-        ``CallableDef.implementations``. They must share the enclosing
-        canonical UUID universe; otherwise independently built but identical
-        boxed cases leak random UUIDs into ``content_hash``.
+        Transform-specific bodies under ``CallableDef.implementations`` must
+        share the enclosing canonical UUID universe; otherwise independently
+        built but identical boxed cases leak random UUIDs into
+        ``content_hash``.
         """
         a = _select_with_boxed_case(
             _callable_body_x_a.block,
@@ -494,6 +493,54 @@ class TestCanonicalizeDeterminism:
 
         assert to_canonical_bytes(a) == to_canonical_bytes(b)
         assert content_hash(a) == content_hash(b)
+
+    def test_symbolic_select_width_canonicalizes_with_its_input(self):
+        """Independent symbolic SELECT widths reuse canonical input identity."""
+
+        @qmc.qkernel
+        def identity(target: qmc.Qubit) -> qmc.Qubit:
+            """Return a SELECT target unchanged."""
+            return target
+
+        @qmc.qkernel
+        def flipped(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply X to a SELECT target."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def first(width: qmc.UInt) -> qmc.Bit:
+            """Build the first symbolic-width SELECT twin."""
+            index = qmc.qubit_array(width, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        @qmc.qkernel
+        def second(width: qmc.UInt) -> qmc.Bit:
+            """Build the second symbolic-width SELECT twin."""
+            index = qmc.qubit_array(width, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        first_block = _to_affine(first)
+        second_block = _to_affine(second)
+        canonical = canonicalize(first_block)
+        select = next(
+            operation
+            for operation in canonical.operations
+            if isinstance(operation, SelectOperation)
+        )
+
+        assert isinstance(select.num_index_qubits, Value)
+        assert select.num_index_qubits.uuid == canonical.input_values[0].uuid
+        assert to_canonical_bytes(first_block) == to_canonical_bytes(second_block)
 
     def test_select_boxed_implementation_body_affects_hash(self):
         """A semantic change in an alternate implementation changes the hash."""
@@ -1175,42 +1222,6 @@ class TestParamSlotsPreservation:
         block = _to_affine(_h_then_rx)
         canon, _, _ = canonicalize_and_remap(block)
         assert canon.param_slots == block.param_slots
-
-    def test_canonicalize_then_serialize_keeps_manifest(self):
-        """canonicalize → dump_json/load_json keeps every slot field.
-
-        Covers the documented flow "canonicalize first for
-        build-independent identity, then serialize", including a
-        ``COMPILE_TIME_BOUND`` slot with a numpy ``bound_value``.
-        """
-        affine = _to_affine(_h_then_rx)
-        bound = np.array([0.1, 0.2, 0.3], dtype=np.float64)
-        block = dataclasses.replace(
-            affine,
-            param_slots=(
-                *affine.param_slots,
-                ParamSlot(
-                    name="weights",
-                    type=FloatType(),
-                    kind=ParamKind.COMPILE_TIME_BOUND,
-                    ndim=1,
-                    bound_value=bound,
-                ),
-            ),
-        )
-        canon = canonicalize(block)
-        restored = load_json(dump_json(canon))
-        assert len(restored.param_slots) == len(canon.param_slots) == 2
-        for original, restored_slot in zip(canon.param_slots, restored.param_slots):
-            assert restored_slot.name == original.name
-            assert restored_slot.kind == original.kind
-            assert restored_slot.ndim == original.ndim
-            assert isinstance(restored_slot.type, type(original.type))
-            assert restored_slot.default == original.default
-            assert restored_slot.differentiable == original.differentiable
-        restored_bound = restored.param_slots[-1].bound_value
-        assert isinstance(restored_bound, np.ndarray)
-        assert np.array_equal(restored_bound, bound)
 
 
 class TestParamSlotsHashParticipation:

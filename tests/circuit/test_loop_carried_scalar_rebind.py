@@ -31,6 +31,7 @@ import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle.containers import Tuple
 from qamomile.circuit.frontend.operation.control_flow import record_loop_rebinds
 from qamomile.circuit.frontend.tracer import trace
+from qamomile.circuit.ir.canonical import to_canonical_bytes
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -830,13 +831,10 @@ class TestSupportedLoopCarriedScalars:
         assert first.output_values[0].uuid == second.output_values[0].uuid
         assert first.output_values[0].logical_id == second.output_values[0].logical_id
 
-        from qamomile.circuit.ir.serialize import to_dict
-
-        assert to_dict(first) == to_dict(second)
+        assert to_canonical_bytes(first) == to_canonical_bytes(second)
 
     def test_static_for_items_replay_preserves_identity_across_runs(self):
-        """Repeated items-loop replay produces identical wire-level IR."""
-        from qamomile.circuit.ir.serialize import to_dict
+        """Repeated items-loop replay produces identical canonical IR."""
         from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
             CompileTimeIfLoweringPass,
         )
@@ -859,7 +857,7 @@ class TestSupportedLoopCarriedScalars:
         assert first.output_values[0].get_const() == 12
         assert first.output_values[0].uuid == second.output_values[0].uuid
         assert first.output_values[0].logical_id == second.output_values[0].logical_id
-        assert to_dict(first) == to_dict(second)
+        assert to_canonical_bytes(first) == to_canonical_bytes(second)
 
     def test_static_quantum_loop_carry_can_surface_as_constant(self):
         """A statically evaluated quantum-loop carry is a real block output."""
@@ -2724,7 +2722,7 @@ class TestCarriedScalarCrossBackend:
 
 
 class TestRegionArgSerialization:
-    """RegionArg records round-trip through both wire formats."""
+    """RegionArg records round-trip through qkernel serialization."""
 
     def _build_block_with_region_args(self):
         """Build a block whose ForOperation carries region args.
@@ -2742,26 +2740,20 @@ class TestRegionArgSerialization:
                 total = total + i
             return total
 
-        return kernel.build(parameters=["n"])
+        return kernel
 
-    @pytest.mark.parametrize("fmt", ["json", "msgpack"])
-    def test_region_args_roundtrip(self, fmt):
+    def test_region_args_roundtrip(self):
         """Region args survive a serialize/deserialize cycle."""
-        from qamomile.circuit.ir.serialize import (
-            dump_json,
-            dump_msgpack,
-            load_json,
-            load_msgpack,
+        from qamomile.circuit.serialization import (
+            deserialize,
+            serialize,
         )
 
-        block = self._build_block_with_region_args()
+        kernel = self._build_block_with_region_args()
         transpiler = QiskitTranspiler()
-        affine = transpiler.inline(block)
+        affine = transpiler.inline(kernel.block)
 
-        if fmt == "json":
-            restored = load_json(dump_json(affine))
-        else:
-            restored = load_msgpack(dump_msgpack(affine))
+        restored = transpiler.inline(deserialize(serialize(kernel)).block)
 
         original_loops = _find_loops(affine.operations)
         restored_loops = _find_loops(restored.operations)
@@ -2774,16 +2766,43 @@ class TestRegionArgSerialization:
             ):
                 found_region_args = True
                 assert orig_arg.var_name == rest_arg.var_name
-                assert orig_arg.init.uuid == rest_arg.init.uuid
-                assert orig_arg.block_arg.uuid == rest_arg.block_arg.uuid
-                assert orig_arg.yielded.uuid == rest_arg.yielded.uuid
-                assert orig_arg.result.uuid == rest_arg.result.uuid
+                original_values = (
+                    orig_arg.init,
+                    orig_arg.block_arg,
+                    orig_arg.yielded,
+                    orig_arg.result,
+                )
+                restored_values = (
+                    rest_arg.init,
+                    rest_arg.block_arg,
+                    rest_arg.yielded,
+                    rest_arg.result,
+                )
+                assert [value.type for value in original_values] == [
+                    value.type for value in restored_values
+                ]
+                for left_index in range(len(original_values)):
+                    for right_index in range(len(original_values)):
+                        assert (
+                            original_values[left_index].uuid
+                            == original_values[right_index].uuid
+                        ) == (
+                            restored_values[left_index].uuid
+                            == restored_values[right_index].uuid
+                        )
+                        assert (
+                            original_values[left_index].logical_id
+                            == original_values[right_index].logical_id
+                        ) == (
+                            restored_values[left_index].logical_id
+                            == restored_values[right_index].logical_id
+                        )
                 assert rest_arg.result in rest.results
         assert found_region_args, "fixture must produce at least one region arg"
 
 
 class TestRebindRecordSerialization:
-    """LoopCarriedRebind records still round-trip (while-loop carries)."""
+    """LoopCarriedRebind records round-trip with their qkernel."""
 
     def _build_block_with_records(self):
         """Build a block whose WhileOperation carries rebind records."""
@@ -2801,25 +2820,20 @@ class TestRebindRecordSerialization:
                 count = count + 1
             return count
 
-        return kernel.build(parameters=["dummy"])
+        return kernel
 
-    @pytest.mark.parametrize("fmt", ["json", "msgpack"])
-    def test_records_roundtrip(self, fmt):
+    def test_records_roundtrip(self):
         """Records survive a serialize/deserialize cycle."""
-        from qamomile.circuit.ir.serialize import (
-            dump_json,
-            dump_msgpack,
-            load_json,
-            load_msgpack,
+        from qamomile.circuit.serialization import (
+            deserialize,
+            serialize,
         )
 
-        block = self._build_block_with_records()
+        kernel = self._build_block_with_records()
         transpiler = QiskitTranspiler()
-        affine = transpiler.inline(block)
-        if fmt == "json":
-            restored = load_json(dump_json(affine))
-        else:
-            restored = load_msgpack(dump_msgpack(affine))
+        affine = transpiler.inline(kernel.block)
+
+        restored = transpiler.inline(deserialize(serialize(kernel)).block)
 
         original_loops = _find_loops(affine.operations)
         restored_loops = _find_loops(restored.operations)
@@ -2834,7 +2848,13 @@ class TestRebindRecordSerialization:
             ):
                 found_records = True
                 assert orig_rec.var_name == rest_rec.var_name
-                assert orig_rec.before.uuid == rest_rec.before.uuid
-                assert orig_rec.after.uuid == rest_rec.after.uuid
+                assert orig_rec.before.type == rest_rec.before.type
+                assert orig_rec.after.type == rest_rec.after.type
+                assert (orig_rec.before.uuid == orig_rec.after.uuid) == (
+                    rest_rec.before.uuid == rest_rec.after.uuid
+                )
+                assert (orig_rec.before.logical_id == orig_rec.after.logical_id) == (
+                    rest_rec.before.logical_id == rest_rec.after.logical_id
+                )
                 assert orig_rec.before_synthesized == rest_rec.before_synthesized
         assert found_records, "fixture must produce at least one rebind record"

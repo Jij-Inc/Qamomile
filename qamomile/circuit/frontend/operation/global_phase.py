@@ -107,8 +107,9 @@ class GlobalPhaseGate:
             TypeError: If the phase or wrapped-call arguments are invalid.
             QubitConsumedError: If a quantum argument was already consumed.
             FrontendTransformError: If the wrapped call cannot be specialized.
-            RuntimeError: If the wrapped qkernel's emitted result count differs
-                from its declared outputs or a returned slice lacks metadata.
+            RuntimeError: If no qkernel tracer is active, the wrapped qkernel's
+                emitted result count differs from its declared outputs, or a
+                returned slice lacks metadata.
         """
         phase = _phase_to_value(self._phase)
         outputs = self._qkernel(*args, **kwargs)

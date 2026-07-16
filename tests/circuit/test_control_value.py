@@ -26,9 +26,9 @@ from qamomile.circuit.ir.operation.callable import (
 )
 from qamomile.circuit.ir.operation.gate import ConcreteControlledU
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
-from qamomile.circuit.ir.serialize import dump_json, load_json
 from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler.passes.inline import InlinePass
 
 
@@ -749,10 +749,9 @@ def test_control_value_composes_with_existing_oracle_controls() -> None:
     assert invoke.control_value == 0b110
 
 
-def test_control_value_round_trips_through_ir_serialization() -> None:
-    """Structural and callable control representations retain their values."""
-    concrete_block = InlinePass().run(_patterned_x_layer.block)
-    concrete_restored = load_json(dump_json(concrete_block))
+def test_control_value_round_trips_through_qkernel_serialization() -> None:
+    """Structural and callable qkernels retain their control values."""
+    concrete_restored = deserialize(serialize(_patterned_x_layer)).block
     [concrete] = [
         operation
         for operation in concrete_restored.operations
@@ -760,8 +759,7 @@ def test_control_value_round_trips_through_ir_serialization() -> None:
     ]
     assert concrete.control_value == 2
 
-    invoke_block = InlinePass().run(_patterned_composite_layer.block)
-    invoke_restored = load_json(dump_json(invoke_block))
+    invoke_restored = deserialize(serialize(_patterned_composite_layer)).block
     [invoke] = [
         operation
         for operation in invoke_restored.operations
@@ -770,8 +768,8 @@ def test_control_value_round_trips_through_ir_serialization() -> None:
     assert invoke.control_value == 2
 
 
-def test_inverse_block_control_value_round_trips() -> None:
-    """An inverse of a patterned composite retains activation metadata."""
+def test_inverse_block_control_value_round_trips_through_qkernel() -> None:
+    """QKernel persistence retains patterned inverse activation metadata."""
 
     @qmc.qkernel
     def inverse_layer(
@@ -795,7 +793,7 @@ def test_inverse_block_control_value_round_trips() -> None:
             target,
         )
 
-    restored = load_json(dump_json(InlinePass().run(inverse_layer.block)))
+    restored = deserialize(serialize(inverse_layer)).block
     [outer_inverse] = [
         operation
         for operation in restored.operations

@@ -24,7 +24,6 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ClassicalBitExpr,
     ForInstruction,
     GateInstruction,
-    GlobalPhaseCapabilities,
     IfInstruction,
     LiteralExpr,
     LoopVariableExpr,
@@ -283,9 +282,7 @@ class PyQretMaterializer:
                 parameter_form=ScalarExpressionForm.CONCRETE_ONLY,
             ),
             pauli_time=numeric,
-            global_phase=GlobalPhaseCapabilities(
-                scalars=numeric,
-            ),
+            global_phase=numeric,
             generic_calls=generic_call,
             supports_dynamic_if=False,
             supports_dynamic_while=False,

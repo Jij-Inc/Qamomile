@@ -456,17 +456,17 @@ class TestControlledGateCall:
     def test_aliasing_control_and_target_raises(self):
         """Reusing the same qubit as control + target raises QubitConsumedError.
 
-        Frontend Step 6 dropped the bespoke
-        ``_validate_no_alias_or_overlap`` entry-point check; the
-        underlying ``Handle.consume()`` linear-type machinery catches
-        the duplicate on the second consume, so the error class is
-        ``QubitConsumedError`` (not ``QubitAliasError``).
+        Controlled gates rely on the ``Handle.consume()`` linear-ownership
+        check instead of a dedicated alias preflight. The duplicate is caught
+        on the second consume, so the error class is ``QubitConsumedError``
+        rather than ``QubitAliasError``.
         """
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         q = _make_qubit("q")
         with trace() as tracer:  # noqa: F841
             with pytest.raises(QubitConsumedError):
                 cg(q, q)
+            assert not q._consumed
 
     def test_aliasing_duplicate_controls_raises(self):
         """Reusing the same qubit across two control slots raises QubitConsumedError.
@@ -480,6 +480,52 @@ class TestControlledGateCall:
         with trace() as tracer:  # noqa: F841
             with pytest.raises(QubitConsumedError):
                 cg(q, q, tgt)
+            assert not q._consumed
+            assert not tgt._consumed
+
+    def test_missing_tracer_does_not_consume_inputs(self):
+        """Tracer validation precedes controlled-call ownership transfer."""
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        ctrl = _make_qubit("ctrl")
+        tgt = _make_qubit("tgt")
+
+        with pytest.raises(RuntimeError, match="No active tracer"):
+            cg(ctrl, tgt, global_phase=0.25)
+
+        assert not ctrl._consumed
+        assert not tgt._consumed
+
+    def test_specialization_failure_does_not_consume_inputs(self, monkeypatch):
+        """Controlled specialization completes before affine ownership moves."""
+        from qamomile.circuit.frontend.operation import control as control_module
+
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        ctrl = _make_qubit("ctrl")
+        tgt = _make_qubit("tgt")
+
+        def fail_specialization(*_args, **_kwargs):
+            """Raise the synthetic specialization failure.
+
+            Args:
+                *_args (object): Ignored positional arguments.
+                **_kwargs (object): Ignored keyword arguments.
+
+            Raises:
+                RuntimeError: Always, to exercise the transaction boundary.
+            """
+            raise RuntimeError("specialization failed")
+
+        monkeypatch.setattr(
+            control_module,
+            "select_specialized_block",
+            fail_specialization,
+        )
+        with trace():
+            with pytest.raises(RuntimeError, match="specialization failed"):
+                cg(ctrl, tgt, global_phase=0.25)
+
+        assert not ctrl._consumed
+        assert not tgt._consumed
 
 
 # =============================================================================
@@ -515,15 +561,30 @@ class TestControlledValidation:
     def test_control_indices_in_concrete_mode_raises(self):
         """Concrete-``num_controls`` rejects ``control_indices`` at compose time.
 
-        The redesign restricted ``control_indices`` to symbolic
-        mode (design §1.1, decision #5); concrete mode has no
-        selection step.
+        ``control_indices`` selects entries from a symbolic control pool;
+        concrete mode has no selection step.
         """
         cg = ControlledGate(_mock_qkernel(), num_controls=2)
         c0, c1, tgt = _make_qubit("c0"), _make_qubit("c1"), _make_qubit("tgt")
         with trace():
             with pytest.raises(ValueError, match="only valid in symbolic mode"):
                 cg(c0, c1, tgt, control_indices=[0])
+
+    def test_concrete_control_rejects_symbolic_length_control_array(self):
+        """Concrete control fails before ownership moves on a symbolic array."""
+
+        @qmc.qkernel
+        def invalid(n: qmc.UInt) -> qmc.Bit:
+            controls = qmc.qubit_array(n, "controls")
+            target = qmc.qubit("target")
+            controls, target = qmc.control(qmc.x, num_controls=2)(
+                controls,
+                target,
+            )
+            return qmc.measure(target)
+
+        with pytest.raises(ValueError, match="has symbolic length"):
+            _ = invalid.block
 
 
 class TestNormalizeControlIndices:
@@ -1354,6 +1415,51 @@ class TestControlledOracle:
 
         with pytest.raises(TypeError, match="symbolic num_controls"):
             qmc.control(oracle, num_controls=qmc.uint(1))
+
+
+class TestOracleOwnershipTransaction:
+    """Opaque calls commit affine ownership only after validation."""
+
+    def test_duplicate_scalar_inputs_leave_handle_unconsumed(self):
+        """An aliased oracle call fails before consuming either role."""
+        oracle = qmc.opaque("two_qubit_oracle", num_qubits=2)
+        qubit = _make_qubit("q")
+
+        with trace():
+            with pytest.raises(QubitConsumedError, match="overlapping physical"):
+                oracle(qubit, qubit)
+
+        assert not qubit._consumed
+
+    def test_missing_tracer_leaves_scalar_input_unconsumed(self):
+        """Tracer lookup precedes an opaque call's ownership commit."""
+        oracle = qmc.opaque("one_qubit_oracle", num_qubits=1)
+        qubit = _make_qubit("q")
+
+        with pytest.raises(RuntimeError, match="No active tracer"):
+            oracle(qubit)
+
+        assert not qubit._consumed
+
+    def test_scalar_result_keeps_direct_element_borrow(self):
+        """An oracle result remains returnable to its parent register."""
+        oracle = qmc.opaque("element_oracle", num_qubits=1)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            """Apply an oracle to one borrowed element and return it.
+
+            Returns:
+                qmc.Vector[qmc.Bit]: Measured parent register.
+            """
+            qubits = qmc.qubit_array(2, "qubits")
+            element = qubits[0]
+            (element,) = oracle(element)
+            element = qmc.x(element)
+            qubits[0] = element
+            return qmc.measure(qubits)
+
+        assert circuit.build() is not None
 
 
 # -- Rejection: errors for unsupported callables -----------------------------
@@ -2264,7 +2370,7 @@ class TestControlledBuiltinStatevectorParityPower:
 
 @pytest.mark.skipif(not _HAS_QISKIT, reason="qiskit not installed")
 class TestControlledBuiltinSymbolicNumControls:
-    """``num_controls=qmc.UInt`` (symbolic) path works end-to-end on built-ins.
+    """Symbolic ``num_controls`` preserves controlled global-phase semantics.
 
     Symbolic ``num_controls`` is the path QPE uses: the count of
     control qubits is a kernel parameter (``UInt`` handle) rather than
@@ -2273,46 +2379,57 @@ class TestControlledBuiltinSymbolicNumControls:
     individual qubits.
 
     ``ControlledGate``'s symbolic path goes through ``_call_symbolic``
-    and emits a ``SymbolicControlledU`` operation, which is orthogonal
-    to the wrapper-synthesis path this PR adds.  This test pins that
-    the built-in form is at least *accepted* on that path: a kernel
-    using ``qmc.control(qmc.rx, num_controls=symbolic_n)``
-    transpiles, samples, and returns shots end-to-end.  We do **not**
-    assert the bit value here — verifying the controlled-rotation
-    semantics under ``SymbolicControlledU`` is the responsibility of
-    the controlled-U emit-pass tests (see ``tests/transpiler/`` and
-    ``tests/circuit/test_qpe.py``); the same assertion fails for a
-    hand-written ``@qmc.qkernel`` wrapper too, confirming the issue is
-    upstream of this PR.
+    and emits a ``SymbolicControlledU`` operation. The interference test
+    below exercises that path through transpilation and execution while
+    making the controlled call's global phase observable.
     """
 
-    def test_symbolic_num_controls_with_global_phase_runs_end_to_end(
+    @pytest.mark.parametrize(
+        "phase",
+        [
+            pytest.param(0.0, id="zero"),
+            pytest.param(math.pi / 2, id="pi-over-two"),
+            pytest.param(math.pi, id="pi"),
+        ],
+    )
+    def test_symbolic_num_controls_preserves_global_phase_by_interference(
         self,
         qiskit_transpiler,
+        seeded_executor,
+        phase,
     ):
+        """Measure a controlled global phase through Hadamard interference."""
+
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> qmc.Bit:
             controls = qmc.qubit_array(n, "c")
             target = qmc.qubit(name="t")
-            for i in qmc.range(n):
-                controls[i] = qmc.x(controls[i])
+            controls[0] = qmc.h(controls[0])
+            controls[1] = qmc.x(controls[1])
             crx = qmc.control(qmc.rx, num_controls=n)
             controls, target = crx(
                 controls,
                 target,
-                angle=math.pi,
-                global_phase=math.pi / 7,
+                angle=0.0,
+                global_phase=phase,
             )
-            return qmc.measure(target)
+            controls[0] = qmc.h(controls[0])
+            return qmc.measure(controls[0])
 
         exe = qiskit_transpiler.transpile(circuit, bindings={"n": 2})
-        results = exe.sample(qiskit_transpiler.executor(), shots=64).result().results
-        # End-to-end smoke: shots are returned with a valid bit value
-        # (0 or 1).  Bit-correctness is out of scope for this PR.
-        total = sum(count for _value, count in results)
-        assert total == 64
-        for value, _count in results:
-            assert value in (0, 1)
+        shots = 4096
+        counts = dict(exe.sample(seeded_executor, shots=shots).result().results)
+
+        # With c1 fixed in |1>, controlled-RX(0) applies diag(1, exp(i phase))
+        # to c0. The final H therefore gives P(c0=1) = sin²(phase / 2).
+        expected_one_probability = math.sin(phase / 2) ** 2
+        observed_one_probability = counts.get(1, 0) / shots
+        np.testing.assert_allclose(
+            observed_one_probability,
+            expected_one_probability,
+            rtol=0.0,
+            atol=0.04,
+        )
 
 
 def _make_controlled_circuit_with_measure(
@@ -3045,13 +3162,11 @@ class TestControlledWholeVectorControlOutput:
 # Cross-SDK execution: concrete-mode VectorView controls + Vector[Qubit] sub args
 # =============================================================================
 #
-# Coverage for Step 2.b of the controlled-API redesign: the new concrete
-# ``cg(qs[0:N], ...)`` form (where the leading control argument is a
-# ``VectorView`` rather than ``N`` separate scalar ``Qubit`` handles) and
-# the new ``cg(c, qs)`` form (where the sub-kernel takes a ``Vector[Qubit]``
-# argument that must be expanded into per-element physical targets at
-# emit time).  Neither form was reachable before Step 2.b's frontend
-# expansion and ``_expand_quantum_operands_to_phys`` emit helper.
+# Coverage for concrete ``cg(qs[0:N], ...)`` calls, where the leading control
+# argument is a ``VectorView`` rather than ``N`` separate scalar ``Qubit``
+# handles, and ``cg(c, qs)`` calls, where the controlled qkernel takes a
+# ``Vector[Qubit]`` argument that must be expanded into per-element physical
+# targets at emit time by ``_expand_quantum_operands_to_phys``.
 #
 # Each test transpiles on every supported SDK and exercises both the
 # sampling and expectation-value primitives so the sampler and
@@ -3348,8 +3463,8 @@ class TestControlledVectorSubArgCrossSDK:
     equivalence against the per-Qubit form is checked separately in
     :class:`TestControlledVectorSubArgQiskitEquivalence` — only on
     Qiskit, because the QURI Parts emitter has a pre-existing
-    multi-target-controlled-custom-gate gap in its fallback decomposer
-    (orthogonal to Step 2.b; tracked separately).
+    multi-target-controlled-custom-gate gap in its fallback decomposer that is
+    independent of Vector target-operand expansion.
     """
 
     def test_sampling_runs(self, transpiler_factory):
@@ -4665,9 +4780,8 @@ class TestSymbolicMultiArgControl:
         supplied positionally to override the default.  Before the
         fix the boundary algorithm counted only required-positional
         parameters and so misclassified the trailing ``theta_val``
-        as part of the control prefix, leaving zero quantum
-        sub-kernel args and raising ``ValueError`` ("no sub-kernel
-        quantum arg, see design decision #9").  After the fix the
+        as part of the control prefix, leaving no quantum argument for the
+        controlled qkernel and raising ``ValueError``. After the fix the
         boundary algorithm peels trailing classical-looking caller
         args (one per unbound default-valued sub-kernel parameter),
         so ``cg(pool, target, math.pi / 4)`` resolves to

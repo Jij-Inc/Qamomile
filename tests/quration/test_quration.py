@@ -231,6 +231,30 @@ def _quration_wide_select() -> qmc.Bit:
 
 
 @qmc.qkernel
+def _quration_explicit_overwide_select() -> qmc.Bit:
+    """Keep an explicit two-bit SELECT width beyond Quration's capability."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_quration_identity, _quration_phased_identity],
+        num_index_qubits=2,
+    )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _quration_symbolic_width_select(width: qmc.UInt) -> qmc.Bit:
+    """Resolve a symbolic SELECT width before Quration capability checks."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_quration_identity, _quration_phased_identity],
+        num_index_qubits=width,
+    )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
 def _quration_select_body(
     index: qmc.Qubit,
     target: qmc.Qubit,
@@ -558,6 +582,34 @@ def test_quration_rejects_wide_select_fallback(index_width: int) -> None:
         verify_target_legal(legalized, capabilities)
 
 
+@pytest.mark.parametrize(
+    ("kernel", "bindings"),
+    [
+        (_quration_explicit_overwide_select, None),
+        (_quration_symbolic_width_select, {"width": 2}),
+    ],
+)
+def test_quration_checks_resolved_declared_select_width(
+    kernel: qmc.QKernel,
+    bindings: dict[str, int] | None,
+) -> None:
+    """Quration validates the declared width, not the case-count minimum.
+
+    Args:
+        kernel (qmc.QKernel): Two-case SELECT with a declared two-bit index.
+        bindings (dict[str, int] | None): Compile-time width bindings.
+    """
+    transpiler = QurationTranspiler()
+    prepared = transpiler.prepare(kernel, bindings=bindings)
+    plan = transpiler.plan_circuit(prepared, bindings=bindings)
+    [segment] = lower_circuit_plan(plan, bindings=bindings).compiled_quantum
+    capabilities = PyQretMaterializer().capabilities
+    legalized = legalize_program(segment.circuit, capabilities, DEFAULT_POLICY)
+
+    with pytest.raises(TargetCapabilityError, match="reusable call transforms"):
+        verify_target_legal(legalized, capabilities)
+
+
 def test_quration_rejects_outer_controlled_select_fallback() -> None:
     """An outer control plus the SELECT index exceeds Quration's bound."""
     capabilities = PyQretMaterializer().capabilities
@@ -839,17 +891,29 @@ def test_quration_executes_two_case_select_phase_kickback() -> None:
 
 @pytest.mark.quration
 @pytest.mark.parametrize(
-    "kernel",
-    [_quration_wide_select, _quration_outer_controlled_select],
+    ("kernel", "bindings"),
+    [
+        (_quration_wide_select, None),
+        (_quration_explicit_overwide_select, None),
+        (_quration_symbolic_width_select, {"width": 2}),
+        (_quration_outer_controlled_select, None),
+    ],
 )
 def test_quration_public_select_rejects_unsupported_controls(
     kernel: qmc.QKernel,
+    bindings: dict[str, int] | None,
 ) -> None:
-    """Public SELECT lowering reports Quration's bounded control support."""
+    """Public SELECT lowering uses the resolved declared index width.
+
+    Args:
+        kernel (qmc.QKernel): SELECT program expected to exceed Quration's
+            distributed-control bound.
+        bindings (dict[str, int] | None): Compile-time width bindings.
+    """
     pytest.importorskip("pyqret")
 
     with pytest.raises(TargetCapabilityError, match="reusable call transforms"):
-        QurationTranspiler().transpile(kernel)
+        QurationTranspiler().transpile(kernel, bindings=bindings)
 
 
 @pytest.mark.quration

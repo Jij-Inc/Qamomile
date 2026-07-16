@@ -78,7 +78,7 @@ dispatches the two violation messages.
 
 from __future__ import annotations
 
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
@@ -119,6 +119,11 @@ ConstBoundToken: TypeAlias = tuple[Literal["const"], int]
 ValueBoundToken: TypeAlias = tuple[Literal["value"], str, int]
 MinBoundToken: TypeAlias = tuple[Literal["min"], object, object]
 BoundToken: TypeAlias = ConstBoundToken | ValueBoundToken | MinBoundToken
+ArrayResourceKey: TypeAlias = tuple[
+    str,
+    object,
+    ConstBoundToken | ValueBoundToken,
+]
 
 
 def _root_of(av: ArrayValue) -> ArrayValue:
@@ -269,11 +274,9 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         # active ``If`` merge proves the representation handoff.
         self._outer_snapshot_stack: list[_SnapshotFrame] = []
         self._active_if_stack: list[IfOperation] = []
-        # UUID-keyed origin map for representation-only slice aliases. Direct
-        # full-reslice constructions add one edge; an If merge inherits the
-        # origin only when both sources reach the same edge root. Gate results
-        # are never inserted, so a runtime-loop state update cannot masquerade
-        # as a skippable alias.
+        # UUID-keyed origin map for representation-only slice aliases. Gate
+        # results are never inserted, so a runtime-loop state update cannot
+        # masquerade as a skippable alias.
         self._representation_alias_origins: dict[str, str] = {}
         # Small expression cache for symbolic slice-bound comparisons.
         # ``SliceArrayOperation`` normalizes user slices through BinOps
@@ -441,10 +444,18 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         borrows.  This is over-conservative but safe.
 
         Args:
-            op: The ``HasNestedOps`` operation being dispatched.
-            state: Caller's mutable borrow tracker.
+            op (HasNestedOps): Nested operation being dispatched.
+            state (State): Caller's mutable borrow tracker.
+
+        Raises:
+            QubitBorrowConflictError: If a nested body creates overlapping
+                slice ownership or directly accesses a borrowed slot.
+            QubitConsumedError: If a nested body accesses a destroyed slot.
+            ValidationError: If nested ownership cannot cross the control-flow
+                boundary safely.
         """
         if isinstance(op, IfOperation):
+            entry_state = dict(state)
             # Push outer snapshot for the duration of branch walks.
             # Any release / drain inside either branch that targets
             # an entry from the snapshot is rejected by the helpers
@@ -452,11 +463,13 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             # deletions out of the body, so cross-body release is
             # unsupported in this revision.
             self._active_if_stack.append(op)
-            self._outer_snapshot_stack.append((_SnapshotKind.IF_BRANCH, dict(state)))
+            self._outer_snapshot_stack.append(
+                (_SnapshotKind.IF_BRANCH, dict(entry_state))
+            )
             try:
-                true_state = dict(state)
+                true_state = dict(entry_state)
                 self._walk(op.true_operations, true_state)
-                false_state = dict(state)
+                false_state = dict(entry_state)
                 self._walk(op.false_operations, false_state)
             finally:
                 self._outer_snapshot_stack.pop()
@@ -481,6 +494,12 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             state.update(merged)
             for merge in op.iter_merges():
                 is_representation_alias = self._record_if_representation_alias(merge)
+                if is_representation_alias:
+                    self._retire_if_root_representation_borrows(
+                        merge,
+                        state,
+                        entry_state,
+                    )
                 self._register_slice_bulk_borrow_if_new(
                     merge.result,
                     state,
@@ -541,16 +560,132 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             self._outer_snapshot_stack.pop()
 
     def _representation_alias_origin(self, view: ArrayValue) -> str:
-        """Return the root UUID of a proven representation-only alias.
+        """Return the provenance token of a representation-only alias.
 
         Args:
             view (ArrayValue): Slice view whose alias origin is requested.
 
         Returns:
-            str: The earliest proven alias UUID, or ``view.uuid`` when no
+            str: The earliest proven alias token, or ``view.uuid`` when no
                 representation-only edge has been recorded.
         """
         return self._representation_alias_origins.get(view.uuid, view.uuid)
+
+    def _exact_reslice_resource(
+        self,
+        value: ArrayValue,
+    ) -> tuple[ArrayResourceKey, bool] | None:
+        """Return the resource beneath an exact full-reslice prefix.
+
+        Args:
+            value (ArrayValue): Array representation to inspect.
+
+        Returns:
+            tuple[ArrayResourceKey, bool] | None: Canonical resource key and
+                whether at least one ordered ``0:length:1`` slice was removed,
+                or ``None`` for a cyclic or malformed extent chain.
+        """
+        current = value
+        saw_reslice = False
+        seen: set[str] = set()
+        while current.slice_of is not None:
+            if current.uuid in seen:
+                return None
+            seen.add(current.uuid)
+            parent = current.slice_of
+            if (
+                current.type != parent.type
+                or len(current.shape) != 1
+                or len(parent.shape) != 1
+                or self._const_int(current.slice_start) != 0
+                or self._const_int(current.slice_step) != 1
+            ):
+                break
+            current_extent = self._value_signature(current.shape[0])
+            parent_extent = self._value_signature(parent.shape[0])
+            same_extent = current_extent is not None and (
+                current_extent == parent_extent
+            )
+            if not same_extent:
+                current_length = self._const_int(current.shape[0])
+                parent_length = self._const_int(parent.shape[0])
+                same_extent = (
+                    current_length is not None and current_length == parent_length
+                )
+            if not same_extent:
+                break
+            saw_reslice = True
+            current = parent
+
+        if len(current.shape) != 1:
+            return None
+        extent: ConstBoundToken | ValueBoundToken
+        length = self._const_int(current.shape[0])
+        if length is not None:
+            extent = ("const", length)
+        else:
+            signature = self._value_signature(current.shape[0])
+            if signature is None:
+                return None
+            extent = ("value", signature[0], signature[1])
+        resource = cast(
+            ArrayResourceKey,
+            (current.logical_id, current.type, extent),
+        )
+        return resource, saw_reslice
+
+    def _retire_if_root_representation_borrows(
+        self,
+        merge: IfMerge,
+        state: State,
+        entry_state: State,
+    ) -> None:
+        """Retire branch-local full-slice owners merged back to a root array.
+
+        Args:
+            merge (IfMerge): Proven representation-only array merge.
+            state (State): Mutable post-branch borrow state.
+            entry_state (State): Borrow state captured before either branch.
+
+        Returns:
+            None.
+        """
+        result = merge.result
+        if not isinstance(result, ArrayValue) or result.slice_of is not None:
+            return
+        sources = tuple(
+            value
+            for value in (merge.true_value, merge.false_value)
+            if isinstance(value, ArrayValue) and value.slice_of is not None
+        )
+        if not sources:
+            return
+
+        result_resource = self._exact_reslice_resource(result)
+        if result_resource is None:
+            return
+
+        source_origins = {
+            self._representation_alias_origin(source) for source in sources
+        }
+        to_remove: list[BorrowKey] = []
+        for key, owner in state.items():
+            if (
+                key in entry_state
+                or not isinstance(owner, ArrayValue)
+                or owner.slice_of is None
+            ):
+                continue
+            owner_resource = self._exact_reslice_resource(owner)
+            if owner_resource is None or owner_resource[0] != result_resource[0]:
+                continue
+            if (
+                any(owner.logical_id == source.logical_id for source in sources)
+                or self._representation_alias_origin(owner) in source_origins
+            ):
+                to_remove.append(key)
+        for key in to_remove:
+            state.pop(key, None)
 
     def _record_if_representation_alias(self, merge: IfMerge) -> bool:
         """Propagate one alias origin through a representation-only If merge.
@@ -559,8 +694,9 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             merge (IfMerge): If merge whose sources and result are inspected.
 
         Returns:
-            bool: ``True`` only when both branch values already denote the
-                same proven slice alias with exactly equal coverage.
+            bool: ``True`` when all merge values differ only by exact full
+                reslices, or when both branch slices already share one proven
+                alias origin and exactly equal coverage.
         """
         values = (merge.true_value, merge.false_value, merge.result)
         if not all(isinstance(value, ArrayValue) for value in values):
@@ -569,6 +705,23 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         assert isinstance(true_value, ArrayValue)
         assert isinstance(false_value, ArrayValue)
         assert isinstance(result, ArrayValue)
+
+        resources = tuple(
+            self._exact_reslice_resource(value)
+            for value in (true_value, false_value, result)
+        )
+        first_resource = resources[0]
+        if (
+            all(resource is not None for resource in resources)
+            and any(resource[1] for resource in resources if resource is not None)
+            and first_resource is not None
+            and all(
+                resource is not None and resource[0] == first_resource[0]
+                for resource in resources[1:]
+            )
+        ):
+            self._representation_alias_origins[result.uuid] = first_resource[0][0]
+            return True
 
         if (
             true_value.uuid not in self._representation_alias_origins

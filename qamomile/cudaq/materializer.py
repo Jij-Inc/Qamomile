@@ -23,7 +23,6 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ClassicalBitExpr,
     ForInstruction,
     GateInstruction,
-    GlobalPhaseCapabilities,
     IfInstruction,
     LiteralExpr,
     LoopVariableExpr,
@@ -140,10 +139,7 @@ class CudaqMaterializer:
                 parameter_form=ScalarExpressionForm.ARBITRARY,
             ),
             pauli_time=numeric,
-            global_phase=GlobalPhaseCapabilities(
-                scalars=numeric,
-                min_qubits=0,
-            ),
+            global_phase=numeric,
             generic_calls=CallTransformCapabilities(
                 supports_power=True,
                 supports_inverse=True,

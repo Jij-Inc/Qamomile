@@ -1,18 +1,19 @@
 """Frontend ``qmc.select``: the quantum multiplexer (SELECT) gate.
 
-``qmc.select([U_0, U_1, ...])`` builds a :class:`SelectGate` that applies
-``U_i`` to a shared target register when an index (select) register reads
-the integer ``i``::
+``qmc.select([U_0, U_1, ...], num_index_qubits=...)`` builds a
+:class:`SelectGate` that applies ``U_i`` to a shared target register when an
+index (select) register reads the integer ``i``::
 
     sel = qmc.select([qmc.x, qmc.y, qmc.z, qmc.h])
     idx_out, tgt_out = sel(index_register, target)
 
-The leading argument is the index register (a ``Vector[Qubit]`` /
-``VectorView[Qubit]`` of length ``ceil(log2(len(cases)))``, or that many
-individual ``Qubit`` arguments). Everything after it is forwarded to every
-case unitary, exactly like the target / parameter arguments of
-``qmc.control``. Index bit order follows Qamomile's LSB-first convention:
-the first index qubit is bit zero.
+With the default ``num_index_qubits=None``, the width is inferred as
+``ceil(log2(len(cases)))``. An explicit ``int`` may be wider, leaving the
+extra index states as identity, while ``UInt`` defers the width to transpile
+time. Leading positional ``Qubit`` / ``Vector`` / ``VectorView`` arguments
+form the index prefix; the shared case signature identifies the trailing
+target and parameter arguments. Index bit order follows Qamomile's LSB-first
+convention: the first flattened index qubit is bit zero.
 
 The frontend reuses ``qmc.control``'s operand / result machinery (so every
 control-prefix and target handle pattern is supported identically) but emits a
@@ -26,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 import numpy as np
 
+from qamomile.circuit.frontend.handle.primitives import UInt
 from qamomile.circuit.frontend.qkernel_specialization import select_specialized_block
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block
@@ -66,6 +68,46 @@ def _num_index_qubits_for(num_cases: int) -> int:
             f"directly instead of wrapping it in a select."
         )
     return (num_cases - 1).bit_length()
+
+
+def _normalize_num_index_qubits(
+    num_cases: int,
+    num_index_qubits: int | UInt | None,
+) -> int | UInt:
+    """Normalize an inferred, concrete, or symbolic SELECT index width.
+
+    Args:
+        num_cases (int): Number of SELECT cases, which must be at least two.
+        num_index_qubits (int | UInt | None): Requested index width. ``None``
+            infers the minimal width, an ``int`` may be wider, and ``UInt``
+            defers width validation until transpilation.
+
+    Returns:
+        int | UInt: Minimal or explicitly requested index width.
+
+    Raises:
+        TypeError: If the requested width is neither a plain ``int``,
+            ``UInt``, nor ``None``.
+        ValueError: If a concrete width cannot address every case.
+    """
+    minimum = _num_index_qubits_for(num_cases)
+    if num_index_qubits is None:
+        return minimum
+    if isinstance(num_index_qubits, bool) or not isinstance(
+        num_index_qubits,
+        (int, UInt),
+    ):
+        raise TypeError(
+            "num_index_qubits must be a Python int, UInt, or None; "
+            f"got {type(num_index_qubits).__name__}."
+        )
+    if isinstance(num_index_qubits, int) and num_index_qubits < minimum:
+        raise ValueError(
+            f"num_index_qubits={num_index_qubits} cannot address "
+            f"{num_cases} cases; at least {minimum} index qubit(s) are "
+            f"required."
+        )
+    return num_index_qubits
 
 
 def _signature_key(qkernel: "Any") -> tuple[tuple[str, Any, Any], ...]:
@@ -355,9 +397,11 @@ class SelectGate:
     Args:
         cases (Sequence[QKernel | Callable[..., Any]]): Case unitaries in
             ascending index order. Every case must expose the same signature.
+        num_index_qubits (int | UInt | None): Number of leading index qubits.
+            ``None`` infers the minimal width. Defaults to ``None``.
 
     Attributes:
-        num_index_qubits (int): Minimal LSB-first index-register width.
+        num_index_qubits (int | UInt): LSB-first index-register width.
         num_cases (int): Number of selectable unitary cases.
 
     Example:
@@ -370,7 +414,11 @@ class SelectGate:
         ...     return qm.measure(t)
     """
 
-    def __init__(self, cases: Sequence["QKernel | Callable[..., Any]"]) -> None:
+    def __init__(
+        self,
+        cases: Sequence["QKernel | Callable[..., Any]"],
+        num_index_qubits: int | UInt | None = None,
+    ) -> None:
         """Wrap and validate the case unitaries.
 
         Args:
@@ -380,16 +428,25 @@ class SelectGate:
                 or a built-in gate callable (``qmc.x``, ``qmc.ry``, ...).
                 All cases must share the same parameter signature (name,
                 type, and order).
+            num_index_qubits (int | UInt | None): Number of index qubits.
+                ``None`` infers ``ceil(log2(len(cases)))``. A wider concrete
+                value leaves unassigned basis states as identity. ``UInt``
+                defers the width and flattened-prefix check to transpilation.
+                Defaults to ``None``.
 
         Raises:
-            ValueError: If fewer than two cases are supplied, or the cases
-                do not all share an identical parameter signature. Case-body
-                footprint and unitarity are validated when the gate is called.
-            TypeError: If a case cannot be wrapped into a kernel (missing
-                annotations, unsupported types, or no qubit parameter).
+            ValueError: If fewer than two cases are supplied, a concrete
+                width is too small, or the cases do not all share an identical
+                parameter signature. Case-body footprint and unitarity are
+                validated when the gate is called.
+            TypeError: If the width has an unsupported type or a case cannot
+                be wrapped into a qkernel.
         """
         case_list = list(cases)
-        self._num_index_qubits = _num_index_qubits_for(len(case_list))
+        self._num_index_qubits = _normalize_num_index_qubits(
+            len(case_list),
+            num_index_qubits,
+        )
 
         wrapped = [_qkernel_for_callable(c, caller="select") for c in case_list]
         reference_key = _signature_key(wrapped[0])
@@ -405,13 +462,17 @@ class SelectGate:
                     f"arguments, so their signatures must match."
                 )
         self._cases = wrapped
+        self._driver = ControlledGate(
+            wrapped[0],
+            num_controls=self._num_index_qubits,
+        )
 
     @property
-    def num_index_qubits(self) -> int:
+    def num_index_qubits(self) -> int | UInt:
         """Number of index (select) qubits this multiplexer expects.
 
         Returns:
-            int: ``ceil(log2(num_cases))``.
+            int | UInt: Inferred/concrete width or the symbolic width handle.
         """
         return self._num_index_qubits
 
@@ -429,11 +490,13 @@ class SelectGate:
 
         Args:
             *args (Any): The index register followed by the target
-                argument(s). The leading ``num_index_qubits`` qubits form
-                the index (supplied as one ``Vector[Qubit]`` /
-                ``VectorView`` of that length, or that many individual
-                ``Qubit`` arguments); the rest are bound to every case's
-                quantum parameters. The first index qubit is bit zero (LSB).
+                argument(s). For a concrete width, leading quantum arguments
+                must contribute exactly ``num_index_qubits`` qubits on an
+                argument boundary. For a symbolic width, the shared case
+                signature identifies the trailing arguments and every earlier
+                ``Qubit`` / ``Vector`` / ``VectorView`` forms the index prefix;
+                its flattened width is checked during transpilation. The first
+                flattened index qubit is bit zero (LSB).
             **params (Any): Classical parameters forwarded identically to
                 every case unitary.
 
@@ -444,26 +507,68 @@ class SelectGate:
                 ``Vector`` -> ``Vector``, ``VectorView`` -> ``VectorView``).
 
         Raises:
-            ValueError: If the leading qubits cannot supply exactly
-                ``num_index_qubits`` index qubits on an argument boundary,
-                no target argument is given, or a specialized case is not a
-                supported unitary on exactly the shared target register.
+            RuntimeError: If no qkernel tracer is active.
+            ValueError: If the index prefix is missing or malformed, concrete
+                splitting crosses an argument boundary, no target argument is
+                given, or a specialized case is not a supported unitary on
+                exactly the shared target register.
             TypeError: On unknown / mistyped forwarded parameters.
             QubitConsumedError: If an index or target qubit was already
                 consumed by an earlier operation.
             QubitBorrowConflictError: If index and target array views overlap
                 or otherwise conflict in the borrow tracker.
         """
+        tracer = get_current_tracer()
+
         # Reuse ``qmc.control``'s concrete prepare choreography: the index
         # register plays the role of the control prefix and the targets /
         # params play the role of the sub-kernel arguments. The Select /
         # index labels flow into consume tags and boundary errors so misuse
         # diagnostics name the API the caller actually used.
-        driver = ControlledGate(self._cases[0], num_controls=self._num_index_qubits)
+        driver = self._driver
+        num_index_qubits = self._num_index_qubits
+        if isinstance(num_index_qubits, UInt):
+            symbolic_prep = driver._prepare_symbolic(
+                args,
+                params,
+                None,
+                operation_label="Select",
+                control_role="index",
+                allow_single_scalar_prefix=True,
+            )
+            case_blocks = [
+                select_specialized_block(case, symbolic_prep.sub_args_resolved)
+                for case in self._cases
+            ]
+            _validate_case_target_footprint(case_blocks)
+
+            op = SelectOperation(
+                operands=symbolic_prep.operands,
+                results=symbolic_prep.results,
+                num_index_qubits=num_index_qubits.value,
+                num_index_args=len(symbolic_prep.prefix_entries),
+                case_blocks=case_blocks,
+            )
+            driver._commit_control_entries(
+                symbolic_prep.prefix_entries,
+                "Select[index]",
+            )
+            driver._commit_control_entries(
+                symbolic_prep.target_entries,
+                "Select[target]",
+            )
+            tracer.add_operation(op)
+            return driver._wrap_symbolic_results_by_input_kind(
+                symbolic_prep,
+                operation_label="Select",
+                control_role="index",
+            )
+
+        assert isinstance(num_index_qubits, int)
         prep = driver._prepare_concrete(
             args,
             params,
-            self._num_index_qubits,
+            num_index_qubits,
             operation_label="Select",
             control_role="index",
         )
@@ -489,20 +594,32 @@ class SelectGate:
         op = SelectOperation(
             operands=prep.operands,
             results=prep.results,
-            num_index_qubits=self._num_index_qubits,
+            num_index_qubits=num_index_qubits,
             case_blocks=case_blocks,
         )
-        get_current_tracer().add_operation(op)
+        driver._commit_control_entries(
+            prep.control_entries,
+            "Select[index]",
+        )
+        driver._commit_control_entries(
+            prep.target_entries,
+            "Select[target]",
+        )
+        tracer.add_operation(op)
 
         return driver._wrap_results_by_input_kind(
-            prep.consumed_controls,
-            prep.consumed_sub_quantum,
+            prep.control_entries,
+            prep.target_entries,
             prep.results,
             operation_name="Select",
+            control_role="index",
         )
 
 
-def select(cases: Sequence["QKernel | Callable[..., Any]"]) -> SelectGate:
+def select(
+    cases: Sequence["QKernel | Callable[..., Any]"],
+    num_index_qubits: int | UInt | None = None,
+) -> SelectGate:
     """Create a quantum multiplexer (SELECT) over a list of unitaries.
 
     The returned gate applies ``cases[i]`` to a shared target register
@@ -520,15 +637,22 @@ def select(cases: Sequence["QKernel | Callable[..., Any]"]) -> SelectGate:
             function, a qkernel-backed composite gate, or a built-in gate
             callable. All cases must share the same parameter signature
             and act on the same target register.
+        num_index_qubits (int | UInt | None): Number of leading index qubits.
+            ``None`` infers the minimal width from the case count. A wider
+            concrete value leaves its unassigned index states as identity.
+            ``UInt`` defers the width check to transpilation. Defaults to
+            ``None``.
 
     Returns:
         SelectGate: A callable applied as ``sel(index, *targets, **params)``.
 
     Raises:
-        ValueError: If fewer than two cases are supplied or the cases do
-            not share an identical parameter signature. Case-body footprint
-            and unitarity are validated when the returned gate is called.
-        TypeError: If a case cannot be wrapped into a kernel.
+        ValueError: If fewer than two cases are supplied, a concrete width is
+            too small, or the cases do not share an identical parameter
+            signature. Case-body footprint and unitarity are validated when
+            the returned gate is called.
+        TypeError: If the width has an unsupported type or a case cannot be
+            wrapped into a qkernel.
 
     Example:
         >>> import qamomile.circuit as qm
@@ -540,4 +664,4 @@ def select(cases: Sequence["QKernel | Callable[..., Any]"]) -> SelectGate:
         ...     idx, t = qm.select([qm.x, qm.y, qm.z, qm.h])(idx, t)
         ...     return qm.measure(idx)
     """
-    return SelectGate(cases)
+    return SelectGate(cases, num_index_qubits=num_index_qubits)
