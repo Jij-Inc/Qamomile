@@ -3695,6 +3695,22 @@ def test_inverse_block_operation_rejects_interleaved_parameters() -> None:
         )
 
 
+def test_inverse_block_operation_rejects_vector_control_operand() -> None:
+    """The constructor rejects controls whose operand width exceeds one qubit."""
+    dimension = Value(type=UIntType(), name="dimension").with_const(3)
+    control = ArrayValue(type=QubitType(), name="control", shape=(dimension,))
+    target = Value(type=QubitType(), name="target")
+
+    with pytest.raises(ValueError, match="control operands must be scalar qubits"):
+        InverseBlockOperation(
+            operands=[control, target],
+            results=[control.next_version(), target.next_version()],
+            num_control_qubits=1,
+            num_target_qubits=1,
+            control_value=0,
+        )
+
+
 def test_inverse_block_operation_rejects_missing_result() -> None:
     """The constructor rejects a result list shorter than the operand layout.
 

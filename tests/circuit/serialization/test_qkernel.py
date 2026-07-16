@@ -27,9 +27,10 @@ from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
 )
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.serialize.encode import _OP_ENCODERS
-from qamomile.circuit.ir.types.primitives import FloatType, QubitType
+from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import (
     QAMOMILE_VERSION,
@@ -690,6 +691,43 @@ def test_select_without_a_quantum_target_is_rejected() -> None:
     )
 
     with pytest.raises(ValueError, match="requires at least one quantum target"):
+        validate_qkernel_ir(block)
+
+
+def test_inverse_block_vector_control_is_rejected_during_validation() -> None:
+    """Serialization validation independently rejects a vector control operand."""
+    scalar_control = Value(type=QubitType(), name="scalar_control")
+    target = Value(type=QubitType(), name="target")
+    scalar_control_result = scalar_control.next_version()
+    target_result = target.next_version()
+    operation = InverseBlockOperation(
+        operands=[scalar_control, target],
+        results=[scalar_control_result, target_result],
+        num_control_qubits=1,
+        num_target_qubits=1,
+        source_block=Block(),
+        implementation_block=Block(),
+        control_value=0,
+    )
+
+    # Corrupt an otherwise valid operation after construction to exercise the
+    # serialization boundary's independent defense against forged IR.
+    dimension = Value(type=UIntType(), name="dimension").with_const(3)
+    vector_control = ArrayValue(
+        type=QubitType(),
+        name="vector_control",
+        shape=(dimension,),
+    )
+    vector_control_result = vector_control.next_version()
+    operation.operands[0] = vector_control
+    operation.results[0] = vector_control_result
+    block = Block(
+        input_values=[vector_control, target],
+        output_values=[vector_control_result, target_result],
+        operations=[operation],
+    )
+
+    with pytest.raises(ValueError, match="control operands must be scalar qubits"):
         validate_qkernel_ir(block)
 
 
