@@ -334,7 +334,7 @@ def test_composite_rejects_wrong_concrete_register_widths() -> None:
 
     with pytest.raises(ValueError, match="requires 2 selection qubits"):
         wrong_selection.build()
-    with pytest.raises(ValueError, match="requires 1 system qubits"):
+    with pytest.raises(ValueError, match="requires 1 system qubit"):
         wrong_system.build()
 
 

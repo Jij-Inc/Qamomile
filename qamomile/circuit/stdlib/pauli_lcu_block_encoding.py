@@ -401,8 +401,9 @@ def _validate_register_width(
     except ValueError:
         return
     if actual != expected:
+        unit = "qubit" if expected == 1 else "qubits"
         raise ValueError(
-            f"Pauli LCU block encoding requires {expected} {name} qubits, got {actual}."
+            f"Pauli LCU block encoding requires {expected} {name} {unit}, got {actual}."
         )
 
 
