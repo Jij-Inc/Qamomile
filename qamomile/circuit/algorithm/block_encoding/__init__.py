@@ -6,11 +6,11 @@ models have different signal-register and workspace contracts.
 """
 
 from .periodic_stencil import (
-    PeriodicStencilEncoding,
+    PeriodicStencilBlockEncoding,
     periodic_stencil_block_encoding,
 )
 
 __all__ = [
-    "PeriodicStencilEncoding",
+    "PeriodicStencilBlockEncoding",
     "periodic_stencil_block_encoding",
 ]

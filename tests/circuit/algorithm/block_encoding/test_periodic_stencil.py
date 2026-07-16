@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Sequence
 from typing import Any
@@ -11,6 +12,12 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.transpiler.circuit_ir import (
+    SELECT_SEMANTIC_KEY,
+    CallInstruction,
+    CircuitProgram,
+    lower_circuit_plan,
+)
 
 
 @qmc.qkernel
@@ -171,6 +178,144 @@ def _run_expval(
     return float(executable.run(sdk_case.transpiler.executor(), bindings={}).result())
 
 
+def _is_all_zero(value: Any) -> bool:
+    """Return whether a sampled scalar or nested register value is all zero.
+
+    Args:
+        value (Any): Backend-independent sampled outcome value.
+
+    Returns:
+        bool: Whether every contained classical bit is zero.
+    """
+    if isinstance(value, tuple):
+        return all(_is_all_zero(item) for item in value)
+    return int(value) == 0
+
+
+def _zero_probability(results: Sequence[tuple[Any, int]]) -> float:
+    """Return the empirical probability of an all-zero sampled outcome.
+
+    Args:
+        results (Sequence[tuple[Any, int]]): Backend result-count pairs.
+
+    Returns:
+        float: Fraction of shots assigned to the all-zero outcome.
+    """
+    shots = sum(count for _, count in results)
+    return sum(count for outcome, count in results if _is_all_zero(outcome)) / shots
+
+
+def _build_unitary_kernel(
+    encoding: qmc.PeriodicStencilBlockEncoding,
+    *,
+    invert: bool = False,
+) -> qmc.QKernel:
+    """Build an allocation-only kernel for exact unitary inspection.
+
+    Args:
+        encoding (qmc.PeriodicStencilBlockEncoding): Descriptor to inspect.
+        invert (bool): Whether to apply the inverse unitary. Defaults to
+            ``False``.
+
+    Returns:
+        qmc.QKernel: Allocation-only kernel ending in removable measurements.
+    """
+    applied_unitary = qmc.inverse(encoding.unitary) if invert else encoding.unitary
+
+    @qmc.qkernel
+    def kernel() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+        """Allocate and apply the selected periodic encoding direction."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, name="system")
+        signal, system = applied_unitary(signal, system)
+        return qmc.measure(signal), qmc.measure(system)
+
+    return kernel
+
+
+def _qiskit_unitary(
+    qiskit_transpiler: Any,
+    encoding: qmc.PeriodicStencilBlockEncoding,
+    *,
+    invert: bool = False,
+) -> np.ndarray:
+    """Materialize one periodic encoding as an exact dense unitary.
+
+    Args:
+        qiskit_transpiler (Any): Qiskit backend fixture.
+        encoding (qmc.PeriodicStencilBlockEncoding): Descriptor to inspect.
+        invert (bool): Whether to materialize the inverse. Defaults to
+            ``False``.
+
+    Returns:
+        np.ndarray: Dense unitary in Qamomile's emitted qubit order.
+    """
+    from qiskit.quantum_info import Operator
+
+    executable = qiskit_transpiler.transpile(
+        _build_unitary_kernel(encoding, invert=invert)
+    )
+    circuit = executable.compiled_quantum[0].circuit.remove_final_measurements(
+        inplace=False
+    )
+    return np.asarray(Operator(circuit).data, dtype=np.complex128)
+
+
+def _top_left_block(
+    unitary: np.ndarray,
+    encoding: qmc.PeriodicStencilBlockEncoding,
+) -> np.ndarray:
+    """Extract the all-zero-signal block from one dense unitary.
+
+    Args:
+        unitary (np.ndarray): Full block-encoding unitary.
+        encoding (qmc.PeriodicStencilBlockEncoding): Register-width metadata.
+
+    Returns:
+        np.ndarray: Projected system block in LSB-first order.
+    """
+    system_dimension = 1 << encoding.num_system_qubits
+    signal_dimension = 1 << encoding.num_signal_qubits
+    indices = np.arange(system_dimension) * signal_dimension
+    return unitary[np.ix_(indices, indices)]
+
+
+def _lower_first_circuit(kernel: qmc.QKernel, transpiler: Any) -> CircuitProgram:
+    """Lower one qkernel and return its first backend-neutral circuit.
+
+    Args:
+        kernel (qmc.QKernel): Entrypoint to lower.
+        transpiler (Any): Transpiler providing prepare and plan stages.
+
+    Returns:
+        CircuitProgram: First lowered quantum segment.
+    """
+    prepared = transpiler.prepare(kernel)
+    program = lower_circuit_plan(transpiler.plan_circuit(prepared)).get_first_circuit()
+    assert isinstance(program, CircuitProgram)
+    return program
+
+
+def _nested_calls(program: CircuitProgram) -> tuple[CallInstruction, ...]:
+    """Collect reusable calls recursively from a lowered circuit.
+
+    Args:
+        program (CircuitProgram): Root circuit to inspect.
+
+    Returns:
+        tuple[CallInstruction, ...]: Calls in depth-first traversal order.
+    """
+    calls: list[CallInstruction] = []
+    pending = [program]
+    while pending:
+        current = pending.pop()
+        for operation in current.operations:
+            if isinstance(operation, CallInstruction):
+                calls.append(operation)
+                pending.append(operation.callee.body)
+    return tuple(calls)
+
+
 @pytest.mark.parametrize(
     ("register_sizes", "coefficients"),
     [
@@ -202,7 +347,7 @@ def test_periodic_stencil_top_left_block_matches_dense_matrix(
     def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
         signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
         system = qmc.qubit_array(encoding.num_system_qubits, name="system")
-        signal, system = encoding(signal, system)
+        signal, system = encoding.unitary(signal, system)
         return qmc.measure(signal), qmc.measure(system)
 
     executable = qiskit_transpiler.transpile(circuit)
@@ -227,6 +372,33 @@ def test_periodic_stencil_top_left_block_matches_dense_matrix(
     )
 
 
+def test_periodic_stencil_inverse_is_exact_adjoint_of_full_unitary(
+    qiskit_transpiler: Any,
+) -> None:
+    """The inverse is the full adjoint and exposes the adjoint encoded block."""
+    coefficients = {
+        (0,): 0.7 + 0.2j,
+        (1,): -0.4 + 0.8j,
+        (-1,): 0.3 - 0.6j,
+    }
+    register_sizes = (2,)
+    encoding = qmc.periodic_stencil_block_encoding(coefficients, register_sizes)
+    forward = _qiskit_unitary(qiskit_transpiler, encoding)
+    inverse = _qiskit_unitary(qiskit_transpiler, encoding, invert=True)
+    identity = np.eye(forward.shape[0], dtype=np.complex128)
+    expected_block = _stencil_matrix(coefficients, register_sizes)
+
+    assert np.allclose(forward.conj().T @ forward, identity, atol=1e-8, rtol=1e-8)
+    assert np.allclose(inverse, forward.conj().T, atol=1e-8, rtol=1e-8)
+    assert np.allclose(inverse @ forward, identity, atol=1e-8, rtol=1e-8)
+    assert np.allclose(
+        encoding.normalization * _top_left_block(inverse, encoding),
+        expected_block.conj().T,
+        atol=1e-8,
+        rtol=1e-8,
+    )
+
+
 def test_periodic_stencil_combines_equivalent_offsets() -> None:
     """Offsets equal modulo an axis size combine before normalization."""
     encoding = qmc.periodic_stencil_block_encoding(
@@ -244,6 +416,79 @@ def test_periodic_stencil_combines_equivalent_offsets() -> None:
     assert encoding.normalization == pytest.approx(2.5)
     assert encoding.num_signal_qubits == 1
     assert encoding.num_system_qubits == 2
+
+
+def test_periodic_stencil_canonical_sum_is_mapping_order_independent() -> None:
+    """Equivalent residues use canonical ``fsum`` order before normalization."""
+    items = [
+        (1, 1e16),
+        (-3, -1e16),
+        (5, 1.0),
+        (0, -2.0),
+    ]
+    forward = qmc.periodic_stencil_block_encoding(dict(items), (2,))
+    reversed_order = qmc.periodic_stencil_block_encoding(
+        dict(reversed(items)),
+        (2,),
+    )
+
+    assert forward.offsets == reversed_order.offsets == ((0,), (1,))
+    np.testing.assert_allclose(
+        forward.coefficients,
+        reversed_order.coefficients,
+        atol=0.0,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        forward.coefficients,
+        (-2.0, 1.0),
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert forward.normalization == pytest.approx(3.0, rel=1e-15, abs=0.0)
+    assert reversed_order.normalization == pytest.approx(
+        3.0,
+        rel=1e-15,
+        abs=0.0,
+    )
+
+
+def test_periodic_stencil_canonicalizes_signed_zero_components() -> None:
+    """Signed-zero coefficient components have one canonical representation."""
+    positive_zero = qmc.periodic_stencil_block_encoding(
+        {0: complex(-1.0, 0.0)},
+        (1,),
+    )
+    negative_zero = qmc.periodic_stencil_block_encoding(
+        {0: complex(-1.0, -0.0)},
+        (1,),
+    )
+
+    np.testing.assert_allclose(
+        positive_zero.coefficients,
+        negative_zero.coefficients,
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert math.copysign(1.0, negative_zero.coefficients[0].imag) == 1.0
+
+
+def test_periodic_stencil_drops_only_exactly_cancelled_residues() -> None:
+    """Partial cancellation removes one residue without losing the operator."""
+    encoding = qmc.periodic_stencil_block_encoding(
+        {1: 1.0, -3: -1.0, 0: 2.0},
+        (2,),
+    )
+
+    assert encoding.offsets == ((0,),)
+    np.testing.assert_allclose(
+        encoding.coefficients,
+        (2.0 + 0.0j,),
+        atol=0.0,
+        rtol=0.0,
+    )
+    assert encoding.normalization == pytest.approx(2.0, rel=1e-15, abs=0.0)
+    assert encoding.num_signal_qubits == 1
 
 
 def test_periodic_laplacian_normalizations() -> None:
@@ -293,10 +538,125 @@ def test_periodic_stencil_rejects_invalid_descriptions(
 
 
 def test_periodic_stencil_factory_is_publicly_exported() -> None:
-    """The method-specific factory is available from both circuit API levels."""
-    from qamomile.circuit.algorithm import periodic_stencil_block_encoding
+    """The descriptor class and factory are available at both API levels."""
+    from qamomile.circuit.algorithm import (
+        PeriodicStencilBlockEncoding,
+        periodic_stencil_block_encoding,
+    )
 
     assert qmc.periodic_stencil_block_encoding is periodic_stencil_block_encoding
+    assert qmc.PeriodicStencilBlockEncoding is PeriodicStencilBlockEncoding
+
+
+def test_periodic_stencil_descriptor_is_frozen_noncallable_and_identity_based() -> None:
+    """The static descriptor has the agreed ABI without value equality."""
+    encoding = qmc.periodic_stencil_block_encoding({0: 1j, 1: 0.5}, (2,))
+    repeated = qmc.periodic_stencil_block_encoding({0: 1j, 1: 0.5}, (2,))
+
+    assert isinstance(encoding, qmc.PeriodicStencilBlockEncoding)
+    assert tuple(field.name for field in dataclasses.fields(encoding)) == (
+        "unitary",
+        "normalization",
+        "num_signal_qubits",
+        "num_system_qubits",
+        "register_sizes",
+        "offsets",
+        "coefficients",
+    )
+    assert isinstance(encoding.unitary, qmc.QKernel)
+    assert tuple(encoding.unitary.signature.parameters) == ("signal", "system")
+    assert encoding.unitary.input_types == {
+        "signal": qmc.Vector[qmc.Qubit],
+        "system": qmc.Vector[qmc.Qubit],
+    }
+    assert encoding.unitary.output_types == [
+        qmc.Vector[qmc.Qubit],
+        qmc.Vector[qmc.Qubit],
+    ]
+    assert type(encoding.normalization) is float
+    assert type(encoding.num_signal_qubits) is int
+    assert type(encoding.num_system_qubits) is int
+    assert not callable(encoding)
+    assert not hasattr(encoding, "__dict__")
+    assert not hasattr(encoding, "kernel")
+    assert not hasattr(encoding, "error_bound")
+    assert encoding is not repeated
+    assert encoding != repeated
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        encoding.normalization = 2.0  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        encoding()  # type: ignore[operator]
+
+
+def test_periodic_descriptor_canonicalizes_equivalent_normalization() -> None:
+    """Direct construction tolerates host rounding and stores the canonical sum."""
+    encoding = qmc.periodic_stencil_block_encoding({0: 0.1, 1: 0.2}, (2,))
+
+    replaced = dataclasses.replace(encoding, normalization=0.3)
+
+    assert replaced.normalization == pytest.approx(
+        math.fsum((0.1, 0.2)),
+        rel=0.0,
+        abs=0.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"normalization": 0.4}, "normalization"),
+        ({"num_signal_qubits": 2}, "num_signal_qubits"),
+        ({"num_system_qubits": 3}, "num_system_qubits"),
+        ({"offsets": ((1,), (0,))}, "canonically sorted"),
+        ({"offsets": ((0,), (0,))}, "unique"),
+        ({"offsets": ((0,), (4,))}, "canonical modular residue"),
+        ({"coefficients": (0.1 + 0.0j,)}, "same nonzero length"),
+        ({"coefficients": (0.0j, 0.2 + 0.0j)}, "must be nonzero"),
+    ],
+)
+def test_periodic_descriptor_rejects_inconsistent_metadata(
+    changes: dict[str, Any],
+    message: str,
+) -> None:
+    """Direct construction rejects inconsistent method-specific metadata."""
+    encoding = qmc.periodic_stencil_block_encoding({0: 0.1, 1: 0.2}, (2,))
+
+    with pytest.raises(ValueError, match=message):
+        dataclasses.replace(encoding, **changes)
+
+
+def test_periodic_stencil_signal_width_tracks_canonical_term_count() -> None:
+    """One and two terms use one signal qubit while three terms use two."""
+    single = qmc.periodic_stencil_block_encoding({0: 1.0}, (2,))
+    two = qmc.periodic_stencil_block_encoding({0: 1.0, 1: 0.5}, (2,))
+    three = qmc.periodic_stencil_block_encoding(
+        {0: 1.0, 1: 0.5, 2: -0.25j},
+        (2,),
+    )
+
+    assert single.num_signal_qubits == 1
+    assert two.num_signal_qubits == 1
+    assert three.num_signal_qubits == 2
+
+
+def test_periodic_stencil_single_term_omits_prepare_and_select(
+    qiskit_transpiler: Any,
+) -> None:
+    """The pass-through signal ABI does not force dummy LCU operations."""
+    encoding = qmc.periodic_stencil_block_encoding({1: 1j}, (2,))
+    calls = _nested_calls(
+        _lower_first_circuit(
+            _build_unitary_kernel(encoding),
+            qiskit_transpiler,
+        )
+    )
+    identities = tuple(
+        call.callee.identity for call in calls if call.callee.identity is not None
+    )
+
+    assert all(identity.key != SELECT_SEMANTIC_KEY for identity in identities)
+    assert all(identity.key.name != "state_preparation" for identity in identities)
 
 
 def test_periodic_stencil_preserves_tiny_nonzero_terms() -> None:
@@ -321,6 +681,7 @@ def test_periodic_stencil_preserves_tiny_nonzero_terms() -> None:
     [
         {0: 10**1000},
         {0: 1e308, 1: 1e308},
+        {1: 1e308, -3: 1e308},
     ],
 )
 def test_periodic_stencil_rejects_unrepresentable_normalization(
@@ -353,11 +714,221 @@ def test_periodic_stencil_rejects_wrong_register_widths(
     def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
         signal = qmc.qubit_array(signal_width, name="signal")
         system = qmc.qubit_array(system_width, name="system")
-        signal, system = encoding(signal, system)
+        signal, system = encoding.unitary(signal, system)
         return qmc.measure(signal), qmc.measure(system)
 
     with pytest.raises(ValueError, match=rf"requires .* {role} qubits"):
         qiskit_transpiler.transpile(circuit)
+
+
+def test_periodic_stencil_width_validation_survives_all_composition_paths() -> None:
+    """Plain, inverse, control, and nested SELECT report the same width ABI."""
+    encoding = qmc.periodic_stencil_block_encoding(
+        {0: 1.0, 1: 0.5j, 2: -0.25},
+        (2,),
+    )
+    inverse_unitary = qmc.inverse(encoding.unitary)
+    controlled_unitary = qmc.control(encoding.unitary)
+    selected_unitary = qmc.select(
+        (_identity_registers, encoding.unitary),
+        num_index_qubits=1,
+    )
+
+    @qmc.qkernel
+    def plain_wrong_signal() -> qmc.Bit:
+        """Invoke the plain unitary with a narrow signal register."""
+        signal = qmc.qubit_array(1, "signal")
+        system = qmc.qubit_array(2, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def inverse_wrong_signal() -> qmc.Bit:
+        """Invoke the inverse unitary with a narrow signal register."""
+        signal = qmc.qubit_array(1, "signal")
+        system = qmc.qubit_array(2, "system")
+        signal, _ = inverse_unitary(signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def control_wrong_signal() -> qmc.Bit:
+        """Invoke the controlled unitary with a narrow signal register."""
+        control = qmc.qubit("control")
+        signal = qmc.qubit_array(1, "signal")
+        system = qmc.qubit_array(2, "system")
+        control, signal, _ = controlled_unitary(control, signal, system)
+        return qmc.measure(control)
+
+    @qmc.qkernel
+    def select_wrong_signal() -> qmc.Bit:
+        """Invoke the nested SELECT with a narrow signal register."""
+        outer = qmc.qubit("outer")
+        signal = qmc.qubit_array(1, "signal")
+        system = qmc.qubit_array(2, "system")
+        outer, signal, _ = selected_unitary(outer, signal, system)
+        return qmc.measure(outer)
+
+    @qmc.qkernel
+    def plain_wrong_system() -> qmc.Bit:
+        """Invoke the plain unitary with a wide system register."""
+        signal = qmc.qubit_array(2, "signal")
+        system = qmc.qubit_array(3, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def inverse_wrong_system() -> qmc.Bit:
+        """Invoke the inverse unitary with a wide system register."""
+        signal = qmc.qubit_array(2, "signal")
+        system = qmc.qubit_array(3, "system")
+        signal, _ = inverse_unitary(signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def control_wrong_system() -> qmc.Bit:
+        """Invoke the controlled unitary with a wide system register."""
+        control = qmc.qubit("control")
+        signal = qmc.qubit_array(2, "signal")
+        system = qmc.qubit_array(3, "system")
+        control, signal, _ = controlled_unitary(control, signal, system)
+        return qmc.measure(control)
+
+    @qmc.qkernel
+    def select_wrong_system() -> qmc.Bit:
+        """Invoke the nested SELECT with a wide system register."""
+        outer = qmc.qubit("outer")
+        signal = qmc.qubit_array(2, "signal")
+        system = qmc.qubit_array(3, "system")
+        outer, signal, _ = selected_unitary(outer, signal, system)
+        return qmc.measure(outer)
+
+    for kernel in (
+        plain_wrong_signal,
+        inverse_wrong_signal,
+        control_wrong_signal,
+        select_wrong_signal,
+    ):
+        with pytest.raises(ValueError) as error:
+            kernel.build()
+        assert str(error.value) == (
+            "periodic stencil block encoding requires 2 signal qubits, got 1."
+        )
+
+    for kernel in (
+        plain_wrong_system,
+        inverse_wrong_system,
+        control_wrong_system,
+        select_wrong_system,
+    ):
+        with pytest.raises(ValueError) as error:
+            kernel.build()
+        assert str(error.value) == (
+            "periodic stencil block encoding requires 2 system qubits, got 3."
+        )
+
+
+def test_distinct_periodic_instances_compose_in_one_caller(
+    qiskit_transpiler: Any,
+) -> None:
+    """Equal-signature ordinary qkernels retain distinct shift semantics."""
+    plus_one = qmc.periodic_stencil_block_encoding({1: 1.0}, (2,))
+    plus_two = qmc.periodic_stencil_block_encoding({2: 1.0}, (2,))
+    controlled_one = qmc.control(plus_one.unitary)
+    controlled_two = qmc.control(plus_two.unitary)
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Bit]:
+        """Apply shifts plus one and plus two under one control."""
+        control = qmc.x(qmc.qubit("control"))
+        signal = qmc.qubit_array(1, "signal")
+        system = qmc.qubit_array(2, "system")
+        control, signal, system = controlled_one(control, signal, system)
+        control, signal, system = controlled_two(control, signal, system)
+        return qmc.measure(system)
+
+    executable = qiskit_transpiler.transpile(circuit)
+    result = executable.sample(qiskit_transpiler.executor(), shots=16).result()
+    assert result.results == [((1, 1), 16)]
+
+
+@pytest.mark.parametrize("num_system_qubits", [1, 2])
+@pytest.mark.parametrize("seed", [0, 42])
+def test_two_term_periodic_encoding_samples_and_estimates_on_every_sdk(
+    sdk_transpiler: Any,
+    num_system_qubits: int,
+    seed: int,
+) -> None:
+    """Random two-term stencils execute sampler and estimator backend paths.
+
+    Acting on ``|0>`` makes the identity and one-step-shift outputs orthogonal,
+    so success probability is ``(|a|² + |b|²) / normalization²``. Projecting
+    signal zero and measuring system Y gives
+    ``2 Im(conj(a) b) / normalization²``.
+    """
+    rng = np.random.default_rng(seed)
+    identity_weight = rng.uniform(0.4, 1.2) * np.exp(
+        1j * rng.uniform(-math.pi, math.pi)
+    )
+    shift_weight = rng.uniform(0.4, 1.2) * np.exp(1j * rng.uniform(-math.pi, math.pi))
+    encoding = qmc.periodic_stencil_block_encoding(
+        {0: identity_weight, 1: shift_weight},
+        (num_system_qubits,),
+    )
+
+    @qmc.qkernel
+    def sample_kernel() -> qmc.Vector[qmc.Bit]:
+        """Apply the encoding and measure its success signal."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal)
+
+    @qmc.qkernel
+    def expval_kernel(observable: qmc.Observable) -> qmc.Float:
+        """Measure the success-projected system-Y interference."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, system = encoding.unitary(signal, system)
+        return qmc.expval((signal[0], system[0]), observable)
+
+    shots = 2048
+    sample_executable = sdk_transpiler.transpiler.transpile(sample_kernel)
+    sample_result = sample_executable.sample(
+        sdk_transpiler.transpiler.executor(),
+        shots=shots,
+    ).result()
+    expected_success = (
+        abs(identity_weight) ** 2 + abs(shift_weight) ** 2
+    ) / encoding.normalization**2
+    sampling_tolerance = (
+        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+    )
+    assert _zero_probability(sample_result.results) == pytest.approx(
+        expected_success,
+        abs=sampling_tolerance,
+    )
+
+    projected_y = qm_o.Hamiltonian(num_qubits=2)
+    projected_y.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), 0.5)
+    projected_y.add_term(
+        (
+            qm_o.PauliOperator(qm_o.Pauli.Z, 0),
+            qm_o.PauliOperator(qm_o.Pauli.Y, 1),
+        ),
+        0.5,
+    )
+    observed_y = _run_expval(
+        sdk_transpiler,
+        expval_kernel,
+        {"observable": projected_y},
+    )
+    expected_y = (
+        2.0
+        * np.imag(np.conj(identity_weight) * shift_weight)
+        / encoding.normalization**2
+    )
+    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed_y == pytest.approx(expected_y, abs=tolerance)
 
 
 @pytest.mark.parametrize("register_sizes", [(1,), (2,), (1, 2)])
@@ -394,8 +965,8 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
         signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
         system = qmc.qubit_array(encoding.num_system_qubits, name="system")
         system = _prepare_basis(system, initial_bits)
-        signal, system = encoding(signal, system)
-        signal, system = qmc.inverse(encoding.kernel)(signal, system)
+        signal, system = encoding.unitary(signal, system)
+        signal, system = qmc.inverse(encoding.unitary)(signal, system)
         _ = qmc.measure(signal)
         return qmc.measure(system)
 
@@ -407,8 +978,8 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
         signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
         system = qmc.qubit_array(encoding.num_system_qubits, name="system")
         system = _prepare_basis(system, initial_bits)
-        signal, system = encoding(signal, system)
-        signal, system = qmc.inverse(encoding.kernel)(signal, system)
+        signal, system = encoding.unitary(signal, system)
+        signal, system = qmc.inverse(encoding.unitary)(signal, system)
         return qmc.expval(system, observable)
 
     sampled = _sample_only_outcome(
@@ -426,12 +997,21 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
 
 
 @pytest.mark.parametrize("composition", ["control", "select"])
-def test_negative_identity_phase_composes_cross_backend(
+def test_nontrivial_lcu_phase_composes_cross_backend(
     sdk_transpiler: Any,
     composition: str,
 ) -> None:
-    """Outer control and nested SELECT observe a negative identity term."""
-    encoding = qmc.periodic_stencil_block_encoding({0: -2.0}, (1,))
+    """Outer control and nested SELECT preserve an inner non-Clifford phase.
+
+    On the all-zero input only the identity term overlaps the initial state,
+    so outer-branch interference directly measures ``a / normalization``.
+    """
+    phase = math.pi / 3.0
+    identity_weight = np.exp(1j * phase)
+    encoding = qmc.periodic_stencil_block_encoding(
+        {0: identity_weight, 1: 0.5},
+        (1,),
+    )
 
     @qmc.qkernel
     def sample_kernel() -> qmc.Bit:
@@ -439,13 +1019,13 @@ def test_negative_identity_phase_composes_cross_backend(
         signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
         system = qmc.qubit_array(encoding.num_system_qubits, name="system")
         if composition == "control":
-            outer, signal, system = qmc.control(encoding.kernel)(
+            outer, signal, system = qmc.control(encoding.unitary)(
                 outer,
                 signal,
                 system,
             )
         else:
-            outer, signal, system = qmc.select([_identity_registers, encoding.kernel])(
+            outer, signal, system = qmc.select([_identity_registers, encoding.unitary])(
                 outer, signal, system
             )
         outer = qmc.h(outer)
@@ -457,22 +1037,36 @@ def test_negative_identity_phase_composes_cross_backend(
         signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
         system = qmc.qubit_array(encoding.num_system_qubits, name="system")
         if composition == "control":
-            outer, signal, system = qmc.control(encoding.kernel)(
+            outer, signal, system = qmc.control(encoding.unitary)(
                 outer,
                 signal,
                 system,
             )
         else:
-            outer, signal, system = qmc.select([_identity_registers, encoding.kernel])(
+            outer, signal, system = qmc.select([_identity_registers, encoding.unitary])(
                 outer, signal, system
             )
         return qmc.expval(outer, observable)
 
-    sampled = _sample_only_outcome(sdk_transpiler, sample_kernel, {})
+    shots = 4096
+    sample_executable = sdk_transpiler.transpiler.transpile(sample_kernel)
+    sample_result = sample_executable.sample(
+        sdk_transpiler.transpiler.executor(),
+        shots=shots,
+    ).result()
     observed = _run_expval(
         sdk_transpiler,
         expval_kernel,
-        {"observable": qm_o.X(0)},
+        {"observable": qm_o.Y(0)},
     )
-    assert sampled == 1
-    assert observed == pytest.approx(-1.0, abs=1e-7)
+    overlap = identity_weight / encoding.normalization
+    expected_zero = (1.0 + overlap.real) / 2.0
+    sampling_tolerance = (
+        6.0 * math.sqrt(expected_zero * (1.0 - expected_zero) / shots) + 0.02
+    )
+    assert _zero_probability(sample_result.results) == pytest.approx(
+        expected_zero,
+        abs=sampling_tolerance,
+    )
+    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed == pytest.approx(overlap.imag, abs=tolerance)

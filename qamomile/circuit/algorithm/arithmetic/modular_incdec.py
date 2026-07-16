@@ -131,6 +131,47 @@ def _modular_decrement(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     return q
 
 
+def _apply_fixed_window_periodic_shift(
+    system: qmc.Vector[qmc.Qubit],
+    start: int,
+    width: int,
+    shift: int,
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply a constant modular shift to one fixed window of a flat register.
+
+    The helper emits the same little-endian increment/decrement ladders as the
+    public modular primitives, but addresses the parent vector directly. This
+    avoids constructing a nested symbolic slice while a concrete axis view is
+    borrowed by a multidimensional caller.
+
+    Args:
+        system (qmc.Vector[qmc.Qubit]): Flattened parent register to update.
+        start (int): First qubit index of the target window.
+        width (int): Positive number of qubits in the target window.
+        shift (int): Signed number of unit modular shifts. Positive values
+            increment and negative values decrement.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated flattened parent register.
+    """
+    increment = shift > 0
+    for _ in range(abs(shift)):
+        if not increment:
+            system[start] = qmc.x(system[start])
+
+        target_indices = range(width - 1, 0, -1) if increment else range(1, width)
+        for target_index in target_indices:
+            controls = system[start : start + target_index]
+            target = system[start + target_index]
+            controls, target = qmc.mcx(controls, target)
+            system[start : start + target_index] = controls
+            system[start + target_index] = target
+
+        if increment:
+            system[start] = qmc.x(system[start])
+    return system
+
+
 modular_increment: Any = _CheckedModularQKernel(
     _modular_increment,
     "modular_increment",

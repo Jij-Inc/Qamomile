@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import math
-import numbers
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
+from qamomile.circuit._block_encoding import (
+    BlockEncodingUnitary as _BlockEncodingUnitary,
+    validate_block_encoding_fields,
+    validate_block_encoding_registers,
+)
 from qamomile.circuit.frontend.composite_gate import (
     composite_gate,
     configure_composite,
 )
 from qamomile.circuit.frontend.constructors import uint
 from qamomile.circuit.frontend.handle import Qubit, Vector
-from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.global_phase import global_phase
 from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x, y, z
@@ -30,11 +32,6 @@ from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding impor
 )
 from qamomile.linalg import PauliLCU, PauliLCUTerm
 from qamomile.observable import Pauli, PauliOperator
-
-_BlockEncodingUnitary = QKernel[
-    ...,
-    tuple[Vector[Qubit], Vector[Qubit]],
-]
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -97,105 +94,18 @@ class PauliLCUBlockEncoding:
             ValueError: If normalization or a register width is outside its
                 valid finite positive range.
         """
-        if not isinstance(self.unitary, QKernel):
-            raise TypeError("unitary must be a QKernel.")
-        parameters = tuple(self.unitary.signature.parameters.values())
-        expected_inputs = {
-            "signal": Vector[Qubit],
-            "system": Vector[Qubit],
-        }
-        expected_outputs = [Vector[Qubit], Vector[Qubit]]
-        if (
-            tuple(parameter.name for parameter in parameters) != ("signal", "system")
-            or any(
-                parameter.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
-                or parameter.default is not inspect.Parameter.empty
-                for parameter in parameters
-            )
-            or self.unitary.input_types != expected_inputs
-            or self.unitary.output_types != expected_outputs
-        ):
-            raise TypeError(
-                "unitary must have signature "
-                "(signal: Vector[Qubit], system: Vector[Qubit]) -> "
-                "tuple[Vector[Qubit], Vector[Qubit]]."
-            )
-
-        object.__setattr__(
-            self,
-            "normalization",
-            _validate_positive_real(self.normalization, "normalization"),
-        )
-        object.__setattr__(
-            self,
-            "num_signal_qubits",
-            _validate_positive_integer(
+        unitary, normalization, num_signal_qubits, num_system_qubits = (
+            validate_block_encoding_fields(
+                self.unitary,
+                self.normalization,
                 self.num_signal_qubits,
-                "num_signal_qubits",
-            ),
-        )
-        object.__setattr__(
-            self,
-            "num_system_qubits",
-            _validate_positive_integer(
                 self.num_system_qubits,
-                "num_system_qubits",
-            ),
+            )
         )
-
-
-def _validate_positive_real(value: object, name: str) -> float:
-    """Validate one finite positive real scalar.
-
-    Args:
-        value (object): Candidate scalar value.
-        name (str): Field name used in diagnostics.
-
-    Returns:
-        float: Equivalent finite positive Python float.
-
-    Raises:
-        TypeError: If ``value`` is not a non-boolean real scalar.
-        ValueError: If conversion overflows or the value is non-finite or
-            non-positive.
-    """
-    if isinstance(value, (bool, np.bool_)) or not isinstance(
-        value,
-        (numbers.Real, np.integer, np.floating),
-    ):
-        raise TypeError(f"{name} must be a real numeric scalar.")
-    try:
-        normalized = float(value)
-    except OverflowError as exc:
-        raise ValueError(f"{name} must be finite and positive.") from exc
-    if not math.isfinite(normalized) or normalized <= 0.0:
-        raise ValueError(f"{name} must be finite and positive.")
-    return normalized
-
-
-def _validate_positive_integer(value: object, name: str) -> int:
-    """Validate one concrete positive integer width.
-
-    Args:
-        value (object): Candidate register width.
-        name (str): Field name used in diagnostics.
-
-    Returns:
-        int: Equivalent positive Python integer.
-
-    Raises:
-        TypeError: If ``value`` is not a non-boolean integer.
-        ValueError: If ``value`` is non-positive.
-    """
-    if isinstance(value, (bool, np.bool_)) or not isinstance(
-        value,
-        (int, np.integer),
-    ):
-        raise TypeError(f"{name} must be an integer.")
-    normalized = int(value)
-    if normalized <= 0:
-        raise ValueError(f"{name} must be positive.")
-    return normalized
+        object.__setattr__(self, "unitary", unitary)
+        object.__setattr__(self, "normalization", normalization)
+        object.__setattr__(self, "num_signal_qubits", num_signal_qubits)
+        object.__setattr__(self, "num_system_qubits", num_system_qubits)
 
 
 @qkernel
@@ -543,35 +453,13 @@ def _validate_register_widths(
         TypeError: If either argument is not a vector register.
         ValueError: If a concrete register width differs from its requirement.
     """
-    _validate_register_width(signal, expected_signal, "signal")
-    _validate_register_width(system, expected_system, "system")
-
-
-def _validate_register_width(
-    register: Vector[Qubit],
-    expected: int,
-    name: str,
-) -> None:
-    """Validate one concrete vector width and defer symbolic-width checks.
-
-    Args:
-        register (Vector[Qubit]): Register to inspect.
-        expected (int): Required width.
-        name (str): Register name used in diagnostics.
-
-    Raises:
-        TypeError: If ``register`` is not a vector.
-        ValueError: If its concrete width differs from ``expected``.
-    """
-    try:
-        actual = get_size(register)
-    except ValueError:
-        return
-    if actual != expected:
-        unit = "qubit" if expected == 1 else "qubits"
-        raise ValueError(
-            f"Pauli LCU block encoding requires {expected} {name} {unit}, got {actual}."
-        )
+    validate_block_encoding_registers(
+        signal,
+        system,
+        expected_signal,
+        expected_system,
+        "Pauli LCU block encoding",
+    )
 
 
 def _configure_block_encoding(

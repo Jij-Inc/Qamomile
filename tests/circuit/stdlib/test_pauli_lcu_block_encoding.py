@@ -466,6 +466,21 @@ def test_descriptor_rejects_invalid_field_types_and_widths() -> None:
         qmc.PauliLCUBlockEncoding(unitary, 1.0, 1, -1)
 
 
+def test_descriptor_normalizes_numpy_integer_widths() -> None:
+    """Shared validation preserves accepted integer-like width inputs."""
+    unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).unitary
+
+    encoding = qmc.PauliLCUBlockEncoding(
+        unitary,
+        1.0,
+        np.int64(1),
+        np.int64(1),
+    )
+
+    assert type(encoding.num_signal_qubits) is int
+    assert type(encoding.num_system_qubits) is int
+
+
 def test_signal_width_covers_zero_single_and_non_power_of_two_terms() -> None:
     """The static ABI retains one signal qubit at small term counts."""
     zero = PauliLCU.from_matrix(np.zeros((2, 2), dtype=np.complex128))

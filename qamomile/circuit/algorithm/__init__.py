@@ -13,7 +13,7 @@ from .basic import (
     superposition_vector,
 )
 from .block_encoding import (
-    PeriodicStencilEncoding,
+    PeriodicStencilBlockEncoding,
     periodic_stencil_block_encoding,
 )
 from .fqaoa import (
@@ -39,7 +39,7 @@ from .trotter import trotterized_time_evolution
 
 __all__ = [
     # Block encoding
-    "PeriodicStencilEncoding",
+    "PeriodicStencilBlockEncoding",
     "periodic_stencil_block_encoding",
     # Arithmetic
     "modular_increment",

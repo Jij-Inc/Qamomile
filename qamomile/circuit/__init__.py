@@ -176,7 +176,7 @@ from .algorithm.arithmetic.modular_incdec import (  # noqa: E402, I001
     modular_increment,
 )
 from .algorithm.block_encoding import (  # noqa: E402, I001
-    PeriodicStencilEncoding,
+    PeriodicStencilBlockEncoding,
     periodic_stencil_block_encoding,
 )
 
@@ -251,7 +251,7 @@ __all__ = [
     "Tensor",
     "Observable",
     # stdlib
-    "PeriodicStencilEncoding",
+    "PeriodicStencilBlockEncoding",
     "periodic_stencil_block_encoding",
     "modular_decrement",
     "modular_increment",

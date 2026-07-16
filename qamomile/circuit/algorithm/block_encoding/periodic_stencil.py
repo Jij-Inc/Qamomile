@@ -23,7 +23,6 @@ displacements.
 
 from __future__ import annotations
 
-import cmath
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -33,11 +32,20 @@ from typing import Any, cast
 import numpy as np
 
 import qamomile.circuit as qmc
+from qamomile.circuit._block_encoding import (
+    BlockEncodingUnitary as _BlockEncodingUnitary,
+    validate_block_encoding_fields,
+    validate_block_encoding_registers,
+)
+from qamomile.circuit.algorithm.arithmetic.modular_incdec import (
+    _apply_fixed_window_periodic_shift,
+)
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
 )
 
 Offset = int | tuple[int, ...]
+_NORMALIZATION_REL_TOLERANCE = 1e-12
 
 
 def _is_integer(value: Any) -> bool:
@@ -55,108 +63,106 @@ def _is_integer(value: Any) -> bool:
     return isinstance(value, Integral)
 
 
-@dataclass(frozen=True)
-class PeriodicStencilEncoding:
-    """Describe one compiled periodic-stencil block-encoding construction.
+@dataclass(frozen=True, slots=True, eq=False)
+class PeriodicStencilBlockEncoding:
+    r"""Describe one static exact periodic-stencil block encoding.
+
+    ``unitary`` is the qkernel implementing the larger unitary ``U``; it is
+    neither the encoded stencil matrix ``A`` nor a dense matrix value. It has
+    no classical arguments and its quantum ABI is
+    ``unitary(signal, system) -> (signal, system)``. ``system`` is the ordered
+    flattened data register on which ``A`` acts. ``signal`` is the complete
+    source-level ancilla bundle whose all-zero state selects the encoded
+    block. The unitary returns the same logical wires in the same order and
+    acts unitarily for arbitrary signal inputs; signal need not return to zero
+    after one application.
+
+    For the all-zero signal isometry ``V0``, the encoded discrete periodic
+    stencil satisfies
+
+    .. math::
+
+        V_0^\dagger U V_0 = A / \mathtt{normalization}
+
+    including coefficient phase. The construction is exact in ideal logical
+    arithmetic; host floating-point roundoff in state-preparation angles and
+    backend gate synthesis are outside this semantic equality. This producer
+    allocates no hidden source-level logical qubits. Backend decomposition
+    scratch is permitted only when resource-accounted and exactly uncomputed
+    for every input, including under inverse and control. Descriptor comparison
+    and hashing use object identity rather than field values.
 
     Args:
-        kernel (qmc.QKernel): Qkernel taking ``(signal, system)`` registers and
-            returning them in the same order after applying the block encoding.
-        normalization (float): Positive LCU normalization
+        unitary (qmc.QKernel): QKernel implementing the block-encoding unitary
+            ``U`` with the static ``(signal, system)`` ABI.
+        normalization (float): Finite positive LCU normalization
             ``sum(abs(coefficients))`` after equivalent periodic offsets are
-            combined.
-        num_signal_qubits (int): Required all-zero signal-register width.
+            combined. Direct construction accepts relative disagreement up to
+            ``1e-12`` for host rounding and stores the canonical
+            coefficient-derived sum.
+        num_signal_qubits (int): Concrete positive width of the complete signal
+            register, including selector padding.
+        num_system_qubits (int): Concrete positive width of the ordered flat
+            system register.
         register_sizes (tuple[int, ...]): Qubit widths of the flattened system
             register's axes.
         offsets (tuple[tuple[int, ...], ...]): Canonical modular offsets, in
             SELECT case order.
         coefficients (tuple[complex, ...]): Nonzero combined coefficients, in
             SELECT case order.
+
+    Raises:
+        TypeError: If the common block-encoding fields or method-specific
+            metadata have invalid runtime types.
+        ValueError: If normalization or a width is invalid, method-specific
+            metadata is inconsistent, or offsets are not canonical.
     """
 
-    kernel: qmc.QKernel
+    unitary: _BlockEncodingUnitary
     normalization: float
     num_signal_qubits: int
+    num_system_qubits: int
     register_sizes: tuple[int, ...]
     offsets: tuple[tuple[int, ...], ...]
     coefficients: tuple[complex, ...]
 
-    @property
-    def num_system_qubits(self) -> int:
-        """Return the required flattened system-register width.
-
-        Returns:
-            int: Sum of the per-axis qubit widths.
-        """
-        return sum(self.register_sizes)
-
-    def __call__(
-        self,
-        signal: qmc.Vector[qmc.Qubit],
-        system: qmc.Vector[qmc.Qubit],
-    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-        """Apply the generated block-encoding qkernel.
-
-        Args:
-            signal (qmc.Vector[qmc.Qubit]): All-zero signal register with
-                ``num_signal_qubits`` qubits.
-            system (qmc.Vector[qmc.Qubit]): Flattened axis registers with
-                ``num_system_qubits`` qubits in total.
-
-        Returns:
-            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated signal
-            and system registers.
+    def __post_init__(self) -> None:
+        """Validate and normalize the immutable descriptor fields.
 
         Raises:
-            ValueError: If a concretely sized signal or system register does
-                not match the factory's required width.
+            TypeError: If a common field or method-specific metadata value has
+                an invalid runtime type.
+            ValueError: If a common field is outside its valid range or the
+                method-specific metadata is inconsistent.
         """
-        _validate_register_width(signal, self.num_signal_qubits, "signal")
-        _validate_register_width(system, self.num_system_qubits, "system")
-        return self.kernel(signal, system)
-
-
-def _concrete_register_width(register: qmc.Vector[qmc.Qubit]) -> int | None:
-    """Return a vector's concrete width when available during tracing.
-
-    Args:
-        register (qmc.Vector[qmc.Qubit]): Quantum register to inspect.
-
-    Returns:
-        int | None: Concrete width, or ``None`` while the shape is symbolic.
-    """
-    if not register.shape:
-        return None
-    dimension = register.shape[0]
-    if isinstance(dimension, int):
-        return dimension
-    value = getattr(dimension, "value", None)
-    if value is not None and value.is_constant():
-        return int(value.get_const())
-    return None
-
-
-def _validate_register_width(
-    register: qmc.Vector[qmc.Qubit],
-    expected: int,
-    role: str,
-) -> None:
-    """Reject a concretely known register width that violates the factory ABI.
-
-    Args:
-        register (qmc.Vector[qmc.Qubit]): Quantum register supplied by a caller.
-        expected (int): Width required by the generated construction.
-        role (str): Register role used in the diagnostic.
-
-    Raises:
-        ValueError: If the concrete width differs from ``expected``.
-    """
-    actual = _concrete_register_width(register)
-    if actual is not None and actual != expected:
-        raise ValueError(
-            f"periodic stencil block encoding requires {expected} {role} "
-            f"qubits, got {actual}"
+        unitary, normalization, num_signal_qubits, num_system_qubits = (
+            validate_block_encoding_fields(
+                self.unitary,
+                self.normalization,
+                self.num_signal_qubits,
+                self.num_system_qubits,
+            )
         )
+        (
+            register_sizes,
+            offsets,
+            coefficients,
+            normalization,
+        ) = _validate_descriptor_metadata(
+            self.register_sizes,
+            self.offsets,
+            self.coefficients,
+            normalization,
+            num_signal_qubits,
+            num_system_qubits,
+        )
+        object.__setattr__(self, "unitary", unitary)
+        object.__setattr__(self, "normalization", normalization)
+        object.__setattr__(self, "num_signal_qubits", num_signal_qubits)
+        object.__setattr__(self, "num_system_qubits", num_system_qubits)
+        object.__setattr__(self, "register_sizes", register_sizes)
+        object.__setattr__(self, "offsets", offsets)
+        object.__setattr__(self, "coefficients", coefficients)
 
 
 def _validate_register_sizes(register_sizes: Sequence[Any]) -> tuple[int, ...]:
@@ -176,15 +182,106 @@ def _validate_register_sizes(register_sizes: Sequence[Any]) -> tuple[int, ...]:
     if not sizes:
         raise ValueError("register_sizes must contain at least one axis")
     for axis, width in enumerate(sizes):
-        if not _is_integer(width):
+        if type(width) is not int:
             raise TypeError(
                 f"register_sizes[{axis}] must be an int, got {type(width).__name__}"
             )
-        if int(width) <= 0:
+        if width <= 0:
+            raise ValueError(f"register_sizes[{axis}] must be positive, got {width}")
+    return cast(tuple[int, ...], sizes)
+
+
+def _validate_descriptor_metadata(
+    register_sizes: object,
+    offsets: object,
+    coefficients: object,
+    normalization: float,
+    num_signal_qubits: int,
+    num_system_qubits: int,
+) -> tuple[
+    tuple[int, ...],
+    tuple[tuple[int, ...], ...],
+    tuple[complex, ...],
+    float,
+]:
+    """Validate periodic metadata stored alongside one generated unitary.
+
+    Args:
+        register_sizes (object): Candidate tuple of per-axis qubit widths.
+        offsets (object): Candidate canonical SELECT-order offset tuple.
+        coefficients (object): Candidate combined coefficient tuple.
+        normalization (float): Validated common block normalization.
+        num_signal_qubits (int): Validated common signal width.
+        num_system_qubits (int): Validated common system width.
+
+    Returns:
+        tuple: Validated register sizes, offsets, coefficients, and canonical
+            coefficient-derived normalization, in that order.
+
+    Raises:
+        TypeError: If metadata is not represented by the documented tuple and
+            scalar types.
+        ValueError: If metadata is empty, noncanonical, or inconsistent with
+            the common descriptor fields.
+    """
+    if not isinstance(register_sizes, tuple):
+        raise TypeError("register_sizes must be a tuple of plain integers.")
+    sizes = _validate_register_sizes(register_sizes)
+    if num_system_qubits != sum(sizes):
+        raise ValueError("num_system_qubits must equal the sum of register_sizes.")
+    if not isinstance(offsets, tuple):
+        raise TypeError("offsets must be a tuple of canonical offset tuples.")
+    if not isinstance(coefficients, tuple):
+        raise TypeError("coefficients must be a tuple of nonzero complex values.")
+    if not offsets or len(offsets) != len(coefficients):
+        raise ValueError("offsets and coefficients must have the same nonzero length.")
+
+    canonical_offsets: list[tuple[int, ...]] = []
+    canonical_coefficients: list[complex] = []
+    for index, (offset, coefficient) in enumerate(
+        zip(offsets, coefficients, strict=True)
+    ):
+        if not isinstance(offset, tuple) or len(offset) != len(sizes):
             raise ValueError(
-                f"register_sizes[{axis}] must be positive, got {int(width)}"
+                f"offsets[{index}] must contain one component per register axis."
             )
-    return tuple(int(width) for width in sizes)
+        for axis, (component, width) in enumerate(zip(offset, sizes, strict=True)):
+            if type(component) is not int:
+                raise TypeError(f"offsets[{index}][{axis}] must be a plain integer.")
+            if component < 0 or component >= 1 << width:
+                raise ValueError(
+                    f"offsets[{index}][{axis}] is not a canonical modular residue."
+                )
+        value = _coerce_coefficient(coefficient, offset)
+        if not value:
+            raise ValueError("descriptor coefficients must be nonzero.")
+        canonical_offsets.append(offset)
+        canonical_coefficients.append(value)
+
+    frozen_offsets = tuple(canonical_offsets)
+    if frozen_offsets != tuple(sorted(frozen_offsets)) or len(
+        set(frozen_offsets)
+    ) != len(frozen_offsets):
+        raise ValueError("descriptor offsets must be unique and canonically sorted.")
+    frozen_coefficients = tuple(canonical_coefficients)
+    expected_signal = max(1, (len(frozen_offsets) - 1).bit_length())
+    if num_signal_qubits != expected_signal:
+        raise ValueError(
+            "num_signal_qubits does not match the number of canonical terms."
+        )
+    canonical_normalization = _normalization(
+        tuple(zip(frozen_offsets, frozen_coefficients, strict=True))
+    )
+    if not math.isclose(
+        normalization,
+        canonical_normalization,
+        rel_tol=_NORMALIZATION_REL_TOLERANCE,
+        abs_tol=0.0,
+    ):
+        raise ValueError(
+            "normalization must equal the sum of absolute canonical coefficients."
+        )
+    return sizes, frozen_offsets, frozen_coefficients, canonical_normalization
 
 
 def _canonical_offset(
@@ -258,39 +355,116 @@ def _canonical_terms(
     if not coefficients:
         raise ValueError("coefficients must contain at least one stencil term")
 
-    combined: dict[tuple[int, ...], complex] = {}
+    grouped: dict[tuple[int, ...], list[complex]] = {}
     for offset, coefficient in coefficients.items():
-        if isinstance(coefficient, bool) or not isinstance(coefficient, Number):
-            raise TypeError(
-                f"coefficient for offset {offset!r} must be numeric, got "
-                f"{type(coefficient).__name__}"
-            )
-        try:
-            value = complex(cast(Any, coefficient))
-        except (TypeError, ValueError) as error:
-            raise TypeError(
-                f"coefficient for offset {offset!r} cannot be converted to complex"
-            ) from error
-        except OverflowError as error:
-            raise ValueError(
-                f"coefficient for offset {offset!r} must be representable as a "
-                "finite complex number"
-            ) from error
-        if not math.isfinite(value.real) or not math.isfinite(value.imag):
-            raise ValueError(
-                f"coefficient for offset {offset!r} must be finite, got {coefficient!r}"
-            )
+        value = _coerce_coefficient(coefficient, offset)
         canonical = _canonical_offset(offset, register_sizes)
-        combined[canonical] = combined.get(canonical, 0.0j) + value
+        grouped.setdefault(canonical, []).append(value)
 
+    combined = tuple(
+        (offset, _sum_complex_values(values, offset))
+        for offset, values in sorted(grouped.items())
+    )
     terms = tuple(
-        (offset, coefficient)
-        for offset, coefficient in sorted(combined.items())
-        if coefficient
+        (offset, coefficient) for offset, coefficient in combined if coefficient
     )
     if not terms:
         raise ValueError("periodic stencil is the zero operator after combining terms")
     return terms
+
+
+def _coerce_coefficient(coefficient: Any, offset: Any) -> complex:
+    """Validate one coefficient and canonicalize signed zero components.
+
+    Args:
+        coefficient (Any): Candidate numeric stencil coefficient.
+        offset (Any): Source offset used in diagnostics.
+
+    Returns:
+        complex: Finite complex coefficient with positive signed zeros.
+
+    Raises:
+        TypeError: If the coefficient is Boolean, nonnumeric, or cannot be
+            converted to complex.
+        ValueError: If conversion overflows or a component is non-finite.
+    """
+    if isinstance(coefficient, bool) or not isinstance(coefficient, Number):
+        raise TypeError(
+            f"coefficient for offset {offset!r} must be numeric, got "
+            f"{type(coefficient).__name__}"
+        )
+    try:
+        value = complex(cast(Any, coefficient))
+    except (TypeError, ValueError) as error:
+        raise TypeError(
+            f"coefficient for offset {offset!r} cannot be converted to complex"
+        ) from error
+    except OverflowError as error:
+        raise ValueError(
+            f"coefficient for offset {offset!r} must be representable as a "
+            "finite complex number"
+        ) from error
+    if not math.isfinite(value.real) or not math.isfinite(value.imag):
+        raise ValueError(
+            f"coefficient for offset {offset!r} must be finite, got {coefficient!r}"
+        )
+    real = value.real if value.real else 0.0
+    imag = value.imag if value.imag else 0.0
+    return complex(real, imag)
+
+
+def _sum_complex_values(
+    values: Sequence[complex],
+    offset: tuple[int, ...],
+) -> complex:
+    """Combine equivalent-offset coefficients in canonical numeric order.
+
+    Args:
+        values (Sequence[complex]): Finite values assigned to one residue.
+        offset (tuple[int, ...]): Canonical residue used in diagnostics.
+
+    Returns:
+        complex: Accurately summed coefficient with signed zero canonicalized.
+
+    Raises:
+        ValueError: If finite inputs overflow during canonical summation.
+    """
+    ordered = sorted(values, key=lambda value: (value.real, value.imag))
+    try:
+        real = math.fsum(value.real for value in ordered)
+        imag = math.fsum(value.imag for value in ordered)
+    except OverflowError as error:
+        raise ValueError(
+            f"combined coefficient for offset {offset!r} must be finite"
+        ) from error
+    if not math.isfinite(real) or not math.isfinite(imag):
+        raise ValueError(f"combined coefficient for offset {offset!r} must be finite")
+    return complex(real if real else 0.0, imag if imag else 0.0)
+
+
+def _normalization(
+    terms: Sequence[tuple[tuple[int, ...], complex]],
+) -> float:
+    """Compute the finite positive LCU normalization of canonical terms.
+
+    Args:
+        terms (Sequence[tuple[tuple[int, ...], complex]]): Canonically ordered
+            nonzero offset-coefficient pairs.
+
+    Returns:
+        float: Sum of coefficient magnitudes.
+
+    Raises:
+        ValueError: If the magnitude sum overflows or is not finite and
+            positive.
+    """
+    try:
+        normalization = math.fsum(abs(coefficient) for _, coefficient in terms)
+    except OverflowError as error:
+        raise ValueError("periodic stencil normalization must be finite") from error
+    if not math.isfinite(normalization) or normalization <= 0.0:
+        raise ValueError("periodic stencil normalization must be finite and positive")
+    return normalization
 
 
 def _shortest_signed_shift(residue: int, width: int) -> int:
@@ -354,50 +528,8 @@ def _apply_multidimensional_shift(
     for width, shift in zip(register_sizes, signed_shifts, strict=True):
         stop = start + width
         if shift:
-            system = _apply_flat_axis_shift(system, start, width, shift)
+            system = _apply_fixed_window_periodic_shift(system, start, width, shift)
         start = stop
-    return system
-
-
-def _apply_flat_axis_shift(
-    system: qmc.Vector[qmc.Qubit],
-    start: int,
-    width: int,
-    shift: int,
-) -> qmc.Vector[qmc.Qubit]:
-    """Shift one fixed subregister without creating symbolic nested slices.
-
-    The existing modular increment/decrement kernels are used for a one-axis
-    system.  A multidimensional flat register needs this fixed-boundary form
-    because passing a concrete axis view into those symbolic-width kernels
-    would create a second, symbolic view under the same live borrow.  This
-    helper emits the same increment/decrement gate ladders with concrete
-    prefix bounds.
-
-    Args:
-        system (qmc.Vector[qmc.Qubit]): Flattened multidimensional register.
-        start (int): First qubit of the axis.
-        width (int): Number of qubits in the axis.
-        shift (int): Signed number of unit modular shifts.
-
-    Returns:
-        qmc.Vector[qmc.Qubit]: Updated flattened register.
-    """
-    increment = shift > 0
-    for _ in range(abs(shift)):
-        if not increment:
-            system[start] = qmc.x(system[start])
-
-        target_indices = range(width - 1, 0, -1) if increment else range(1, width)
-        for target_index in target_indices:
-            controls = system[start : start + target_index]
-            target = system[start + target_index]
-            controls, target = qmc.mcx(controls, target)
-            system[start : start + target_index] = controls
-            system[start + target_index] = target
-
-        if increment:
-            system[start] = qmc.x(system[start])
     return system
 
 
@@ -442,7 +574,11 @@ def _make_shift_case(
             signed_shifts,
         )
 
-    phased_shift = qmc.global_phase(shift_case, cmath.phase(coefficient))
+    phase = _coefficient_phase(coefficient)
+    if not phase:
+        return shift_case
+
+    phased_shift = qmc.global_phase(shift_case, phase)
 
     @qmc.qkernel
     def phased_shift_case(
@@ -461,10 +597,167 @@ def _make_shift_case(
     return phased_shift_case
 
 
+def _coefficient_phase(coefficient: complex) -> float:
+    """Return one nonzero coefficient phase with signed zero canonicalized.
+
+    Args:
+        coefficient (complex): Nonzero canonical stencil coefficient.
+
+    Returns:
+        float: Principal coefficient phase, using positive zero for a
+            positive-real coefficient.
+    """
+    phase = math.atan2(coefficient.imag, coefficient.real)
+    return phase if phase else 0.0
+
+
+def _validate_register_widths(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+    expected_signal: int,
+    expected_system: int,
+) -> None:
+    """Validate concrete registers while allowing symbolic cache traces.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Complete public signal register.
+        system (qmc.Vector[qmc.Qubit]): Ordered flat system register.
+        expected_signal (int): Required signal width.
+        expected_system (int): Required system width.
+
+    Raises:
+        TypeError: If either argument is not a qubit vector.
+        ValueError: If a concrete register width differs from its requirement.
+    """
+    validate_block_encoding_registers(
+        signal,
+        system,
+        expected_signal,
+        expected_system,
+        "periodic stencil block encoding",
+    )
+
+
+def _build_single_term_encoding(
+    term: tuple[tuple[int, ...], complex],
+    register_sizes: tuple[int, ...],
+    num_signal_qubits: int,
+) -> _BlockEncodingUnitary:
+    """Build an unconditional phased-shift encoding for one stencil term.
+
+    Args:
+        term (tuple[tuple[int, ...], complex]): Canonical nonzero stencil term.
+        register_sizes (tuple[int, ...]): Per-axis system-register widths.
+        num_signal_qubits (int): Positive pass-through signal width.
+
+    Returns:
+        _BlockEncodingUnitary: Single-term periodic block-encoding unitary.
+    """
+    offset, coefficient = term
+    phased_shift = _make_shift_case(offset, coefficient, register_sizes)
+    num_system_qubits = sum(register_sizes)
+
+    @qmc.qkernel
+    def unitary(
+        signal: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Apply one captured phased periodic shift.
+
+        Args:
+            signal (qmc.Vector[qmc.Qubit]): Pass-through signal register.
+            system (qmc.Vector[qmc.Qubit]): Flattened system register.
+
+        Returns:
+            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Preserved
+                signal and shifted system registers.
+        """
+        _validate_register_widths(
+            signal,
+            system,
+            num_signal_qubits,
+            num_system_qubits,
+        )
+        system = phased_shift(system)
+        return signal, system
+
+    return unitary
+
+
+def _build_multi_term_encoding(
+    terms: tuple[tuple[tuple[int, ...], complex], ...],
+    register_sizes: tuple[int, ...],
+    normalization: float,
+    num_signal_qubits: int,
+) -> _BlockEncodingUnitary:
+    """Build PREPARE-SELECT-PREPARE-dagger for multiple stencil terms.
+
+    Args:
+        terms (tuple[tuple[tuple[int, ...], complex], ...]): Canonical nonzero
+            periodic stencil terms.
+        register_sizes (tuple[int, ...]): Per-axis system-register widths.
+        normalization (float): Finite positive sum of coefficient magnitudes.
+        num_signal_qubits (int): Required SELECT index width.
+
+    Returns:
+        _BlockEncodingUnitary: Multi-term periodic block-encoding unitary.
+
+    Raises:
+        RuntimeError: If state preparation disagrees with the SELECT width.
+    """
+    amplitudes = np.zeros(1 << num_signal_qubits, dtype=np.float64)
+    sqrt_normalization = math.sqrt(normalization)
+    for index, (_, coefficient) in enumerate(terms):
+        amplitudes[index] = math.sqrt(abs(coefficient)) / sqrt_normalization
+
+    preparation, required_signal_qubits = _mottonen_composite(amplitudes)
+    if required_signal_qubits != num_signal_qubits:
+        raise RuntimeError(
+            "Möttönen preparation width disagrees with the stencil SELECT width."
+        )
+    unprepare = qmc.inverse(preparation)
+    selector = qmc.select(
+        tuple(
+            _make_shift_case(offset, coefficient, register_sizes)
+            for offset, coefficient in terms
+        ),
+        num_index_qubits=qmc.uint(num_signal_qubits),
+    )
+    num_system_qubits = sum(register_sizes)
+
+    @qmc.qkernel
+    def unitary(
+        signal: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Apply PREPARE, phased shift SELECT, and inverse PREPARE.
+
+        Args:
+            signal (qmc.Vector[qmc.Qubit]): All-zero block signal register.
+            system (qmc.Vector[qmc.Qubit]): Flattened system register.
+
+        Returns:
+            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated signal
+                and system registers.
+        """
+        _validate_register_widths(
+            signal,
+            system,
+            num_signal_qubits,
+            num_system_qubits,
+        )
+        signal = preparation(signal)
+        signal, system = selector(signal, system)
+        signal = unprepare(signal)
+        return signal, system
+
+    return unitary
+
+
 def periodic_stencil_block_encoding(
     coefficients: Mapping[Offset, complex],
     register_sizes: Sequence[int],
-) -> PeriodicStencilEncoding:
+) -> PeriodicStencilBlockEncoding:
     """Build an LCU block encoding of a periodic constant-coefficient stencil.
 
     The system is a flattened concatenation of LSB-first axis registers.  An
@@ -476,9 +769,11 @@ def periodic_stencil_block_encoding(
     Only exact cancellations are removed before ``lambda`` and PREPARE are
     constructed, so every representable nonzero coefficient is preserved.
 
-    The returned qkernel expects an all-zero signal register.  Projecting that
-    register onto all zero before and after the qkernel yields ``A / lambda``,
-    where ``lambda`` is available as ``result.normalization``.
+    The returned descriptor's ``unitary`` expects an all-zero signal register.
+    Projecting that register onto all zero before and after the unitary yields
+    ``A / lambda``, where ``lambda`` is available as ``result.normalization``.
+    A single term retains one pass-through signal qubit for composition but
+    omits PREPARE and SELECT entirely.
 
     Args:
         coefficients (Mapping[int | tuple[int, ...], complex]): Constant
@@ -487,7 +782,8 @@ def periodic_stencil_block_encoding(
             flattened-system order.
 
     Returns:
-        PeriodicStencilEncoding: Method-specific kernel and metadata.
+        PeriodicStencilBlockEncoding: Frozen non-callable descriptor containing
+            the generated unitary and method-specific canonical metadata.
 
     Raises:
         ValueError: If no axes or terms are supplied, an axis width is not
@@ -499,67 +795,43 @@ def periodic_stencil_block_encoding(
 
     Example:
         >>> import qamomile.circuit as qmc
-        >>> encoding = periodic_stencil_block_encoding(
+        >>> encoding = qmc.periodic_stencil_block_encoding(
         ...     {-1: 1.0, 0: -2.0, 1: 1.0},
         ...     register_sizes=(3,),
         ... )
         >>> encoding.normalization
         4.0
         >>> @qmc.qkernel
-        ... def apply():
+        ... def apply() -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
         ...     signal = qmc.qubit_array(encoding.num_signal_qubits)
         ...     system = qmc.qubit_array(encoding.num_system_qubits)
-        ...     return encoding(signal, system)
+        ...     return encoding.unitary(signal, system)
     """
     sizes = _validate_register_sizes(register_sizes)
     terms = _canonical_terms(coefficients, sizes)
-    normalization = float(sum(abs(coefficient) for _, coefficient in terms))
-    if not math.isfinite(normalization):
-        raise ValueError("periodic stencil normalization must be finite")
-
-    num_terms = len(terms)
-    num_signal_qubits = max(1, (num_terms - 1).bit_length())
-    prepare_amplitudes = np.zeros(1 << num_signal_qubits, dtype=np.float64)
-    for index, (_, coefficient) in enumerate(terms):
-        prepare_amplitudes[index] = math.sqrt(abs(coefficient) / normalization)
-
-    cases = [
-        _make_shift_case(offset, coefficient, sizes) for offset, coefficient in terms
-    ]
-    if len(cases) == 1:
-        cases.append(_make_shift_case(tuple(0 for _ in sizes), 1.0 + 0.0j, sizes))
-
-    prepare, required_signal_qubits = _mottonen_composite(prepare_amplitudes)
-    if required_signal_qubits != num_signal_qubits:
-        raise AssertionError("state-preparation width disagrees with SELECT width")
-    unprepare = qmc.inverse(prepare)
-    select_gate = qmc.select(cases, num_index_qubits=num_signal_qubits)
-
-    @qmc.qkernel
-    def kernel(
-        signal: qmc.Vector[qmc.Qubit],
-        system: qmc.Vector[qmc.Qubit],
-    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-        """Apply PREPARE, phased shift SELECT, and inverse PREPARE.
-
-        Args:
-            signal (qmc.Vector[qmc.Qubit]): All-zero signal register.
-            system (qmc.Vector[qmc.Qubit]): Flattened system register.
-
-        Returns:
-            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated signal
-            and system registers.
-        """
-        signal = prepare(signal)
-        signal, system = select_gate(signal, system)
-        signal = unprepare(signal)
-        return signal, system
-
-    kernel.name = "periodic_stencil_block_encoding"
-    return PeriodicStencilEncoding(
-        kernel=kernel,
+    normalization = _normalization(terms)
+    num_signal_qubits = max(1, (len(terms) - 1).bit_length())
+    if len(terms) == 1:
+        unitary = _build_single_term_encoding(
+            terms[0],
+            sizes,
+            num_signal_qubits,
+        )
+    else:
+        unitary = _build_multi_term_encoding(
+            terms,
+            sizes,
+            normalization,
+            num_signal_qubits,
+        )
+    # This display name is diagnostic only. Stable boxed callable identity is
+    # intentionally deferred until boxed inverse lowering supports this body.
+    unitary.name = "periodic_stencil_block_encoding"
+    return PeriodicStencilBlockEncoding(
+        unitary=unitary,
         normalization=normalization,
         num_signal_qubits=num_signal_qubits,
+        num_system_qubits=sum(sizes),
         register_sizes=sizes,
         offsets=tuple(offset for offset, _ in terms),
         coefficients=tuple(coefficient for _, coefficient in terms),
@@ -567,6 +839,6 @@ def periodic_stencil_block_encoding(
 
 
 __all__ = [
-    "PeriodicStencilEncoding",
+    "PeriodicStencilBlockEncoding",
     "periodic_stencil_block_encoding",
 ]
