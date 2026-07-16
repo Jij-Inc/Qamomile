@@ -19,6 +19,7 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.canonical import (
     canonicalize,
     canonicalize_and_remap,
+    content_fingerprint,
     content_hash,
     to_canonical_bytes,
 )
@@ -554,6 +555,28 @@ class TestCanonicalizeDeterminism:
         )
 
         assert content_hash(h_impl) != content_hash(z_impl)
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        {"alpha", "beta"},
+        object(),
+        np.array([object()], dtype=object),
+    ],
+    ids=["set", "object", "object-dtype-array"],
+)
+def test_content_fingerprint_rejects_unsupported_nested_values(
+    unsupported: object,
+) -> None:
+    """Strict lowered-IR fingerprints never use an implicit repr fallback."""
+    with pytest.raises(TypeError, match=r"content_fingerprint\(\)"):
+        content_fingerprint({"nested": [unsupported]})
+
+
+def test_content_fingerprint_accepts_structural_range_values() -> None:
+    """Concrete loop index ranges have a stable strict representation."""
+    assert len(content_fingerprint(range(1, 7, 2))) == 64
 
 
 class TestCanonicalizeIdempotence:

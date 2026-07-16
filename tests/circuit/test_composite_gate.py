@@ -181,6 +181,11 @@ def test_inverse_accepts_a_composite_qkernel() -> None:
     assert inverse.implementation_for() is not None
 
 
+def test_inverse_of_inverse_composite_returns_original_kernel() -> None:
+    """Applying the inverse transform twice cancels at the frontend boundary."""
+    assert qmc.inverse(qmc.inverse(bell_pair)) is bell_pair
+
+
 def test_composite_resource_estimate_is_derived_from_its_body() -> None:
     """A body-backed composite has no second resource-definition surface."""
 

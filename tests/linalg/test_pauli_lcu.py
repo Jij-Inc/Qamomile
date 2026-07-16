@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
+import qamomile.linalg.pauli_lcu as pauli_lcu_module
 from qamomile.linalg import PauliLCU, PauliLCUTerm
 from qamomile.observable import Pauli, PauliOperator
 
@@ -13,6 +16,26 @@ X = np.array([[0, 1], [1, 0]], dtype=np.complex128)
 Y = np.array([[0, -1j], [1j, 0]], dtype=np.complex128)
 Z = np.array([[1, 0], [0, -1]], dtype=np.complex128)
 _PAULI_MATRIX = {Pauli.I: I2, Pauli.X: X, Pauli.Y: Y, Pauli.Z: Z}
+
+
+class _CountingCoefficientArray(np.ndarray):
+    """Count scalar coefficient reads made by decomposition code."""
+
+    scalar_reads = 0
+
+    def __getitem__(self, key: Any) -> Any:
+        """Return one indexed value and count scalar results.
+
+        Args:
+            key (Any): NumPy index or mask applied to the coefficient array.
+
+        Returns:
+            Any: NumPy's indexed scalar or array result.
+        """
+        result = super().__getitem__(key)
+        if np.isscalar(result):
+            type(self).scalar_reads += 1
+        return result
 
 
 def _term_matrix(term: PauliLCUTerm, num_qubits: int) -> np.ndarray:
@@ -172,6 +195,28 @@ def test_default_threshold_keeps_tiny_nonzero_coefficients() -> None:
     assert lcu.truncation_error_bound == 0.0
 
 
+def test_sparse_coefficients_avoid_dense_python_scalar_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sparse FWHT output is filtered in NumPy before retained-term iteration."""
+    dim = 256
+    coeffs = np.zeros((dim, dim), dtype=np.complex128).view(_CountingCoefficientArray)
+    coeffs[0, 0] = 1.0
+    coeffs[0, 1] = 1e-9
+    _CountingCoefficientArray.scalar_reads = 0
+    monkeypatch.setattr(
+        pauli_lcu_module,
+        "fwht_complex_pauli_coefficients",
+        lambda matrix: (coeffs, 8),
+    )
+
+    lcu = PauliLCU.from_matrix(np.ones((1, 1)), atol=1e-8)
+
+    assert lcu.terms == (PauliLCUTerm(1.0, ()),)
+    assert lcu.truncation_error_bound == pytest.approx(1e-9)
+    assert _CountingCoefficientArray.scalar_reads <= 2
+
+
 def test_explicit_threshold_records_operator_norm_error_bound() -> None:
     """Dropped coefficient magnitudes bound the resulting spectral-norm error."""
     tiny = 1e-8
@@ -182,6 +227,25 @@ def test_explicit_threshold_records_operator_norm_error_bound() -> None:
     assert lcu.num_terms == 1
     assert lcu.truncation_error_bound == pytest.approx(tiny)
     assert np.linalg.norm(error, ord=2) <= lcu.truncation_error_bound + 1e-15
+
+
+def test_threshold_boundary_uses_python_complex_magnitude() -> None:
+    """A coefficient exactly at ``atol`` remains on the dropped side."""
+    coefficient = complex(0.345584192064786, -0.32776493753426794)
+    threshold = abs(coefficient)
+
+    lcu = PauliLCU.from_matrix(
+        np.asarray([[coefficient]], dtype=np.complex128),
+        atol=threshold,
+    )
+
+    assert lcu.terms == ()
+    np.testing.assert_allclose(
+        lcu.truncation_error_bound,
+        threshold,
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def test_zero_and_all_pruned_matrices_are_valid_lcus() -> None:
@@ -276,6 +340,16 @@ def test_term_constructor_canonicalizes_operator_order() -> None:
     )
 
     assert tuple(operator.index for operator in term.operators) == (0, 2)
+
+
+def test_term_constructor_canonicalizes_numpy_integer_indices() -> None:
+    """Accepted NumPy indices become frontend-safe Python integers."""
+    term = PauliLCUTerm(
+        1.0,
+        (PauliOperator(Pauli.X, np.int64(0)),),
+    )
+
+    assert type(term.operators[0].index) is int
 
 
 def test_term_constructor_canonicalizes_signed_complex_zero() -> None:

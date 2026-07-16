@@ -41,10 +41,12 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     CircuitProgram,
     ClassicalBitExpr,
     ForInstruction,
+    GateInstruction,
     IfInstruction,
     LiteralExpr,
     LoopVariableExpr,
     ParameterExpr,
+    PauliEvolutionInstruction,
     ReusableCircuit,
     ScalarExpr,
     SemanticArguments,
@@ -107,13 +109,11 @@ _RUNTIME_BINARY_OPERATORS = {
 
 
 def _circuit_program_fingerprint(program: CircuitProgram) -> str:
-    """Return a deterministic content fingerprint for lowered circuit IR.
+    """Return a deterministic behavior fingerprint for lowered circuit IR.
 
-    Display-only circuit, reusable-call, and identity symbols are removed
-    before the shared canonical IR token encoder hashes the lowered body. This
-    lets SELECT identify cases by behavior rather than Python function name,
-    including bodies carried by boxed inverse composites that do not pass
-    through the entrypoint's affine canonicalization pipeline.
+    Display-only names are removed and lexically bound loop variables are
+    alpha-renamed before hashing. This lets SELECT compare equivalent case
+    bodies independently of Python callable and induction-variable names.
 
     Args:
         program (CircuitProgram): Lowered reusable case body.
@@ -121,94 +121,180 @@ def _circuit_program_fingerprint(program: CircuitProgram) -> str:
     Returns:
         str: Hexadecimal SHA-256 content digest.
     """
-    normalized = _without_circuit_display_names(program)
+    normalized = _normalize_circuit_program(program, {}, [0])
     return content_fingerprint(normalized)
 
 
-def _without_circuit_display_names(program: CircuitProgram) -> CircuitProgram:
-    """Return a circuit program with non-semantic display names removed.
+def _normalize_circuit_program(
+    program: CircuitProgram,
+    loop_names: dict[str, str],
+    next_loop_id: list[int],
+) -> CircuitProgram:
+    """Remove display names and alpha-normalize one circuit program.
 
     Args:
         program (CircuitProgram): Circuit program to normalize recursively.
+        loop_names (dict[str, str]): Active source-to-canonical loop binders.
+        next_loop_id (list[int]): Mutable one-element canonical binder counter.
 
     Returns:
-        CircuitProgram: Equivalent program with display-only names blanked.
+        CircuitProgram: Equivalent normalized circuit program.
     """
     return dataclasses.replace(
         program,
         name="",
         operations=tuple(
-            _without_instruction_display_names(operation)
+            _normalize_instruction(operation, loop_names, next_loop_id)
             for operation in program.operations
         ),
+        global_phase=_normalize_scalar_expression(program.global_phase, loop_names),
     )
 
 
-def _without_instruction_display_names(
+def _normalize_instruction(
     instruction: CircuitInstruction,
+    loop_names: dict[str, str],
+    next_loop_id: list[int],
 ) -> CircuitInstruction:
-    """Remove display names from reusable bodies nested in an instruction.
+    """Normalize display names and loop references in one instruction.
 
     Args:
         instruction (CircuitInstruction): Instruction to normalize.
+        loop_names (dict[str, str]): Active source-to-canonical loop binders.
+        next_loop_id (list[int]): Mutable one-element canonical binder counter.
 
     Returns:
         CircuitInstruction: Semantically equivalent normalized instruction.
     """
+    if isinstance(instruction, GateInstruction):
+        return dataclasses.replace(
+            instruction,
+            parameters=tuple(
+                _normalize_scalar_expression(parameter, loop_names)
+                for parameter in instruction.parameters
+            ),
+        )
+    if isinstance(instruction, PauliEvolutionInstruction):
+        return dataclasses.replace(
+            instruction,
+            time=_normalize_scalar_expression(instruction.time, loop_names),
+        )
     if isinstance(instruction, CallInstruction):
         return dataclasses.replace(
             instruction,
-            callee=_without_reusable_display_names(instruction.callee),
+            callee=_normalize_reusable_circuit(
+                instruction.callee,
+                loop_names,
+                next_loop_id,
+            ),
         )
     if isinstance(instruction, ForInstruction):
+        canonical_name = f"bound:{next_loop_id[0]}"
+        next_loop_id[0] += 1
+        body_loop_names = dict(loop_names)
+        body_loop_names[instruction.loop_variable.name] = canonical_name
         return dataclasses.replace(
             instruction,
+            loop_variable=LoopVariableExpr(canonical_name),
             body=tuple(
-                _without_instruction_display_names(operation)
+                _normalize_instruction(operation, body_loop_names, next_loop_id)
                 for operation in instruction.body
             ),
         )
     if isinstance(instruction, IfInstruction):
         return dataclasses.replace(
             instruction,
+            condition=_normalize_scalar_expression(instruction.condition, loop_names),
             true_body=tuple(
-                _without_instruction_display_names(operation)
+                _normalize_instruction(operation, loop_names, next_loop_id)
                 for operation in instruction.true_body
             ),
             false_body=tuple(
-                _without_instruction_display_names(operation)
+                _normalize_instruction(operation, loop_names, next_loop_id)
                 for operation in instruction.false_body
+            ),
+            true_global_phase=_normalize_scalar_expression(
+                instruction.true_global_phase,
+                loop_names,
+            ),
+            false_global_phase=_normalize_scalar_expression(
+                instruction.false_global_phase,
+                loop_names,
             ),
         )
     if isinstance(instruction, WhileInstruction):
         return dataclasses.replace(
             instruction,
+            condition=_normalize_scalar_expression(instruction.condition, loop_names),
             body=tuple(
-                _without_instruction_display_names(operation)
+                _normalize_instruction(operation, loop_names, next_loop_id)
                 for operation in instruction.body
+            ),
+            body_global_phase=_normalize_scalar_expression(
+                instruction.body_global_phase,
+                loop_names,
             ),
         )
     return instruction
 
 
-def _without_reusable_display_names(callee: ReusableCircuit) -> ReusableCircuit:
-    """Remove display-only names from one reusable circuit tree.
+def _normalize_reusable_circuit(
+    callee: ReusableCircuit,
+    loop_names: dict[str, str],
+    next_loop_id: list[int],
+) -> ReusableCircuit:
+    """Normalize one reusable circuit nested in the current lexical scope.
 
     Args:
         callee (ReusableCircuit): Reusable circuit to normalize.
+        loop_names (dict[str, str]): Active source-to-canonical loop binders.
+        next_loop_id (list[int]): Mutable one-element canonical binder counter.
 
     Returns:
-        ReusableCircuit: Equivalent reusable circuit with blank display names.
+        ReusableCircuit: Equivalent reusable circuit without display names.
     """
     identity = callee.identity
     if identity is not None:
         identity = dataclasses.replace(identity, symbol="")
     return dataclasses.replace(
         callee,
-        body=_without_circuit_display_names(callee.body),
+        body=_normalize_circuit_program(callee.body, loop_names, next_loop_id),
         name="",
         identity=identity,
     )
+
+
+def _normalize_scalar_expression(
+    expression: ScalarExpr,
+    loop_names: dict[str, str],
+) -> ScalarExpr:
+    """Alpha-normalize loop references in one scalar expression.
+
+    Bound and free references receive disjoint prefixes so a source name cannot
+    collide with a generated binder name.
+
+    Args:
+        expression (ScalarExpr): Scalar expression to normalize recursively.
+        loop_names (dict[str, str]): Active source-to-canonical loop binders.
+
+    Returns:
+        ScalarExpr: Equivalent expression with normalized loop references.
+    """
+    if isinstance(expression, LoopVariableExpr):
+        normalized_name = loop_names.get(expression.name, f"free:{expression.name}")
+        return dataclasses.replace(expression, name=normalized_name)
+    if isinstance(expression, BinaryExpr):
+        return dataclasses.replace(
+            expression,
+            left=_normalize_scalar_expression(expression.left, loop_names),
+            right=_normalize_scalar_expression(expression.right, loop_names),
+        )
+    if isinstance(expression, UnaryExpr):
+        return dataclasses.replace(
+            expression,
+            operand=_normalize_scalar_expression(expression.operand, loop_names),
+        )
+    return expression
 
 
 class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
@@ -325,7 +411,6 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
         local_indices = tuple(range(index_width))
         local_targets = tuple(range(index_width, index_width + len(target_indices)))
         case_fingerprints: list[str] = []
-
         for case_index, case_block in enumerate(op.case_blocks):
             case_program, broadcast = self._lower_select_case(
                 case_block,

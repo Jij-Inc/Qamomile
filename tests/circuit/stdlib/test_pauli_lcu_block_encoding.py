@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import math
 from typing import Any
 
@@ -31,7 +32,7 @@ def _build_unitary_kernel(lcu: PauliLCU, *, invert: bool = False) -> qmc.QKernel
 
     Args:
         lcu (PauliLCU): Decomposition whose block encoding should be exposed.
-        invert (bool): Whether to apply the explicit inverse implementation.
+        invert (bool): Whether to apply the inverse transform.
             Defaults to ``False``.
 
     Returns:
@@ -58,7 +59,7 @@ def _qiskit_unitary(lcu: PauliLCU, *, invert: bool = False) -> np.ndarray:
 
     Args:
         lcu (PauliLCU): Decomposition whose unitary should be materialized.
-        invert (bool): Whether to materialize the explicit inverse.
+        invert (bool): Whether to materialize the inverse transform.
             Defaults to ``False``.
 
     Returns:
@@ -102,7 +103,7 @@ def _select_case_fingerprints(
 
     Args:
         lcu (PauliLCU): Decomposition whose composite should be lowered.
-        invert (bool): Whether to lower the explicit inverse implementation.
+        invert (bool): Whether to lower the inverse transform.
             Defaults to ``False``.
 
     Returns:
@@ -248,7 +249,7 @@ def test_inverse_top_left_block_is_adjoint_matrix() -> None:
     )
 
 
-def test_explicit_inverse_select_has_stable_conjugated_case_fingerprints() -> None:
+def test_lazy_inverse_select_has_stable_conjugated_case_fingerprints() -> None:
     """Lowered identity-case phases distinguish forward and inverse bodies."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
 
@@ -270,6 +271,34 @@ def test_multi_term_root_composite_round_trips_qkernel_serialization() -> None:
 
     payload = serialize(gate)
     assert serialize(deserialize(payload)) == payload
+
+
+def test_factory_builds_only_the_forward_multi_term_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Construction leaves inverse materialization to the lazy transform path."""
+    module = importlib.import_module("qamomile.circuit.stdlib.pauli_lcu_block_encoding")
+    original_builder = module._build_multi_term_encoding
+    calls: list[PauliLCU] = []
+
+    def counted_builder(lcu: PauliLCU) -> qmc.QKernel:
+        """Record and delegate one multi-term kernel construction.
+
+        Args:
+            lcu (PauliLCU): Decomposition passed to the patched builder.
+
+        Returns:
+            qmc.QKernel: Kernel produced by the original builder.
+        """
+        calls.append(lcu)
+        return original_builder(lcu)
+
+    monkeypatch.setattr(module, "_build_multi_term_encoding", counted_builder)
+    lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
+    gate = module.pauli_lcu_block_encoding(lcu)
+
+    assert calls == [lcu]
+    assert qmc.inverse(qmc.inverse(gate)) is gate
 
 
 def test_selection_width_covers_zero_single_and_non_power_of_two_terms() -> None:
@@ -297,6 +326,21 @@ def test_lcu_helpers_reject_non_lcu_values() -> None:
         qmc.pauli_lcu_num_selection_qubits(object())  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="PauliLCU"):
         qmc.pauli_lcu_block_encoding(object())  # type: ignore[arg-type]
+
+
+def test_numpy_integer_pauli_index_builds_block_encoding() -> None:
+    """Accepted NumPy operator indices remain valid qkernel subscripts."""
+    lcu = PauliLCU(
+        1,
+        (
+            PauliLCUTerm(
+                1.0,
+                (qm_o.PauliOperator(qm_o.Pauli.X, np.int64(0)),),
+            ),
+        ),
+    )
+
+    assert qmc.pauli_lcu_block_encoding(lcu).block is not None
 
 
 def test_signed_zero_does_not_change_block_compiler_identity() -> None:
@@ -480,6 +524,8 @@ def test_inverse_round_trip_executes_on_every_sdk(sdk_transpiler: Any) -> None:
     """The generated composite followed by its inverse restores both registers."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
     gate = qmc.pauli_lcu_block_encoding(lcu)
+    double_inverse = qmc.inverse(qmc.inverse(gate))
+    assert double_inverse is gate
 
     @qmc.qkernel
     def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
@@ -487,7 +533,7 @@ def test_inverse_round_trip_executes_on_every_sdk(sdk_transpiler: Any) -> None:
         selection = qmc.qubit_array(1, "selection")
         system = qmc.qubit_array(1, "system")
         system[0] = qmc.x(system[0])
-        selection, system = gate(selection, system)
+        selection, system = double_inverse(selection, system)
         selection, system = qmc.inverse(gate)(selection, system)
         return qmc.measure(selection), qmc.measure(system)
 
@@ -499,7 +545,7 @@ def test_inverse_round_trip_executes_on_every_sdk(sdk_transpiler: Any) -> None:
 def test_inverse_alone_conjugates_complex_phase_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
-    """The explicit inverse body independently exposes the adjoint block."""
+    """The lazy inverse transform independently exposes the adjoint block."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
     inverse_gate = qmc.inverse(qmc.pauli_lcu_block_encoding(lcu))
 

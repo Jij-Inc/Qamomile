@@ -77,7 +77,15 @@ class PauliLCUTerm:
                     "Identity operators must be omitted from a sparse Pauli word."
                 )
 
-        canonical = tuple(sorted(operators, key=lambda operator: operator.index))
+        canonical = tuple(
+            sorted(
+                (
+                    PauliOperator(operator.pauli, int(operator.index))
+                    for operator in operators
+                ),
+                key=lambda operator: operator.index,
+            )
+        )
         indices = [int(operator.index) for operator in canonical]
         if len(indices) != len(set(indices)):
             raise ValueError("A Pauli word cannot address one qubit more than once.")
@@ -201,33 +209,43 @@ class PauliLCU:
             (1, 1): Pauli.Y,
         }
 
+        flat_coeffs = coeffs.reshape(-1)
+        if threshold:
+            with np.errstate(over="ignore"):
+                # ``np.hypot`` matches Python's prior ``abs(complex)``
+                # threshold decisions while retaining vectorized discovery.
+                magnitudes = np.hypot(flat_coeffs.real, flat_coeffs.imag)
+            retained_indices = np.flatnonzero(magnitudes > threshold)
+            dropped_magnitudes = magnitudes[
+                (magnitudes > 0.0) & (magnitudes <= threshold)
+            ]
+        else:
+            retained_indices = np.flatnonzero(flat_coeffs)
+            dropped_magnitudes = np.empty(0, dtype=np.float64)
+
         terms: list[PauliLCUTerm] = []
-        dropped_magnitudes: list[float] = []
-        for x_mask in range(dim):
-            for z_mask in range(dim):
-                coefficient = complex(coeffs[x_mask, z_mask])
-                magnitude = abs(coefficient)
-                if magnitude <= threshold:
-                    if magnitude:
-                        dropped_magnitudes.append(magnitude)
-                    continue
-                operators = tuple(
-                    PauliOperator(
-                        pauli_for_bits[((x_mask >> qubit) & 1, (z_mask >> qubit) & 1)],
-                        qubit,
-                    )
-                    for qubit in range(num_qubits)
-                    if ((x_mask >> qubit) & 1, (z_mask >> qubit) & 1) != (0, 0)
+        for flat_index in retained_indices:
+            x_mask, z_mask = divmod(int(flat_index), dim)
+            coefficient = complex(flat_coeffs[flat_index])
+            operators = tuple(
+                PauliOperator(
+                    pauli_for_bits[((x_mask >> qubit) & 1, (z_mask >> qubit) & 1)],
+                    qubit,
                 )
-                terms.append(
-                    PauliLCUTerm(
-                        coefficient=coefficient,
-                        operators=operators,
-                    )
+                for qubit in range(num_qubits)
+                if ((x_mask >> qubit) & 1, (z_mask >> qubit) & 1) != (0, 0)
+            )
+            terms.append(
+                PauliLCUTerm(
+                    coefficient=coefficient,
+                    operators=operators,
                 )
+            )
 
         try:
-            truncation_error_bound = math.fsum(dropped_magnitudes)
+            truncation_error_bound = math.fsum(
+                float(magnitude) for magnitude in dropped_magnitudes
+            )
         except OverflowError as exc:
             raise ValueError(
                 "PauliLCU truncation error bound exceeds the finite float range."

@@ -2,9 +2,11 @@
 
 Qamomile circuits are fixed-structure at compile time: loop bounds determine
 how many gates are emitted, and SELECT index widths determine reusable-call
-arity. These values must be resolvable before emit. This pass catches two
-failure families early — right before segmentation — with an actionable
-diagnostic, instead of letting them surface downstream as inconsistent errors:
+arity, while controlled-unitary widths, powers, and selected control indices
+determine coherent-control structure. These values must be resolvable before
+emit. This pass catches two failure families early — right before segmentation
+— with an actionable diagnostic, instead of letting them surface downstream as
+inconsistent errors:
 
 1. **Unresolved parameter shape dims** (e.g. ``gamma_dim0``): a loop
    bound reads a parameter array's length, but no concrete binding was
@@ -21,6 +23,10 @@ diagnostic, instead of letting them surface downstream as inconsistent errors:
    control flow when a bound *expression* strands its classical op
    between quantum ops at segmentation.
 
+The same early diagnostic applies to symbolic controlled-unitary structure
+(``num_controls``, ``power``, and ``control_indices``) and to loops stored in
+operation-owned SELECT/control blocks.
+
 Bounds that depend only on enclosing loop variables (e.g. a nested
 ``qmc.range(i + 1)`` inside ``qmc.range(p)``) are resolvable during
 emit-time unrolling and are left alone, as are measurement-derived
@@ -35,9 +41,14 @@ is unaffected — compile-time-bound counters are folded to constants by
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation import (
+    ControlledUOperation,
+    Operation,
+    SymbolicControlledU,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -45,7 +56,10 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.select import SelectOperation
-from qamomile.circuit.ir.value import Value, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    pair_block_operands,
+)
 from qamomile.circuit.transpiler.errors import QamomileCompileError
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
@@ -131,8 +145,9 @@ def _build_classical_dependency_graph(
     quantum edge could blame an unrelated gate parameter for a
     measurement-derived bound. Array-element metadata edges (the element's
     indices, parent array, and the parent's ``slice_of`` chain including
-    slice bounds) are recorded for operands of every operation kind — they
-    are type-preserving and are needed when a bound indexes a runtime
+    slice bounds) are recorded for every input value, including subclass-only
+    structural fields such as a SELECT width or controlled-U power. These
+    edges are type-preserving and are needed when a bound indexes a runtime
     parameter array directly (e.g. ``qmc.range(idxs[0])`` as a
     ``ForOperation`` operand) or uses a runtime parameter as the index into
     a compile-time-bound array (e.g. ``qmc.range(idxs[start])``).
@@ -163,16 +178,13 @@ def _build_classical_dependency_graph(
             Returns:
                 None: Mutates ``self.graph`` in place.
             """
+            input_values = op.all_input_values()
             if op.operation_kind == OperationKind.CLASSICAL:
-                operand_uuids = {
-                    v.uuid for v in op.operands if isinstance(v, ValueBase)
-                }
+                operand_uuids = {value.uuid for value in input_values}
                 for result in op.results:
                     self.graph.setdefault(result.uuid, set()).update(operand_uuids)
-            for v in op.operands:
-                if not isinstance(v, ValueBase):
-                    continue
-                self._record_value_reference_edges(v)
+            for value in input_values:
+                self._record_value_reference_edges(value)
 
         def _record_value_reference_edges(
             self,
@@ -283,11 +295,38 @@ def _format_runtime_parameter_select_width_error(param_name: str) -> str:
     )
 
 
+def _format_runtime_parameter_control_structure_error(
+    param_name: str,
+    field_label: str,
+) -> str:
+    """Build the diagnostic for a runtime-dependent controlled-U field.
+
+    Args:
+        param_name (str): Runtime parameter that determines controlled-U
+            structure.
+        field_label (str): Human-readable controlled-U field name, such as
+            ``"num_controls"`` or ``"power"``.
+
+    Returns:
+        str: Actionable error explaining the compile-time binding requirement.
+    """
+    return (
+        f"Cannot resolve controlled-unitary {field_label} at compile time "
+        f"because it depends on runtime parameter '{param_name}'.\n\n"
+        f"Qamomile circuits have fixed wire arity and gate structure before "
+        f"execution, so controlled-unitary structural values cannot be "
+        f"runtime parameters. Bind '{param_name}' during transpilation (and "
+        f"remove it from parameters=[...] if present):\n"
+        f"    transpiler.transpile(..., bindings={{'{param_name}': <int>}})"
+    )
+
+
 class SymbolicShapeValidationPass(Pass[Block, Block]):
     """Reject unresolvable values that determine emitted circuit structure.
 
-    Runs two checks on every ``ForOperation`` bound and symbolic SELECT index
-    width, walking nested control flow recursively:
+    Runs two checks on every ``ForOperation`` bound, symbolic SELECT index
+    width, and symbolic controlled-unitary structural field, walking nested
+    control flow and operation-owned SELECT/control blocks recursively:
 
     1. Unresolved parameter array shape dims, recognized by the
        ``{array}_dim{i}`` naming convention.
@@ -310,7 +349,11 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         return "symbolic_shape_validation"
 
     def run(self, input: Block) -> Block:
-        """Validate structural loop bounds and SELECT widths in the block.
+        """Validate compile-time structure throughout the analyzed block.
+
+        Checks loop bounds, SELECT widths, and controlled-unitary structural
+        fields at top level, in ordinary control-flow bodies, and in
+        operation-owned SELECT/control blocks.
 
         Args:
             input (Block): The block to validate. Must be
@@ -322,8 +365,9 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             Block: ``input``, unchanged, when validation succeeds.
 
         Raises:
-            QamomileCompileError: If a loop bound is an unresolved
-                parameter shape dim or depends on a runtime parameter.
+            QamomileCompileError: If any checked structural value is an
+                unresolved parameter shape dim or depends on a runtime
+                parameter.
         """
         if input.kind != BlockKind.ANALYZED:
             # Pass is defensive — only runs on analyzed blocks. Skip
@@ -335,14 +379,23 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             for name, value in input.parameters.items()
             if isinstance(value, ValueBase)
         }
-        self._dependency_graph = _build_classical_dependency_graph(input.operations)
-        self._walk(input.operations, frozenset())
+        dependency_graph = _build_classical_dependency_graph(input.operations)
+        self._walk(
+            input.operations,
+            frozenset(),
+            dependency_graph,
+            frozenset(),
+            frozenset(),
+        )
         return input
 
     def _walk(
         self,
         operations: list[Operation],
         enclosing_loop_vars: frozenset[str],
+        dependency_graph: dict[str, set[str]],
+        aliased_shape_dims: frozenset[str],
+        owned_blocks_on_path: frozenset[int],
     ) -> None:
         """Check operations recursively, tracking enclosing loop variables.
 
@@ -351,6 +404,15 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
                 top-level list or a control-flow op's nested body).
             enclosing_loop_vars (frozenset[str]): UUIDs of loop variables
                 declared by the control-flow ops enclosing ``operations``.
+            dependency_graph (dict[str, set[str]]): Classical dependency edges
+                visible in the current value scope.
+            aliased_shape_dims (frozenset[str]): UUIDs of owned-block formal
+                shape dimensions that are paired with a call-site actual.
+                Their display names alone do not imply an unresolved public
+                parameter shape.
+            owned_blocks_on_path (frozenset[int]): Object identities of
+                operation-owned Blocks currently being traversed. This stops
+                malformed or recursive block graphs from recursing forever.
 
         Returns:
             None: Raises on violation, otherwise returns nothing.
@@ -359,11 +421,104 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             QamomileCompileError: Propagated from :meth:`_check_op`.
         """
         for op in operations:
-            self._check_op(op, enclosing_loop_vars)
+            self._check_op(
+                op,
+                enclosing_loop_vars,
+                dependency_graph,
+                aliased_shape_dims,
+            )
             if isinstance(op, HasNestedOps):
                 nested_scope = enclosing_loop_vars | self._declared_loop_var_uuids(op)
                 for nested in op.nested_op_lists():
-                    self._walk(nested, nested_scope)
+                    self._walk(
+                        nested,
+                        nested_scope,
+                        dependency_graph,
+                        aliased_shape_dims,
+                        owned_blocks_on_path,
+                    )
+            for block, actual_operands in self._owned_blocks(op):
+                block_id = id(block)
+                if block_id in owned_blocks_on_path:
+                    continue
+                owned_graph, owned_shape_dims = self._owned_block_dependency_graph(
+                    block,
+                    actual_operands,
+                    dependency_graph,
+                )
+                self._walk(
+                    block.operations,
+                    enclosing_loop_vars,
+                    owned_graph,
+                    aliased_shape_dims | owned_shape_dims,
+                    owned_blocks_on_path | {block_id},
+                )
+
+    def _owned_blocks(
+        self,
+        op: Operation,
+    ) -> list[tuple[Block, Sequence[ValueBase]]]:
+        """Return operation-owned blocks and their call-site actuals.
+
+        Args:
+            op (Operation): Operation whose independently-scoped blocks should
+                be traversed.
+
+        Returns:
+            list[tuple[Block, Sequence[ValueBase]]]: Each owned block paired with
+                its target and classical/object operands. Controls external to
+                the owned callable are excluded. Ordinary control-flow bodies
+                are excluded because :class:`HasNestedOps` handles them in the
+                parent value scope.
+        """
+        if isinstance(op, SelectOperation):
+            actuals = [*op.target_operands, *op.param_operands]
+            return [(block, actuals) for block in op.case_blocks]
+        if isinstance(op, ControlledUOperation) and op.block is not None:
+            targets = [value for value in op.target_operands if value.type.is_quantum()]
+            return [(op.block, [*targets, *op.param_operands])]
+        return []
+
+    def _owned_block_dependency_graph(
+        self,
+        block: Block,
+        actual_operands: Sequence[ValueBase],
+        parent_graph: dict[str, set[str]],
+    ) -> tuple[dict[str, set[str]], frozenset[str]]:
+        """Build dependency edges for one independently-scoped owned block.
+
+        Formal values inside SELECT/control bodies have fresh UUIDs, so their
+        runtime provenance cannot be recovered by display name. This method
+        joins each formal to its call-site actual using the same positional
+        pairing contract as partial evaluation and emission.
+
+        Args:
+            block (Block): Operation-owned block to inspect.
+            actual_operands (Sequence[ValueBase]): Target and classical/object
+                call-site operands supplied by the owning operation, grouped
+                by quantum then non-quantum category.
+            parent_graph (dict[str, set[str]]): Dependency edges visible at the
+                owning operation.
+
+        Returns:
+            tuple[dict[str, set[str]], frozenset[str]]: Combined dependency
+                graph and the owned formal shape-dimension UUIDs paired to
+                call-site actual dimensions.
+        """
+        graph = {uuid: set(dependencies) for uuid, dependencies in parent_graph.items()}
+        for uuid, dependencies in _build_classical_dependency_graph(
+            block.operations
+        ).items():
+            graph.setdefault(uuid, set()).update(dependencies)
+        aliased_shape_dims: set[str] = set()
+        for formal, actual in pair_block_operands(block, actual_operands):
+            graph.setdefault(formal.uuid, set()).add(actual.uuid)
+            if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
+                for formal_dim, actual_dim in zip(formal.shape, actual.shape):
+                    graph.setdefault(formal_dim.uuid, set()).add(actual_dim.uuid)
+                    graph.setdefault(actual_dim.uuid, set()).add(actual.uuid)
+                    aliased_shape_dims.add(formal_dim.uuid)
+        return graph, frozenset(aliased_shape_dims)
 
     def _declared_loop_var_uuids(self, op: Operation) -> frozenset[str]:
         """Collect the loop-variable UUIDs declared by a control-flow op.
@@ -392,6 +547,8 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         self,
         op: Operation,
         enclosing_loop_vars: frozenset[str],
+        dependency_graph: dict[str, set[str]],
+        aliased_shape_dims: frozenset[str],
     ) -> None:
         """Dispatch the bound checks for a single operation.
 
@@ -399,6 +556,10 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             op (Operation): The operation to check.
             enclosing_loop_vars (frozenset[str]): UUIDs of loop variables
                 in scope at ``op``.
+            dependency_graph (dict[str, set[str]]): Classical dependency edges
+                visible at ``op``.
+            aliased_shape_dims (frozenset[str]): Owned formal shape dimensions
+                paired to call-site actuals.
 
         Returns:
             None: Raises on violation, otherwise returns nothing.
@@ -408,14 +569,33 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
                 :meth:`_check_for_operation`.
         """
         if isinstance(op, ForOperation):
-            self._check_for_operation(op, enclosing_loop_vars)
+            self._check_for_operation(
+                op,
+                enclosing_loop_vars,
+                dependency_graph,
+                aliased_shape_dims,
+            )
         elif isinstance(op, SelectOperation):
-            self._check_select_operation(op, enclosing_loop_vars)
+            self._check_select_operation(
+                op,
+                enclosing_loop_vars,
+                dependency_graph,
+                aliased_shape_dims,
+            )
+        if isinstance(op, ControlledUOperation):
+            self._check_controlled_operation(
+                op,
+                enclosing_loop_vars,
+                dependency_graph,
+                aliased_shape_dims,
+            )
 
     def _check_select_operation(
         self,
         op: SelectOperation,
         enclosing_loop_vars: frozenset[str],
+        dependency_graph: dict[str, set[str]],
+        aliased_shape_dims: frozenset[str],
     ) -> None:
         """Validate one symbolic SELECT index width.
 
@@ -424,6 +604,10 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             enclosing_loop_vars (frozenset[str]): UUIDs of loop variables in
                 scope. Widths derived solely from these remain resolvable
                 during emit-time unrolling.
+            dependency_graph (dict[str, set[str]]): Classical dependency edges
+                visible at the SELECT operation.
+            aliased_shape_dims (frozenset[str]): Owned formal shape dimensions
+                paired to call-site actuals.
 
         Returns:
             None: Raises on violation, otherwise returns nothing.
@@ -436,7 +620,7 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         if not isinstance(width, Value) or width.is_constant():
             return
         shape_info = _looks_like_parameter_shape_dim(width)
-        if shape_info is not None:
+        if shape_info is not None and width.uuid not in aliased_shape_dims:
             array_name, dim_index = shape_info
             raise QamomileCompileError(
                 _format_actionable_error(
@@ -445,16 +629,119 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
                     "a SELECT num_index_qubits value",
                 )
             )
-        param_name = self._runtime_parameter_source(width, enclosing_loop_vars)
+        param_name = self._runtime_parameter_source(
+            width,
+            enclosing_loop_vars,
+            dependency_graph,
+        )
         if param_name is not None:
             raise QamomileCompileError(
                 _format_runtime_parameter_select_width_error(param_name)
+            )
+
+    def _check_controlled_operation(
+        self,
+        op: ControlledUOperation,
+        enclosing_loop_vars: frozenset[str],
+        dependency_graph: dict[str, set[str]],
+        aliased_shape_dims: frozenset[str],
+    ) -> None:
+        """Validate symbolic fields that determine controlled-U structure.
+
+        Args:
+            op (ControlledUOperation): Controlled operation whose structural
+                values should be compile-time resolvable.
+            enclosing_loop_vars (frozenset[str]): UUIDs of loop variables in
+                scope. Fields derived solely from these remain resolvable
+                during emit-time unrolling.
+            dependency_graph (dict[str, set[str]]): Classical dependency edges
+                visible at the operation.
+            aliased_shape_dims (frozenset[str]): Owned formal shape dimensions
+                paired to call-site actuals.
+
+        Returns:
+            None: Raises on invalid structure; otherwise returns nothing.
+
+        Raises:
+            QamomileCompileError: If a structural field is an unresolved
+                parameter shape or depends on a runtime parameter.
+        """
+        fields: list[tuple[str, Value]] = []
+        if isinstance(op.power, Value):
+            fields.append(("power", op.power))
+        if isinstance(op, SymbolicControlledU):
+            fields.append(("num_controls", op.num_controls))
+            fields.extend(
+                (f"control_indices[{index}]", value)
+                for index, value in enumerate(op.control_indices or ())
+            )
+        for field_label, value in fields:
+            self._check_controlled_structural_value(
+                value,
+                field_label,
+                enclosing_loop_vars,
+                dependency_graph,
+                aliased_shape_dims,
+            )
+
+    def _check_controlled_structural_value(
+        self,
+        value: Value,
+        field_label: str,
+        enclosing_loop_vars: frozenset[str],
+        dependency_graph: dict[str, set[str]],
+        aliased_shape_dims: frozenset[str],
+    ) -> None:
+        """Validate one symbolic controlled-U structural value.
+
+        Args:
+            value (Value): Candidate structural value.
+            field_label (str): Controlled-U field name used in diagnostics.
+            enclosing_loop_vars (frozenset[str]): UUIDs of enclosing loop
+                variables that emit-time unrolling can resolve.
+            dependency_graph (dict[str, set[str]]): Classical dependency edges
+                visible at the operation.
+            aliased_shape_dims (frozenset[str]): Owned formal shape dimensions
+                paired to call-site actuals.
+
+        Returns:
+            None: Raises on invalid structure; otherwise returns nothing.
+
+        Raises:
+            QamomileCompileError: If ``value`` is an unresolved parameter
+                shape or depends on a runtime parameter.
+        """
+        if value.is_constant():
+            return
+        shape_info = _looks_like_parameter_shape_dim(value)
+        if shape_info is not None and value.uuid not in aliased_shape_dims:
+            array_name, dim_index = shape_info
+            raise QamomileCompileError(
+                _format_actionable_error(
+                    array_name,
+                    dim_index,
+                    f"a controlled-unitary {field_label} value",
+                )
+            )
+        param_name = self._runtime_parameter_source(
+            value,
+            enclosing_loop_vars,
+            dependency_graph,
+        )
+        if param_name is not None:
+            raise QamomileCompileError(
+                _format_runtime_parameter_control_structure_error(
+                    param_name,
+                    field_label,
+                )
             )
 
     def _check_for_operation(
         self,
         op: ForOperation,
         enclosing_loop_vars: frozenset[str],
+        dependency_graph: dict[str, set[str]],
+        aliased_shape_dims: frozenset[str],
     ) -> None:
         """Validate the start / stop / step bounds of one ``ForOperation``.
 
@@ -462,6 +749,10 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             op (ForOperation): The loop whose bounds are checked.
             enclosing_loop_vars (frozenset[str]): UUIDs of loop variables
                 declared by loops enclosing ``op`` (not ``op``'s own).
+            dependency_graph (dict[str, set[str]]): Classical dependency edges
+                visible at the loop.
+            aliased_shape_dims (frozenset[str]): Owned formal shape dimensions
+                paired to call-site actuals.
 
         Returns:
             None: Raises on violation, otherwise returns nothing.
@@ -476,13 +767,17 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             if not isinstance(operand, Value):
                 continue
             shape_info = _looks_like_parameter_shape_dim(operand)
-            if shape_info is not None:
+            if shape_info is not None and operand.uuid not in aliased_shape_dims:
                 array_name, dim_index = shape_info
                 location = f"a for-loop '{label}' bound (loop variable '{op.loop_var}')"
                 raise QamomileCompileError(
                     _format_actionable_error(array_name, dim_index, location)
                 )
-            param_name = self._runtime_parameter_source(operand, enclosing_loop_vars)
+            param_name = self._runtime_parameter_source(
+                operand,
+                enclosing_loop_vars,
+                dependency_graph,
+            )
             if param_name is not None:
                 raise QamomileCompileError(
                     _format_runtime_parameter_bound_error(
@@ -494,6 +789,7 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         self,
         operand: Value,
         enclosing_loop_vars: frozenset[str],
+        dependency_graph: dict[str, set[str]],
     ) -> str | None:
         """Trace a bound operand's dataflow back to a runtime parameter.
 
@@ -512,6 +808,8 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
                 ``ForOperation``.
             enclosing_loop_vars (frozenset[str]): UUIDs of loop variables
                 in scope at the loop being checked.
+            dependency_graph (dict[str, set[str]]): Classical dependency edges
+                visible at the structural value.
 
         Returns:
             str | None: The runtime parameter's name when the bound
@@ -532,5 +830,5 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             param_name = self._runtime_param_names.get(uuid)
             if param_name is not None:
                 return param_name
-            stack.extend(self._dependency_graph.get(uuid, ()))
+            stack.extend(dependency_graph.get(uuid, ()))
         return None

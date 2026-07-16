@@ -21,12 +21,7 @@ from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x, y, z
 from qamomile.circuit.frontend.operation.select import select
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
-from qamomile.circuit.frontend.qkernel_build import build_specialized_block
-from qamomile.circuit.ir.operation.callable import (
-    CallableImplementation,
-    CallPolicy,
-    CallTransform,
-)
+from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
 )
@@ -135,14 +130,11 @@ def pauli_lcu_block_encoding(lcu: PauliLCU) -> BlockEncodingKernel:
 
     if lcu.num_terms == 0:
         kernel = _build_zero_encoding(lcu)
-        inverse_kernel = _build_zero_encoding(lcu)
     elif lcu.num_terms == 1:
         kernel = _build_single_term_encoding(lcu)
-        inverse_kernel = _build_single_term_encoding(lcu, phase_sign=-1.0)
     else:
         kernel = _build_multi_term_encoding(lcu)
-        inverse_kernel = _build_multi_term_encoding(lcu, phase_sign=-1.0)
-    return _configure_block_encoding(kernel, inverse_kernel, lcu)
+    return _configure_block_encoding(kernel, lcu)
 
 
 def _build_zero_encoding(lcu: PauliLCU) -> BlockEncodingKernel:
@@ -180,22 +172,18 @@ def _build_zero_encoding(lcu: PauliLCU) -> BlockEncodingKernel:
 
 def _build_single_term_encoding(
     lcu: PauliLCU,
-    *,
-    phase_sign: float = 1.0,
 ) -> BlockEncodingKernel:
     """Build an unconditional phased-Pauli encoding for one term.
 
     Args:
         lcu (PauliLCU): One-term Pauli linear combination.
-        phase_sign (float): Multiplier for the coefficient phase. Use ``-1``
-            for the explicit inverse implementation. Defaults to ``1``.
 
     Returns:
         BlockEncodingKernel: Single-term block-encoding qkernel.
     """
     selection_width = pauli_lcu_num_selection_qubits(lcu)
     term = lcu.terms[0]
-    phase = _coefficient_phase(term.coefficient, phase_sign)
+    phase = _coefficient_phase(term.coefficient)
 
     @composite_gate(name="pauli_lcu_block_encoding")
     def kernel(
@@ -223,17 +211,12 @@ def _build_single_term_encoding(
 
 def _build_multi_term_encoding(
     lcu: PauliLCU,
-    *,
-    phase_sign: float = 1.0,
 ) -> BlockEncodingKernel:
     """Build a PREPARE-SELECT-PREPARE-dagger encoding.
 
     Args:
         lcu (PauliLCU): Pauli linear combination containing at least two
             terms.
-        phase_sign (float): Multiplier for every SELECT coefficient phase.
-            Use ``-1`` for the explicit inverse implementation. Defaults to
-            ``1``.
 
     Returns:
         BlockEncodingKernel: Multi-term block-encoding qkernel.
@@ -254,9 +237,7 @@ def _build_multi_term_encoding(
     # A constant UInt keeps the unspecialized composite's selection Vector
     # traceable while lowering still resolves the exact fixed LCU width.
     selector = select(
-        tuple(
-            _build_phased_pauli_case(term, phase_sign=phase_sign) for term in lcu.terms
-        ),
+        tuple(_build_phased_pauli_case(term) for term in lcu.terms),
         num_index_qubits=uint(selection_width),
     )
 
@@ -286,25 +267,38 @@ def _build_multi_term_encoding(
 
 def _build_phased_pauli_case(
     term: PauliLCUTerm,
-    *,
-    phase_sign: float = 1.0,
 ) -> QKernel[..., Vector[Qubit]]:
     """Build one explicit QKernel SELECT case for a complex Pauli term.
 
     Args:
         term (PauliLCUTerm): Nonzero Pauli LCU term.
-        phase_sign (float): Multiplier for the coefficient phase. Defaults to
-            ``1``.
 
     Returns:
         QKernel[..., Vector[Qubit]]: QKernel implementing
             ``exp(1j * arg(coefficient)) * P``.
     """
     operators = term.operators
-    phase = _coefficient_phase(term.coefficient, phase_sign)
+    phase = _coefficient_phase(term.coefficient)
+
+    if not phase:
+
+        @qkernel
+        def real_case(system: Vector[Qubit]) -> Vector[Qubit]:
+            """Apply one real-positive sparse Pauli word.
+
+            Args:
+                system (Vector[Qubit]): Shared SELECT target register.
+
+            Returns:
+                Vector[Qubit]: Transformed target register.
+            """
+            _apply_pauli_word(system, operators)
+            return system
+
+        return real_case
 
     @qkernel
-    def case(system: Vector[Qubit]) -> Vector[Qubit]:
+    def phased_case(system: Vector[Qubit]) -> Vector[Qubit]:
         """Apply one phased sparse Pauli word.
 
         Args:
@@ -316,7 +310,7 @@ def _build_phased_pauli_case(
         _apply_pauli_word(system, operators)
         return global_phase(_identity_vector, phase)(system)
 
-    return case
+    return phased_case
 
 
 def _apply_pauli_word(
@@ -343,18 +337,17 @@ def _apply_pauli_word(
             raise ValueError(f"Unsupported sparse Pauli value: {operator.pauli!r}.")
 
 
-def _coefficient_phase(coefficient: complex, phase_sign: float) -> float:
-    """Return a coefficient phase with signed zero canonicalized.
+def _coefficient_phase(coefficient: complex) -> float:
+    """Return the coefficient phase with signed zero canonicalized.
 
     Args:
         coefficient (complex): Nonzero complex Pauli coefficient.
-        phase_sign (float): Direction multiplier, normally ``1`` or ``-1``.
 
     Returns:
-        float: Signed coefficient phase, using positive zero for either
-            direction when the coefficient is positive real.
+        float: Coefficient phase, using positive zero for a positive-real
+            coefficient.
     """
-    phase = phase_sign * math.atan2(coefficient.imag, coefficient.real)
+    phase = math.atan2(coefficient.imag, coefficient.real)
     return phase if phase else 0.0
 
 
@@ -409,15 +402,12 @@ def _validate_register_width(
 
 def _configure_block_encoding(
     kernel: BlockEncodingKernel,
-    inverse_kernel: BlockEncodingKernel,
     lcu: PauliLCU,
 ) -> BlockEncodingKernel:
     """Attach stable compiler identity and semantic LCU metadata.
 
     Args:
         kernel (BlockEncodingKernel): Composite qkernel to configure.
-        inverse_kernel (BlockEncodingKernel): Explicit inverse body whose
-            SELECT phases have been conjugated before tracing.
         lcu (PauliLCU): Decomposition determining the composite unitary.
 
     Returns:
@@ -430,26 +420,11 @@ def _configure_block_encoding(
         separators=(",", ":"),
     ).encode("utf-8")
     digest = hashlib.sha256(digest_input).hexdigest()[:16]
-    inverse_body = build_specialized_block(
-        inverse_kernel,
-        parameters=[],
-        bindings={},
-        qubit_sizes={
-            "selection": pauli_lcu_num_selection_qubits(lcu),
-            "system": lcu.num_qubits,
-        },
-    )
     configure_composite(
         kernel,
         name="pauli_lcu_block_encoding",
         namespace=f"qamomile.stdlib.pauli_lcu.{digest}",
         policy=CallPolicy.PRESERVE_BOX,
-        implementations=(
-            CallableImplementation(
-                transform=CallTransform.INVERSE,
-                body=inverse_body,
-            ),
-        ),
         semantic_arguments=semantic_arguments,
     )
     return kernel

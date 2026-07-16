@@ -30,32 +30,6 @@ def is_power_of_two(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
 
 
-def fwht_inplace(vec: np.ndarray) -> None:
-    """Apply an in-place unnormalized Fast Walsh-Hadamard Transform.
-
-    Length must be a power of two. After calling,
-    ``vec[s] == sum_q original_vec[q] * (-1)**popcount(q & s)``.
-
-    Args:
-        vec (np.ndarray): One-dimensional array whose length is a power of
-            two. The transform modifies this array in place.
-    """
-    # TODO(perf): each butterfly allocates two temporary halves via `.copy()`.
-    # A reshape-based vectorization (operating on
-    # ``vec.reshape(-1, 2 * step)`` blocks) would eliminate the per-iteration
-    # copies. Fine for the current O(n*4**n) callers; revisit if this becomes
-    # a hot path.
-    length = vec.shape[0]
-    step = 1
-    while step < length:
-        for start in range(0, length, 2 * step):
-            x = vec[start : start + step].copy()
-            y = vec[start + step : start + 2 * step].copy()
-            vec[start : start + step] = x + y
-            vec[start + step : start + 2 * step] = x - y
-        step *= 2
-
-
 def _float_to_subnormal_units(value: float) -> int:
     """Convert one finite binary64 value to exact subnormal-sized units.
 
