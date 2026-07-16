@@ -3719,6 +3719,43 @@ class TestControlledGate:
         )
         assert statevectors_equal(sv, expected)
 
+    @pytest.mark.parametrize("num_controls", [1, 4])
+    def test_multi_controlled_y_preserves_relative_phase_statevector(
+        self, num_controls
+    ):
+        """A coherently controlled Y has ``+i`` rather than ``-i`` phase.
+
+        Every control is put in superposition so an erroneous ``-Y`` cannot
+        hide as an unobservable global phase. The four-control case also
+        exercises the clean-ancilla conjunction used by wide SELECT calls.
+        """
+
+        @qmc.qkernel
+        def y_gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.y(q)
+
+        controlled_y = qmc.control(y_gate, num_controls=num_controls)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+            ctrl = qmc.qubit_array(num_controls, "ctrl")
+            target = qmc.qubit("target")
+            for i in qmc.range(num_controls):
+                ctrl[i] = qmc.h(ctrl[i])
+            ctrl, target = controlled_y(ctrl, target)
+            return qmc.measure(ctrl), qmc.measure(target)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        sv = _strip_zero_ancillas(_run_statevector(circ), num_controls + 1)
+        hadamard = GATE_SPECS["H"].matrix_fn()
+        preparation = tensor_product(identity(2), *([hadamard] * num_controls))
+        initial = preparation @ all_zeros_state(num_controls + 1)
+        expected = (
+            _multi_controlled_unitary(GATE_SPECS["Y"].matrix_fn(), num_controls)
+            @ initial
+        )
+        assert statevectors_equal(sv, expected)
+
     def test_multi_controlled_x_beyond_former_matrix_cap(self):
         """A 10-control X samples correctly despite its 11-local-qubit width.
 

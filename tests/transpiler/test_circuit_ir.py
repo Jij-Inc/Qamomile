@@ -13,6 +13,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     CallInstruction,
     CircuitBuilder,
     CircuitLoweringPass,
+    CircuitProgram,
     ClassicalBitExpr,
     ForInstruction,
     GateInstruction,
@@ -24,11 +25,16 @@ from qamomile.circuit.transpiler.circuit_ir import (
     ParameterExpr,
     PauliEvolutionInstruction,
     ReusableCircuit,
+    UnaryExpr,
+    UnaryOperator,
     WhileInstruction,
     WireId,
     lower_circuit_plan,
     materialize_executable,
     verify_circuit,
+)
+from qamomile.circuit.transpiler.circuit_ir.lowering import (
+    _circuit_program_fingerprint,
 )
 from qamomile.circuit.transpiler.gate_emitter import GateKind
 from qamomile.qiskit import QiskitTranspiler
@@ -101,6 +107,12 @@ def _select_x(qubit: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _select_x_alias(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Apply the same X case under an unrelated display name."""
+    return qmc.x(qubit)
+
+
+@qmc.qkernel
 def _select_phased_identity(qubit: qmc.Qubit) -> qmc.Qubit:
     """Apply a nonzero phase to an identity SELECT case."""
     return qmc.global_phase(_select_identity, 0.25)(qubit)
@@ -120,6 +132,15 @@ def _four_case_select() -> qmc.Bit:
     index, target = qmc.select(
         [_select_identity, _select_x, _select_identity, _select_x]
     )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _equivalent_named_case_select() -> qmc.Bit:
+    """Select between behaviorally identical differently named cases."""
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    index, target = qmc.select([_select_x, _select_x_alias])(index, target)
     return qmc.measure(target)
 
 
@@ -849,6 +870,160 @@ def test_lowering_keeps_select_as_one_semantic_call_with_lsb_fallback() -> None:
     assert first_case.callee.controls == 2
     assert second_case.callee.controls == 2
     verify_circuit(program)
+
+
+def test_select_case_fingerprints_ignore_display_only_callable_names() -> None:
+    """Equivalent lowered case bodies share one semantic fingerprint."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_equivalent_named_case_select)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    select_call = next(
+        operation
+        for operation in lowered.quantum_circuit.operations
+        if isinstance(operation, CallInstruction)
+    )
+    identity = select_call.callee.identity
+    assert identity is not None
+
+    fingerprints = identity.arguments.get("case_fingerprints")
+    assert isinstance(fingerprints, tuple)
+    assert fingerprints[0] == fingerprints[1]
+
+
+def _alpha_named_loop_program(loop_name: str) -> CircuitProgram:
+    """Build a lowered program exercising every loop-expression location.
+
+    Args:
+        loop_name (str): Source spelling assigned to the loop binder.
+
+    Returns:
+        CircuitProgram: Program carrying the binder through all scalar fields.
+    """
+    source = WireId(0)
+    target = WireId(1)
+    variable = LoopVariableExpr(loop_name)
+    negative_variable = UnaryExpr(UnaryOperator.NEG, variable)
+    rotation = GateInstruction(
+        GateKind.RX,
+        (source,),
+        (target,),
+        parameters=(variable + 1,),
+    )
+    evolution = PauliEvolutionInstruction(
+        qm_o.Hamiltonian(num_qubits=1),
+        negative_variable,
+        (source,),
+        (target,),
+    )
+    branch = IfInstruction(
+        condition=variable,
+        inputs=(source,),
+        true_body=(rotation,),
+        false_body=(),
+        true_outputs=(target,),
+        false_outputs=(source,),
+        outputs=(target,),
+        true_global_phase=variable,
+        false_global_phase=negative_variable,
+    )
+    loop = WhileInstruction(
+        condition=variable,
+        inputs=(source,),
+        body=(rotation,),
+        body_outputs=(target,),
+        outputs=(target,),
+        body_global_phase=variable + 2,
+    )
+    nested_body = CircuitProgram(
+        name=f"nested_{loop_name}",
+        num_qubits=1,
+        num_clbits=0,
+        input_wires=(source,),
+        output_wires=(target,),
+        operations=(rotation,),
+        global_phase=negative_variable,
+    )
+    nested_call = CallInstruction(
+        ReusableCircuit(nested_body, name=f"callee_{loop_name}"),
+        (source,),
+        (target,),
+    )
+    for_loop = ForInstruction(
+        indexset=range(3),
+        loop_variable=variable,
+        inputs=(source,),
+        body=(rotation, evolution, branch, loop, nested_call),
+        body_outputs=(target,),
+        outputs=(target,),
+    )
+    return CircuitProgram(
+        name=f"program_{loop_name}",
+        num_qubits=1,
+        num_clbits=0,
+        input_wires=(source,),
+        output_wires=(target,),
+        operations=(for_loop,),
+    )
+
+
+def _nested_loop_reference_program(*, use_inner: bool) -> CircuitProgram:
+    """Build a nested-loop program referencing one selected lexical binder.
+
+    Args:
+        use_inner (bool): Whether the rotation reads the inner rather than
+            outer loop binder.
+
+    Returns:
+        CircuitProgram: Nested-loop program with the selected reference.
+    """
+    source = WireId(0)
+    target = WireId(1)
+    outer = LoopVariableExpr("outer")
+    inner = LoopVariableExpr("inner")
+    rotation = GateInstruction(
+        GateKind.RX,
+        (source,),
+        (target,),
+        parameters=(inner if use_inner else outer,),
+    )
+    inner_loop = ForInstruction(
+        indexset=range(2),
+        loop_variable=inner,
+        inputs=(source,),
+        body=(rotation,),
+        body_outputs=(target,),
+        outputs=(target,),
+    )
+    outer_loop = ForInstruction(
+        indexset=range(2),
+        loop_variable=outer,
+        inputs=(source,),
+        body=(inner_loop,),
+        body_outputs=(target,),
+        outputs=(target,),
+    )
+    return CircuitProgram(
+        name="nested_loops",
+        num_qubits=1,
+        num_clbits=0,
+        input_wires=(source,),
+        output_wires=(target,),
+        operations=(outer_loop,),
+    )
+
+
+def test_case_fingerprint_alpha_renames_loop_binders_and_references() -> None:
+    """Loop spelling does not affect any lowered expression or scoped phase."""
+    assert _circuit_program_fingerprint(
+        _alpha_named_loop_program("i")
+    ) == _circuit_program_fingerprint(_alpha_named_loop_program("renamed_index"))
+
+
+def test_case_fingerprint_preserves_nested_loop_reference_scope() -> None:
+    """References to outer and inner binders remain behaviorally distinct."""
+    assert _circuit_program_fingerprint(
+        _nested_loop_reference_program(use_inner=False)
+    ) != _circuit_program_fingerprint(_nested_loop_reference_program(use_inner=True))
 
 
 def test_lowering_brackets_control_value_at_the_circuit_boundary() -> None:

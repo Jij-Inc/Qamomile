@@ -1136,6 +1136,51 @@ def test_inverse_pauli_evolve_matches_manual_negative_time(qiskit_transpiler) ->
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("with_body", [True, False], ids=["body", "opaque"])
+def test_block_inverter_cancels_inverse_invoke_transform(with_body: bool) -> None:
+    """An inverse invocation returns to its direct callable definition."""
+    callee_input = Value(type=QubitType(), name="callee_input")
+    callee_output = callee_input.next_version()
+    callee_body = Block(
+        name="callee",
+        input_values=[callee_input],
+        output_values=[callee_output],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [callee_input],
+                [callee_output],
+            )
+        ],
+    )
+    ref = CallableRef(namespace="test", name="inverse_call")
+    definition = CallableDef(ref=ref, body=callee_body if with_body else None)
+    source = Value(type=QubitType(), name="source")
+    transformed = source.next_version()
+    inverse_call = InvokeOperation(
+        operands=[source],
+        results=[transformed],
+        target=ref,
+        transform=CallTransform.INVERSE,
+        definition=definition,
+    )
+    block = Block(
+        name="inverse_invoke",
+        input_values=[source],
+        output_values=[transformed],
+        operations=[inverse_call],
+        kind=BlockKind.HIERARCHICAL,
+    )
+
+    inverted = _BlockInverter().invert_block(block)
+    [direct_call] = inverted.operations
+
+    assert isinstance(direct_call, InvokeOperation)
+    assert direct_call.transform is CallTransform.DIRECT
+    assert direct_call.definition is definition
+    assert direct_call.body is (callee_body if with_body else None)
+
+
 def test_inverse_of_inverse_restores_source_operations() -> None:
     """inverse() cancels a nested inverse block back to its source body."""
 

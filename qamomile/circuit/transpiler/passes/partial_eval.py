@@ -80,10 +80,9 @@ class PartialEvaluationPass(Pass[Block, Block]):
         # partial-evaluation pipeline explicitly with case-local bindings so a
         # bound/default parameter can remove compile-time ``if`` nodes before
         # controlled emission without leaking an outer same-named parameter.
-        input = dataclasses.replace(
-            input,
-            operations=self._evaluate_select_case_blocks(input.operations),
-        )
+        evaluated_operations = self._evaluate_select_case_blocks(input.operations)
+        if evaluated_operations is not input.operations:
+            input = dataclasses.replace(input, operations=evaluated_operations)
 
         # Reject self-referential in-loop classical stores BEFORE folding:
         # ConstantFoldingPass folds bound element reads to plain constants,
@@ -143,13 +142,15 @@ class PartialEvaluationPass(Pass[Block, Block]):
             operations (list[Operation]): Operations to inspect.
 
         Returns:
-            list[Operation]: Operations with evaluated SELECT case Blocks.
+            list[Operation]: Operations with evaluated SELECT case Blocks. The
+                original list is returned when no reachable SELECT changes.
 
         Raises:
             ValidationError: If a case has a stage unsupported by partial
                 evaluation or violates a pre-fold control-flow invariant.
         """
         rewritten: list[Operation] = []
+        changed = False
         for operation in operations:
             current = operation
             if isinstance(current, SelectOperation):
@@ -176,11 +177,19 @@ class PartialEvaluationPass(Pass[Block, Block]):
                     )
                 current = dataclasses.replace(current, case_blocks=case_blocks)
             if isinstance(current, HasNestedOps):
-                current = current.rebuild_nested(
-                    [
-                        self._evaluate_select_case_blocks(nested)
-                        for nested in current.nested_op_lists()
-                    ]
-                )
+                nested_lists = current.nested_op_lists()
+                evaluated_nested = [
+                    self._evaluate_select_case_blocks(nested) for nested in nested_lists
+                ]
+                if any(
+                    evaluated is not original
+                    for evaluated, original in zip(
+                        evaluated_nested,
+                        nested_lists,
+                        strict=True,
+                    )
+                ):
+                    current = current.rebuild_nested(evaluated_nested)
+            changed = changed or current is not operation
             rewritten.append(current)
-        return rewritten
+        return rewritten if changed else operations

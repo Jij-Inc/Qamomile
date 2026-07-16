@@ -939,14 +939,28 @@ class _BlockInverter:
             for param in op.parameters
         ]
 
+        if op.transform is CallTransform.INVERSE:
+            direct_op = InvokeOperation(
+                operands=[*current_qubits, *mapped_params],
+                results=new_results,
+                target=op.target,
+                transform=CallTransform.DIRECT,
+                attrs=dict(op.attrs),
+                definition=op.definition,
+            )
+            self._update_quantum_value_map(
+                value_map,
+                op.control_qubits + op.target_qubits,
+                new_results,
+            )
+            return [direct_op]
+
         attrs = dict(op.attrs)
         target = op.target
         body = op.body
         opaque_cost = op.definition.opaque_cost if op.definition is not None else None
         if op.transform is CallTransform.CONTROLLED:
             transform = CallTransform.CONTROLLED
-        elif op.transform is CallTransform.INVERSE:
-            transform = CallTransform.DIRECT
         else:
             transform = CallTransform.INVERSE
 
@@ -2519,6 +2533,8 @@ def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
         ...     q = qmc.inverse(layer)(q, angle)
         ...     return q
     """
+    if isinstance(target, _InverseComposite):
+        return target.kernel
     known_inverse = _inverse_known_qft_target(target)
     if known_inverse is not None:
         return known_inverse

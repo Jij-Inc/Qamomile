@@ -21,6 +21,8 @@ Exposes:
   provides only the classical angle math so that hybrid loops can
   pre-compute angle vectors outside any kernel and feed them to
   ``amplitude_encoding_from_angles`` via ``parameters=[...]``.
+* :class:`PauliLCU`, which decomposes any finite complex power-of-two square
+  matrix into immutable complex-weighted Pauli terms for LCU algorithms.
 """
 
 from qamomile.linalg.hermitian import HermitianMatrix
@@ -29,6 +31,7 @@ from qamomile.linalg.mottonen import (
     compute_mottonen_amplitude_encoding_rz_angles,
     validate_and_normalize_amplitudes,
 )
+from qamomile.linalg.pauli_lcu import PauliLCU, PauliLCUTerm
 from qamomile.linalg.subspace import (
     generalized_subspace_matrices,
     solve_subspace,
@@ -37,6 +40,8 @@ from qamomile.linalg.subspace import (
 
 __all__ = [
     "HermitianMatrix",
+    "PauliLCU",
+    "PauliLCUTerm",
     "compute_mottonen_amplitude_encoding_ry_angles",
     "compute_mottonen_amplitude_encoding_rz_angles",
     "generalized_subspace_matrices",

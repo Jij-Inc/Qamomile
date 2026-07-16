@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
@@ -33,6 +34,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
 )
 from qamomile.circuit.transpiler.errors import EmitError, TargetCapabilityError
 from qamomile.circuit.transpiler.gate_emitter import GateKind
+from qamomile.linalg import PauliLCU
 from qamomile.quration import QurationTranspiler
 from qamomile.quration.materializer import (
     PyQretMaterializer,
@@ -278,6 +280,67 @@ def _quration_outer_controlled_select() -> qmc.Bit:
     return qmc.measure(target)
 
 
+_quration_two_term_lcu = PauliLCU.from_matrix(
+    np.array([[1j, 0.5], [0.5, 1j]], dtype=np.complex128),
+    atol=1e-12,
+)
+_quration_two_term_encoding = qmc.pauli_lcu_block_encoding(_quration_two_term_lcu)
+_quration_three_term_lcu = PauliLCU.from_matrix(
+    np.array(
+        [[0.25 + 1j, 0.5], [0.5, -0.25 + 1j]],
+        dtype=np.complex128,
+    ),
+    atol=1e-12,
+)
+_quration_three_term_encoding = qmc.pauli_lcu_block_encoding(_quration_three_term_lcu)
+
+
+@qmc.qkernel
+def _quration_two_term_pauli_lcu() -> qmc.Bit:
+    """Apply the supported two-term Pauli LCU block encoding."""
+    signal = qmc.qubit_array(1, "signal")
+    system = qmc.qubit_array(1, "system")
+    signal, _ = _quration_two_term_encoding.unitary(signal, system)
+    return qmc.measure(signal[0])
+
+
+@qmc.qkernel
+def _quration_two_term_pauli_lcu_expval(
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Apply the supported complex LCU and evaluate an observable."""
+    signal = qmc.qubit_array(1, "signal")
+    system = qmc.qubit_array(1, "system")
+    signal, system = _quration_two_term_encoding.unitary(signal, system)
+    return qmc.expval((signal[0], system[0]), observable)
+
+
+@qmc.qkernel
+def _quration_three_term_pauli_lcu() -> qmc.Bit:
+    """Build an LCU whose two-bit SELECT exceeds Quration's control bound."""
+    signal = qmc.qubit_array(2, "signal")
+    system = qmc.qubit_array(1, "system")
+    signal, _ = _quration_three_term_encoding.unitary(signal, system)
+    return qmc.measure(signal[0])
+
+
+def _lower_quration_program(kernel: qmc.QKernel) -> CircuitProgram:
+    """Lower one public qkernel to backend-neutral circuit IR.
+
+    Args:
+        kernel (qmc.QKernel): Classical-I/O entrypoint to lower.
+
+    Returns:
+        CircuitProgram: First lowered quantum segment.
+    """
+    transpiler = QurationTranspiler()
+    prepared = transpiler.prepare(kernel)
+    plan = transpiler.plan_circuit(prepared)
+    program = lower_circuit_plan(plan).get_first_circuit()
+    assert isinstance(program, CircuitProgram)
+    return program
+
+
 def _quration_select_program(
     index_width: int,
     outer_controls: int = 0,
@@ -478,6 +541,31 @@ def test_quration_accepts_two_case_select_fallback() -> None:
     )
 
     verify_target_legal(legalized, capabilities)
+
+
+def test_quration_accepts_two_term_pauli_lcu() -> None:
+    """A one-bit LCU SELECT fits Quration's distributed-control profile."""
+    capabilities = PyQretMaterializer().capabilities
+    legalized = legalize_program(
+        _lower_quration_program(_quration_two_term_pauli_lcu),
+        capabilities,
+        DEFAULT_POLICY,
+    )
+
+    verify_target_legal(legalized, capabilities)
+
+
+def test_quration_rejects_three_term_pauli_lcu() -> None:
+    """A two-bit LCU SELECT exceeds Quration's distributed-control profile."""
+    capabilities = PyQretMaterializer().capabilities
+    legalized = legalize_program(
+        _lower_quration_program(_quration_three_term_pauli_lcu),
+        capabilities,
+        DEFAULT_POLICY,
+    )
+
+    with pytest.raises(TargetCapabilityError, match=r"quration.*controls=2"):
+        verify_target_legal(legalized, capabilities)
 
 
 @pytest.mark.parametrize("index_width", [2, 3])
@@ -718,6 +806,64 @@ def test_quration_transpiles_and_executes_expectation_value() -> None:
 
     result = executable.run(transpiler.executor(seed=5)).result()
     assert result == pytest.approx(1.0, abs=1e-10)
+
+
+@pytest.mark.quration
+def test_quration_samples_two_term_complex_pauli_lcu() -> None:
+    """Quration samples the supported complex two-term block encoding."""
+    pytest.importorskip("pyqret")
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(_quration_two_term_pauli_lcu)
+    shots = 1024
+
+    result = executable.sample(transpiler.executor(seed=13), shots=shots).result()
+    counts = dict(result.results)
+    assert sum(counts.values()) == shots
+    assert set(counts) <= {0, 1}
+
+    expected_success = (
+        abs(1j) ** 2 + abs(0.5) ** 2
+    ) / _quration_two_term_encoding.normalization**2
+    tolerance = (
+        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+    )
+    assert counts.get(0, 0) / shots == pytest.approx(
+        expected_success,
+        abs=tolerance,
+    )
+
+
+@pytest.mark.quration
+def test_quration_executes_two_term_complex_pauli_lcu() -> None:
+    """Quration executes the supported complex two-term block encoding."""
+    pytest.importorskip("pyqret")
+    projected_y = qm_o.Hamiltonian(num_qubits=2)
+    projected_y.add_term(
+        (qm_o.PauliOperator(qm_o.Pauli.Y, 1),),
+        0.5,
+    )
+    projected_y.add_term(
+        (
+            qm_o.PauliOperator(qm_o.Pauli.Z, 0),
+            qm_o.PauliOperator(qm_o.Pauli.Y, 1),
+        ),
+        0.5,
+    )
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(
+        _quration_two_term_pauli_lcu_expval,
+        bindings={"observable": projected_y},
+    )
+
+    result = executable.run(transpiler.executor(seed=12)).result()
+    identity_weight = 1j
+    x_weight = 0.5
+    expected_y = (
+        2.0
+        * np.imag(np.conj(identity_weight) * x_weight)
+        / _quration_two_term_encoding.normalization**2
+    )
+    assert float(result) == pytest.approx(expected_y, abs=1e-8)
 
 
 @pytest.mark.quration

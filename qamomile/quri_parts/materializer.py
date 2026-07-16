@@ -1040,7 +1040,7 @@ def _emit_controlled_gate(
     if kind in {GateKind.Y, GateKind.CY}:
         intrinsic_controls = qubits[:-1] if kind is GateKind.CY else ()
         target = qubits[-1]
-        emitter.emit_s(circuit, target)
+        emitter.emit_sdg(circuit, target)
         _emit_multi_controlled_x(
             emitter,
             circuit,
@@ -1048,7 +1048,7 @@ def _emit_controlled_gate(
             target,
             ancillas,
         )
-        emitter.emit_sdg(circuit, target)
+        emitter.emit_s(circuit, target)
         return
     if len(controls) > 1:
         required = len(controls) - 1
