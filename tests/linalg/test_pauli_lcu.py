@@ -129,7 +129,12 @@ def test_subnormal_identity_survives_exact_fwht_accumulation() -> None:
 
 
 def test_fwht_preserves_tiny_terms_across_extreme_row_cancellation() -> None:
-    """Exact integer butterflies retain representable mixed-scale outputs."""
+    """Exact integer butterflies retain representable mixed-scale outputs.
+
+    For a two-qubit diagonal ``d``, each Z-word coefficient is the signed
+    average ``sum_q d[q] * (-1)**popcount(q & z_mask) / 4``. The four masks
+    below therefore isolate the large half-difference and tiny quarter-sum.
+    """
     matrix = np.diag([1e308, -1e308, 1e-300, 0.0]).astype(np.complex128)
     coefficients = _coefficient_map(PauliLCU.from_matrix(matrix))
 

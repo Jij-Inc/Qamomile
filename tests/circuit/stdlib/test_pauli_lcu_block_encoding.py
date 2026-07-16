@@ -27,7 +27,16 @@ DENSE_TWO_QUBIT_MATRIX += (0.5 + 0.25j) * np.eye(4, dtype=np.complex128)
 
 
 def _build_unitary_kernel(lcu: PauliLCU, *, invert: bool = False) -> qmc.QKernel:
-    """Build an allocation-only kernel exposing the block-encoding unitary."""
+    """Build an allocation-only kernel exposing the block-encoding unitary.
+
+    Args:
+        lcu (PauliLCU): Decomposition whose block encoding should be exposed.
+        invert (bool): Whether to apply the explicit inverse implementation.
+            Defaults to ``False``.
+
+    Returns:
+        qmc.QKernel: Allocation-only kernel for exact unitary inspection.
+    """
     gate = qmc.pauli_lcu_block_encoding(lcu)
     applied_gate = qmc.inverse(gate) if invert else gate
 
@@ -45,7 +54,16 @@ def _build_unitary_kernel(lcu: PauliLCU, *, invert: bool = False) -> qmc.QKernel
 
 
 def _qiskit_unitary(lcu: PauliLCU, *, invert: bool = False) -> np.ndarray:
-    """Transpile a block encoding and return its exact Qiskit unitary."""
+    """Transpile a block encoding and return its exact Qiskit unitary.
+
+    Args:
+        lcu (PauliLCU): Decomposition whose unitary should be materialized.
+        invert (bool): Whether to materialize the explicit inverse.
+            Defaults to ``False``.
+
+    Returns:
+        np.ndarray: Dense unitary matrix emitted through Qiskit.
+    """
     pytest.importorskip("qiskit")
     from qiskit.quantum_info import Operator
 
@@ -59,7 +77,15 @@ def _qiskit_unitary(lcu: PauliLCU, *, invert: bool = False) -> np.ndarray:
 
 
 def _top_left_block(unitary: np.ndarray, lcu: PauliLCU) -> np.ndarray:
-    """Extract the all-zero-selection block in Qamomile LSB order."""
+    """Extract the all-zero-selection block in Qamomile LSB order.
+
+    Args:
+        unitary (np.ndarray): Dense block-encoding unitary.
+        lcu (PauliLCU): Decomposition defining the register widths.
+
+    Returns:
+        np.ndarray: Projected all-zero-selection system block.
+    """
     selection_width = qmc.pauli_lcu_num_selection_qubits(lcu)
     system_indices = [
         basis_index << selection_width for basis_index in range(1 << lcu.num_qubits)
@@ -108,14 +134,30 @@ def _prepare_basis(
     basis_index: int,
     num_qubits: int,
 ) -> None:
-    """Prepare a little-endian computational-basis system state in place."""
+    """Prepare a little-endian computational-basis system state in place.
+
+    Args:
+        system (qmc.Vector[qmc.Qubit]): System register to prepare.
+        basis_index (int): Computational-basis value to encode.
+        num_qubits (int): Number of little-endian basis bits to inspect.
+
+    Returns:
+        None: The register is updated in place.
+    """
     for qubit in range(num_qubits):
         if (basis_index >> qubit) & 1:
             system[qubit] = qmc.x(system[qubit])
 
 
 def _executor(case: Any) -> Any:
-    """Return a local simulator executor for one SDK fixture case."""
+    """Return a local simulator executor for one SDK fixture case.
+
+    Args:
+        case (Any): Cross-backend fixture carrying a transpiler and name.
+
+    Returns:
+        Any: Backend-specific local executor.
+    """
     if case.backend_name == "qiskit":
         from qiskit.providers.basic_provider import BasicSimulator
 
@@ -124,7 +166,14 @@ def _executor(case: Any) -> Any:
 
 
 def _zero_probability(results: list[tuple[Any, int]]) -> float:
-    """Return the measured probability of an all-zero output value."""
+    """Return the measured probability of an all-zero output value.
+
+    Args:
+        results (list[tuple[Any, int]]): Outcome and count pairs to aggregate.
+
+    Returns:
+        float: Fraction of shots whose flattened outcome is all zero.
+    """
     total = sum(count for _, count in results)
     zero_count = sum(
         count
@@ -135,7 +184,14 @@ def _zero_probability(results: list[tuple[Any, int]]) -> float:
 
 
 def _flatten(value: Any) -> tuple[int, ...]:
-    """Flatten nested scalar/vector measurement values into integer bits."""
+    """Flatten nested scalar/vector measurement values into integer bits.
+
+    Args:
+        value (Any): Scalar or nested tuple measurement value.
+
+    Returns:
+        tuple[int, ...]: Depth-first tuple of integer measurement bits.
+    """
     if isinstance(value, tuple):
         return tuple(bit for item in value for bit in _flatten(item))
     return (int(value),)
@@ -376,7 +432,7 @@ def test_three_term_lcu_executes_two_bit_select_on_every_sdk(
     shots = 4096
     executable = sdk_transpiler.transpiler.transpile(circuit)
     result = executable.sample(_executor(sdk_transpiler), shots=shots).result()
-    expected_success = 3.0 / 7.0
+    expected_success = float(np.linalg.norm(matrix[:, 0]) ** 2 / lcu.alpha**2)
     tolerance = (
         6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
     )
@@ -470,7 +526,12 @@ def test_inverse_alone_conjugates_complex_phase_on_every_sdk(
     )
 
     observed = float(executable.run(_executor(sdk_transpiler)).result())
-    assert observed == pytest.approx(4.0 / 9.0, abs=1e-6)
+    inverse_identity_weight = -1j
+    x_weight = 0.5
+    expected_y = (
+        2.0 * np.imag(np.conj(inverse_identity_weight) * x_weight) / lcu.alpha**2
+    )
+    assert observed == pytest.approx(expected_y, abs=1e-6)
 
 
 def test_outer_control_observes_single_identity_term_phase(
@@ -519,7 +580,8 @@ def test_outer_control_executes_multi_term_prepare_select_path(
     zero_probability = (
         sum(count for outcome, count in result.results if int(outcome) == 0) / shots
     )
-    expected = 2.0 / 3.0
+    block_overlap = identity_weight / lcu.alpha
+    expected = (1.0 + float(np.real(block_overlap))) / 2.0
     tolerance = 6.0 * math.sqrt(expected * (1.0 - expected) / shots) + 0.02
     assert zero_probability == pytest.approx(expected, abs=tolerance)
 

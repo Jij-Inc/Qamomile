@@ -831,7 +831,14 @@ def test_quration_executes_two_term_complex_pauli_lcu() -> None:
     )
 
     result = executable.run(transpiler.executor(seed=12)).result()
-    assert float(result) == pytest.approx(-4.0 / 9.0, abs=1e-8)
+    identity_weight = 1j
+    x_weight = 0.5
+    expected_y = (
+        2.0
+        * np.imag(np.conj(identity_weight) * x_weight)
+        / _quration_two_term_lcu.alpha**2
+    )
+    assert float(result) == pytest.approx(expected_y, abs=1e-8)
 
 
 @pytest.mark.quration
