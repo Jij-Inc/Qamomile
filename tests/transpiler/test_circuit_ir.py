@@ -113,6 +113,12 @@ def _select_phased_identity(qubit: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _select_phased_x(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Apply a nonzero phase to an X SELECT case."""
+    return qmc.global_phase(qmc.x, 0.25)(qubit)
+
+
+@qmc.qkernel
 def _four_case_select() -> qmc.Bit:
     """Build a four-case SELECT for circuit-IR structure tests."""
     index = qmc.qubit_array(2, "index")
@@ -142,6 +148,27 @@ def _phase_only_select() -> qmc.Bit:
         target,
     )
     return qmc.measure(target)
+
+
+@qmc.qkernel
+def _broadcast_phase_select() -> qmc.Vector[qmc.Bit]:
+    """Broadcast a phased scalar SELECT case over three target qubits."""
+    index = qmc.qubit("index")
+    targets = qmc.qubit_array(3, "targets")
+    index, targets = qmc.select([_select_identity, _select_phased_x])(
+        index,
+        targets,
+    )
+    return qmc.measure(targets)
+
+
+@qmc.qkernel
+def _controlled_broadcast_phase() -> qmc.Vector[qmc.Bit]:
+    """Broadcast a phased scalar controlled body over three targets."""
+    control = qmc.qubit("control")
+    targets = qmc.qubit_array(3, "targets")
+    control, targets = qmc.control(_select_phased_x)(control, targets)
+    return qmc.measure(targets)
 
 
 @qmc.qkernel
@@ -898,6 +925,36 @@ def test_lowering_keeps_phase_only_identity_case_under_index_control() -> None:
     )
     assert phase_case.callee.body.global_phase == LiteralExpr(0.25)
     assert select_call.callee.body.global_phase == LiteralExpr(0.0)
+    verify_circuit(program)
+
+
+@pytest.mark.parametrize(
+    "kernel",
+    [_broadcast_phase_select, _controlled_broadcast_phase],
+)
+def test_scalar_broadcast_repeats_complete_case_on_each_lane(kernel) -> None:
+    """SELECT and control preserve each scalar case's phase per target lane."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(kernel)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    if kernel is _broadcast_phase_select:
+        outer_call = next(
+            operation
+            for operation in program.operations
+            if isinstance(operation, CallInstruction)
+        )
+        operations = outer_call.callee.body.operations
+    else:
+        operations = program.operations
+
+    calls = [
+        operation for operation in operations if isinstance(operation, CallInstruction)
+    ]
+    assert len(calls) == 3
+    assert all(call.callee.body.operations for call in calls)
+    assert all(call.callee.body.global_phase == LiteralExpr(0.25) for call in calls)
     verify_circuit(program)
 
 

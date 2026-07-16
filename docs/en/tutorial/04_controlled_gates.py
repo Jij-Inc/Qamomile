@@ -17,12 +17,12 @@
 # tags: [tutorial]
 # ---
 #
-# # Coherent Control with `qmc.control` and `qmc.select`
+# # Coherent Control with `qmc.control`
 #
 # `qmc.control` turns any Qamomile gate (a built-in like `qmc.rx`,
 # or a user-defined `@qmc.qkernel`) into its *controlled* version.
-# This tutorial first develops that API in detail, then introduces
-# `qmc.select` for coherently choosing among several unitary cases.
+# This tutorial develops that API from a single control through
+# value-activated controls, symbolic control widths, and reusable sub-kernels.
 #
 # `qmc.control` has two modes: *concrete* (the number of control
 # qubits is a Python `int`) and *symbolic* (the number is a
@@ -142,7 +142,7 @@ assert on_counts == {1: 256}
 # | `num_controls=` | Python `int` (default `1`) | `qmc.UInt` handle, or any `UInt` expression |
 # | Control argument(s) | one or more positional args (`Qubit`, `VectorView`, or `Vector[Qubit]`) whose qubit counts sum to `num_controls` | one positional `Vector[Qubit]` / `VectorView` *pool* (single-pool form, with optional `control_indices`), **or** several positional args mixing `Qubit` / `VectorView` / `Vector[Qubit]` |
 # | `control_indices` | not accepted | optional — picks which slots of the pool are active |
-# | `control_value` | optional Python `int` — activates on that LSB-first register value | not accepted; bind `num_controls` first and use concrete mode |
+# | `control_value` | optional Python `int` — activates on that LSB-first register value | only the default `None`; construct `qmc.control` with a concrete Python `int` width for any other value |
 # | Control count resolved at | when `qmc.control(...)` is evaluated (module-load or tracing time) | transpile time (from `bindings`) |
 #
 # Most of `qmc.control`'s features (`power=`, default values,
@@ -294,7 +294,9 @@ default_arg_demo_symbolic.draw(n=3, fold_loops=False)
 # itself. `power` accepts a Python `int` (resolved at compile
 # time) or a `qmc.UInt` handle (resolved at transpile time from
 # `bindings`), and works regardless of whether `num_controls` is
-# concrete or symbolic.
+# concrete or symbolic. The resolved value must be a strictly positive integer;
+# zero, negative values, and `bool` are rejected. A symbolic `power` changes
+# circuit structure, so supply it through `bindings`, not runtime `parameters`.
 
 
 # %%
@@ -321,8 +323,9 @@ power_demo_concrete.draw()
 # change ordinary measurement probabilities. Qamomile nevertheless keeps the
 # phase as part of the current lexical circuit region. When a reversible
 # region is coherently controlled, the same factor becomes a relative phase on
-# the all-active control subspace. This is particularly important for SELECT
-# circuits, where even an identity Pauli term may carry a complex coefficient.
+# the all-active control subspace. This matters whenever an algorithm stores
+# information in a subroutine's phase rather than only in its measurement
+# probabilities.
 #
 # Qamomile provides two related ways to attach this phase:
 #
@@ -341,6 +344,15 @@ power_demo_concrete.draw()
 # phase together with inverting `U`. `global_phase` is a reserved call-site
 # keyword; if the target callable also has an ordinary parameter named
 # `global_phase`, pass that parameter positionally.
+#
+# A scalar body whose formal target is `Qubit` can be called with a
+# `Vector[Qubit]` or `VectorView[Qubit]`. Qamomile then broadcasts the complete
+# scalar unitary to every element, exactly like an explicit loop. If
+# $U = e^{i\phi}V$ and the target has $N$ elements, the result is
+# $U^{\otimes N} = e^{iN\phi}V^{\otimes N}$; `power=k` also multiplies
+# that phase by $k$. To attach one phase to the register as a whole, define the
+# controlled body with a `Vector[Qubit]` parameter and attach the phase to that
+# vector body, so it remains one logical call.
 #
 # A phase attached inside a runtime `if` branch or `while` body stays in that
 # branch or iteration. It is not moved to the top-level circuit or discarded.
@@ -571,10 +583,10 @@ assert control_value_zero_counts == {1: 256}
 # `control_value=None` is the default all-ones control. Supplying the explicit
 # all-ones value `2**num_controls - 1` is canonicalized to that same default.
 # Any other value must satisfy `0 <= control_value < 2**num_controls`.
-# `control_value` is intentionally concrete-only: when `num_controls` is a
-# `qmc.UInt`, bind the width first and construct the corresponding concrete
-# controlled gate. This keeps the activation bit pattern unambiguous when the
-# operation is created.
+# Non-default `control_value` is intentionally concrete-only. To activate on a
+# value other than all ones, construct `qmc.control` with a concrete Python
+# `int` width rather than a `qmc.UInt`. This keeps the activation bit pattern
+# unambiguous when the operation is created.
 
 # %% [markdown]
 # (cg-5)=
@@ -1030,81 +1042,15 @@ case_controlled_qft_over_uint_slice()
 
 # %% [markdown]
 # (cg-7)=
-# ## 7. Quantum multiplexers with `qmc.select`
-#
-# `qmc.select([U_0, U_1, ...], num_index_qubits=...)` constructs a quantum
-# multiplexer. Its leading quantum arguments form an index prefix, followed by
-# the shared target arguments. If the index reads `i`, case `U_i` is applied.
-# With the default `num_index_qubits=None`, Qamomile infers the minimum width,
-# `ceil(log2(len(cases)))`. An explicit Python `int` may be wider than that
-# minimum; every index value without a corresponding case acts as identity.
-# A `qmc.UInt` value (or expression) keeps the width symbolic until transpile
-# time, when both the width and the index-prefix size are checked.
-#
-# The index prefix and targets may each mix scalar `Qubit`, `Vector[Qubit]`,
-# and `VectorView[Qubit]` arguments. Qamomile flattens the index arguments from
-# left to right and each array from element 0 upward. The first resulting qubit
-# is bit 0, so the integer convention is LSB-first. The index/target boundary
-# must lie *between* arguments: SELECT never takes only the first few elements
-# of an array to complete the requested width. Consequently, the flattened
-# size of all complete index-prefix arguments must equal `num_index_qubits`.
-#
-# Every case must have the same argument signature and must return
-# exactly the quantum target wires it receives. Cases are unitary:
-# measurement, projection, reset, internal ancilla allocation, and extra
-# classical outputs are not accepted. Shared classical parameters may be
-# forwarded by keyword; bound/default branches inside a case are resolved at
-# transpile time.
-
-
-# %%
-@qmc.qkernel
-def keep_target(q: qmc.Qubit) -> qmc.Qubit:
-    return q
-
-
-@qmc.qkernel
-def flip_target(q: qmc.Qubit) -> qmc.Qubit:
-    return qmc.x(q)
-
-
-@qmc.qkernel
-def select_demo() -> qmc.Bit:
-    index = qmc.qubit_array(1, name="index")
-    index[0] = qmc.x(index[0])  # Select case 1.
-    target = qmc.qubit(name="target")
-    index, target = qmc.select([keep_target, flip_target])(index, target)
-    return qmc.measure(target)
-
-
-select_counts = dict(
-    transpiler.transpile(select_demo)
-    .sample(transpiler.executor(), shots=256)
-    .result()
-    .results
-)
-assert select_counts == {1: 256}
-
-# %% [markdown]
-# On the CircuitProgram-based Engine path, SELECT remains one high-level
-# operation until CircuitProgram lowering. There it becomes one semantic
-# reusable call whose portable fallback controls each case on the
-# corresponding index state. Engines with a different lowering path must
-# implement SELECT explicitly or report it as unsupported. SELECT can be
-# nested in `qmc.range`, and in measurement-backed `if` / `while` control
-# flow when the selected Engine supports that runtime control flow. It can
-# also appear under `qmc.control` or `qmc.inverse`; global phase inside a
-# case is preserved as observable relative phase.
-
-# %% [markdown]
-# (cg-8)=
-# ## 8. Summary
+# ## 7. Summary
 #
 # `qmc.control(fn, num_controls=...)` makes a controlled version
 # of any Qamomile built-in gate or user-defined kernel. It has two
 # modes, decided by the type of `num_controls`: a Python `int`
 # gives *concrete* mode, and a `qmc.UInt` (or a `UInt` expression
 # like `n - 1`) gives *symbolic* mode.
-# For indexed families of unitary cases, `qmc.select` provides a single
-# quantum-multiplexer operation. Its inferred, explicit, or symbolic index
-# width uses LSB-first semantics, and unassigned basis states act as identity.
+# Concrete mode also supports `control_value`, including zero-controls, using
+# the same LSB-first order in which control arguments are flattened. In either
+# mode, `power`, global phase, scalar-to-vector broadcast, inverse, and nested
+# control preserve the complete controlled unitary. Invalid widths, overlapping
+# control and target wires, and unsupported reversible bodies fail explicitly.
