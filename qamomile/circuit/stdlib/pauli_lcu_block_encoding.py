@@ -13,6 +13,7 @@ from qamomile.circuit.frontend.composite_gate import (
     composite_gate,
     configure_composite,
 )
+from qamomile.circuit.frontend.constructors import uint
 from qamomile.circuit.frontend.handle import Qubit, Vector
 from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.global_phase import global_phase
@@ -250,10 +251,13 @@ def _build_multi_term_encoding(
             "Möttönen preparation width disagrees with the LCU selection width."
         )
     unprepare = inverse(preparation)
+    # A constant UInt keeps the unspecialized composite's selection Vector
+    # traceable while lowering still resolves the exact fixed LCU width.
     selector = select(
         tuple(
             _build_phased_pauli_case(term, phase_sign=phase_sign) for term in lcu.terms
-        )
+        ),
+        num_index_qubits=uint(selection_width),
     )
 
     @composite_gate(name="pauli_lcu_block_encoding")

@@ -206,6 +206,16 @@ def test_explicit_inverse_select_has_stable_conjugated_case_fingerprints() -> No
     assert forward[1] == adjoint[1]
 
 
+def test_multi_term_root_composite_round_trips_qkernel_serialization() -> None:
+    """A symbolic root signature retains its constant SELECT width on the wire."""
+    from qamomile.circuit.serialization import deserialize, serialize
+
+    gate = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(1j * I2 + 0.5 * X))
+
+    payload = serialize(gate)
+    assert serialize(deserialize(payload)) == payload
+
+
 def test_selection_width_covers_zero_single_and_non_power_of_two_terms() -> None:
     """The stable two-register ABI retains one signal qubit at small term counts."""
     zero = PauliLCU.from_matrix(np.zeros((2, 2), dtype=np.complex128))
