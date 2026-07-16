@@ -2730,17 +2730,25 @@ def _should_emit_single_target_block_per_vector_element(
 
 def _split_broadcast_reusable_global_phase(
     gate: Any,
+    *,
+    has_explicit_global_phase: bool,
 ) -> tuple[Any | None, Any | None]:
     """Split a CircuitProgram gate into lane and one-shot phase callees.
 
     Args:
         gate (Any): Controlled reusable gate prepared for scalar broadcast.
+        has_explicit_global_phase (bool): Whether the source operation tree
+            contains an explicit global-phase operation.
 
     Returns:
         tuple[Any | None, Any | None]: The phase-free gate repeated on each
             target lane and a phase-only gate applied to one carrier. For
             non-CircuitProgram emitters, ``gate`` is returned unchanged with
             no phase-only gate.
+
+    Raises:
+        EmitError: If an explicit phase cannot be separated from a
+            non-CircuitProgram gate.
     """
     from qamomile.circuit.transpiler.circuit_ir.model import (
         ReusableCircuit,
@@ -2748,6 +2756,13 @@ def _split_broadcast_reusable_global_phase(
     )
 
     if not isinstance(gate, ReusableCircuit):
+        if has_explicit_global_phase:
+            raise EmitError(
+                "A phase-bearing scalar controlled body requires a reusable "
+                "CircuitProgram for Vector broadcast. This emitter returned "
+                "an opaque gate whose phase cannot be applied exactly once.",
+                operation="ControlledUOperation",
+            )
         return gate, None
 
     phase_free, phase_only = _split_broadcast_global_phase(gate.body)
@@ -2850,12 +2865,16 @@ def _emit_single_target_block_per_vector_element(
             the fallback controlled decomposition does not support the
             block shape.
     """
+    has_explicit_global_phase = _contains_global_phase_operation(block_value.operations)
     unitary_gate = emit_pass._blockvalue_to_gate(block_value, 1, bindings)
     if unitary_gate is not None:
         if power > 1:
             unitary_gate = emit_pass._emitter.gate_power(unitary_gate, power)
         controlled_gate = emit_pass._emitter.gate_controlled(unitary_gate, num_controls)
-        lane_gate, phase_gate = _split_broadcast_reusable_global_phase(controlled_gate)
+        lane_gate, phase_gate = _split_broadcast_reusable_global_phase(
+            controlled_gate,
+            has_explicit_global_phase=has_explicit_global_phase,
+        )
         if lane_gate is not None:
             for target_idx in target_indices:
                 _checked_append_gate(
@@ -2875,7 +2894,7 @@ def _emit_single_target_block_per_vector_element(
             )
         return
 
-    if _contains_global_phase_operation(block_value.operations):
+    if has_explicit_global_phase:
         raise EmitError(
             "A phase-bearing scalar controlled body could not be converted "
             "to a reusable gate for Vector broadcast. Repeating its fallback "
