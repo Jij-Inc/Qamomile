@@ -1470,11 +1470,20 @@ class _BlockInverter:
             _as_value(_substitute_value(param, value_map), "Select parameter")
             for param in op.param_operands
         ]
+        mapped_width = (
+            _as_value(
+                _substitute_value(op.num_index_qubits, value_map),
+                "Select index width",
+            )
+            if isinstance(op.num_index_qubits, Value)
+            else op.num_index_qubits
+        )
         inverse_op = SelectOperation(
             operands=[*current_results, *mapped_params],
             results=new_results,
-            num_index_qubits=op.num_index_qubits,
+            num_index_qubits=mapped_width,
             case_blocks=inverse_blocks,
+            num_index_args=op.num_index_args,
         )
         self._update_quantum_value_map(
             value_map,

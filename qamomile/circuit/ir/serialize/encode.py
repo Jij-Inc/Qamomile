@@ -1312,7 +1312,12 @@ def _encode_select(op: SelectOperation, ctx: _EncodeContext) -> dict[str, Any]:
         dict[str, Any]: Encoded operation payload.
     """
     payload = _base_op_dict("SelectOperation", op)
-    payload["num_index_qubits"] = op.num_index_qubits
+    if isinstance(op.num_index_qubits, Value):
+        ctx.register_value(op.num_index_qubits)
+        payload["num_index_qubits_ref"] = op.num_index_qubits.uuid
+        payload["num_index_args"] = op.num_index_args
+    else:
+        payload["num_index_qubits"] = op.num_index_qubits
     payload["case_blocks"] = [_encode_block(block, ctx) for block in op.case_blocks]
     return payload
 

@@ -1788,14 +1788,40 @@ def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
         SelectOperation: Reconstructed operation.
 
     Raises:
-        ValueError: If the index width or case list is malformed.
+        ValueError: If the concrete/reference width union, index-argument
+            count, or case list is malformed.
     """
     operands, results = _operands_results(d, ctx)
-    num_index_qubits = d.get("num_index_qubits")
-    if not is_plain_int(num_index_qubits):
+    has_concrete_width = "num_index_qubits" in d
+    has_symbolic_width = "num_index_qubits_ref" in d
+    if has_concrete_width == has_symbolic_width:
         raise ValueError(
-            "SelectOperation.num_index_qubits must be a Python int, "
-            f"got {num_index_qubits!r}."
+            "SelectOperation requires exactly one of num_index_qubits and "
+            "num_index_qubits_ref."
+        )
+    if has_concrete_width:
+        num_index_qubits = d["num_index_qubits"]
+        if not is_plain_int(num_index_qubits):
+            raise ValueError(
+                "SelectOperation.num_index_qubits must be a Python int, "
+                f"got {num_index_qubits!r}."
+            )
+        num_index_args = d.get("num_index_args", num_index_qubits)
+    else:
+        width_ref = d["num_index_qubits_ref"]
+        if not isinstance(width_ref, str):
+            raise ValueError(
+                "SelectOperation.num_index_qubits_ref must be a string, "
+                f"got {width_ref!r}."
+            )
+        num_index_qubits = _materialize_as_value(ctx, width_ref)
+        if "num_index_args" not in d:
+            raise ValueError("A symbolic SelectOperation requires num_index_args.")
+        num_index_args = d["num_index_args"]
+    if not is_plain_int(num_index_args) or num_index_args < 1:
+        raise ValueError(
+            "SelectOperation.num_index_args must be a positive Python int, "
+            f"got {num_index_args!r}."
         )
     raw_case_blocks = d.get("case_blocks")
     if not isinstance(raw_case_blocks, list):
@@ -1803,8 +1829,9 @@ def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
     return SelectOperation(
         operands=operands,
         results=results,
-        num_index_qubits=cast(int, num_index_qubits),
+        num_index_qubits=cast("int | Value", num_index_qubits),
         case_blocks=[_decode_block(block, ctx) for block in raw_case_blocks],
+        num_index_args=cast(int, num_index_args),
     )
 
 

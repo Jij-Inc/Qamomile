@@ -214,6 +214,48 @@ class _ConcreteCallPrep:
     sub_args_resolved: dict[str, Any]
 
 
+@dataclasses.dataclass
+class _SymbolicCallPrep:
+    """Store shared symbolic-prefix preparation for control and SELECT.
+
+    The prefix stays grouped by caller argument: a scalar ``Qubit`` produces
+    one scalar operand/result, while a ``Vector`` or ``VectorView`` produces
+    one array operand/result. The resolved symbolic width is checked later by
+    the transpiler against the flattened size of these groups.
+
+    Args:
+        prefix_entries (list[_ControlEntry]): Prepared leading quantum
+            arguments whose ownership has not yet been committed.
+        target_entries (list[_ControlEntry]): Prepared target arguments whose
+            ownership has not yet been committed.
+        operands (list[Any]): Grouped prefix operands followed by target and
+            classical operands.
+        prefix_results (list[Value]): One quantum result per prefix argument.
+        target_results (list[Value]): One quantum result per target argument.
+        sub_args_resolved (dict[str, Any]): Bound arguments for specializing
+            the wrapped qkernel body.
+        control_indices (tuple[Value, ...] | None): Normalized pool-selection
+            indices used only by symbolic ``qmc.control``.
+    """
+
+    prefix_entries: list[_ControlEntry]
+    target_entries: list[_ControlEntry]
+    operands: list[Any]
+    prefix_results: list[Value]
+    target_results: list[Value]
+    sub_args_resolved: dict[str, Any]
+    control_indices: tuple[Value, ...] | None = None
+
+    @property
+    def results(self) -> list[Value]:
+        """Return quantum results in prefix-then-target order.
+
+        Returns:
+            list[Value]: Concatenated prefix and target results.
+        """
+        return [*self.prefix_results, *self.target_results]
+
+
 class ControlledGate:
     """Wrapper for controlled version of a QKernel.
 
@@ -943,6 +985,8 @@ class ControlledGate:
         self,
         sub_positional_args: Sequence[Any],
         sub_kwargs: dict[str, Any],
+        *,
+        caller: str = "control()",
     ) -> dict[str, Any]:
         """Bind sub-kernel arguments to the wrapped kernel's signature.
 
@@ -964,6 +1008,8 @@ class ControlledGate:
             sub_kwargs (dict[str, Any]): Keyword arguments passed to
                 ``cg(...)`` after stripping the reserved ``power`` and
                 ``control_indices`` kwargs.
+            caller (str): Public API name used in diagnostics. Defaults to
+                ``"control()"``.
 
         Returns:
             dict[str, Any]: An ordered dict mapping parameter name to
@@ -996,7 +1042,7 @@ class ControlledGate:
                 n for n, decl in input_types.items() if _is_classical_param_decl(decl)
             ]
             raise TypeError(
-                f"control(): unknown parameter(s) {extras!r}. "
+                f"{caller}: unknown parameter(s) {extras!r}. "
                 f"The wrapped kernel's classical parameters are "
                 f"{classical_names!r}."
             )
@@ -1557,7 +1603,11 @@ class ControlledGate:
         controls, sub_positional = self._split_controls_by_count(
             args, num_controls, operation_label, control_role
         )
-        sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        sub_args_resolved = self._bind_to_sub_signature(
+            sub_positional,
+            sub_kwargs,
+            caller=("control()" if operation_label == "ControlledU" else "select()"),
+        )
         _validate_bound_handles(
             self._qkernel.input_types,
             sub_args_resolved,
@@ -1816,55 +1866,55 @@ class ControlledGate:
                 )
         return tuple(normalized)
 
-    def _call_symbolic(
+    def _prepare_symbolic(
         self,
         args: tuple[Any, ...],
-        power: int | Value,
-        global_phase: Value | None,
         sub_kwargs: dict[str, Any],
         control_indices: Sequence[int | UInt] | None,
-        tracer: Any,
-    ) -> tuple[Any, ...]:
-        """Symbolic-``num_controls`` path for :meth:`ControlledGate.__call__`.
+        *,
+        operation_label: str = "ControlledU",
+        control_role: str = "control",
+        allow_single_scalar_prefix: bool = False,
+    ) -> _SymbolicCallPrep:
+        """Prepare a symbolic-width quantum prefix without consuming inputs.
 
-        Mirrors :meth:`_call_concrete`'s structure but expects a
-        ``Vector[Qubit]`` / ``VectorView[Qubit]`` as ``args[0]`` —
-        the control *pool* — and routes ``control_indices`` into
-        the new ``SymbolicControlledU.control_indices`` field.
+        The wrapped qkernel signature identifies the trailing target and
+        classical arguments. Every preceding positional quantum argument is
+        retained as one grouped prefix operand, so scalar ``Qubit`` values and
+        array handles can be mixed without flattening symbolic-length arrays.
 
         Args:
-            args (tuple[Any, ...]): Positional arguments to ``cg(...)``.
-            power (int | Value): Normalised power (output of
-                :meth:`_normalize_power`).
-            global_phase (Value | None): Normalized target-global phase for
-                this controlled call.
-            sub_kwargs (dict[str, Any]): Caller kwargs after stripping
-                the reserved ``power``, ``global_phase``, and
-                ``control_indices`` keys.
-            control_indices (Sequence[int | UInt] | None): The
-                caller-supplied selection (or ``None`` to use the
-                entire pool).
-            tracer (Any): Active tracer obtained before ownership validation.
+            args (tuple[Any, ...]): Positional prefix and qkernel arguments.
+            sub_kwargs (dict[str, Any]): Keyword arguments forwarded to the
+                wrapped qkernel.
+            control_indices (Sequence[int | UInt] | None): Optional indices
+                selecting controls from a single array pool. SELECT passes
+                ``None`` because every index-prefix qubit participates.
+            operation_label (str): Operation name used in diagnostics and
+                ownership tags. Defaults to ``"ControlledU"``.
+            control_role (str): Name of the leading quantum role. Defaults to
+                ``"control"``; SELECT uses ``"index"``.
+            allow_single_scalar_prefix (bool): Whether a lone scalar ``Qubit``
+                may form a symbolic prefix. Defaults to ``False`` for
+                ``qmc.control``; SELECT enables it because a symbolic width may
+                later resolve to one.
 
         Returns:
-            tuple[Any, ...]: One output handle per input handle, in
-                the concatenation order ``(c_qs_out, sub_kernel_quantum_out)``.
+            _SymbolicCallPrep: Grouped operands/results and ownership previews.
 
         Raises:
-            ValueError: ``args[0]`` is not a ``Vector`` / ``VectorView``,
-                or the sub-kernel has no quantum arguments.
-            TypeError / QubitConsumedError / QubitBorrowConflictError:
-                As documented on :meth:`__call__`.
+            ValueError: If the prefix is missing, contains a non-quantum
+                argument, violates pool-selection rules, or has no target.
+            TypeError: If qkernel arguments or control indices are invalid.
+            QubitConsumedError: If a prefix or target handle is consumed.
+            QubitBorrowConflictError: If quantum argument regions overlap.
         """
         from qamomile.circuit.frontend.handle.array import ArrayBase
 
-        num_controls = self._num_controls
-        assert isinstance(num_controls, UInt)
-
         if not args:
             raise ValueError(
-                "When num_controls is symbolic (UInt), at least one "
-                "positional control argument is required."
+                f"When {control_role} width is symbolic (UInt), at least one "
+                f"positional {control_role} argument is required."
             )
 
         # Split args into (control prefix, sub-kernel positional).
@@ -1879,19 +1929,31 @@ class ControlledGate:
         sub_positional_count = self._sub_positional_count_for_symbolic(args, sub_kwargs)
         if sub_positional_count > len(args):
             raise ValueError(
-                f"ControlledU: not enough positional args.  The wrapped "
+                f"{operation_label}: not enough positional args.  The wrapped "
                 f"sub-kernel expects {sub_positional_count} positional "
                 f"arg(s) after kwargs, got {len(args)} total."
             )
-        control_args = list(args[: len(args) - sub_positional_count])
+        prefix_args = list(args[: len(args) - sub_positional_count])
         sub_positional = list(args[len(args) - sub_positional_count :])
-        if not control_args:
+        if not prefix_args:
             raise ValueError(
-                "When num_controls is symbolic (UInt), at least one "
-                "positional control argument is required."
+                f"When {control_role} width is symbolic (UInt), at least one "
+                f"positional {control_role} argument is required."
             )
 
-        if len(control_args) == 1 and not isinstance(control_args[0], ArrayBase):
+        for position, prefix_arg in enumerate(prefix_args):
+            if not _is_quantum_handle(prefix_arg):
+                raise ValueError(
+                    f"{operation_label}: positional {control_role} argument "
+                    f"#{position} must be a Qubit, Vector[Qubit], or "
+                    f"VectorView[Qubit]; got {type(prefix_arg).__name__}."
+                )
+
+        if (
+            not allow_single_scalar_prefix
+            and len(prefix_args) == 1
+            and not isinstance(prefix_args[0], ArrayBase)
+        ):
             raise ValueError(
                 "When num_controls is symbolic (UInt), a single control "
                 "argument must be a Vector[Qubit] / VectorView pool, not a "
@@ -1902,8 +1964,8 @@ class ControlledGate:
                 "at least one more control argument (the multi-arg form)."
             )
 
-        is_legacy_pool_form = len(control_args) == 1 and isinstance(
-            control_args[0], ArrayBase
+        is_legacy_pool_form = len(prefix_args) == 1 and isinstance(
+            prefix_args[0], ArrayBase
         )
         if not is_legacy_pool_form and control_indices is not None:
             raise ValueError(
@@ -1919,19 +1981,29 @@ class ControlledGate:
             else None
         )
 
-        sub_args_resolved = self._bind_to_sub_signature(sub_positional, sub_kwargs)
+        caller = "control()" if operation_label == "ControlledU" else "select()"
+        sub_args_resolved = self._bind_to_sub_signature(
+            sub_positional,
+            sub_kwargs,
+            caller=caller,
+        )
         _validate_bound_handles(
             self._qkernel.input_types,
             sub_args_resolved,
-            context="control()",
+            context=caller,
             allow_broadcast=True,
         )
         sub_quantum_args = self._collect_sub_quantum_args(sub_args_resolved)
         if not sub_quantum_args:
+            if operation_label == "ControlledU":
+                raise ValueError(
+                    "ControlledU requires at least one quantum sub-kernel "
+                    "argument (target); got the control prefix and no "
+                    "sub-kernel quantum argument."
+                )
             raise ValueError(
-                "ControlledU requires at least one quantum sub-kernel "
-                "argument (target); got the control prefix and no "
-                "sub-kernel quantum argument."
+                f"{operation_label} requires at least one quantum target "
+                f"argument after the {control_role} prefix."
             )
         quantum_ids = {id(h) for h in sub_quantum_args}
         sub_classical_dict = {
@@ -1942,7 +2014,8 @@ class ControlledGate:
 
         overlap_arguments = {
             **{
-                f"control[{index}]": handle for index, handle in enumerate(control_args)
+                f"{control_role}[{index}]": handle
+                for index, handle in enumerate(prefix_args)
             },
             **{
                 f"target[{name}]": handle
@@ -1953,14 +2026,16 @@ class ControlledGate:
         reject_aliased_quantum_args(
             self._qkernel.name,
             overlap_arguments,
-            caller="control()",
+            caller=caller,
         )
 
-        control_entries = self._prepare_control_entries(
-            control_args, "ControlledU[control]"
+        prefix_entries = self._prepare_control_entries(
+            prefix_args,
+            f"{operation_label}[{control_role}]",
         )
         target_entries = self._prepare_control_entries(
-            sub_quantum_args, "ControlledU[target]"
+            sub_quantum_args,
+            f"{operation_label}[target]",
         )
 
         # Build per-control-arg operand + result.  For the legacy
@@ -1972,11 +2047,11 @@ class ControlledGate:
         # ``operands[:num_control_args]`` to recover the per-physical
         # qubit control set.
         operands: list[Any] = []
-        control_results: list[Value] = []
-        for entry in control_entries:
+        prefix_results: list[Value] = []
+        for entry in prefix_entries:
             op_value = self._sub_quantum_operand_value(entry)
             operands.append(op_value)
-            control_results.append(op_value.next_version())
+            prefix_results.append(op_value.next_version())
 
         sub_quantum_results: list[Value] = []
         for entry in target_entries:
@@ -1984,46 +2059,123 @@ class ControlledGate:
             operands.append(op_value)
             sub_quantum_results.append(op_value.next_version())
         self._params_to_operands(sub_classical_dict, operands)
-        block = self._block_for_sub_call(sub_args_resolved)
-        block = self._with_global_phase(block, global_phase)
-        if global_phase is not None:
-            operands.append(global_phase)
-
-        results: list[Value] = control_results + sub_quantum_results
-
-        op = SymbolicControlledU(
+        return _SymbolicCallPrep(
+            prefix_entries=prefix_entries,
+            target_entries=target_entries,
             operands=operands,
-            results=results,
-            num_controls=num_controls.value,
+            prefix_results=prefix_results,
+            target_results=sub_quantum_results,
+            sub_args_resolved=sub_args_resolved,
             control_indices=ci_values,
-            power=power,
-            block=block,
-            num_control_args=len(control_entries),
-            callable_ref=self._callable_ref(),
-            callable_attrs=self._callable_attrs(),
         )
-        self._commit_control_entries(control_entries, "ControlledU[control]")
-        self._commit_control_entries(target_entries, "ControlledU[target]")
-        tracer.add_operation(op)
 
+    def _wrap_symbolic_results_by_input_kind(
+        self,
+        prep: _SymbolicCallPrep,
+        *,
+        operation_label: str = "ControlledU",
+        control_role: str = "control",
+    ) -> tuple[Any, ...]:
+        """Wrap grouped symbolic-prefix results as caller-facing handles.
+
+        Args:
+            prep (_SymbolicCallPrep): Prepared entries and one grouped result
+                per prefix and target argument.
+            operation_label (str): Operation name used for ownership-transfer
+                tags. Defaults to ``"ControlledU"``.
+            control_role (str): Name of the leading quantum role. Defaults to
+                ``"control"``; SELECT uses ``"index"``.
+
+        Returns:
+            tuple[Any, ...]: Prefix outputs followed by target outputs, each
+            preserving the corresponding input handle kind.
+        """
         wrapped: list[Any] = []
-        for entry, result_value in zip(control_entries, control_results):
+        for entry, result_value in zip(
+            prep.prefix_entries,
+            prep.prefix_results,
+            strict=True,
+        ):
             wrapped.append(
                 self._wrap_entry_output(
                     entry,
                     [result_value],
-                    operation_name="ControlledU[control]",
+                    operation_name=f"{operation_label}[{control_role}]",
                 )
             )
-        for entry, result_value in zip(target_entries, sub_quantum_results):
+        for entry, result_value in zip(
+            prep.target_entries,
+            prep.target_results,
+            strict=True,
+        ):
             wrapped.append(
                 self._wrap_entry_output(
                     entry,
                     [result_value],
-                    operation_name="ControlledU[target]",
+                    operation_name=f"{operation_label}[target]",
                 )
             )
         return tuple(wrapped)
+
+    def _call_symbolic(
+        self,
+        args: tuple[Any, ...],
+        power: int | Value,
+        global_phase: Value | None,
+        sub_kwargs: dict[str, Any],
+        control_indices: Sequence[int | UInt] | None,
+        tracer: Any,
+    ) -> tuple[Any, ...]:
+        """Apply a controlled gate with a symbolic-width control prefix.
+
+        Args:
+            args (tuple[Any, ...]): Positional control and qkernel arguments.
+            power (int | Value): Normalized positive application count.
+            global_phase (Value | None): Normalized target-global phase.
+            sub_kwargs (dict[str, Any]): Keyword arguments for the qkernel.
+            control_indices (Sequence[int | UInt] | None): Optional selected
+                positions from a single control pool.
+            tracer (Any): Active frontend tracer.
+
+        Returns:
+            tuple[Any, ...]: Control outputs followed by target outputs.
+
+        Raises:
+            ValueError: If symbolic-prefix preparation fails.
+            TypeError: If a qkernel argument or control index is invalid.
+            QubitConsumedError: If a quantum input is already consumed.
+            QubitBorrowConflictError: If quantum argument regions overlap.
+        """
+        num_controls = self._num_controls
+        assert isinstance(num_controls, UInt)
+
+        prep = self._prepare_symbolic(args, sub_kwargs, control_indices)
+        block = self._block_for_sub_call(prep.sub_args_resolved)
+        block = self._with_global_phase(block, global_phase)
+        if global_phase is not None:
+            prep.operands.append(global_phase)
+
+        op = SymbolicControlledU(
+            operands=prep.operands,
+            results=prep.results,
+            num_controls=num_controls.value,
+            control_indices=prep.control_indices,
+            power=power,
+            block=block,
+            num_control_args=len(prep.prefix_entries),
+            callable_ref=self._callable_ref(),
+            callable_attrs=self._callable_attrs(),
+        )
+        self._commit_control_entries(
+            prep.prefix_entries,
+            "ControlledU[control]",
+        )
+        self._commit_control_entries(
+            prep.target_entries,
+            "ControlledU[target]",
+        )
+        tracer.add_operation(op)
+        return self._wrap_symbolic_results_by_input_kind(prep)
 
     def _sub_positional_count_for_symbolic(
         self, args: tuple[Any, ...], sub_kwargs: dict[str, Any]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Iterable, cast
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import (
     ExpvalOp,
@@ -69,7 +70,7 @@ from qamomile.circuit.ir.types.primitives import (
     ValueType,
 )
 from qamomile.circuit.ir.types.q_register import QFixedType
-from qamomile.circuit.ir.value import ArrayValue, DictValue, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
 
 _SINGLE_QUBIT_GATES = frozenset(
     {
@@ -965,26 +966,62 @@ def _validate_select(operation: SelectOperation, location: str) -> None:
         location (str): Human-readable operation location.
 
     Raises:
-        ValueError: If the index width, quantum result layout, or case block
-            interfaces are inconsistent.
+        ValueError: If the index width, argument grouping, quantum result
+            layout, or case block interfaces are inconsistent.
     """
     width = operation.num_index_qubits
-    if width < 1 or width >= len(operation.operands):
-        raise ValueError(f"{location} has an invalid num_index_qubits")
-    if len(operation.case_blocks) < 2 or len(operation.case_blocks) > (1 << width):
-        raise ValueError(f"{location} has an invalid number of case blocks")
+    num_index_args = operation.num_index_args
+    if num_index_args < 1 or num_index_args >= len(operation.operands):
+        raise ValueError(f"{location} has an invalid num_index_args")
 
-    index_operands = operation.operands[:width]
-    if any(isinstance(value, ArrayValue) for value in index_operands):
-        raise ValueError(f"{location} index operands must be scalar qubits")
-    _require_types(index_operands, [QubitType()] * width, location, "index operand")
+    if is_plain_int(width):
+        concrete_width = cast(int, width)
+        if concrete_width < 1 or num_index_args != concrete_width:
+            raise ValueError(f"{location} has an invalid num_index_qubits")
+        minimum_width = (len(operation.case_blocks) - 1).bit_length()
+        if len(operation.case_blocks) < 2 or concrete_width < minimum_width:
+            raise ValueError(f"{location} has an invalid number of case blocks")
+    else:
+        if not isinstance(width, Value) or isinstance(width, ArrayValue):
+            raise ValueError(f"{location} has an invalid num_index_qubits")
+        _require_value_type(width, UIntType(), location)
+        if len(operation.case_blocks) < 2:
+            raise ValueError(f"{location} has an invalid number of case blocks")
+
+    index_operands = operation.operands[:num_index_args]
+    if not all(value.type.is_quantum() for value in index_operands):
+        raise ValueError(f"{location} index arguments must be quantum values")
+    _require_types(
+        index_operands,
+        [QubitType()] * num_index_args,
+        location,
+        "index argument",
+    )
+    if is_plain_int(width):
+        if any(isinstance(value, ArrayValue) for value in index_operands):
+            raise ValueError(
+                f"{location} concrete index operands must be scalar qubits"
+            )
 
     target_operands = [
-        value for value in operation.operands[width:] if value.type.is_quantum()
+        value
+        for value in operation.operands[num_index_args:]
+        if value.type.is_quantum()
     ]
     if not target_operands:
         raise ValueError(f"{location} requires at least one quantum target")
     quantum_operands = [*index_operands, *target_operands]
+    if len(operation.results) != len(quantum_operands):
+        raise ValueError(f"{location} results must mirror quantum operands")
+    if any(
+        isinstance(operand, ArrayValue) != isinstance(result, ArrayValue)
+        for operand, result in zip(
+            quantum_operands,
+            operation.results,
+            strict=True,
+        )
+    ):
+        raise ValueError(f"{location} results must preserve quantum argument grouping")
     _require_types(
         operation.results,
         [value.type for value in quantum_operands],
@@ -992,7 +1029,7 @@ def _validate_select(operation: SelectOperation, location: str) -> None:
         "result",
     )
 
-    case_inputs = operation.operands[width:]
+    case_inputs = operation.operands[num_index_args:]
     case_outputs = target_operands
     for case_index, case_block in enumerate(operation.case_blocks):
         case_location = f"{location} case block {case_index}"

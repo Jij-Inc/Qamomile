@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import numbers
 from typing import Any
 
 import numpy as np
@@ -297,9 +298,17 @@ def create_bound_input(param_type: Any, name: str, value: Any) -> Handle:
         )
 
     if param_type in (int, UInt):
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, numbers.Integral
+        ):
+            raise TypeError(
+                f"Binding {name!r} is declared as UInt/int and requires "
+                f"an integer scalar, got {type(value).__name__}."
+            )
+        normalized = int(value)
         return UInt(
-            value=Value(type=UIntType(), name=name).with_const(int(value)),
-            init_value=int(value),
+            value=Value(type=UIntType(), name=name).with_const(normalized),
+            init_value=normalized,
         )
 
     if is_array_type(param_type):

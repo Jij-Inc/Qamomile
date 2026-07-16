@@ -25,9 +25,10 @@ from qamomile.circuit.ir.operation.callable import (
     CallTransform,
     CompositeGateType,
 )
+from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import (
     QAMOMILE_VERSION,
     SerializedQKernel,
@@ -210,6 +211,64 @@ def _select_program(
 ) -> tuple[qmc.Qubit, qmc.Qubit]:
     """Select identity or X from one index qubit."""
     return qmc.select([_serialization_identity, qmc.x])(index, target)
+
+
+@qmc.qkernel
+def _wide_select_program() -> qmc.Bit:
+    """Preserve a concrete SELECT index width greater than 64."""
+    index = qmc.qubit_array(70, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_serialization_identity, qmc.x],
+        num_index_qubits=70,
+    )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _select_pair_identity(
+    scalar: qmc.Qubit,
+    vector: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
+    """Return a scalar and vector SELECT target unchanged."""
+    return scalar, vector
+
+
+@qmc.qkernel
+def _select_pair_x(
+    scalar: qmc.Qubit,
+    vector: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Qubit, qmc.Vector[qmc.Qubit]]:
+    """Apply X to the scalar while retaining a vector SELECT target."""
+    return qmc.x(scalar), vector
+
+
+@qmc.qkernel
+def _symbolic_select_program(width: qmc.UInt) -> qmc.Bit:
+    """Use a symbolic width across scalar and array index arguments."""
+    index_scalar = qmc.qubit("index_scalar")
+    index_array = qmc.qubit_array(width - 1, "index_array")
+    target_scalar = qmc.qubit("target_scalar")
+    target_array = qmc.qubit_array(2, "target_array")
+    index_scalar, index_array, target_scalar, target_array = qmc.select(
+        [_select_pair_identity, _select_pair_x],
+        num_index_qubits=width,
+    )(
+        index_scalar,
+        index_array,
+        target_scalar,
+        target_array,
+    )
+    return qmc.measure(target_scalar)
+
+
+@qmc.qkernel
+def _ordered_select_program() -> qmc.Bit:
+    """Select four distinct gates in ascending index order."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select([qmc.x, qmc.y, qmc.z, qmc.h])(index, target)
+    return qmc.measure(target)
 
 
 @qmc.qkernel
@@ -569,6 +628,154 @@ def test_select_without_a_quantum_target_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="requires at least one quantum target"):
         validate_qkernel_ir(block)
+
+
+def test_concrete_select_width_greater_than_64_round_trips() -> None:
+    """The original concrete-width field preserves a large overwide SELECT."""
+    message = _message(_wide_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+
+    assert encoded.HasField("num_index_qubits")
+    assert encoded.num_index_qubits == 70
+    assert not encoded.HasField("num_index_qubits_ref")
+    assert not encoded.HasField("num_index_args")
+
+    restored = _restore(message)
+    select = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, SelectOperation)
+    )
+    assert select.num_index_qubits == 70
+    assert select.num_index_args == 70
+
+
+def test_symbolic_select_width_and_argument_groups_round_trip() -> None:
+    """A UInt width references its Value and retains mixed index groups."""
+    message = _message(_symbolic_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+
+    assert not encoded.HasField("num_index_qubits")
+    assert encoded.HasField("num_index_qubits_ref")
+    assert encoded.num_index_args == 2
+    assert encoded.num_index_qubits_ref in {value.uuid for value in message.value_table}
+
+    restored = _restore(message)
+    select = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, SelectOperation)
+    )
+    assert isinstance(select.num_index_qubits, Value)
+    assert select.num_index_qubits.name == "width"
+    assert select.num_index_args == 2
+    assert not isinstance(select.index_operands[0], ArrayValue)
+    assert isinstance(select.index_operands[1], ArrayValue)
+    assert not isinstance(select.target_operands[0], ArrayValue)
+    assert isinstance(select.target_operands[1], ArrayValue)
+
+    original_circuit = _circuit(_symbolic_select_program, bindings={"width": 3})
+    restored_circuit = _circuit(restored, bindings={"width": 3})
+    assert original_circuit.num_qubits == restored_circuit.num_qubits
+    assert original_circuit.count_ops() == restored_circuit.count_ops()
+
+
+def test_select_case_order_round_trips() -> None:
+    """SELECT case blocks remain in ascending index order."""
+    restored = _restore(_message(_ordered_select_program))
+    select = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, SelectOperation)
+    )
+    gate_types = [
+        next(
+            operation.gate_type
+            for operation in case.operations
+            if isinstance(operation, GateOperation)
+        )
+        for case in select.case_blocks
+    ]
+
+    assert gate_types == [
+        GateOperationType.X,
+        GateOperationType.Y,
+        GateOperationType.Z,
+        GateOperationType.H,
+    ]
+
+
+@pytest.mark.parametrize("retain_concrete", [False, True])
+def test_select_width_union_rejects_missing_or_mutually_present_fields(
+    retain_concrete: bool,
+) -> None:
+    """SELECT requires exactly one concrete or symbolic width field."""
+    message = _message(_wide_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+    if retain_concrete:
+        encoded.num_index_qubits_ref = encoded.operand_refs[0]
+    else:
+        encoded.ClearField("num_index_qubits")
+
+    with pytest.raises(ValueError, match="requires exactly one"):
+        _restore(message)
+
+
+def test_symbolic_select_rejects_a_missing_width_reference() -> None:
+    """A symbolic SELECT width must resolve through the Value table."""
+    message = _message(_symbolic_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+    encoded.num_index_qubits_ref = "missing-width-value"
+
+    with pytest.raises(ValueError, match="value_table is missing entry"):
+        _restore(message)
+
+
+def test_symbolic_select_requires_its_index_argument_count() -> None:
+    """A symbolic SELECT cannot infer its operand-slot boundary on load."""
+    message = _message(_symbolic_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+    encoded.ClearField("num_index_args")
+
+    with pytest.raises(ValueError, match="requires num_index_args"):
+        _restore(message)
+
+
+def test_symbolic_select_rejects_changed_result_grouping() -> None:
+    """Scalar and array index result slots cannot be interchanged."""
+    message = _message(_symbolic_select_program)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.SELECT_OPERATION
+    )
+    result_refs = list(encoded.result_refs)
+    result_refs[0], result_refs[1] = result_refs[1], result_refs[0]
+    del encoded.result_refs[:]
+    encoded.result_refs.extend(result_refs)
+
+    with pytest.raises(ValueError, match="preserve quantum argument grouping"):
+        _restore(message)
 
 
 @pytest.mark.parametrize(

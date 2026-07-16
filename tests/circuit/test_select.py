@@ -20,7 +20,7 @@ from qamomile.circuit.frontend.handle import (
 )
 from qamomile.circuit.frontend.tracer import trace
 from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import QubitConsumedError
 
 
@@ -132,6 +132,24 @@ def _swap_pair(q0: Qubit, q1: Qubit) -> tuple[Qubit, Qubit]:
 
 
 @qkernel
+def _identity_scalar_vector(
+    scalar: Qubit,
+    vector: Vector[Qubit],
+) -> tuple[Qubit, Vector[Qubit]]:
+    """Return mixed scalar and vector targets unchanged."""
+    return scalar, vector
+
+
+@qkernel
+def _x_scalar_vector(
+    scalar: Qubit,
+    vector: Vector[Qubit],
+) -> tuple[Qubit, Vector[Qubit]]:
+    """Apply X to the scalar target and preserve the vector target."""
+    return qmc.x(scalar), vector
+
+
+@qkernel
 def _select_x_on_one(index: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
     """Apply X only when a one-qubit index reads one."""
     return qmc.select([_identity, _x])(index, target)
@@ -141,6 +159,19 @@ def _select_x_on_one(index: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
 def _select_x_on_zero(index: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
     """Apply X only when a one-qubit index reads zero."""
     return qmc.select([_x, _identity])(index, target)
+
+
+@qkernel
+def _symbolic_select_x(
+    index: Vector[Qubit],
+    target: Qubit,
+    width: UInt,
+) -> tuple[Vector[Qubit], Qubit]:
+    """Apply identity-or-X SELECT with a symbolic index width."""
+    return qmc.select(
+        [_identity, _x],
+        num_index_qubits=width,
+    )(index, target)
 
 
 def _executor(case: Any, *, runtime_control: bool = False) -> Any:
@@ -265,6 +296,132 @@ class TestSelectCrossBackend:
 
         expected = 1 if index_value == 2 else 0
         assert _sample_outcomes(sdk_transpiler, circuit) == {expected}
+
+    @pytest.mark.parametrize(
+        ("index_value", "expected"),
+        [(1, 1), (7, 0)],
+    )
+    def test_explicit_wide_index_leaves_extra_states_as_identity(
+        self,
+        sdk_transpiler: Any,
+        index_value: int,
+        expected: int,
+    ) -> None:
+        """An explicit over-wide register maps only supplied case addresses."""
+        bits = tuple((index_value >> offset) & 1 for offset in range(3))
+
+        @qkernel
+        def circuit() -> Bit:
+            index = qmc.qubit_array(3, "index")
+            if bits[0]:
+                index[0] = qmc.x(index[0])
+            if bits[1]:
+                index[1] = qmc.x(index[1])
+            if bits[2]:
+                index[2] = qmc.x(index[2])
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [_identity, _x],
+                num_index_qubits=3,
+            )(index, target)
+            return qmc.measure(target)
+
+        assert _sample_outcomes(sdk_transpiler, circuit) == {expected}
+
+    @pytest.mark.parametrize(
+        ("index_value", "expected"),
+        [
+            (1, (1, (0, 0))),
+            (5, (0, (0, 0))),
+        ],
+    )
+    def test_symbolic_width_flattens_mixed_index_and_target_groups(
+        self,
+        sdk_transpiler: Any,
+        index_value: int,
+        expected: tuple[int, tuple[int, int]],
+    ) -> None:
+        """A bound UInt width preserves grouped operands and LSB-first order."""
+        bits = tuple((index_value >> offset) & 1 for offset in range(3))
+
+        @qkernel
+        def circuit(width: UInt) -> tuple[Bit, Vector[Bit]]:
+            index_scalar = qmc.qubit("index_scalar")
+            index_array = qmc.qubit_array(2, "index_array")
+            if bits[0]:
+                index_scalar = qmc.x(index_scalar)
+            if bits[1]:
+                index_array[0] = qmc.x(index_array[0])
+            if bits[2]:
+                index_array[1] = qmc.x(index_array[1])
+            target_scalar = qmc.qubit("target_scalar")
+            target_array = qmc.qubit_array(2, "target_array")
+            index_scalar, index_array, target_scalar, target_array = qmc.select(
+                [_identity_scalar_vector, _x_scalar_vector],
+                num_index_qubits=width,
+            )(
+                index_scalar,
+                index_array,
+                target_scalar,
+                target_array,
+            )
+            return qmc.measure(target_scalar), qmc.measure(target_array)
+
+        executable = sdk_transpiler.transpiler.transpile(
+            circuit,
+            bindings={"width": 3},
+        )
+        result = executable.sample(_executor(sdk_transpiler), shots=128).result()
+        assert {bits for bits, _ in result.results} == {expected}
+
+    def test_symbolic_width_requires_exact_flattened_index_size(
+        self,
+        sdk_transpiler: Any,
+    ) -> None:
+        """Lowering rejects a bound width that would split an index array."""
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        @qkernel
+        def circuit(width: UInt) -> Bit:
+            index_scalar = qmc.qubit("index_scalar")
+            index_array = qmc.qubit_array(2, "index_array")
+            target = qmc.qubit("target")
+            index_scalar, index_array, target = qmc.select(
+                [_identity, _x],
+                num_index_qubits=width,
+            )(index_scalar, index_array, target)
+            return qmc.measure(target)
+
+        with pytest.raises(
+            EmitError,
+            match=r"expanded to 3 qubit\(s\).*resolves to 2",
+        ):
+            sdk_transpiler.transpiler.transpile(
+                circuit,
+                bindings={"width": 2},
+            )
+
+    def test_inverse_preserves_symbolic_select_width(
+        self,
+        sdk_transpiler: Any,
+    ) -> None:
+        """A symbolic-width SELECT followed by its inverse cancels exactly."""
+
+        @qkernel
+        def circuit(width: UInt) -> Bit:
+            index = qmc.qubit_array(width, "index")
+            index[0] = qmc.x(index[0])
+            target = qmc.qubit("target")
+            index, target = _symbolic_select_x(index, target, width)
+            index, target = qmc.inverse(_symbolic_select_x)(index, target, width)
+            return qmc.measure(target)
+
+        executable = sdk_transpiler.transpiler.transpile(
+            circuit,
+            bindings={"width": 3},
+        )
+        result = executable.sample(_executor(sdk_transpiler), shots=128).result()
+        assert {bits for bits, _ in result.results} == {0}
 
     @pytest.mark.parametrize("outer_value", [0, 1])
     @pytest.mark.parametrize("index_value", [0, 1])
@@ -479,6 +636,26 @@ class TestSelectCrossBackend:
 
         assert _sample_outcomes(sdk_transpiler, circuit) == {(1, 1)}
 
+    def test_symbolic_width_uses_one_trip_loop_value(
+        self,
+        sdk_transpiler: Any,
+    ) -> None:
+        """One-trip loop lowering substitutes SELECT's structural width."""
+
+        @qkernel
+        def circuit() -> Bit:
+            index = qmc.qubit_array(3, "index")
+            index[0] = qmc.x(index[0])
+            target = qmc.qubit("target")
+            for width in qmc.range(3, 4):
+                index, target = qmc.select(
+                    [_identity, _x],
+                    num_index_qubits=width,
+                )(index, target)
+            return qmc.measure(target)
+
+        assert _sample_outcomes(sdk_transpiler, circuit) == {1}
+
     def test_select_inside_runtime_if(self, sdk_transpiler: Any) -> None:
         """SELECT results merge from a measurement-backed conditional."""
         if sdk_transpiler.backend_name == "quri_parts":
@@ -552,6 +729,156 @@ class TestSelectValidation:
     def test_num_index_qubits(self, case_count: int, width: int) -> None:
         """Index width is the ceiling of the case-count base-two logarithm."""
         assert qmc.select([_identity] * case_count).num_index_qubits == width
+
+    def test_explicit_wider_index_width_is_preserved(self) -> None:
+        """A concrete width may exceed the minimum required by the cases."""
+        selector = qmc.select([_identity, _x], num_index_qubits=3)
+        assert selector.num_index_qubits == 3
+
+    @pytest.mark.parametrize("width", [True, 2.0, "2"])
+    def test_invalid_frontend_index_width_type_is_rejected(self, width: Any) -> None:
+        """The public API accepts only int, UInt, or None index widths."""
+        with pytest.raises(TypeError, match="int, UInt, or None"):
+            qmc.select([_identity, _x], num_index_qubits=width)
+
+    @pytest.mark.parametrize("width", [0, 1])
+    def test_too_small_frontend_index_width_is_rejected(self, width: int) -> None:
+        """A concrete width must address every supplied SELECT case."""
+        with pytest.raises(ValueError, match="at least 2 index qubit"):
+            qmc.select([_identity] * 4, num_index_qubits=width)
+
+    def test_symbolic_width_is_preserved_by_public_api(self) -> None:
+        """A UInt width remains symbolic until the transpiler resolves it."""
+        width = qmc.uint("width")
+        selector = qmc.select([_identity, _x], num_index_qubits=width)
+        assert selector.num_index_qubits is width
+
+    @pytest.mark.parametrize("width", [True, 3.0])
+    def test_symbolic_width_binding_requires_a_plain_int(
+        self,
+        qiskit_transpiler: Any,
+        width: Any,
+    ) -> None:
+        """Compile-time bindings cannot coerce bool or float into a width."""
+
+        @qkernel
+        def circuit(num_index_qubits: UInt) -> Bit:
+            index = qmc.qubit_array(3, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [_identity, _x],
+                num_index_qubits=num_index_qubits,
+            )(index, target)
+            return qmc.measure(target)
+
+        with pytest.raises(TypeError) as exc_info:
+            qiskit_transpiler.transpile(
+                circuit,
+                bindings={"num_index_qubits": width},
+            )
+        message = str(exc_info.value)
+        assert "num_index_qubits" in message
+        assert "integer" in message
+
+    def test_symbolic_mixed_prefix_and_targets_keep_grouped_ir_layout(self) -> None:
+        """Symbolic SELECT groups each scalar/array index and target argument."""
+        from qamomile.circuit.ir.operation.select import SelectOperation
+
+        @qkernel
+        def pair_case(
+            scalar: Qubit,
+            vector: Vector[Qubit],
+            theta: Float = 0.5,
+        ) -> tuple[Qubit, Vector[Qubit]]:
+            _ = theta
+            return scalar, vector
+
+        @qkernel
+        def circuit(width: UInt) -> tuple[Bit, Vector[Bit]]:
+            index_scalar = qmc.qubit("index_scalar")
+            index_array = qmc.qubit_array(width - 1, "index_array")
+            target_scalar = qmc.qubit("target_scalar")
+            target_array = qmc.qubit_array(2, "target_array")
+            index_scalar, index_array, target_scalar, target_array = qmc.select(
+                [pair_case, pair_case],
+                num_index_qubits=width,
+            )(
+                index_scalar,
+                index_array,
+                target_scalar,
+                target_array,
+            )
+            return qmc.measure(target_scalar), qmc.measure(target_array)
+
+        select_op = next(
+            operation
+            for operation in circuit.block.operations
+            if isinstance(operation, SelectOperation)
+        )
+        assert select_op.num_index_args == 2
+        assert select_op.num_index_qubits.name == "width"
+        assert not isinstance(select_op.operands[0], ArrayValue)
+        assert isinstance(select_op.operands[1], ArrayValue)
+        assert not isinstance(select_op.operands[2], ArrayValue)
+        assert isinstance(select_op.operands[3], ArrayValue)
+        assert len(select_op.results) == 4
+
+    def test_symbolic_width_accepts_a_lone_scalar_index(self) -> None:
+        """SELECT permits one scalar index when a UInt width resolves to one."""
+        from qamomile.circuit.ir.operation.select import SelectOperation
+
+        @qkernel
+        def circuit(width: UInt) -> Bit:
+            index = qmc.qubit("index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [_identity, _x],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        select_op = next(
+            operation
+            for operation in circuit.block.operations
+            if isinstance(operation, SelectOperation)
+        )
+        assert select_op.num_index_args == 1
+        assert select_op.num_index_qubits.name == "width"
+
+    def test_symbolic_case_failure_does_not_consume_inputs(self) -> None:
+        """Symbolic SELECT validates every case before ownership transfer."""
+
+        @qkernel
+        def reset_case(q: Qubit) -> Qubit:
+            return qmc.reset(q)
+
+        width = qmc.uint("width")
+        index = _make_qubit("index")
+        target = _make_qubit("target")
+
+        with trace():
+            with pytest.raises(ValueError, match="non-unitary ResetOperation"):
+                qmc.select(
+                    [_identity, reset_case],
+                    num_index_qubits=width,
+                )(index, target)
+
+        assert not index._consumed
+        assert not target._consumed
+
+    def test_concrete_width_does_not_split_an_index_array(self) -> None:
+        """A concrete index boundary must not truncate an array argument."""
+        with trace():
+            index = qmc.qubit_array(3, "index")
+            target = qmc.qubit("target")
+            with pytest.raises(ValueError, match="boundary mid-argument"):
+                qmc.select(
+                    [_identity] * 4,
+                    num_index_qubits=2,
+                )(index, target)
+
+            assert not index._consumed
+            assert not target._consumed
 
     def test_aliased_index_and_target_are_rejected(self) -> None:
         """An aliased SELECT fails before committing index ownership."""

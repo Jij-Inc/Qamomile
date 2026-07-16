@@ -284,6 +284,8 @@ message Operation {
 
   optional sint64 num_index_qubits = 100;
   repeated Block case_blocks = 101;
+  optional string num_index_qubits_ref = 102;
+  optional sint64 num_index_args = 103;
 }
 
 message IntegerOrReference {

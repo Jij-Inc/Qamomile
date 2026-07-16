@@ -494,6 +494,54 @@ class TestCanonicalizeDeterminism:
         assert to_canonical_bytes(a) == to_canonical_bytes(b)
         assert content_hash(a) == content_hash(b)
 
+    def test_symbolic_select_width_canonicalizes_with_its_input(self):
+        """Independent symbolic SELECT widths reuse canonical input identity."""
+
+        @qmc.qkernel
+        def identity(target: qmc.Qubit) -> qmc.Qubit:
+            """Return a SELECT target unchanged."""
+            return target
+
+        @qmc.qkernel
+        def flipped(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply X to a SELECT target."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def first(width: qmc.UInt) -> qmc.Bit:
+            """Build the first symbolic-width SELECT twin."""
+            index = qmc.qubit_array(width, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        @qmc.qkernel
+        def second(width: qmc.UInt) -> qmc.Bit:
+            """Build the second symbolic-width SELECT twin."""
+            index = qmc.qubit_array(width, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        first_block = _to_affine(first)
+        second_block = _to_affine(second)
+        canonical = canonicalize(first_block)
+        select = next(
+            operation
+            for operation in canonical.operations
+            if isinstance(operation, SelectOperation)
+        )
+
+        assert isinstance(select.num_index_qubits, Value)
+        assert select.num_index_qubits.uuid == canonical.input_values[0].uuid
+        assert to_canonical_bytes(first_block) == to_canonical_bytes(second_block)
+
     def test_select_boxed_implementation_body_affects_hash(self):
         """A semantic change in an alternate implementation changes the hash."""
         h_impl = _select_with_boxed_case(

@@ -114,9 +114,10 @@ assert on_counts == {1: 256}
 # | `num_controls=` | Pythonの`int`(デフォルト`1`) | `qmc.UInt`ハンドル、または`UInt`式 |
 # | 制御引数 | 合計量子ビット数が`num_controls`に一致する1つ以上のpositional引数(`Qubit`、`VectorView`、`Vector[Qubit]`) | 1つのpositionalな`Vector[Qubit]` / `VectorView`の*pool*(single-pool形、任意で`control_indices`)、**または**`Qubit` / `VectorView` / `Vector[Qubit]`を混ぜた複数のpositional引数 |
 # | `control_indices` | 受け付けない | 任意。poolのどの量子ビットがactiveかを指定 |
+# | `control_value` | 任意のPython `int`。LSB-firstでそのregister値のときにactive | 非対応。`num_controls`をbindしてconcrete modeを使う |
 # | 制御数が解決される時点 | `qmc.control(...)`が評価された時(module load時かtracing時) | transpile時(`bindings`から) |
 #
-# `qmc.control`のほとんどの機能(`power=`、デフォルト値、古典kwargの並び替え、`Vector[Qubit]`を受け取る量子カーネル、multi-argの制御引数形など)は両モードで同じ挙動を示します。これらは[](#cg-3)でまとめます。[](#cg-4)はconcrete modeを必要とする唯一の形を、[](#cg-5)はsymbolic mode固有の機能を扱います。
+# `qmc.control`のほとんどの機能(`power=`、デフォルト値、古典kwargの並び替え、`Vector[Qubit]`を受け取る量子カーネル、multi-argの制御引数形など)は両モードで同じ挙動を示します。これらは[](#cg-3)でまとめます。[](#cg-4)はconcrete modeを必要とする機能を、[](#cg-5)はsymbolic mode固有の機能を扱います。
 
 # %% [markdown]
 # (cg-3)=
@@ -416,9 +417,15 @@ mixed_controls_demo.draw()
 
 # %% [markdown]
 # (cg-4)=
-# ## 4. concrete専用: 単一のscalar制御
+# ## 4. concrete mode専用のパターン
 #
-# 制御引数の形はほぼすべて両モードで動き([](#cg-3))、symbolic modeはさらに固有の機能を持ちます([](#cg-5))。concrete modeを*必要とする*唯一の形は、単一のscalar `Qubit`を制御にするケースです。symbolic modeでは単一の制御引数はpoolの形と解釈され`Vector` / `VectorView`が要求されます。そもそも制御数が1に固定されている制御をsymbolicにする理由がないためです。これは[](#cg-1)の最小controlled-RXとまったく同じ形で、以下のcontrolled-X(CNOT)も同じ単一scalar制御の形です。
+# 制御引数の形はほぼすべて両モードで動き([](#cg-3))、symbolic modeはさらに固有の機能を持ちます([](#cg-5))。concrete modeではこれに加え、単一scalar制御と、指定した計算基底値を条件にする制御を利用できます。
+
+# %% [markdown]
+# (cg-4-1)=
+# ### 4.1 単一のscalar制御
+#
+# 単一のscalar `Qubit`を唯一の制御にする形はconcrete modeを必要とします。symbolic modeでは単一の制御引数はpoolの形と解釈され`Vector` / `VectorView`が要求されます。そもそも制御数が1に固定されている制御をsymbolicにする理由がないためです。これは[](#cg-1)の最小controlled-RXとまったく同じ形で、以下のcontrolled-X(CNOT)も同じ単一scalar制御の形です。
 
 
 # %%
@@ -436,6 +443,69 @@ def cnot_demo() -> qmc.Bit:
 
 
 cnot_demo.draw()
+
+# %% [markdown]
+# (cg-4-2)=
+# ### 4.2 control registerの値を指定してactiveにする
+#
+# 通常の量子的な制御は、すべての制御量子ビットが`1`のときにactiveになります。
+# `control_value=v`を指定すると、代わりにflatten後のcontrol registerが具体的な整数
+# `v`を表すときにactiveになります。flattenは呼び出し順で行われ、各`Vector` /
+# `VectorView`はindex 0から昇順に要素を加えます。最初にflattenされた制御がbit 0
+# (LSB)です。そのため2制御で`control_value=2`なら
+# `(bit_0, bit_1) = (0, 1)`を意味します。
+#
+# Qamomileはこれを1つの値指定付き制御演算として表現します。portable loweringは、
+# 値が0の各制御bitについて制御の前後にXを適用することと等価で、これらの一時的な
+# Xは打ち消し合うため、返される制御量子ビットは保存されます。以下の例ではflatten順を
+# 明確にするため、scalar制御と要素数1の`VectorView`を意図的に混在させます。
+
+
+# %%
+control_on_two = qmc.control(qmc.x, num_controls=2, control_value=2)
+control_on_zero = qmc.control(qmc.x, num_controls=1, control_value=0)
+
+
+# %%
+@qmc.qkernel
+def control_value_two_demo() -> qmc.Bit:
+    qs = qmc.qubit_array(3, "qs")
+    qs[1] = qmc.x(qs[1])  # flatten後の制御は(qs[0], qs[1]) = (0, 1)
+    qs[0], qs[1:2], qs[2] = control_on_two(qs[0], qs[1:2], qs[2])
+    return qmc.measure(qs[2])
+
+
+@qmc.qkernel
+def control_value_zero_demo() -> qmc.Bit:
+    control = qmc.qubit("control")  # |0>のまま
+    target = qmc.qubit("target")
+    control, target = control_on_zero(control, target)
+    return qmc.measure(target)
+
+
+# %%
+control_value_two_counts = dict(
+    transpiler.transpile(control_value_two_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+control_value_zero_counts = dict(
+    transpiler.transpile(control_value_zero_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+assert control_value_two_counts == {1: 256}
+assert control_value_zero_counts == {1: 256}
+
+# %% [markdown]
+# `control_value=None`はデフォルトのall-ones制御です。all-onesを明示する
+# `2**num_controls - 1`を与えても、同じデフォルト表現へcanonicalizeされます。
+# その他の値は`0 <= control_value < 2**num_controls`を満たす必要があります。
+# `control_value`は意図的にconcrete mode専用です。`num_controls`が`qmc.UInt`の
+# 場合は、まず幅をbindし、対応するconcreteな制御ゲートを構築してください。これに
+# より、演算を作る時点でactiveにするbit patternが一意に決まります。
 
 # %% [markdown]
 # (cg-5)=
@@ -802,7 +872,9 @@ case_controlled_qft_over_uint_slice()
 # (cg-7)=
 # ## 7. `qmc.select`による量子multiplexer
 #
-# `qmc.select([U_0, U_1, ...])`は量子multiplexerを構築します。先頭の引数がindex registerで、その後ろに各caseで共有するtarget引数を並べます。indexが`i`を表すとき、case `U_i`が適用されます。indexはLSB-firstで、index量子ビット`j`がbit `j`を表します。したがってindex量子ビット0が最下位bitです。registerには`ceil(log2(len(cases)))`個の量子ビットが必要です。case数は2のべき乗でなくてもよく、割り当てられていないindex値ではidentityとして動作します。
+# `qmc.select([U_0, U_1, ...], num_index_qubits=...)`は量子multiplexerを構築します。先頭側の量子引数群がindex prefixとなり、その後ろに各caseで共有するtarget引数を並べます。indexが`i`を表すとき、case `U_i`が適用されます。デフォルトの`num_index_qubits=None`では、Qamomileが最小の幅`ceil(log2(len(cases)))`を推論します。Pythonの`int`で明示する幅はこの最小値より大きくても構いません。対応するcaseがないすべてのindex値ではidentityとして動作します。`qmc.UInt`の値（または式）を与えると、幅はtranspile時までsymbolicに保たれ、その時点で幅とindex prefixの大きさが検査されます。
+#
+# index prefixとtargetには、それぞれscalarの`Qubit`、`Vector[Qubit]`、`VectorView[Qubit]`を混在させられます。Qamomileはindex引数を左から右へ、各arrayの要素を0番から昇順にflattenします。flatten後の最初の量子ビットがbit 0になるため、integerの規約はLSB-firstです。indexとtargetの境界は必ず引数と引数の間に置かれます。要求した幅を満たすためにSELECTがarrayの先頭要素だけをindexとして切り出すことはありません。したがって、index prefixに含める各引数を丸ごとflattenした個数は`num_index_qubits`と一致する必要があります。
 #
 # すべてのcaseは引数signatureが同じで、受け取った量子target wireを過不足なく返す必要があります。caseはunitaryであり、測定、射影、reset、内部ancillaの割り当て、追加の古典出力は利用できません。共有する古典parameterはkeywordで渡せます。case内のbound/default分岐はトランスパイル時に解決されます。
 
@@ -842,4 +914,4 @@ assert select_counts == {1: 256}
 # (cg-8)=
 # ## 8. まとめ
 #
-# `qmc.control(fn, num_controls=...)`を使うことでQamomileのビルトインゲートやユーザ定義の量子カーネルを制御化することができます。`qmc.control`には二つのモードがあり、そのモードは`num_controls`の型で決まります。Pythonの`int`であれば*concrete mode*、`qmc.UInt`(または`n - 1`のような`UInt`式)なら*symbolic mode*です。indexでunitary case群を選択する場合は、`qmc.select`を使うとLSB-first index semanticsと未割り当てbasis stateでのidentity動作を持つ単一の量子multiplexer operationとして表現できます。
+# `qmc.control(fn, num_controls=...)`を使うことでQamomileのビルトインゲートやユーザ定義の量子カーネルを制御化することができます。`qmc.control`には二つのモードがあり、そのモードは`num_controls`の型で決まります。Pythonの`int`であれば*concrete mode*、`qmc.UInt`(または`n - 1`のような`UInt`式)なら*symbolic mode*です。indexでunitary case群を選択する場合は、`qmc.select`を使うと、推論・明示・symbolicのいずれかで指定したindex幅、LSB-firstの規約、未割り当てbasis stateでのidentity動作を単一の量子multiplexer operationとして表現できます。

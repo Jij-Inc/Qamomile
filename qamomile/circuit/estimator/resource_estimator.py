@@ -2849,7 +2849,12 @@ class ResourceInterpreter:
             ResourceEstimate: Sequential estimate of all controlled case
             bodies, including scalar-case broadcast over vector targets.
         """
-        total_controls = _expr(controls) + operation.num_index_qubits
+        index_controls = (
+            resolver.resolve(operation.num_index_qubits)
+            if isinstance(operation.num_index_qubits, Value)
+            else _expr(operation.num_index_qubits)
+        )
+        total_controls = _expr(controls) + index_controls
         estimate = ResourceEstimate.zero()
         for case_index, case_block in enumerate(operation.case_blocks):
             child = _select_case_child_resolver(operation, case_block, resolver)
