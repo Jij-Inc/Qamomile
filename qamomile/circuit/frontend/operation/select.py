@@ -627,6 +627,13 @@ def select(
     the least-significant bit. ``len(cases)`` need not be a power of
     two; index values ``>= len(cases)`` apply no operation.
 
+    A scalar ``Qubit`` case called with a ``Vector[Qubit]`` or
+    ``VectorView[Qubit]`` target is applied independently to every element.
+    This is the same tensor-product unitary as an explicit per-element loop,
+    including one copy of the scalar case's global phase per element. A phase
+    intended for the complete register belongs on a case whose parameter is
+    itself ``Vector[Qubit]``.
+
     Circuit-family lowering retains the abstract SELECT identity while its
     portable fallback invokes each case under the corresponding mixed
     ``0``/``1`` (anti-/normal) index pattern.

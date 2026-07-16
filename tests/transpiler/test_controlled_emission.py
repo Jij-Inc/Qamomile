@@ -73,19 +73,6 @@ def test_gate_matches_qubit_count_rejects_unknown_width() -> None:
     assert not _gate_matches_qubit_count(_GateWithQubitCount(1), 2)
 
 
-def test_opaque_phase_broadcast_gate_fails_closed() -> None:
-    """An opaque gate cannot silently repeat an explicit controlled phase."""
-    import pytest
-
-    from qamomile.circuit.transpiler.errors import EmitError
-
-    with pytest.raises(EmitError, match="opaque gate"):
-        controlled_emission._split_broadcast_reusable_global_phase(
-            _GateWithoutQubitCount(),
-            has_explicit_global_phase=True,
-        )
-
-
 def test_controlled_dispatch_accepts_inverse_block(monkeypatch) -> None:
     """Controlled dispatch resolves inverse-block operands via the map."""
     q = Value(type=QubitType(), name="q")

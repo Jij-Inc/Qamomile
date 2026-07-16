@@ -899,8 +899,8 @@ def test_lowering_keeps_phase_only_identity_case_under_index_control() -> None:
     "kernel",
     [_broadcast_phase_select, _controlled_broadcast_phase],
 )
-def test_scalar_broadcast_splits_global_phase_from_lane_calls(kernel) -> None:
-    """SELECT and control emit one phase call beside phase-free lane calls."""
+def test_scalar_broadcast_repeats_complete_case_on_each_lane(kernel) -> None:
+    """SELECT and control preserve each scalar case's phase per target lane."""
     transpiler = QiskitTranspiler()
     prepared = transpiler.prepare(kernel)
     lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
@@ -919,13 +919,9 @@ def test_scalar_broadcast_splits_global_phase_from_lane_calls(kernel) -> None:
     calls = [
         operation for operation in operations if isinstance(operation, CallInstruction)
     ]
-    assert len(calls) == 4
-    lane_calls = calls[:3]
-    phase_call = calls[3]
-    assert all(call.callee.body.global_phase == LiteralExpr(0.0) for call in lane_calls)
-    assert all(call.callee.body.operations for call in lane_calls)
-    assert phase_call.callee.body.operations == ()
-    assert phase_call.callee.body.global_phase == LiteralExpr(0.25)
+    assert len(calls) == 3
+    assert all(call.callee.body.operations for call in calls)
+    assert all(call.callee.body.global_phase == LiteralExpr(0.25) for call in calls)
     verify_circuit(program)
 
 

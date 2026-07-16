@@ -930,54 +930,6 @@ class CircuitProgram:
     )
 
 
-def _split_broadcast_global_phase(
-    program: CircuitProgram,
-) -> tuple[CircuitProgram, CircuitProgram | None]:
-    """Separate one scalar broadcast body's root global phase.
-
-    Scalar-to-vector broadcast repeats the body's gate operations for every
-    target element, but its root global phase belongs to the logical call and
-    must be applied only once. The returned phase-only program uses one
-    identity carrier qubit so controlled materializers can preserve the phase
-    without relying on zero-qubit controlled-gate support.
-
-    Args:
-        program (CircuitProgram): One-qubit reusable body being broadcast.
-
-    Returns:
-        tuple[CircuitProgram, CircuitProgram | None]: The original body with
-            a zero root phase and, when nonzero, a one-qubit phase-only body.
-            A zero-phase input is returned unchanged with ``None``.
-
-    Raises:
-        ValueError: If ``program`` is not a unitary one-qubit reusable body.
-    """
-    if program.num_qubits != 1 or program.num_clbits != 0:
-        raise ValueError(
-            "Broadcast global-phase splitting requires a one-qubit unitary "
-            f"body, got {program.num_qubits} qubit(s) and "
-            f"{program.num_clbits} classical bit(s)."
-        )
-    if _is_zero_scalar(program.global_phase):
-        return program, None
-
-    phase_free = dataclasses.replace(
-        program,
-        global_phase=LiteralExpr(0.0),
-    )
-    carrier = WireId(0)
-    phase_only = CircuitProgram(
-        name=f"{program.name}_global_phase",
-        num_qubits=1,
-        num_clbits=0,
-        input_wires=(carrier,),
-        output_wires=(carrier,),
-        operations=(),
-        global_phase=program.global_phase,
-    )
-    return phase_free, phase_only
-
-
 @dataclasses.dataclass
 class _RegionState:
     """Track one mutable builder region.
