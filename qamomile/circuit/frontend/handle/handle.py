@@ -288,9 +288,11 @@ class Handle(abc.ABC):
         """
         raise TypeError(
             f"{type(self).__name__} is a symbolic Qamomile handle and cannot "
-            "be converted to a Python bool. Use 'if handle:' for qkernel "
-            "control flow, and use '&', '|', and '~' instead of 'and', "
-            "'or', and 'not'."
+            "be converted to a Python bool. Inside a qkernel body, use "
+            "'if handle:' for control flow; outside qkernel tracing, symbolic "
+            "handles cannot be used as Python conditions. For compound "
+            "conditions, use '&', '|', and '~' instead of 'and', 'or', and "
+            "'not'."
         )
 
     def _should_enforce_linear(self) -> bool:

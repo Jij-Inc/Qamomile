@@ -124,15 +124,15 @@ def array_to_dict(arr: np.ndarray) -> dict[str, Any]:
         )
     dtype_spec = arr.dtype.str
     _validated_dtype(dtype_spec, "array")
-    # Ensure contiguous bytes so np.frombuffer + reshape round-trips.
-    # ``np.ascontiguousarray`` promotes a zero-dimensional array to shape
-    # ``(1,)``.  ``copy(order="C")`` preserves rank while still producing
-    # canonical C-order bytes for non-contiguous inputs.
-    contiguous = arr.copy(order="C")
+    # Ensure contiguous bytes so np.frombuffer + reshape round-trips without
+    # copying arrays that are already in C order. Zero-dimensional arrays are
+    # C-contiguous, so they retain their rank on the no-copy path instead of
+    # being promoted to shape ``(1,)`` by ``np.ascontiguousarray``.
+    contiguous = arr if arr.flags.c_contiguous else np.ascontiguousarray(arr)
     return {
         _NP_ARRAY_TAG: True,
         "dtype": dtype_spec,
-        "shape": list(contiguous.shape),
+        "shape": list(arr.shape),
         "data": contiguous.tobytes(),
     }
 

@@ -215,8 +215,12 @@ class TestFailLoudPythonSemantics:
 
     def test_symbolic_handle_has_no_python_truth_value(self):
         """Direct bool conversion of a symbolic handle raises TypeError."""
-        with pytest.raises(TypeError, match="symbolic Qamomile handle"):
+        with pytest.raises(TypeError, match="symbolic Qamomile handle") as exc_info:
             bool(qmc.bit(False))
+
+        message = str(exc_info.value)
+        assert "Inside a qkernel body, use 'if handle:'" in message
+        assert "outside qkernel tracing" in message
 
     def test_not_on_symbolic_handle_is_rejected(self):
         """Python ``not`` cannot silently fold a symbolic Bit to false."""

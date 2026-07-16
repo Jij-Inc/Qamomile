@@ -19,6 +19,21 @@ def test_zero_dimensional_array_round_trip_preserves_shape(dtype: type) -> None:
     assert restored.item() == source.item()
 
 
+def test_c_contiguous_array_skips_recontiguation(mocker) -> None:
+    """C-contiguous inputs avoid a redundant full-array conversion."""
+    source = np.arange(12, dtype=np.float64).reshape(3, 4)
+    ascontiguousarray = mocker.patch.object(
+        np,
+        "ascontiguousarray",
+        side_effect=AssertionError("C-contiguous input must not be copied"),
+    )
+
+    restored = dict_to_array(array_to_dict(source))
+
+    ascontiguousarray.assert_not_called()
+    np.testing.assert_array_equal(restored, source)
+
+
 def test_payload_nesting_is_rejected_before_protobuf_parser_limit() -> None:
     """Encoding rejects excessive nesting with the documented ValueError."""
     nested: object = 0
