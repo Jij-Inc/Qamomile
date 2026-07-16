@@ -78,7 +78,7 @@ class Transpiler(ABC, Generic[T]):
         circuit = transpiler.to_circuit(kernel, bindings={"theta": 0.5})
 
         # With configuration (strategy overrides)
-        config = TranspilerConfig.with_strategies({"qft": "approximate"})
+        config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
         transpiler = QiskitTranspiler(config=config)
     """
 
@@ -162,21 +162,14 @@ class Transpiler(ABC, Generic[T]):
                 ``parameters`` (propagated from ``kernel.build``), violating
                 the bindings/parameters disjointness rule.
 
-        When bindings or parameters are provided, uses kernel.build() to properly
-        resolve array shapes from the bound data. Otherwise uses the cached
-        hierarchical block for efficiency.
+        Always uses ``kernel.build()`` so Python defaults, required arguments,
+        runtime parameters, and array shapes follow one validated entry path.
         """
-        if bindings or parameters:
-            # Use build() to properly handle bindings and parameters
-            # This resolves array shapes from bound data (e.g., bias.shape[0])
-            traced = kernel.build(parameters=parameters, **(bindings or {}))
-            return replace(
-                traced,
-                kind=BlockKind.HIERARCHICAL,
-            )
-        else:
-            # Original behavior for no bindings
-            return kernel.block
+        traced = kernel.build(parameters=parameters, **(bindings or {}))
+        return replace(
+            traced,
+            kind=BlockKind.HIERARCHICAL,
+        )
 
     # === Pipeline Passes ===
 

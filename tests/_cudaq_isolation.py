@@ -26,8 +26,18 @@ The fix has two halves, enforced by ``tests/test_cudaq_import_isolation.py``:
 
 from __future__ import annotations
 
+import os
 import re
 from functools import lru_cache
+from typing import MutableMapping
+
+NATIVE_THREAD_LIMIT_ENV: tuple[str, ...] = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
 
 #: Test modules (rootdir-relative POSIX paths) that import ``cudaq`` at
 #: module scope, i.e. during collection. Every entry must also carry
@@ -76,3 +86,21 @@ def markexpr_can_select_cudaq(markexpr: str) -> bool:
         # upgrade, recognize only the stock exclusion spelling and
         # otherwise keep collecting as before — never wrongly hide tests.
         return re.search(r"\bnot\s+cudaq\b", expression) is None
+
+
+def configure_cudaq_thread_limits(
+    markexpr: str,
+    environ: MutableMapping[str, str] | None = None,
+) -> None:
+    """Bound implicit native thread pools when CUDA-Q tests can run.
+
+    Args:
+        markexpr (str): Active pytest marker expression.
+        environ (MutableMapping[str, str] | None): Environment mapping to
+            update. Defaults to ``os.environ``.
+    """
+    if not markexpr_can_select_cudaq(markexpr):
+        return
+    target = os.environ if environ is None else environ
+    for variable in NATIVE_THREAD_LIMIT_ENV:
+        target.setdefault(variable, "1")

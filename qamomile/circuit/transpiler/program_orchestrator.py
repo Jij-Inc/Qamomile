@@ -8,6 +8,8 @@ from __future__ import annotations
 import numbers
 from typing import Any, Generic, TypeVar
 
+import numpy as np
+
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
@@ -27,12 +29,10 @@ from qamomile.circuit.transpiler.compiled_segments import (
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.job import ExpvalJob, RunJob, SampleJob
-from qamomile.circuit.transpiler.param_keys import (
-    dict_param_key,
-    is_decomposable_dict_binding_key,
-    normalize_dict_binding_key,
+from qamomile.circuit.transpiler.parameter_binding import (
+    ParameterMetadata,
+    flatten_user_bindings,
 )
-from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
 from qamomile.circuit.transpiler.segments import (
     ClassicalStep,
@@ -83,6 +83,7 @@ class ProgramOrchestrator(Generic[T]):
             )
 
         indexed_bindings = self._convert_user_bindings(bindings)
+        self._validate_user_array_bindings(bindings)
         context = self._create_execution_context(bindings, indexed_bindings)
         circuit = self._prepare_quantum_execution(context, executor)
 
@@ -114,6 +115,7 @@ class ProgramOrchestrator(Generic[T]):
         program = self._program
 
         indexed_bindings = self._convert_user_bindings(bindings)
+        self._validate_user_array_bindings(bindings)
         context = self._create_execution_context(bindings, indexed_bindings)
         circuit = self._prepare_quantum_execution(context, executor)
 
@@ -121,7 +123,13 @@ class ProgramOrchestrator(Generic[T]):
             isinstance(step, ExpvalStep) for step in program.plan.steps
         ):
             result = self._execute_post_quantum_steps(context, executor, circuit)
-            if not any(isinstance(step, ClassicalStep) for step in program.plan.steps):
+            if (
+                len(program.compiled_expval) == 1
+                and isinstance(result, numbers.Real)
+                and not any(
+                    isinstance(step, ClassicalStep) for step in program.plan.steps
+                )
+            ):
                 return ExpvalJob(float(result))
             return RunJob({"": 1}, lambda _: result)
 
@@ -146,6 +154,7 @@ class ProgramOrchestrator(Generic[T]):
     ) -> ExpvalJob:
         """Backward-compatible helper for pure expval execution."""
         indexed_bindings = self._convert_user_bindings(bindings)
+        self._validate_user_array_bindings(bindings)
         context = self._create_execution_context(bindings, indexed_bindings)
         circuit = self._prepare_quantum_execution(context, executor)
         result_value = self._execute_post_quantum_steps(context, executor, circuit)
@@ -161,68 +170,49 @@ class ProgramOrchestrator(Generic[T]):
     def _convert_user_bindings(
         bindings: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Convert user-friendly bindings to indexed format.
-
-        Sequence values (array parameters) expand positionally to
-        ``name[0]``, ``name[1]``, ...; dict values (Dict runtime
-        parameters) expand per key to ``name[<key>]`` using the same
-        naming the emit pass used when creating the backend parameters.
+        """Convert public bindings into the scalar backend ABI.
 
         Args:
-            bindings (dict[str, Any] | None): User-supplied bindings
-                keyed by kernel argument name. ``None`` means no
-                bindings.
+            bindings (dict[str, Any] | None): Raw public runtime bindings.
 
         Returns:
-            dict[str, Any]: Flat mapping from backend parameter names to
-                scalar values, with non-container bindings passed
-                through unchanged.
+            dict[str, Any]: Flattened scalar and dictionary binding map.
         """
-        if bindings is None:
-            return {}
-
-        import numpy as np
-
-        result: dict[str, Any] = {}
-        for key, value in bindings.items():
-            if isinstance(value, (list, tuple, np.ndarray)):
-                for i, v in enumerate(value):
-                    result[f"{key}[{i}]"] = v
-            elif isinstance(value, dict):
-                for k, v in value.items():
-                    normalized = normalize_dict_binding_key(k)
-                    # Keys that can never match an emitted parameter name
-                    # (str, non-integer floats, ...) must not be string-
-                    # formatted: "1" would collide with the int key 1
-                    # (both format as name[1]) and bind the wrong
-                    # parameter. Leaving them out means a genuinely
-                    # missing integer key still errors loudly downstream.
-                    if not is_decomposable_dict_binding_key(normalized):
-                        continue
-                    result[dict_param_key(key, normalized)] = v
-            else:
-                result[key] = value
-        return result
+        return flatten_user_bindings(bindings)
 
     @staticmethod
     def _validate_bindings(
         indexed_bindings: dict[str, Any],
         parameter_metadata: ParameterMetadata,
     ) -> None:
-        """Validate that all required parameters are bound."""
-        required = {p.name for p in parameter_metadata.parameters}
-        provided = set(indexed_bindings.keys())
-        missing = required - provided
+        """Validate that every emitted scalar slot has a runtime value.
 
-        if missing:
-            array_names = {
-                p.array_name for p in parameter_metadata.parameters if p.name in missing
-            }
-            raise ValueError(
-                f"Missing parameter bindings: {sorted(missing)}. "
-                f"Provide bindings for: {sorted(array_names)} "
-                f"(e.g., bindings={{'{list(array_names)[0] if array_names else 'param'}': [...]}})"
-            )
+        Args:
+            indexed_bindings (dict[str, Any]): Flattened runtime bindings.
+            parameter_metadata (ParameterMetadata): Compiled parameter ABI.
+
+        Raises:
+            ValueError: If one or more emitted scalar slots are missing.
+        """
+        parameter_metadata.validate_required_bindings(indexed_bindings)
+
+    def _validate_user_array_bindings(
+        self,
+        bindings: dict[str, Any] | None,
+    ) -> None:
+        """Validate public arrays against the merged compiled ABI.
+
+        Args:
+            bindings (dict[str, Any] | None): Raw public runtime bindings.
+
+        Raises:
+            ValueError: If a runtime array has invalid rank or exceeds a
+                concrete emitted dimension.
+        """
+        metadata = ParameterMetadata.merge(
+            [segment.parameter_metadata for segment in self._program.compiled_quantum]
+        )
+        metadata.validate_array_shapes(bindings)
 
     # ------------------------------------------------------------------
     # Execution context and measurement handling
@@ -554,7 +544,7 @@ class ProgramOrchestrator(Generic[T]):
                     # backend parameter must never bind to it. Skip so a
                     # genuinely missing per-key entry surfaces as a
                     # missing-binding error instead of a dict-typed angle.
-                    if isinstance(candidate, dict):
+                    if isinstance(candidate, (dict, list, tuple, np.ndarray)):
                         continue
                     bindings[param.name] = candidate
                     value_found = True

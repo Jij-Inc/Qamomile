@@ -27,8 +27,8 @@
 # %%
 # Install Qamomile with the CUDA-Q extras through pip.
 # Choose the optional dependency group that matches your CUDA-Q environment.
-# # !pip install "qamomile[cudaq-cu12]"  # CUDA 12.x, Linux
-# # !pip install "qamomile[cudaq-cu13]"  # CUDA 13.x, Linux or macOS ARM64
+# # !pip install "qamomile[cudaq-cu12,visualization]"  # CUDA 12.x, Linux
+# # !pip install "qamomile[cudaq-cu13,visualization]"  # CUDA 13.x, Linux or macOS ARM64
 
 # %%
 import os

@@ -1,6 +1,6 @@
 from typing import Any, Sequence, Union, overload
 
-from qamomile.circuit.frontend.handle import Float, Qubit, Vector, VectorView
+from qamomile.circuit.frontend.handle import Float, Qubit, UInt, Vector, VectorView
 from qamomile.circuit.frontend.handle.array import Vector as VectorClass
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
@@ -33,9 +33,18 @@ def _check_qubit_alias(
         seen[lid] = role
 
 
-def _to_theta_value(angle: float | Float) -> Value:
-    """Convert a frontend angle to an IR Value for operands."""
-    if isinstance(angle, Float):
+def _to_theta_value(angle: float | Float | UInt) -> Value:
+    """Convert a frontend angle to an IR Value for operands.
+
+    Args:
+        angle (float | Float | UInt): Numeric literal or traced scalar. UInt
+            support is required for a bare ``qmc.range`` induction variable
+            used as a rotation angle.
+
+    Returns:
+        Value: Underlying traced value or a new floating-point constant.
+    """
+    if isinstance(angle, (Float, UInt)):
         return angle.value
     # Raw float → wrap as constant Value
     return Value(type=FloatType(), name="theta").with_const(angle)
@@ -145,7 +154,7 @@ def _broadcast_single_qubit_gate(
 
 def _broadcast_rotation_gate(
     qubits: Vector[Qubit],
-    angle: float | Float,
+    angle: float | Float | UInt,
     gate_type: GateOperationType,
 ) -> Vector[Qubit]:
     """Broadcast a parametric single-qubit rotation gate over a qubit array.
@@ -161,7 +170,7 @@ def _broadcast_rotation_gate(
     Args:
         qubits (Vector[Qubit]): The `Vector[Qubit]` to apply the rotation
             to. This handle is consumed by the call.
-        angle (float | Float): The rotation angle in radians, shared
+        angle (float | Float | UInt): The rotation angle in radians, shared
             across all qubits in the broadcast. Accepts a Python `float`
             or a `Float` handle.
         gate_type (GateOperationType): The rotation gate kind (`RX`, `RY`,
@@ -507,12 +516,12 @@ def cz(control: Qubit, target: Qubit) -> tuple[Qubit, Qubit]:
     return _apply_two_qubit_gate(control, target, GateOperationType.CZ)
 
 
-def _apply_phase_gate(qubit: Qubit, theta: float | Float) -> Qubit:
+def _apply_phase_gate(qubit: Qubit, theta: float | Float | UInt) -> Qubit:
     """Apply the phase gate ``P(theta)`` to a single qubit.
 
     Args:
         qubit (Qubit): Qubit to consume and phase.
-        theta (float | Float): Phase angle in radians.
+        theta (float | Float | UInt): Phase angle in radians.
 
     Returns:
         Qubit: Fresh output qubit handle after the phase rotation.
@@ -539,7 +548,9 @@ def _apply_phase_gate(qubit: Qubit, theta: float | Float) -> Qubit:
     return output_qubit
 
 
-def _broadcast_phase_gate(qubits: Vector[Qubit], theta: float | Float) -> Vector[Qubit]:
+def _broadcast_phase_gate(
+    qubits: Vector[Qubit], theta: float | Float | UInt
+) -> Vector[Qubit]:
     """Broadcast the phase gate ``P(theta)`` over every element of a qubit array.
 
     Lowers to a `ForOperation` so that downstream passes see the same IR
@@ -551,7 +562,7 @@ def _broadcast_phase_gate(qubits: Vector[Qubit], theta: float | Float) -> Vector
     Args:
         qubits (Vector[Qubit]): The `Vector[Qubit]` to apply the phase
             gate to. This handle is consumed by the call.
-        theta (float | Float): Phase angle in radians, shared across all
+        theta (float | Float | UInt): Phase angle in radians, shared across all
             qubits.
 
     Returns:
@@ -577,13 +588,13 @@ def _broadcast_phase_gate(qubits: Vector[Qubit], theta: float | Float) -> Vector
 
 
 @overload
-def p(target: Qubit, theta: float | Float) -> Qubit: ...
+def p(target: Qubit, theta: float | Float | UInt) -> Qubit: ...
 @overload
-def p(target: VectorView[Qubit], theta: float | Float) -> VectorView[Qubit]: ...
+def p(target: VectorView[Qubit], theta: float | Float | UInt) -> VectorView[Qubit]: ...
 @overload
-def p(target: Vector[Qubit], theta: float | Float) -> Vector[Qubit]: ...
+def p(target: Vector[Qubit], theta: float | Float | UInt) -> Vector[Qubit]: ...
 def p(
-    target: Union[Qubit, Vector[Qubit]], theta: float | Float
+    target: Union[Qubit, Vector[Qubit]], theta: float | Float | UInt
 ) -> Union[Qubit, Vector[Qubit]]:
     """Phase gate: ``P(theta)|1> = e^{i*theta}|1>``.
 
@@ -610,13 +621,15 @@ def p(
     )
 
 
-def cp(control: Qubit, target: Qubit, theta: float | Float) -> tuple[Qubit, Qubit]:
+def cp(
+    control: Qubit, target: Qubit, theta: float | Float | UInt
+) -> tuple[Qubit, Qubit]:
     """Apply a controlled phase gate.
 
     Args:
         control (Qubit): Control input qubit.
         target (Qubit): Target input qubit.
-        theta (float | Float): Phase angle in radians.
+        theta (float | Float | UInt): Phase angle in radians.
 
     Returns:
         tuple[Qubit, Qubit]: Fresh control and target handles.
@@ -653,13 +666,13 @@ def cp(control: Qubit, target: Qubit, theta: float | Float) -> tuple[Qubit, Qubi
 
 
 def _apply_rotation_gate(
-    qubit: Qubit, angle: float | Float, gate_type: GateOperationType
+    qubit: Qubit, angle: float | Float | UInt, gate_type: GateOperationType
 ) -> Qubit:
     """Apply a parameterized single-qubit rotation.
 
     Args:
         qubit (Qubit): Input qubit handle to consume.
-        angle (float | Float): Rotation angle in radians.
+        angle (float | Float | UInt): Rotation angle in radians.
         gate_type (GateOperationType): Rotation gate kind to emit.
 
     Returns:
@@ -689,7 +702,7 @@ def _apply_rotation_gate(
 
 def _dispatch_rotation_gate(
     target: Union[Qubit, Vector[Qubit]],
-    angle: float | Float,
+    angle: float | Float | UInt,
     gate_type: GateOperationType,
 ) -> Union[Qubit, Vector[Qubit]]:
     """Apply a rotation gate to a qubit or broadcast over a qubit array.
@@ -722,13 +735,13 @@ def _dispatch_rotation_gate(
 
 
 @overload
-def rx(target: Qubit, angle: float | Float) -> Qubit: ...
+def rx(target: Qubit, angle: float | Float | UInt) -> Qubit: ...
 @overload
-def rx(target: VectorView[Qubit], angle: float | Float) -> VectorView[Qubit]: ...
+def rx(target: VectorView[Qubit], angle: float | Float | UInt) -> VectorView[Qubit]: ...
 @overload
-def rx(target: Vector[Qubit], angle: float | Float) -> Vector[Qubit]: ...
+def rx(target: Vector[Qubit], angle: float | Float | UInt) -> Vector[Qubit]: ...
 def rx(
-    target: Union[Qubit, Vector[Qubit]], angle: float | Float
+    target: Union[Qubit, Vector[Qubit]], angle: float | Float | UInt
 ) -> Union[Qubit, Vector[Qubit]]:
     """Rotation around X-axis: ``RX(angle) = exp(-i * angle/2 * X)``.
 
@@ -749,13 +762,13 @@ def rx(
 
 
 @overload
-def ry(target: Qubit, angle: float | Float) -> Qubit: ...
+def ry(target: Qubit, angle: float | Float | UInt) -> Qubit: ...
 @overload
-def ry(target: VectorView[Qubit], angle: float | Float) -> VectorView[Qubit]: ...
+def ry(target: VectorView[Qubit], angle: float | Float | UInt) -> VectorView[Qubit]: ...
 @overload
-def ry(target: Vector[Qubit], angle: float | Float) -> Vector[Qubit]: ...
+def ry(target: Vector[Qubit], angle: float | Float | UInt) -> Vector[Qubit]: ...
 def ry(
-    target: Union[Qubit, Vector[Qubit]], angle: float | Float
+    target: Union[Qubit, Vector[Qubit]], angle: float | Float | UInt
 ) -> Union[Qubit, Vector[Qubit]]:
     """Rotation around Y-axis: ``RY(angle) = exp(-i * angle/2 * Y)``.
 
@@ -776,13 +789,13 @@ def ry(
 
 
 @overload
-def rz(target: Qubit, angle: float | Float) -> Qubit: ...
+def rz(target: Qubit, angle: float | Float | UInt) -> Qubit: ...
 @overload
-def rz(target: VectorView[Qubit], angle: float | Float) -> VectorView[Qubit]: ...
+def rz(target: VectorView[Qubit], angle: float | Float | UInt) -> VectorView[Qubit]: ...
 @overload
-def rz(target: Vector[Qubit], angle: float | Float) -> Vector[Qubit]: ...
+def rz(target: Vector[Qubit], angle: float | Float | UInt) -> Vector[Qubit]: ...
 def rz(
-    target: Union[Qubit, Vector[Qubit]], angle: float | Float
+    target: Union[Qubit, Vector[Qubit]], angle: float | Float | UInt
 ) -> Union[Qubit, Vector[Qubit]]:
     """Rotation around Z-axis: ``RZ(angle) = exp(-i * angle/2 * Z)``.
 
@@ -802,7 +815,9 @@ def rz(
     return _dispatch_rotation_gate(target, angle, GateOperationType.RZ)
 
 
-def rzz(qubit_0: Qubit, qubit_1: Qubit, angle: float | Float) -> tuple[Qubit, Qubit]:
+def rzz(
+    qubit_0: Qubit, qubit_1: Qubit, angle: float | Float | UInt
+) -> tuple[Qubit, Qubit]:
     """RZZ gate: exp(-i * angle/2 * Z ⊗ Z).
 
     The RZZ gate applies a rotation around the ZZ axis on two qubits.
@@ -810,7 +825,7 @@ def rzz(qubit_0: Qubit, qubit_1: Qubit, angle: float | Float) -> tuple[Qubit, Qu
     Args:
         qubit_0 (Qubit): First input qubit.
         qubit_1 (Qubit): Second input qubit.
-        angle (float | Float): Rotation angle in radians.
+        angle (float | Float | UInt): Rotation angle in radians.
 
     Returns:
         tuple[Qubit, Qubit]: Fresh handles after the RZZ operation.

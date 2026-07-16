@@ -822,6 +822,17 @@ def test_quration_transpiles_semantic_composites(kernel: qmc.QKernel) -> None:
 
 
 @pytest.mark.quration
+def test_quration_multi_controlled_x_uses_target_first_abi() -> None:
+    """Native MCX flips its target when every control is one."""
+    pytest.importorskip("pyqret")
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(_quration_multi_controlled_x)
+
+    result = executable.sample(transpiler.executor(seed=11), shots=8).result()
+    assert dict(result.results) == {1: 8}
+
+
+@pytest.mark.quration
 def test_quration_preserves_named_composites_as_pyqret_calls() -> None:
     """Named Qamomile composites remain nodes in PyQret's call graph."""
     pytest.importorskip("pyqret")

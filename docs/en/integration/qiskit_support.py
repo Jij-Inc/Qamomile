@@ -21,14 +21,14 @@
 # # Qiskit Support
 #
 # This page shows how to use Qamomile's [Qiskit](https://quantum-computing.ibm.com/docs/) quantum SDK integration through a concrete optimization problem.
-# Qiskit is Qamomile's default quantum SDK integration. Installing `qamomile` gives you access to `QiskitTranspiler` and `QiskitExecutor`.
+# Qiskit support is optional. Install the `qiskit` extra to use `QiskitTranspiler` and `QiskitExecutor`.
 # In this tutorial, we use QAOA optimization for a small MaxCut instance as an example. We transpile a Qamomile qkernel to a Qiskit circuit, then run sampling and expectation-value evaluation on a Qiskit simulator.
 # Along the way, we also look at several advanced Qiskit features.
 
 # %%
 # Install the latest Qamomile through pip.
-# Qiskit and qiskit-aer are core dependencies, so no extra group is needed.
-# # !pip install qamomile
+# Install the Qiskit backend and circuit-visualization dependencies used below.
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import os
@@ -370,8 +370,8 @@ assert np.isfinite(energy_via_run)
 # %% [markdown]
 # ## Advanced Qiskit features
 #
-# Qiskit is Qamomile's default quantum SDK integration.
-# For that reason, Qamomile provides several ways to use advanced Qiskit features.
+# Qiskit is available through Qamomile's optional Qiskit integration.
+# Qamomile provides several ways to use advanced Qiskit features.
 #
 # This section shows three features exposed by the Qiskit integration that are useful when running generated circuits on Qiskit execution targets:
 #

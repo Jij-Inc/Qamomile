@@ -38,7 +38,6 @@ paper.  In particular:
 
 from __future__ import annotations
 
-import functools
 import math
 from collections.abc import Sequence
 
@@ -84,8 +83,8 @@ def _bit_reverse(value: int, num_bits: int) -> int:
     :func:`compute_all_ry_angles_per_level` /
     :func:`compute_disentangling_angles_per_level` numbers chunks
     big-endian (chunk index 0 = controls all zero in the
-    most-significant order), while the matrix in
-    :func:`_compute_angle_transform_matrix` (paper **Eq. (3)**) is
+    most-significant order), while the Walsh-Hadamard transform used for
+    paper **Eq. (3)** is
     indexed in the little-endian convention.  Bit-reversing the
     chunk index converts between the two before applying ``M^(k)``.
 
@@ -100,48 +99,31 @@ def _bit_reverse(value: int, num_bits: int) -> int:
     return int(format(value, f"0{num_bits}b")[::-1], 2)
 
 
-@functools.lru_cache(maxsize=None)
-def _compute_angle_transform_matrix(k: int) -> np.ndarray:
-    """Build the :math:`M^{(k)}` matrix that maps per-state angles to Gray-walk angles.
+def _fast_walsh_hadamard(values: np.ndarray) -> np.ndarray:
+    """Apply the unnormalized Walsh-Hadamard transform to a copy.
 
-    Implements **Eq. (3)** of Möttönen et al.,
-    arXiv:quant-ph/0407010 (Section II):
-
-    .. math::
-
-        M^{(k)}_{ij} = \\frac{1}{2^k}\\,(-1)^{\\,b(g_i)\\cdot b(j)},
-
-    where ``g_i`` is the Gray code of ``i`` and ``b(\\cdot)\\cdot b(\\cdot)``
-    denotes the bitwise inner product modulo 2.  This is the
-    closed-form transform that turns the per-control-state rotation
-    angles ``α`` into the elementary Gray-walk angles ``θ`` consumed
-    by the ``2^k`` rotation / ``2^k`` CNOT decomposition (paper
-    Section II, Fig. 2 + paragraph after Eq. (2)).
-
-    Cached at module scope (``functools.lru_cache``) because every
-    public entry point reaches :func:`_to_gray_walk_basis`, which in
-    turn rebuilds one matrix per level on every invocation.  The
-    result depends only on ``k``, so a per-process cache is safe.
-    The returned array is marked read-only to prevent callers from
-    accidentally mutating the cached buffer.
+    The dense matrix in paper Eq. (3) is a Hadamard matrix whose rows are
+    permuted by Gray code. Butterfly additions compute its ordinary
+    Walsh-Hadamard part in ``O(N log N)`` time and ``O(N)`` working memory,
+    avoiding the former ``O(N**2)`` matrix and unbounded cache.
 
     Args:
-        k (int): Number of control qubits for the uniformly controlled
-            rotation.
+        values (np.ndarray): One-dimensional, power-of-two-length input.
 
     Returns:
-        np.ndarray: A read-only ``(2**k, 2**k)`` array implementing the
-            linear transform.
+        np.ndarray: Unnormalized Hadamard transform of ``values``.
     """
-    size = 2**k
-    matrix = np.zeros((size, size))
-    for i in range(size):
-        g_i = _gray_code(i)
-        for j in range(size):
-            parity = (j & g_i).bit_count() & 1
-            matrix[i, j] = (2.0**-k) * (1.0 if parity == 0 else -1.0)
-    matrix.flags.writeable = False
-    return matrix
+    transformed = np.asarray(values, dtype=float).copy()
+    half_width = 1
+    while half_width < len(transformed):
+        block_width = 2 * half_width
+        for start in range(0, len(transformed), block_width):
+            left = transformed[start : start + half_width].copy()
+            right = transformed[start + half_width : start + block_width].copy()
+            transformed[start : start + half_width] = left + right
+            transformed[start + half_width : start + block_width] = left - right
+        half_width = block_width
+    return transformed
 
 
 # ---------------------------------------------------------------------------
@@ -236,10 +218,10 @@ def _to_gray_walk_basis(
     arXiv:quant-ph/0407010, Section II):
     ``θ = M^(k) α``.  The Gray-walk emission interleaves ``2^k``
     elementary rotations with ``2^k`` CNOTs in a Gray-code order
-    (Section II, Fig. 2); ``M^(k)`` (built by
-    :func:`_compute_angle_transform_matrix`) is the closed-form
-    transform from the natural per-control-state angles ``α`` to the
-    elementary Gray-walk angles ``θ``.  Used identically by the Ry
+    (Section II, Fig. 2); ``M^(k)`` is a normalized Hadamard transform
+    with Gray-permuted rows. It is evaluated without materializing a dense
+    matrix. The transform maps natural per-control-state angles ``α`` to
+    elementary Gray-walk angles ``θ``. Used identically by the Ry
     (magnitude) and Rz (phase) stages.
 
     The bit-reverse step is **not in the paper as a numbered step**
@@ -266,10 +248,15 @@ def _to_gray_walk_basis(
         if k == 0:
             transformed.append(raw)
             continue
-        bit_reversed = np.empty(2**k)
-        for j in range(2**k):
+        size = 2**k
+        bit_reversed = np.empty(size)
+        for j in range(size):
             bit_reversed[j] = raw[_bit_reverse(j, k)]
-        transformed.append(_compute_angle_transform_matrix(k) @ bit_reversed)
+        hadamard = _fast_walsh_hadamard(bit_reversed)
+        gray_walk = np.empty(size)
+        for i in range(size):
+            gray_walk[i] = hadamard[_gray_code(i)] / size
+        transformed.append(gray_walk)
     return transformed
 
 

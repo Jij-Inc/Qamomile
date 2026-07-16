@@ -117,3 +117,57 @@ def test_constant_fold_rewrites_value_inside_dict_output():
     [(folded_key, folded_value)] = folded_output.entries
     assert folded_key is key
     assert folded_value.get_const() == 3
+
+
+def test_store_folding_does_not_resolve_array_by_display_name():
+    """An unrelated binding with the same display name cannot seed a store."""
+    size = Value(type=UIntType(), name="size").with_const(1)
+    source = ArrayValue(type=FloatType(), name="collision", shape=(size,))
+    result = ArrayValue(
+        type=FloatType(),
+        name=source.name,
+        version=1,
+        logical_id=source.logical_id,
+        shape=source.shape,
+    )
+    store = StoreArrayElementOperation(
+        operands=[
+            source,
+            Value(type=FloatType(), name="stored").with_const(2.0),
+            Value(type=UIntType(), name="index").with_const(0),
+        ],
+        results=[result],
+    )
+    block = Block(
+        name="display_name_collision",
+        operations=[store],
+        output_values=[],
+        kind=BlockKind.AFFINE,
+    )
+
+    folded = ConstantFoldingPass(bindings={"collision": [9.0]}).run(block)
+
+    assert folded.operations == [store]
+
+
+def test_binop_folding_rejects_non_scalar_parameter_bindings():
+    """Container bindings cannot be folded through Python list arithmetic."""
+    left = Value(type=FloatType(), name="left").with_parameter("left")
+    right = Value(type=FloatType(), name="right").with_const(2.0)
+    result = Value(type=FloatType(), name="result")
+    operation = BinOp(
+        kind=BinOpKind.MUL,
+        operands=[left, right],
+        results=[result],
+    )
+    block = Block(
+        name="non_scalar_binop",
+        operations=[operation],
+        output_values=[result],
+        kind=BlockKind.AFFINE,
+    )
+
+    folded = ConstantFoldingPass(bindings={"left": [1.0]}).run(block)
+
+    assert folded.operations == [operation]
+    assert folded.output_values == [result]

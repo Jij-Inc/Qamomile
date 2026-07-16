@@ -62,8 +62,10 @@ project:
             - file: api/circuit/estimator
             - file: api/circuit/frontend
             - file: api/circuit/ir
+            - file: api/circuit/multi_controlled_x
             - file: api/circuit/qft
             - file: api/circuit/qpe
+            - file: api/circuit/serialization
             - file: api/circuit/stdlib
             - file: api/circuit/transpiler
             - file: api/circuit/visualization

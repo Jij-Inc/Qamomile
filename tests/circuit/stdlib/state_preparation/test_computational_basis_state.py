@@ -1,7 +1,7 @@
 """Tests for ``computational_basis_state``.
 
-The kernel prepares ``|bits>`` from ``|0>^n`` via ``Rx(pi * bits[i])`` on each
-qubit.  Sampling must yield exactly the prepared bit string on every shot, and
+The kernel prepares ``|bits>`` from ``|0>^n`` via exact conditional X powers.
+Sampling must yield exactly the prepared bit string on every shot, and
 the expectation value of any diagonal Pauli-Z Hamiltonian must match the
 analytical eigenvalue at ``|bits>``.  We pin both paths down on Qiskit,
 QURI Parts, and CUDA-Q so that any backend-specific Rx parameter or
@@ -16,6 +16,9 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.stdlib.state_preparation import computational_basis_state
+from qamomile.circuit.stdlib.state_preparation.computational_basis_state import (
+    _apply_exact_basis_bit,
+)
 
 
 @qmc.qkernel
@@ -138,6 +141,38 @@ def _assert_deterministic_sample(results, expected_bits: list[int], shots: int):
 _SIZES = [1, 2, 3, 5]
 _SEEDS = [0, 1, 2, 42]
 _BOUNDARY_SIZES = [1, 3, 4]
+
+
+@qmc.qkernel
+def _controlled_basis_bit_phase_probe(bit: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Expose any conditional-X global phase through control interference."""
+    qubits = qmc.qubit_array(2, "qubits")
+    control = qubits[0]
+    target = qubits[1]
+    control = qmc.h(control)
+    target = qmc.h(target)
+    control, target = qmc.control(_apply_exact_basis_bit)(control, target, bit)
+    control = qmc.h(control)
+    qubits[0] = control
+    qubits[1] = target
+    return qmc.measure(qubits)
+
+
+def test_controlled_basis_bit_has_no_spurious_relative_phase() -> None:
+    """Controlled bit=1 acts as controlled-X, not controlled-RX(pi)."""
+    from qamomile.qiskit import QiskitTranspiler
+
+    transpiler = QiskitTranspiler()
+    result = (
+        transpiler.transpile(
+            _controlled_basis_bit_phase_probe,
+            bindings={"bit": 1},
+        )
+        .sample(transpiler.executor(), shots=128)
+        .result()
+    )
+
+    assert all(sample[0] == 0 for sample, _ in result.results)
 
 
 class TestComputationalBasisStateSample:

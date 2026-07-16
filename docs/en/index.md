@@ -40,7 +40,7 @@ Connect QUBO and Ising models to quantum algorithms, then implement and run opti
 Qamomile can be installed from pip.
 
 ```bash
-pip install qamomile
+pip install "qamomile[qiskit,visualization]"
 ```
 
 The following example runs a quantum algorithm with Qamomile. For details, see [Your First Quantum Kernel](tutorial/01_your_first_quantum_kernel.ipynb).

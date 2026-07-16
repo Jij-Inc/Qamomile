@@ -247,8 +247,13 @@ def _array_binding_payload(
         arr = np.asarray(value)
         return FloatType(), arr.shape, arr.tolist()
     if element_type in (UInt, int):
-        arr = np.asarray(value)
-        return UIntType(), arr.shape, arr.tolist()
+        arr = np.asarray(value, dtype=object)
+        normalized = [
+            _coerce_uint_binding(name, item, index=index)
+            for index, item in enumerate(arr.flat)
+        ]
+        payload = np.asarray(normalized, dtype=object).reshape(arr.shape).tolist()
+        return UIntType(), arr.shape, payload
     if element_type is Observable:
         if getattr(param_type, "__origin__", param_type) is not Vector:
             raise TypeError(
@@ -298,14 +303,7 @@ def create_bound_input(param_type: Any, name: str, value: Any) -> Handle:
         )
 
     if param_type in (int, UInt):
-        if isinstance(value, (bool, np.bool_)) or not isinstance(
-            value, numbers.Integral
-        ):
-            raise TypeError(
-                f"Binding {name!r} is declared as UInt/int and requires "
-                f"an integer scalar, got {type(value).__name__}."
-            )
-        normalized = int(value)
+        normalized = _coerce_uint_binding(name, value)
         return UInt(
             value=Value(type=UIntType(), name=name).with_const(normalized),
             init_value=normalized,
@@ -354,3 +352,33 @@ def create_bound_input(param_type: Any, name: str, value: Any) -> Handle:
         return dict_handle
 
     raise TypeError(f"Cannot create bound value for type {param_type}")
+
+
+def _coerce_uint_binding(name: str, value: Any, *, index: int | None = None) -> int:
+    """Validate and normalize one compile-time UInt binding.
+
+    Args:
+        name (str): QKernel parameter name used in diagnostics.
+        value (Any): Candidate scalar binding.
+        index (int | None): Optional flattened array index. Defaults to
+            ``None`` for a scalar binding.
+
+    Returns:
+        int: Non-negative integral binding.
+
+    Raises:
+        TypeError: If ``value`` is boolean or non-integral.
+        ValueError: If ``value`` is negative.
+    """
+    location = f" at flattened index {index}" if index is not None else ""
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise TypeError(
+            f"UInt binding '{name}'{location} must be an integer, got "
+            f"{type(value).__name__} ({value!r})."
+        )
+    normalized = int(value)
+    if normalized < 0:
+        raise ValueError(
+            f"UInt binding '{name}'{location} must be non-negative, got {normalized}."
+        )
+    return normalized

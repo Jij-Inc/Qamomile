@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import numbers
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -922,9 +923,21 @@ class ValueResolver:
         return None
 
     def _resolve_numeric_index(self, value: Any) -> int | None:
-        """Resolve a bound numeric scalar to a Python int."""
+        """Resolve an exactly integral bound scalar to a Python int.
+
+        Args:
+            value (Any): Candidate Python or NumPy numeric scalar.
+
+        Returns:
+            int | None: Exact integer value, or ``None`` for a non-integral,
+            non-finite, or non-numeric value.
+        """
         numeric = self._resolve_numeric_value(value)
         if numeric is None:
+            return None
+        if isinstance(numeric, int):
+            return numeric
+        if not math.isfinite(numeric) or not numeric.is_integer():
             return None
         return int(numeric)
 

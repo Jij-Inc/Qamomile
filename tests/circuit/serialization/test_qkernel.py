@@ -26,7 +26,12 @@ from qamomile.circuit.ir.operation.callable import (
     CallTransform,
     CompositeGateType,
 )
+from qamomile.circuit.ir.operation.classical_ops import (
+    ReturnQuantumArrayElementOperation,
+)
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.serialize.encode import _OP_ENCODERS
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType
@@ -76,6 +81,32 @@ def _parent(theta: qmc.Float) -> qmc.Bit:
     q = qmc.qubit("q")
     q = _child(q, theta)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _phase_identity(q: qmc.Qubit) -> qmc.Qubit:
+    """Return one qubit unchanged for global-phase serialization tests."""
+    return q
+
+
+@qmc.qkernel
+def _global_phase_kernel(q: qmc.Qubit) -> qmc.Qubit:
+    """Append a zero-result global-phase operation."""
+    return qmc.global_phase(_phase_identity, 0.375)(q)
+
+
+@qmc.qkernel
+def _branch_selected_array_return() -> qmc.Vector[qmc.Bit]:
+    """Return statically selected qubits to loop-indexed array slots."""
+    qubits = qmc.qubit_array(2, "qubits")
+    for index in qmc.range(2):
+        if index == 0:
+            selected = qubits[0]
+        else:
+            selected = qubits[1]
+        selected = qmc.x(selected)
+        qubits[index] = selected
+    return qmc.measure(qubits)
 
 
 @qmc.qkernel
@@ -1058,6 +1089,20 @@ def test_operation_with_invalid_arity_is_rejected_during_deserialize() -> None:
         _restore(message)
 
 
+def test_if_decoder_internal_error_is_normalized_to_value_error() -> None:
+    """Malformed branch operands cannot leak a developer RuntimeError."""
+    message = _message(_native_annotations)
+    operation = next(
+        item
+        for item in message.body.operations
+        if item.operation_type == pb.IF_OPERATION
+    )
+    del operation.operand_refs[:]
+
+    with pytest.raises(ValueError, match="payload is malformed"):
+        _restore(message)
+
+
 def test_operation_with_invalid_operand_type_is_rejected_during_deserialize() -> None:
     """A forged reference cannot feed a Float value to a measurement op."""
     message = _message(_parameterized)
@@ -1314,6 +1359,46 @@ def test_explicit_parameter_binding_overlap_is_rejected_after_load() -> None:
 
     with pytest.raises(ValueError, match="appear in both"):
         restored.build(parameters=["theta"], theta=0.5, n=2)
+
+
+def test_global_phase_round_trip_preserves_zero_result_operand() -> None:
+    """Public protobuf serialization preserves a standalone global phase."""
+    restored = deserialize(serialize(_global_phase_kernel))
+    block = restored.build()
+
+    phase_operations = [
+        operation
+        for operation in block.operations
+        if isinstance(operation, GlobalPhaseOperation)
+    ]
+    assert len(phase_operations) == 1
+    phase_operation = phase_operations[0]
+    assert phase_operation.results == []
+    assert phase_operation.phase.get_const() == pytest.approx(0.375)
+
+
+def test_branch_selected_quantum_return_round_trip() -> None:
+    """Serialization preserves deferred quantum array return validation."""
+    restored = deserialize(serialize(_branch_selected_array_return))
+    block = restored.build()
+
+    pending = list(block.operations)
+    return_operations = []
+    while pending:
+        operation = pending.pop()
+        if isinstance(operation, ReturnQuantumArrayElementOperation):
+            return_operations.append(operation)
+        if isinstance(operation, HasNestedOps):
+            for nested in operation.nested_op_lists():
+                pending.extend(nested)
+
+    assert len(return_operations) == 1
+    executable = QiskitTranspiler().transpile(restored)
+    result = executable.sample(
+        QiskitTranspiler().executor(),
+        shots=16,
+    ).result()
+    assert result.results == [((1, 1), 16)]
 
 
 def test_signature_parameter_kind_is_preserved() -> None:

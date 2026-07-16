@@ -3,10 +3,10 @@
 Available routines:
 
 * :func:`computational_basis_state`: prepare ``|bits>`` from
-  :math:`|0\\rangle^{\\otimes n}` via per-qubit ``Rx(pi * bits[i])``.
-  Equivalent to a conditional ``X`` (up to a global phase) but emitted
-  as a parameterised rotation so ``bits`` can be left as a runtime
-  parameter at transpile time.
+  :math:`|0\\rangle^{\\otimes n}` via exact conditional ``X`` powers.
+  The parameterized RX implementation includes phase compensation, so
+  ``bits`` can remain a runtime parameter and the routine can be controlled
+  without exposing an unintended relative phase.
 * :func:`amplitude_encoding`: prepare
   an arbitrary real- or complex-amplitude state from
   :math:`|0\\rangle^{\\otimes n}` using Möttönen's Ry (and, for complex

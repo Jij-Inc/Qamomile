@@ -8,8 +8,16 @@ from typing import Generic, Iterator, TypeVar, overload
 
 from qamomile._utils import is_plain_int
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
-from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
+    CompOp,
+)
+from qamomile.circuit.ir.operation.classical_ops import (
+    ReturnQuantumArrayElementOperation,
+    StoreArrayElementOperation,
+)
+from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
@@ -553,6 +561,119 @@ class ArrayBase(Handle, Generic[T]):
                 return True
         return False
 
+    def _index_expression_key(
+        self,
+        index: UInt,
+        visiting: frozenset[str] = frozenset(),
+    ) -> tuple[typing.Any, ...]:
+        """Build a structural identity for one symbolic index expression.
+
+        Re-evaluating ``i + 1`` creates a fresh result UUID even though the
+        expression denotes the same index. The borrow checker compares this
+        structural key so ordinary read/modify/write syntax remains valid,
+        while a cross-index write such as ``q[i + 2] = op(q[i])`` is rejected.
+
+        Args:
+            index (UInt): Index handle to describe.
+            visiting (frozenset[str]): Result UUIDs already traversed while
+                following arithmetic producers. Defaults to an empty set.
+
+        Returns:
+            tuple[Any, ...]: Hashable structural expression identity.
+        """
+        value = index.value
+        if value.is_constant():
+            return ("const", int(value.get_const()))
+        if value.is_parameter():
+            return ("parameter", value.parameter_name())
+        if value.parent_array is not None and value.element_indices:
+            return (
+                "array_element",
+                value.parent_array.uuid,
+                tuple(
+                    self._index_expression_key(UInt(value=element_index), visiting)
+                    for element_index in value.element_indices
+                ),
+            )
+        if value.uuid in visiting:
+            return ("value", value.uuid)
+
+        try:
+            operations = get_current_tracer().operations
+        except RuntimeError:
+            return ("value", value.uuid)
+
+        for operation in reversed(operations):
+            if not isinstance(operation, BinOp) or operation.output.uuid != value.uuid:
+                continue
+            next_visiting = visiting | {value.uuid}
+            return (
+                "binop",
+                operation.kind,
+                self._index_expression_key(UInt(value=operation.lhs), next_visiting),
+                self._index_expression_key(UInt(value=operation.rhs), next_visiting),
+            )
+        return ("value", value.uuid)
+
+    def _indices_structurally_equal(
+        self,
+        lhs: tuple[UInt, ...],
+        rhs: tuple[UInt, ...],
+    ) -> bool:
+        """Return whether two index tuples are provably the same expression.
+
+        Args:
+            lhs (tuple[UInt, ...]): Target-side indices.
+            rhs (tuple[UInt, ...]): Borrow-source indices.
+
+        Returns:
+            bool: ``True`` only when every index has the same structural key.
+        """
+        return len(lhs) == len(rhs) and all(
+            self._index_expression_key(left) == self._index_expression_key(right)
+            for left, right in zip(lhs, rhs, strict=True)
+        )
+
+    @staticmethod
+    def _indices_are_branch_merges(indices: tuple[UInt, ...]) -> bool:
+        """Return whether every index is produced by an if-merge.
+
+        Branch-selected quantum array elements carry an auxiliary UInt merge
+        for each source index. The target assignment cannot be checked until
+        a static loop/if is replayed at emit time, so this predicate selects
+        the one case allowed to emit a deferred return validator.
+
+        Args:
+            indices (tuple[UInt, ...]): Borrow-source indices to inspect.
+
+        Returns:
+            bool: ``True`` when every index is an ``IfOperation`` merge
+                result in the active tracer.
+        """
+        if not indices:
+            return False
+        try:
+            operations = get_current_tracer().operations
+        except RuntimeError:
+            return False
+        comparison_results = {
+            result.uuid
+            for operation in operations
+            if isinstance(operation, CompOp)
+            for result in operation.results
+        }
+        merge_results = {
+            merge.result.uuid
+            for operation in operations
+            if isinstance(operation, IfOperation)
+            and (
+                operation.condition.is_constant()
+                or operation.condition.uuid in comparison_results
+            )
+            for merge in operation.iter_merges()
+        }
+        return all(index.value.uuid in merge_results for index in indices)
+
     def _get_element(self, indices: tuple[UInt, ...]) -> T:
         """Get an element at the given indices.
 
@@ -571,6 +692,15 @@ class ArrayBase(Handle, Generic[T]):
         # side effect: a negative index built into the IR would either
         # silently compose to the wrong root slot through a view's affine
         # map or surface much later as an internal allocator assertion.
+        invalid_index = next(
+            (index for index in indices if not isinstance(index, UInt)),
+            None,
+        )
+        if invalid_index is not None:
+            raise TypeError(
+                "array index must be a plain int or qmc.UInt, got "
+                f"{type(invalid_index).__name__} ({invalid_index!r})"
+            )
         self._reject_negative_const_indices(indices)
 
         indices_key = self._make_indices_key(indices)
@@ -778,8 +908,9 @@ class ArrayBase(Handle, Generic[T]):
            handle, releases borrow. Normal borrow-return path.
         2. **Borrowed index, wrong parent**: raises ``AffineTypeError``.
            Prevents returning a value from a different array.
-        3. **Unborrowed index**: consumes the handle without identity check.
-           Allows writing a fresh qubit to an index that was never borrowed.
+        3. **Unborrowed index**: rejects the assignment. Replacing a quantum
+           array slot with an unrelated resource would require an explicit IR
+           move that the borrow-return model cannot represent.
 
         For **classical arrays** (``Bit`` / ``UInt`` / ``Float`` elements)
         the assignment is a genuine value store, not a borrow return:
@@ -807,8 +938,8 @@ class ArrayBase(Handle, Generic[T]):
                 a handle of the element type or a compatible Python
                 literal.
             QubitConsumedError: If the array was already consumed.
-            AffineTypeError: If the index was borrowed **and** the value
-                was not borrowed from this array (``value.parent is not self``).
+            AffineTypeError: If a quantum write is not a verifiable return of
+                the value borrowed from the same array slot.
 
         Notes:
             For computed symbolic indices (e.g. ``i + 1``, ``n - j - 1``),
@@ -847,20 +978,32 @@ class ArrayBase(Handle, Generic[T]):
         if isinstance(value, Handle) and value.parent is self and value.indices:
             source_key = self._make_indices_key(value.indices)
 
+        defer_quantum_return = False
         if (
             self.value.type.is_quantum()
             and source_key is not None
             and source_key in self._borrowed_indices
-            and self._indices_definitely_different(indices, value.indices)
+            and not self._indices_structurally_equal(indices, value.indices)
         ):
-            source_index_str = self._format_index(value.indices)
-            raise AffineTypeError(
-                f"Cannot return borrowed element '{self.value.name}[{source_index_str}]' "
-                f"to '{self.value.name}[{index_str}]'.\n"
-                f"Borrowed elements must be returned to the same index.",
-                handle_name=self.value.name,
-                operation_name="array element return",
-            )
+            if self._indices_are_branch_merges(value.indices):
+                defer_quantum_return = True
+            else:
+                source_index_str = self._format_index(value.indices)
+                if self._indices_definitely_different(indices, value.indices):
+                    reason = "the target is a different index"
+                else:
+                    reason = "equivalence of the symbolic indices cannot be proven"
+                raise AffineTypeError(
+                    f"Cannot return borrowed element "
+                    f"'{self.value.name}[{source_index_str}]' to "
+                    f"'{self.value.name}[{index_str}]': {reason}.\n"
+                    "Borrowed elements must be returned with the exact same "
+                    "index handle. Compute a symbolic index once, assign it "
+                    "to a local variable, and reuse that variable for both "
+                    "the read and write.",
+                    handle_name=self.value.name,
+                    operation_name="array element return",
+                )
 
         release_key = (
             source_key
@@ -886,23 +1029,38 @@ class ArrayBase(Handle, Generic[T]):
                         operation_name="array element return",
                     )
             else:
-                # Non-borrowed index: reject handles actively borrowed from
-                # a *different*, still-live array.  Handles whose parent was
-                # already consumed (e.g. returned from a @qkernel call) are
-                # treated as detached/fresh and allowed.
                 if (
                     isinstance(value, Handle)
                     and value.parent is not None
                     and value.parent is not self
-                    and not value.parent._consumed
                 ):
-                    raise AffineTypeError(
-                        f"Cannot assign a handle borrowed from another array "
-                        f"to '{self.value.name}[{index_str}]' — "
-                        f"it was not borrowed from this array.",
-                        handle_name=self.value.name,
-                        operation_name="array element return",
+                    reason = "it was not borrowed from this array"
+                else:
+                    reason = (
+                        "replacing a slot with a different physical resource "
+                        "is not representable"
                     )
+                raise AffineTypeError(
+                    f"Cannot assign a fresh or unrelated quantum handle to "
+                    f"unborrowed slot '{self.value.name}[{index_str}]'. "
+                    "Quantum array assignment only returns a value previously "
+                    f"borrowed from that exact slot; {reason}.",
+                    handle_name=self.value.name,
+                    operation_name="array element return",
+                )
+
+            if defer_quantum_return:
+                get_current_tracer().add_operation(
+                    ReturnQuantumArrayElementOperation(
+                        operands=[
+                            self.value,
+                            value.value,
+                            *(index.value for index in indices),
+                            *(index.value for index in value.indices),
+                        ],
+                        results=[],
+                    )
+                )
 
             # Consume the handle (prevents reuse of old handle)
             value.consume(operation_name=f"return to {self.value.name}[{index_str}]")
@@ -1870,7 +2028,12 @@ class Vector(ArrayBase[T]):
         """
         if isinstance(value, int):
             return self._make_uint_index(value)
-        return value
+        if isinstance(value, UInt):
+            return value
+        raise TypeError(
+            "array index must be a plain int or qmc.UInt, got "
+            f"{type(value).__name__} ({value!r})"
+        )
 
     def __iter__(self) -> Iterator[T]:
         """Iteration over Vector is prohibited to prevent common bugs.
@@ -1887,7 +2050,7 @@ class Vector(ArrayBase[T]):
                     qi = qm.h(qi)  # This doesn't modify qubits!
 
             Use:
-                for i in qmc.range(len(qubits)):
+                for i in qmc.range(qubits.shape[0]):
                     qubits[i] = qm.h(qubits[i])  # This works correctly
         """
         raise TypeError(
@@ -1898,7 +2061,7 @@ class Vector(ArrayBase[T]):
             "  for item in vector:\n"
             "      item = qmc.operation(item)\n\n"
             "  # Correct:\n"
-            "  for i in qmc.range(len(vector)):\n"
+            "  for i in qmc.range(vector.shape[0]):\n"
             "      vector[i] = qmc.operation(vector[i])\n"
         )
 
@@ -3022,11 +3185,41 @@ class VectorView(Vector[T]):
         # owner for those slots and can be slice-assigned back to its
         # parent once the inner view is returned.  This implements the
         # "return inner to outer, then outer to root" semantics.
-        if nested_covered is not None:
+        if nested_covered is not None and self.value.type.is_quantum():
+            nested_slots = set(nested_covered)
+            outer_start = _as_int_const(self._slice_start)
+            outer_step = _as_int_const(self._slice_step)
+            if outer_start is not None and outer_step is not None:
+                for key, owner in self._borrowed_indices.items():
+                    if len(key) != 1 or not key[0].startswith("const:"):
+                        continue
+                    local_index = int(key[0].removeprefix("const:"))
+                    root_index = outer_start + outer_step * local_index
+                    if root_index in nested_slots:
+                        raise QubitBorrowConflictError(
+                            f"Cannot create nested slice '{new_sliced_av.name}': "
+                            f"outer slot {local_index} (root slot "
+                            f"'{self._slice_parent.value.name}[{root_index}]') "
+                            "is already borrowed. Return the element before "
+                            "slicing across it.",
+                            handle_name=f"{self.value.name}[{local_index}]",
+                            operation_name="array slicing",
+                        )
             for idx in nested_covered:
                 key = (f"const:{idx}",)
-                if self._slice_parent._borrowed_indices.get(key) is self:
-                    del self._slice_parent._borrowed_indices[key]
+                owner = self._slice_parent._borrowed_indices.get(key)
+                if owner is not self:
+                    raise QubitBorrowConflictError(
+                        f"Cannot create nested slice '{new_sliced_av.name}': "
+                        f"root slot '{self._slice_parent.value.name}[{idx}]' "
+                        "is borrowed outside the outer view. Return the "
+                        "element or nested view before slicing across it.",
+                        handle_name=f"{self._slice_parent.value.name}[{idx}]",
+                        operation_name="array slicing",
+                    )
+            for idx in nested_covered:
+                key = (f"const:{idx}",)
+                del self._slice_parent._borrowed_indices[key]
 
         new_view = VectorView._wrap(
             parent=self._slice_parent,

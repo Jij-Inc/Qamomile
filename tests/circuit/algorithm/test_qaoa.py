@@ -165,16 +165,16 @@ def test_ising_cost_gate_counts():
     assert counts.get("rzz", 0) == 2
     assert counts.get("rz", 0) == 1
 
-    # Verify RZZ angles = Jij * gamma
+    # Verify RZZ angles realize exp(-i * gamma * Jij * ZiZj).
     rzz_gates = _gate_list(qc, "rzz")
-    expected_rzz_angles = sorted([0.5 * gamma, -0.3 * gamma])
+    expected_rzz_angles = sorted([2.0 * 0.5 * gamma, 2.0 * -0.3 * gamma])
     actual_rzz_angles = sorted(float(g.operation.params[0]) for g in rzz_gates)
     for exp, act in zip(expected_rzz_angles, actual_rzz_angles):
         assert abs(exp - act) < 1e-10
 
-    # Verify RZ angle = hi * gamma
+    # Verify RZ angle realizes exp(-i * gamma * hi * Zi).
     rz_gates = _gate_list(qc, "rz")
-    assert abs(float(rz_gates[0].operation.params[0]) - 1.0 * gamma) < 1e-10
+    assert abs(float(rz_gates[0].operation.params[0]) - 2.0 * gamma) < 1e-10
 
 
 def test_x_mixer_gate_counts():

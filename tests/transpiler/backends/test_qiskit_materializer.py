@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from qiskit.circuit import ForLoopOp, IfElseOp, WhileLoopOp
+from qiskit.circuit import ForLoopOp, IfElseOp, QuantumCircuit, WhileLoopOp
 from qiskit.quantum_info import Operator
 
 from qamomile.circuit.transpiler.circuit_ir import (
@@ -242,6 +242,40 @@ def test_qiskit_materializer_reuses_parameters_across_reusable_calls() -> None:
         "rotation",
     ]
     assert {parameter.name for parameter in circuit.parameters} == {"theta"}
+
+
+def test_qiskit_materializer_caches_equivalent_reusable_gates(mocker) -> None:
+    """Structurally equal callees share one materialized Qiskit gate."""
+    to_gate = mocker.spy(QuantumCircuit, "to_gate")
+    body = CircuitBuilder(1, 0, name="helper")
+    body.append_gate(GateKind.H, (0,))
+    frozen_body = body.freeze()
+    caller = CircuitBuilder(1, 0)
+    caller.append_call(ReusableCircuit(frozen_body, "helper"), (0,))
+    caller.append_call(ReusableCircuit(frozen_body, "helper"), (0,))
+
+    QiskitMaterializer().materialize(caller.freeze())
+
+    assert to_gate.call_count == 1
+
+
+def test_qiskit_materializer_accepts_unhashable_reusable_body() -> None:
+    """Semantic payloads without hashing bypass the optional gate cache."""
+
+    class UnhashableReusableCircuit(ReusableCircuit):
+        """Model a reusable body containing an unhashable semantic payload."""
+
+        __hash__ = None  # type: ignore[assignment]
+
+    body = CircuitBuilder(1, 0, name="helper")
+    body.append_gate(GateKind.H, (0,))
+    caller = CircuitBuilder(1, 0)
+    caller.append_call(UnhashableReusableCircuit(body.freeze(), "helper"), (0,))
+
+    circuit = QiskitMaterializer().materialize(caller.freeze()).artifact
+
+    assert len(circuit.data) == 1
+    assert circuit.data[0].operation.label == "helper"
 
 
 @pytest.mark.parametrize(

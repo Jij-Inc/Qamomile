@@ -32,7 +32,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %% [markdown]
 # ## MaxCut問題とは？
@@ -195,7 +195,7 @@ def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 #
 # コストユニタリ$e^{-i \gamma H_C}$を適用します。
 #
-# Qamomileの回転ゲートは$1/2$の因子を含む規約を使います: $\text{RZ}(\theta) = e^{-i \theta Z / 2}$、$\text{RZZ}(\theta) = e^{-i \theta Z \otimes Z / 2}$。$e^{-i \gamma H_C}$と厳密に一致させるには角度を$2 J_{ij} \gamma$とすべきですが、$\gamma$は古典オプティマイザが自由に調整する**変分パラメータ**であるため、この定数倍は最適な$\gamma$の値に吸収されます。したがって、$J_{ij} \cdot \gamma$（および$h_i \cdot \gamma$）をそのまま渡します。
+# Qamomileの回転ゲートは$1/2$の因子を含む規約を使います: $\text{RZ}(\theta) = e^{-i \theta Z / 2}$、$\text{RZZ}(\theta) = e^{-i \theta Z \otimes Z / 2}$。$e^{-i \gamma H_C}$と厳密に一致させるため、`rzz`には$2 J_{ij} \gamma$、`rz`には$2 h_i \gamma$を渡します。
 #
 # 重みなしMaxCutでは`linear`引数は空ですが、そのまま引数として残しておきます。こうすることで、線形項$h_i$を持つ重みつきMaxCutや一般のスピングラスハミルトニアンにそのまま流用できます。
 
@@ -209,9 +209,9 @@ def cost_layer(
     gamma: qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
     for (i, j), Jij in quad.items():
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * gamma)
+        q[i], q[j] = qmc.rzz(q[i], q[j], angle=2.0 * Jij * gamma)
     for i, hi in linear.items():
-        q[i] = qmc.rz(q[i], angle=hi * gamma)
+        q[i] = qmc.rz(q[i], angle=2.0 * hi * gamma)
     return q
 
 

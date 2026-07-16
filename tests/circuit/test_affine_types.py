@@ -622,18 +622,16 @@ class TestSetitemConsumeAndValidation:
             with pytest.raises(AffineTypeError, match="not borrowed from this array"):
                 qs1[0] = rogue
 
-    def test_setitem_unborrowed_index_consumes_handle(self):
-        """Writing to an unborrowed index should consume the handle."""
+    def test_setitem_unborrowed_index_rejects_fresh_handle(self):
+        """Writing a fresh qubit to an unborrowed slot fails without mutation."""
         from qamomile.circuit.frontend.tracer import trace
 
         with trace():
             qs = qubit_array(2, "qs")
             rogue = qm.qubit("rogue")
-            # Fresh assignment to unborrowed index is allowed but consumes handle
-            qs[1] = rogue
-            # rogue is now consumed and cannot be reused
-            with pytest.raises(QubitConsumedError):
-                qm.h(rogue)
+            with pytest.raises(AffineTypeError, match="not representable"):
+                qs[1] = rogue
+            assert rogue._consumed is False
 
     def test_setitem_unborrowed_rejects_foreign_array_handle(self):
         """Writing a handle borrowed from another array to an unborrowed index should raise."""
@@ -915,6 +913,19 @@ class TestComputedIndexBorrowReturn:
 
         with pytest.raises(UnreturnedBorrowError):
             bad_circuit.build(n=3)
+
+    def test_symbolic_cross_index_write_is_rejected(self):
+        """A symbolic target cannot hide a write to a different quantum slot."""
+
+        @qkernel
+        def bad_cross_index(n: int) -> qm.Vector[qm.Bit]:
+            qubits = qubit_array(n, "q")
+            for i in qm.range(1):
+                qubits[i + 2] = qm.x(qubits[i])
+            return qm.measure(qubits)
+
+        with pytest.raises(AffineTypeError, match="symbolic indices cannot be proven"):
+            bad_cross_index.build(n=4)
 
 
 class TestAllSingleQubitGatesDoubleUse:
@@ -3560,3 +3571,46 @@ class TestDirectElementBorrowHandoff:
             qm.measure(element)
             with pytest.raises(QubitConsumedError, match="destructive"):
                 _ = register[0]
+
+
+class TestArrayIndexValidation:
+    """Array indexing rejects aliases and non-integral index types early."""
+
+    @pytest.mark.parametrize("index_kind", ["python_float", "float_handle"])
+    def test_non_integer_element_index_has_clear_type_error(
+        self,
+        index_kind: str,
+    ) -> None:
+        """Floats cannot silently floor or leak an AttributeError."""
+
+        @qkernel
+        def invalid_index() -> Qubit:
+            register = qubit_array(2, "q")
+            index = 1.0 if index_kind == "python_float" else qm.float_(1.0)
+            return register[index]  # type: ignore[index]
+
+        with pytest.raises(TypeError, match="plain int or qmc.UInt"):
+            invalid_index.build()
+
+    def test_nested_slice_rejects_slot_borrowed_from_outer_view(self) -> None:
+        """A nested slice cannot duplicate an outstanding element borrow."""
+
+        @qkernel
+        def aliased_nested_slice() -> qm.Vector[Qubit]:
+            register = qubit_array(4, "q")
+            outer = register[0:4]
+            borrowed = outer[1]
+            _ = borrowed
+            return outer[0:2]
+
+        with pytest.raises(QubitBorrowConflictError, match="already borrowed"):
+            aliased_nested_slice.build()
+
+    def test_vector_iteration_message_uses_shape(self) -> None:
+        """The suggested index loop only uses APIs Vector implements."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            register = qubit_array(2, "q")
+            with pytest.raises(TypeError, match=r"range\(vector\.shape\[0\]\)"):
+                iter(register)

@@ -20,6 +20,8 @@ from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.job import ExpvalJob, RunJob, SampleJob
 from qamomile.circuit.transpiler.parameter_binding import (
+    ParameterArrayInfo,
+    ParameterContainerKind,
     ParameterInfo,
     ParameterMetadata,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "CompiledQuantumSegment",
     "ExecutableProgram",
     "ExecutionContext",
+    "ParameterArrayInfo",
+    "ParameterContainerKind",
     "ParameterInfo",
     "ParameterMetadata",
     "QuantumExecutor",

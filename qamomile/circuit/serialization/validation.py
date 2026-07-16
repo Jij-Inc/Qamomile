@@ -38,6 +38,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -295,6 +296,8 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         _require_types(operation.results, [FloatType()], location, "result")
     elif isinstance(operation, StoreArrayElementOperation):
         _validate_array_store(operation, location)
+    elif isinstance(operation, ReturnQuantumArrayElementOperation):
+        _validate_quantum_array_return(operation, location)
     elif isinstance(operation, DictGetItemOperation):
         _validate_dict_get(operation, location)
     elif isinstance(operation, CastOperation):
@@ -423,6 +426,9 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         _validate_inverse_block(operation, location)
     elif isinstance(operation, SelectOperation):
         _validate_select(operation, location)
+    elif isinstance(operation, GlobalPhaseOperation):
+        _require_arity(operation, 1, 0, location)
+        _require_types(operation.operands, [FloatType()], location, "operand")
     else:
         raise ValueError(f"{location} has unsupported operation type")
 
@@ -695,6 +701,38 @@ def _validate_array_store(
     _require_types(
         operation.operands[2:],
         [UIntType()] * (len(operation.operands) - 2),
+        location,
+        "index",
+    )
+
+
+def _validate_quantum_array_return(
+    operation: ReturnQuantumArrayElementOperation,
+    location: str,
+) -> None:
+    """Validate one deferred quantum array borrow return.
+
+    Args:
+        operation (ReturnQuantumArrayElementOperation): Return to validate.
+        location (str): Human-readable graph location.
+
+    Raises:
+        ValueError: If the array, qubit, index arity, or result contract is
+            malformed.
+    """
+    if len(operation.operands) != 4:
+        raise ValueError(
+            f"{location} requires an array, qubit, target index, and source index"
+        )
+    _require_result_count(operation, 0, location)
+    source = operation.operands[0]
+    if not isinstance(source, ArrayValue) or not source.type.is_quantum():
+        raise ValueError(f"{location} first operand must be a quantum ArrayValue")
+    if operation.returned_value.type != source.type:
+        raise ValueError(f"{location} returned qubit type must match its array")
+    _require_types(
+        [*operation.target_indices, *operation.source_indices],
+        [UIntType()] * (2 * operation.index_arity),
         location,
         "index",
     )
