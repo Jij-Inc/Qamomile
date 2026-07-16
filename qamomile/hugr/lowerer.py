@@ -89,6 +89,27 @@ from qamomile.circuit.transpiler.prepared import PreparedModule
 _QuantumOrigin: TypeAlias = tuple[str, int | None]
 _QuantumFootprint: TypeAlias = frozenset[_QuantumOrigin]
 
+_BIT_COMPARISON_NAMES: Mapping[CompOpKind, str] = {
+    CompOpKind.EQ: "eq",
+    CompOpKind.NEQ: "xor",
+}
+_UINT_COMPARISON_NAMES: Mapping[CompOpKind, str] = {
+    CompOpKind.EQ: "ieq",
+    CompOpKind.NEQ: "ine",
+    CompOpKind.LT: "ilt_u",
+    CompOpKind.LE: "ile_u",
+    CompOpKind.GT: "igt_u",
+    CompOpKind.GE: "ige_u",
+}
+_FLOAT_COMPARISON_NAMES: Mapping[CompOpKind, str] = {
+    CompOpKind.EQ: "feq",
+    CompOpKind.NEQ: "fne",
+    CompOpKind.LT: "flt",
+    CompOpKind.LE: "fle",
+    CompOpKind.GT: "fgt",
+    CompOpKind.GE: "fge",
+}
+
 
 @dataclasses.dataclass(frozen=True)
 class HugrCompilationPlan:
@@ -3924,7 +3945,11 @@ def _lower_compop(
     builder: Any,
     environment: dict[str, Any],
 ) -> None:
-    """Lower Float and UInt comparisons to matching HUGR extensions.
+    """Lower Boolean and numeric comparisons to HUGR extensions.
+
+    Mixed operands stay abstract in Qamomile IR. This target converts a Bit to
+    the UInt width only for mixed equality, or a UInt to Float only for mixed
+    numeric comparisons, immediately before selecting the target operation.
 
     Args:
         operation (CompOp): Qamomile comparison operation.
@@ -3936,47 +3961,103 @@ def _lower_compop(
     """
     if operation.kind is None:
         raise EmitError("HUGR comparison has no comparison kind")
-    if all(isinstance(value.type, FloatType) for value in operation.operands):
-        from hugr.std.float import FLOAT_OPS_EXTENSION
 
-        names = {
-            CompOpKind.EQ: "feq",
-            CompOpKind.NEQ: "fne",
-            CompOpKind.LT: "flt",
-            CompOpKind.LE: "fle",
-            CompOpKind.GT: "fgt",
-            CompOpKind.GE: "fge",
-        }
-        extension = FLOAT_OPS_EXTENSION
-        arguments: list[Any] = []
-        concrete_signature = None
+    operands = [
+        _resolve_classical_argument(value, builder, environment)
+        for value in operation.operands
+    ]
+
+    if all(isinstance(value.type, BitType) for value in operation.operands):
+        import tket_exts
+
+        name = _BIT_COMPARISON_NAMES.get(operation.kind)
+        if name is None:
+            raise EmitError("HUGR Bit comparisons support only equality and inequality")
+        extension = tket_exts.bool()
+        [left] = builder.add_op(
+            extension.get_op("make_opaque").instantiate(),
+            operands[0],
+        )
+        [right] = builder.add_op(
+            extension.get_op("make_opaque").instantiate(),
+            operands[1],
+        )
+        [opaque_result] = builder.add_op(
+            extension.get_op(name).instantiate(),
+            left,
+            right,
+        )
+        [wire] = builder.add_op(
+            extension.get_op("read").instantiate(),
+            opaque_result,
+        )
     elif all(isinstance(value.type, UIntType) for value in operation.operands):
         from hugr import tys
         from hugr.std.int import INT_OPS_EXTENSION, INT_T
 
-        names = {
-            CompOpKind.EQ: "ieq",
-            CompOpKind.NEQ: "ine",
-            CompOpKind.LT: "ilt_u",
-            CompOpKind.LE: "ile_u",
-            CompOpKind.GT: "igt_u",
-            CompOpKind.GE: "ige_u",
-        }
-        extension = INT_OPS_EXTENSION
-        arguments = [tys.BoundedNatArg(5)]
-        concrete_signature = tys.FunctionType([INT_T, INT_T], [tys.Bool])
+        name = _UINT_COMPARISON_NAMES.get(operation.kind)
+        if name is None:
+            raise EmitError(f"Unsupported HUGR UInt comparison: {operation.kind}")
+        comparison = INT_OPS_EXTENSION.get_op(name).instantiate(
+            list(INT_T.args),
+            concrete_signature=tys.FunctionType([INT_T, INT_T], [tys.Bool]),
+        )
+        [wire] = builder.add_op(comparison, *operands)
+    elif all(
+        isinstance(value.type, (BitType, UIntType)) for value in operation.operands
+    ):
+        from hugr import tys
+        from hugr.std.int import (
+            CONVERSIONS_EXTENSION,
+            INT_OPS_EXTENSION,
+            INT_T,
+            int_t,
+        )
+
+        name = _UINT_COMPARISON_NAMES.get(operation.kind)
+        if name not in {"ieq", "ine"}:
+            raise EmitError(
+                "HUGR Bit and UInt comparisons support only equality and inequality"
+            )
+        bit_int_type = int_t(0)
+        converted = []
+        for value, operand in zip(operation.operands, operands, strict=True):
+            if isinstance(value.type, BitType):
+                from_bool = CONVERSIONS_EXTENSION.get_op("ifrombool").instantiate()
+                [operand] = builder.add_op(from_bool, operand)
+                widen = INT_OPS_EXTENSION.get_op("iwiden_u").instantiate(
+                    [*bit_int_type.args, *INT_T.args],
+                    concrete_signature=tys.FunctionType([bit_int_type], [INT_T]),
+                )
+                [operand] = builder.add_op(widen, operand)
+            converted.append(operand)
+        comparison = INT_OPS_EXTENSION.get_op(name).instantiate(
+            list(INT_T.args),
+            concrete_signature=tys.FunctionType([INT_T, INT_T], [tys.Bool]),
+        )
+        [wire] = builder.add_op(comparison, *converted)
+    elif all(
+        isinstance(value.type, (UIntType, FloatType)) for value in operation.operands
+    ):
+        from hugr import tys
+        from hugr.std.float import FLOAT_OPS_EXTENSION, FLOAT_T
+        from hugr.std.int import CONVERSIONS_EXTENSION, INT_T
+
+        converted = []
+        for value, operand in zip(operation.operands, operands, strict=True):
+            if isinstance(value.type, UIntType):
+                conversion = CONVERSIONS_EXTENSION.get_op("convert_u").instantiate(
+                    list(INT_T.args),
+                    concrete_signature=tys.FunctionType([INT_T], [FLOAT_T]),
+                )
+                [operand] = builder.add_op(conversion, operand)
+            converted.append(operand)
+        name = _FLOAT_COMPARISON_NAMES.get(operation.kind)
+        if name is None:
+            raise EmitError(f"Unsupported HUGR numeric comparison: {operation.kind}")
+        comparison = FLOAT_OPS_EXTENSION.get_op(name).instantiate()
+        [wire] = builder.add_op(comparison, *converted)
     else:
-        raise EmitError("HUGR comparison operands must share Float or UInt type")
-    name = names.get(operation.kind)
-    if name is None:
-        raise EmitError(f"Unsupported HUGR comparison: {operation.kind}")
-    op = extension.get_op(name).instantiate(
-        arguments,
-        concrete_signature=concrete_signature,
-    )
-    [wire] = builder.add_op(
-        op,
-        _resolve_classical_argument(operation.operands[0], builder, environment),
-        _resolve_classical_argument(operation.operands[1], builder, environment),
-    )
+        raise EmitError("HUGR comparison operands must both be Bit or numeric handles")
+
     environment[operation.results[0].uuid] = wire
