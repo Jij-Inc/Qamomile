@@ -78,7 +78,7 @@ dispatches the two violation messages.
 
 from __future__ import annotations
 
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
@@ -96,6 +96,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     HasNestedOps,
+    IfMerge,
     IfOperation,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
@@ -118,6 +119,11 @@ ConstBoundToken: TypeAlias = tuple[Literal["const"], int]
 ValueBoundToken: TypeAlias = tuple[Literal["value"], str, int]
 MinBoundToken: TypeAlias = tuple[Literal["min"], object, object]
 BoundToken: TypeAlias = ConstBoundToken | ValueBoundToken | MinBoundToken
+ArrayResourceKey: TypeAlias = tuple[
+    str,
+    object,
+    ConstBoundToken | ValueBoundToken,
+]
 
 
 def _root_of(av: ArrayValue) -> ArrayValue:
@@ -262,11 +268,16 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         # already registered — those changes cannot be propagated
         # out of the body by the current merge logic, so they're
         # rejected up-front.  Empty stack means we're at the top
-        # level.  Each frame also records whether the body is a
-        # statically non-zero ``For`` loop, which is the only context
-        # where same-slice SSA-version refresh of an outer owner can
-        # safely be accepted without propagating a deletion.
+        # level.  Each frame also records its control-flow kind so a
+        # same-slice SSA-version refresh is accepted only for an exact slice
+        # construction alias, a statically non-zero ``For`` body, or when an
+        # active ``If`` merge proves the representation handoff.
         self._outer_snapshot_stack: list[_SnapshotFrame] = []
+        self._active_if_stack: list[IfOperation] = []
+        # UUID-keyed origin map for representation-only slice aliases. Gate
+        # results are never inserted, so a runtime-loop state update cannot
+        # masquerade as a skippable alias.
+        self._representation_alias_origins: dict[str, str] = {}
         # Small expression cache for symbolic slice-bound comparisons.
         # ``SliceArrayOperation`` normalizes user slices through BinOps
         # such as ``min(k, n)``, ``x - 0``, ``x + 0`` and ``x // 1``.
@@ -312,6 +323,8 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             )
 
         self._bound_exprs.clear()
+        self._active_if_stack.clear()
+        self._representation_alias_origins.clear()
         state: State = {}
         self._walk(input.operations, state)
 
@@ -384,7 +397,9 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 # runs (where the op is gone) still register sliced
                 # arrays encountered via downstream operand fields.
                 self._register_slice_bulk_borrow_if_new(
-                    op.results[0] if op.results else None, state
+                    op.results[0] if op.results else None,
+                    state,
+                    is_slice_construction=True,
                 )
                 continue
 
@@ -429,24 +444,36 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         borrows.  This is over-conservative but safe.
 
         Args:
-            op: The ``HasNestedOps`` operation being dispatched.
-            state: Caller's mutable borrow tracker.
+            op (HasNestedOps): Nested operation being dispatched.
+            state (State): Caller's mutable borrow tracker.
+
+        Raises:
+            QubitBorrowConflictError: If a nested body creates overlapping
+                slice ownership or directly accesses a borrowed slot.
+            QubitConsumedError: If a nested body accesses a destroyed slot.
+            ValidationError: If nested ownership cannot cross the control-flow
+                boundary safely.
         """
         if isinstance(op, IfOperation):
+            entry_state = dict(state)
             # Push outer snapshot for the duration of branch walks.
             # Any release / drain inside either branch that targets
             # an entry from the snapshot is rejected by the helpers
             # — the current merge policy cannot propagate entry
             # deletions out of the body, so cross-body release is
             # unsupported in this revision.
-            self._outer_snapshot_stack.append((_SnapshotKind.IF_BRANCH, dict(state)))
+            self._active_if_stack.append(op)
+            self._outer_snapshot_stack.append(
+                (_SnapshotKind.IF_BRANCH, dict(entry_state))
+            )
             try:
-                true_state = dict(state)
+                true_state = dict(entry_state)
                 self._walk(op.true_operations, true_state)
-                false_state = dict(state)
+                false_state = dict(entry_state)
                 self._walk(op.false_operations, false_state)
             finally:
                 self._outer_snapshot_stack.pop()
+                self._active_if_stack.pop()
             # Conservative union with a consumption-priority rule.  If
             # either branch destroyed a slot the post-If state must
             # treat it as destroyed; otherwise a downstream operand
@@ -465,6 +492,19 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                     merged[k] = v
             state.clear()
             state.update(merged)
+            for merge in op.iter_merges():
+                is_representation_alias = self._record_if_representation_alias(merge)
+                if is_representation_alias:
+                    self._retire_if_root_representation_borrows(
+                        merge,
+                        state,
+                        entry_state,
+                    )
+                self._register_slice_bulk_borrow_if_new(
+                    merge.result,
+                    state,
+                    is_representation_alias=is_representation_alias,
+                )
             return
 
         # For/ForItems/While: simulate one iteration.  We use a copy so
@@ -518,6 +558,211 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                         state[k] = v
         finally:
             self._outer_snapshot_stack.pop()
+
+    def _representation_alias_origin(self, view: ArrayValue) -> str:
+        """Return the provenance token of a representation-only alias.
+
+        Args:
+            view (ArrayValue): Slice view whose alias origin is requested.
+
+        Returns:
+            str: The earliest proven alias token, or ``view.uuid`` when no
+                representation-only edge has been recorded.
+        """
+        return self._representation_alias_origins.get(view.uuid, view.uuid)
+
+    def _exact_reslice_resource(
+        self,
+        value: ArrayValue,
+    ) -> tuple[ArrayResourceKey, bool] | None:
+        """Return the resource beneath an exact full-reslice prefix.
+
+        Args:
+            value (ArrayValue): Array representation to inspect.
+
+        Returns:
+            tuple[ArrayResourceKey, bool] | None: Canonical resource key and
+                whether at least one ordered ``0:length:1`` slice was removed,
+                or ``None`` for a cyclic or malformed extent chain.
+        """
+        current = value
+        saw_reslice = False
+        seen: set[str] = set()
+        while current.slice_of is not None:
+            if current.uuid in seen:
+                return None
+            seen.add(current.uuid)
+            parent = current.slice_of
+            if (
+                current.type != parent.type
+                or len(current.shape) != 1
+                or len(parent.shape) != 1
+                or self._const_int(current.slice_start) != 0
+                or self._const_int(current.slice_step) != 1
+            ):
+                break
+            current_extent = self._value_signature(current.shape[0])
+            parent_extent = self._value_signature(parent.shape[0])
+            same_extent = current_extent is not None and (
+                current_extent == parent_extent
+            )
+            if not same_extent:
+                current_length = self._const_int(current.shape[0])
+                parent_length = self._const_int(parent.shape[0])
+                same_extent = (
+                    current_length is not None and current_length == parent_length
+                )
+            if not same_extent:
+                break
+            saw_reslice = True
+            current = parent
+
+        if len(current.shape) != 1:
+            return None
+        extent: ConstBoundToken | ValueBoundToken
+        length = self._const_int(current.shape[0])
+        if length is not None:
+            extent = ("const", length)
+        else:
+            signature = self._value_signature(current.shape[0])
+            if signature is None:
+                return None
+            extent = ("value", signature[0], signature[1])
+        resource = cast(
+            ArrayResourceKey,
+            (current.logical_id, current.type, extent),
+        )
+        return resource, saw_reslice
+
+    def _retire_if_root_representation_borrows(
+        self,
+        merge: IfMerge,
+        state: State,
+        entry_state: State,
+    ) -> None:
+        """Retire branch-local full-slice owners merged back to a root array.
+
+        Args:
+            merge (IfMerge): Proven representation-only array merge.
+            state (State): Mutable post-branch borrow state.
+            entry_state (State): Borrow state captured before either branch.
+
+        Returns:
+            None.
+        """
+        result = merge.result
+        if not isinstance(result, ArrayValue) or result.slice_of is not None:
+            return
+        sources = tuple(
+            value
+            for value in (merge.true_value, merge.false_value)
+            if isinstance(value, ArrayValue) and value.slice_of is not None
+        )
+        if not sources:
+            return
+
+        result_resource = self._exact_reslice_resource(result)
+        if result_resource is None:
+            return
+
+        source_origins = {
+            self._representation_alias_origin(source) for source in sources
+        }
+        to_remove: list[BorrowKey] = []
+        for key, owner in state.items():
+            if (
+                key in entry_state
+                or not isinstance(owner, ArrayValue)
+                or owner.slice_of is None
+            ):
+                continue
+            owner_resource = self._exact_reslice_resource(owner)
+            if owner_resource is None or owner_resource[0] != result_resource[0]:
+                continue
+            if (
+                any(owner.logical_id == source.logical_id for source in sources)
+                or self._representation_alias_origin(owner) in source_origins
+            ):
+                to_remove.append(key)
+        for key in to_remove:
+            state.pop(key, None)
+
+    def _record_if_representation_alias(self, merge: IfMerge) -> bool:
+        """Propagate one alias origin through a representation-only If merge.
+
+        Args:
+            merge (IfMerge): If merge whose sources and result are inspected.
+
+        Returns:
+            bool: ``True`` when all merge values differ only by exact full
+                reslices, or when both branch slices already share one proven
+                alias origin and exactly equal coverage.
+        """
+        values = (merge.true_value, merge.false_value, merge.result)
+        if not all(isinstance(value, ArrayValue) for value in values):
+            return False
+        true_value, false_value, result = values
+        assert isinstance(true_value, ArrayValue)
+        assert isinstance(false_value, ArrayValue)
+        assert isinstance(result, ArrayValue)
+
+        resources = tuple(
+            self._exact_reslice_resource(value)
+            for value in (true_value, false_value, result)
+        )
+        first_resource = resources[0]
+        if (
+            all(resource is not None for resource in resources)
+            and any(resource[1] for resource in resources if resource is not None)
+            and first_resource is not None
+            and all(
+                resource is not None and resource[0] == first_resource[0]
+                for resource in resources[1:]
+            )
+        ):
+            self._representation_alias_origins[result.uuid] = first_resource[0][0]
+            return True
+
+        if (
+            true_value.uuid not in self._representation_alias_origins
+            and false_value.uuid not in self._representation_alias_origins
+        ):
+            return False
+        true_origin = self._representation_alias_origin(true_value)
+        if true_origin != self._representation_alias_origin(false_value):
+            return False
+
+        def same_coverage(left: ArrayValue, right: ArrayValue) -> bool:
+            """Check exact concrete or symbolic coverage equality.
+
+            Args:
+                left (ArrayValue): First slice representation.
+                right (ArrayValue): Second slice representation.
+
+            Returns:
+                bool: Whether both values address exactly one root-space
+                    slice descriptor.
+            """
+            if (
+                left.slice_of is None
+                or right.slice_of is None
+                or _root_of(left).logical_id != _root_of(right).logical_id
+            ):
+                return False
+            left_coverage = self._collect_view_coverage(left)
+            right_coverage = self._collect_view_coverage(right)
+            if left_coverage is not None and right_coverage is not None:
+                return left_coverage == right_coverage
+            if left_coverage is None and right_coverage is None:
+                return self._same_symbolic_slice_descriptor(left, right)
+            return False
+
+        if not same_coverage(true_value, false_value) or not same_coverage(
+            true_value, result
+        ):
+            return False
+        self._representation_alias_origins[result.uuid] = true_origin
+        return True
 
     # ------------------------------------------------------------------
     # Borrow / release processing
@@ -903,29 +1148,62 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             f"outer view."
         )
 
+    def _if_merge_allows_same_coverage_handoff(
+        self,
+        owner: ArrayValue,
+        candidate: ArrayValue,
+    ) -> bool:
+        """Return whether an active If phi proves one representation handoff.
+
+        Args:
+            owner (ArrayValue): Current same-coverage state owner.
+            candidate (ArrayValue): Replacement created in an active branch.
+
+        Returns:
+            bool: ``True`` when a surrounding merge relates both lineages.
+        """
+        if owner.logical_id == candidate.logical_id:
+            return True
+        for if_op in reversed(self._active_if_stack):
+            for merge in if_op.iter_merges():
+                if not isinstance(merge.result, ArrayValue):
+                    continue
+                source_ids = {
+                    merge.true_value.logical_id,
+                    merge.false_value.logical_id,
+                }
+                if (
+                    merge.result.logical_id == owner.logical_id
+                    and candidate.logical_id in source_ids
+                ):
+                    return True
+        return False
+
     def _can_body_local_same_coverage_handoff(
         self,
         owner: ArrayValue,
+        candidate: ArrayValue,
         keys: list[BorrowKey],
     ) -> bool:
         """Check whether a same-coverage handoff may rewrite body state.
 
         Distinct-lineage same-coverage replacement is normally treated
         as an implicit drain and is rejected inside control-flow bodies.
-        A statically non-zero ``For`` body is the narrow exception:
-        the body definitely executes at least once, and the rewrite is
-        used only while checking that simulated body.  The enclosing
+        A statically non-zero ``For`` body is one narrow exception because
+        the body definitely executes at least once. An ``If`` branch is the
+        other when its active merge explicitly relates both representations.
+        The rewrite is used only while checking the nested body; the enclosing
         state remains conservative after merge.
 
         Args:
             owner (ArrayValue): Existing owner that the body-local
                 handoff would replace.
+            candidate (ArrayValue): Same-coverage replacement candidate.
             keys (list[BorrowKey]): Exact state entries covered by the
                 owner and candidate.
 
         Returns:
-            bool: ``True`` when every matching active snapshot is a
-                statically non-zero ``For`` body.
+            bool: ``True`` when every matching snapshot proves the handoff.
         """
         matching_kinds: list[str] = []
         for kind, snapshot in self._outer_snapshot_stack:
@@ -935,16 +1213,29 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                     snapshot_owner.uuid == owner.uuid
                 ):
                     matching_kinds.append(kind)
-        return bool(matching_kinds) and all(
-            kind == _SnapshotKind.FOR_STATIC_NONZERO for kind in matching_kinds
-        )
+        if not matching_kinds:
+            return False
+        for kind in matching_kinds:
+            if kind == _SnapshotKind.FOR_STATIC_NONZERO:
+                continue
+            if kind == _SnapshotKind.IF_BRANCH and (
+                self._if_merge_allows_same_coverage_handoff(owner, candidate)
+            ):
+                continue
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Slice registration
     # ------------------------------------------------------------------
 
     def _register_slice_bulk_borrow_if_new(
-        self, av: ValueBase | None, state: State
+        self,
+        av: ValueBase | None,
+        state: State,
+        *,
+        is_slice_construction: bool = False,
+        is_representation_alias: bool = False,
     ) -> None:
         """Register covered slots for a sliced ArrayValue if not yet seen.
 
@@ -960,6 +1251,12 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             av (ValueBase | None): Candidate sliced value. Silently
                 returns on ``None`` or non-sliced values.
             state (State): Mutable borrow tracker.
+            is_slice_construction (bool): Whether ``av`` is the direct result
+                of the currently visited ``SliceArrayOperation``. Defaults to
+                ``False``.
+            is_representation_alias (bool): Whether control-flow provenance
+                proves ``av`` is only another representation of the current
+                owner. Defaults to ``False``.
 
         Raises:
             QubitBorrowConflictError: If any covered slot is already held by
@@ -977,7 +1274,12 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
 
         new_covered = self._collect_view_coverage(av)
         if new_covered is None:
-            self._register_symbolic_slice_if_new(av, state)
+            self._register_symbolic_slice_if_new(
+                av,
+                state,
+                is_slice_construction=is_slice_construction,
+                is_representation_alias=is_representation_alias,
+            )
             return
 
         root = _root_of(av)
@@ -1038,8 +1340,17 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 if self._is_forward_same_slice_view_refresh(av, other_view):
                     refresh_keys = [_const_key(root, slot) for slot in other_full]
                     self._guard_refresh_against_unsafe_snapshots(
-                        other_view, av, refresh_keys
+                        other_view,
+                        av,
+                        refresh_keys,
+                        is_slice_construction=(
+                            is_slice_construction or is_representation_alias
+                        ),
                     )
+                    if is_slice_construction:
+                        self._representation_alias_origins[av.uuid] = (
+                            self._representation_alias_origin(other_view)
+                        )
                     # Refreshing updates the owner identity in place.
                     # It is not a drain: no slot is released or claimed by
                     # a different lineage, so later view-internal element
@@ -1074,7 +1385,11 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                 # identical coverage because ``VectorView._nested_slice``
                 # flattens nested ``slice_of`` chains to the root.
                 refresh_keys = [_const_key(root, slot) for slot in other_full]
-                if self._can_body_local_same_coverage_handoff(other_view, refresh_keys):
+                if self._can_body_local_same_coverage_handoff(
+                    other_view,
+                    av,
+                    refresh_keys,
+                ):
                     # In a statically non-zero loop body, a concrete
                     # full-slice handoff is path-insensitive for the body
                     # walk: the inner view fully replaces the outer for
@@ -1165,7 +1480,14 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             ):
                 state[key] = av
 
-    def _register_symbolic_slice_if_new(self, av: ArrayValue, state: State) -> None:
+    def _register_symbolic_slice_if_new(
+        self,
+        av: ArrayValue,
+        state: State,
+        *,
+        is_slice_construction: bool = False,
+        is_representation_alias: bool = False,
+    ) -> None:
         """Register or refresh a symbolic slice descriptor exactly.
 
         Symbolic coverage cannot be enumerated into per-qubit keys, so
@@ -1178,6 +1500,12 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         Args:
             av (ArrayValue): Sliced view with non-concrete coverage.
             state (State): Mutable borrow tracker.
+            is_slice_construction (bool): Whether ``av`` is the direct result
+                of the currently visited ``SliceArrayOperation``. Defaults to
+                ``False``.
+            is_representation_alias (bool): Whether control-flow provenance
+                proves ``av`` is only another representation of the current
+                owner. Defaults to ``False``.
 
         Raises:
             QubitBorrowConflictError: If a symbolic descriptor is already
@@ -1233,7 +1561,18 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             # This is the symbolic counterpart of the concrete refresh
             # path above: keep the single descriptor key and replace only
             # the owner version.  No per-qubit slots are inferred.
-            self._guard_refresh_against_unsafe_snapshots(existing, av, [key])
+            self._guard_refresh_against_unsafe_snapshots(
+                existing,
+                av,
+                [key],
+                is_slice_construction=(
+                    is_slice_construction or is_representation_alias
+                ),
+            )
+            if is_slice_construction:
+                self._representation_alias_origins[av.uuid] = (
+                    self._representation_alias_origin(existing)
+                )
             state[key] = av
             return
         if self._same_slice_lineage(av, existing) and av.version <= existing.version:
@@ -1827,6 +2166,8 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         owner: ArrayValue,
         candidate: ArrayValue,
         keys: list[BorrowKey],
+        *,
+        is_slice_construction: bool = False,
     ) -> None:
         """Reject refreshes that would rewrite unsafe snapshot owners.
 
@@ -1836,10 +2177,15 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             candidate (ArrayValue): Newer same-lineage view.
             keys (list[BorrowKey]): Exact state entries that the
                 refresh would rewrite.
+            is_slice_construction (bool): Whether ``candidate`` is the direct
+                result of the currently visited ``SliceArrayOperation``.
+                Defaults to ``False``.
 
         Raises:
             ValidationError: If any matching active snapshot
-                frame is not a statically non-zero ``For`` body.
+                frame is not covered by an exact slice-construction alias, a
+                statically non-zero ``For`` body, or an ``If`` branch with a
+                merge-proven representation handoff.
         """
         matching_kinds: list[str] = []
         # Scan every active frame, not just the innermost one.  A static
@@ -1854,11 +2200,15 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
                     matching_kinds.append(kind)
         if not matching_kinds:
             return
-        # Only the all-static-nonzero case is path-insensitive enough to
-        # allow this body-local owner rewrite.  One unsafe match is enough
-        # to reject because the rewritten owner could otherwise be visible
-        # only on some runtime paths.
-        if all(kind == _SnapshotKind.FOR_STATIC_NONZERO for kind in matching_kinds):
+        if all(
+            kind == _SnapshotKind.FOR_STATIC_NONZERO
+            or (
+                kind == _SnapshotKind.IF_BRANCH
+                and self._if_merge_allows_same_coverage_handoff(owner, candidate)
+            )
+            or (kind == _SnapshotKind.UNSAFE_CONTROL_BODY and is_slice_construction)
+            for kind in matching_kinds
+        ):
             return
         root = _root_of(candidate)
         raise ValidationError(
@@ -1866,8 +2216,9 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
             f"refresh view '{owner.name}' (registered on '{root.name}' "
             f"by an enclosing block) to '{candidate.name}', but that "
             f"enclosing body may be skipped or branch-dependent.  "
-            f"Only statically non-zero for-loop bodies may refresh an "
-            f"outer slice view's SSA version without returning it."
+            f"Only exact full-reslice aliases, statically non-zero for-loop "
+            f"bodies, or if-branches with an explicit same-resource merge may "
+            f"refresh an outer slice view's SSA version without returning it."
         )
 
     @staticmethod

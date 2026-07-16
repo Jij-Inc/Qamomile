@@ -539,7 +539,10 @@ def emit_qpe_manual(
         block_value = op.operands[0]
 
         local_bindings = emit_pass._resolver.bind_block_params(
-            block_value, op.parameters, bindings
+            block_value,
+            op.parameters,
+            bindings,
+            parameter_factory=emit_pass._get_or_create_parameter,
         )
 
         # _emit_controlled_powers lives in controlled_emission module;

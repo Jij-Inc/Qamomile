@@ -34,7 +34,7 @@ from qamomile.circuit.frontend.operation.inverse import (
     _InverseRotationCallable,
     _static_quantum_width,
 )
-from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.frontend.tracer import get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.callable import (
@@ -62,6 +62,7 @@ from qamomile.circuit.stdlib.state_preparation import (
     amplitude_encoding_from_angles,
     computational_basis_state,
 )
+from qamomile.circuit.transpiler.errors import QubitConsumedError
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import CircuitStyle
 from tests.circuit.conftest import run_statevector
@@ -797,6 +798,112 @@ def test_inverse_qkernel_can_be_assigned_before_calling() -> None:
         GateOperationType.RZ,
         GateOperationType.H,
     ]
+
+
+def test_inverse_duplicate_inputs_leave_handles_unconsumed() -> None:
+    """Aliased inverse arguments fail before affine ownership moves."""
+
+    @qmc.qkernel
+    def pair(
+        left: qmc.Qubit,
+        right: qmc.Qubit,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Return two inputs unchanged.
+
+        Args:
+            left (qmc.Qubit): First input qubit.
+            right (qmc.Qubit): Second input qubit.
+
+        Returns:
+            tuple[qmc.Qubit, qmc.Qubit]: Original inputs.
+        """
+        return left, right
+
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    with trace():
+        with pytest.raises(QubitConsumedError, match="overlapping physical"):
+            qmc.inverse(pair)(qubit, qubit)
+
+    assert not qubit._consumed
+
+
+def test_inverse_missing_tracer_leaves_input_unconsumed() -> None:
+    """Tracer validation happens before inverse ownership commit."""
+
+    @qmc.qkernel
+    def identity(qubit: qmc.Qubit) -> qmc.Qubit:
+        """Return one input unchanged.
+
+        Args:
+            qubit (qmc.Qubit): Input qubit.
+
+        Returns:
+            qmc.Qubit: Original input.
+        """
+        return qubit
+
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    with pytest.raises(RuntimeError, match="No active tracer"):
+        qmc.inverse(identity)(qubit)
+
+    assert not qubit._consumed
+
+
+def test_inverse_specialization_failure_leaves_input_unconsumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed inverse specialization does not consume its input."""
+    from qamomile.circuit.frontend.operation import inverse as inverse_module
+
+    def fail_specialization(*_args, **_kwargs):
+        """Raise a synthetic specialization failure.
+
+        Args:
+            *_args (object): Ignored positional arguments.
+            **_kwargs (object): Ignored keyword arguments.
+
+        Raises:
+            RuntimeError: Always, to exercise the transaction boundary.
+        """
+        raise RuntimeError("specialization failed")
+
+    monkeypatch.setattr(
+        inverse_module,
+        "select_specialized_block",
+        fail_specialization,
+    )
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    with trace():
+        with pytest.raises(RuntimeError, match="specialization failed"):
+            qmc.inverse(_inverse_layer)(qubit, 0.5)
+
+    assert not qubit._consumed
+
+
+def test_inverse_construction_failure_leaves_input_unconsumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed inverse-block construction does not consume its input."""
+
+    def fail_inversion(*_args, **_kwargs):
+        """Raise a synthetic block-inversion failure.
+
+        Args:
+            *_args (object): Ignored positional arguments.
+            **_kwargs (object): Ignored keyword arguments.
+
+        Raises:
+            RuntimeError: Always, to exercise the transaction boundary.
+        """
+        raise RuntimeError("inversion failed")
+
+    monkeypatch.setattr(_BlockInverter, "invert_block", fail_inversion)
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    with trace():
+        with pytest.raises(RuntimeError, match="inversion failed"):
+            qmc.inverse(_inverse_layer)(qubit, 0.5)
+
+    assert not qubit._consumed
 
 
 def test_inverse_qkernel_keeps_inverse_fallback_block() -> None:

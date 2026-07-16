@@ -1564,13 +1564,13 @@ class TestRuntimeIfPreservation:
         """if based on measurement result stays as IfOperation."""
 
         @qm.qkernel
-        def kernel() -> qm.Vector[qm.Bit]:
+        def kernel() -> qm.Bit:
             q = qm.qubit_array(2, "q")
             q[0] = qm.h(q[0])
             b = qm.measure(q[0])
             if b:
                 q[1] = qm.x(q[1])
-            return qm.measure(q)
+            return qm.measure(q[1])
 
         lowered = _lower(kernel)
 

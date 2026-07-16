@@ -66,6 +66,71 @@ class TestDivergentSliceMergeDiagnostics:
         ):
             QiskitTranspiler().transpile(kernel, bindings={"dummy": 0})
 
+    @pytest.mark.parametrize("transform", ["reslice", "broadcast"])
+    def test_transform_does_not_hide_divergent_merge(self, transform):
+        """Ownership-preserving view transforms retain divergence metadata."""
+
+        if transform == "reslice":
+
+            @qmc.qkernel
+            def kernel() -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(3, "qs")
+                probe = qmc.h(qmc.qubit("probe"))
+                bit = qmc.measure(probe)
+                if bit:
+                    view = qs[0:2]
+                else:
+                    view = qs[1:3]
+                view = view[:]
+                view[0] = qmc.x(view[0])
+                return qmc.measure(view)
+
+        else:
+
+            @qmc.qkernel
+            def kernel() -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(3, "qs")
+                probe = qmc.h(qmc.qubit("probe"))
+                bit = qmc.measure(probe)
+                if bit:
+                    view = qs[0:2]
+                else:
+                    view = qs[1:3]
+                view = qmc.h(view)
+                view[0] = qmc.x(view[0])
+                return qmc.measure(view)
+
+        with pytest.raises(
+            QubitBorrowConflictError,
+            match="merges different slices across if/else branches",
+        ):
+            _ = kernel.block
+
+    def test_nested_merge_does_not_hide_existing_divergence(self):
+        """A later view merge retains divergence inherited from its input."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            probe = qmc.h(qmc.qubit("probe"))
+            bit = qmc.measure(probe)
+            if bit:
+                view = qs[0:2]
+            else:
+                view = qs[1:3]
+            if True:
+                view = view[:]
+            else:
+                view = qmc.h(view)
+            view[0] = qmc.x(view[0])
+            return qmc.measure(view)
+
+        with pytest.raises(
+            QubitBorrowConflictError,
+            match="merges different slices across if/else branches",
+        ):
+            _ = kernel.block
+
     def test_classical_divergent_view_merge_names_the_cause(self):
         """Executing a divergent classical view merge explains the merge."""
 

@@ -73,6 +73,20 @@ class CallControlMode(enum.Enum):
     DISTRIBUTE = "distribute"
 
 
+class CallPhaseMode(enum.Enum):
+    """Enumerate how a target realizes phase in coherently controlled calls.
+
+    ``NATIVE_BODY`` means the target call itself preserves the reusable body's
+    phase. ``EXPLICIT_CORRECTION`` means the materializer emits a separate
+    phase correction alongside the call. ``UNSUPPORTED`` rejects a body phase
+    once coherent controls make it observable.
+    """
+
+    NATIVE_BODY = "native-body"
+    EXPLICIT_CORRECTION = "explicit-correction"
+    UNSUPPORTED = "unsupported"
+
+
 @dataclasses.dataclass(frozen=True)
 class ScalarCapabilities:
     """Declare the scalar language accepted in one instruction context.
@@ -94,6 +108,59 @@ class ScalarCapabilities:
 
 
 @dataclasses.dataclass(frozen=True)
+class GlobalPhaseCapabilities:
+    """Declare exact standalone global-phase realization requirements.
+
+    Args:
+        scalars (ScalarCapabilities): Scalar language accepted for the phase.
+        min_qubits (int): Minimum program width required to preserve a
+            nonzero standalone phase. Targets with a native zero-qubit phase
+            operation, or permission to allocate an internal clean carrier,
+            use the default zero. Targets that require an existing logical
+            qubit declare one.
+    """
+
+    scalars: ScalarCapabilities
+    min_qubits: int = 0
+
+    @property
+    def atoms(self) -> frozenset[ScalarAtom]:
+        """Return the legacy scalar-atom declaration.
+
+        Returns:
+            frozenset[ScalarAtom]: Accepted scalar leaf kinds.
+        """
+        return self.scalars.atoms
+
+    @property
+    def unary_operators(self) -> frozenset[UnaryOperator]:
+        """Return the legacy unary-operator declaration.
+
+        Returns:
+            frozenset[UnaryOperator]: Accepted unary operators.
+        """
+        return self.scalars.unary_operators
+
+    @property
+    def binary_operators(self) -> frozenset[BinaryOperator]:
+        """Return the legacy binary-operator declaration.
+
+        Returns:
+            frozenset[BinaryOperator]: Accepted binary operators.
+        """
+        return self.scalars.binary_operators
+
+    @property
+    def parameter_form(self) -> ScalarExpressionForm:
+        """Return the legacy runtime-parameter expression form.
+
+        Returns:
+            ScalarExpressionForm: Maximum accepted parameter expression form.
+        """
+        return self.scalars.parameter_form
+
+
+@dataclasses.dataclass(frozen=True)
 class CallTransformCapabilities:
     """Declare reusable-call forms accepted by a target realization.
 
@@ -112,6 +179,14 @@ class CallTransformCapabilities:
         controlled_pauli_time (ScalarCapabilities | None): Pauli-time scalar
             language accepted under distributed controls, or ``None`` when
             controlled Pauli evolution is unsupported.
+        phase_mode (CallPhaseMode): How a reusable body's phase is realized
+            after coherent controls are known. For native semantic calls, an
+            ``EXPLICIT_CORRECTION`` declaration makes the native materializer
+            responsible for emitting that correction. Defaults to
+            ``UNSUPPORTED``.
+        controlled_phase_scalars (ScalarCapabilities | None): Scalar language
+            accepted for an observable controlled-call phase, or ``None``
+            when no such phase is supported. Defaults to ``None``.
     """
 
     supports_power: bool
@@ -122,12 +197,20 @@ class CallTransformCapabilities:
     control_mode: CallControlMode = CallControlMode.WHOLE_CALL
     controlled_gate_kinds: frozenset[GateKind] = frozenset()
     controlled_pauli_time: ScalarCapabilities | None = None
+    phase_mode: CallPhaseMode = CallPhaseMode.UNSUPPORTED
+    controlled_phase_scalars: ScalarCapabilities | None = None
 
-    def accepts(self, callee: ReusableCircuit) -> bool:
+    def accepts(
+        self,
+        callee: ReusableCircuit,
+        inherited_controls: int = 0,
+    ) -> bool:
         """Return whether this declaration accepts a concrete call shape.
 
         Args:
             callee (ReusableCircuit): Reusable body and requested transforms.
+            inherited_controls (int): Controls physically distributed from an
+                enclosing call. Defaults to zero.
 
         Returns:
             bool: Whether power, inverse, and control transforms are accepted.
@@ -136,9 +219,10 @@ class CallTransformCapabilities:
             return False
         if callee.inverse and not self.supports_inverse:
             return False
-        if callee.controls and self.control_mode is CallControlMode.UNSUPPORTED:
+        effective_controls = inherited_controls + callee.controls
+        if effective_controls and self.control_mode is CallControlMode.UNSUPPORTED:
             return False
-        return self.max_controls is None or callee.controls <= self.max_controls
+        return self.max_controls is None or effective_controls <= self.max_controls
 
 
 @dataclasses.dataclass(frozen=True)
@@ -174,18 +258,24 @@ class NativeSemanticOpCapabilities:
     required_arguments: frozenset[str] = frozenset()
     matching_operand_widths: tuple[tuple[int, int], ...] = ()
 
-    def accepts(self, callee: ReusableCircuit) -> bool:
+    def accepts(
+        self,
+        callee: ReusableCircuit,
+        inherited_controls: int = 0,
+    ) -> bool:
         """Return whether this realization accepts one semantic call shape.
 
         Args:
             callee (ReusableCircuit): Reusable call retaining source operand
                 grouping and deferred transforms.
+            inherited_controls (int): Controls physically distributed from an
+                enclosing call. Defaults to zero.
 
         Returns:
             bool: Whether transform, total-width, and operand-shape contracts
             all accept the call.
         """
-        if not self.call_transforms.accepts(callee):
+        if not self.call_transforms.accepts(callee, inherited_controls):
             return False
         if callee.identity is None:
             return False
@@ -237,8 +327,10 @@ class CircuitCapabilities:
             ``if`` and ``while`` predicates.
         pauli_time (ScalarCapabilities): Scalar language accepted by Pauli
             evolution time values.
-        global_phase (ScalarCapabilities | None): Scalar language accepted for
-            nonzero program-level global phase, or ``None`` when unsupported.
+        global_phase (GlobalPhaseCapabilities | ScalarCapabilities | None):
+            Exact standalone phase realization requirements, or ``None`` when
+            unsupported. The former ``ScalarCapabilities`` value remains
+            accepted and readable for source compatibility.
         generic_calls (CallTransformCapabilities): Reusable-call forms accepted
             after semantic-call legalization.
         supports_dynamic_if (bool): Whether runtime ``if`` regions are
@@ -256,12 +348,25 @@ class CircuitCapabilities:
     gate_parameters: ScalarCapabilities
     predicates: ScalarCapabilities
     pauli_time: ScalarCapabilities
-    global_phase: ScalarCapabilities | None
+    global_phase: GlobalPhaseCapabilities | ScalarCapabilities | None
     generic_calls: CallTransformCapabilities
     supports_dynamic_if: bool
     supports_dynamic_while: bool
     supports_reset: bool
     pauli_realizations: frozenset[PauliEvolutionRealization]
+
+    @property
+    def normalized_global_phase(self) -> GlobalPhaseCapabilities | None:
+        """Return standalone phase requirements in the extended form.
+
+        Returns:
+            GlobalPhaseCapabilities | None: Normalized declaration, or
+                ``None`` when standalone phase is unsupported.
+        """
+        value = self.global_phase
+        if isinstance(value, ScalarCapabilities):
+            return GlobalPhaseCapabilities(value)
+        return value
 
     def native_semantic_op(
         self,

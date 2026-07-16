@@ -41,6 +41,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     SemanticOpKey,
     UnaryExpr,
     UnaryOperator,
+    _contains_classical_bit,
 )
 from qamomile.circuit.transpiler.circuit_ir.verify import verify_circuit
 from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
@@ -436,8 +437,6 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
                 operation="PauliEvolveOp",
             )
         gamma = _resolve_gamma(self, op, bindings)
-        if gamma is None:
-            raise EmitError("Cannot resolve Pauli evolution time")
         for operators, coefficient in hamiltonian:
             if abs(coefficient.imag) > HERMITIAN_IMAG_ATOL:
                 raise EmitError(
@@ -632,26 +631,6 @@ _SCALAR_EXPR_TYPES = (
     BinaryExpr,
     UnaryExpr,
 )
-
-
-def _contains_classical_bit(expression: ScalarExpr) -> bool:
-    """Return whether an expression depends on a measured classical bit.
-
-    Args:
-        expression (ScalarExpr): Expression to inspect.
-
-    Returns:
-        bool: True when a :class:`ClassicalBitExpr` occurs recursively.
-    """
-    if isinstance(expression, ClassicalBitExpr):
-        return True
-    if isinstance(expression, BinaryExpr):
-        return _contains_classical_bit(expression.left) or _contains_classical_bit(
-            expression.right
-        )
-    if isinstance(expression, UnaryExpr):
-        return _contains_classical_bit(expression.operand)
-    return False
 
 
 def lower_circuit_plan(

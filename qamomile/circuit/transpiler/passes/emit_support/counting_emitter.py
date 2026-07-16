@@ -331,6 +331,18 @@ class CountingEmitter:
             angle (Any): Ignored phase angle.
         """
 
+    def emit_global_phase(self, circuit: Any, angle: Any) -> None:
+        """Accept a standalone phase during the internal counting walk.
+
+        The counting emitter observes only peak clean-ancilla demand. It does
+        not materialize any gate, including a phase that the wrapped real
+        emitter will preserve during the subsequent emission walk.
+
+        Args:
+            circuit (Any): Ignored placeholder circuit.
+            angle (Any): Ignored phase angle.
+        """
+
     def emit_cx(self, circuit: Any, control: int, target: int) -> None:
         """Count a CX gate as a no-op.
 

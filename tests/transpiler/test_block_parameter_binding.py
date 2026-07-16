@@ -3,8 +3,8 @@
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.gate import ConcreteControlledU
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
-from qamomile.circuit.ir.types.primitives import QubitType, UIntType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.block_parameter_binding import (
     pair_block_operands,
     pair_block_parameter_operands,
@@ -127,6 +127,86 @@ def test_missing_actual_clears_distinct_provenance_and_display_names() -> None:
     assert "parameter_theta" not in bindings
     assert inner_theta.uuid not in bindings
     assert resolver.resolve_classical_value(inner_theta, bindings) is None
+
+
+def test_runtime_parameter_actual_uses_injected_parameter_factory() -> None:
+    """A declared runtime actual rebinds the callee formal symbolically."""
+    target = Value(type=QubitType(), name="target")
+    formal = Value(type=FloatType(), name="step").with_parameter("step")
+    actual = Value(type=FloatType(), name="angle").with_parameter("angle")
+    block = Block(input_values=[target, formal])
+    resolver = ValueResolver(parameters={"angle"})
+    calls: list[tuple[str, str]] = []
+
+    def factory(name: str, uuid: str) -> object:
+        """Record and return one backend-parameter stand-in."""
+        calls.append((name, uuid))
+        return ("parameter", name, uuid)
+
+    bindings = resolver.bind_block_params(
+        block,
+        [actual],
+        {},
+        parameter_factory=factory,
+    )
+
+    expected = ("parameter", "angle", actual.uuid)
+    assert calls == [("angle", actual.uuid)]
+    assert bindings[formal.uuid] == expected
+    assert bindings["step"] == expected
+
+
+def test_runtime_array_actual_is_structural_alias_for_element_parameters() -> None:
+    """A callee array element keeps the caller's runtime parameter name."""
+    target = Value(type=QubitType(), name="target")
+    length = Value(type=UIntType(), name="length").with_const(3)
+    formal = ArrayValue(
+        type=FloatType(), name="formal", shape=(length,)
+    ).with_parameter("formal")
+    actual = ArrayValue(
+        type=FloatType(), name="actual", shape=(length,)
+    ).with_parameter("actual")
+    element = Value(
+        type=FloatType(),
+        name="formal[2]",
+        parent_array=formal,
+        element_indices=(Value(type=UIntType(), name="index").with_const(2),),
+    )
+    block = Block(input_values=[target, formal])
+    resolver = ValueResolver(parameters={"actual"})
+    calls: list[tuple[str, str]] = []
+
+    bindings = resolver.bind_block_params(
+        block,
+        [actual],
+        {},
+        parameter_factory=lambda name, uuid: calls.append((name, uuid)),
+    )
+
+    assert calls == []
+    assert bindings[formal.uuid] is actual
+    assert resolver.get_parameter_key(element, bindings) == "actual[2]"
+
+
+def test_undeclared_symbolic_actual_does_not_use_parameter_factory() -> None:
+    """Parameter injection remains fail-closed for undeclared symbols."""
+    target = Value(type=QubitType(), name="target")
+    formal = Value(type=FloatType(), name="step").with_parameter("step")
+    actual = Value(type=FloatType(), name="angle").with_parameter("angle")
+    block = Block(input_values=[target, formal])
+    resolver = ValueResolver()
+    calls: list[tuple[str, str]] = []
+
+    bindings = resolver.bind_block_params(
+        block,
+        [actual],
+        {},
+        parameter_factory=lambda name, uuid: calls.append((name, uuid)),
+    )
+
+    assert calls == []
+    assert formal.uuid not in bindings
+    assert "step" not in bindings
 
 
 def test_generic_block_binder_overrides_outer_same_name() -> None:
