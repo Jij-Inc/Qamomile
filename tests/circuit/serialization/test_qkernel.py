@@ -17,6 +17,7 @@ from qamomile.circuit.frontend.qkernel_callable import (
     qkernel_callable_ref,
 )
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.arithmetic_operations import CompOp, CompOpKind
 from qamomile.circuit.ir.operation.callable import (
     CallableBodyRef,
     CallableImplementation,
@@ -97,6 +98,24 @@ def _native_tuple_return(theta: float) -> tuple[bool, float]:
     """Expose a Python tuple return annotation in the static interface."""
     q = qmc.rx(qmc.qubit("q"), theta)
     return qmc.measure(q), theta
+
+
+@qmc.qkernel
+def _comparison_operations(
+    integer: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]:
+    """Expose serializable Bit and mixed Bit-UInt comparisons.
+
+    Args:
+        integer (qmc.UInt): Unsigned-integer equality operand.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]: Bit equality, Bit
+            inequality, mixed equality, and reflected mixed inequality.
+    """
+    left = qmc.measure(qmc.qubit("left"))
+    right = qmc.measure(qmc.qubit("right"))
+    return left == right, left != right, left == integer, integer != right
 
 
 @qmc.qkernel
@@ -344,6 +363,34 @@ def test_qkernel_round_trip_preserves_static_ir_and_interface() -> None:
     original_body = kernel_to_dict(_parent)["artifact"]["body"]
     assert restored_body == original_body
     assert len(message.callable_table) > 0
+
+
+def test_bit_comparison_operations_round_trip() -> None:
+    """Bit and mixed Bit-UInt CompOps survive protobuf serialization."""
+    payload = serialize(_comparison_operations)
+    restored = deserialize(payload)
+    comparisons = [
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, CompOp)
+    ]
+
+    assert [operation.kind for operation in comparisons] == [
+        CompOpKind.EQ,
+        CompOpKind.NEQ,
+        CompOpKind.EQ,
+        CompOpKind.NEQ,
+    ]
+    assert serialize(restored) == payload
+
+
+def test_bit_ordering_operation_is_rejected_during_deserialize() -> None:
+    """A forged ordering relation cannot use Bit comparison operands."""
+    message = _message(_comparison_operations)
+    message.body.operations[4].expression_kind = CompOpKind.LT.name
+
+    with pytest.raises(ValueError, match="numeric scalars.*equality"):
+        _restore(message)
 
 
 def test_scalar_bindings_and_runtime_parameters_work_after_load() -> None:

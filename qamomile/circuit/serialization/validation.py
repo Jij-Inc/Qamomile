@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
     CompOp,
+    CompOpKind,
     CondOp,
     NotOp,
     RuntimeClassicalExpr,
@@ -510,21 +511,52 @@ def _validate_binop(operation: BinOp, location: str) -> None:
     _require_types(operation.results, [expected_result], location, "result")
 
 
+def _supports_comparison_operands(
+    operand_types: Iterable[ValueType],
+    *,
+    equality: bool,
+) -> bool:
+    """Return whether scalar types support one comparison family.
+
+    Args:
+        operand_types (Iterable[ValueType]): Ordered comparison operand types.
+        equality (bool): Whether equality and inequality semantics apply.
+
+    Returns:
+        bool: ``True`` for numeric pairs, or for Bit/UInt pairs when the
+            operation is equality or inequality.
+    """
+    types = tuple(operand_types)
+    numeric_comparison = all(
+        isinstance(value_type, (UIntType, FloatType)) for value_type in types
+    )
+    bit_equality = equality and all(
+        isinstance(value_type, (BitType, UIntType)) for value_type in types
+    )
+    return numeric_comparison or bit_equality
+
+
 def _validate_comparison(operation: CompOp, location: str) -> None:
-    """Validate a scalar numeric comparison.
+    """Validate a scalar comparison.
 
     Args:
         operation (CompOp): Comparison operation to validate.
         location (str): Human-readable operation location.
 
     Raises:
-        ValueError: If operands are not numeric scalars or result is not a bit.
+        ValueError: If the operand types do not support the comparison kind or
+            the result is not a bit.
     """
     _require_arity(operation, 2, 1, location)
-    if not all(
-        isinstance(value.type, (UIntType, FloatType)) for value in operation.operands
+    operand_types = [value.type for value in operation.operands]
+    if not _supports_comparison_operands(
+        operand_types,
+        equality=operation.kind in {CompOpKind.EQ, CompOpKind.NEQ},
     ):
-        raise ValueError(f"{location} operands must be UIntType or FloatType")
+        raise ValueError(
+            f"{location} operands must be numeric scalars, or BitType and "
+            "UIntType for equality"
+        )
     _require_types(operation.results, [BitType()], location, "result")
 
 
@@ -584,11 +616,15 @@ def _validate_runtime_expression(
         RuntimeOpKind.GE,
     }:
         _require_arity(operation, 2, 1, location)
-        if not all(
-            isinstance(value.type, (UIntType, FloatType))
-            for value in operation.operands
+        operand_types = [value.type for value in operation.operands]
+        if not _supports_comparison_operands(
+            operand_types,
+            equality=operation.kind in {RuntimeOpKind.EQ, RuntimeOpKind.NEQ},
         ):
-            raise ValueError(f"{location} operands must be UIntType or FloatType")
+            raise ValueError(
+                f"{location} operands must be numeric scalars, or BitType and "
+                "UIntType for equality"
+            )
         _require_types(operation.results, [BitType()], location, "result")
         return
     if operation.kind in {RuntimeOpKind.AND, RuntimeOpKind.OR}:
