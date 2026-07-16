@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import math
 from typing import Any
@@ -27,38 +28,117 @@ DENSE_TWO_QUBIT_MATRIX = (
 DENSE_TWO_QUBIT_MATRIX += (0.5 + 0.25j) * np.eye(4, dtype=np.complex128)
 
 
-def _build_unitary_kernel(lcu: PauliLCU, *, invert: bool = False) -> qmc.QKernel:
+@qmc.qkernel
+def _identity_block_case(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Return a block-encoding target pair unchanged.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Signal register to preserve.
+        system (qmc.Vector[qmc.Qubit]): System register to preserve.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Unchanged signal
+            and system registers in their original order.
+    """
+    return signal, system
+
+
+@qmc.qkernel
+def _invalid_scalar_block_unitary(
+    signal: qmc.Qubit,
+    system: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Return scalar qubits through an intentionally invalid block ABI.
+
+    Args:
+        signal (qmc.Qubit): Scalar signal qubit.
+        system (qmc.Qubit): Scalar system qubit.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Unchanged scalar qubits.
+    """
+    return signal, system
+
+
+@qmc.qkernel
+def _invalid_keyword_block_unitary(
+    *,
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Return vectors through an intentionally keyword-only block ABI.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Signal register to preserve.
+        system (qmc.Vector[qmc.Qubit]): System register to preserve.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Unchanged input
+            registers.
+    """
+    return signal, system
+
+
+@qmc.qkernel
+def _invalid_reversed_block_unitary(
+    system: qmc.Vector[qmc.Qubit],
+    signal: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Return vectors through an intentionally reversed block ABI.
+
+    Args:
+        system (qmc.Vector[qmc.Qubit]): System register to preserve.
+        signal (qmc.Vector[qmc.Qubit]): Signal register to preserve.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Registers in the
+            required output order despite their invalid input order.
+    """
+    return signal, system
+
+
+def _build_unitary_kernel(
+    encoding: qmc.PauliLCUBlockEncoding,
+    *,
+    invert: bool = False,
+) -> qmc.QKernel:
     """Build an allocation-only kernel exposing the block-encoding unitary.
 
     Args:
-        lcu (PauliLCU): Decomposition whose block encoding should be exposed.
+        encoding (qmc.PauliLCUBlockEncoding): Descriptor whose unitary should
+            be exposed.
         invert (bool): Whether to apply the inverse transform.
             Defaults to ``False``.
 
     Returns:
         qmc.QKernel: Allocation-only kernel for exact unitary inspection.
     """
-    gate = qmc.pauli_lcu_block_encoding(lcu)
-    applied_gate = qmc.inverse(gate) if invert else gate
+    applied_unitary = qmc.inverse(encoding.unitary) if invert else encoding.unitary
 
     @qmc.qkernel
     def kernel() -> qmc.Bit:
         """Allocate registers and apply the selected block-encoding direction."""
-        selection = qmc.qubit_array(
-            qmc.pauli_lcu_num_selection_qubits(lcu), "selection"
-        )
-        system = qmc.qubit_array(lcu.num_qubits, "system")
-        selection, _ = applied_gate(selection, system)
-        return qmc.measure(selection[0])
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = applied_unitary(signal, system)
+        return qmc.measure(signal[0])
 
     return kernel
 
 
-def _qiskit_unitary(lcu: PauliLCU, *, invert: bool = False) -> np.ndarray:
+def _qiskit_unitary(
+    encoding: qmc.PauliLCUBlockEncoding,
+    *,
+    invert: bool = False,
+) -> np.ndarray:
     """Transpile a block encoding and return its exact Qiskit unitary.
 
     Args:
-        lcu (PauliLCU): Decomposition whose unitary should be materialized.
+        encoding (qmc.PauliLCUBlockEncoding): Descriptor whose unitary should
+            be materialized.
         invert (bool): Whether to materialize the inverse transform.
             Defaults to ``False``.
 
@@ -70,26 +150,32 @@ def _qiskit_unitary(lcu: PauliLCU, *, invert: bool = False) -> np.ndarray:
 
     from qamomile.qiskit import QiskitTranspiler
 
-    executable = QiskitTranspiler().transpile(_build_unitary_kernel(lcu, invert=invert))
+    executable = QiskitTranspiler().transpile(
+        _build_unitary_kernel(encoding, invert=invert)
+    )
     quantum_circuit = executable.quantum_circuit.remove_final_measurements(
         inplace=False
     )
     return np.asarray(Operator(quantum_circuit).data)
 
 
-def _top_left_block(unitary: np.ndarray, lcu: PauliLCU) -> np.ndarray:
-    """Extract the all-zero-selection block in Qamomile LSB order.
+def _top_left_block(
+    unitary: np.ndarray,
+    encoding: qmc.PauliLCUBlockEncoding,
+) -> np.ndarray:
+    """Extract the all-zero-signal block in Qamomile LSB order.
 
     Args:
         unitary (np.ndarray): Dense block-encoding unitary.
-        lcu (PauliLCU): Decomposition defining the register widths.
+        encoding (qmc.PauliLCUBlockEncoding): Descriptor defining the register
+            widths.
 
     Returns:
-        np.ndarray: Projected all-zero-selection system block.
+        np.ndarray: Projected all-zero-signal system block.
     """
-    selection_width = qmc.pauli_lcu_num_selection_qubits(lcu)
     system_indices = [
-        basis_index << selection_width for basis_index in range(1 << lcu.num_qubits)
+        basis_index << encoding.num_signal_qubits
+        for basis_index in range(1 << encoding.num_system_qubits)
     ]
     return unitary[np.ix_(system_indices, system_indices)]
 
@@ -111,8 +197,9 @@ def _select_case_fingerprints(
     """
     from qamomile.qiskit import QiskitTranspiler
 
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
     transpiler = QiskitTranspiler()
-    prepared = transpiler.prepare(_build_unitary_kernel(lcu, invert=invert))
+    prepared = transpiler.prepare(_build_unitary_kernel(encoding, invert=invert))
     lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
     pending = [lowered.quantum_circuit]
     while pending:
@@ -216,15 +303,17 @@ def test_qiskit_unitary_has_exact_normalized_top_left_block(
     """Every term-count path embeds the complex matrix without phase alignment."""
     del case_id
     lcu = PauliLCU.from_matrix(matrix)
-    unitary = _qiskit_unitary(lcu)
-    normalization = lcu.alpha if lcu.alpha != 0.0 else 1.0
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
+    unitary = _qiskit_unitary(encoding)
 
     np.testing.assert_allclose(
-        _top_left_block(unitary, lcu),
-        matrix / normalization,
+        _top_left_block(unitary, encoding),
+        matrix / encoding.normalization,
         atol=1e-10,
         rtol=0.0,
     )
+    expected_dimension = 1 << (encoding.num_signal_qubits + encoding.num_system_qubits)
+    assert unitary.shape == (expected_dimension, expected_dimension)
     np.testing.assert_allclose(
         unitary.conj().T @ unitary,
         np.eye(unitary.shape[0]),
@@ -240,10 +329,11 @@ def test_inverse_top_left_block_is_adjoint_matrix() -> None:
         dtype=np.complex128,
     )
     lcu = PauliLCU.from_matrix(matrix)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
 
     np.testing.assert_allclose(
-        _top_left_block(_qiskit_unitary(lcu, invert=True), lcu),
-        matrix.conj().T / lcu.alpha,
+        _top_left_block(_qiskit_unitary(encoding, invert=True), encoding),
+        matrix.conj().T / encoding.normalization,
         atol=1e-10,
         rtol=0.0,
     )
@@ -267,9 +357,9 @@ def test_multi_term_root_composite_round_trips_qkernel_serialization() -> None:
     """A symbolic root signature retains its constant SELECT width on the wire."""
     from qamomile.circuit.serialization import deserialize, serialize
 
-    gate = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(1j * I2 + 0.5 * X))
+    encoding = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(1j * I2 + 0.5 * X))
 
-    payload = serialize(gate)
+    payload = serialize(encoding.unitary)
     assert serialize(deserialize(payload)) == payload
 
 
@@ -295,21 +385,102 @@ def test_factory_builds_only_the_forward_multi_term_kernel(
 
     monkeypatch.setattr(module, "_build_multi_term_encoding", counted_builder)
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
-    gate = module.pauli_lcu_block_encoding(lcu)
+    encoding = module.pauli_lcu_block_encoding(lcu)
 
     assert calls == [lcu]
-    assert qmc.inverse(qmc.inverse(gate)) is gate
+    assert encoding.unitary._block is None
+    assert qmc.inverse(qmc.inverse(encoding.unitary)) is encoding.unitary
 
 
-def test_selection_width_covers_zero_single_and_non_power_of_two_terms() -> None:
-    """The stable two-register ABI retains one signal qubit at small term counts."""
+def test_descriptor_contract_is_frozen_noncallable_and_identity_based() -> None:
+    """The public descriptor exposes exactly the agreed static four fields."""
+    lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
+    repeated = qmc.pauli_lcu_block_encoding(lcu)
+
+    assert isinstance(encoding, qmc.PauliLCUBlockEncoding)
+    assert tuple(field.name for field in dataclasses.fields(encoding)) == (
+        "unitary",
+        "normalization",
+        "num_signal_qubits",
+        "num_system_qubits",
+    )
+    assert isinstance(encoding.unitary, qmc.QKernel)
+    assert tuple(encoding.unitary.signature.parameters) == ("signal", "system")
+    assert encoding.unitary.input_types == {
+        "signal": qmc.Vector[qmc.Qubit],
+        "system": qmc.Vector[qmc.Qubit],
+    }
+    assert encoding.unitary.output_types == [
+        qmc.Vector[qmc.Qubit],
+        qmc.Vector[qmc.Qubit],
+    ]
+    assert encoding.normalization == pytest.approx(lcu.alpha)
+    assert type(encoding.num_signal_qubits) is int
+    assert type(encoding.num_system_qubits) is int
+    assert encoding.num_signal_qubits == 1
+    assert encoding.num_system_qubits == 1
+    assert not callable(encoding)
+    assert not hasattr(encoding, "__dict__")
+    assert not hasattr(encoding, "kernel")
+    assert not hasattr(encoding, "error_bound")
+    assert encoding is not repeated
+    assert encoding != repeated
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        encoding.normalization = 2.0  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        encoding()  # type: ignore[operator]
+
+
+@pytest.mark.parametrize("normalization", [0.0, -1.0, math.inf, math.nan, 10**1000])
+def test_descriptor_rejects_invalid_normalization(normalization: float) -> None:
+    """Descriptor construction rejects non-positive or non-finite scaling."""
+    unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).unitary
+
+    with pytest.raises(ValueError, match="normalization"):
+        qmc.PauliLCUBlockEncoding(unitary, normalization, 1, 1)
+
+
+def test_descriptor_rejects_invalid_field_types_and_widths() -> None:
+    """Descriptor construction enforces its QKernel ABI and positive widths."""
+    unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).unitary
+
+    with pytest.raises(TypeError, match="unitary must be a QKernel"):
+        qmc.PauliLCUBlockEncoding(object(), 1.0, 1, 1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="unitary must have signature"):
+        qmc.PauliLCUBlockEncoding(_invalid_scalar_block_unitary, 1.0, 1, 1)
+    with pytest.raises(TypeError, match="unitary must have signature"):
+        qmc.PauliLCUBlockEncoding(_invalid_keyword_block_unitary, 1.0, 1, 1)
+    with pytest.raises(TypeError, match="unitary must have signature"):
+        qmc.PauliLCUBlockEncoding(_invalid_reversed_block_unitary, 1.0, 1, 1)
+    with pytest.raises(TypeError, match="normalization"):
+        qmc.PauliLCUBlockEncoding(unitary, "1", 1, 1)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="num_signal_qubits"):
+        qmc.PauliLCUBlockEncoding(unitary, 1.0, True, 1)
+    with pytest.raises(TypeError, match="num_system_qubits"):
+        qmc.PauliLCUBlockEncoding(unitary, 1.0, 1, 1.0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="num_signal_qubits"):
+        qmc.PauliLCUBlockEncoding(unitary, 1.0, 0, 1)
+    with pytest.raises(ValueError, match="num_system_qubits"):
+        qmc.PauliLCUBlockEncoding(unitary, 1.0, 1, -1)
+
+
+def test_signal_width_covers_zero_single_and_non_power_of_two_terms() -> None:
+    """The static ABI retains one signal qubit at small term counts."""
     zero = PauliLCU.from_matrix(np.zeros((2, 2), dtype=np.complex128))
     single = PauliLCU.from_matrix(1j * I2)
     three = PauliLCU.from_matrix(1j * I2 + 0.5 * X + 0.25 * np.diag([1, -1]))
 
-    assert qmc.pauli_lcu_num_selection_qubits(zero) == 1
-    assert qmc.pauli_lcu_num_selection_qubits(single) == 1
-    assert qmc.pauli_lcu_num_selection_qubits(three) == 2
+    zero_encoding = qmc.pauli_lcu_block_encoding(zero)
+    single_encoding = qmc.pauli_lcu_block_encoding(single)
+    three_encoding = qmc.pauli_lcu_block_encoding(three)
+
+    assert zero_encoding.normalization == 1.0
+    assert zero.alpha == 0.0
+    assert zero_encoding.num_signal_qubits == 1
+    assert single_encoding.num_signal_qubits == 1
+    assert three_encoding.num_signal_qubits == 2
 
 
 def test_scalar_lcu_is_rejected_by_circuit_factory() -> None:
@@ -320,10 +491,8 @@ def test_scalar_lcu_is_rejected_by_circuit_factory() -> None:
         qmc.pauli_lcu_block_encoding(lcu)
 
 
-def test_lcu_helpers_reject_non_lcu_values() -> None:
-    """Public circuit helpers reject values outside their method-specific API."""
-    with pytest.raises(TypeError, match="PauliLCU"):
-        qmc.pauli_lcu_num_selection_qubits(object())  # type: ignore[arg-type]
+def test_lcu_factory_rejects_non_lcu_values() -> None:
+    """The public factory rejects values outside its Pauli-specific API."""
     with pytest.raises(TypeError, match="PauliLCU"):
         qmc.pauli_lcu_block_encoding(object())  # type: ignore[arg-type]
 
@@ -340,7 +509,7 @@ def test_numpy_integer_pauli_index_builds_block_encoding() -> None:
         ),
     )
 
-    assert qmc.pauli_lcu_block_encoding(lcu).block is not None
+    assert qmc.pauli_lcu_block_encoding(lcu).unitary.block is not None
 
 
 def test_signed_zero_does_not_change_block_compiler_identity() -> None:
@@ -350,36 +519,119 @@ def test_signed_zero_does_not_change_block_compiler_identity() -> None:
     positive_zero = PauliLCU(1, (PauliLCUTerm(complex(-1.0, 0.0), ()),))
     negative_zero = PauliLCU(1, (PauliLCUTerm(complex(-1.0, -0.0), ()),))
 
-    positive_ref = qkernel_callable_ref(qmc.pauli_lcu_block_encoding(positive_zero))
-    negative_ref = qkernel_callable_ref(qmc.pauli_lcu_block_encoding(negative_zero))
+    positive_ref = qkernel_callable_ref(
+        qmc.pauli_lcu_block_encoding(positive_zero).unitary
+    )
+    negative_ref = qkernel_callable_ref(
+        qmc.pauli_lcu_block_encoding(negative_zero).unitary
+    )
     assert positive_ref == negative_ref
 
 
 def test_composite_rejects_wrong_concrete_register_widths() -> None:
-    """Selection and system widths are checked at each specialized call site."""
+    """Plain, inverse, control, and SELECT share exact width diagnostics."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X + 0.25 * np.diag([1, -1]))
-    gate = qmc.pauli_lcu_block_encoding(lcu)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
+    inverse_unitary = qmc.inverse(encoding.unitary)
+    controlled_unitary = qmc.control(encoding.unitary)
+    selected_unitary = qmc.select(
+        (_identity_block_case, encoding.unitary),
+        num_index_qubits=1,
+    )
 
     @qmc.qkernel
-    def wrong_selection() -> qmc.Bit:
-        """Call the two-index-qubit composite with one selection qubit."""
-        selection = qmc.qubit_array(1, "selection")
+    def plain_wrong_signal() -> qmc.Bit:
+        """Call the plain unitary with one signal qubit."""
+        signal = qmc.qubit_array(1, "signal")
         system = qmc.qubit_array(1, "system")
-        selection, _ = gate(selection, system)
-        return qmc.measure(selection[0])
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal[0])
 
     @qmc.qkernel
-    def wrong_system() -> qmc.Bit:
-        """Call the one-system-qubit composite with two system qubits."""
-        selection = qmc.qubit_array(2, "selection")
-        system = qmc.qubit_array(2, "system")
-        selection, _ = gate(selection, system)
-        return qmc.measure(selection[0])
+    def inverse_wrong_signal() -> qmc.Bit:
+        """Call the inverse unitary with one signal qubit."""
+        signal = qmc.qubit_array(1, "signal")
+        system = qmc.qubit_array(1, "system")
+        signal, _ = inverse_unitary(signal, system)
+        return qmc.measure(signal[0])
 
-    with pytest.raises(ValueError, match="requires 2 selection qubits"):
-        wrong_selection.build()
-    with pytest.raises(ValueError, match="requires 1 system qubit"):
-        wrong_system.build()
+    @qmc.qkernel
+    def control_wrong_signal() -> qmc.Bit:
+        """Call the controlled unitary with one signal qubit."""
+        control = qmc.qubit("control")
+        signal = qmc.qubit_array(1, "signal")
+        system = qmc.qubit_array(1, "system")
+        control, signal, _ = controlled_unitary(control, signal, system)
+        return qmc.measure(control)
+
+    @qmc.qkernel
+    def select_wrong_signal() -> qmc.Bit:
+        """Call the nested-SELECT unitary with one signal qubit."""
+        outer = qmc.qubit_array(1, "outer")
+        signal = qmc.qubit_array(1, "signal")
+        system = qmc.qubit_array(1, "system")
+        outer, signal, _ = selected_unitary(outer, signal, system)
+        return qmc.measure(outer[0])
+
+    @qmc.qkernel
+    def plain_wrong_system() -> qmc.Bit:
+        """Call the plain unitary with two system qubits."""
+        signal = qmc.qubit_array(2, "signal")
+        system = qmc.qubit_array(2, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def inverse_wrong_system() -> qmc.Bit:
+        """Call the inverse unitary with two system qubits."""
+        signal = qmc.qubit_array(2, "signal")
+        system = qmc.qubit_array(2, "system")
+        signal, _ = inverse_unitary(signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def control_wrong_system() -> qmc.Bit:
+        """Call the controlled unitary with two system qubits."""
+        control = qmc.qubit("control")
+        signal = qmc.qubit_array(2, "signal")
+        system = qmc.qubit_array(2, "system")
+        control, signal, _ = controlled_unitary(control, signal, system)
+        return qmc.measure(control)
+
+    @qmc.qkernel
+    def select_wrong_system() -> qmc.Bit:
+        """Call the nested-SELECT unitary with two system qubits."""
+        outer = qmc.qubit_array(1, "outer")
+        signal = qmc.qubit_array(2, "signal")
+        system = qmc.qubit_array(2, "system")
+        outer, signal, _ = selected_unitary(outer, signal, system)
+        return qmc.measure(outer[0])
+
+    wrong_signal_kernels = (
+        plain_wrong_signal,
+        inverse_wrong_signal,
+        control_wrong_signal,
+        select_wrong_signal,
+    )
+    for kernel in wrong_signal_kernels:
+        with pytest.raises(ValueError) as error:
+            kernel.build()
+        assert str(error.value) == (
+            "Pauli LCU block encoding requires 2 signal qubits, got 1."
+        )
+
+    wrong_system_kernels = (
+        plain_wrong_system,
+        inverse_wrong_system,
+        control_wrong_system,
+        select_wrong_system,
+    )
+    for kernel in wrong_system_kernels:
+        with pytest.raises(ValueError) as error:
+            kernel.build()
+        assert str(error.value) == (
+            "Pauli LCU block encoding requires 1 system qubit, got 2."
+        )
 
 
 @pytest.mark.parametrize("num_qubits", [1, 2, 3])
@@ -398,38 +650,33 @@ def test_random_complex_two_term_lcu_samples_and_estimates_on_every_sdk(
     x_on_q0 = np.kron(np.eye(dim // 2, dtype=np.complex128), X)
     matrix = identity_weight * np.eye(dim) + x_weight * x_on_q0
     lcu = PauliLCU.from_matrix(matrix, atol=1e-12)
-    gate = qmc.pauli_lcu_block_encoding(lcu)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
     initial_basis = (seed % (1 << max(0, num_qubits - 1))) << 1
 
     @qmc.qkernel
     def sample_kernel() -> qmc.Vector[qmc.Bit]:
-        """Apply the random LCU and measure its selection register."""
-        selection = qmc.qubit_array(
-            qmc.pauli_lcu_num_selection_qubits(lcu), "selection"
-        )
+        """Apply the random LCU and measure its signal register."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(num_qubits, "system")
         _prepare_basis(system, initial_basis, num_qubits)
-        selection, _ = gate(selection, system)
-        return qmc.measure(selection)
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal)
 
     @qmc.qkernel
     def expval_kernel(observable: qmc.Observable) -> qmc.Float:
         """Estimate the success-projected phase-sensitive system observable."""
-        selection = qmc.qubit_array(
-            qmc.pauli_lcu_num_selection_qubits(lcu), "selection"
-        )
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(num_qubits, "system")
         _prepare_basis(system, initial_basis, num_qubits)
-        selection, system = gate(selection, system)
-        return qmc.expval((selection[0], system[0]), observable)
+        signal, system = encoding.unitary(signal, system)
+        return qmc.expval((signal[0], system[0]), observable)
 
     shots = 2048
     sample_executable = sdk_transpiler.transpiler.transpile(sample_kernel)
     results = sample_executable.sample(_executor(sdk_transpiler), shots=shots).result()
     observed_success = _zero_probability(results.results)
 
-    alpha = 1.0 + x_weight
-    expected_success = (1.0 + x_weight**2) / alpha**2
+    expected_success = (1.0 + x_weight**2) / encoding.normalization**2
     sampling_tolerance = (
         6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
     )
@@ -452,7 +699,9 @@ def test_random_complex_two_term_lcu_samples_and_estimates_on_every_sdk(
         bindings={"observable": observable},
     )
     observed_expval = float(expval_executable.run(_executor(sdk_transpiler)).result())
-    expected_expval = 2.0 * np.imag(np.conj(identity_weight) * x_weight) / alpha**2
+    expected_expval = (
+        2.0 * np.imag(np.conj(identity_weight) * x_weight) / encoding.normalization**2
+    )
     expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
     assert observed_expval == pytest.approx(expected_expval, abs=expval_tolerance)
 
@@ -463,20 +712,22 @@ def test_three_term_lcu_executes_two_bit_select_on_every_sdk(
     """A padded non-power-of-two SELECT executes with two index qubits."""
     matrix = 1j * I2 + 0.5 * X + 0.25 * np.diag([1.0, -1.0])
     lcu = PauliLCU.from_matrix(matrix, atol=1e-12)
-    gate = qmc.pauli_lcu_block_encoding(lcu)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
 
     @qmc.qkernel
     def circuit() -> qmc.Vector[qmc.Bit]:
-        """Apply the three-term encoding and measure its selection register."""
-        selection = qmc.qubit_array(2, "selection")
-        system = qmc.qubit_array(1, "system")
-        selection, _ = gate(selection, system)
-        return qmc.measure(selection)
+        """Apply the three-term encoding and measure its signal register."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal)
 
     shots = 4096
     executable = sdk_transpiler.transpiler.transpile(circuit)
     result = executable.sample(_executor(sdk_transpiler), shots=shots).result()
-    expected_success = float(np.linalg.norm(matrix[:, 0]) ** 2 / lcu.alpha**2)
+    expected_success = float(
+        np.linalg.norm(matrix[:, 0]) ** 2 / encoding.normalization**2
+    )
     tolerance = (
         6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
     )
@@ -492,25 +743,27 @@ def test_dense_two_qubit_lcu_executes_wide_select_on_every_sdk(
     """A seeded dense matrix executes all sixteen four-bit SELECT cases."""
     matrix = DENSE_TWO_QUBIT_MATRIX
     lcu = PauliLCU.from_matrix(matrix, atol=1e-12)
-    gate = qmc.pauli_lcu_block_encoding(lcu)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
     basis_index = 3
 
     assert lcu.num_terms == 16
-    assert qmc.pauli_lcu_num_selection_qubits(lcu) == 4
+    assert encoding.num_signal_qubits == 4
 
     @qmc.qkernel
     def circuit() -> qmc.Vector[qmc.Bit]:
-        """Apply the dense encoding and measure its four selection qubits."""
-        selection = qmc.qubit_array(4, "selection")
-        system = qmc.qubit_array(2, "system")
+        """Apply the dense encoding and measure its four signal qubits."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
         _prepare_basis(system, basis_index, 2)
-        selection, _ = gate(selection, system)
-        return qmc.measure(selection)
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal)
 
     shots = 4096
     executable = sdk_transpiler.transpiler.transpile(circuit)
     result = executable.sample(_executor(sdk_transpiler), shots=shots).result()
-    expected_success = float(np.linalg.norm(matrix[:, basis_index]) ** 2 / lcu.alpha**2)
+    expected_success = float(
+        np.linalg.norm(matrix[:, basis_index]) ** 2 / encoding.normalization**2
+    )
     tolerance = (
         6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
     )
@@ -523,19 +776,19 @@ def test_dense_two_qubit_lcu_executes_wide_select_on_every_sdk(
 def test_inverse_round_trip_executes_on_every_sdk(sdk_transpiler: Any) -> None:
     """The generated composite followed by its inverse restores both registers."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
-    gate = qmc.pauli_lcu_block_encoding(lcu)
-    double_inverse = qmc.inverse(qmc.inverse(gate))
-    assert double_inverse is gate
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
+    double_inverse = qmc.inverse(qmc.inverse(encoding.unitary))
+    assert double_inverse is encoding.unitary
 
     @qmc.qkernel
     def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
         """Apply the block encoding and its inverse to a basis state."""
-        selection = qmc.qubit_array(1, "selection")
-        system = qmc.qubit_array(1, "system")
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
         system[0] = qmc.x(system[0])
-        selection, system = double_inverse(selection, system)
-        selection, system = qmc.inverse(gate)(selection, system)
-        return qmc.measure(selection), qmc.measure(system)
+        signal, system = double_inverse(signal, system)
+        signal, system = qmc.inverse(encoding.unitary)(signal, system)
+        return qmc.measure(signal), qmc.measure(system)
 
     executable = sdk_transpiler.transpiler.transpile(circuit)
     result = executable.sample(_executor(sdk_transpiler), shots=128).result()
@@ -547,15 +800,16 @@ def test_inverse_alone_conjugates_complex_phase_on_every_sdk(
 ) -> None:
     """The lazy inverse transform independently exposes the adjoint block."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
-    inverse_gate = qmc.inverse(qmc.pauli_lcu_block_encoding(lcu))
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
+    inverse_unitary = qmc.inverse(encoding.unitary)
 
     @qmc.qkernel
     def circuit(observable: qmc.Observable) -> qmc.Float:
         """Estimate projected system Y after only the inverse encoding."""
-        selection = qmc.qubit_array(1, "selection")
-        system = qmc.qubit_array(1, "system")
-        selection, system = inverse_gate(selection, system)
-        return qmc.expval((selection[0], system[0]), observable)
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, system = inverse_unitary(signal, system)
+        return qmc.expval((signal[0], system[0]), observable)
 
     projected_y = qm_o.Hamiltonian(num_qubits=2)
     projected_y.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 1),), 0.5)
@@ -575,7 +829,9 @@ def test_inverse_alone_conjugates_complex_phase_on_every_sdk(
     inverse_identity_weight = -1j
     x_weight = 0.5
     expected_y = (
-        2.0 * np.imag(np.conj(inverse_identity_weight) * x_weight) / lcu.alpha**2
+        2.0
+        * np.imag(np.conj(inverse_identity_weight) * x_weight)
+        / encoding.normalization**2
     )
     assert observed == pytest.approx(expected_y, abs=1e-6)
 
@@ -583,23 +839,31 @@ def test_inverse_alone_conjugates_complex_phase_on_every_sdk(
 def test_outer_control_observes_single_identity_term_phase(
     sdk_transpiler: Any,
 ) -> None:
-    """A negative identity coefficient kicks its phase onto an outer control."""
-    lcu = PauliLCU.from_matrix(-I2)
-    gate = qmc.pauli_lcu_block_encoding(lcu)
+    """A non-Clifford identity phase interferes through an outer control."""
+    phase = math.pi / 3.0
+    lcu = PauliLCU.from_matrix(np.exp(1j * phase) * I2)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
 
     @qmc.qkernel
     def circuit() -> qmc.Bit:
         """Run a Hadamard test around the single-term block encoding."""
         outer = qmc.h(qmc.qubit("outer"))
-        selection = qmc.qubit_array(1, "selection")
-        system = qmc.qubit_array(1, "system")
-        outer, selection, system = qmc.control(gate)(outer, selection, system)
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        outer, signal, system = qmc.control(encoding.unitary)(
+            outer,
+            signal,
+            system,
+        )
         outer = qmc.h(outer)
         return qmc.measure(outer)
 
+    shots = 4096
     executable = sdk_transpiler.transpiler.transpile(circuit)
-    result = executable.sample(_executor(sdk_transpiler), shots=128).result()
-    assert result.results == [(1, 128)]
+    result = executable.sample(_executor(sdk_transpiler), shots=shots).result()
+    expected = (1.0 + math.cos(phase)) / 2.0
+    tolerance = 6.0 * math.sqrt(expected * (1.0 - expected) / shots) + 0.02
+    assert _zero_probability(result.results) == pytest.approx(expected, abs=tolerance)
 
 
 def test_outer_control_executes_multi_term_prepare_select_path(
@@ -608,15 +872,19 @@ def test_outer_control_executes_multi_term_prepare_select_path(
     """A Hadamard test observes a controlled multi-term block encoding."""
     identity_weight = np.exp(1j * math.pi / 3.0)
     lcu = PauliLCU.from_matrix(identity_weight * I2 + 0.5 * X, atol=1e-12)
-    gate = qmc.pauli_lcu_block_encoding(lcu)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
 
     @qmc.qkernel
     def circuit() -> qmc.Bit:
         """Control the complete PREPARE-SELECT-PREPARE-dagger composite."""
         outer = qmc.h(qmc.qubit("outer"))
-        selection = qmc.qubit_array(1, "selection")
-        system = qmc.qubit_array(1, "system")
-        outer, selection, system = qmc.control(gate)(outer, selection, system)
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        outer, signal, system = qmc.control(encoding.unitary)(
+            outer,
+            signal,
+            system,
+        )
         outer = qmc.h(outer)
         return qmc.measure(outer)
 
@@ -626,10 +894,68 @@ def test_outer_control_executes_multi_term_prepare_select_path(
     zero_probability = (
         sum(count for outcome, count in result.results if int(outcome) == 0) / shots
     )
-    block_overlap = identity_weight / lcu.alpha
+    block_overlap = identity_weight / encoding.normalization
     expected = (1.0 + float(np.real(block_overlap))) / 2.0
     tolerance = 6.0 * math.sqrt(expected * (1.0 - expected) / shots) + 0.02
     assert zero_probability == pytest.approx(expected, abs=tolerance)
+
+
+def test_outer_select_observes_single_identity_term_phase_on_every_sdk(
+    sdk_transpiler: Any,
+) -> None:
+    """A nested SELECT preserves a nontrivial child-unitary global phase."""
+    phase = math.pi / 3.0
+    encoding = qmc.pauli_lcu_block_encoding(
+        PauliLCU.from_matrix(np.exp(1j * phase) * I2)
+    )
+    selected_unitary = qmc.select(
+        (_identity_block_case, encoding.unitary),
+        num_index_qubits=1,
+    )
+
+    @qmc.qkernel
+    def sample_kernel() -> qmc.Bit:
+        """Interfere the identity and phased-unitary SELECT branches."""
+        outer = qmc.qubit_array(1, "outer")
+        outer[0] = qmc.h(outer[0])
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        outer, signal, system = selected_unitary(outer, signal, system)
+        outer[0] = qmc.h(outer[0])
+        return qmc.measure(outer[0])
+
+    @qmc.qkernel
+    def expval_kernel(observable: qmc.Observable) -> qmc.Float:
+        """Estimate phase-sensitive outer-selector Y interference."""
+        outer = qmc.qubit_array(1, "outer")
+        outer[0] = qmc.h(outer[0])
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        outer, signal, system = selected_unitary(outer, signal, system)
+        return qmc.expval(outer[0], observable)
+
+    shots = 4096
+    sample_executable = sdk_transpiler.transpiler.transpile(sample_kernel)
+    sample_result = sample_executable.sample(
+        _executor(sdk_transpiler),
+        shots=shots,
+    ).result()
+    expected_zero = (1.0 + math.cos(phase)) / 2.0
+    sample_tolerance = (
+        6.0 * math.sqrt(expected_zero * (1.0 - expected_zero) / shots) + 0.02
+    )
+    assert _zero_probability(sample_result.results) == pytest.approx(
+        expected_zero,
+        abs=sample_tolerance,
+    )
+
+    expval_executable = sdk_transpiler.transpiler.transpile(
+        expval_kernel,
+        bindings={"observable": qm_o.Y(0)},
+    )
+    observed_y = float(expval_executable.run(_executor(sdk_transpiler)).result())
+    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed_y == pytest.approx(math.sin(phase), abs=expval_tolerance)
 
 
 @pytest.mark.parametrize(
@@ -644,30 +970,30 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
 ) -> None:
     """An LSB-first zero control composes with the phase-bearing inner SELECT.
 
-    With ``alpha = 3 / 2``, the active branch has selection-zero amplitude
+    With ``alpha = 3 / 2``, the active branch has signal-zero amplitude
     ``2j / 3`` and success probability ``5 / 9``. The inactive identity branch
     succeeds with probability one, so their equal superposition succeeds with
     probability ``7 / 9`` and has control-Y expectation ``-2 / 3`` (conjugated
     by inverse).
     """
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
-    gate = qmc.pauli_lcu_block_encoding(lcu)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
 
     @qmc.qkernel
     def forward_lcu(
-        selection: qmc.Vector[qmc.Qubit],
+        signal: qmc.Vector[qmc.Qubit],
         system: qmc.Vector[qmc.Qubit],
     ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
         """Expose the forward composite through a fixed qkernel signature."""
-        return gate(selection, system)
+        return encoding.unitary(signal, system)
 
     @qmc.qkernel
     def inverse_lcu(
-        selection: qmc.Vector[qmc.Qubit],
+        signal: qmc.Vector[qmc.Qubit],
         system: qmc.Vector[qmc.Qubit],
     ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
         """Expose the inverse composite through a fixed qkernel signature."""
-        return qmc.inverse(gate)(selection, system)
+        return qmc.inverse(encoding.unitary)(signal, system)
 
     applied_gate = inverse_lcu if invert else forward_lcu
     controlled_gate = qmc.control(
@@ -682,14 +1008,14 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
         controls = qmc.qubit_array(2, "controls")
         controls[0] = qmc.h(controls[0])
         controls[1] = qmc.x(controls[1])
-        selection = qmc.qubit_array(1, "selection")
+        signal = qmc.qubit_array(1, "signal")
         system = qmc.qubit_array(1, "system")
-        controls, selection, system = controlled_gate(
+        controls, signal, system = controlled_gate(
             controls,
-            selection,
+            signal,
             system,
         )
-        return qmc.measure(selection)
+        return qmc.measure(signal)
 
     @qmc.qkernel
     def expval_kernel(observable: qmc.Observable) -> qmc.Float:
@@ -697,11 +1023,11 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
         controls = qmc.qubit_array(2, "controls")
         controls[0] = qmc.h(controls[0])
         controls[1] = qmc.x(controls[1])
-        selection = qmc.qubit_array(1, "selection")
+        signal = qmc.qubit_array(1, "signal")
         system = qmc.qubit_array(1, "system")
-        controls, selection, system = controlled_gate(
+        controls, signal, system = controlled_gate(
             controls,
-            selection,
+            signal,
             system,
         )
         return qmc.expval(controls[0], observable)
@@ -735,23 +1061,23 @@ def test_zero_operator_path_samples_and_estimates_on_every_sdk(
 ) -> None:
     """The exact-zero path flips its signal and remains executable everywhere."""
     lcu = PauliLCU.from_matrix(np.zeros((2, 2), dtype=np.complex128))
-    gate = qmc.pauli_lcu_block_encoding(lcu)
+    encoding = qmc.pauli_lcu_block_encoding(lcu)
 
     @qmc.qkernel
     def sample_kernel() -> qmc.Bit:
         """Apply the zero encoding and measure its signal qubit."""
-        selection = qmc.qubit_array(1, "selection")
-        system = qmc.qubit_array(1, "system")
-        selection, _ = gate(selection, system)
-        return qmc.measure(selection[0])
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal[0])
 
     @qmc.qkernel
     def expval_kernel(observable: qmc.Observable) -> qmc.Float:
         """Apply the zero encoding and estimate signal Z."""
-        selection = qmc.qubit_array(1, "selection")
-        system = qmc.qubit_array(1, "system")
-        selection, _ = gate(selection, system)
-        return qmc.expval(selection[0], observable)
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.expval(signal[0], observable)
 
     sample_executable = sdk_transpiler.transpiler.transpile(sample_kernel)
     sample_result = sample_executable.sample(
