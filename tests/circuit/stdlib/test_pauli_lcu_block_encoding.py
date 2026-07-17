@@ -664,7 +664,7 @@ def test_random_complex_two_term_lcu_samples_and_estimates_on_every_sdk(
 
     @qmc.qkernel
     def expval_kernel(observable: qmc.Observable) -> qmc.Float:
-        """Estimate the success-projected phase-sensitive system observable."""
+        """Estimate a phase-sensitive observable on the all-zero signal block."""
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(num_qubits, "system")
         _prepare_basis(system, initial_basis, num_qubits)
@@ -674,14 +674,20 @@ def test_random_complex_two_term_lcu_samples_and_estimates_on_every_sdk(
     shots = 2048
     sample_executable = sdk_transpiler.transpiler.transpile(sample_kernel)
     results = sample_executable.sample(_executor(sdk_transpiler), shots=shots).result()
-    observed_success = _zero_probability(results.results)
+    observed_zero_signal_probability = _zero_probability(results.results)
 
-    expected_success = (1.0 + x_weight**2) / encoding.normalization**2
+    expected_zero_signal_probability = (1.0 + x_weight**2) / encoding.normalization**2
     sampling_tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
-    assert observed_success == pytest.approx(
-        expected_success,
+    assert observed_zero_signal_probability == pytest.approx(
+        expected_zero_signal_probability,
         abs=sampling_tolerance,
     )
 
@@ -725,14 +731,20 @@ def test_three_term_lcu_executes_two_bit_select_on_every_sdk(
     shots = 4096
     executable = sdk_transpiler.transpiler.transpile(circuit)
     result = executable.sample(_executor(sdk_transpiler), shots=shots).result()
-    expected_success = float(
+    expected_zero_signal_probability = float(
         np.linalg.norm(matrix[:, 0]) ** 2 / encoding.normalization**2
     )
     tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
     assert _zero_probability(result.results) == pytest.approx(
-        expected_success,
+        expected_zero_signal_probability,
         abs=tolerance,
     )
 
@@ -761,14 +773,20 @@ def test_dense_two_qubit_lcu_executes_wide_select_on_every_sdk(
     shots = 4096
     executable = sdk_transpiler.transpiler.transpile(circuit)
     result = executable.sample(_executor(sdk_transpiler), shots=shots).result()
-    expected_success = float(
+    expected_zero_signal_probability = float(
         np.linalg.norm(matrix[:, basis_index]) ** 2 / encoding.normalization**2
     )
     tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
     assert _zero_probability(result.results) == pytest.approx(
-        expected_success,
+        expected_zero_signal_probability,
         abs=tolerance,
     )
 
@@ -971,10 +989,10 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
     """An LSB-first zero control composes with the phase-bearing inner SELECT.
 
     With ``alpha = 3 / 2``, the active branch has signal-zero amplitude
-    ``2j / 3`` and success probability ``5 / 9``. The inactive identity branch
-    succeeds with probability one, so their equal superposition succeeds with
-    probability ``7 / 9`` and has control-Y expectation ``-2 / 3`` (conjugated
-    by inverse).
+    ``2j / 3`` and all-zero signal projection probability ``5 / 9``. The
+    inactive identity branch has projection probability one, so their equal
+    superposition has projection probability ``7 / 9`` and control-Y
+    expectation ``-2 / 3`` (conjugated by inverse).
     """
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
     encoding = qmc.pauli_lcu_block_encoding(lcu)
@@ -1004,7 +1022,7 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
 
     @qmc.qkernel
     def sample_kernel() -> qmc.Vector[qmc.Bit]:
-        """Measure LCU success across active and inactive control branches."""
+        """Measure the all-zero signal component across both control branches."""
         controls = qmc.qubit_array(2, "controls")
         controls[0] = qmc.h(controls[0])
         controls[1] = qmc.x(controls[1])
@@ -1038,12 +1056,18 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
         _executor(sdk_transpiler),
         shots=shots,
     ).result()
-    expected_success = 7.0 / 9.0
+    expected_zero_signal_probability = 7.0 / 9.0
     sampling_tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
     assert _zero_probability(sample_result.results) == pytest.approx(
-        expected_success,
+        expected_zero_signal_probability,
         abs=sampling_tolerance,
     )
 

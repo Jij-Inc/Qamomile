@@ -7,6 +7,7 @@ import dataclasses
 import pytest
 
 import qamomile.circuit as qmc
+import qamomile.circuit.transpiler.circuit_ir.lowering as circuit_ir_lowering
 import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.circuit_ir import (
     SELECT_SEMANTIC_KEY,
@@ -141,6 +142,48 @@ def _equivalent_named_case_select() -> qmc.Bit:
     index = qmc.qubit("index")
     target = qmc.qubit("target")
     index, target = qmc.select([_select_x, _select_x_alias])(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _repeated_select_in_static_loop() -> qmc.Vector[qmc.Bit]:
+    """Apply one parameter-free SELECT to four distinct target wires."""
+    index = qmc.x(qmc.qubit("index"))
+    targets = qmc.qubit_array(4, "targets")
+    for iteration in qmc.range(4):
+        index, targets[iteration] = qmc.select([_select_identity, _select_x])(
+            index,
+            targets[iteration],
+        )
+    return qmc.measure(targets)
+
+
+@qmc.qkernel
+def _select_flag_identity(qubit: qmc.Qubit, flag: qmc.UInt) -> qmc.Qubit:
+    """Accept a compile-time flag without changing the target."""
+    _ = flag
+    return qubit
+
+
+@qmc.qkernel
+def _select_flag_x(qubit: qmc.Qubit, flag: qmc.UInt) -> qmc.Qubit:
+    """Apply X only for a nonzero compile-time flag."""
+    if flag:
+        qubit = qmc.x(qubit)
+    return qubit
+
+
+@qmc.qkernel
+def _select_with_varying_loop_binding() -> qmc.Bit:
+    """Apply one SELECT under two distinct case specializations."""
+    index = qmc.x(qmc.qubit("index"))
+    target = qmc.qubit("target")
+    for flag in qmc.range(2):
+        index, target = qmc.select([_select_flag_identity, _select_flag_x])(
+            index,
+            target,
+            flag=flag,
+        )
     return qmc.measure(target)
 
 
@@ -888,6 +931,62 @@ def test_select_case_fingerprints_ignore_display_only_callable_names() -> None:
     fingerprints = identity.arguments.get("case_fingerprints")
     assert isinstance(fingerprints, tuple)
     assert fingerprints[0] == fingerprints[1]
+
+
+def test_select_case_lowering_is_reused_across_static_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parameter-free cases lower and fingerprint once per case block."""
+    lowering_calls = 0
+    fingerprint_calls = 0
+    original_lower = CircuitLoweringPass._lower_select_case
+    original_fingerprint = circuit_ir_lowering._circuit_program_fingerprint
+
+    def count_lowering(*args: object, **kwargs: object):
+        nonlocal lowering_calls
+        lowering_calls += 1
+        return original_lower(*args, **kwargs)
+
+    def count_fingerprint(program: CircuitProgram) -> str:
+        nonlocal fingerprint_calls
+        fingerprint_calls += 1
+        return original_fingerprint(program)
+
+    monkeypatch.setattr(CircuitLoweringPass, "_lower_select_case", count_lowering)
+    monkeypatch.setattr(
+        circuit_ir_lowering,
+        "_circuit_program_fingerprint",
+        count_fingerprint,
+    )
+
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_repeated_select_in_static_loop)
+    lower_circuit_plan(transpiler.plan_circuit(prepared))
+
+    assert lowering_calls == 2
+    assert fingerprint_calls == 2
+
+
+def test_select_case_cache_separates_case_local_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct case parameter values produce distinct cached programs."""
+    lowering_calls = 0
+    original_lower = CircuitLoweringPass._lower_select_case
+
+    def count_lowering(*args: object, **kwargs: object):
+        nonlocal lowering_calls
+        lowering_calls += 1
+        return original_lower(*args, **kwargs)
+
+    monkeypatch.setattr(CircuitLoweringPass, "_lower_select_case", count_lowering)
+
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_select_with_varying_loop_binding)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+
+    assert lowering_calls == 4
+    verify_circuit(lowered.quantum_circuit)
 
 
 def _alpha_named_loop_program(loop_name: str) -> CircuitProgram:

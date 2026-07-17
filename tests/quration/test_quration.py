@@ -821,14 +821,20 @@ def test_quration_samples_two_term_complex_pauli_lcu() -> None:
     assert sum(counts.values()) == shots
     assert set(counts) <= {0, 1}
 
-    expected_success = (
+    expected_zero_signal_probability = (
         abs(1j) ** 2 + abs(0.5) ** 2
     ) / _quration_two_term_encoding.normalization**2
     tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
     assert counts.get(0, 0) / shots == pytest.approx(
-        expected_success,
+        expected_zero_signal_probability,
         abs=tolerance,
     )
 

@@ -48,8 +48,8 @@ class PauliLCUBlockEncoding:
     logical data register on which ``A`` acts. ``signal`` is the complete
     source-level ancilla bundle whose all-zero state selects the encoded block.
     The unitary returns the same logical wires in the same order and acts
-    unitarily for arbitrary signal inputs; the signal may contain failure
-    components rather than returning to zero after one application.
+    unitarily for arbitrary signal inputs; after one application, the signal
+    may have non-zero components rather than returning entirely to zero.
 
     For the all-zero signal isometry ``V0``, the exact retained LCU satisfies
 
