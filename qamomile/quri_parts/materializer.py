@@ -7,7 +7,6 @@ import math
 import numbers
 from typing import Any
 
-from qamomile._utils import is_close_zero
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 from qamomile.circuit.transpiler.circuit_ir import (
     ALL_PRIMITIVE_GATES,
@@ -17,6 +16,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     BinaryOperator,
     CallControlMode,
     CallInstruction,
+    CallPhaseMode,
     CallTransformCapabilities,
     CircuitCapabilities,
     CircuitInstruction,
@@ -42,6 +42,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     UnaryOperator,
     WhileInstruction,
     WireId,
+    has_mid_circuit_measurement,
     verify_circuit,
 )
 from qamomile.circuit.transpiler.errors import EmitError
@@ -102,7 +103,7 @@ class QuriPartsMaterializer:
                 parameter_form=ScalarExpressionForm.CONCRETE_ONLY,
             ),
             pauli_time=numeric,
-            global_phase=None,
+            global_phase=numeric,
             generic_calls=CallTransformCapabilities(
                 supports_power=True,
                 supports_inverse=True,
@@ -117,6 +118,8 @@ class QuriPartsMaterializer:
                     GateKind.CRZ,
                 },
                 controlled_pauli_time=controlled_numeric,
+                phase_mode=CallPhaseMode.EXPLICIT_CORRECTION,
+                controlled_phase_scalars=numeric,
             ),
             supports_dynamic_if=False,
             supports_dynamic_while=False,
@@ -132,11 +135,14 @@ class QuriPartsMaterializer:
     def materialize(
         self,
         program: CircuitProgram,
+        parameter_names: tuple[str, ...] = (),
     ) -> MaterializedCircuit[Any]:
         """Build a QURI Parts circuit and static-measurement metadata.
 
         Args:
             program (CircuitProgram): Verified circuit-family program.
+            parameter_names (tuple[str, ...]): Public runtime-parameter ABI in
+                positional order. Defaults to an empty tuple.
 
         Returns:
             MaterializedCircuit[Any]: QURI circuit, parameters, and static
@@ -148,12 +154,38 @@ class QuriPartsMaterializer:
                 linear.
         """
         verify_circuit(program)
+        if has_mid_circuit_measurement(program.operations):
+            raise EmitError(
+                "QURI Parts static sampling cannot represent a mid-circuit "
+                "measurement whose post-measurement qubit is used again. "
+                "Use a backend with dynamic measurement support or make the "
+                "measurement terminal."
+            )
         ancilla_count = _ancilla_demand(program.operations)
-        emitter = QuriPartsGateEmitter()
-        circuit = emitter.create_circuit(program.num_qubits + ancilla_count, 0)
+        needs_phase_carrier = _requires_phase_carrier(program)
+        phase_carrier = (
+            program.num_qubits + ancilla_count if needs_phase_carrier else None
+        )
+        emitter = QuriPartsGateEmitter(phase_carrier=phase_carrier)
+        circuit = emitter.create_circuit(
+            program.num_qubits + ancilla_count + int(needs_phase_carrier),
+            0,
+        )
         wires = {wire: index for index, wire in enumerate(program.input_wires)}
-        parameters: dict[str, Any] = {}
+        parameters = {name: emitter.create_parameter(name) for name in parameter_names}
         measurements: dict[int, int] = {}
+        phase = _materialize_scalar(
+            program.global_phase,
+            parameters,
+            {},
+            emitter,
+        )
+        if not _is_zero(program.global_phase):
+            emitter.emit_global_phase(
+                circuit,
+                phase,
+                carrier=0 if program.num_qubits else None,
+            )
         _emit_region(
             program.operations,
             circuit,
@@ -164,16 +196,12 @@ class QuriPartsMaterializer:
             emitter,
             tuple(range(program.num_qubits, program.num_qubits + ancilla_count)),
         )
-        if not _is_zero(program.global_phase):
-            raise QamomileQuriPartsTranspileError(
-                "QURI Parts cannot represent a program-level global phase; "
-                "it must be legalized before materialization"
-            )
         return MaterializedCircuit(
             artifact=circuit,
             parameters=parameters,
             measurement_qubit_map=measurements,
             parameter_order=tuple(parameters),
+            implicit_output_qubit_indices=tuple(range(program.num_qubits)),
         )
 
 
@@ -495,6 +523,15 @@ def _emit_transformed_call(
     targets = actual[callee.controls :]
     controls = (*inherited_controls, *own_controls)
     inverse = inherited_inverse ^ callee.inverse
+    phase_expression: ScalarExpr = callee.body.global_phase
+    if inverse and not _is_zero(phase_expression):
+        phase_expression = UnaryExpr(UnaryOperator.NEG, phase_expression)
+    phase = _materialize_scalar(
+        phase_expression,
+        parameters,
+        loop_variables,
+        emitter,
+    )
     for _ in range(callee.power):
         body_entry = callee.body.output_wires if inverse else callee.body.input_wires
         body_exit = callee.body.input_wires if inverse else callee.body.output_wires
@@ -512,7 +549,60 @@ def _emit_transformed_call(
             inverse,
         )
         targets = [body_wires[wire] for wire in body_exit]
+        if not _is_zero(phase_expression):
+            if controls:
+                _emit_projector_phase(
+                    circuit,
+                    phase,
+                    controls,
+                    emitter,
+                    ancillas,
+                )
+            else:
+                emitter.emit_global_phase(
+                    circuit,
+                    phase,
+                    carrier=targets[0] if targets else None,
+                )
     _publish(call_outputs, [*own_controls, *targets], wires)
+
+
+def _emit_projector_phase(
+    circuit: Any,
+    phase: Any,
+    controls: tuple[int, ...],
+    emitter: QuriPartsGateEmitter,
+    ancillas: tuple[int, ...],
+) -> None:
+    """Emit a phase conditioned on every active control being one.
+
+    Args:
+        circuit (Any): Destination QURI Parts circuit.
+        phase (Any): Concrete or linear phase expression.
+        controls (tuple[int, ...]): Accumulated coherent control slots.
+        emitter (QuriPartsGateEmitter): Primitive gate adapter.
+        ancillas (tuple[int, ...]): Available clean ancillary slots.
+
+    Raises:
+        EmitError: If no controls are supplied or the ancilla pool is too
+            small for a multi-controlled phase.
+    """
+    if not controls:
+        raise EmitError("Projector phase requires at least one control")
+    if len(controls) == 1:
+        emitter.emit_p(circuit, controls[0], phase)
+        return
+    outer_controls = tuple(controls[index] for index in range(len(controls) - 1))
+    target = controls[len(controls) - 1]
+    _emit_controlled_gate(
+        emitter,
+        circuit,
+        GateKind.P,
+        outer_controls,
+        (target,),
+        (phase,),
+        ancillas,
+    )
 
 
 def _emit_transformed_region(
@@ -855,21 +945,6 @@ def _emit_controlled_pauli_evolution(
                 emitter.emit_h(circuit, slot)
                 emitter.emit_s(circuit, slot)
 
-    constant = operation.hamiltonian.constant
-    if abs(constant) > 0:
-        phase = -float(constant.real) * float(time)
-        if len(controls) == 1:
-            emitter.emit_p(circuit, controls[0], phase)
-        else:
-            _emit_controlled_gate(
-                emitter,
-                circuit,
-                GateKind.P,
-                controls[:-1],
-                (controls[-1],),
-                (phase,),
-                ancillas,
-            )
     _publish(operation.outputs, slots, wires)
 
 
@@ -973,7 +1048,11 @@ def _emit_controlled_gate(
     if kind in {GateKind.Y, GateKind.CY}:
         intrinsic_controls = qubits[:-1] if kind is GateKind.CY else ()
         target = qubits[-1]
-        emitter.emit_s(circuit, target)
+        # Y = S X Sdg. Circuit APIs append in execution order, so the
+        # controlled-X conjugation must be Sdg -> MCX -> S. Reversing these
+        # two phase gates realizes controlled(-Y), whose sign is observable
+        # on a superposed control.
+        emitter.emit_sdg(circuit, target)
         _emit_multi_controlled_x(
             emitter,
             circuit,
@@ -981,7 +1060,7 @@ def _emit_controlled_gate(
             target,
             ancillas,
         )
-        emitter.emit_sdg(circuit, target)
+        emitter.emit_s(circuit, target)
         return
     if len(controls) > 1:
         required = len(controls) - 1
@@ -1235,9 +1314,104 @@ def _is_zero(expression: ScalarExpr) -> bool:
     Returns:
         bool: True only for a zero literal.
     """
-    return isinstance(expression, LiteralExpr) and is_close_zero(
-        float(expression.value)
+    return isinstance(expression, LiteralExpr) and not float(expression.value)
+
+
+def _contains_runtime_parameter(expression: ScalarExpr) -> bool:
+    """Return whether a scalar expression contains a runtime parameter.
+
+    Loop variables are intentionally concrete here because QURI Parts unrolls
+    every accepted ``ForInstruction`` before gate emission.
+
+    Args:
+        expression (ScalarExpr): Expression to inspect recursively.
+
+    Returns:
+        bool: True when a ``ParameterExpr`` occurs in the expression tree.
+    """
+    if isinstance(expression, ParameterExpr):
+        return True
+    if isinstance(expression, UnaryExpr):
+        return _contains_runtime_parameter(expression.operand)
+    if isinstance(expression, BinaryExpr):
+        return _contains_runtime_parameter(
+            expression.left
+        ) or _contains_runtime_parameter(expression.right)
+    return False
+
+
+def _requires_phase_carrier(program: CircuitProgram) -> bool:
+    """Return whether QURI materialization can emit a scalar phase.
+
+    Args:
+        program (CircuitProgram): Verified circuit program to inspect.
+
+    Returns:
+        bool: True when a dedicated clean phase-carrier qubit is required.
+    """
+    root_requires_carrier = not _is_zero(program.global_phase) and (
+        program.num_qubits == 0 or _contains_runtime_parameter(program.global_phase)
     )
+    return root_requires_carrier or _region_requires_phase_carrier(
+        program.operations,
+        inherited_controls=0,
+    )
+
+
+def _region_requires_phase_carrier(
+    operations: tuple[CircuitInstruction, ...],
+    inherited_controls: int,
+) -> bool:
+    """Inspect one region for paths that call ``emit_global_phase``.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Instructions to inspect.
+        inherited_controls (int): Coherent controls inherited from callers.
+
+    Returns:
+        bool: True when any executable path requires the clean carrier.
+    """
+    for operation in operations:
+        if isinstance(operation, GateInstruction):
+            if operation.kind in {GateKind.P, GateKind.CP} and any(
+                _contains_runtime_parameter(parameter)
+                for parameter in operation.parameters
+            ):
+                return True
+        elif isinstance(operation, CallInstruction):
+            effective_controls = inherited_controls + operation.callee.controls
+            phase = operation.callee.body.global_phase
+            if not _is_zero(phase) and (
+                _contains_runtime_parameter(phase)
+                or (effective_controls == 0 and operation.callee.body.num_qubits == 0)
+            ):
+                return True
+            if _region_requires_phase_carrier(
+                operation.callee.body.operations,
+                effective_controls,
+            ):
+                return True
+        elif isinstance(operation, ForInstruction):
+            if operation.indexset and _region_requires_phase_carrier(
+                operation.body,
+                inherited_controls,
+            ):
+                return True
+        elif isinstance(operation, IfInstruction):
+            if _region_requires_phase_carrier(
+                operation.true_body,
+                inherited_controls,
+            ) or _region_requires_phase_carrier(
+                operation.false_body,
+                inherited_controls,
+            ):
+                return True
+        elif isinstance(operation, WhileInstruction) and _region_requires_phase_carrier(
+            operation.body,
+            inherited_controls,
+        ):
+            return True
+    return False
 
 
 def _ancilla_demand(
@@ -1277,11 +1451,18 @@ def _ancilla_demand(
             if inherited_controls > 1:
                 demand = max(demand, inherited_controls - 1)
         elif isinstance(operation, CallInstruction):
+            effective_controls = inherited_controls + operation.callee.controls
+            phase_demand = (
+                max(0, effective_controls - 2)
+                if not _is_zero(operation.callee.body.global_phase)
+                else 0
+            )
             demand = max(
                 demand,
+                phase_demand,
                 _ancilla_demand(
                     operation.callee.body.operations,
-                    inherited_controls + operation.callee.controls,
+                    effective_controls,
                 ),
             )
         elif isinstance(operation, ForInstruction):

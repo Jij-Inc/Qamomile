@@ -87,6 +87,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
@@ -393,8 +394,11 @@ class _Canonicalizer:
         Uses ``Operation.all_input_values`` / ``Operation.replace_values``
         so subclass-extra Value fields (e.g., ``ControlledU.power``,
         ``ForOperation.loop_var_value``) are rewritten consistently.
-        Recurses into nested control-flow ops via ``HasNestedOps`` and
-        into nested operation Blocks.
+        Recurses into nested control-flow ops via ``HasNestedOps`` and into
+        operation-owned Blocks, including every ``SelectOperation`` case.
+        Each owned Block retains its fresh formal namespace: it is
+        canonicalized independently rather than receiving parent-value
+        substitutions.
 
         Args:
             op (Operation): The Operation to canonicalize.
@@ -435,11 +439,32 @@ class _Canonicalizer:
                 ],
             )
 
-        if isinstance(new_op, InvokeOperation) and new_op.body is not None:
-            sub = self.canonical_block(new_op.body)
-            assert new_op.definition is not None
-            definition = dataclasses.replace(new_op.definition, body=sub)
-            new_op = dataclasses.replace(new_op, definition=definition)
+        if isinstance(new_op, InvokeOperation) and new_op.definition is not None:
+            definition = new_op.definition
+            body = (
+                self.canonical_block(definition.body)
+                if definition.body is not None
+                else None
+            )
+            implementations = [
+                dataclasses.replace(
+                    implementation,
+                    body=(
+                        self.canonical_block(implementation.body)
+                        if implementation.body is not None
+                        else None
+                    ),
+                )
+                for implementation in definition.implementations
+            ]
+            new_op = dataclasses.replace(
+                new_op,
+                definition=dataclasses.replace(
+                    definition,
+                    body=body,
+                    implementations=implementations,
+                ),
+            )
         if isinstance(new_op, InverseBlockOperation):
             if new_op.source_block is not None:
                 sub = self.canonical_block(new_op.source_block)
@@ -455,6 +480,19 @@ class _Canonicalizer:
         if isinstance(new_op, ControlledUOperation) and new_op.block is not None:
             sub_block = self.canonical_block(new_op.block)
             new_op = dataclasses.replace(new_op, block=sub_block)
+
+        # SELECT cases are operation-owned callable regions, not
+        # ``HasNestedOps`` lists in the parent's SSA scope. Canonicalize each
+        # Block through the shared deterministic counter while never applying
+        # the parent's substitution map to the case formals.
+        if isinstance(new_op, SelectOperation):
+            new_op = dataclasses.replace(
+                new_op,
+                case_blocks=[
+                    self.canonical_block(case_block)
+                    for case_block in new_op.case_blocks
+                ],
+            )
 
         return new_op
 
@@ -617,7 +655,8 @@ def _token(obj: Any) -> str:
     ``bytes``, ``numpy.ndarray`` (rendered as dtype + shape + a digest
     of the raw buffer), ``Hamiltonian`` (rendered structurally,
     order-independently over its terms — see ``_hamiltonian_token``),
-    tuples/lists, dicts (sorted by key), ``ValueBase`` instances
+    tuples/lists, dicts (sorted by key), nested ``Block`` instances,
+    ``ValueBase`` instances
     (rendered as a compact ``<ClassName:UUID>`` reference since the
     full state is emitted in the value-declaration section), and
     ``ValueType`` instances (rendered via ``.label()`` to avoid
@@ -669,9 +708,17 @@ def _token(obj: Any) -> str:
         # potentially large array is allocated; ``ascontiguousarray``
         # already guarantees a C-contiguous buffer.
         digest = hashlib.sha256(memoryview(data.reshape(-1)).cast("B")).hexdigest()
-        return f"ndarray<dtype={data.dtype.str},shape={data.shape},sha256={digest}>"
+        return f"ndarray<dtype={data.dtype.str},shape={obj.shape},sha256={digest}>"
     if isinstance(obj, Hamiltonian):
         return _hamiltonian_token(obj)
+    if isinstance(obj, Block):
+        # Blocks can appear inside CallableDef dataclass fields. Their normal
+        # dataclass repr includes display-only names and would reintroduce
+        # build-local identity after canonicalization, so render them through
+        # the same semantic emitter used by the top-level block.
+        block_lines: list[str] = []
+        _emit_block(obj, block_lines, indent=0)
+        return "Block<" + "\n".join(block_lines) + ">"
     if isinstance(obj, ValueBase):
         return _value_token(obj)
     if isinstance(obj, ValueType):
@@ -882,11 +929,14 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _collect_from_operation(child, visit)
-    if isinstance(op, InvokeOperation):
-        if op.body is not None:
+    if isinstance(op, InvokeOperation) and op.definition is not None:
+        if op.definition.body is not None:
             # Nested block's values participate in the same canonical
             # universe; recurse to ensure they are declared too.
-            _collect_from_subblock(op.body, visit)
+            _collect_from_subblock(op.definition.body, visit)
+        for implementation in op.definition.implementations:
+            if implementation.body is not None:
+                _collect_from_subblock(implementation.body, visit)
     if isinstance(op, InverseBlockOperation):
         if op.source_block is not None:
             _collect_from_subblock(op.source_block, visit)
@@ -894,6 +944,9 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
             _collect_from_subblock(op.implementation_block, visit)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _collect_from_subblock(op.block, visit)
+    if isinstance(op, SelectOperation):
+        for case_block in op.case_blocks:
+            _collect_from_subblock(case_block, visit)
 
 
 def _collect_from_subblock(sub: Block, visit: Any) -> None:
@@ -937,6 +990,7 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
         "implementation_block",
         "source_block",
         "block",
+        "case_blocks",
         # Control-flow source labels. Their UUID-bearing formal Values and
         # operation structure carry the semantics.
         "loop_var",
@@ -1081,6 +1135,11 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
     if isinstance(op, ControlledUOperation) and op.block is not None:
         out.append(f"{pad}{_INLINE_INDENT}unitary_block:")
         _emit_block(op.block, out, indent + 2)
+
+    if isinstance(op, SelectOperation):
+        for index, case_block in enumerate(op.case_blocks):
+            out.append(f"{pad}{_INLINE_INDENT}case[{index}]:")
+            _emit_block(case_block, out, indent + 2)
 
 
 def _extra_field_tokens(op: Operation) -> list[str]:

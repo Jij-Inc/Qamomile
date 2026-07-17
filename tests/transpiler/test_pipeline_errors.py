@@ -119,8 +119,10 @@ class TestMultipleQuantumSegmentsErrorContract:
         assert "3 quantum segments" in str(err)
 
     def test_error_is_exception(self) -> None:
-        """MultipleQuantumSegmentsError inherits from Exception."""
-        assert issubclass(MultipleQuantumSegmentsError, Exception)
+        """MultipleQuantumSegmentsError follows the compile-error contract."""
+        from qamomile.circuit.transpiler.errors import QamomileCompileError
+
+        assert issubclass(MultipleQuantumSegmentsError, QamomileCompileError)
 
     def test_true_multi_segment_program_keeps_segment_count_message(
         self, qiskit_transpiler

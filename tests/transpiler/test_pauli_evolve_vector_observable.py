@@ -21,10 +21,8 @@ from qamomile.qiskit.transpiler import QiskitTranspiler
 
 
 def _pad_to(num_qubits: int, term: qm_o.Hamiltonian) -> qm_o.Hamiltonian:
-    """Pad a Hamiltonian with a zero-coefficient identity on the highest
-    qubit so it declares the full register width. ``pauli_evolve`` expects
-    ``Hamiltonian.num_qubits`` to equal the qubit register size."""
-    padded = term + 0.0 * qm_o.Z(num_qubits - 1)
+    """Pad a Hamiltonian to the register's declared width."""
+    padded = term + qm_o.Hamiltonian.zero(num_qubits=num_qubits)
     assert padded.num_qubits == num_qubits
     return padded
 

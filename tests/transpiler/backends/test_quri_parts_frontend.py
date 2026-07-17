@@ -162,13 +162,12 @@ def _run_statevector(circuit, parameter_bindings=None) -> np.ndarray:
 
 
 def _strip_zero_ancillas(statevector: np.ndarray, num_data_qubits: int) -> np.ndarray:
-    """Project out trailing ancilla qubits that must have uncomputed to zero.
+    """Project out trailing internal qubits that must finish in zero.
 
-    The shared multi-controlled lowering appends clean ancilla qubits
-    after the kernel's data qubits and uncomputes them before the
-    circuit ends, so every amplitude with any ancilla bit set must be
-    zero and the data-qubit statevector is the leading
-    ``2**num_data_qubits`` amplitudes in the little-endian convention.
+    Multi-control ancillas and QURI's scalar-phase carrier are appended after
+    the qkernel's data qubits. Every amplitude with any internal bit set must
+    be zero, so the data-qubit statevector is the leading
+    ``2**num_data_qubits`` amplitudes in little-endian convention.
     Thin wrapper over :func:`assert_ancillas_uncomputed` expressing this
     module's natural unit (a data-qubit count); that helper holds the
     shared ancilla-uncomputation assertion.
@@ -1703,7 +1702,7 @@ class TestGateCombinations:
         """
 
         @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
+        def circuit() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
             # Alice's qubit to teleport (prepared in |1>)
             alice = qmc.qubit("alice")
             alice = qmc.x(alice)
@@ -1718,12 +1717,13 @@ class TestGateCombinations:
             alice, bell0 = qmc.cx(alice, bell0)
             alice = qmc.h(alice)
 
-            # Measure all three qubits
-            q = qmc.qubit_array(3, "out")
-            q[0] = alice
-            q[1] = bell0
-            q[2] = bell1
-            return qmc.measure(q)
+            # Measure all three independent resources without pretending a
+            # fresh array owns them.
+            return (
+                qmc.measure(alice),
+                qmc.measure(bell0),
+                qmc.measure(bell1),
+            )
 
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
@@ -2569,7 +2569,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         assert block is not None
-        assert len(block.operations) == 4
+        assert len(block.operations) == 3
 
     def test_inline(self, transpiler):
         """inline() flattens inline invocations from sub-kernel calls."""
@@ -3091,7 +3091,10 @@ class TestParametricGates:
         gates = _get_gates(qc, parameter_bindings=[angle])
         # P gate emits as RZ in parametric path (U1 in non-parametric)
         assert any(g.name == gate_names.RZ for g in gates)
-        sv = _run_statevector(qc, parameter_bindings=[angle])
+        sv = _strip_zero_ancillas(
+            _run_statevector(qc, parameter_bindings=[angle]),
+            1,
+        )
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["P"].matrix_fn(angle)
         )
@@ -3116,7 +3119,10 @@ class TestParametricGates:
         gate_name_set = {g.name for g in gates}
         assert gate_names.RZ in gate_name_set
         assert gate_names.CNOT in gate_name_set
-        sv = _run_statevector(qc, parameter_bindings=[angle])
+        sv = _strip_zero_ancillas(
+            _run_statevector(qc, parameter_bindings=[angle]),
+            2,
+        )
         expected = compute_expected_statevector(
             all_zeros_state(2), GATE_SPECS["CP"].matrix_fn(angle)
         )
@@ -3381,7 +3387,7 @@ class TestStdlibQFT:
         assert np.allclose(sv, expected, atol=1e-10)
 
     def test_qft_decomposed_gate_set(self):
-        """Decomposed QFT uses basic gates (H, RZ, CNOT, SWAP)."""
+        """Decomposed QFT uses basic gates (H, RZ, U1, CNOT, SWAP)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3391,15 +3397,17 @@ class TestStdlibQFT:
 
         _, circ = _transpile_and_get_circuit(circuit)
         gates = _get_gates(circ)
-        # 3-qubit QFT: 3 H gates + 3 CP (each → 3 RZ + 2 CNOT) + 1 SWAP = 19 gates
+        # 3-qubit QFT: 3 H + 3 CP (2 RZ + U1 + 2 CNOT) + 1 SWAP = 19 gates.
         h_gates = [g for g in gates if g.name == gate_names.H]
         rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        u1_gates = [g for g in gates if g.name == gate_names.U1]
         cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 3
         for i, g in enumerate(h_gates):
             assert g.target_indices == (2 - i,)
-        assert len(rz_gates) == 9  # 3 CP × 3 RZ each
+        assert len(rz_gates) == 6  # 3 CP × 2 RZ each
+        assert len(u1_gates) == 3  # 3 CP × 1 exact U1 factor each
         assert len(cx_gates) == 6  # 3 CP × 2 CNOT each
         assert len(swap_gates) == 1
         assert swap_gates[0].target_indices == (0, 2)
@@ -6605,15 +6613,16 @@ class TestGHZStateParametrised:
 class TestManualQFTCircuit:
     """Textbook QFT from scratch using CP + H + SWAP (Nielsen & Chuang).
 
-    In QuriParts, each CP gate is decomposed into 5 gates: 3×RZ + 2×CNOT.
-    Gate count assertions are adjusted accordingly.
+    In QuriParts, each concrete CP gate is decomposed into five gates:
+    2×RZ + 1×U1 + 2×CNOT. The U1 combines the control rotation with the
+    decomposition's exact scalar factor.
     """
 
     def test_manual_qft_2q_gate_counts(self):
         """2-qubit manual QFT gate counts with CP decomposition.
 
         Qiskit: 2H + 1CP + 1SWAP
-        QuriParts: 2H + (3RZ + 2CNOT) + 1SWAP = 2H + 3RZ + 2CNOT + 1SWAP
+        QuriParts: 2H + (2RZ + U1 + 2CNOT) + 1SWAP
         """
 
         @qmc.qkernel
@@ -6632,11 +6641,12 @@ class TestManualQFTCircuit:
         gates = _get_gates(circ)
         h_gates = [g for g in gates if g.name == gate_names.H]
         rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        u1_gates = [g for g in gates if g.name == gate_names.U1]
         cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 2
-        # CP decomposed: 3 RZ + 2 CNOT per CP, 1 CP total
-        assert len(rz_gates) == 3
+        assert len(rz_gates) == 2
+        assert len(u1_gates) == 1
         assert len(cx_gates) == 2
         assert len(swap_gates) == 1
         # H gates target qubits 0 and 1
@@ -6686,7 +6696,7 @@ class TestManualQFTCircuit:
         """3-qubit manual QFT gate counts with CP decomposition.
 
         Qiskit: 3H + 3CP + 1SWAP
-        QuriParts: 3H + 3×(3RZ + 2CNOT) + 1SWAP = 3H + 9RZ + 6CNOT + 1SWAP
+        QuriParts: 3H + 3×(2RZ + U1 + 2CNOT) + 1SWAP
         """
 
         @qmc.qkernel
@@ -6709,11 +6719,12 @@ class TestManualQFTCircuit:
         gates = _get_gates(circ)
         h_gates = [g for g in gates if g.name == gate_names.H]
         rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        u1_gates = [g for g in gates if g.name == gate_names.U1]
         cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 3
-        # 3 CP gates, each decomposed to 3 RZ + 2 CNOT
-        assert len(rz_gates) == 9
+        assert len(rz_gates) == 6
+        assert len(u1_gates) == 3
         assert len(cx_gates) == 6
         assert len(swap_gates) == 1
         # H gates target qubits 0, 1, 2

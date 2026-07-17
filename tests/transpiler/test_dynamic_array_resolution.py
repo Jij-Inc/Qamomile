@@ -568,7 +568,7 @@ class TestDynamicArraySizeResolution:
         """Test that negative scalar sizes are rejected."""
         transpiler = QiskitTranspiler()
 
-        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+        with pytest.raises(ValueError, match="UInt binding 'n'.*non-negative"):
             transpiler.transpile(kernel_size_from_uint_scalar, bindings={"n": n})
 
     @pytest.mark.parametrize(
@@ -582,7 +582,7 @@ class TestDynamicArraySizeResolution:
         """Test that negative vector-element sizes are rejected."""
         transpiler = QiskitTranspiler()
 
-        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+        with pytest.raises(ValueError, match="UInt binding 'sizes'.*non-negative"):
             transpiler.transpile(
                 kernel_size_from_uint_element, bindings={"sizes": sizes}
             )
@@ -608,7 +608,7 @@ class TestDynamicArraySizeResolution:
         """
         transpiler = QiskitTranspiler()
 
-        with pytest.raises(NotImplementedError, match="Negative index"):
+        with pytest.raises(ValueError, match="UInt binding 'i'.*non-negative"):
             transpiler.transpile(
                 kernel_size_from_symbolic_uint_element,
                 bindings={"sizes": np.array([2, 5, 7], dtype=np.uint64), "i": -1},
@@ -618,7 +618,7 @@ class TestDynamicArraySizeResolution:
         """Test that non-integral element sizes are not silently truncated."""
         transpiler = QiskitTranspiler()
 
-        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+        with pytest.raises(TypeError, match="UInt binding 'sizes'.*integer"):
             transpiler.transpile(
                 kernel_size_from_uint_element,
                 bindings={"sizes": np.array([5.5], dtype=np.float64)},
@@ -628,7 +628,7 @@ class TestDynamicArraySizeResolution:
         """Test that boolean element sizes are not coerced to one or zero."""
         transpiler = QiskitTranspiler()
 
-        with pytest.raises(QamomileCompileError, match="Cannot resolve array size"):
+        with pytest.raises(TypeError, match="UInt binding 'sizes'.*integer"):
             transpiler.transpile(
                 kernel_size_from_uint_element,
                 bindings={"sizes": np.array([True], dtype=np.bool_)},

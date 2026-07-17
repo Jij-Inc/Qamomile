@@ -378,6 +378,117 @@ def as_scalar_expr(value: ScalarExpr | bool | int | float) -> ScalarExpr:
     return value
 
 
+def _is_zero_scalar(expression: ScalarExpr) -> bool:
+    """Return whether an expression is a concrete numeric zero.
+
+    Args:
+        expression (ScalarExpr): Expression to inspect.
+
+    Returns:
+        bool: True only for a zero-valued literal.
+    """
+    return isinstance(expression, LiteralExpr) and not float(expression.value)
+
+
+def _add_phase_expression(left: ScalarExpr, right: ScalarExpr) -> ScalarExpr:
+    """Add phase contributions without growing trivial expression chains.
+
+    Args:
+        left (ScalarExpr): Accumulated phase.
+        right (ScalarExpr): New phase contribution.
+
+    Returns:
+        ScalarExpr: Simplified sum expression.
+    """
+    if _is_zero_scalar(left):
+        return right
+    if _is_zero_scalar(right):
+        return left
+    if isinstance(left, LiteralExpr) and isinstance(right, LiteralExpr):
+        return LiteralExpr(float(left.value) + float(right.value))
+    return BinaryExpr(BinaryOperator.ADD, left, right)
+
+
+def _scale_phase_expression(expression: ScalarExpr, factor: int) -> ScalarExpr:
+    """Scale one loop-body phase by a concrete iteration count.
+
+    Args:
+        expression (ScalarExpr): Single-iteration phase.
+        factor (int): Number of loop iterations.
+
+    Returns:
+        ScalarExpr: Simplified scaled phase.
+    """
+    if factor == 0 or _is_zero_scalar(expression):
+        return LiteralExpr(0.0)
+    if factor == 1:
+        return expression
+    if isinstance(expression, LiteralExpr):
+        return LiteralExpr(float(expression.value) * factor)
+    return BinaryExpr(BinaryOperator.MUL, LiteralExpr(factor), expression)
+
+
+def _contains_loop_variable(expression: ScalarExpr, name: str) -> bool:
+    """Return whether a scalar expression references one loop variable.
+
+    Args:
+        expression (ScalarExpr): Expression to inspect.
+        name (str): Circuit-local loop-variable name.
+
+    Returns:
+        bool: Whether the named induction expression occurs recursively.
+    """
+    if isinstance(expression, LoopVariableExpr):
+        return expression.name == name
+    if isinstance(expression, BinaryExpr):
+        return _contains_loop_variable(
+            expression.left, name
+        ) or _contains_loop_variable(expression.right, name)
+    if isinstance(expression, UnaryExpr):
+        return _contains_loop_variable(expression.operand, name)
+    return False
+
+
+def _contains_any_loop_variable(expression: ScalarExpr) -> bool:
+    """Return whether a scalar expression contains an induction reference.
+
+    Args:
+        expression (ScalarExpr): Expression to inspect.
+
+    Returns:
+        bool: Whether any loop variable occurs recursively.
+    """
+    if isinstance(expression, LoopVariableExpr):
+        return True
+    if isinstance(expression, BinaryExpr):
+        return _contains_any_loop_variable(
+            expression.left
+        ) or _contains_any_loop_variable(expression.right)
+    if isinstance(expression, UnaryExpr):
+        return _contains_any_loop_variable(expression.operand)
+    return False
+
+
+def _contains_classical_bit(expression: ScalarExpr) -> bool:
+    """Return whether a scalar expression depends on a measurement result.
+
+    Args:
+        expression (ScalarExpr): Expression to inspect.
+
+    Returns:
+        bool: Whether a classical-bit reference occurs recursively.
+    """
+    if isinstance(expression, ClassicalBitExpr):
+        return True
+    if isinstance(expression, BinaryExpr):
+        return _contains_classical_bit(expression.left) or _contains_classical_bit(
+            expression.right
+        )
+    if isinstance(expression, UnaryExpr):
+        return _contains_classical_bit(expression.operand)
+    return False
+
+
 @dataclasses.dataclass(frozen=True)
 class GateInstruction:
     """Apply one primitive gate to versioned virtual wires.
@@ -527,6 +638,15 @@ MULTI_CONTROLLED_X_SEMANTIC_KEY = SemanticOpKey(
     "multi_controlled_x",
 )
 """Semantic key for an arbitrary-width multi-controlled X operation."""
+
+SELECT_SEMANTIC_KEY = SemanticOpKey("qamomile.circuit", "select")
+"""Semantic key for a fallback-defined, index-addressed quantum multiplexer.
+
+SELECT identities include a content fingerprint for every case body. A target
+that registers a native realization for this open key must therefore preserve
+the referenced fallback semantics rather than treating the case count alone as
+a complete operation definition.
+"""
 
 
 SemanticValue: TypeAlias = None | bool | int | float | str | tuple["SemanticValue", ...]
@@ -725,6 +845,8 @@ class IfInstruction:
         true_outputs (tuple[WireId, ...]): Wires yielded by the true branch.
         false_outputs (tuple[WireId, ...]): Wires yielded by the false branch.
         outputs (tuple[WireId, ...]): Merged post-branch wires.
+        true_global_phase (ScalarExpr): Phase applied only in the true branch.
+        false_global_phase (ScalarExpr): Phase applied only in the false branch.
     """
 
     condition: ScalarExpr
@@ -734,6 +856,12 @@ class IfInstruction:
     true_outputs: tuple[WireId, ...]
     false_outputs: tuple[WireId, ...]
     outputs: tuple[WireId, ...]
+    true_global_phase: ScalarExpr = dataclasses.field(
+        default_factory=lambda: LiteralExpr(0.0)
+    )
+    false_global_phase: ScalarExpr = dataclasses.field(
+        default_factory=lambda: LiteralExpr(0.0)
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -746,6 +874,7 @@ class WhileInstruction:
         body (tuple[CircuitInstruction, ...]): Loop body.
         body_outputs (tuple[WireId, ...]): Wires yielded to the next iteration.
         outputs (tuple[WireId, ...]): Wires available after loop termination.
+        body_global_phase (ScalarExpr): Phase applied once per loop iteration.
     """
 
     condition: ScalarExpr
@@ -753,6 +882,9 @@ class WhileInstruction:
     body: tuple[CircuitInstruction, ...]
     body_outputs: tuple[WireId, ...]
     outputs: tuple[WireId, ...]
+    body_global_phase: ScalarExpr = dataclasses.field(
+        default_factory=lambda: LiteralExpr(0.0)
+    )
 
 
 CircuitInstruction: TypeAlias = (
@@ -769,6 +901,109 @@ CircuitInstruction: TypeAlias = (
 )
 
 
+def _contains_measurement(
+    operations: tuple[CircuitInstruction, ...],
+) -> bool:
+    """Return whether a structured region contains any measurement.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Region to inspect.
+
+    Returns:
+        bool: True when a scalar/vector measurement occurs directly or in a
+            nested call or control-flow region.
+    """
+    for operation in operations:
+        if isinstance(operation, (MeasureInstruction, MeasureVectorInstruction)):
+            return True
+        if isinstance(operation, CallInstruction) and _contains_measurement(
+            operation.callee.body.operations
+        ):
+            return True
+        if isinstance(operation, ForInstruction) and _contains_measurement(
+            operation.body
+        ):
+            return True
+        if isinstance(operation, IfInstruction) and (
+            _contains_measurement(operation.true_body)
+            or _contains_measurement(operation.false_body)
+        ):
+            return True
+        if isinstance(operation, WhileInstruction) and _contains_measurement(
+            operation.body
+        ):
+            return True
+    return False
+
+
+def has_mid_circuit_measurement(
+    operations: tuple[CircuitInstruction, ...],
+) -> bool:
+    """Return whether measured quantum state is consumed again in a region.
+
+    Static-sampling backends may defer terminal measurements to the end of a
+    shot, but doing so is incorrect when a later gate, reset, call, or control
+    region consumes the post-measurement wire. The circuit IR uses versioned
+    wires, so this scan can distinguish those two cases without backend SDK
+    knowledge.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Structured instruction
+            region to inspect.
+
+    Returns:
+        bool: ``True`` when the region or a nested reusable/control-flow body
+            contains a non-terminal measurement.
+    """
+    measured_outputs: set[WireId] = set()
+    for operation in operations:
+        if isinstance(operation, MeasureInstruction):
+            measured_outputs.add(operation.output)
+            continue
+        if isinstance(operation, MeasureVectorInstruction):
+            measured_outputs.update(operation.outputs)
+            continue
+
+        if isinstance(operation, GateInstruction):
+            consumed = operation.inputs
+        elif isinstance(operation, ResetInstruction):
+            consumed = (operation.input,)
+        elif isinstance(operation, PauliEvolutionInstruction):
+            consumed = operation.inputs
+        elif isinstance(
+            operation,
+            (CallInstruction, ForInstruction, IfInstruction, WhileInstruction),
+        ):
+            consumed = operation.inputs
+        else:
+            consumed = ()
+        if measured_outputs.intersection(consumed):
+            return True
+
+        if isinstance(operation, CallInstruction) and has_mid_circuit_measurement(
+            operation.callee.body.operations
+        ):
+            return True
+        if isinstance(operation, ForInstruction):
+            # A measurement that is terminal within one loop body is still
+            # mid-circuit when another iteration follows: the yielded
+            # post-measurement wires become the next iteration's inputs.
+            if len(operation.indexset) > 1 and _contains_measurement(operation.body):
+                return True
+            if has_mid_circuit_measurement(operation.body):
+                return True
+        if isinstance(operation, IfInstruction) and (
+            has_mid_circuit_measurement(operation.true_body)
+            or has_mid_circuit_measurement(operation.false_body)
+        ):
+            return True
+        if isinstance(operation, WhileInstruction) and has_mid_circuit_measurement(
+            operation.body
+        ):
+            return True
+    return False
+
+
 @dataclasses.dataclass(frozen=True)
 class CircuitProgram:
     """Store one immutable backend-neutral circuit program.
@@ -781,8 +1016,10 @@ class CircuitProgram:
         output_wires (tuple[WireId, ...]): Final wire version per qubit slot.
         operations (tuple[CircuitInstruction, ...]): Structured instruction
             sequence.
-        global_phase (ScalarExpr): Program-level phase in radians. Defaults to
-            zero and becomes observable when the program is controlled.
+        global_phase (ScalarExpr): Phase accumulated in the root lexical
+            region, in radians. Dynamic control-flow regions retain their own
+            scoped phases. Defaults to zero and becomes observable when the
+            program is controlled.
     """
 
     name: str
@@ -804,10 +1041,14 @@ class _RegionState:
         operations (list[CircuitInstruction]): Instructions appended to the
             region.
         wires (dict[int, WireId]): Current wire version per physical slot.
+        global_phase (ScalarExpr): Phase accumulated only within this region.
     """
 
     operations: list[CircuitInstruction]
     wires: dict[int, WireId]
+    global_phase: ScalarExpr = dataclasses.field(
+        default_factory=lambda: LiteralExpr(0.0)
+    )
 
 
 @dataclasses.dataclass
@@ -884,7 +1125,6 @@ class CircuitBuilder:
         self._input_wires = tuple(input_wires.values())
         self._regions = [_RegionState([], input_wires)]
         self._controls: list[_ForContext | _IfContext | _WhileContext] = []
-        self._global_phase: ScalarExpr = LiteralExpr(0.0)
 
     @property
     def operations(self) -> list[CircuitInstruction]:
@@ -1019,13 +1259,32 @@ class CircuitBuilder:
             qubits (tuple[int, ...]): Participating qubit slots.
             hamiltonian (Any): Qamomile Hamiltonian value.
             time (ScalarExpr | bool | int | float): Evolution time.
+
+        Raises:
+            ValueError: If a Qamomile Hamiltonian has a non-Hermitian
+                identity coefficient.
         """
+        from qamomile.observable.hamiltonian import (
+            HERMITIAN_IMAG_ATOL,
+            Hamiltonian,
+        )
+
+        time_expression = as_scalar_expr(time)
+        if isinstance(hamiltonian, Hamiltonian):
+            constant = complex(hamiltonian.constant)
+            if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
+                raise ValueError("Pauli evolution requires a real Hamiltonian constant")
+            if constant.real:
+                self.add_global_phase(-float(constant.real) * time_expression)
+            hamiltonian = hamiltonian - hamiltonian.constant
+            if not len(hamiltonian):
+                return
         inputs = tuple(self.current_wire(qubit) for qubit in qubits)
         outputs = tuple(self.fresh_wire() for _ in qubits)
         self.operations.append(
             PauliEvolutionInstruction(
                 hamiltonian=hamiltonian,
-                time=as_scalar_expr(time),
+                time=time_expression,
                 inputs=inputs,
                 outputs=outputs,
             )
@@ -1040,6 +1299,18 @@ class CircuitBuilder:
             callee (ReusableCircuit): Reusable circuit and transforms.
             qubits (tuple[int, ...]): Participating qubit slots.
         """
+        if not callee.controls and not _is_zero_scalar(callee.body.global_phase):
+            phase_factor = -callee.power if callee.inverse else callee.power
+            self.add_global_phase(
+                _scale_phase_expression(callee.body.global_phase, phase_factor)
+            )
+            callee = dataclasses.replace(
+                callee,
+                body=dataclasses.replace(
+                    callee.body,
+                    global_phase=LiteralExpr(0.0),
+                ),
+            )
         inputs = tuple(self.current_wire(qubit) for qubit in qubits)
         outputs = tuple(self.fresh_wire() for _ in qubits)
         self.operations.append(CallInstruction(callee, inputs, outputs))
@@ -1050,15 +1321,16 @@ class CircuitBuilder:
         self,
         phase: ScalarExpr | bool | int | float,
     ) -> None:
-        """Accumulate a program-level global phase in radians.
+        """Accumulate a global phase in the current lexical region.
 
         Args:
             phase (ScalarExpr | bool | int | float): Phase contribution.
         """
-        self._global_phase = BinaryExpr(
-            BinaryOperator.ADD,
-            self._global_phase,
-            as_scalar_expr(phase),
+        expression = as_scalar_expr(phase)
+        region = self._regions[-1]
+        region.global_phase = _add_phase_expression(
+            region.global_phase,
+            expression,
         )
 
     def begin_for(self, indexset: range) -> LoopVariableExpr:
@@ -1089,6 +1361,17 @@ class CircuitBuilder:
         self._controls.pop()
         body = self._regions.pop()
         parent = self._regions[-1]
+        if _contains_loop_variable(body.global_phase, context.loop_variable.name):
+            raise RuntimeError(
+                "A structured for-loop phase cannot depend on its induction "
+                "variable; semantic lowering must unroll this loop"
+            )
+        # A deterministic loop composes every iteration coherently, so its
+        # scalar phases add before the instruction is frozen.
+        parent.global_phase = _add_phase_expression(
+            parent.global_phase,
+            _scale_phase_expression(body.global_phase, len(context.indexset)),
+        )
         outputs = {index: self.fresh_wire() for index in range(self.num_qubits)}
         parent.operations.append(
             ForInstruction(
@@ -1164,6 +1447,8 @@ class CircuitBuilder:
                 true_outputs=tuple(true_region.wires.values()),
                 false_outputs=tuple(false_region.wires.values()),
                 outputs=tuple(outputs.values()),
+                true_global_phase=true_region.global_phase,
+                false_global_phase=false_region.global_phase,
             )
         )
         parent.wires = outputs
@@ -1205,6 +1490,7 @@ class CircuitBuilder:
                 body=tuple(body.operations),
                 body_outputs=tuple(body.wires.values()),
                 outputs=tuple(outputs.values()),
+                body_global_phase=body.global_phase,
             )
         )
         parent.wires = outputs
@@ -1221,6 +1507,11 @@ class CircuitBuilder:
         if len(self._regions) != 1 or self._controls:
             raise RuntimeError("Cannot freeze a circuit with open structured regions")
         root = self._regions[0]
+        if _contains_any_loop_variable(root.global_phase):
+            raise RuntimeError(
+                "Circuit global phase contains a loop variable outside its "
+                "owning structured region"
+            )
         return CircuitProgram(
             name=self.name,
             num_qubits=self.num_qubits,
@@ -1228,5 +1519,5 @@ class CircuitBuilder:
             input_wires=self._input_wires,
             output_wires=tuple(root.wires[index] for index in range(self.num_qubits)),
             operations=tuple(root.operations),
-            global_phase=self._global_phase,
+            global_phase=root.global_phase,
         )

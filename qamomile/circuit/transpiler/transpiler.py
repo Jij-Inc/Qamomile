@@ -57,29 +57,14 @@ class Transpiler(ABC, Generic[T]):
     Provides the full compilation pipeline from qkernel-like frontend objects
     to executable programs.
 
-    Usage:
-        transpiler = QiskitTranspiler()
-
-        # Option 1: Full pipeline
-        executable = transpiler.compile(kernel, bindings={"theta": 0.5})
-        results = executable.run(transpiler.executor())
-
-        # Option 2: Step-by-step
-        block = transpiler.to_block(kernel)
-        substituted = transpiler.substitute(block)
-        affine = transpiler.inline(substituted)
-        validated = transpiler.affine_validate(affine)
-        folded = transpiler.constant_fold(validated, bindings={"theta": 0.5})
-        analyzed = transpiler.analyze(folded)
-        plan = transpiler.plan(analyzed)
-        executable = transpiler.emit(plan, bindings={"theta": 0.5})
-
-        # Option 3: Just get the circuit (no execution)
-        circuit = transpiler.to_circuit(kernel, bindings={"theta": 0.5})
-
-        # With configuration (strategy overrides)
-        config = TranspilerConfig.with_strategies({"qft": "approximate"})
-        transpiler = QiskitTranspiler(config=config)
+    Example:
+        >>> from qamomile.circuit.transpiler import TranspilerConfig
+        >>> from qamomile.qiskit import QiskitTranspiler
+        >>> transpiler = QiskitTranspiler()
+        >>> executable = transpiler.transpile(kernel, bindings={"theta": 0.5})
+        >>> circuit = executable.get_first_circuit()
+        >>> config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
+        >>> transpiler.set_config(config)
     """
 
     # Generic passes (can be overridden by subclasses)
@@ -162,21 +147,14 @@ class Transpiler(ABC, Generic[T]):
                 ``parameters`` (propagated from ``kernel.build``), violating
                 the bindings/parameters disjointness rule.
 
-        When bindings or parameters are provided, uses kernel.build() to properly
-        resolve array shapes from the bound data. Otherwise uses the cached
-        hierarchical block for efficiency.
+        Always uses ``kernel.build()`` so Python defaults, required arguments,
+        runtime parameters, and array shapes follow one validated entry path.
         """
-        if bindings or parameters:
-            # Use build() to properly handle bindings and parameters
-            # This resolves array shapes from bound data (e.g., bias.shape[0])
-            traced = kernel.build(parameters=parameters, **(bindings or {}))
-            return replace(
-                traced,
-                kind=BlockKind.HIERARCHICAL,
-            )
-        else:
-            # Original behavior for no bindings
-            return kernel.block
+        traced = kernel.build(parameters=parameters, **(bindings or {}))
+        return replace(
+            traced,
+            kind=BlockKind.HIERARCHICAL,
+        )
 
     # === Pipeline Passes ===
 
@@ -236,10 +214,11 @@ class Transpiler(ABC, Generic[T]):
         callable invocation and then folds the base-case
         ``IfOperation`` via ``partial_eval``. Terminates when no
         inline callable invocation remains (success), when every residual call
-        is trapped inside an operation-owned block where ``partial_eval``
-        cannot fold it (control / inverse of a recursive kernel — raises a
-        targeted error, see below), or when ``MAX_UNROLL_DEPTH`` is reached
-        (genuinely non-terminating top-level recursion — raises).
+        is trapped inside an operation-owned block whose recursive callable
+        contract is unsupported (control / inverse / select over a recursive
+        kernel — raises a targeted error, see below), or when
+        ``MAX_UNROLL_DEPTH`` is reached (genuinely non-terminating top-level
+        recursion — raises).
 
         Args:
             block (Block): The block to unroll. May be ``HIERARCHICAL``
@@ -256,9 +235,11 @@ class Transpiler(ABC, Generic[T]):
 
         Raises:
             FrontendTransformError: If every remaining inline callable invocation
-                is trapped inside a ``ControlledUOperation.block`` /
-                ``InverseBlockOperation`` block (a self-recursive kernel was
-                passed to ``qmc.control`` / ``qmc.inverse``), or if a
+                is trapped inside a ``ControlledUOperation.block``, an
+                ``InverseBlockOperation`` block, or a
+                ``SelectOperation.case_blocks`` entry (a self-recursive kernel
+                was passed to ``qmc.control``, ``qmc.inverse``, or
+                ``qmc.select``), or if a
                 genuinely non-terminating top-level recursion does not
                 converge within ``MAX_UNROLL_DEPTH`` iterations. The two
                 cases carry distinct, cause-specific messages.
@@ -278,26 +259,28 @@ class Transpiler(ABC, Generic[T]):
                 return self.inline(block)
             # After a full inline + partial_eval iteration, if calls remain
             # only inside operation-owned blocks (a ControlledUOperation's
-            # ``block`` or an InverseBlockOperation's nested blocks), no
-            # further iteration can make progress: ``inline`` already
-            # unrolled one layer there, but ``partial_eval`` never descends
-            # into those blocks to fold the base-case ``if``. This is the
-            # signature of a self-recursive @qkernel passed to
-            # ``qmc.control`` / ``qmc.inverse``; fail fast with a targeted
+            # ``block``, an InverseBlockOperation's nested blocks, or a
+            # SelectOperation case block), the fixed-point loop deliberately
+            # does not treat the operation-owned recursion as safely
+            # re-enterable. SELECT case partial evaluation can fold ordinary
+            # case-local branches, but it does not make a recursively selected
+            # callable a supported contract. This is the signature of a
+            # self-recursive @qkernel passed to
+            # ``qmc.control`` / ``qmc.inverse`` / ``qmc.select``; fail fast with a targeted
             # message instead of spinning to ``MAX_UNROLL_DEPTH`` and
             # blaming the bindings.
             if count_unrollable_inline_invokes(block.operations) == 0:
                 raise FrontendTransformError(
-                    "qmc.control / qmc.inverse was given a recursive "
+                    "qmc.control / qmc.inverse / qmc.select was given a recursive "
                     "@qkernel: after inlining, an inline callable invocation still "
-                    "remains inside the controlled / inverted block, and "
-                    "partial_eval cannot fold its base-case `if` there "
-                    "(constant folding does not descend into a "
-                    "ControlledUOperation.block or an InverseBlockOperation "
-                    "block). Controlling or inverting a self-recursive "
+                    "remains inside the controlled / inverted / selected block, and "
+                    "the fixed-point loop cannot safely re-enter that "
+                    "operation-owned recursive body. Controlling, "
+                    "inverting, or selecting a self-recursive "
                     "kernel is not supported. Rewrite the kernel "
                     "non-recursively (manually unrolled to the required "
-                    "depth) before passing it to qmc.control / qmc.inverse."
+                    "depth) before passing it to qmc.control / qmc.inverse / "
+                    "qmc.select."
                 )
 
         raise FrontendTransformError(

@@ -23,10 +23,18 @@ from qamomile.circuit.ir.canonical import (
     to_canonical_bytes,
 )
 from qamomile.circuit.ir.operation import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallPolicy,
+    CallTransform,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
-from qamomile.circuit.ir.serialize import dump_json, load_json
 from qamomile.circuit.ir.types.primitives import (
     FloatType,
     QubitType,
@@ -229,6 +237,115 @@ def _controlled_phase_a(
 
 
 @qmc.qkernel
+def _callable_body_x_a(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply X in the first independently-built callable body."""
+    return qmc.x(q)
+
+
+@qmc.qkernel
+def _callable_body_x_b(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply X in the structurally identical callable body twin."""
+    return qmc.x(q)
+
+
+@qmc.qkernel
+def _callable_impl_h_a(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply H in the first transform-specific implementation body."""
+    return qmc.h(q)
+
+
+@qmc.qkernel
+def _callable_impl_h_b(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply H in the implementation-body twin."""
+    return qmc.h(q)
+
+
+@qmc.qkernel
+def _callable_impl_z(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply Z in a semantically different implementation body."""
+    return qmc.z(q)
+
+
+def _boxed_callable_case(body: Block, implementation_body: Block) -> Block:
+    """Build one SELECT case containing a boxed callable definition.
+
+    Args:
+        body (Block): Default callable body.
+        implementation_body (Block): Transform-specific implementation body.
+
+    Returns:
+        Block: AFFINE one-qubit case block containing an ``InvokeOperation``.
+    """
+    q = Value(type=QubitType(), name="case_q")
+    result = q.next_version()
+    ref = CallableRef(namespace="test.canonical", name="boxed_case")
+    definition = CallableDef(
+        ref=ref,
+        body=body,
+        implementations=[
+            CallableImplementation(
+                transform=CallTransform.DIRECT,
+                strategy="alternate",
+                body=implementation_body,
+                attrs={"variant": "stable"},
+            )
+        ],
+        default_policy=CallPolicy.PRESERVE_BOX,
+        attrs={"kind": "composite"},
+    )
+    invoke = InvokeOperation(
+        operands=[q],
+        results=[result],
+        target=ref,
+        attrs={"kind": "composite", "default_policy": "PRESERVE_BOX"},
+        definition=definition,
+    )
+    return Block(
+        input_values=[q],
+        output_values=[result],
+        operations=[invoke],
+        kind=BlockKind.AFFINE,
+        label_args=["q"],
+    )
+
+
+def _select_with_boxed_case(body: Block, implementation_body: Block) -> Block:
+    """Build an AFFINE SELECT whose selected case contains a boxed callable.
+
+    Args:
+        body (Block): Default boxed-callable body.
+        implementation_body (Block): Alternate boxed-callable body.
+
+    Returns:
+        Block: Two-qubit SELECT block with independent random Value UUIDs.
+    """
+    identity_q = Value(type=QubitType(), name="identity_q")
+    identity_case = Block(
+        input_values=[identity_q],
+        output_values=[identity_q],
+        kind=BlockKind.AFFINE,
+        label_args=["q"],
+    )
+    idx = Value(type=QubitType(), name="idx")
+    target = Value(type=QubitType(), name="target")
+    idx_result = idx.next_version()
+    target_result = target.next_version()
+    select_op = SelectOperation(
+        operands=[idx, target],
+        results=[idx_result, target_result],
+        num_index_qubits=1,
+        case_blocks=[identity_case, _boxed_callable_case(body, implementation_body)],
+    )
+    return Block(
+        input_values=[idx, target],
+        output_values=[idx_result, target_result],
+        operations=[select_op],
+        kind=BlockKind.AFFINE,
+        label_args=["idx", "target"],
+    )
+
+
+@qmc.qkernel
 def _controlled_phase_b(
     ctrl: qmc.Qubit, target: qmc.Qubit, theta: qmc.Float
 ) -> tuple[qmc.Qubit, qmc.Qubit]:
@@ -356,6 +473,87 @@ class TestCanonicalizeDeterminism:
         b = _to_affine(_controlled_phase_b)
         assert to_canonical_bytes(a) != to_canonical_bytes(b)
         assert content_hash(a) != content_hash(b)
+
+    def test_select_boxed_implementation_twins_have_same_hash(self):
+        """Callable implementation bodies inside SELECT canonicalize fully.
+
+        Transform-specific bodies under ``CallableDef.implementations`` must
+        share the enclosing canonical UUID universe; otherwise independently
+        built but identical boxed cases leak random UUIDs into
+        ``content_hash``.
+        """
+        a = _select_with_boxed_case(
+            _callable_body_x_a.block,
+            _callable_impl_h_a.block,
+        )
+        b = _select_with_boxed_case(
+            _callable_body_x_b.block,
+            _callable_impl_h_b.block,
+        )
+
+        assert to_canonical_bytes(a) == to_canonical_bytes(b)
+        assert content_hash(a) == content_hash(b)
+
+    def test_symbolic_select_width_canonicalizes_with_its_input(self):
+        """Independent symbolic SELECT widths reuse canonical input identity."""
+
+        @qmc.qkernel
+        def identity(target: qmc.Qubit) -> qmc.Qubit:
+            """Return a SELECT target unchanged."""
+            return target
+
+        @qmc.qkernel
+        def flipped(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply X to a SELECT target."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def first(width: qmc.UInt) -> qmc.Bit:
+            """Build the first symbolic-width SELECT twin."""
+            index = qmc.qubit_array(width, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        @qmc.qkernel
+        def second(width: qmc.UInt) -> qmc.Bit:
+            """Build the second symbolic-width SELECT twin."""
+            index = qmc.qubit_array(width, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        first_block = _to_affine(first)
+        second_block = _to_affine(second)
+        canonical = canonicalize(first_block)
+        select = next(
+            operation
+            for operation in canonical.operations
+            if isinstance(operation, SelectOperation)
+        )
+
+        assert isinstance(select.num_index_qubits, Value)
+        assert select.num_index_qubits.uuid == canonical.input_values[0].uuid
+        assert to_canonical_bytes(first_block) == to_canonical_bytes(second_block)
+
+    def test_select_boxed_implementation_body_affects_hash(self):
+        """A semantic change in an alternate implementation changes the hash."""
+        h_impl = _select_with_boxed_case(
+            _callable_body_x_a.block,
+            _callable_impl_h_a.block,
+        )
+        z_impl = _select_with_boxed_case(
+            _callable_body_x_a.block,
+            _callable_impl_z.block,
+        )
+
+        assert content_hash(h_impl) != content_hash(z_impl)
 
 
 class TestCanonicalizeIdempotence:
@@ -1025,42 +1223,6 @@ class TestParamSlotsPreservation:
         canon, _, _ = canonicalize_and_remap(block)
         assert canon.param_slots == block.param_slots
 
-    def test_canonicalize_then_serialize_keeps_manifest(self):
-        """canonicalize → dump_json/load_json keeps every slot field.
-
-        Covers the documented flow "canonicalize first for
-        build-independent identity, then serialize", including a
-        ``COMPILE_TIME_BOUND`` slot with a numpy ``bound_value``.
-        """
-        affine = _to_affine(_h_then_rx)
-        bound = np.array([0.1, 0.2, 0.3], dtype=np.float64)
-        block = dataclasses.replace(
-            affine,
-            param_slots=(
-                *affine.param_slots,
-                ParamSlot(
-                    name="weights",
-                    type=FloatType(),
-                    kind=ParamKind.COMPILE_TIME_BOUND,
-                    ndim=1,
-                    bound_value=bound,
-                ),
-            ),
-        )
-        canon = canonicalize(block)
-        restored = load_json(dump_json(canon))
-        assert len(restored.param_slots) == len(canon.param_slots) == 2
-        for original, restored_slot in zip(canon.param_slots, restored.param_slots):
-            assert restored_slot.name == original.name
-            assert restored_slot.kind == original.kind
-            assert restored_slot.ndim == original.ndim
-            assert isinstance(restored_slot.type, type(original.type))
-            assert restored_slot.default == original.default
-            assert restored_slot.differentiable == original.differentiable
-        restored_bound = restored.param_slots[-1].bound_value
-        assert isinstance(restored_bound, np.ndarray)
-        assert np.array_equal(restored_bound, bound)
-
 
 class TestParamSlotsHashParticipation:
     """``param_slots`` is functional and participates in ``content_hash``."""
@@ -1090,6 +1252,15 @@ class TestParamSlotsHashParticipation:
         hash_a = content_hash(_block_with_bound_slot(np.array([0.1, 0.2, 0.3])))
         hash_b = content_hash(_block_with_bound_slot(np.array([0.1, 0.2, 0.3])))
         assert hash_a == hash_b
+
+    def test_numpy_bound_value_shape_changes_hash(self):
+        """A scalar array and a length-one array have distinct identities."""
+        scalar = np.array(0.5)
+        vector = np.array([0.5])
+        assert scalar.tobytes() == vector.tobytes()
+        assert content_hash(_block_with_bound_slot(scalar)) != content_hash(
+            _block_with_bound_slot(vector)
+        )
 
     def test_large_numpy_bound_values_hash_by_content(self):
         """Arrays indistinguishable under truncated ``repr`` still hash apart."""

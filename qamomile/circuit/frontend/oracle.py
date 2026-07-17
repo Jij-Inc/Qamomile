@@ -9,6 +9,7 @@ from typing import Any
 from qamomile.circuit.frontend.callable_signature import CallableSignature
 from qamomile.circuit.frontend.handle.array import Vector, VectorView
 from qamomile.circuit.frontend.handle.primitives import Qubit, UInt
+from qamomile.circuit.frontend.qkernel_utils import reject_aliased_quantum_args
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -18,6 +19,7 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
     signature_from_values,
 )
+from qamomile.circuit.ir.operation.control_value import normalize_control_value
 
 
 @dataclasses.dataclass
@@ -90,6 +92,7 @@ class Oracle:
         self,
         *qubits: Qubit | Vector[Qubit],
         controls: Sequence[Qubit] = (),
+        control_value: int | None = None,
     ) -> tuple[Qubit, ...] | Vector[Qubit]:
         """Apply the oracle to scalar qubits or a vector register.
 
@@ -98,20 +101,40 @@ class Oracle:
                 or ``num_qubits`` scalar qubits.
             controls (Sequence[Qubit]): Explicit control qubits. Defaults to
                 an empty sequence.
+            control_value (int | None): LSB-first activation value for
+                ``controls``. ``None`` uses the ordinary all-ones state.
+                Defaults to ``None``.
 
         Returns:
             tuple[Qubit, ...] | Vector[Qubit]: Oracle outputs with the same
             shape as the input form.
 
         Raises:
-            ValueError: If the provided arity does not match ``num_qubits``.
-            TypeError: If the argument shape is not supported.
+            ValueError: If the provided arity does not match ``num_qubits``
+                or ``control_value`` does not fit the control width.
+            TypeError: If the argument shape is not supported or
+                ``control_value`` is invalid.
+            QubitConsumedError: If an input was already consumed or two input
+                roles overlap the same physical qubit.
+            RuntimeError: If no qkernel tracer is active.
         """
         if len(qubits) == 1 and isinstance(qubits[0], Vector):
-            if controls:
-                raise TypeError("Oracle vector calls do not accept controls yet.")
+            if controls or control_value is not None:
+                raise TypeError(
+                    "Oracle vector calls do not accept controls or control_value yet."
+                )
+            if self.num_control_qubits:
+                raise ValueError(
+                    f"Oracle '{self.name}' requires {self.num_control_qubits} "
+                    "explicit control qubits; use the scalar call form until "
+                    "vector calls support a separate controls argument."
+                )
             return self._call_vector(qubits[0])
-        return self._call_scalars(*qubits, controls=controls)
+        return self._call_scalars(
+            *qubits,
+            controls=controls,
+            control_value=control_value,
+        )
 
     def _call_vector(
         self,
@@ -128,6 +151,9 @@ class Oracle:
         Raises:
             ValueError: If the vector has a concrete length different from
                 ``num_qubits``.
+            QubitConsumedError: If the register was already consumed or has
+                an outstanding borrow.
+            RuntimeError: If no tracer is active.
         """
         size_handle = qubits.shape[0] if qubits.shape else None
         if isinstance(size_handle, int):
@@ -146,8 +172,10 @@ class Oracle:
                 f"got {int(size)}."
             )
 
-        consumed = qubits.consume(operation_name=f"Oracle[{self.name}]")
-        result = consumed.value.next_version()
+        operation_name = f"Oracle[{self.name}]"
+        tracer = get_current_tracer()
+        qubits.validate_consumable(operation_name)
+        result = qubits.value.next_version()
         oracle_ref = CallableRef(namespace="user.oracle", name=self.name)
         num_targets = self.num_qubits
         if num_targets is None and size is not None:
@@ -164,14 +192,14 @@ class Oracle:
             self.signature.to_ir_signature()
             if self.signature is not None
             else signature_from_values(
-                [consumed.value],
+                [qubits.value],
                 [result],
                 operand_names=["qubits"],
                 result_names=["qubits"],
             )
         )
         op = InvokeOperation(
-            operands=[consumed.value],
+            operands=[qubits.value],
             results=[result],
             target=oracle_ref,
             attrs=attrs,
@@ -183,7 +211,8 @@ class Oracle:
                 attrs=attrs,
             ),
         )
-        get_current_tracer().add_operation(op)
+        consumed = qubits.consume(operation_name=operation_name)
+        tracer.add_operation(op)
         consumed_any: Any = consumed
         if isinstance(consumed_any, VectorView):
             new_view = VectorView._wrap_unregistered(
@@ -193,7 +222,7 @@ class Oracle:
                 start_uint=consumed_any._slice_start,
                 step_uint=consumed_any._slice_step,
             )
-            consumed_any._transfer_borrow_to(new_view, f"Oracle[{self.name}]")
+            consumed_any._transfer_borrow_to(new_view, operation_name)
             return new_view
         return type(qubits)._create_from_value(value=result, shape=qubits.shape)
 
@@ -201,6 +230,7 @@ class Oracle:
         self,
         *qubits: Qubit | Vector[Qubit],
         controls: Sequence[Qubit] = (),
+        control_value: int | None = None,
     ) -> tuple[Qubit, ...]:
         """Apply the oracle to scalar qubits.
 
@@ -208,13 +238,20 @@ class Oracle:
             *qubits (Qubit | Vector[Qubit] | VectorView[Qubit]): Scalar qubit
                 handles. Vector arguments are rejected here.
             controls (Sequence[Qubit]): Explicit scalar controls.
+            control_value (int | None): LSB-first activation value for the
+                explicit controls. Defaults to ``None``.
 
         Returns:
             tuple[Qubit, ...]: Next-version scalar qubits.
 
         Raises:
-            TypeError: If any argument is not a scalar qubit.
-            ValueError: If the number of scalar qubits is wrong.
+            TypeError: If any argument is not a scalar qubit or
+                ``control_value`` is invalid.
+            ValueError: If the number of scalar qubits is wrong or the
+                activation value does not fit the control width.
+            QubitConsumedError: If an input was consumed or two roles overlap
+                the same physical qubit.
+            RuntimeError: If no tracer is active.
         """
         if self.num_qubits is None:
             raise TypeError(
@@ -235,44 +272,59 @@ class Oracle:
             raise TypeError("Oracle scalar calls accept only Qubit arguments.")
         if not all(isinstance(c, Qubit) for c in controls):
             raise TypeError("Oracle controls accept only Qubit arguments.")
+        normalized_control_value = (
+            normalize_control_value(control_value, len(controls)) if controls else None
+        )
+        if not controls and control_value is not None:
+            raise ValueError("Oracle control_value requires at least one control.")
 
-        consumed_controls = [
-            c.consume(operation_name=f"Oracle[{self.name}][control]") for c in controls
-        ]
-        consumed = [
-            q.consume(operation_name=f"Oracle[{self.name}][target]") for q in qubits
-        ]
-        results = [q.value.next_version() for q in [*consumed_controls, *consumed]]
+        tracer = get_current_tracer()
+        all_inputs = [*controls, *qubits]
+        reject_aliased_quantum_args(
+            self.name,
+            {
+                **{
+                    f"control[{index}]": control
+                    for index, control in enumerate(controls)
+                },
+                **{f"target[{index}]": qubit for index, qubit in enumerate(qubits)},
+            },
+            caller=f"Oracle[{self.name}]",
+        )
+        for handle in all_inputs:
+            handle.validate_consumable(f"Oracle[{self.name}]")
+
+        results = [q.value.next_version() for q in all_inputs]
         oracle_ref = CallableRef(namespace="user.oracle", name=self.name)
         attrs = {
             "kind": "oracle",
-            "num_control_qubits": len(consumed_controls),
-            "num_target_qubits": len(consumed),
+            "num_control_qubits": len(controls),
+            "num_target_qubits": len(qubits),
             "custom_name": self.name,
             "gate_type": "CUSTOM",
             "default_policy": CallPolicy.PRESERVE_BOX.name,
         }
-        transform = (
-            CallTransform.CONTROLLED if consumed_controls else CallTransform.DIRECT
-        )
+        if normalized_control_value is not None:
+            attrs["control_value"] = normalized_control_value
+        transform = CallTransform.CONTROLLED if controls else CallTransform.DIRECT
         signature = (
             self.signature.to_ir_signature()
             if self.signature is not None
             else signature_from_values(
-                [q.value for q in [*consumed_controls, *consumed]],
+                [q.value for q in all_inputs],
                 results,
                 operand_names=[
-                    *[f"control_{i}" for i in range(len(consumed_controls))],
-                    *[f"target_{i}" for i in range(len(consumed))],
+                    *[f"control_{i}" for i in range(len(controls))],
+                    *[f"target_{i}" for i in range(len(qubits))],
                 ],
                 result_names=[
-                    *[f"control_{i}" for i in range(len(consumed_controls))],
-                    *[f"target_{i}" for i in range(len(consumed))],
+                    *[f"control_{i}" for i in range(len(controls))],
+                    *[f"target_{i}" for i in range(len(qubits))],
                 ],
             )
         )
         op = InvokeOperation(
-            operands=[q.value for q in [*consumed_controls, *consumed]],
+            operands=[q.value for q in all_inputs],
             results=results,
             target=oracle_ref,
             transform=transform,
@@ -285,13 +337,28 @@ class Oracle:
                 attrs=attrs,
             ),
         )
-        get_current_tracer().add_operation(op)
+        consumed_qubits = [
+            handle.consume(
+                operation_name=(
+                    f"Oracle[{self.name}][control]"
+                    if index < len(controls)
+                    else f"Oracle[{self.name}][target]"
+                )
+            )
+            for index, handle in enumerate(all_inputs)
+        ]
+        tracer.add_operation(op)
 
-        consumed_qubits = [*consumed_controls, *consumed]
-        return tuple(
-            Qubit(value=result, parent=qubit.parent, indices=qubit.indices)
-            for result, qubit in zip(results, consumed_qubits, strict=True)
-        )
+        outputs = []
+        for result, qubit in zip(results, consumed_qubits, strict=True):
+            output = Qubit(
+                value=result,
+                parent=qubit.parent,
+                indices=qubit.indices,
+            )
+            qubit._handoff_direct_borrow_to(output)
+            outputs.append(output)
+        return tuple(outputs)
 
 
 def opaque(

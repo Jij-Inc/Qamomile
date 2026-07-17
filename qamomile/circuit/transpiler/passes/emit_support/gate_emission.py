@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.transpiler.errors import (
+    EmitError,
     OperandResolutionInfo,
     QubitAliasError,
     QubitIndexResolutionError,
@@ -152,8 +153,14 @@ def emit_gate(
             if v.element_indices:
                 for idx in v.element_indices:
                     if idx.parent_array is not None:
+                        nested_index = idx.element_indices[0]
+                        display_index = nested_index.name or (
+                            str(nested_index.get_const())
+                            if nested_index.is_constant()
+                            else "?"
+                        )
                         element_indices_names.append(
-                            f"{idx.parent_array.name}[{idx.element_indices[0].name if idx.element_indices else '?'}]"
+                            f"{idx.parent_array.name}[{display_index}]"
                         )
                     else:
                         element_indices_names.append(idx.name)
@@ -178,8 +185,14 @@ def emit_gate(
                 if v.element_indices:
                     for idx in v.element_indices:
                         if idx.parent_array is not None:
+                            nested_index = idx.element_indices[0]
+                            display_index = nested_index.name or (
+                                str(nested_index.get_const())
+                                if nested_index.is_constant()
+                                else "?"
+                            )
                             element_indices_names.append(
-                                f"{idx.parent_array.name}[{idx.element_indices[0].name if idx.element_indices else '?'}]"
+                                f"{idx.parent_array.name}[{display_index}]"
                             )
                         else:
                             element_indices_names.append(idx.name)
@@ -289,40 +302,87 @@ def resolve_angle(
 ) -> float | Any:
     """Resolve angle parameter for rotation gates.
 
-    theta is always a Value stored as the last element of operands
-    for rotation gates.
+    The angle is always a `Value` stored as the last operand of a rotation
+    gate.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass providing parameter
+            resolution and creation.
+        op (GateOperation): Rotation gate whose angle is resolved.
+        bindings (dict[str, Any]): Active compile-time bindings.
+
+    Returns:
+        float | Any: Concrete angle or backend parameter expression.
+
+    Raises:
+        EmitError: If the rotation angle is missing or cannot be resolved.
     """
-    theta = op.theta
-    if theta is not None:
-        # Shape-hint fast path: if theta is an element of a declared
-        # parameter array (``gamma[p]`` with ``parameters=['gamma']``),
-        # skip bindings lookup and go straight to backend parameter
-        # creation. Otherwise the concrete shape-hint binding would
-        # short-circuit the symbolic path.
-        if _theta_is_param_array_element(theta, emit_pass._resolver.parameters):
-            param_key = emit_pass._resolver.get_parameter_key(theta, bindings)
-            if param_key:
-                return emit_pass._get_or_create_parameter(param_key, theta.uuid)
+    return resolve_angle_value(emit_pass, op.theta, bindings)
 
-        # Use unified resolver for value resolution.
-        resolved = UnifiedValueResolver(context=bindings, bindings=bindings).resolve(
-            theta
+
+def resolve_angle_value(
+    emit_pass: "StandardEmitPass",
+    theta: Any,
+    bindings: dict[str, Any],
+) -> float | Any:
+    """Resolve a bare angle Value to a concrete float or backend parameter.
+
+    Shared core of :func:`resolve_angle` so operations carrying a standalone
+    angle Value reuse the exact same resolution order as rotation-gate thetas.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass providing the
+            resolver and backend-parameter factory.
+        theta (Any): Angle ``Value`` to resolve.
+        bindings (dict[str, Any]): Active compile-time bindings.
+
+    Returns:
+        float | Any: A concrete ``float`` when the angle is bound, or a
+            backend parameter expression when it stays symbolic.
+
+    Raises:
+        EmitError: If the angle is missing or cannot be resolved to a concrete
+            value or backend parameter. Emitting ``0.0`` in this case would
+            silently change the requested unitary.
+    """
+    if theta is None:
+        raise EmitError(
+            "Cannot emit an angle-dependent operation without an angle Value.",
+            operation="AngleResolution",
         )
-        if resolved is not None:
-            if not isinstance(resolved, (int, float)):
-                return resolved
-            return float(resolved)
 
-        # Fall back to array element resolution from the emission resolver.
-        array_resolved = emit_pass._resolver.resolve_classical_value(theta, bindings)
-        if array_resolved is not None:
-            if not isinstance(array_resolved, (int, float)):
-                return array_resolved
-            return float(array_resolved)
-
-        # Fall back to symbolic parameter creation.
+    # Shape-hint fast path: if theta is an element of a declared
+    # parameter array (``gamma[p]`` with ``parameters=['gamma']``),
+    # skip bindings lookup and go straight to backend parameter
+    # creation. Otherwise the concrete shape-hint binding would
+    # short-circuit the symbolic path.
+    if _theta_is_param_array_element(theta, emit_pass._resolver.parameters):
         param_key = emit_pass._resolver.get_parameter_key(theta, bindings)
         if param_key:
             return emit_pass._get_or_create_parameter(param_key, theta.uuid)
 
-    return 0.0
+    # Use unified resolver for value resolution.
+    resolved = UnifiedValueResolver(context=bindings, bindings=bindings).resolve(theta)
+    if resolved is not None:
+        if not isinstance(resolved, (int, float)):
+            return resolved
+        return float(resolved)
+
+    # Fall back to array element resolution from the emission resolver.
+    array_resolved = emit_pass._resolver.resolve_classical_value(theta, bindings)
+    if array_resolved is not None:
+        if not isinstance(array_resolved, (int, float)):
+            return array_resolved
+        return float(array_resolved)
+
+    # Fall back to symbolic parameter creation.
+    param_key = emit_pass._resolver.get_parameter_key(theta, bindings)
+    if param_key:
+        return emit_pass._get_or_create_parameter(param_key, theta.uuid)
+
+    name = getattr(theta, "name", None) or "<anonymous>"
+    raise EmitError(
+        f"Cannot resolve angle value {name!r}. Bind it at transpile time or "
+        "declare it as a runtime parameter.",
+        operation="AngleResolution",
+    )

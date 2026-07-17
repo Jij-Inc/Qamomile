@@ -25,7 +25,7 @@
 
 # %%
 # 本チュートリアルで追加で必要なパッケージのインストール
-# # !pip install qamomile ommx-quantum-benchmarks ommx-pyscipopt-adapter
+# # !pip install "qamomile[qiskit]" ommx-quantum-benchmarks ommx-pyscipopt-adapter
 
 # %%
 import os

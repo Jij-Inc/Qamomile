@@ -15,12 +15,14 @@ from .sampleset import BinarySampleSet
 
 class BinaryModel(Generic[VT]):
     def __init__(self, expr: BinaryExpr[VT]) -> None:
-        self._expr = expr
+        self._expr = self._normalize_expression(expr)
 
         # Bidirectional index mapping
         index_new_to_origin: dict[int, int] = {}
         index_origin_to_new: dict[int, int] = {}
-        unique_indices = set([i for inds in expr.coefficients.keys() for i in inds])
+        unique_indices = {
+            index for indices in self._expr.coefficients for index in indices
+        }
         for new_i, old_i in enumerate(sorted(unique_indices)):
             index_new_to_origin[new_i] = old_i
             index_origin_to_new[old_i] = new_i
@@ -34,6 +36,47 @@ class BinaryModel(Generic[VT]):
         self.constant: float = 0.0
         self.order = 0
         self._update_internal_coefficients()
+
+    @staticmethod
+    def _normalize_expression(expr: BinaryExpr[VT]) -> BinaryExpr[VT]:
+        """Return a vartype-canonical copy of a binary expression.
+
+        Args:
+            expr: Expression whose term indices should be reduced.
+
+        Returns:
+            A copy with duplicate indices reduced, like terms accumulated,
+            empty products promoted to the constant, and zero terms removed.
+        """
+        constant = expr.constant
+        coefficients: dict[tuple[int, ...], float] = {}
+        for indices, coefficient in expr.coefficients.items():
+            if is_close_zero(coefficient):
+                continue
+            reduced = BinaryExpr.reduce_indices(expr.vartype, indices)
+            if reduced != tuple(sorted(indices)):
+                warnings.warn(
+                    "Duplicate variable indices in term "
+                    f"{indices} were normalized to {reduced} using "
+                    f"{expr.vartype} algebra.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+            if not reduced:
+                constant += coefficient
+                continue
+            coefficients[reduced] = coefficients.get(reduced, 0.0) + coefficient
+
+        coefficients = {
+            indices: coefficient
+            for indices, coefficient in coefficients.items()
+            if not is_close_zero(coefficient)
+        }
+        return BinaryExpr(
+            vartype=expr.vartype,
+            constant=constant,
+            coefficients=coefficients,
+        )
 
     @property
     def num_bits(self) -> int:
@@ -53,16 +96,6 @@ class BinaryModel(Generic[VT]):
         for inds, coeff in self._expr.coefficients.items():
             if is_close_zero(coeff):
                 continue
-
-            if len(set(inds)) != len(inds):
-                normalized = tuple(sorted(set(inds)))
-                warnings.warn(
-                    "Duplicate variable indices in term "
-                    f"{inds} were normalized to {normalized}.",
-                    UserWarning,
-                    stacklevel=4,
-                )
-                inds = normalized
 
             if len(inds) == 0:
                 constant += coeff

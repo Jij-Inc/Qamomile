@@ -7,6 +7,12 @@ import numbers
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
+)
 from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -31,6 +37,7 @@ from qamomile.circuit.ir.operation.gate import (
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -48,6 +55,10 @@ from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import
     resolve_condition_address_detailed,
     resolve_if_condition,
 )
+from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
+    resolve_loop_bounds,
+    validated_loop_indexset,
+)
 from qamomile.circuit.transpiler.passes.emit_support.physical_index_map import (
     copy_array_element_aliases,
 )
@@ -60,6 +71,7 @@ from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
     ValueResolver,
     resolve_qubit_key,
 )
+from qamomile.circuit.transpiler.passes.eval_utils import FoldPolicy, fold_classical_op
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -932,7 +944,19 @@ class ResourceAllocator:
                         self._next_clbit_index += 1
 
             elif isinstance(op, GateOperation):
-                self._allocate_gate(op, qubit_map)
+                self._allocate_gate(op, qubit_map, bindings)
+
+            elif isinstance(op, (BinOp, CompOp, CondOp, NotOp)):
+                folded = fold_classical_op(
+                    op,
+                    lambda value: self._resolver.resolve_classical_value(
+                        value, bindings
+                    ),
+                    self._resolver.parameters,
+                    FoldPolicy.EMIT_RESPECT_PARAMS,
+                )
+                if folded is not None and op.results:
+                    bindings[op.results[0].uuid] = folded
 
             elif isinstance(op, IfOperation):
                 resolved = resolve_if_condition(op.condition, bindings)
@@ -1033,8 +1057,46 @@ class ResourceAllocator:
                         "WhileOperation construction."
                     )
 
+            elif isinstance(op, ForOperation):
+                start, stop, step = resolve_loop_bounds(self._resolver, op, bindings)
+                if (
+                    start is not None
+                    and stop is not None
+                    and step is not None
+                    and op.loop_var_value is not None
+                ):
+                    indexset = validated_loop_indexset(start, stop, step)
+                    if not indexset:
+                        # The frontend traces a loop body once, so later
+                        # quantum values can reference SSA successors created
+                        # in that body even when the concrete loop is empty.
+                        # Walk it once for alias discovery only; emit_for still
+                        # emits no instructions for a zero-trip loop.
+                        self._allocate_recursive(
+                            op.operations,
+                            qubit_map,
+                            clbit_map,
+                            bindings,
+                        )
+                    for index in indexset:
+                        loop_bindings = bindings.copy()
+                        loop_bindings[op.loop_var_value.uuid] = index
+                        self._allocate_recursive(
+                            op.operations,
+                            qubit_map,
+                            clbit_map,
+                            loop_bindings,
+                        )
+                else:
+                    self._allocate_recursive(
+                        op.operations,
+                        qubit_map,
+                        clbit_map,
+                        bindings,
+                    )
+
             elif isinstance(op, HasNestedOps):
-                # Generic recursion for For/ForItems: recurse into all nested bodies.
+                # Generic recursion for ForItems and future nested ops.
                 for body in op.nested_op_lists():
                     self._allocate_recursive(body, qubit_map, clbit_map, bindings)
 
@@ -1046,6 +1108,9 @@ class ResourceAllocator:
 
             elif isinstance(op, ControlledUOperation):
                 self._allocate_controlled_u(op, qubit_map, bindings)
+
+            elif isinstance(op, SelectOperation):
+                self._allocate_select(op, qubit_map)
 
             elif isinstance(op, CastOperation):
                 self._allocate_cast(op, qubit_map)
@@ -1159,11 +1224,34 @@ class ResourceAllocator:
             clbit_map,
             bindings=bindings,
             resolver=self._resolver,
-            reject_runtime_bit_mux=(
-                bool(op.operands) and op.operands[0].uuid in self._measurement_tainted
-            ),
+            # Even a condition that becomes constant only after loop unrolling
+            # must not collapse distinct pre-existing clbits during this
+            # rolled allocation pass. If the alias model cannot represent the
+            # merge without overwriting a live value, fail now and let the user
+            # restructure the branch instead of emitting a wrong circuit.
+            reject_runtime_bit_mux=True,
             allowed_mixed_bit_outputs=self._safe_mixed_bit_merge_outputs,
         )
+
+        condition_is_runtime = (
+            bool(op.operands) and op.operands[0].uuid in self._measurement_tainted
+        )
+        if condition_is_runtime:
+            return
+
+        for merge in op.iter_merges():
+            output = merge.result
+            if not output.type.is_quantum() or isinstance(output, ArrayValue):
+                continue
+            if QubitAddress(output.uuid) not in qubit_map:
+                raise EmitError(
+                    "A loop-dependent compile-time if merges quantum values "
+                    "whose physical resource cannot be resolved during "
+                    "allocation. Assign branch operations back to the same "
+                    "array slot, or hoist the structural condition outside "
+                    "the quantum-value merge.",
+                    operation="IfOperation",
+                )
 
     def _remap_static_merge_outputs(
         self,
@@ -1273,8 +1361,19 @@ class ResourceAllocator:
         self,
         op: GateOperation,
         qubit_map: QubitMap,
+        bindings: dict[str, Any],
     ) -> None:
-        """Allocate resources for a GateOperation."""
+        """Allocate resources and aliases for a gate operation.
+
+        Args:
+            op (GateOperation): Gate whose qubit carriers are allocated.
+            qubit_map (QubitMap): Mutable logical-to-physical qubit map.
+            bindings (dict[str, Any]): Active iteration bindings used to
+                resolve symbolic array-element operands.
+
+        Returns:
+            None: ``qubit_map`` is updated in place.
+        """
         # GateOperation represents a unitary gate: qubit count is preserved.
         qubit_ops = op.qubit_operands
         assert len(op.results) == len(qubit_ops), (
@@ -1293,7 +1392,18 @@ class ResourceAllocator:
         # physical qubit for ``q[1]``.
         for operand in qubit_ops:
             operand_addr = QubitAddress(operand.uuid)
-            if operand_addr not in qubit_map:
+            resolved = self._resolver.resolve_qubit_index(
+                operand,
+                qubit_map,
+                bindings,
+            )
+            if resolved is not None:
+                # The same SSA operation is replayed for every unrolled loop
+                # iteration. Its scalar UUID can therefore alias a different
+                # root-array slot each time; refresh the alias even when a
+                # prior iteration already registered it.
+                qubit_map[operand_addr] = resolved
+            elif operand_addr not in qubit_map:
                 chain_addr = self._resolve_root_qubit_address(operand)
                 if chain_addr is not None:
                     assert chain_addr in qubit_map, (
@@ -1317,11 +1427,13 @@ class ResourceAllocator:
         # Phase 2: Map each result to its corresponding qubit operand (1:1)
         for i, result in enumerate(op.results):
             result_addr = QubitAddress(result.uuid)
-            if result_addr not in qubit_map:
-                operand = qubit_ops[i]
-                operand_addr = QubitAddress(operand.uuid)
-                if operand_addr in qubit_map:
-                    qubit_map[result_addr] = qubit_map[operand_addr]
+            operand = qubit_ops[i]
+            operand_addr = QubitAddress(operand.uuid)
+            if operand_addr in qubit_map:
+                # Refresh loop-replayed result aliases for the same reason as
+                # the operand aliases above. A unitary gate's output always
+                # remains on its corresponding input carrier.
+                qubit_map[result_addr] = qubit_map[operand_addr]
 
     def _allocate_qubit_list(
         self,
@@ -1585,6 +1697,28 @@ class ResourceAllocator:
         target_qubits = [v for v in op.target_operands if v.type.is_quantum()]
         all_qubits = control_qubits + target_qubits
         self._allocate_qubit_list(all_qubits, list(op.results), qubit_map)
+
+    def _allocate_select(
+        self,
+        op: SelectOperation,
+        qubit_map: QubitMap,
+    ) -> None:
+        """Alias a SELECT operation's pass-through quantum results.
+
+        SELECT changes amplitudes and relative phases without moving physical
+        qubits. Its index and target outputs therefore reuse the slots of the
+        corresponding inputs, including every element of vector operands.
+
+        Args:
+            op (SelectOperation): Multiplexer operation to allocate.
+            qubit_map (QubitMap): Mutable logical-to-physical slot mapping.
+
+        Returns:
+            None: ``qubit_map`` is updated in place.
+        """
+        quantum_operands = [*op.index_operands, *op.target_operands]
+        quantum_results = [result for result in op.results if result.type.is_quantum()]
+        self._allocate_qubit_list(quantum_operands, quantum_results, qubit_map)
 
     @staticmethod
     def _parse_composite_key(key: str) -> QubitAddress:

@@ -688,26 +688,22 @@ def test_store_op_shape_in_ir():
 
 
 def test_store_op_serialize_roundtrip():
-    """A block containing a store op round-trips through JSON and msgpack."""
-    from qamomile.circuit.ir import serialize
+    """A qkernel containing a store op round-trips through protobuf."""
+    from qamomile.circuit.serialization import deserialize, serialize
 
     transpiler = QiskitTranspiler()
     block = transpiler.inline(transpiler.to_block(copy_bit_kernel))
 
-    for dump, load in (
-        (serialize.dump_json, serialize.load_json),
-        (serialize.dump_msgpack, serialize.load_msgpack),
-    ):
-        restored = load(dump(block))
-        restored_ops = [type(op).__name__ for op in restored.operations]
-        assert restored_ops == [type(op).__name__ for op in block.operations]
-        restored_store = next(
-            op
-            for op in restored.operations
-            if isinstance(op, StoreArrayElementOperation)
-        )
-        assert len(restored_store.operands) == 3
-        assert restored_store.results[0].uuid == block.output_values[0].uuid
+    restored = transpiler.inline(deserialize(serialize(copy_bit_kernel)).block)
+    restored_ops = [type(op).__name__ for op in restored.operations]
+    assert restored_ops == [type(op).__name__ for op in block.operations]
+    restored_store = next(
+        op for op in restored.operations if isinstance(op, StoreArrayElementOperation)
+    )
+    assert len(restored_store.operands) == 3
+    assert restored_store.results[0].uuid == restored.output_values[0].uuid
+    assert restored_store.results[0].logical_id == restored_store.array.logical_id
+    assert restored_store.results[0].version == restored_store.array.version + 1
 
 
 def test_store_op_canonicalize_stable():

@@ -160,7 +160,15 @@ def draw_qkernel(
         ValueError: If visualization requires a missing concrete register
             size.
     """
-    from qamomile.circuit.visualization import MatplotlibDrawer
+    try:
+        from qamomile.circuit.visualization import MatplotlibDrawer
+    except ModuleNotFoundError as error:
+        if error.name is None or not error.name.startswith("matplotlib"):
+            raise
+        raise ImportError(
+            "Circuit drawing requires the optional visualization dependencies. "
+            "Install them with: pip install 'qamomile[visualization]'"
+        ) from error
 
     return MatplotlibDrawer.draw_kernel(
         kernel,

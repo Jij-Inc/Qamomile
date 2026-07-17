@@ -9,7 +9,7 @@ Example:
     config = SubstitutionConfig(
         rules=[
             SubstitutionRule(source_name="my_oracle", target=optimized_oracle),
-            SubstitutionRule(source_name="qft", strategy="approximate"),
+            SubstitutionRule(source_name="qft", strategy="approximate_k2"),
         ]
     )
     pass = SubstitutionPass(config)
@@ -30,6 +30,7 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 
@@ -240,6 +241,18 @@ class SubstitutionPass(Pass[Block, Block]):
         if isinstance(op, InvokeOperation):
             return self._transform_invoke(op)
 
+        if isinstance(op, SelectOperation):
+            return dataclasses.replace(
+                op,
+                case_blocks=[
+                    dataclasses.replace(
+                        case_block,
+                        operations=self._transform_operations(case_block.operations),
+                    )
+                    for case_block in op.case_blocks
+                ],
+            )
+
         if isinstance(op, HasNestedOps):
             # Recursively transform all nested operation lists
             new_lists = [
@@ -284,7 +297,6 @@ class SubstitutionPass(Pass[Block, Block]):
         gate_names = [
             str(op.attrs.get("custom_name", "")),
             op.target.name,
-            str(op.attrs.get("gate_type", "")).lower(),
         ]
         rule = next(
             (
@@ -366,7 +378,7 @@ def create_substitution_pass(
     Example:
         pass = create_substitution_pass(
             block_replacements={"my_oracle": optimized_oracle},
-            strategy_overrides={"qft": "approximate", "iqft": "approximate"},
+            strategy_overrides={"qft": "approximate_k2", "iqft": "approximate_k2"},
         )
     """
     rules: list[SubstitutionRule] = []

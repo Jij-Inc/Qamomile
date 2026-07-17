@@ -22,10 +22,13 @@ from typing import Any
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import (
+    CallTransform,
     CastOperation,
+    ConcreteControlledU,
     ControlledUOperation,
     ForItemsOperation,
     GateOperation,
+    GlobalPhaseOperation,
     InverseBlockOperation,
     InvokeOperation,
     MeasureOperation,
@@ -228,19 +231,27 @@ class _BlockPrinter:
         self.lines.append(f"{pad}}}{_format_region_yields(op)}")
 
     def _emit_invoke(self, op: InvokeOperation, *, indent: int, pad: str) -> None:
+        """Emit one invocation with transform and activation metadata.
+
+        Args:
+            op (InvokeOperation): Invocation to print.
+            indent (int): Current indentation depth for an expanded body.
+            pad (str): Precomputed indentation prefix for the invocation line.
+        """
         target = op.body
         name = op.name
         args = ", ".join(_format_value(v) for v in op.operands)
         rets = ", ".join(_format_value(v) for v in op.results)
         arrow = f" -> ({rets})" if rets else ""
+        metadata = _format_invoke_metadata(op)
         if self.depth > 0 and target is not None:
-            self.lines.append(f"{pad}invoke {name}({args}){arrow} {{")
+            self.lines.append(f"{pad}invoke {name}({args}){arrow}{metadata} {{")
             child = _BlockPrinter(depth=self.depth - 1)
             child._emit_ops(target.operations, indent=indent + 1)
             self.lines.extend(child.lines)
             self.lines.append(f"{pad}}}")
         else:
-            self.lines.append(f"{pad}invoke {name}({args}){arrow}")
+            self.lines.append(f"{pad}invoke {name}({args}){arrow}{metadata}")
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +260,14 @@ class _BlockPrinter:
 
 
 def _format_flat_op(op: Operation) -> str:
-    """Format a non-control-flow operation as a single line."""
+    """Format a non-control-flow operation as a single line.
+
+    Args:
+        op (Operation): Operation to render.
+
+    Returns:
+        str: Single-line textual representation of the operation.
+    """
     if isinstance(op, GateOperation):
         return _format_gate(op)
     if isinstance(op, ControlledUOperation):
@@ -258,6 +276,8 @@ def _format_flat_op(op: Operation) -> str:
         return _format_invoke(op)
     if isinstance(op, InverseBlockOperation):
         return _format_inverse_block(op)
+    if isinstance(op, GlobalPhaseOperation):
+        return _format_global_phase(op)
     if isinstance(op, MeasureOperation):
         return _format_measure(op, "measure")
     if isinstance(op, ProjectOperation):
@@ -346,6 +366,15 @@ def _format_gate(op: GateOperation) -> str:
 
 
 def _format_controlled(op: ControlledUOperation) -> str:
+    """Format a structural controlled-unitary operation.
+
+    Args:
+        op (ControlledUOperation): Controlled operation to format.
+
+    Returns:
+        str: Single-line controlled-unitary representation including a
+            non-default activation value when present.
+    """
     block_name = op.block.name if op.block is not None and op.block.name else "<block>"
     power = op.power
     power_str = (
@@ -353,18 +382,85 @@ def _format_controlled(op: ControlledUOperation) -> str:
         if isinstance(power, Value)
         else f", power={power}"
     )
+    control_value = (
+        f", control_value={op.control_value}"
+        if isinstance(op, ConcreteControlledU) and op.control_value is not None
+        else ""
+    )
     args = ", ".join(_format_value(v) for v in op.operands)
-    return f"{_format_results(op.results)} = controlled {block_name}({args}{power_str})"
+    return (
+        f"{_format_results(op.results)} = controlled "
+        f"{block_name}({args}{power_str}{control_value})"
+    )
 
 
 def _format_invoke(op: InvokeOperation) -> str:
+    """Format a flat callable invocation.
+
+    Args:
+        op (InvokeOperation): Invocation to format.
+
+    Returns:
+        str: Single-line invocation including transform metadata.
+    """
     args = ", ".join(_format_value(v) for v in op.operands)
-    return f"{_format_results(op.results)} = invoke {op.name}({args})"
+    return (
+        f"{_format_results(op.results)} = invoke {op.name}({args})"
+        f"{_format_invoke_metadata(op)}"
+    )
+
+
+def _format_invoke_metadata(op: InvokeOperation) -> str:
+    """Format transform metadata that changes invocation semantics.
+
+    Args:
+        op (InvokeOperation): Invocation whose transform metadata should be
+            rendered.
+
+    Returns:
+        str: Bracketed transform metadata, or an empty string for a direct
+            invocation.
+    """
+    if op.transform is CallTransform.DIRECT:
+        return ""
+    fields = [f"transform={op.transform.name}"]
+    if op.transform is CallTransform.CONTROLLED:
+        fields.append(f"controls={op.num_control_qubits}")
+        if op.control_value is not None:
+            fields.append(f"control_value={op.control_value}")
+    return " [" + ", ".join(fields) + "]"
 
 
 def _format_inverse_block(op: InverseBlockOperation) -> str:
+    """Format a first-class inverse block operation.
+
+    Args:
+        op (InverseBlockOperation): Inverse operation to format.
+
+    Returns:
+        str: Single-line inverse representation including coherent-control
+            metadata when present.
+    """
     args = ", ".join(_format_value(v) for v in op.operands)
-    return f"{_format_results(op.results)} = inverse {op.name}({args})"
+    fields: list[str] = []
+    if op.num_control_qubits:
+        fields.append(f"controls={op.num_control_qubits}")
+        if op.control_value is not None:
+            fields.append(f"control_value={op.control_value}")
+    metadata = " [" + ", ".join(fields) + "]" if fields else ""
+    return f"{_format_results(op.results)} = inverse {op.name}({args}){metadata}"
+
+
+def _format_global_phase(op: GlobalPhaseOperation) -> str:
+    """Format a zero-qubit global-phase operation.
+
+    Args:
+        op (GlobalPhaseOperation): Operation to format.
+
+    Returns:
+        str: ``global_phase(<phase>)`` textual representation.
+    """
+    return f"global_phase({_format_value(op.phase)})"
 
 
 def _format_measure(op: Operation, mnemonic: str) -> str:

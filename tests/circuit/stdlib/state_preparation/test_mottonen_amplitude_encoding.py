@@ -168,13 +168,11 @@ def _state_fidelity(got: np.ndarray, expected: np.ndarray) -> float:
 
 
 def _pad_observable(num_qubits: int, term: qm_o.Hamiltonian) -> qm_o.Hamiltonian:
-    """Pad a single-qubit Pauli to *num_qubits* width with a zero-weighted Z term.
+    """Pad a single-qubit Pauli to *num_qubits* declared width.
 
-    Several backend emit paths require the ``Hamiltonian.num_qubits``
-    to match the register width.  Adding ``0.0 * qm_o.Z(num_qubits - 1)``
-    extends the declared qubit count to ``num_qubits`` without affecting
-    any expectation value (the weight is exactly zero).  This is the
-    standard trick used elsewhere in the test suite.
+    Several backend emit paths require ``Hamiltonian.num_qubits`` to match
+    the register width. A declared-width zero Hamiltonian preserves that
+    metadata even though canonical term normalization removes zero terms.
 
     Args:
         num_qubits (int): Target register width.
@@ -188,7 +186,7 @@ def _pad_observable(num_qubits: int, term: qm_o.Hamiltonian) -> qm_o.Hamiltonian
     """
     if term.num_qubits >= num_qubits:
         return term
-    padded = term + 0.0 * qm_o.Z(num_qubits - 1)
+    padded = term + qm_o.Hamiltonian.zero(num_qubits=num_qubits)
     assert padded.num_qubits == num_qubits
     return padded
 
@@ -422,6 +420,14 @@ class TestComputeAngles:
         for n in _QUBIT_COUNTS:
             ry_angles = compute_mottonen_amplitude_encoding_ry_angles(np.ones(2**n))
             assert ry_angles.shape == (2**n - 1,)
+
+    def test_fourteen_qubit_transform_avoids_dense_matrix(self) -> None:
+        """A 14-qubit transform completes with linear working memory."""
+        n_qubits = 14
+        ry_angles = compute_mottonen_amplitude_encoding_ry_angles(np.ones(2**n_qubits))
+
+        assert ry_angles.shape == (2**n_qubits - 1,)
+        np.testing.assert_allclose(ry_angles[0], np.pi / 2, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------

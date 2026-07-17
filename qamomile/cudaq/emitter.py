@@ -21,9 +21,11 @@ import enum
 import itertools
 import linecache
 import math
+import re
 from collections.abc import Callable, Hashable
 from typing import Any
 
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.gate_emitter import MeasurementMode
 
 
@@ -123,6 +125,17 @@ class CudaqExpr:
         """
         return CudaqExpr(f"({self._expr}) / ({_to_expr(other)})")
 
+    def __mod__(self, other: Any) -> "CudaqExpr":
+        """Build a modulo expression.
+
+        Args:
+            other (Any): Right operand.
+
+        Returns:
+            CudaqExpr: Parenthesized modulo expression.
+        """
+        return CudaqExpr(f"({self._expr}) % ({_to_expr(other)})")
+
     def __pow__(self, other: Any) -> "CudaqExpr":
         """Build an exponentiation expression.
 
@@ -178,6 +191,17 @@ class CudaqExpr:
             CudaqExpr: Parenthesized division expression.
         """
         return CudaqExpr(f"({_to_expr(other)}) / ({self._expr})")
+
+    def __rmod__(self, other: Any) -> "CudaqExpr":
+        """Build a reflected modulo expression.
+
+        Args:
+            other (Any): Left operand.
+
+        Returns:
+            CudaqExpr: Parenthesized modulo expression.
+        """
+        return CudaqExpr(f"({_to_expr(other)}) % ({self._expr})")
 
     def __rpow__(self, other: Any) -> "CudaqExpr":
         """Build a reflected exponentiation expression.
@@ -600,10 +624,11 @@ class CudaqKernelEmitter:
             else:
                 sig = "def _qamomile_kernel():"
 
+        helper_bodies, entry_lines = self._collapse_passthrough_helpers()
         parameter_signature = ", thetas: list[float]" if self._parametric else ""
         parameter_argument = ", thetas" if self._parametric else ""
         helper_sources = []
-        for name, num_qubits, helper_body in self._helper_bodies:
+        for name, num_qubits, helper_body in helper_bodies:
             qubit_signature = ", ".join(
                 f"q{index}: cudaq.qubit" for index in range(num_qubits)
             )
@@ -616,7 +641,7 @@ class CudaqKernelEmitter:
                 f"@cudaq.kernel\ndef {name}({signature}):\n{rendered_body}\n"
             )
 
-        body = "\n".join(self._lines).replace(
+        body = "\n".join(entry_lines).replace(
             self._parameter_argument_marker,
             parameter_argument,
         )
@@ -646,6 +671,86 @@ class CudaqKernelEmitter:
         circuit.execution_mode = mode
         circuit.param_count = self._param_count
         return circuit
+
+    def _collapse_passthrough_helpers(
+        self,
+    ) -> tuple[
+        list[tuple[str, int, tuple[str, ...]]],
+        list[str],
+    ]:
+        """Remove helper kernels that only forward their quantum arguments.
+
+        CUDA-Q's argument-synthesis pass can fail on deeply nested chains of
+        decorator kernels even when every wrapper merely forwards the same
+        qubits to another helper.  Qamomile produces such wrappers naturally
+        when nested qkernels and reusable operations are lowered.  Replacing
+        each transparent wrapper at its call sites preserves the circuit while
+        keeping the generated helper graph shallow enough for CUDA-Q.
+
+        Returns:
+            tuple[list[tuple[str, int, tuple[str, ...]]], list[str]]: Retained
+            helper definitions and rewritten entry-kernel source lines.
+        """
+        widths = {name: width for name, width, _ in self._helper_bodies}
+        aliases: dict[str, str] = {}
+        direct_call = re.compile(r"^\s+(_qamomile_[A-Za-z0-9_]+)\((.*)\)$")
+        for name, width, helper_body in self._helper_bodies:
+            if len(helper_body) != 1:
+                continue
+            match = direct_call.fullmatch(helper_body[0])
+            if match is None:
+                continue
+            callee, arguments = match.groups()
+            expected_arguments = (
+                ", ".join(f"q{index}" for index in range(width))
+                + self._parameter_argument_marker
+            )
+            if arguments == expected_arguments and widths.get(callee) == width:
+                aliases[name] = callee
+
+        def resolve(name: str) -> str:
+            """Resolve a transparent-helper alias to its retained callee.
+
+            Args:
+                name (str): Generated helper name.
+
+            Returns:
+                str: Final nontransparent helper name.
+            """
+            visited: set[str] = set()
+            while name in aliases and name not in visited:
+                visited.add(name)
+                name = aliases[name]
+            return name
+
+        resolved = {name: resolve(name) for name in aliases}
+        if not resolved:
+            return list(self._helper_bodies), list(self._lines)
+        names = "|".join(
+            re.escape(name) for name in sorted(resolved, key=len, reverse=True)
+        )
+        alias_pattern = re.compile(rf"(?<![A-Za-z0-9_])(?:{names})(?![A-Za-z0-9_])")
+
+        def rewrite(lines: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+            """Rewrite transparent-helper references in source lines.
+
+            Args:
+                lines (tuple[str, ...] | list[str]): Generated source lines.
+
+            Returns:
+                tuple[str, ...]: Lines with aliases replaced by their callees.
+            """
+            return tuple(
+                alias_pattern.sub(lambda match: resolved[match.group(0)], line)
+                for line in lines
+            )
+
+        helpers = [
+            (name, width, rewrite(body))
+            for name, width, body in self._helper_bodies
+            if name not in resolved
+        ]
+        return helpers, list(rewrite(self._lines))
 
     def create_parameter(self, name: str) -> CudaqExpr:
         """Return a ``CudaqExpr`` referencing ``thetas[i]``.
@@ -738,6 +843,71 @@ class CudaqKernelEmitter:
         """Emit phase gate (R1)."""
         self._emit(f"r1({self._angle_expr(angle)}, {self._qref(qubit)})")
 
+    def emit_global_phase(
+        self,
+        circuit: CudaqKernelArtifact,
+        angle: float | Any,
+        carrier: int | None = None,
+    ) -> None:
+        """Synthesize ``exp(i * angle) I`` on an existing CUDA-Q qubit.
+
+        The exact identity is ``R1(2a) RZ(-2a) = exp(ia) I``; it preserves an
+        arbitrary state of the selected carrier qubit.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            angle (float | Any): Concrete or source-level phase in radians.
+            carrier (int | None): Existing qubit used by the identity
+                sequence. Defaults to qubit zero when the artifact is
+                nonempty.
+
+        Raises:
+            EmitError: If the artifact has no qubit or ``carrier`` is outside
+                its physical width.
+        """
+        if carrier is None:
+            if circuit.num_qubits == 0:
+                raise EmitError(
+                    "CUDA-Q standalone global phase requires an existing "
+                    "qubit or an explicitly allocated clean carrier"
+                )
+            carrier = 0
+        if carrier < 0 or carrier >= circuit.num_qubits:
+            raise EmitError(
+                "CUDA-Q phase-carrier index is outside the circuit: "
+                f"carrier={carrier}, width={circuit.num_qubits}"
+            )
+        self.emit_p(circuit, carrier, 2.0 * angle)
+        self.emit_rz(circuit, carrier, -2.0 * angle)
+
+    def emit_global_phase_on_clean_carrier(
+        self,
+        circuit: CudaqKernelArtifact,
+        angle: float | Any,
+        carrier: int,
+    ) -> None:
+        """Synthesize ``exp(i * angle)`` on a dedicated clean carrier.
+
+        Because the carrier is known to remain in ``|0>``, the single gate
+        ``RZ(-2a)`` produces ``exp(ia)|0>`` exactly. This specialized form is
+        not valid for an arbitrary-state logical qubit.
+
+        Args:
+            circuit (CudaqKernelArtifact): Artifact currently being built.
+            angle (float | Any): Concrete or source-level phase in radians.
+            carrier (int): Internal qubit known to be initialized in ``|0>``.
+
+        Raises:
+            EmitError: If ``carrier`` is outside the artifact's physical
+                width.
+        """
+        if carrier < 0 or carrier >= circuit.num_qubits:
+            raise EmitError(
+                "CUDA-Q clean phase-carrier index is outside the circuit: "
+                f"carrier={carrier}, width={circuit.num_qubits}"
+            )
+        self.emit_rz(circuit, carrier, -2.0 * angle)
+
     # ------------------------------------------------------------------
     # Two-qubit gates
     # ------------------------------------------------------------------
@@ -765,24 +935,9 @@ class CudaqKernelEmitter:
         target: int,
         angle: float | Any,
     ) -> None:
-        """Emit controlled-Phase via decomposition.
-
-        Follows the shared CP_DECOMPOSITION recipe from
-        ``qamomile.circuit.transpiler.decompositions``.
-        Inlined here because CudaqExpr angles require string-based codegen.
-        """
+        """Emit controlled phase through CUDA-Q's exact controlled R1."""
         a = self._angle_expr(angle)
-        if isinstance(angle, (int, float)):
-            half = repr(angle / 2.0)
-            neg_half = repr(-angle / 2.0)
-        else:
-            half = f"({a}) * 0.5"
-            neg_half = f"({a}) * (-0.5)"
-        self._emit(f"rz({half}, {self._qref(target)})")
-        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
-        self._emit(f"rz({neg_half}, {self._qref(target)})")
-        self._emit(f"x.ctrl({self._qref(control)}, {self._qref(target)})")
-        self._emit(f"rz({half}, {self._qref(control)})")
+        self._emit(f"r1.ctrl({a}, {self._qref(control)}, {self._qref(target)})")
 
     def emit_rzz(
         self,
@@ -954,8 +1109,8 @@ class CudaqKernelEmitter:
             self.emit_rx(circuit, target_idx, angle)
             return
         a = self._angle_expr(angle)
-        controls = ", ".join(f"q[{i}]" for i in control_indices)
-        self._emit(f"rx.ctrl({a}, {controls}, q[{target_idx}])")
+        controls = ", ".join(self._qref(index) for index in control_indices)
+        self._emit(f"rx.ctrl({a}, {controls}, {self._qref(target_idx)})")
 
     def emit_multi_controlled_ry(
         self,
@@ -977,8 +1132,8 @@ class CudaqKernelEmitter:
             self.emit_ry(circuit, target_idx, angle)
             return
         a = self._angle_expr(angle)
-        controls = ", ".join(f"q[{i}]" for i in control_indices)
-        self._emit(f"ry.ctrl({a}, {controls}, q[{target_idx}])")
+        controls = ", ".join(self._qref(index) for index in control_indices)
+        self._emit(f"ry.ctrl({a}, {controls}, {self._qref(target_idx)})")
 
     def emit_multi_controlled_rz(
         self,
@@ -1000,8 +1155,8 @@ class CudaqKernelEmitter:
             self.emit_rz(circuit, target_idx, angle)
             return
         a = self._angle_expr(angle)
-        controls = ", ".join(f"q[{i}]" for i in control_indices)
-        self._emit(f"rz.ctrl({a}, {controls}, q[{target_idx}])")
+        controls = ", ".join(self._qref(index) for index in control_indices)
+        self._emit(f"rz.ctrl({a}, {controls}, {self._qref(target_idx)})")
 
     # ------------------------------------------------------------------
     # Measurement
