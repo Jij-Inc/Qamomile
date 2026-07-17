@@ -564,7 +564,7 @@ def _apply_amplitude_encoding(
             f"{api_name} requires a Vector[Qubit] with a compile-time "
             "known size; received a symbolic-shape vector. Bind the qubit "
             "count via transpiler.transpile(kernel, bindings={...}) so the "
-            "Möttönen angle pre-computation can run at trace time."
+            "amplitude encoding can be traced with a concrete register width."
         ) from e
 
     if isinstance(amplitudes, Vector):

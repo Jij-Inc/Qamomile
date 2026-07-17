@@ -128,6 +128,22 @@ def _generic_bound_kernel(
     return qmc.measure(qubits)
 
 
+@qmc.qkernel
+def _generic_symbolic_qubit_kernel(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply generic amplitude encoding to a symbolic-width register.
+
+    Args:
+        qubits (qmc.Vector[qmc.Qubit]): Register whose width is unresolved while
+            this kernel is traced standalone.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Encoded register when tracing succeeds.
+    """
+    return qmc.amplitude_encoding(qubits, [1.0, 0.0, 0.0, 0.0])
+
+
 def _bits_to_index(bits: tuple[int, ...] | int) -> int:
     """Convert a little-endian sample value to a basis-state index.
 
@@ -258,3 +274,14 @@ def test_generic_api_rejects_runtime_amplitude_parameters(
             _generic_bound_kernel,
             parameters=["amplitudes"],
         )
+
+
+def test_generic_symbolic_shape_error_is_method_agnostic() -> None:
+    """The generic API reports an algorithm-independent shape error."""
+    with pytest.raises(ValueError) as exc_info:
+        _generic_symbolic_qubit_kernel.build()
+
+    message = str(exc_info.value)
+    assert message.startswith("amplitude_encoding requires")
+    assert "concrete register width" in message
+    assert "Möttönen" not in message
