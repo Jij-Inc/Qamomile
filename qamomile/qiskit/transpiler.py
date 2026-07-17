@@ -69,12 +69,17 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
         """Execute circuit and return bitstring counts.
 
         Args:
-            circuit: The quantum circuit to execute
-            shots: Number of measurement shots
+            circuit (QuantumCircuit): Qiskit circuit to execute.
+            shots (int): Number of measurement shots.
 
         Returns:
-            Dictionary mapping bitstrings to counts (e.g., {"00": 512, "11": 512).
-            A circuit without quantum or classical bits returns ``{"": shots}``.
+            dict[str, int]: Dictionary mapping bitstrings to counts. A circuit
+            without quantum or classical bits returns ``{"": shots}``.
+
+        Raises:
+            RuntimeError: If no Qiskit backend is available for execution, or
+                if Aer would still receive an empty-parameter multiplexer after
+                the workaround decomposition.
         """
         if circuit.num_qubits == 0 and circuit.num_clbits == 0:
             return {"": shots}
@@ -86,17 +91,9 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
 
         circuit_with_meas = self._ensure_measurements(circuit)
         transpiled = transpile(circuit_with_meas, self.backend)
-        # Aer may retain Qiskit's internal multiplexer instruction and crash
-        # in native assembly when it is composed with its inverse. Keep the
-        # public circuit abstract, but lower that private runtime detail before
-        # submitting it to the backend.
-        if type(self.backend).__module__.startswith("qiskit_aer.") and any(
-            instruction.operation.name == "multiplexer"
-            for instruction in transpiled.data
-        ):
-            transpiled = transpile(
-                transpiled.decompose(gates_to_decompose=["multiplexer"], reps=4),
-                self.backend,
+        if type(self.backend).__module__.startswith("qiskit_aer."):
+            transpiled = _decompose_empty_parameter_multiplexers(
+                transpiled, self.backend
             )
         job = self.backend.run(transpiled, shots=shots)
         return job.result().get_counts()
@@ -295,3 +292,63 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
             QiskitExecutor: Executor configured with the backend.
         """
         return QiskitExecutor(backend)
+
+
+def _contains_empty_parameter_multiplexer(circuit: "QuantumCircuit") -> bool:
+    """Return whether a circuit contains Aer's unsafe multiplexer form.
+
+    Args:
+        circuit (QuantumCircuit): Qiskit circuit to inspect, including any
+            nested control-flow blocks reachable through ``ControlFlowOp``.
+
+    Returns:
+        bool: True when the circuit contains a ``multiplexer`` instruction
+            whose parameter list is empty, otherwise False.
+    """
+    from qiskit.circuit import ControlFlowOp
+
+    for instruction in circuit.data:
+        operation = instruction.operation
+        if operation.name == "multiplexer" and not operation.params:
+            return True
+        if isinstance(operation, ControlFlowOp) and any(
+            _contains_empty_parameter_multiplexer(block) for block in operation.blocks
+        ):
+            return True
+    return False
+
+
+def _decompose_empty_parameter_multiplexers(
+    circuit: "QuantumCircuit", backend: Any
+) -> "QuantumCircuit":
+    """Decompose Aer's unsafe empty-parameter multiplexers before execution.
+
+    Args:
+        circuit (QuantumCircuit): Transpiled Qiskit circuit to sanitize.
+        backend (Any): Qiskit backend used for the follow-up transpilation.
+
+    Returns:
+        QuantumCircuit: The original circuit when no unsafe multiplexer is
+            present, otherwise a re-transpiled circuit with matching
+            multiplexers decomposed through nested control-flow blocks.
+
+    Raises:
+        RuntimeError: If an empty-parameter multiplexer remains after the
+            decomposition pass and re-transpilation.
+    """
+    if not _contains_empty_parameter_multiplexer(circuit):
+        return circuit
+
+    from qiskit import transpile
+    from qiskit.circuit import ControlFlowOp
+
+    decomposed = transpile(
+        circuit.decompose(gates_to_decompose=["multiplexer", ControlFlowOp], reps=4),
+        backend,
+    )
+    if _contains_empty_parameter_multiplexer(decomposed):
+        raise RuntimeError(
+            "Aer execution would receive an empty-parameter multiplexer that "
+            "can crash native assembly."
+        )
+    return decomposed
