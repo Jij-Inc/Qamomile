@@ -40,6 +40,7 @@ project:
     - title: Release Notes
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_13_0.md
         - file: release_notes/v0_12_7.md
         - file: release_notes/v0_12_6.md
         - file: release_notes/v0_12_5.md
