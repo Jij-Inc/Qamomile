@@ -15,6 +15,12 @@ RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
 :::
 
 :::{card}
+:header: **Grover探索入門**
+:link: grover_search
+5量子ビットの位相オラクルを使い、振幅増幅前後の探索状態確率を比較します。
+:::
+
+:::{card}
 :header: **ハイブリッド量子ニューラルネットワーク (HQNN)**
 :link: hybrid_qnn
 CNN＋量子変分回路をFashion-MNISTでend-to-end学習し、パラメータシフトルールで勾配を計算します。
