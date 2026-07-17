@@ -1,4 +1,4 @@
-"""State preparation via Möttönen's uniformly-controlled-rotation construction.
+"""Amplitude encoding with generic and Möttönen-specific APIs.
 
 Prepares the n-qubit state
 
@@ -23,15 +23,21 @@ complex amplitudes work end-to-end.
     applied to a different input), not the target amplitude vector.
     There is no runtime guard for this — Qamomile does not track
     qubit states — so it is the caller's responsibility to ensure the
-    register has not yet been mutated when ``amplitude_encoding`` /
-    ``amplitude_encoding_from_angles`` is invoked.  In practice, call
-    these helpers immediately after ``qmc.qubit_array(n, ...)``
-    inside a kernel.
+    register has not yet been mutated when an amplitude-encoding helper is
+    invoked. In practice, call these helpers immediately after
+    ``qmc.qubit_array(n, ...)`` inside a kernel.
 
-This module hosts the gate-emission side of the algorithm. The public
-``amplitude_encoding`` helper creates one QKernel-backed composite for concrete
-amplitudes, while ``amplitude_encoding_from_angles`` emits the parametric
-Gray-walk directly. Classical angle precomputation lives in
+The generic :func:`amplitude_encoding` API specifies the prepared state but not
+the synthesis algorithm. Backends may therefore replace it with a native state
+preparation implementation. Its portable Qamomile body currently uses the
+Möttönen construction described below.
+
+The :func:`mottonen_amplitude_encoding` API makes that construction part of the
+callable identity, so a backend cannot replace it with a generic state
+preparation implementation. The parametric companion
+:func:`mottonen_amplitude_encoding_from_angles` emits the Möttönen Gray walk
+directly. :func:`amplitude_encoding_from_angles` remains as a compatibility
+wrapper for the parametric companion. Classical angle precomputation lives in
 :mod:`qamomile.linalg.mottonen` so hybrid loops can compute angles outside a
 kernel and bind them as runtime parameters.
 
@@ -72,8 +78,8 @@ Pipeline
 
 ``_MottonenAngles`` validates and normalizes eagerly, then caches the more
 expensive angle precomputation. It is an internal classical helper rather than a
-second frontend gate type; the only frontend object produced here is a normal
-``QKernel`` decorated with ``@composite_gate``.
+second frontend gate type; the frontend objects produced here are normal
+``QKernel`` instances decorated with ``@composite_gate``.
 """
 
 from __future__ import annotations
@@ -97,6 +103,8 @@ from qamomile.linalg.mottonen import (
 __all__ = [
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
+    "mottonen_amplitude_encoding",
+    "mottonen_amplitude_encoding_from_angles",
 ]
 
 
@@ -150,7 +158,7 @@ def _emit_mottonen_gates(
     *angles* may be either a concrete numerical sequence (Python list,
     NumPy array of dtype float) or a ``Vector[Float]`` handle — the
     latter is what makes the runtime-parametric path
-    (:func:`amplitude_encoding_from_angles`) work: indexing a
+    (:func:`mottonen_amplitude_encoding_from_angles`) work: indexing a
     ``Vector[Float]`` with a Python ``int`` produces a ``Float`` handle
     that ``qmc.ry`` / ``qmc.rz`` accept directly.
 
@@ -187,7 +195,14 @@ def _emit_mottonen_gates(
             raise ValueError(f"gate must be 'ry' or 'rz', got {gate!r}")
 
     def _angle(at: int) -> Float | float:
-        """Return ``angles[at]`` as the right type for ``rotation``."""
+        """Return one angle in the type accepted by the rotation builder.
+
+        Args:
+            at (int): Index of the requested angle.
+
+        Returns:
+            Float | float: Symbolic angle handle or concrete Python float.
+        """
         if isinstance(angles, Vector):
             return angles[at]
         return float(angles[at])
@@ -252,12 +267,16 @@ class _MottonenAngles:
           :meth:`_resources` reads only the cached complex flag and
           never triggers the angle pass.
 
+    Args:
+        amplitudes (Sequence[float] | Sequence[complex] | np.ndarray):
+            Amplitude vector whose length is a power of two and at least two.
+
     Example::
 
         @qmc.qkernel
         def prepare() -> qmc.Vector[qmc.Qubit]:
             q = qmc.qubit_array(2, "q")
-            return amplitude_encoding(q, [1.0, 0.0, 0.0, 1.0])
+            return mottonen_amplitude_encoding(q, [1.0, 0.0, 0.0, 1.0])
     """
 
     def __init__(self, amplitudes: Sequence[float] | Sequence[complex] | np.ndarray):
@@ -272,8 +291,8 @@ class _MottonenAngles:
         ``_decompose()`` call and is cached afterwards.
 
         The helper is internal and independent of frontend tracing. Its cached
-        angles are consumed when ``amplitude_encoding`` builds the executable
-        composite body.
+        angles are consumed when an amplitude-encoding helper builds the
+        executable composite body.
 
         Args:
             amplitudes (Sequence[float] | Sequence[complex] | np.ndarray):
@@ -307,6 +326,9 @@ class _MottonenAngles:
 
         ``O(n * 2^n)`` — populates the per-level Ry (and, for complex
         inputs, Rz) caches.  Idempotent.
+
+        Returns:
+            None: The computed angles are stored in this instance's caches.
         """
         if self._ry_angles_per_level_cache is not None:
             return
@@ -379,12 +401,17 @@ class _MottonenAngles:
 
 def _mottonen_composite(
     amplitudes: Sequence[float] | Sequence[complex] | np.ndarray,
+    *,
+    name: str,
+    policy: CallPolicy,
 ) -> tuple[QKernel[..., Vector[Qubit]], int]:
     """Build a body-backed composite qkernel for concrete amplitudes.
 
     Args:
         amplitudes (Sequence[float] | Sequence[complex] | np.ndarray): Target
             amplitude vector.
+        name (str): Stable callable name used by backend semantic matching.
+        policy (CallPolicy): Default lowering policy for the callable.
 
     Returns:
         tuple[QKernel[..., Vector[Qubit]], int]: Named composite qkernel and its
@@ -395,7 +422,7 @@ def _mottonen_composite(
     """
     angles = _MottonenAngles(amplitudes)
 
-    @composite_gate(name="state_preparation")
+    @composite_gate(name=name)
     def kernel(qubits: Vector[Qubit]) -> Vector[Qubit]:
         """Apply the concrete Möttönen primitive decomposition.
 
@@ -411,9 +438,9 @@ def _mottonen_composite(
     normalized = np.asarray(angles.normalized_amplitudes, dtype=np.complex128)
     configure_composite(
         kernel,
-        name="state_preparation",
+        name=name,
         namespace="qamomile.stdlib",
-        policy=CallPolicy.NATIVE_FIRST,
+        policy=policy,
         semantic_arguments={
             "amplitudes": [
                 [float(amplitude.real), float(amplitude.imag)]
@@ -430,16 +457,20 @@ def _mottonen_composite(
 # ---------------------------------------------------------------------------
 
 
-def amplitude_encoding(
+def _apply_amplitude_encoding(
     qubits: Vector[Qubit],
     amplitudes: Sequence[float] | Sequence[complex] | np.ndarray | Vector[Float],
+    *,
+    api_name: str,
+    composite_name: str,
+    policy: CallPolicy,
 ) -> Vector[Qubit]:
-    """Apply Möttönen amplitude encoding to *qubits* in place.
+    """Apply concrete amplitude data through a configured Möttönen body.
 
-    Creates a QKernel-backed composite specialized to the concrete amplitude
-    data, then applies it to the supplied ``Vector``. Real and complex
-    amplitudes are both supported; complex data adds the phase-restoration RZ
-    stage.
+    This shared implementation validates frontend values and creates a
+    QKernel-backed Möttönen body. ``composite_name`` and ``policy`` determine
+    whether that body represents generic state preparation or the explicit
+    Möttönen algorithm at backend materialization time.
 
     .. important::
 
@@ -466,11 +497,12 @@ def amplitude_encoding(
       pre-compute Möttönen angles.  ``Vector[Float]`` carries real
       numbers only; for complex amplitudes via a kernel parameter,
       either pass a concrete ``np.ndarray`` directly (closure form), or
-      use :func:`amplitude_encoding_from_angles` with separate
+      use :func:`mottonen_amplitude_encoding_from_angles` with separate
       ``ry_angles`` and ``rz_angles`` parameters.
     * **Not** a ``Vector[Float]`` left symbolic by
       ``parameters=["amps"]`` — the angle computation requires concrete
-      values at trace time.  Use :func:`amplitude_encoding_from_angles`
+      values at trace time. Use
+      :func:`mottonen_amplitude_encoding_from_angles`
       with ``parameters=["ry_angles", "rz_angles"]`` for the
       runtime-parametric case.
 
@@ -485,7 +517,10 @@ def amplitude_encoding(
             time (i.e., it came from a ``bindings={...}`` entry, not
             from ``parameters=[...]``) and (b) the values are real;
             complex amplitudes via a kernel parameter must instead go
-            through :func:`amplitude_encoding_from_angles`.
+            through :func:`mottonen_amplitude_encoding_from_angles`.
+        api_name (str): Public API name used in validation errors.
+        composite_name (str): Stable callable name used by backend matching.
+        policy (CallPolicy): Default lowering policy for the callable.
 
     Returns:
         Vector[Qubit]: The same *qubits* vector, with each element
@@ -501,7 +536,7 @@ def amplitude_encoding(
             ``log2(len(amplitudes))``, or *amplitudes* is a
             ``Vector[Float]`` handle whose concrete values are not
             available at trace time (use
-            :func:`amplitude_encoding_from_angles` with
+            :func:`mottonen_amplitude_encoding_from_angles` with
             ``parameters=[...]`` for runtime-parametric angles).
 
     Example::
@@ -526,7 +561,7 @@ def amplitude_encoding(
         n = get_size(qubits)
     except ValueError as e:
         raise ValueError(
-            "amplitude_encoding requires a Vector[Qubit] with a compile-time "
+            f"{api_name} requires a Vector[Qubit] with a compile-time "
             "known size; received a symbolic-shape vector. Bind the qubit "
             "count via transpiler.transpile(kernel, bindings={...}) so the "
             "Möttönen angle pre-computation can run at trace time."
@@ -536,11 +571,11 @@ def amplitude_encoding(
         const_array = amplitudes.value.get_const_array()
         if const_array is None:
             raise ValueError(
-                "amplitude_encoding received a Vector[Float] handle without "
+                f"{api_name} received a Vector[Float] handle without "
                 "concrete values at trace time. Bind it via "
                 "transpiler.transpile(kernel, bindings={...}) for compile-time "
-                "amplitudes, or use amplitude_encoding_from_angles with "
-                "parameters=[...] for runtime-parametric angles."
+                "amplitudes, or use mottonen_amplitude_encoding_from_angles "
+                "with parameters=[...] for runtime-parametric angles."
             )
         concrete_amplitudes: Sequence[float] | Sequence[complex] | np.ndarray = (
             np.asarray(const_array)
@@ -548,17 +583,125 @@ def amplitude_encoding(
     else:
         concrete_amplitudes = amplitudes
 
-    gate, required_qubits = _mottonen_composite(concrete_amplitudes)
+    gate, required_qubits = _mottonen_composite(
+        concrete_amplitudes,
+        name=composite_name,
+        policy=policy,
+    )
     if required_qubits != n:
         raise ValueError(
-            f"amplitude_encoding requires {required_qubits} qubits "
+            f"{api_name} requires {required_qubits} qubits "
             f"for an amplitude vector of length {len(concrete_amplitudes)}, "
             f"got {n}"
         )
     return gate(qubits)
 
 
-def amplitude_encoding_from_angles(
+def amplitude_encoding(
+    qubits: Vector[Qubit],
+    amplitudes: Sequence[float] | Sequence[complex] | np.ndarray | Vector[Float],
+) -> Vector[Qubit]:
+    """Prepare an amplitude-encoded state with a backend-selected synthesis.
+
+    The semantic contract is that an all-zero ``n``-qubit register becomes the
+    normalized state :math:`\\sum_i a_i |i\\rangle`. The synthesis algorithm is
+    intentionally unspecified: a backend may use its native state-preparation
+    implementation. Qamomile's portable fallback currently uses the Möttönen
+    construction.
+
+    State-preparation algorithms can implement different unitaries away from
+    the all-zero input even when they prepare the same target state. Use
+    :func:`mottonen_amplitude_encoding` when the exact construction, its
+    resource profile, or transformed uses such as inverse and control matter.
+
+    A concrete sequence or NumPy array may contain real or complex amplitudes.
+    A ``Vector[Float]`` parameter must be resolved through ``bindings`` at
+    compile time. For runtime-parametric Möttönen angles, use
+    :func:`mottonen_amplitude_encoding_from_angles`.
+
+    Args:
+        qubits (Vector[Qubit]): Vector of ``n`` qubit handles in
+            :math:`|0\\rangle^{\\otimes n}`.
+        amplitudes (Sequence[float] | Sequence[complex] | np.ndarray | Vector[Float]):
+            Amplitude vector of length ``2**n``. Values are normalized
+            automatically. ``Vector[Float]`` values must be concrete at trace
+            time.
+
+    Returns:
+        Vector[Qubit]: The input vector updated to the prepared-state handles.
+
+    Raises:
+        ValueError: If a vector shape is unresolved, the amplitudes are invalid
+            or unavailable at trace time, or the register width does not match
+            the amplitude-vector length.
+
+    Example::
+
+        @qmc.qkernel
+        def prepare() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, name="q")
+            q = amplitude_encoding(q, [1.0, 0.0, 0.0, 1.0])
+            return qmc.measure(q)
+    """
+    return _apply_amplitude_encoding(
+        qubits,
+        amplitudes,
+        api_name="amplitude_encoding",
+        composite_name="state_preparation",
+        policy=CallPolicy.NATIVE_FIRST,
+    )
+
+
+def mottonen_amplitude_encoding(
+    qubits: Vector[Qubit],
+    amplitudes: Sequence[float] | Sequence[complex] | np.ndarray | Vector[Float],
+) -> Vector[Qubit]:
+    """Prepare an amplitude-encoded state with the Möttönen construction.
+
+    This API makes Möttönen's uniformly controlled Ry/Rz construction part
+    of the callable identity. Backends therefore use Qamomile's Möttönen body
+    instead of replacing it with a generic native state-preparation operation.
+    The input register must be in :math:`|0\\rangle^{\\otimes n}`.
+
+    A concrete sequence or NumPy array may contain real or complex amplitudes.
+    A ``Vector[Float]`` parameter must be resolved through ``bindings`` at
+    compile time. For runtime parameters, precompute the Gray-walk angles and
+    call :func:`mottonen_amplitude_encoding_from_angles`.
+
+    Args:
+        qubits (Vector[Qubit]): Vector of ``n`` qubit handles in
+            :math:`|0\\rangle^{\\otimes n}`.
+        amplitudes (Sequence[float] | Sequence[complex] | np.ndarray | Vector[Float]):
+            Amplitude vector of length ``2**n``. Values are normalized
+            automatically. ``Vector[Float]`` values must be concrete at trace
+            time.
+
+    Returns:
+        Vector[Qubit]: The input vector updated to the prepared-state handles.
+
+    Raises:
+        ValueError: If a vector shape is unresolved, the amplitudes are invalid
+            or unavailable at trace time, or the register width does not match
+            the amplitude-vector length.
+
+    Example::
+
+        @qmc.qkernel
+        def prepare() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(2, name="q")
+            q = mottonen_amplitude_encoding(q, [1.0, 0.0, 0.0, 1.0])
+            return qmc.measure(q)
+    """
+    return _apply_amplitude_encoding(
+        qubits,
+        amplitudes,
+        api_name="mottonen_amplitude_encoding",
+        composite_name="mottonen_amplitude_encoding",
+        policy=CallPolicy.PRESERVE_BOX,
+    )
+
+
+def mottonen_amplitude_encoding_from_angles(
     qubits: Vector[Qubit],
     ry_angles: Sequence[float] | np.ndarray | Vector[Float],
     rz_angles: Sequence[float] | np.ndarray | Vector[Float] | None = None,
@@ -575,7 +718,7 @@ def amplitude_encoding_from_angles(
         the same ``U`` and a different ``|\\phi\\rangle``, which is in
         general not the target amplitude vector.
 
-    Companion to :func:`amplitude_encoding` for the **parametric** use
+    Companion to :func:`mottonen_amplitude_encoding` for the **parametric** use
     case: the user pre-computes the Gray-walk Ry (and optionally Rz)
     angles classically with
     :func:`qamomile.linalg.compute_mottonen_amplitude_encoding_ry_angles`
@@ -589,8 +732,8 @@ def amplitude_encoding_from_angles(
     amplitude vectors without recompilation — useful inside hybrid
     optimisation loops.
 
-    Unlike :func:`amplitude_encoding`, this function does not create a named
-    composite invocation. The Ry / Rz / CNOT Gray-walk gates are emitted
+    Unlike :func:`mottonen_amplitude_encoding`, this function does not create a
+    named composite invocation. The Ry / Rz / CNOT Gray-walk gates are emitted
     directly into the surrounding kernel, so resource estimation and
     visualization see the elementary operations.
 
@@ -636,7 +779,7 @@ def amplitude_encoding_from_angles(
             rz_a: qmc.Vector[qmc.Float],
         ) -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, name="q")
-            q = amplitude_encoding_from_angles(q, ry_a, rz_a)
+            q = mottonen_amplitude_encoding_from_angles(q, ry_a, rz_a)
             return qmc.measure(q)
 
         exe = transpiler.transpile(prepare, parameters=["ry_a", "rz_a"])
@@ -675,3 +818,33 @@ def amplitude_encoding_from_angles(
     for i in range(n):
         qubits[i] = qubit_list[i]
     return qubits
+
+
+def amplitude_encoding_from_angles(
+    qubits: Vector[Qubit],
+    ry_angles: Sequence[float] | np.ndarray | Vector[Float],
+    rz_angles: Sequence[float] | np.ndarray | Vector[Float] | None = None,
+) -> Vector[Qubit]:
+    """Apply Möttönen encoding from angles through the compatibility API.
+
+    This function preserves the original public name and delegates directly to
+    :func:`mottonen_amplitude_encoding_from_angles`. New code should prefer the
+    algorithm-specific name because angle vectors define the Möttönen Gray-walk
+    decomposition rather than generic amplitude encoding.
+
+    Args:
+        qubits (Vector[Qubit]): Vector of ``n`` qubit handles in
+            :math:`|0\\rangle^{\\otimes n}`.
+        ry_angles (Sequence[float] | np.ndarray | Vector[Float]): Gray-walk Ry
+            angles of length ``2**n - 1``.
+        rz_angles (Sequence[float] | np.ndarray | Vector[Float] | None):
+            Optional Gray-walk Rz angles of length ``2**n - 1``.
+
+    Returns:
+        Vector[Qubit]: The input vector updated to the prepared-state handles.
+
+    Raises:
+        ValueError: If a concrete angle vector has the wrong length or the
+            qubit-vector shape cannot be resolved.
+    """
+    return mottonen_amplitude_encoding_from_angles(qubits, ry_angles, rz_angles)

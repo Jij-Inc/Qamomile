@@ -8,13 +8,14 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation import InvokeOperation
-from qamomile.circuit.ir.operation.callable import CompositeGateType
+from qamomile.circuit.ir.operation.callable import CallPolicy, CompositeGateType
 from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.value import ArrayValue, resolve_root_qubit_address
 from qamomile.circuit.stdlib.state_preparation import (
-    amplitude_encoding,
     amplitude_encoding_from_angles,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
 )
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
@@ -225,11 +226,16 @@ class TestCompositeGateMetadata:
 
     def test_gate_identifiers(self) -> None:
         """``gate_type`` and ``custom_name`` match what the IR will tag."""
-        gate, width = _mottonen_composite([1.0, 0.0])
+        gate, width = _mottonen_composite(
+            [1.0, 0.0],
+            name="mottonen_amplitude_encoding",
+            policy=CallPolicy.PRESERVE_BOX,
+        )
         assert width == 1
         assert gate._callable_gate_type == CompositeGateType.CUSTOM
-        assert gate._callable_name == "state_preparation"
+        assert gate._callable_name == "mottonen_amplitude_encoding"
         assert gate._callable_namespace == "qamomile.stdlib"
+        assert gate._callable_policy is CallPolicy.PRESERVE_BOX
 
     @pytest.mark.parametrize("n_qubits", [1, 2, 3, 4])
     def test_resources_real(self, n_qubits: int) -> None:
@@ -239,7 +245,7 @@ class TestCompositeGateMetadata:
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Qubit]:
             q = qmc.qubit_array(n_qubits, "q")
-            q = amplitude_encoding(q, amplitudes)
+            q = mottonen_amplitude_encoding(q, amplitudes)
             return q
 
         estimate = kernel.estimate_resources()
@@ -256,7 +262,7 @@ class TestCompositeGateMetadata:
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Qubit]:
             q = qmc.qubit_array(n_qubits, "q")
-            q = amplitude_encoding(q, amplitudes)
+            q = mottonen_amplitude_encoding(q, amplitudes)
             return q
 
         estimate = kernel.estimate_resources()
@@ -487,7 +493,7 @@ class TestLazyConstruction:
         inside a kernel body, in order to populate the ``body`` field on the
         resulting ``InvokeOperation``.  As a consequence, even though
         ``MottonenAmplitudeEncoding._decompose()`` is lazy on the gate
-        object itself, going through ``amplitude_encoding(q, amps)``
+        object itself, going through ``mottonen_amplitude_encoding(q, amps)``
         inside a ``@qkernel`` will still compute the angles at
         kernel-build time — the lazy contract is partially defeated by
         the surrounding framework.
@@ -502,14 +508,15 @@ class TestLazyConstruction:
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(4, "q")
-            q = amplitude_encoding(q, amps)
+            q = mottonen_amplitude_encoding(q, amps)
             return qmc.measure(q)
 
         block = kernel.build()
         invoke_ops = [
             op
             for op in block.operations
-            if isinstance(op, InvokeOperation) and op.target.name == "state_preparation"
+            if isinstance(op, InvokeOperation)
+            and op.target.name == "mottonen_amplitude_encoding"
         ]
         assert len(invoke_ops) == 1
         # Today: the decomposition body IS populated by kernel.build() because
@@ -564,7 +571,7 @@ class TestResourceEstimationAgainstPaper:
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n_qubits, "q")
-            q = amplitude_encoding(q, amps)
+            q = mottonen_amplitude_encoding(q, amps)
             return qmc.measure(q)
 
         est = kernel.estimate_resources()
@@ -600,7 +607,7 @@ class TestResourceEstimationAgainstPaper:
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(n_qubits, "q")
-            q = amplitude_encoding(q, amps)
+            q = mottonen_amplitude_encoding(q, amps)
             return qmc.measure(q)
 
         est = kernel.estimate_resources()
@@ -702,12 +709,12 @@ class TestInputValidation:
             np.testing.assert_allclose(rz_angles, np.zeros(2**n - 1), atol=1e-12)
 
     def test_qubit_count_mismatch_raises(self) -> None:
-        """``amplitude_encoding`` rejects qubit / amplitude mismatches."""
+        """``mottonen_amplitude_encoding`` rejects qubit / amplitude mismatches."""
 
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q = amplitude_encoding(q, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            q = mottonen_amplitude_encoding(q, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
             return qmc.measure(q)
 
         with pytest.raises(ValueError, match="qubits"):
@@ -721,21 +728,21 @@ def _amp_encode_with_symbolic_qubits(
     """Sub-kernel taking a Vector[Qubit] of symbolic length.
 
     Used by ``test_symbolic_shape_qubits_raise_clear_error`` to drive
-    the ``get_size`` failure path inside ``amplitude_encoding`` and
+    the ``get_size`` failure path inside ``mottonen_amplitude_encoding`` and
     confirm the API-specific error message is raised.
     """
-    qs = amplitude_encoding(qs, [1.0, 0.0, 0.0, 0.0])
+    qs = mottonen_amplitude_encoding(qs, [1.0, 0.0, 0.0, 0.0])
     return qs
 
 
 class TestSymbolicShapeQubitsRejected:
-    """``amplitude_encoding`` raises an API-specific error on symbolic qubits."""
+    """``mottonen_amplitude_encoding`` raises an API-specific error on symbolic qubits."""
 
     def test_symbolic_shape_qubits_raise_clear_error(self) -> None:
         """A Vector[Qubit] without a compile-time-known size is rejected
-        with an ``amplitude_encoding``-prefixed ValueError that names the
+        with an ``mottonen_amplitude_encoding``-prefixed ValueError that names the
         binding workaround, rather than the bare ``get_size`` message."""
-        with pytest.raises(ValueError, match="amplitude_encoding requires"):
+        with pytest.raises(ValueError, match="mottonen_amplitude_encoding requires"):
             _amp_encode_with_symbolic_qubits.build()
 
 
@@ -766,7 +773,7 @@ def _build_measure_kernel(
     @qmc.qkernel
     def kernel() -> qmc.Vector[qmc.Bit]:
         q = qmc.qubit_array(n_qubits, "q")
-        q = amplitude_encoding(q, amplitudes)
+        q = mottonen_amplitude_encoding(q, amplitudes)
         return qmc.measure(q)
 
     return kernel
@@ -793,7 +800,7 @@ def _build_expval_kernel(
     @qmc.qkernel
     def kernel(H: qmc.Observable) -> qmc.Float:
         q = qmc.qubit_array(n_qubits, "q")
-        q = amplitude_encoding(q, amplitudes)
+        q = mottonen_amplitude_encoding(q, amplitudes)
         return qmc.expval(q, H)
 
     return kernel
@@ -810,14 +817,14 @@ def _build_wrapper_measure_kernel(
 
     Returns:
         qmc.QKernel: Kernel that calls an inner qkernel wrapper around
-            ``amplitude_encoding`` before measuring the register.
+            ``mottonen_amplitude_encoding`` before measuring the register.
     """
     n_qubits = int(round(np.log2(len(amplitudes))))
 
     @qmc.qkernel
     def layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply Möttönen encoding through a qkernel wrapper."""
-        q = amplitude_encoding(q, amplitudes)
+        q = mottonen_amplitude_encoding(q, amplitudes)
         return q
 
     @qmc.qkernel
@@ -840,14 +847,14 @@ def _build_wrapper_expval_kernel(
 
     Returns:
         qmc.QKernel: Kernel that calls an inner qkernel wrapper around
-            ``amplitude_encoding`` before computing ``<H>``.
+            ``mottonen_amplitude_encoding`` before computing ``<H>``.
     """
     n_qubits = int(round(np.log2(len(amplitudes))))
 
     @qmc.qkernel
     def layer(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply Möttönen encoding through a qkernel wrapper."""
-        q = amplitude_encoding(q, amplitudes)
+        q = mottonen_amplitude_encoding(q, amplitudes)
         return q
 
     @qmc.qkernel
@@ -870,14 +877,14 @@ def _build_nested_wrapper_measure_kernel(
 
     Returns:
         qmc.QKernel: Kernel whose outer wrapper calls another wrapper
-            around ``amplitude_encoding``.
+            around ``mottonen_amplitude_encoding``.
     """
     n_qubits = int(round(np.log2(len(amplitudes))))
 
     @qmc.qkernel
     def inner(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply Möttönen encoding inside the innermost wrapper."""
-        q = amplitude_encoding(q, amplitudes)
+        q = mottonen_amplitude_encoding(q, amplitudes)
         return q
 
     @qmc.qkernel
@@ -906,14 +913,14 @@ def _build_nested_wrapper_expval_kernel(
 
     Returns:
         qmc.QKernel: Kernel whose outer wrapper calls another wrapper
-            around ``amplitude_encoding`` before computing ``<H>``.
+            around ``mottonen_amplitude_encoding`` before computing ``<H>``.
     """
     n_qubits = int(round(np.log2(len(amplitudes))))
 
     @qmc.qkernel
     def inner(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply Möttönen encoding inside the innermost wrapper."""
-        q = amplitude_encoding(q, amplitudes)
+        q = mottonen_amplitude_encoding(q, amplitudes)
         return q
 
     @qmc.qkernel
@@ -1036,7 +1043,7 @@ def _shot_noise_tolerance(p: float, shots: int) -> float:
 
 
 class TestAmplitudeEncodingWrapperBoxing:
-    """Regression tests for amplitude_encoding inside qkernel wrappers."""
+    """Regression tests for mottonen_amplitude_encoding inside qkernel wrappers."""
 
     @pytest.mark.parametrize(
         "amplitudes",
@@ -1109,7 +1116,7 @@ class TestAmplitudeEncodingWrapperBoxing:
 
     @pytest.mark.parametrize("amplitudes", _WRAPPER_AMPLITUDE_CASES)
     def test_forward_wrapper_sampler(self, sdk_transpiler, amplitudes) -> None:
-        """Wrapped amplitude_encoding samples the encoded distribution."""
+        """Wrapped mottonen_amplitude_encoding samples the encoded distribution."""
         kernel = _build_wrapper_measure_kernel(amplitudes)
         exe = sdk_transpiler.transpiler.transpile(kernel)
         results = (
@@ -1137,7 +1144,7 @@ class TestAmplitudeEncodingWrapperBoxing:
 
     @pytest.mark.parametrize("amplitudes", _WRAPPER_AMPLITUDE_CASES)
     def test_forward_wrapper_expval(self, sdk_transpiler, amplitudes) -> None:
-        """Wrapped amplitude_encoding gives the analytic little-endian <Z0>."""
+        """Wrapped mottonen_amplitude_encoding gives the analytic little-endian <Z0>."""
         n_qubits = int(round(np.log2(len(amplitudes))))
         H = _pad_observable(n_qubits, _make_pauli("Z", 0))
         exe = sdk_transpiler.transpiler.transpile(
@@ -1147,7 +1154,7 @@ class TestAmplitudeEncodingWrapperBoxing:
         assert float(result) == pytest.approx(_expected_z0(amplitudes), abs=1e-8)
 
     def test_forward_wrapper_phase_expval(self, sdk_transpiler) -> None:
-        """Wrapped complex amplitude_encoding preserves phase-sensitive <Y0>."""
+        """Wrapped complex mottonen_amplitude_encoding preserves phase-sensitive <Y0>."""
         amplitudes = [1.0 + 0j, 0.0 + 1j]
         H = _make_pauli("Y", 0)
         exe = sdk_transpiler.transpiler.transpile(
@@ -1159,7 +1166,7 @@ class TestAmplitudeEncodingWrapperBoxing:
         )
 
     def test_nested_wrapper_sampler(self, sdk_transpiler) -> None:
-        """Nested wrapper amplitude_encoding samples the encoded distribution."""
+        """Nested wrapper mottonen_amplitude_encoding samples the encoded distribution."""
         amplitudes = [1.0, 2.0, 3.0, -4.0, 5.0, -6.0, 7.0, 8.0]
         exe = sdk_transpiler.transpiler.transpile(
             _build_nested_wrapper_measure_kernel(amplitudes)
@@ -1187,7 +1194,7 @@ class TestAmplitudeEncodingWrapperBoxing:
             )
 
     def test_nested_wrapper_expval(self, sdk_transpiler) -> None:
-        """Nested wrapper complex amplitude_encoding preserves phase-sensitive <Y0>."""
+        """Nested wrapper complex mottonen_amplitude_encoding preserves phase-sensitive <Y0>."""
         amplitudes = [1.0 + 0j, 0.0 + 1j, 0.0 + 0j, 0.0 + 0j]
         n_qubits = int(round(np.log2(len(amplitudes))))
         H = _pad_observable(n_qubits, _make_pauli("Y", 0))
@@ -1461,7 +1468,7 @@ class TestEncodingCudaq:
 
 
 # ---------------------------------------------------------------------------
-# amplitude_encoding via bound Vector[Float] amplitudes
+# mottonen_amplitude_encoding via bound Vector[Float] amplitudes
 # ---------------------------------------------------------------------------
 
 
@@ -1479,14 +1486,14 @@ def _build_amplitude_encoding_bound_kernel(n_qubits: int) -> qmc.QKernel:
     @qmc.qkernel
     def kernel(amps: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
         q = qmc.qubit_array(n_qubits, "q")
-        q = amplitude_encoding(q, amps)
+        q = mottonen_amplitude_encoding(q, amps)
         return qmc.measure(q)
 
     return kernel
 
 
 class TestAmplitudeEncodingBoundVector:
-    """``amplitude_encoding`` accepts a Vector[Float] kernel parameter when bound.
+    """``mottonen_amplitude_encoding`` accepts a Vector[Float] kernel parameter when bound.
 
     The same ``MottonenAmplitudeEncoding`` CompositeGate path runs;
     only the entry-point ergonomics differ from the closure-based call.
@@ -1510,14 +1517,14 @@ class TestAmplitudeEncodingBoundVector:
     def test_runtime_parameter_rejected(self, qiskit_transpiler) -> None:
         """``parameters=["amps"]`` raises a directing error toward the angle path."""
         kernel = _build_amplitude_encoding_bound_kernel(2)
-        with pytest.raises(ValueError, match="amplitude_encoding_from_angles"):
+        with pytest.raises(ValueError, match="mottonen_amplitude_encoding_from_angles"):
             qiskit_transpiler.transpile(kernel, parameters=["amps"])
 
     def test_bound_amplitudes_emits_composite_gate(self, qiskit_transpiler) -> None:
         """Bound-Vector path keeps the high-level invoke in the IR.
 
         Distinguishes the bound path from
-        ``amplitude_encoding_from_angles``, which emits flat RY/CNOT
+        ``mottonen_amplitude_encoding_from_angles``, which emits flat RY/CNOT
         directly.  Verified by counting block operations in the traced
         kernel — the bound path produces a single composite-gate
         invocation while the angle path expands inline.
@@ -1527,10 +1534,11 @@ class TestAmplitudeEncodingBoundVector:
         invoke_ops = [
             op
             for op in block.operations
-            if isinstance(op, InvokeOperation) and op.target.name == "state_preparation"
+            if isinstance(op, InvokeOperation)
+            and op.target.name == "mottonen_amplitude_encoding"
         ]
         assert len(invoke_ops) == 1
-        assert invoke_ops[0].attrs["custom_name"] == "state_preparation"
+        assert invoke_ops[0].attrs["custom_name"] == "mottonen_amplitude_encoding"
 
 
 # ---------------------------------------------------------------------------
@@ -1552,7 +1560,7 @@ def _build_parametric_real_kernel(n_qubits: int) -> qmc.QKernel:
     @qmc.qkernel
     def kernel(ry_angles: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
         q = qmc.qubit_array(n_qubits, "q")
-        q = amplitude_encoding_from_angles(q, ry_angles)
+        q = mottonen_amplitude_encoding_from_angles(q, ry_angles)
         return qmc.measure(q)
 
     return kernel
@@ -1575,7 +1583,7 @@ def _build_parametric_complex_kernel(n_qubits: int) -> qmc.QKernel:
         ry_angles: qmc.Vector[qmc.Float], rz_angles: qmc.Vector[qmc.Float]
     ) -> qmc.Vector[qmc.Bit]:
         q = qmc.qubit_array(n_qubits, "q")
-        q = amplitude_encoding_from_angles(q, ry_angles, rz_angles)
+        q = mottonen_amplitude_encoding_from_angles(q, ry_angles, rz_angles)
         return qmc.measure(q)
 
     return kernel
@@ -1599,7 +1607,7 @@ def _build_parametric_real_expval_kernel(n_qubits: int) -> qmc.QKernel:
     @qmc.qkernel
     def kernel(ry_angles: qmc.Vector[qmc.Float], H: qmc.Observable) -> qmc.Float:
         q = qmc.qubit_array(n_qubits, "q")
-        q = amplitude_encoding_from_angles(q, ry_angles)
+        q = mottonen_amplitude_encoding_from_angles(q, ry_angles)
         return qmc.expval(q, H)
 
     return kernel
@@ -1624,7 +1632,7 @@ def _build_parametric_complex_expval_kernel(n_qubits: int) -> qmc.QKernel:
         H: qmc.Observable,
     ) -> qmc.Float:
         q = qmc.qubit_array(n_qubits, "q")
-        q = amplitude_encoding_from_angles(q, ry_angles, rz_angles)
+        q = mottonen_amplitude_encoding_from_angles(q, ry_angles, rz_angles)
         return qmc.expval(q, H)
 
     return kernel
@@ -1640,7 +1648,7 @@ class TestParametricInputValidation:
         def kernel() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
             # 2 qubits → expects 3 angles, we provide 5
-            q = amplitude_encoding_from_angles(q, [0.0, 0.0, 0.0, 0.0, 0.0])
+            q = mottonen_amplitude_encoding_from_angles(q, [0.0, 0.0, 0.0, 0.0, 0.0])
             return qmc.measure(q)
 
         with pytest.raises(ValueError, match="ry_angles must have length"):
@@ -1653,7 +1661,9 @@ class TestParametricInputValidation:
         def kernel() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
             # 2 qubits → expects 3 angles for each stage; ry ok, rz wrong
-            q = amplitude_encoding_from_angles(q, [0.0, 0.0, 0.0], rz_angles=[0.0, 0.0])
+            q = mottonen_amplitude_encoding_from_angles(
+                q, [0.0, 0.0, 0.0], rz_angles=[0.0, 0.0]
+            )
             return qmc.measure(q)
 
         with pytest.raises(ValueError, match="rz_angles must have length"):
@@ -1674,7 +1684,7 @@ class TestParametricInputValidation:
             q = qmc.qubit_array(2, "q")
             ry = compute_mottonen_amplitude_encoding_ry_angles([1.0, 2.0, 3.0, 4.0])
             assert isinstance(ry, np.ndarray)
-            q = amplitude_encoding_from_angles(q, ry)
+            q = mottonen_amplitude_encoding_from_angles(q, ry)
             return qmc.measure(q)
 
         block = kernel.build()
@@ -1704,6 +1714,20 @@ class TestParametricEncodingQiskit:
     ``parameters`` (runtime-parametric angles) entry points, and both
     real and complex catalogues.
     """
+
+    def test_legacy_helper_name_remains_compatible(self, qiskit_transpiler) -> None:
+        """The old angle-helper name still prepares the requested state."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(1, "q")
+            q = amplitude_encoding_from_angles(q, [np.pi])
+            return qmc.measure(q)
+
+        statevector = run_statevector(qiskit_transpiler.to_circuit(kernel))
+        np.testing.assert_allclose(
+            np.abs(statevector), np.asarray([0.0, 1.0]), atol=1e-8
+        )
 
     @pytest.mark.parametrize(
         "amplitudes",
