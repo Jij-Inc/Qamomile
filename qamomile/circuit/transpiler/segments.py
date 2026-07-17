@@ -9,6 +9,7 @@ from typing import TypeAlias
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.value import Value, ValueLike
+from qamomile.circuit.transpiler.errors import SeparationError
 
 
 class SegmentKind(Enum):
@@ -114,7 +115,7 @@ class HybridBoundary:
     value_ref: str
 
 
-class MultipleQuantumSegmentsError(Exception):
+class MultipleQuantumSegmentsError(SeparationError):
     """Raised when a program cannot fit the single-quantum-segment model.
 
     Qamomile enforces a single quantum circuit execution pattern:

@@ -254,7 +254,7 @@ class TestValidation:
     @pytest.mark.parametrize("bad_order", [0, 3, 5, -2])
     def test_reject_non_even_or_nonpositive_order(self, bad_order: int) -> None:
         tr = QiskitTranspiler()
-        with pytest.raises(ValueError, match="order must be 1 or"):
+        with pytest.raises(ValueError, match="order.*(1 or|non-negative)"):
             tr.transpile(
                 _rabi_trotter,
                 bindings={
@@ -262,6 +262,20 @@ class TestValidation:
                     "Hs": HS_2TERM,
                     "gamma": T_EVOLVE,
                     "step": 1,
+                },
+            )
+
+    @pytest.mark.parametrize("bad_step", [0, -1])
+    def test_reject_nonpositive_step(self, bad_step: int) -> None:
+        """Trotter step counts must be strictly positive."""
+        with pytest.raises(ValueError, match="step.*(positive|non-negative)"):
+            QiskitTranspiler().transpile(
+                _rabi_trotter,
+                bindings={
+                    "order": 2,
+                    "Hs": HS_2TERM,
+                    "gamma": T_EVOLVE,
+                    "step": bad_step,
                 },
             )
 

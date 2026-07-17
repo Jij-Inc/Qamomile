@@ -32,7 +32,12 @@ def serialize(kernel: QKernelLike) -> bytes:
         TypeError: If the qkernel contains an unsupported type or payload.
         ValueError: If the qkernel is bound, lowered, or malformed.
     """
-    return _to_proto(kernel).SerializeToString(deterministic=True)
+    try:
+        return _to_proto(kernel).SerializeToString(deterministic=True)
+    except (DecodeError, RecursionError) as exc:
+        raise ValueError(
+            "qkernel structure exceeds the supported protobuf nesting depth"
+        ) from exc
 
 
 def deserialize(payload: bytes) -> SerializedQKernel:
@@ -56,9 +61,14 @@ def deserialize(payload: bytes) -> SerializedQKernel:
         message.ParseFromString(raw_payload)
     except DecodeError as exc:
         raise ValueError("payload is not a valid Qamomile qkernel protobuf") from exc
-    restored = _from_proto(message)
-    if serialize(restored) != raw_payload:
-        raise ValueError("protobuf qkernel bytes are not in canonical form")
+    try:
+        restored = _from_proto(message)
+        if serialize(restored) != raw_payload:
+            raise ValueError("protobuf qkernel bytes are not in canonical form")
+    except ValueError:
+        raise
+    except (TypeError, RuntimeError, KeyError, IndexError, AssertionError) as exc:
+        raise ValueError("protobuf qkernel payload is malformed") from exc
     return restored
 
 

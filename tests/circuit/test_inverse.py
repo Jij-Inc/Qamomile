@@ -2283,8 +2283,8 @@ def test_inverse_vector_qkernel_uses_cudaq_adjoint_helper() -> None:
 
 
 @pytest.mark.cudaq
-def test_inverse_of_inverse_cudaq_uses_explicit_late_fallback() -> None:
-    """Nested adjoint uses the SDK-safe fallback at materialization only.
+def test_inverse_of_inverse_cudaq_collapses_transparent_fallback() -> None:
+    """Nested adjoint collapses its transparent late-fallback wrapper.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2315,7 +2315,7 @@ def test_inverse_of_inverse_cudaq_uses_explicit_late_fallback() -> None:
         maxsplit=1,
     )
     assert helper_source.count("cudaq.adjoint(") == 1
-    assert "def _qamomile_U_inverse_" in helper_source
+    assert "def _qamomile_U_inverse_" not in helper_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,

@@ -42,6 +42,51 @@ def transform_qkernel_function(func: Callable[..., Any]) -> Callable[..., Any]:
         )
 
 
+def refresh_qkernel_function_namespace(kernel: Any) -> None:
+    """Refresh an AST-transformed qkernel's live Python name bindings.
+
+    The transformed function is compiled into a private globals dictionary so
+    generated control-flow helpers do not pollute the user's module. Python
+    module globals and closure values must nevertheless retain normal
+    call-time lookup semantics, so this function synchronizes them immediately
+    before each trace.
+
+    Args:
+        kernel (Any): QKernel-like object exposing ``raw_func``, ``func``,
+            and ``name`` attributes.
+
+    Raises:
+        FrontendTransformError: If a closure cell required by the transformed
+            function is empty at trace time.
+    """
+    raw_func = kernel.raw_func
+    transformed_func = kernel.func
+    namespace = transformed_func.__globals__
+    namespace.update(raw_func.__globals__)
+
+    generated_globals = getattr(
+        transformed_func,
+        "__qamomile_generated_globals__",
+        {},
+    )
+    namespace.update(generated_globals)
+
+    if raw_func.__closure__ is not None:
+        for name, cell in zip(raw_func.__code__.co_freevars, raw_func.__closure__):
+            try:
+                namespace[name] = cell.cell_contents
+            except ValueError as error:
+                raise FrontendTransformError(
+                    f"Closure variable '{name}' in @qkernel '{kernel.name}' "
+                    "is not bound at trace time."
+                ) from error
+
+    # The live module dictionary normally contains the decorated QKernel under
+    # this name. Set it explicitly as well for nested/local definitions and
+    # self-recursive kernels whose local binding is not module-global.
+    namespace[kernel.name] = kernel
+
+
 def resolve_kernel_io_types(
     func: Callable[..., Any],
     signature: inspect.Signature,

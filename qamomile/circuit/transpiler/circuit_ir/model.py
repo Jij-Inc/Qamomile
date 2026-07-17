@@ -901,6 +901,109 @@ CircuitInstruction: TypeAlias = (
 )
 
 
+def _contains_measurement(
+    operations: tuple[CircuitInstruction, ...],
+) -> bool:
+    """Return whether a structured region contains any measurement.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Region to inspect.
+
+    Returns:
+        bool: True when a scalar/vector measurement occurs directly or in a
+            nested call or control-flow region.
+    """
+    for operation in operations:
+        if isinstance(operation, (MeasureInstruction, MeasureVectorInstruction)):
+            return True
+        if isinstance(operation, CallInstruction) and _contains_measurement(
+            operation.callee.body.operations
+        ):
+            return True
+        if isinstance(operation, ForInstruction) and _contains_measurement(
+            operation.body
+        ):
+            return True
+        if isinstance(operation, IfInstruction) and (
+            _contains_measurement(operation.true_body)
+            or _contains_measurement(operation.false_body)
+        ):
+            return True
+        if isinstance(operation, WhileInstruction) and _contains_measurement(
+            operation.body
+        ):
+            return True
+    return False
+
+
+def has_mid_circuit_measurement(
+    operations: tuple[CircuitInstruction, ...],
+) -> bool:
+    """Return whether measured quantum state is consumed again in a region.
+
+    Static-sampling backends may defer terminal measurements to the end of a
+    shot, but doing so is incorrect when a later gate, reset, call, or control
+    region consumes the post-measurement wire. The circuit IR uses versioned
+    wires, so this scan can distinguish those two cases without backend SDK
+    knowledge.
+
+    Args:
+        operations (tuple[CircuitInstruction, ...]): Structured instruction
+            region to inspect.
+
+    Returns:
+        bool: ``True`` when the region or a nested reusable/control-flow body
+            contains a non-terminal measurement.
+    """
+    measured_outputs: set[WireId] = set()
+    for operation in operations:
+        if isinstance(operation, MeasureInstruction):
+            measured_outputs.add(operation.output)
+            continue
+        if isinstance(operation, MeasureVectorInstruction):
+            measured_outputs.update(operation.outputs)
+            continue
+
+        if isinstance(operation, GateInstruction):
+            consumed = operation.inputs
+        elif isinstance(operation, ResetInstruction):
+            consumed = (operation.input,)
+        elif isinstance(operation, PauliEvolutionInstruction):
+            consumed = operation.inputs
+        elif isinstance(
+            operation,
+            (CallInstruction, ForInstruction, IfInstruction, WhileInstruction),
+        ):
+            consumed = operation.inputs
+        else:
+            consumed = ()
+        if measured_outputs.intersection(consumed):
+            return True
+
+        if isinstance(operation, CallInstruction) and has_mid_circuit_measurement(
+            operation.callee.body.operations
+        ):
+            return True
+        if isinstance(operation, ForInstruction):
+            # A measurement that is terminal within one loop body is still
+            # mid-circuit when another iteration follows: the yielded
+            # post-measurement wires become the next iteration's inputs.
+            if len(operation.indexset) > 1 and _contains_measurement(operation.body):
+                return True
+            if has_mid_circuit_measurement(operation.body):
+                return True
+        if isinstance(operation, IfInstruction) and (
+            has_mid_circuit_measurement(operation.true_body)
+            or has_mid_circuit_measurement(operation.false_body)
+        ):
+            return True
+        if isinstance(operation, WhileInstruction) and has_mid_circuit_measurement(
+            operation.body
+        ):
+            return True
+    return False
+
+
 @dataclasses.dataclass(frozen=True)
 class CircuitProgram:
     """Store one immutable backend-neutral circuit program.

@@ -40,12 +40,14 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
         exp_val = executor.estimate(circuit, observable)
     """
 
-    def __init__(self, backend=None, estimator=None):
+    def __init__(self, backend: Any = None, estimator: Any = None):
         """Initialize executor with backend and optional estimator.
 
         Args:
-            backend: Qiskit backend (defaults to AerSimulator if available)
-            estimator: Optional QiskitExpectationEstimator for expectation values
+            backend (Any): Qiskit backend. Defaults to an ``AerSimulator``
+                when available.
+            estimator (Any): Optional Qiskit expectation estimator. Defaults
+                to None.
         """
         self.backend = backend
         self._estimator = estimator
@@ -54,7 +56,7 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             try:
                 from qiskit_aer import AerSimulator
 
-                self.backend = AerSimulator(max_parallel_threads=1)
+                self.backend = AerSimulator()
             except ImportError:
                 try:
                     from qiskit.providers.basic_provider import BasicSimulator
@@ -282,14 +284,14 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
 
     def executor(  # type: ignore[override]
         self,
-        backend=None,
+        backend: Any = None,
     ) -> QiskitExecutor:
         """Create a Qiskit executor.
 
         Args:
-            backend: Qiskit backend (defaults to AerSimulator)
+            backend (Any): Qiskit backend. Defaults to an ``AerSimulator``.
 
         Returns:
-            QiskitExecutor configured with the backend
+            QiskitExecutor: Executor configured with the backend.
         """
         return QiskitExecutor(backend)

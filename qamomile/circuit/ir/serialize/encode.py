@@ -53,6 +53,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -867,6 +868,22 @@ def _encode_store_array_element(
     return _base_op_dict("StoreArrayElementOperation", op)
 
 
+def _encode_return_quantum_array_element(
+    op: ReturnQuantumArrayElementOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`ReturnQuantumArrayElementOperation`.
+
+    Args:
+        op (ReturnQuantumArrayElementOperation): The operation to encode.
+        ctx (_EncodeContext): Active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary.
+    """
+    del ctx
+    return _base_op_dict("ReturnQuantumArrayElementOperation", op)
+
+
 def _encode_dict_getitem(
     op: DictGetItemOperation, ctx: _EncodeContext
 ) -> dict[str, Any]:
@@ -1588,6 +1605,7 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     DecodeQFixedOperation: _encode_decode_qfixed,
     DictGetItemOperation: _encode_dict_getitem,
     StoreArrayElementOperation: _encode_store_array_element,
+    ReturnQuantumArrayElementOperation: _encode_return_quantum_array_element,
     CastOperation: _encode_cast,
     QInitOperation: _encode_qinit,
     CInitOperation: _encode_cinit,

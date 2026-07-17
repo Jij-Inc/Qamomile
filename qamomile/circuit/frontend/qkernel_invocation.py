@@ -54,8 +54,16 @@ def _collect_input_view_metas(arguments: dict[str, Any]) -> dict[InputViewKey, A
             root_av = handle.value
             while root_av.slice_of is not None:
                 root_av = root_av.slice_of
-            start_uuid = handle._slice_start.value.uuid if handle._slice_start else None
-            step_uuid = handle._slice_step.value.uuid if handle._slice_step else None
+            start_uuid = (
+                handle._slice_start.value.uuid
+                if handle._slice_start is not None
+                else None
+            )
+            step_uuid = (
+                handle._slice_step.value.uuid
+                if handle._slice_step is not None
+                else None
+            )
             length_uuid = handle.value.shape[0].uuid if handle.value.shape else None
             input_view_metas[
                 (root_av.logical_id, start_uuid, step_uuid, length_uuid)
@@ -241,7 +249,13 @@ def _wrap_array_result(
         type[ArrayBase[Any]],
         getattr(handle_type, "__origin__", handle_type),
     )
-    assert isinstance(val, ArrayValue)
+    if not isinstance(val, ArrayValue):
+        raise TypeError(
+            f"QKernel '{kernel.name}' declares array return type "
+            f"{handle_type!r}, but result {result_idx} is a scalar "
+            f"{type(val).__name__}. Update the return annotation or return "
+            "an array value."
+        )
 
     formal_output = (
         block_ir_for_call.output_values[result_idx]

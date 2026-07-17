@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import threading
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -60,6 +61,10 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         # Lazy initialization for hierarchical Block
         self._block: Block | None = None
         self._block_building: bool = False
+        # Serialize first access to the lazy block. An RLock is required:
+        # same-thread re-entry must reach the explicit recursion diagnostic,
+        # while another thread waits and then receives the shared cached block.
+        self._block_lock = threading.RLock()
         # Reentry guard for :meth:`__call__`'s call-time specialization
         # path. While the specialized re-trace runs the kernel body,
         # any self-call must fall back to the cached ``self.block`` to

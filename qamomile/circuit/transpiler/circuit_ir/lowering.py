@@ -74,11 +74,13 @@ from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission impor
 from qamomile.circuit.transpiler.passes.emit_support.control_value_emission import (
     bracket_control_value,
 )
-from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
-    _map_operand_result_groups,
     _prepare_nested_block_for_emit,
+)
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    _map_operand_result_groups,
     _should_emit_single_target_block_per_vector_element,
     build_controlled_block_qubit_map,
 )
