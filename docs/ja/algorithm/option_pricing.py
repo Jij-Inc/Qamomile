@@ -73,191 +73,63 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # ### ペイオフの計算
 #
-# QAE ではグローバー演算子 $\mathcal{Q}$ を $k$ 回繰り返すことで、測定確率が $\sin^2 ((2k+1) \theta_\alpha)$ という既知の関数形で変化します。
-# これにより、少ない測定回数でも $\theta_\alpha$ を高精度に推定することが可能になります。
-# ここでは QAE を用い、どのようにペイオフの計算を行うかを実際に見ていきましょう。
-# 求めたい $n$ 量子ビット状態を $\vert \psi_1 \rangle_n$、それ以外の必要でない量子状態を $\vert \psi_0 \rangle_n$ とに分けるユニタリ演算子を $\mathcal{A}$ とします。
-# 状態を分けるためにアンシラ量子ビットを1つ用いることにすると、演算子 $\mathcal{A}$ は $n+1$ 量子ビットに作用し
+# QAE ではグローバー演算子 $\mathcal{Q}$ を $k$ 回繰り返すことで、測定確率が
+# $\sin^2((2k+1)\theta_a)$ という既知の関数形で変化します。
+# これにより、少ない測定回数でも $\theta_a$ を高精度に推定することが可能になります。  
+# 今、アセットの価格を $S_i$とし、それが起こる確率を $p_i$ としましょう。
+# 演算子 $\mathcal{A}$ が
 #
 # $$
 # \mathcal{A} \vert 0 \rangle_{n+1} 
-# = \sqrt{1-a} \vert \psi_0 \rangle_n \vert 0 \rangle + \sqrt{a} \vert \psi_1 \rangle_n \vert 1 \rangle \tag{1}
+# = \sum_{i=0}^{2^n - 1} \sqrt{1-f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 0 \rangle + \sum_{i=0}^{2^n - 1} \sqrt{f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 1 \rangle \tag{1}
 # $$
 #
-# のようになります。
-# この重み $\sqrt{1-a}, \sqrt{a}$ を求めることを可能にするのが、QAEです。
-# これをオプションプライシングに応用することを考えましょう。
-# アセットが取りうる値を $S_i$、その値が出る確率を $p_i$ とします。
-# ペイオフ $f$ を伴うオプションに対し、演算子 $\mathcal{A}$ が以下のような状態を作れるとします。
+# のような状態を作れるとすると、$\vert 1 \rangle$ の振幅は $a = \mathbb{E}[f(S)]$ となり、QAE によりペイオフの期待値を計算できることがわかります。
+# [Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321) は補助レジスタにペイオフをバイナリ表現で格納する手法を提案しましたが、量子ビット数と回路 depth が増大する問題がありました。
+# そこで [Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/) では、[Woerner & Egger (2019)](https://www.nature.com/articles/s41534-019-0130-6) の軽量な $R_y$ 手法を採用しました。
+#
+# ### 平均値への適用と $c$ パラメータ
+#
+# $\sin^2$ の導関数が最大となる $\pi/4$ の周りで展開するために、目標振幅角を
 #
 # $$
-# \mathcal{A} \vert 0 \rangle_{n+1} 
-# = \sum_{i=0}^{2^n - 1} \sqrt{1-f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 0 \rangle + \sum_{i=0}^{2^n - 1} \sqrt{f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 1 \rangle \tag{2} 
+# \tilde{f}(i) = 2 \frac{f(i) - f_\mathrm{min}}{f_\mathrm{max} - f_\mathrm{min}} - 1, \qquad
+# \alpha(i) = c\tilde{f}(i) + \frac{\pi}{4} \tag{2}
 # $$
 #
-# 式(1), (2)を見比べると
+# と定義します ($c \in [0, 1]$ はスケーリングパラメータ)。
+# このときペイオフ量子ビットが $\vert 1 \rangle$ となる確率は
 #
 # $$
-# a 
-# = \sum_{i=0}^{2^n - 1} f(S_i) p_i 
-# = \mathbb{E} [f(S)] \tag{3}
+# P_1 \approx \frac{1}{2} + c\,\mathbb{E}[\tilde{f}] + \mathcal{O}(c^3) \tag{3}
 # $$
 #
-# となることがわかります。
-# ここで $\mathbb{E}[f(S)]$ は、オプション $S$ のペイオフ $f$ の平均値です。
-# すなわち、式(2)のような状態を作る演算子 $\mathcal{A}$ さえ構築できれば、QAEによりペイオフの平均値を計算できることがわかります。  
-# [Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)は、ペイオフを補助レジスタにバイナリ表現で格納し、制御回転をかける手法を提案しました。
-# しかし、量子ビット数と回路depthが増大する問題を抱えていました。
-# そこで[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、[Woerner & Egger (2019)](https://www.nature.com/articles/s41534-019-0130-6)の線形 $R_y$ 手法による軽量な実装を提案しました。
-#
-# ### 簡単な場合: $f(i) = f_1 i + f_0$
-#
-# まずは一番簡単なケースについて議論していきましょう。
-# 関数 $f$ が線形、すなわち $f(i) = f_1 i + f_0 $ ($f_0, f_1$ は定数) のように書けるとします。
-# このとき
-#
-# $$
-# \vert i \rangle_n \vert 0 \rangle \ \longrightarrow \ 
-# \vert i \rangle_n (\cos [f(i)] \vert 0 \rangle  + \sin [f(i)] \vert 1 \rangle ) \tag{4}
-# $$
-#
-# は、制御 $R_y$ ゲートのみで効率的に実装することができます。
-# $i$ を量子ビット $j$ ($j \in \{0, 1, \dots, n-1\}$) を用いて $i=\sum_{j=0}^{n-1} 2^j b_j \ (b_j \in \{0, 1\})$ のようにバイナリ表現したものと $R_y$ の加法性を組合せることで、各量子ビット $\vert j \rangle$ をコントロールとしてペイオフ量子ビットに $R_y (2 \cdot 2^j f_1)$ をかけるだけで、$\sin [f(i)]$ を実現することができます。
-# $f_0$ は定数であることから、単純な $R_y$ で実装することができます。
-# $R_y (\alpha) R_y (\beta) = R_y (\alpha + \beta)$ のような加法性から、これらを組合せることで $\vert i \rangle_n [\cos (f_0 + f_1 i ) \vert 0 \rangle + \sin (f_0 + f_1 i ) \vert 1 \rangle]$ を実装することができることがわかります。
-#
-# ### 平均値への適用
-#
-# 振幅推定では、入力は重ね合わせ $\sum_i \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle$ で与えられます。
-# ここに先ほどの制御回転を施すことで
-#
-# $$
-# \sum_i \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle \ \longrightarrow \ 
-# \sum_i \sqrt{p_i} \vert i \rangle_n \{ \cos [f(i)] \vert 0 \rangle + \sin [f(i)] \vert 1 \rangle \} \tag{5}
-# $$
-#
-# を得ます。
-# しかしこの状態でペイオフ量子ビットを測定すると、$\vert 1 \rangle$ を得る確率は
-#
-# $$
-# P_1 
-# = \sum_i p_i \sin^2 [f(i)] 
-# \neq \mathbb{E} [f(S)] \tag{6}
-# $$
-#
-# のようになり、振幅推定で取り出した値がそのまま平均値になりません。
-# そこで $\sin^2$ を線形近似した時に最も精度が良くなるように、$\sin^2$ の導関数の値が最大となる $\pi/4$ の周りで展開するような形にしましょう。
-# すなわち
-#
-# $$
-# \sum_i \sqrt{p_i} \vert i \rangle_n \{ \cos [f(i)] \vert 0 \rangle + \sin [f(i)] \vert 1 \rangle \} \approx
-# \sum_i \sqrt{p_i} \vert i \rangle_n \left\{ \cos \left( c \tilde{f}(i) + \frac{\pi}{4} \right) \vert 0 \rangle + \sin \left( c \tilde{f}(i) + \frac{\pi}{4} \right) \vert 1 \rangle \right\} \tag{7}
-# $$
-#
-# のような状態を実現する演算子を構築することにしましょう。
-# ここで $c \in [0, 1]$ は追加のスケーリングパラメータです。
-# さらに $\tilde{f}(i)$ は
-#
-# $$
-# \tilde{f} (i) 
-# = 2 \frac{f(i) - f_\mathrm{min}}{f_\mathrm{max} - f_\mathrm{min}} - 1 \tag{8}
-# $$
-#
-# のように $f(i)$ を規格化したもので、その値の範囲は $\tilde{f}(i) \in [-1, 1]$ となります。
-# ここで、$f_\mathrm{max} = \max_i f(i), f_\mathrm{min} = \min_i f(i)$ です。
-# 式(7)から、ペイオフ量子ビットが $\vert 1 \rangle$ となる確率は
-#
-# $$
-# P_1 
-# = \sum_i p_i \sin^2 \left\{ c \tilde{f}(i) + \frac{\pi}{4} \right\} 
-# = \sum_i p_i \frac{1}{2} \left[ 1 - \cos \left\{ 2 c \tilde{f}(i) + \frac{\pi}{2} \right\} \right] 
-# = \sum_i p_i \frac{1}{2} \left[ 1 + \sin \left\{ 2 c \tilde{f}(i) \right\} \right] 
-# \underbrace{\approx}_{cf \ll 1} \sum_i p_i \left( \frac{1}{2} + c\tilde{f} (i) + \mathcal{O}(c^3 \tilde{f}^3)\right) 
-# = \frac{1}{2} + c \mathbb{E} [\tilde{f}(i)] + \mathcal{O} (c^3 \tilde{f}^3) \tag{9}
-# $$
-#
-# のようになります。
-# $P_1$ を振幅推定で推定すれば、既知の $c, f_\mathrm{min}, f_\mathrm{max}$ により $\mathbb{E}[\tilde{f}]$ を算出することが可能になります。
-# しかし、ここでは $c$ の選び方が重要になります。
-# 式(9)より $\mathbb{E}[\tilde{f}]$ は
-#
-# $$
-# \mathbb{E}[\tilde{f}] 
-# \approx \frac{P_1 - \frac{1}{2}}{c} \tag{10}
-# $$
-#
-# のように計算されます。
-# したがってこの計算では、$P_1$ の推定誤差 $\delta P_1$ としたときに $\delta P_1 / c$ だけの誤差が生まれます。
-# $c$ を小さくすると、この誤差増幅が大きくなります。
-# 逆に $c$ を大きくするとこの誤差増幅は抑えられますが、式(9)の線形近似の高次項 $\mathcal{O}(c^3 \tilde{f}^3)$ を $c$ で割った $\mathcal{O}(c^2)$ の近似誤差が大きくなります。
-# このトレードオフから、収束率はサンプル数に対して $\mathcal{O}(M^{-2/3})$ のような中間的な収束率となります。
-# 完全なサンプル数の2次高速化を達成することはできませんが、依然として古典MCの $\mathcal{O}(M^{-1/2})$ を凌駕することがわかります。  
-# 以下に示す実装では、QAE の中でも最尤振幅推定 (Maximum Likelihood Amplitude Estimation: MLAE) と呼ばれる手法を用いています。
-# この手法は、QAE の中でも位相推定を用いない軽量な手法であることから、実用に適しています。
+# となり、$P_1$ を推定すれば既知の $c, f_\mathrm{min}, f_\mathrm{max}$ から $\mathbb{E}[f(S)]$ を算出できます。  
+# $P_1$ の推定誤差を $\delta P_1$ とすると、$\mathbb{E}[\tilde{f}] \approx (P_1 - 1/2)/c$ より
+# 推定誤差は $\delta P_1/c$ に増幅されます。
+# $c$ を小さくするとこの誤差増幅が大きくなり、逆に大きくすると
+# 近似バイアス $\mathcal{O}(c^2)$ が増大します。
+# このトレードオフから収束率は $\mathcal{O}(M^{-2/3})$ となります。
+# 完全な二次高速化には至りませんが、依然として古典 MC の $\mathcal{O}(M^{-1/2})$ を凌駕します。  
+# 以下の実装では、位相推定を用いない軽量な最尤振幅推定(MLAE)を採用しています。
 #
 # ### コールオプションへの応用
 #
-# 例えばバニラコールオプションでは、アセット価格がある値 $K$ を上回っている場合、その実際の価格と権利行使価格 $K$ の差額が支払われます。
-# すなわち、コールオプションペイオフ $f_C (S_T)$ は、次のように書くことができます。
+# コールオプションのペイオフ $f_C(S_T) = \max(0, S_T - K)$ は $K$ を境に折れ曲がる区分線形関数です。
+# 本実装では均一制御回転(UCR-Y)を用い、各格子点 $S_i$ に対して
 #
 # $$
-# f_C (S_T) 
-# = \max (0, S_T - K) \tag{10}
+# \alpha(S_i) = \frac{\pi}{4} - c + \frac{2c\,\max(S_i - K,\,0)}{S_\mathrm{max} - K} \tag{4}
 # $$
 #
-# それに対し、プットオプションペイオフ $f_P (S_T)$ は、権利行使価格より小さな場合に支払われるものです。
-# すなわち
-#
-# $$
-# f_P (S_T) 
-# = \max (0, K - S_T) \tag{11}
-# $$
-#
-# のように書かれます。
-# これらの関数は区分的に線形で、$K$ を境に折れ曲がるような関数形をしています。
-# これを処理するため、さらに論文では比較のためのアンシラ量子ビットを導入しました。
-# この量子ビットは初期に $\vert 0 \rangle$ として準備され、もし $i \leq K$ ならば $\vert 1 \rangle$ 状態になります。
-# すなわち
-#
-# $$
-# \vert \psi \rangle_n \vert 0 \rangle \ \longrightarrow \ 
-# \vert \phi_1 \rangle 
-# = \sum_{i<K} \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle + \sum_{i \geq K} \sqrt{p_i} \vert i \rangle_n \vert 1 \rangle \tag{12}
-# $$
-#
-# のようになります。
-# このような演算子は、CNOTとトフォリゲートをベースに実装することができると知られています。
-# そしてペイオフ量子ビットへの $R_y$ 回転を、比較のためのアンシラ量子ビットでも制御することで、$i \geq K$ のときのみ線形ペイオフを適用します。
-# 具体的には、回転角を
-#
-# $$
-# c\tilde{f}(i) + \frac{\pi}{4}
-# = g_0 + g(i) 
-# = \frac{\pi}{4} - c + \frac{2c(i - K)}{i_\mathrm{max} - K} \tag{13}
-# $$
-#
-# のようにします。
-# このようにして回転を式(12)に適用すれば
-#
-# $$
-# \sum_{i<K} \sqrt{p_i} \vert i \rangle_n \vert 0 \rangle \{\cos(g_0) \vert 0 \rangle + \sin(g_0) \vert 1 \rangle\} + \sum_{i \geq K} \sqrt{p_i} \vert i \rangle_n \vert 1 \rangle [\cos\{g_0 + g(i)\} \vert 0 \rangle + \sin\{g_0 + g(i)\} \vert 1 \rangle ] \tag{14}
-# $$
-#
-# のようになり、2つ目のアンシラ量子ビットが $\vert 1 \rangle$ となる確率は
-#
-# $$
-# P_1 
-# = \sum_{i<K} p_i \sin^2 (g_0) + \sum_{i\geq K} p_i \sin^2 \{g_0 + g(i)\} \tag{15}
-# $$
-#
-# と求まります。
-# これは振幅推定を用いて効率的に求めることができます。
+# という目標振幅角を直接適用します。
+# $S < K$ では定数角 $\pi/4 - c$、$S \geq K$ では線形増加という区分線形構造を、正確に符号化することができます。
 
 # %% [markdown]
 # ## Qamomileによる実装
 
 # %% [markdown]
-# ### 分布の読み込み
+# ### 分布の準備
 #
 # それでは、[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)で示された実装を見ていきましょう。
 # ここではまず、幾何ブラウン運動下にある満期 $S_T$ の対数正規分布を離散化したものを準備し、これを株価のデータとします。
@@ -282,52 +154,42 @@ amps  = np.sqrt(probs)   # Möttönen エンコード用の振幅 √p_i
 c     = 0.25             # スケーリングパラメータ
 F_max = float(S_max - K)
 
-# ── 目標振幅角(式7: 区分線形コールオプションペイオフ) ──
+# ── 目標振幅角 ──
 payoff       = np.maximum(S_grid - K, 0.0)
 alpha_target = np.pi / 4 - c + 2 * c * payoff / F_max   # shape: (2^n,)
 
 # ── 参照値 ──
-# exact_E_f: 数値積分による厳密な期待ペイオフ(MC 推定値ではなく離散格子上の積分値)
+# exact_E_f: 数値積分による厳密な期待ペイオフ(離散格子上の積分値)
 exact_E_f  = float(np.sum(probs * payoff))
 exact_fair = np.exp(-r * T) * exact_E_f
 
 # P1 の厳密値: Σ_i p_i sin²(α_i)  ← 線形近似を使わない
 P1_exact  = float(np.sum(probs * np.sin(alpha_target)**2))
 
-# P1 の近似値: 式(5) の線形近似
+# P1 の近似値
 E_ftilde  = 2 * exact_E_f / F_max - 1
 P1_approx = c * E_ftilde + 0.5
 
 print(f"期待ペイオフ(数値積分):     {exact_E_f:.6f}")
 print(f"フェアバリュー(参照値):     {exact_fair:.6f}")
 print(f"P1 厳密値:                 {P1_exact:.6f}")
-print(f"P1 近似値(式5 線形近似):   {P1_approx:.6f}")
+print(f"P1 近似値(線形近似):        {P1_approx:.6f}")
 print(f"P1 近似誤差:               {abs(P1_exact - P1_approx):.6f}")
 
 
 # %% [markdown]
 # ### ペイオフ演算子の実装
 #
-# コールオプションのペイオフ $f(S) = \max (S-K, 0)$ を、区分線形として量子レジスタ振幅に埋め込みましょう。
-# $S$ の値が $K$ を超える領域でのみ線形に振幅を回転させます。
-# 具体的には
-#
-# $$ 
-# \vert i \rangle \vert 0 \rangle \ \longrightarrow \ \vert i \rangle \left(\cos(\hat{f}(S_i)) \vert 0 \rangle + \sin(\hat{f}(S_i)) \vert 1 \rangle \right) \tag{20}
-# $$
-#
-# のような回転演算子を実装します。
-# ここで $\hat{f}(S_i) = \frac{2c(S_i - S_\mathrm{min})}{S_\mathrm{max} - S_\mathrm{min}} - c + \frac{\pi}{4} = \hat{f}_1 S_i + \hat{f}_0$ であり、小さな $c$ により線形近似を行います。
-# このようにすると、$\hat{f}$ が $S_i$ について線形なので、$S_i = S_\mathrm{min} + \Delta S \cdot i$ かつ $i = \sum_j 2^j b_j$ のように展開すれば
+# アルゴリズムの部分で示したように、コールオプションのペイオフ $f(S) = \max(S-K, 0)$ は $K$ で折れ曲がる区分線形関数です。
+# そのため、格子点ごとに異なる目標振幅角
 #
 # $$
-# R_y (\hat{f}(S_i)) 
-# = R_y (\hat{f}_0) \Pi_j \mathrm{CR}_y (2^j \hat{f}_1)_{b_j \rightarrow \mathrm{payoff}} \tag{21}
+# \alpha(S_i) = \frac{\pi}{4} - c + \frac{2c\,\max(S_i - K,\, 0)}{S_\mathrm{max} - K}
 # $$
 #
-# のように、各レジスタ量子ビット $S$ とペイオフ量子ビットへの $\mathrm{CR}_y$ ゲートのみで実現することができます。  
-# ここまでの議論から、次のような実装例が考えられます。
-# まず先ほど準備した株価データを読み込む演算と、そのエルミート演算を実装しましょう。
+# をペイオフ量子ビットに適用する必要があります。
+# UCR-Y は各基底状態 $\vert i \rangle$ に対して独立な振幅角 $\alpha(S_i)$ を適用できるため、$K$ を境とした区分線形構造を正確に符号化することができます。
+# 以下では、この UCR-Y を $R_y$ と CNOT のみで分解する実装を示しています。
 
 # %%
 # ── UCR-Y ゲートリストを事前計算(Python レベルの再帰) ──
@@ -364,14 +226,9 @@ for gate in reversed(ucry_gates):
 
 print(f"UCR-Y ゲート数: {len(ucry_gates)} (Ry + CNOT)")
 
-# ── UCR-Y を @qkernel 内から呼ぶための Python 関数 ──
-# @qkernel 内でシーケンスのループは禁止されているが、
-# 通常の Python 関数を @qkernel 内から呼ぶことは可能。
-# ゲートリストのループは Python 関数内で実行され、
-# qmc.ry / qmc.cx の各呼び出しが Qamomile トレーサーに捕捉される。
-
+# UCR-Y を @qkernel 内から呼ぶための関数 
 def _make_ucry_func(gate_list):
-    """UCR-Y ゲートリストを順に適用する Python 関数を返す。"""
+    """UCR-Y ゲートリストを順に適用する関数を返す。"""
     def apply_ucry(q_S, q_p):
         for gate in gate_list:
             if gate[0] == 'ry':
@@ -384,6 +241,14 @@ def _make_ucry_func(gate_list):
 apply_payoff_ucr     = _make_ucry_func(ucry_gates)      # F  (ペイオフ回路)
 apply_payoff_ucr_inv = _make_ucry_func(ucry_inv_gates)  # F† (ペイオフ随伴)
 
+
+# %% [markdown]
+# ### 分布の読み込みの実装
+#
+# そして先ほど準備した株価データを読み込む演算と、そのエルミート演算を実装しましょう。
+# Qamomile には、振幅符号化の関数が標準で備わっています。
+
+# %%
 # ── P_X と P_X†(分布ロードとその随伴) ──
 @qmc.qkernel
 def load_distribution(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
@@ -432,13 +297,15 @@ for q, num in res_k0.results:
 P1_k0 = ones_k0 / num_shots
 
 print(f"\n[Qamomile k=0]")
-print(f"P1 測定値:           {P1_k0:.4f}")
+print(f"P1 測定値:              {P1_k0:.4f}")
 print(f"P1 厳密値(参照):     {P1_exact:.4f}")
-print(f"P1 近似値(式5, 参照):{P1_approx:.4f}")
+print(f"P1 近似値:          {P1_approx:.4f}")
 print("→ 測定値が厳密値に近ければペイオフ回路は正しく動いています")
 
 
 # %% [markdown]
+# ### 量子振幅推定の実装
+#
 # 振幅推定のためのGrover演算子 $\mathcal{Q} = \mathcal{A} \mathcal{S}_0 \mathcal{A}^\dagger \mathcal{S}_\chi$ を $k$ 回適用する量子回路を構築しましょう。
 # $k$ 回適用した量子状態において、ペイオフ量子ビットが $\vert 1 \rangle$ になる確率 $P_1^{(k)} = \sin^2 ((2k+1) \theta_\alpha)$ を求めます。
 
@@ -646,7 +513,7 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# 今回の実装が、理論値に近い結果を得られていることがわかります。
+# 今回の実装が、理論値に非常に近い結果を得られていることがわかります。
 
 # %% [markdown]
 # ## まとめ
@@ -656,5 +523,3 @@ plt.show()
 #
 # * 対数正規分布を Möttönen の符号化手法により量子状態に符号化、一様な制御回転を用いてコールオプションのペイオフをペイオフ量子ビット振幅に符号化しました。状態の読み込みには、Qamomile の `amplitude_encoding` を用いることができます。
 # * Grover 演算子 $\mathcal{Q}$ を $k$ 回適用した回路を様々な $k$ で測定し、最尤推定から振幅角を推定することで、期待ペイオフを求めました。
-
-# %%
