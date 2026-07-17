@@ -17,10 +17,12 @@
 # tags: [tutorial]
 # ---
 #
-# # Controlling Gates and Sub-Kernels with `qmc.control`
+# # Coherent Control with `qmc.control`
 #
 # `qmc.control` turns any Qamomile gate (a built-in like `qmc.rx`,
 # or a user-defined `@qmc.qkernel`) into its *controlled* version.
+# This tutorial develops that API from a single control through
+# value-activated controls, symbolic control widths, and reusable sub-kernels.
 #
 # `qmc.control` has two modes: *concrete* (the number of control
 # qubits is a Python `int`) and *symbolic* (the number is a
@@ -33,7 +35,7 @@
 
 # %%
 # Install the latest Qamomile from pip.
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import math
@@ -140,13 +142,14 @@ assert on_counts == {1: 256}
 # | `num_controls=` | Python `int` (default `1`) | `qmc.UInt` handle, or any `UInt` expression |
 # | Control argument(s) | one or more positional args (`Qubit`, `VectorView`, or `Vector[Qubit]`) whose qubit counts sum to `num_controls` | one positional `Vector[Qubit]` / `VectorView` *pool* (single-pool form, with optional `control_indices`), **or** several positional args mixing `Qubit` / `VectorView` / `Vector[Qubit]` |
 # | `control_indices` | not accepted | optional — picks which slots of the pool are active |
+# | `control_value` | optional Python `int` — activates on that LSB-first register value | only the default `None`; construct `qmc.control` with a concrete Python `int` width for any other value |
 # | Control count resolved at | when `qmc.control(...)` is evaluated (module-load or tracing time) | transpile time (from `bindings`) |
 #
 # Most of `qmc.control`'s features (`power=`, default values,
 # classical-kwarg reordering, sub-kernels that take
 # `Vector[Qubit]`, the multi-argument control shapes, ...) behave
 # identically in both modes; [](#cg-3) collects those. [](#cg-4)
-# covers the one shape that genuinely requires concrete mode, and
+# covers the features that require concrete mode, and
 # [](#cg-5) the symbolic-mode-specific features.
 
 # %% [markdown]
@@ -291,7 +294,9 @@ default_arg_demo_symbolic.draw(n=3, fold_loops=False)
 # itself. `power` accepts a Python `int` (resolved at compile
 # time) or a `qmc.UInt` handle (resolved at transpile time from
 # `bindings`), and works regardless of whether `num_controls` is
-# concrete or symbolic.
+# concrete or symbolic. The resolved value must be a strictly positive integer;
+# zero, negative values, and `bool` are rejected. A symbolic `power` changes
+# circuit structure, so supply it through `bindings`, not runtime `parameters`.
 
 
 # %%
@@ -318,8 +323,9 @@ power_demo_concrete.draw()
 # change ordinary measurement probabilities. Qamomile nevertheless keeps the
 # phase as part of the current lexical circuit region. When a reversible
 # region is coherently controlled, the same factor becomes a relative phase on
-# the all-active control subspace. This is particularly important for SELECT
-# circuits, where even an identity Pauli term may carry a complex coefficient.
+# the all-active control subspace. This matters whenever an algorithm stores
+# information in a subroutine's phase rather than only in its measurement
+# probabilities.
 #
 # Qamomile provides two related ways to attach this phase:
 #
@@ -338,6 +344,15 @@ power_demo_concrete.draw()
 # phase together with inverting `U`. `global_phase` is a reserved call-site
 # keyword; if the target callable also has an ordinary parameter named
 # `global_phase`, pass that parameter positionally.
+#
+# A scalar body whose formal target is `Qubit` can be called with a
+# `Vector[Qubit]` or `VectorView[Qubit]`. Qamomile then broadcasts the complete
+# scalar unitary to every element, exactly like an explicit loop. If
+# $U = e^{i\phi}V$ and the target has $N$ elements, the result is
+# $U^{\otimes N} = e^{iN\phi}V^{\otimes N}$; `power=k` also multiplies
+# that phase by $k$. To attach one phase to the register as a whole, define the
+# controlled body with a `Vector[Qubit]` parameter and attach the phase to that
+# vector body, so it remains one logical call.
 #
 # A phase attached inside a runtime `if` branch or `while` body stays in that
 # branch or iteration. It is not moved to the top-level circuit or discarded.
@@ -474,17 +489,22 @@ mixed_controls_demo.draw()
 
 # %% [markdown]
 # (cg-4)=
-# ## 4. Concrete-mode-only: a single scalar control
+# ## 4. Concrete-mode-only patterns
 #
 # Almost every control-argument shape works in both modes
 # ([](#cg-3)), and symbolic mode adds its own features
-# ([](#cg-5)). The one shape that genuinely *requires* concrete
-# mode is a single scalar `Qubit` as the lone control. In symbolic
-# mode a single control argument is read as the pool form and must
-# be a `Vector` / `VectorView`; a control whose count is fixed at
-# one has no reason to be symbolic anyway. This is exactly the
-# minimal controlled-RX of [](#cg-1); the controlled-X (CNOT)
-# below is the same single-scalar-control shape.
+# ([](#cg-5)). Concrete mode additionally supports a single scalar
+# control and activation on a specified computational-basis value.
+
+# %% [markdown]
+# (cg-4-1)=
+# ### 4.1 A single scalar control
+#
+# A single scalar `Qubit` as the lone control requires concrete mode. In
+# symbolic mode a single control argument is read as the pool form and must
+# be a `Vector` / `VectorView`; a control whose count is fixed at one has no
+# reason to be symbolic anyway. This is exactly the minimal controlled-RX of
+# [](#cg-1); the controlled-X (CNOT) below has the same shape.
 
 
 # %%
@@ -502,6 +522,71 @@ def cnot_demo() -> qmc.Bit:
 
 
 cnot_demo.draw()
+
+# %% [markdown]
+# (cg-4-2)=
+# ### 4.2 Activating on a control-register value
+#
+# Ordinary coherent control activates when every control is `1`.
+# `control_value=v` instead activates when the flattened control register
+# represents the concrete integer `v`. Flattening follows call order; each
+# `Vector` / `VectorView` contributes elements from index zero upward, and the
+# first flattened control is bit zero (LSB). Thus `control_value=2` over two
+# controls means `(bit_0, bit_1) = (0, 1)`.
+#
+# Qamomile represents this as one value-activated controlled operation. Its
+# portable lowering is equivalent to applying X before and after the control
+# on every zero-valued bit, so those temporary X gates cancel on the returned
+# controls. The example deliberately mixes a scalar control and a one-element
+# `VectorView` to make the flattening order explicit.
+
+
+# %%
+control_on_two = qmc.control(qmc.x, num_controls=2, control_value=2)
+control_on_zero = qmc.control(qmc.x, num_controls=1, control_value=0)
+
+
+# %%
+@qmc.qkernel
+def control_value_two_demo() -> qmc.Bit:
+    qs = qmc.qubit_array(3, "qs")
+    qs[1] = qmc.x(qs[1])  # flattened controls are (qs[0], qs[1]) = (0, 1)
+    qs[0], qs[1:2], qs[2] = control_on_two(qs[0], qs[1:2], qs[2])
+    return qmc.measure(qs[2])
+
+
+@qmc.qkernel
+def control_value_zero_demo() -> qmc.Bit:
+    control = qmc.qubit("control")  # remains |0>
+    target = qmc.qubit("target")
+    control, target = control_on_zero(control, target)
+    return qmc.measure(target)
+
+
+# %%
+control_value_two_counts = dict(
+    transpiler.transpile(control_value_two_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+control_value_zero_counts = dict(
+    transpiler.transpile(control_value_zero_demo)
+    .sample(transpiler.executor(), shots=256)
+    .result()
+    .results
+)
+assert control_value_two_counts == {1: 256}
+assert control_value_zero_counts == {1: 256}
+
+# %% [markdown]
+# `control_value=None` is the default all-ones control. Supplying the explicit
+# all-ones value `2**num_controls - 1` is canonicalized to that same default.
+# Any other value must satisfy `0 <= control_value < 2**num_controls`.
+# Non-default `control_value` is intentionally concrete-only. To activate on a
+# value other than all ones, construct `qmc.control` with a concrete Python
+# `int` width rather than a `qmc.UInt`. This keeps the activation bit pattern
+# unambiguous when the operation is created.
 
 # %% [markdown]
 # (cg-5)=
@@ -695,7 +780,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # | --- | --- | --- |
 # | 6.1 control qubit count crosses an argument boundary | concrete | `ValueError` |
 # | 6.2 `control_indices` in concrete mode | concrete | `ValueError` |
-# | 6.3 symbolic-length `VectorView` in concrete | concrete | `NotImplementedError` |
+# | 6.3 symbolic-length `VectorView` in concrete | concrete | `ValueError` |
 # | 6.4 same-pool slot reused as target | symbolic | `UnreturnedBorrowError` |
 # | 6.5 multi-arg control prefix + `control_indices` | symbolic | `ValueError` |
 # | 6.6 single scalar control in symbolic mode | symbolic | `ValueError` |
@@ -782,7 +867,7 @@ expect_error(
 #
 # Concrete mode must determine each control argument's qubit count
 # at compile time. A slice whose length depends on a `UInt` is not
-# supported in concrete mode and raises `NotImplementedError`.
+# supported in concrete mode and raises `ValueError` before ownership moves.
 
 
 # %%
@@ -801,7 +886,7 @@ def case_symbolic_view_in_concrete() -> None:
 
 expect_error(
     "symbolic-length VectorView in concrete mode",
-    NotImplementedError,
+    ValueError,
     case_symbolic_view_in_concrete,
 )
 
@@ -964,3 +1049,8 @@ case_controlled_qft_over_uint_slice()
 # modes, decided by the type of `num_controls`: a Python `int`
 # gives *concrete* mode, and a `qmc.UInt` (or a `UInt` expression
 # like `n - 1`) gives *symbolic* mode.
+# Concrete mode also supports `control_value`, including zero-controls, using
+# the same LSB-first order in which control arguments are flattened. In either
+# mode, `power`, global phase, scalar-to-vector broadcast, inverse, and nested
+# control preserve the complete controlled unitary. Invalid widths, overlapping
+# control and target wires, and unsupported reversible bodies fail explicitly.

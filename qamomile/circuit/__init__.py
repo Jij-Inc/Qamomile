@@ -112,6 +112,7 @@ from .frontend.operation.qubit_gates import (
     y,
     z,
 )
+from .frontend.operation.select import select
 from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 
@@ -127,6 +128,8 @@ from .stdlib import (
     mcx,
     modmul_const,
     modular_add,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
     multi_controlled_x,
     qft,
     qpe,
@@ -191,6 +194,7 @@ __all__ = [
     "WidthResources",
     "estimate_resources",
     "control",
+    "select",
     "inverse",
     "global_phase",
     "cast",
@@ -250,6 +254,8 @@ __all__ = [
     "computational_basis_state",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
+    "mottonen_amplitude_encoding",
+    "mottonen_amplitude_encoding_from_angles",
     "ripple_carry_add",
     "modular_add",
     "controlled_modular_add",

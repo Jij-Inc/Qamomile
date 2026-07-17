@@ -34,6 +34,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     PauliEvolutionInstruction,
     PauliEvolutionRealization,
     ResetInstruction,
+    ReusableCircuit,
     ScalarAtom,
     ScalarCapabilities,
     ScalarExpr,
@@ -213,7 +214,16 @@ class QiskitMaterializer:
         """
         verify_circuit(program)
         artifact = self._materialize(program, preserve_control_flow=True)
-        parameters = {parameter.name: parameter for parameter in artifact.parameters}
+        # Qiskit represents a native for-loop induction value as an internal
+        # ``Parameter`` (for example ``_loop_i_0``). It is part of
+        # ``artifact.parameters`` but not of Qamomile's public runtime ABI and
+        # must never be exposed as an executor binding. Keep only names the
+        # compiled segment explicitly declared.
+        parameters = {
+            parameter.name: parameter
+            for parameter in artifact.parameters
+            if parameter.name in parameter_names
+        }
         if missing_names := set(parameter_names) - parameters.keys():
             from qiskit.circuit import Parameter
 
@@ -236,6 +246,7 @@ class QiskitMaterializer:
         program: CircuitProgram,
         preserve_control_flow: bool,
         parameters: dict[str, Any] | None = None,
+        reusable_gates: dict[ReusableCircuit, Any] | None = None,
     ) -> Any:
         """Build a Qiskit circuit with native or unrolled loop regions.
 
@@ -248,6 +259,9 @@ class QiskitMaterializer:
                 enclosing reusable circuit. Reusing the same Qiskit Parameter
                 identities through every nested definition keeps recursive
                 ``assign_parameters`` reliable. Defaults to a fresh cache.
+            reusable_gates (dict[ReusableCircuit, Any] | None): Gate cache
+                shared across one root materialization. Defaults to a fresh
+                cache.
 
         Returns:
             Any: Materialized ``QuantumCircuit``.
@@ -264,6 +278,7 @@ class QiskitMaterializer:
             for index, wire in enumerate(program.input_wires)
         }
         parameter_cache = {} if parameters is None else parameters
+        reusable_gate_cache = {} if reusable_gates is None else reusable_gates
         _emit_region(
             program.operations,
             circuit,
@@ -271,6 +286,7 @@ class QiskitMaterializer:
             parameter_cache,
             {},
             preserve_control_flow,
+            reusable_gate_cache,
         )
         circuit.global_phase += _materialize_scalar(
             program.global_phase,
@@ -288,6 +304,7 @@ def _emit_region(
     parameters: dict[str, Any],
     loop_variables: dict[str, Any],
     preserve_control_flow: bool,
+    reusable_gates: dict[ReusableCircuit, Any],
 ) -> dict[WireId, Any]:
     """Emit one structured circuit region.
 
@@ -298,6 +315,8 @@ def _emit_region(
         parameters (dict[str, Any]): Shared Qiskit parameter cache.
         loop_variables (dict[str, Any]): Active induction-variable mapping.
         preserve_control_flow (bool): Whether concrete loops remain native.
+        reusable_gates (dict[ReusableCircuit, Any]): Materialized gate cache
+            scoped to the root circuit.
 
     Returns:
         dict[WireId, Any]: Mapping containing every produced virtual wire.
@@ -366,6 +385,7 @@ def _emit_region(
                 circuit,
                 wires,
                 parameters,
+                reusable_gates,
             )
         elif isinstance(operation, ForInstruction):
             _emit_for(
@@ -375,6 +395,7 @@ def _emit_region(
                 parameters,
                 loop_variables,
                 preserve_control_flow,
+                reusable_gates,
             )
         elif isinstance(operation, IfInstruction):
             _emit_if(
@@ -384,6 +405,7 @@ def _emit_region(
                 parameters,
                 loop_variables,
                 preserve_control_flow,
+                reusable_gates,
             )
         elif isinstance(operation, WhileInstruction):
             _emit_while(
@@ -393,6 +415,7 @@ def _emit_region(
                 parameters,
                 loop_variables,
                 preserve_control_flow,
+                reusable_gates,
             )
         else:  # pragma: no cover - defensive guard for a closed union
             raise EmitError(f"Unsupported Qiskit circuit instruction: {operation!r}")
@@ -544,7 +567,13 @@ def _materialize_binary(operator: BinaryOperator, left: Any, right: Any) -> Any:
         try:
             return functions[operator](left, right)
         except (TypeError, ValueError):
-            pass
+            mixed_comparison = _materialize_bool_uint_comparison(
+                operator,
+                left,
+                right,
+            )
+            if mixed_comparison is not None:
+                return mixed_comparison
 
     try:
         return python_functions[operator]()
@@ -552,6 +581,65 @@ def _materialize_binary(operator: BinaryOperator, left: Any, right: Any) -> Any:
         raise EmitError(
             f"Unsupported Qiskit binary operator: {operator.value}"
         ) from error
+
+
+def _materialize_bool_uint_comparison(
+    operator: BinaryOperator,
+    left: Any,
+    right: Any,
+) -> Any | None:
+    """Materialize mixed Qiskit Bool and Uint equality at the target boundary.
+
+    Qiskit does not directly compare its classical ``Bool`` and ``Uint``
+    types. Preserve the single abstract comparison through Qamomile's shared
+    circuit IR, then express equality using the Boolean value's numeric domain
+    only when Qiskit rejects the direct operation.
+
+    Args:
+        operator (BinaryOperator): Requested equality operation.
+        left (Any): Materialized left operand.
+        right (Any): Materialized right operand.
+
+    Returns:
+        Any | None: Qiskit classical expression for mixed equality, or
+            ``None`` when the operands or operator do not match this case.
+    """
+    if operator not in {BinaryOperator.EQ, BinaryOperator.NEQ}:
+        return None
+
+    from qiskit.circuit.classical import expr, types
+
+    try:
+        left_expression = expr.lift(left)
+        right_expression = expr.lift(right)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(left_expression.type, types.Bool) and isinstance(
+        right_expression.type, types.Uint
+    ):
+        bit_expression = left_expression
+        uint_expression = right_expression
+    elif isinstance(left_expression.type, types.Uint) and isinstance(
+        right_expression.type, types.Bool
+    ):
+        uint_expression = left_expression
+        bit_expression = right_expression
+    else:
+        return None
+
+    equality = expr.logic_or(
+        expr.logic_and(
+            expr.logic_not(bit_expression),
+            expr.equal(uint_expression, 0),
+        ),
+        expr.logic_and(
+            bit_expression,
+            expr.equal(uint_expression, 1),
+        ),
+    )
+    if operator is BinaryOperator.NEQ:
+        return expr.logic_not(equality)
+    return equality
 
 
 def _condition(
@@ -583,6 +671,7 @@ def _emit_for(
     parameters: dict[str, Any],
     loop_variables: dict[str, Any],
     preserve_control_flow: bool,
+    reusable_gates: dict[ReusableCircuit, Any],
 ) -> None:
     """Materialize a structured Qiskit for-loop.
 
@@ -593,6 +682,7 @@ def _emit_for(
         parameters (dict[str, Any]): Parameter cache.
         loop_variables (dict[str, Any]): Active loop-variable mapping.
         preserve_control_flow (bool): Whether to retain native loop structure.
+        reusable_gates (dict[ReusableCircuit, Any]): Materialized gate cache.
     """
     current = [wires[wire] for wire in operation.inputs]
     if preserve_control_flow:
@@ -607,6 +697,7 @@ def _emit_for(
                 parameters,
                 nested_variables,
                 preserve_control_flow,
+                reusable_gates,
             )
         current = [body_wires[wire] for wire in operation.body_outputs]
     else:
@@ -621,6 +712,7 @@ def _emit_for(
                 parameters,
                 nested_variables,
                 preserve_control_flow,
+                reusable_gates,
             )
             current = [body_wires[wire] for wire in operation.body_outputs]
     _publish_wires(
@@ -637,6 +729,7 @@ def _emit_if(
     parameters: dict[str, Any],
     loop_variables: dict[str, Any],
     preserve_control_flow: bool,
+    reusable_gates: dict[ReusableCircuit, Any],
 ) -> None:
     """Materialize a structured Qiskit conditional.
 
@@ -647,6 +740,7 @@ def _emit_if(
         parameters (dict[str, Any]): Parameter cache.
         loop_variables (dict[str, Any]): Active loop variables.
         preserve_control_flow (bool): Whether nested loops remain native.
+        reusable_gates (dict[ReusableCircuit, Any]): Materialized gate cache.
     """
     condition = _condition(
         operation.condition,
@@ -669,6 +763,7 @@ def _emit_if(
             parameters,
             loop_variables,
             preserve_control_flow,
+            reusable_gates,
         )
     with else_context:
         circuit.global_phase += _materialize_scalar(
@@ -684,6 +779,7 @@ def _emit_if(
             parameters,
             loop_variables,
             preserve_control_flow,
+            reusable_gates,
         )
     true_qubits = [true_wires[wire] for wire in operation.true_outputs]
     false_qubits = [false_wires[wire] for wire in operation.false_outputs]
@@ -699,6 +795,7 @@ def _emit_while(
     parameters: dict[str, Any],
     loop_variables: dict[str, Any],
     preserve_control_flow: bool,
+    reusable_gates: dict[ReusableCircuit, Any],
 ) -> None:
     """Materialize a structured Qiskit while-loop.
 
@@ -709,6 +806,7 @@ def _emit_while(
         parameters (dict[str, Any]): Parameter cache.
         loop_variables (dict[str, Any]): Active loop variables.
         preserve_control_flow (bool): Whether nested loops remain native.
+        reusable_gates (dict[ReusableCircuit, Any]): Materialized gate cache.
     """
     condition = _condition(
         operation.condition,
@@ -731,6 +829,7 @@ def _emit_while(
             parameters,
             loop_variables,
             preserve_control_flow,
+            reusable_gates,
         )
     _publish_wires(
         operation.outputs,
@@ -744,6 +843,7 @@ def _emit_call(
     circuit: Any,
     wires: dict[WireId, Any],
     parameters: dict[str, Any],
+    reusable_gates: dict[ReusableCircuit, Any],
 ) -> None:
     """Materialize a reusable circuit call as a Qiskit gate.
 
@@ -752,6 +852,7 @@ def _emit_call(
         circuit (Any): Destination circuit.
         wires (dict[WireId, Any]): Enclosing wire mapping.
         parameters (dict[str, Any]): Shared parameter cache.
+        reusable_gates (dict[ReusableCircuit, Any]): Materialized gate cache.
 
     Raises:
         EmitError: If the reusable body is not unitary or has incompatible
@@ -763,25 +864,39 @@ def _emit_call(
         return
     if callee.body.num_clbits:
         raise EmitError("A measured circuit cannot be materialized as a Qiskit gate")
-    nested = QiskitMaterializer()._materialize(
-        callee.body,
-        preserve_control_flow=False,
-        parameters=parameters,
-    )
-    from qiskit.exceptions import QiskitError
-
     try:
-        gate = nested.to_gate(label=callee.name)
-        if callee.inverse:
-            gate = gate.inverse()
-        if callee.controls:
-            gate = gate.control(callee.controls)
-        if callee.power != 1:
-            gate = gate.power(callee.power, annotated=True)
-    except (QiskitError, TypeError, ValueError) as error:
-        raise EmitError(
-            f"Reusable circuit {callee.name!r} cannot become a Qiskit gate"
-        ) from error
+        gate = reusable_gates.get(callee)
+        cacheable = True
+    except TypeError:
+        # Some otherwise immutable circuit instructions carry third-party
+        # semantic payloads, such as Hamiltonian, that deliberately do not
+        # implement hashing. They remain valid reusable bodies but cannot be
+        # structural dictionary keys, so materialize them without caching.
+        gate = None
+        cacheable = False
+    if gate is None:
+        nested = QiskitMaterializer()._materialize(
+            callee.body,
+            preserve_control_flow=False,
+            parameters=parameters,
+            reusable_gates=reusable_gates,
+        )
+        from qiskit.exceptions import QiskitError
+
+        try:
+            gate = nested.to_gate(label=callee.name)
+            if callee.inverse:
+                gate = gate.inverse()
+            if callee.controls:
+                gate = gate.control(callee.controls)
+            if callee.power != 1:
+                gate = gate.power(callee.power, annotated=True)
+        except (QiskitError, TypeError, ValueError) as error:
+            raise EmitError(
+                f"Reusable circuit {callee.name!r} cannot become a Qiskit gate"
+            ) from error
+        if cacheable:
+            reusable_gates[callee] = gate
     qubits = [wires[wire] for wire in operation.inputs]
     if gate.num_qubits != len(qubits):
         raise EmitError(

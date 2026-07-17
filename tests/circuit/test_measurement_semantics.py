@@ -180,3 +180,64 @@ class TestResetBackendUnsupported:
         ) as excinfo:
             QuriPartsTranspiler().transpile(kernel)
         assert excinfo.value.target == "quri_parts"
+
+
+def test_quri_parts_rejects_projection_followed_by_gate():
+    """QURI Parts must not defer a non-terminal projection to shot end."""
+    pytest.importorskip("quri_parts")
+    from qamomile.circuit.transpiler.errors import EmitError
+    from qamomile.quri_parts import QuriPartsTranspiler
+
+    @qmc.qkernel
+    def kernel() -> tuple[qmc.Bit, qmc.Bit]:
+        q = qmc.qubit("q")
+        q, projected = qmc.project_z(q)
+        q = qmc.x(q)
+        return projected, qmc.measure(q)
+
+    with pytest.raises(EmitError, match="mid-circuit measurement"):
+        QuriPartsTranspiler().transpile(kernel)
+
+
+@pytest.mark.cudaq
+def test_cudaq_measure_reset_selects_runnable_mode():
+    """CUDA-Q preserves a measurement taken before resetting the qubit."""
+    pytest.importorskip("cudaq")
+    from qamomile.cudaq import CudaqTranspiler
+
+    @qmc.qkernel
+    def kernel() -> tuple[qmc.Bit, qmc.Bit]:
+        q = qmc.x(qmc.qubit("q"))
+        q, before_reset = qmc.measure_reset(q)
+        return before_reset, qmc.measure(q)
+
+    transpiler = CudaqTranspiler()
+    result = (
+        transpiler.transpile(kernel).sample(transpiler.executor(), shots=32).result()
+    )
+    assert dict(result.results) == {(1, 0): 32}
+
+
+def test_repeated_loop_terminal_measurement_is_mid_circuit():
+    """A terminal body measurement feeds the next loop iteration."""
+    from qamomile.circuit.transpiler.circuit_ir import (
+        ForInstruction,
+        LoopVariableExpr,
+        MeasureInstruction,
+        WireId,
+        has_mid_circuit_measurement,
+    )
+
+    before = WireId(0)
+    measured = WireId(1)
+    after = WireId(2)
+    loop = ForInstruction(
+        indexset=range(2),
+        loop_variable=LoopVariableExpr("index"),
+        inputs=(before,),
+        body=(MeasureInstruction(before, measured, 0),),
+        body_outputs=(measured,),
+        outputs=(after,),
+    )
+
+    assert has_mid_circuit_measurement((loop,))

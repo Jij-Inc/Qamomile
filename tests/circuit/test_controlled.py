@@ -456,11 +456,10 @@ class TestControlledGateCall:
     def test_aliasing_control_and_target_raises(self):
         """Reusing the same qubit as control + target raises QubitConsumedError.
 
-        Frontend Step 6 dropped the bespoke
-        ``_validate_no_alias_or_overlap`` entry-point check; the
-        underlying ``Handle.consume()`` linear-type machinery catches
-        the duplicate on the second consume, so the error class is
-        ``QubitConsumedError`` (not ``QubitAliasError``).
+        Controlled gates rely on the ``Handle.consume()`` linear-ownership
+        check instead of a dedicated alias preflight. The duplicate is caught
+        on the second consume, so the error class is ``QubitConsumedError``
+        rather than ``QubitAliasError``.
         """
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         q = _make_qubit("q")
@@ -562,15 +561,30 @@ class TestControlledValidation:
     def test_control_indices_in_concrete_mode_raises(self):
         """Concrete-``num_controls`` rejects ``control_indices`` at compose time.
 
-        The redesign restricted ``control_indices`` to symbolic
-        mode (design §1.1, decision #5); concrete mode has no
-        selection step.
+        ``control_indices`` selects entries from a symbolic control pool;
+        concrete mode has no selection step.
         """
         cg = ControlledGate(_mock_qkernel(), num_controls=2)
         c0, c1, tgt = _make_qubit("c0"), _make_qubit("c1"), _make_qubit("tgt")
         with trace():
             with pytest.raises(ValueError, match="only valid in symbolic mode"):
                 cg(c0, c1, tgt, control_indices=[0])
+
+    def test_concrete_control_rejects_symbolic_length_control_array(self):
+        """Concrete control fails before ownership moves on a symbolic array."""
+
+        @qmc.qkernel
+        def invalid(n: qmc.UInt) -> qmc.Bit:
+            controls = qmc.qubit_array(n, "controls")
+            target = qmc.qubit("target")
+            controls, target = qmc.control(qmc.x, num_controls=2)(
+                controls,
+                target,
+            )
+            return qmc.measure(target)
+
+        with pytest.raises(ValueError, match="has symbolic length"):
+            _ = invalid.block
 
 
 class TestNormalizeControlIndices:
@@ -1297,6 +1311,32 @@ class TestControlledAcceptsBuiltinGate:
         assert op.attrs["default_policy"] == "PRESERVE_BOX"
         assert op.definition is not None
         assert op.definition.body is boxed_h.block
+
+    def test_controlled_composite_counts_vector_target_width(self):
+        """Controlled composite attrs count scalar qubits inside a Vector."""
+
+        @qmc.composite_gate(name="boxed_vector_x")
+        def boxed_vector_x(
+            targets: qmc.Vector[qmc.Qubit],
+        ) -> qmc.Vector[qmc.Qubit]:
+            return qmc.x(targets)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            control = qmc.qubit(name="control")
+            targets = qmc.qubit_array(3, name="targets")
+            control, targets = qmc.control(boxed_vector_x)(control, targets)
+            return qmc.measure(targets)
+
+        block = circuit.build()
+        op = next(
+            operation
+            for operation in block.operations
+            if isinstance(operation, InvokeOperation)
+        )
+
+        assert op.num_control_qubits == 1
+        assert op.num_target_qubits == 3
 
     def test_composite_call_global_phase_uses_structural_controlled_u(self):
         """A call-site phase cannot be hidden by an unphased native identity."""
@@ -3122,13 +3162,11 @@ class TestControlledWholeVectorControlOutput:
 # Cross-SDK execution: concrete-mode VectorView controls + Vector[Qubit] sub args
 # =============================================================================
 #
-# Coverage for Step 2.b of the controlled-API redesign: the new concrete
-# ``cg(qs[0:N], ...)`` form (where the leading control argument is a
-# ``VectorView`` rather than ``N`` separate scalar ``Qubit`` handles) and
-# the new ``cg(c, qs)`` form (where the sub-kernel takes a ``Vector[Qubit]``
-# argument that must be expanded into per-element physical targets at
-# emit time).  Neither form was reachable before Step 2.b's frontend
-# expansion and ``_expand_quantum_operands_to_phys`` emit helper.
+# Coverage for concrete ``cg(qs[0:N], ...)`` calls, where the leading control
+# argument is a ``VectorView`` rather than ``N`` separate scalar ``Qubit``
+# handles, and ``cg(c, qs)`` calls, where the controlled qkernel takes a
+# ``Vector[Qubit]`` argument that must be expanded into per-element physical
+# targets at emit time by ``_expand_quantum_operands_to_phys``.
 #
 # Each test transpiles on every supported SDK and exercises both the
 # sampling and expectation-value primitives so the sampler and
@@ -3425,8 +3463,8 @@ class TestControlledVectorSubArgCrossSDK:
     equivalence against the per-Qubit form is checked separately in
     :class:`TestControlledVectorSubArgQiskitEquivalence` — only on
     Qiskit, because the QURI Parts emitter has a pre-existing
-    multi-target-controlled-custom-gate gap in its fallback decomposer
-    (orthogonal to Step 2.b; tracked separately).
+    multi-target-controlled-custom-gate gap in its fallback decomposer that is
+    independent of Vector target-operand expansion.
     """
 
     def test_sampling_runs(self, transpiler_factory):
@@ -4742,9 +4780,8 @@ class TestSymbolicMultiArgControl:
         supplied positionally to override the default.  Before the
         fix the boundary algorithm counted only required-positional
         parameters and so misclassified the trailing ``theta_val``
-        as part of the control prefix, leaving zero quantum
-        sub-kernel args and raising ``ValueError`` ("no sub-kernel
-        quantum arg, see design decision #9").  After the fix the
+        as part of the control prefix, leaving no quantum argument for the
+        controlled qkernel and raising ``ValueError``. After the fix the
         boundary algorithm peels trailing classical-looking caller
         args (one per unbound default-valued sub-kernel parameter),
         so ``cg(pool, target, math.pi / 4)`` resolves to
@@ -5010,3 +5047,71 @@ class TestControlledPassThroughWrapperInlined:
                 f"SDK={transpiler_factory.__name__}, seed={seed}, theta={theta}: "
                 f"wrapper={val_w}, leaf={val_l}"
             )
+
+
+@qmc.qkernel
+def _symbolic_power_x(target: qmc.Qubit) -> qmc.Qubit:
+    """Apply the body used by the symbolic controlled-power regression."""
+    return qmc.x(target)
+
+
+@qmc.qkernel
+def _symbolic_zero_power_probe() -> qmc.Vector[qmc.Bit]:
+    """Apply controlled-X with loop powers zero and one."""
+    q = qmc.qubit_array(2, name="q")
+    controlled_x = qmc.control(_symbolic_power_x)
+    q[0] = qmc.x(q[0])
+    for power in qmc.range(2):
+        q[0], q[1] = controlled_x(q[0], q[1], power=power)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _nested_symbolic_power_body(
+    inner_control: qmc.Qubit,
+    target: qmc.Qubit,
+    inner_power: qmc.UInt,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Apply a symbolically powered inner controlled-X."""
+    return qmc.control(_symbolic_power_x)(
+        inner_control,
+        target,
+        power=inner_power,
+    )
+
+
+@qmc.qkernel
+def _nested_symbolic_zero_power_probe() -> qmc.Vector[qmc.Bit]:
+    """Place a zero-powered controlled-X inside another controlled body."""
+    q = qmc.qubit_array(3, name="q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    outer = qmc.control(_nested_symbolic_power_body)
+    for power in qmc.range(1):
+        q[0], q[1], q[2] = outer(q[0], q[1], q[2], inner_power=power)
+    return qmc.measure(q)
+
+
+def test_symbolic_controlled_power_zero_is_identity(sdk_transpiler) -> None:
+    """A power resolving to zero emits identity on every SDK backend."""
+    transpiler = sdk_transpiler.transpiler
+    result = (
+        transpiler.transpile(_symbolic_zero_power_probe)
+        .sample(transpiler.executor(), shots=32)
+        .result()
+    )
+
+    assert result.results == [((1, 1), 32)]
+
+
+def test_nested_symbolic_controlled_power_zero_is_identity(
+    qiskit_transpiler,
+) -> None:
+    """A nested reusable-gate path treats symbolic power zero as identity."""
+    result = (
+        qiskit_transpiler.transpile(_nested_symbolic_zero_power_probe)
+        .sample(qiskit_transpiler.executor(), shots=32)
+        .result()
+    )
+
+    assert result.results == [((1, 1, 0), 32)]

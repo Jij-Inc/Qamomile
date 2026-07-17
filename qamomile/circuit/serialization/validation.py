@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable
+from typing import Iterable, cast
 
+from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import (
     ExpvalOp,
     ForItemsOperation,
     GateOperation,
     GateOperationType,
+    GlobalPhaseOperation,
     InverseBlockOperation,
     InvokeOperation,
     MeasureOperation,
@@ -19,11 +21,13 @@ from qamomile.circuit.ir.operation import (
     ProjectOperation,
     ResetOperation,
     ReturnOperation,
+    SelectOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
     CompOp,
+    CompOpKind,
     CondOp,
     NotOp,
     RuntimeClassicalExpr,
@@ -34,6 +38,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -43,6 +48,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     RegionArg,
     WhileOperation,
 )
+from qamomile.circuit.ir.operation.control_value import normalize_control_value
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     SymbolicControlledU,
@@ -66,7 +72,7 @@ from qamomile.circuit.ir.types.primitives import (
     ValueType,
 )
 from qamomile.circuit.ir.types.q_register import QFixedType
-from qamomile.circuit.ir.value import ArrayValue, DictValue, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase
 
 _SINGLE_QUBIT_GATES = frozenset(
     {
@@ -199,6 +205,13 @@ def _validate_operation(
                 state,
                 f"{location} implementation block",
             )
+    if isinstance(operation, SelectOperation):
+        for case_index, case_block in enumerate(operation.case_blocks):
+            _validate_block(
+                case_block,
+                state,
+                f"{location} case block {case_index}",
+            )
 
 
 def _validate_definition(
@@ -283,6 +296,8 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         _require_types(operation.results, [FloatType()], location, "result")
     elif isinstance(operation, StoreArrayElementOperation):
         _validate_array_store(operation, location)
+    elif isinstance(operation, ReturnQuantumArrayElementOperation):
+        _validate_quantum_array_return(operation, location)
     elif isinstance(operation, DictGetItemOperation):
         _validate_dict_get(operation, location)
     elif isinstance(operation, CastOperation):
@@ -328,6 +343,13 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
             raise ValueError(f"{location} must release an ArrayValue")
     elif isinstance(operation, ReturnOperation):
         _require_result_count(operation, 0, location)
+    elif isinstance(operation, GlobalPhaseOperation):
+        _require_arity(operation, 1, 0, location)
+        _require_scalar_type(
+            operation.operands[0],
+            FloatType(),
+            f"{location} phase operand",
+        )
     elif isinstance(operation, ExpvalOp):
         _require_arity(operation, 2, 1, location)
         if not operation.operands[0].type.is_quantum():
@@ -339,10 +361,15 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         if not operation.operands[0].type.is_quantum():
             raise ValueError(f"{location} first operand must be quantum")
         _require_types(
-            operation.operands[1:],
-            [ObservableType(), FloatType()],
+            operation.operands[1:2],
+            [ObservableType()],
             location,
             "operand",
+        )
+        _require_scalar_type(
+            operation.operands[2],
+            FloatType(),
+            f"{location} angle operand",
         )
         if operation.results[0].type != operation.operands[0].type:
             raise ValueError(f"{location} result type must match its quantum input")
@@ -397,6 +424,11 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         _validate_invoke(operation, location)
     elif isinstance(operation, InverseBlockOperation):
         _validate_inverse_block(operation, location)
+    elif isinstance(operation, SelectOperation):
+        _validate_select(operation, location)
+    elif isinstance(operation, GlobalPhaseOperation):
+        _require_arity(operation, 1, 0, location)
+        _require_types(operation.operands, [FloatType()], location, "operand")
     else:
         raise ValueError(f"{location} has unsupported operation type")
 
@@ -432,7 +464,11 @@ def _validate_gate(operation: GateOperation, location: str) -> None:
         "operand",
     )
     if has_angle:
-        _require_value_type(operation.operands[-1], FloatType(), location)
+        _require_scalar_type(
+            operation.operands[-1],
+            FloatType(),
+            f"{location} angle operand",
+        )
     _require_types(
         operation.results,
         [QubitType()] * qubits,
@@ -493,21 +529,55 @@ def _validate_binop(operation: BinOp, location: str) -> None:
     _require_types(operation.results, [expected_result], location, "result")
 
 
+def _supports_comparison_operands(
+    operand_types: Iterable[ValueType],
+    *,
+    equality: bool,
+) -> bool:
+    """Return whether scalar types support one comparison family.
+
+    Args:
+        operand_types (Iterable[ValueType]): Ordered comparison operand types.
+        equality (bool): Whether equality and inequality semantics apply.
+
+    Returns:
+        bool: ``True`` for numeric pairs, or for Bit/UInt pairs when the
+            operation is equality or inequality.
+    """
+    types = tuple(operand_types)
+    numeric_comparison = all(
+        isinstance(value_type, (UIntType, FloatType)) for value_type in types
+    )
+    bit_equality = equality and all(
+        isinstance(value_type, (BitType, UIntType)) for value_type in types
+    )
+    return numeric_comparison or bit_equality
+
+
+_COMPARISON_OPERANDS_ERROR = (
+    "operands must be numeric scalars (each UIntType or FloatType); equality and "
+    "inequality additionally allow each operand to be BitType or UIntType"
+)
+
+
 def _validate_comparison(operation: CompOp, location: str) -> None:
-    """Validate a scalar numeric comparison.
+    """Validate a scalar comparison.
 
     Args:
         operation (CompOp): Comparison operation to validate.
         location (str): Human-readable operation location.
 
     Raises:
-        ValueError: If operands are not numeric scalars or result is not a bit.
+        ValueError: If the operand types do not support the comparison kind or
+            the result is not a bit.
     """
     _require_arity(operation, 2, 1, location)
-    if not all(
-        isinstance(value.type, (UIntType, FloatType)) for value in operation.operands
+    operand_types = [value.type for value in operation.operands]
+    if not _supports_comparison_operands(
+        operand_types,
+        equality=operation.kind in {CompOpKind.EQ, CompOpKind.NEQ},
     ):
-        raise ValueError(f"{location} operands must be UIntType or FloatType")
+        raise ValueError(f"{location} {_COMPARISON_OPERANDS_ERROR}")
     _require_types(operation.results, [BitType()], location, "result")
 
 
@@ -567,11 +637,12 @@ def _validate_runtime_expression(
         RuntimeOpKind.GE,
     }:
         _require_arity(operation, 2, 1, location)
-        if not all(
-            isinstance(value.type, (UIntType, FloatType))
-            for value in operation.operands
+        operand_types = [value.type for value in operation.operands]
+        if not _supports_comparison_operands(
+            operand_types,
+            equality=operation.kind in {RuntimeOpKind.EQ, RuntimeOpKind.NEQ},
         ):
-            raise ValueError(f"{location} operands must be UIntType or FloatType")
+            raise ValueError(f"{location} {_COMPARISON_OPERANDS_ERROR}")
         _require_types(operation.results, [BitType()], location, "result")
         return
     if operation.kind in {RuntimeOpKind.AND, RuntimeOpKind.OR}:
@@ -630,6 +701,38 @@ def _validate_array_store(
     _require_types(
         operation.operands[2:],
         [UIntType()] * (len(operation.operands) - 2),
+        location,
+        "index",
+    )
+
+
+def _validate_quantum_array_return(
+    operation: ReturnQuantumArrayElementOperation,
+    location: str,
+) -> None:
+    """Validate one deferred quantum array borrow return.
+
+    Args:
+        operation (ReturnQuantumArrayElementOperation): Return to validate.
+        location (str): Human-readable graph location.
+
+    Raises:
+        ValueError: If the array, qubit, index arity, or result contract is
+            malformed.
+    """
+    if len(operation.operands) != 4:
+        raise ValueError(
+            f"{location} requires an array, qubit, target index, and source index"
+        )
+    _require_result_count(operation, 0, location)
+    source = operation.operands[0]
+    if not isinstance(source, ArrayValue) or not source.type.is_quantum():
+        raise ValueError(f"{location} first operand must be a quantum ArrayValue")
+    if operation.returned_value.type != source.type:
+        raise ValueError(f"{location} returned qubit type must match its array")
+    _require_types(
+        [*operation.target_indices, *operation.source_indices],
+        [UIntType()] * (2 * operation.index_arity),
         location,
         "index",
     )
@@ -728,7 +831,43 @@ def _validate_concrete_controlled(
         for operand in operation.operands[: operation.num_controls]
     ):
         raise ValueError(f"{location} controls must be quantum values")
+    _validate_control_activation(
+        operation.control_value,
+        operation.num_controls,
+        location,
+    )
     _validate_controlled_results(operation, location)
+
+
+def _validate_control_activation(
+    control_value: object,
+    num_controls: int,
+    location: str,
+) -> None:
+    """Validate a canonical coherent-control activation value.
+
+    Args:
+        control_value (object): Candidate LSB-first activation integer or null.
+        num_controls (int): Concrete width of the control register.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the value is malformed, does not fit the control width,
+            or uses the non-canonical explicit all-ones representation.
+    """
+    if num_controls == 0:
+        if control_value is not None:
+            raise ValueError(f"{location} control_value requires a control qubit")
+        return
+    try:
+        normalized = normalize_control_value(
+            cast("int | None", control_value),
+            num_controls,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{location} has an invalid control_value") from exc
+    if normalized != control_value:
+        raise ValueError(f"{location} has a non-canonical control_value")
 
 
 def _validate_symbolic_controlled(
@@ -827,6 +966,18 @@ def _validate_invoke(operation: InvokeOperation, location: str) -> None:
             + operation.results[:control_count]
         ):
             raise ValueError(f"{location} control inputs and results must be quantum")
+        if (
+            "control_value" in operation.attrs
+            and operation.attrs["control_value"] is None
+        ):
+            raise ValueError(f"{location} has a non-canonical null control_value")
+        _validate_control_activation(
+            operation.attrs.get("control_value"),
+            control_count,
+            location,
+        )
+    elif "control_value" in operation.attrs:
+        raise ValueError(f"{location} has control_value on a non-controlled invocation")
     signature = operation.definition.signature
     if signature is None:
         return
@@ -868,6 +1019,100 @@ def _validate_inverse_block(
     """
     if operation.source_block is None and operation.implementation_block is None:
         raise ValueError(f"{location} requires a source or implementation block")
+    _validate_control_activation(
+        operation.control_value,
+        operation.num_control_qubits,
+        location,
+    )
+
+
+def _validate_select(operation: SelectOperation, location: str) -> None:
+    """Validate a SELECT operation and every case interface.
+
+    Args:
+        operation (SelectOperation): Multiplexer operation to validate.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the index width, argument grouping, quantum result
+            layout, or case block interfaces are inconsistent.
+    """
+    width = operation.num_index_qubits
+    num_index_args = operation.num_index_args
+    if num_index_args < 1 or num_index_args >= len(operation.operands):
+        raise ValueError(f"{location} has an invalid num_index_args")
+
+    if is_plain_int(width):
+        concrete_width = cast(int, width)
+        if concrete_width < 1 or num_index_args != concrete_width:
+            raise ValueError(f"{location} has an invalid num_index_qubits")
+        minimum_width = (len(operation.case_blocks) - 1).bit_length()
+        if len(operation.case_blocks) < 2 or concrete_width < minimum_width:
+            raise ValueError(f"{location} has an invalid number of case blocks")
+    else:
+        if not isinstance(width, Value) or isinstance(width, ArrayValue):
+            raise ValueError(f"{location} has an invalid num_index_qubits")
+        _require_value_type(width, UIntType(), location)
+        if len(operation.case_blocks) < 2:
+            raise ValueError(f"{location} has an invalid number of case blocks")
+
+    index_operands = operation.operands[:num_index_args]
+    if not all(value.type.is_quantum() for value in index_operands):
+        raise ValueError(f"{location} index arguments must be quantum values")
+    _require_types(
+        index_operands,
+        [QubitType()] * num_index_args,
+        location,
+        "index argument",
+    )
+    if is_plain_int(width):
+        if any(isinstance(value, ArrayValue) for value in index_operands):
+            raise ValueError(
+                f"{location} concrete index operands must be scalar qubits"
+            )
+
+    target_operands = [
+        value
+        for value in operation.operands[num_index_args:]
+        if value.type.is_quantum()
+    ]
+    if not target_operands:
+        raise ValueError(f"{location} requires at least one quantum target")
+    quantum_operands = [*index_operands, *target_operands]
+    if len(operation.results) != len(quantum_operands):
+        raise ValueError(f"{location} results must mirror quantum operands")
+    if any(
+        isinstance(operand, ArrayValue) != isinstance(result, ArrayValue)
+        for operand, result in zip(
+            quantum_operands,
+            operation.results,
+            strict=True,
+        )
+    ):
+        raise ValueError(f"{location} results must preserve quantum argument grouping")
+    _require_types(
+        operation.results,
+        [value.type for value in quantum_operands],
+        location,
+        "result",
+    )
+
+    case_inputs = operation.operands[num_index_args:]
+    case_outputs = target_operands
+    for case_index, case_block in enumerate(operation.case_blocks):
+        case_location = f"{location} case block {case_index}"
+        _require_types(
+            case_block.input_values,
+            [value.type for value in case_inputs],
+            case_location,
+            "input",
+        )
+        _require_types(
+            case_block.output_values,
+            [value.type for value in case_outputs],
+            case_location,
+            "output",
+        )
 
 
 def _validate_quantum_operand_uniqueness(
@@ -998,6 +1243,29 @@ def _require_value_type(
             f"{location} value has type {value.type.label()}, "
             f"expected {expected.label()}"
         )
+
+
+def _require_scalar_type(
+    value: ValueBase,
+    expected: ValueType,
+    location: str,
+) -> None:
+    """Require a scalar Value with a specific IR type.
+
+    Args:
+        value (ValueBase): Value to inspect.
+        expected (ValueType): Expected IR type object.
+        location (str): Human-readable value location.
+
+    Raises:
+        ValueError: If the value is not a matching scalar.
+    """
+    if (
+        not isinstance(value, Value)
+        or isinstance(value, ArrayValue)
+        or value.type != expected
+    ):
+        raise ValueError(f"{location} requires a scalar {expected.label()}")
 
 
 def _require_array_type(

@@ -1702,7 +1702,7 @@ class TestGateCombinations:
         """
 
         @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
+        def circuit() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
             # Alice's qubit to teleport (prepared in |1>)
             alice = qmc.qubit("alice")
             alice = qmc.x(alice)
@@ -1717,12 +1717,13 @@ class TestGateCombinations:
             alice, bell0 = qmc.cx(alice, bell0)
             alice = qmc.h(alice)
 
-            # Measure all three qubits
-            q = qmc.qubit_array(3, "out")
-            q[0] = alice
-            q[1] = bell0
-            q[2] = bell1
-            return qmc.measure(q)
+            # Measure all three independent resources without pretending a
+            # fresh array owns them.
+            return (
+                qmc.measure(alice),
+                qmc.measure(bell0),
+                qmc.measure(bell1),
+            )
 
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
@@ -2568,7 +2569,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         assert block is not None
-        assert len(block.operations) == 4
+        assert len(block.operations) == 3
 
     def test_inline(self, transpiler):
         """inline() flattens inline invocations from sub-kernel calls."""

@@ -11,6 +11,13 @@ from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
     InvokeOperation,
 )
+from qamomile.circuit.ir.operation.gate import (
+    MeasureOperation,
+    MeasureQFixedOperation,
+    MeasureVectorOperation,
+    ProjectOperation,
+    ResetOperation,
+)
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -21,6 +28,7 @@ from qamomile.circuit.ir.value import (
     collect_value_like_uuids,
     resolve_root_qubit_address,
 )
+from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     CompiledClassicalSegment,
     CompiledExpvalSegment,
@@ -29,6 +37,7 @@ from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
 )
 from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.passes.control_flow_visitor import OperationCollector
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     resolve_condition_address_detailed,
 )
@@ -165,7 +174,18 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         Returns:
             ExecutableProgram[T]: Executable program containing all compiled
                 segments and the public output contract.
+
         """
+        # ``Block.parameters`` includes special values such as Observable
+        # inputs even when they are supplied as compile-time bindings. The
+        # public bindings/parameters disjointness check has already rejected
+        # genuine user overlap; subtract bound manifest entries here so only
+        # unbound symbols are promoted into the backend runtime ABI.
+        planned_parameters = set(input.parameters) - set(self.bindings)
+        if not planned_parameters.issubset(self.parameters):
+            self.parameters.update(planned_parameters)
+            self._resolver = ValueResolver(self.parameters)
+
         self._program_output_values = tuple(input.abi.output_values)
         self._program_output_refs = frozenset(
             uuid
@@ -178,6 +198,33 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         compiled_expval: list[CompiledExpvalSegment] = []
         expval_segments: list[ExpvalSegment] = []
         compiled_quantum: list[CompiledQuantumSegment[T]] = []
+
+        if any(isinstance(step, ExpvalStep) for step in input.steps):
+            nonunitary_types = (
+                MeasureOperation,
+                MeasureQFixedOperation,
+                MeasureVectorOperation,
+                ProjectOperation,
+                ResetOperation,
+            )
+            for step in input.steps:
+                if not isinstance(step, QuantumStep):
+                    continue
+                collector = OperationCollector(
+                    lambda operation: isinstance(operation, nonunitary_types)
+                )
+                collector.visit_operations(step.segment.operations)
+                if collector.collected:
+                    operation_names = sorted(
+                        {type(operation).__name__ for operation in collector.collected}
+                    )
+                    raise EmitError(
+                        "Programs that compute expval cannot also contain "
+                        "measurement, projection, or reset operations in the "
+                        "same quantum execution. Split sampling and expectation "
+                        "evaluation into separate kernels. Found: "
+                        f"{operation_names}."
+                    )
 
         for step in input.steps:
             if isinstance(step, ClassicalStep):
@@ -445,6 +492,18 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             quantum_segment_index,
             compiled_quantum,
         )
+        observable_indices = {
+            operator.index
+            for operators, _coefficient in hamiltonian
+            for operator in operators
+        }
+        invalid_indices = sorted(observable_indices.difference(qubit_map))
+        if invalid_indices:
+            raise ValueError(
+                "Observable qubit indices are outside the register passed to "
+                f"expval: {invalid_indices}. Valid logical indices are "
+                f"{sorted(qubit_map)}."
+            )
 
         # Create CompiledExpvalSegment with qm_o.Hamiltonian directly
         return CompiledExpvalSegment(

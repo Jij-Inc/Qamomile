@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -17,6 +17,7 @@ from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
@@ -183,48 +184,57 @@ def _substitute_output_values(
     ]
 
 
-def _has_any_inline_call(operations: list[Operation]) -> bool:
-    """Return whether any operation (or nested operation) is a call.
+def _iter_inline_invokes(operations: list[Operation]) -> Iterator[InvokeOperation]:
+    """Yield every inlineable invocation reachable from an operation list.
 
-    Recurses into the nested blocks of ``InverseBlockOperation`` and
-    ``ControlledUOperation`` and into ``HasNestedOps``
-    bodies, so a call hidden inside a control-flow body or an
-    operation-owned block is still detected. ``InlinePass`` uses this to
-    decide whether its output block is ``AFFINE`` (no calls remain) or
-    stays ``HIERARCHICAL``.
+    Recurses into the nested blocks of ``InverseBlockOperation``,
+    ``ControlledUOperation``, and ``SelectOperation`` and into
+    ``HasNestedOps`` bodies so detection and counting share one traversal.
+
+    Args:
+        operations (list[Operation]): Operations to scan.
+
+    Yields:
+        InvokeOperation: Each reachable invocation with an inline body.
+    """
+    for op in operations:
+        if isinstance(op, InvokeOperation) and _invoke_inline_body(op) is not None:
+            yield op
+        if isinstance(op, InverseBlockOperation):
+            for block in (op.source_block, op.implementation_block):
+                if block is not None:
+                    yield from _iter_inline_invokes(block.operations)
+        if isinstance(op, ControlledUOperation):
+            if op.block is not None:
+                yield from _iter_inline_invokes(op.block.operations)
+        if isinstance(op, SelectOperation):
+            for block in op.case_blocks:
+                yield from _iter_inline_invokes(block.operations)
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                yield from _iter_inline_invokes(body)
+
+
+def _has_any_inline_call(operations: list[Operation]) -> bool:
+    """Return whether any inlineable call is reachable from operations.
 
     Args:
         operations (list[Operation]): Operations to scan.
 
     Returns:
-        bool: ``True`` if at least one inlineable call is reachable
-            from *operations*, otherwise ``False``.
+        bool: Whether at least one inlineable invocation is reachable.
     """
-    for op in operations:
-        if isinstance(op, InvokeOperation) and _invoke_inline_body(op) is not None:
-            return True
-        if isinstance(op, InverseBlockOperation):
-            for block in (op.source_block, op.implementation_block):
-                if block is not None and _has_any_inline_call(block.operations):
-                    return True
-        if isinstance(op, ControlledUOperation):
-            if op.block is not None and _has_any_inline_call(op.block.operations):
-                return True
-        if isinstance(op, HasNestedOps):
-            for body in op.nested_op_lists():
-                if _has_any_inline_call(body):
-                    return True
-    return False
+    return next(_iter_inline_invokes(operations), None) is not None
 
 
 def count_inline_invokes(operations: list[Operation]) -> int:
     """Count all inlineable calls reachable from an operation list.
 
-    Recurses into ``InverseBlockOperation`` / ``ControlledUOperation``
-    nested blocks and into ``HasNestedOps`` bodies, so calls hidden inside
-    control flow or operation-owned blocks are
-    counted. ``unroll_recursion`` uses this as the primary termination
-    signal (``count == 0`` means the block is fully inlined).
+    Recurses into ``InverseBlockOperation`` / ``ControlledUOperation`` /
+    ``SelectOperation`` nested blocks and into ``HasNestedOps`` bodies, so
+    calls hidden inside control flow or operation-owned blocks are counted.
+    ``unroll_recursion`` uses this as the primary termination signal
+    (``count == 0`` means the block is fully inlined).
 
     Args:
         operations (list[Operation]): Operations to scan.
@@ -232,37 +242,22 @@ def count_inline_invokes(operations: list[Operation]) -> int:
     Returns:
         int: Total number of inlineable calls reachable from *operations*.
     """
-    count = 0
-    for op in operations:
-        if isinstance(op, InvokeOperation) and _invoke_inline_body(op) is not None:
-            count += 1
-        if isinstance(op, InverseBlockOperation):
-            for block in (op.source_block, op.implementation_block):
-                if block is not None:
-                    count += count_inline_invokes(block.operations)
-        if isinstance(op, ControlledUOperation):
-            if op.block is not None:
-                count += count_inline_invokes(op.block.operations)
-        if isinstance(op, HasNestedOps):
-            for body in op.nested_op_lists():
-                count += count_inline_invokes(body)
-    return count
+    return sum(1 for _ in _iter_inline_invokes(operations))
 
 
 def count_unrollable_inline_invokes(operations: list[Operation]) -> int:
     """Count inlineable calls the inline/partial-eval loop can still resolve.
 
     This mirrors :func:`count_inline_invokes` but **does not** descend into
-    a ``ControlledUOperation.block`` or an ``InverseBlockOperation``'s
-    nested blocks. A call still inside one of those operation-owned blocks
-    after a full ``inline`` pass is a self-recursive call that inline's
-    cycle guard could not unroll — it stops after one layer and does not
-    re-enter the operation-owned block — so no later ``unroll_recursion``
-    iteration can resolve it. Folding compile-time ``if``s there (which
-    ``CompileTimeIfLoweringPass`` does do for a ``ControlledUOperation``'s
-    block) never removes the trapped call itself. Such a call is therefore
-    *not* unrollable. Calls at the top level or inside ``For`` / ``If`` /
-    ``While`` bodies are unrollable and are counted.
+    a ``ControlledUOperation.block``, an ``InverseBlockOperation``'s nested
+    blocks, or a ``SelectOperation`` case block. A call still inside one of
+    those operation-owned blocks after a full ``inline`` pass is a
+    self-recursive call that inline's cycle guard could not unroll — it stops
+    after one layer and does not re-enter the operation-owned block — so no
+    later ``unroll_recursion`` iteration can resolve it. Folding compile-time
+    ``if``s there never removes the trapped call itself. Such a call is
+    therefore *not* unrollable. Calls at the top level or inside ``For`` /
+    ``If`` / ``While`` bodies are unrollable and are counted.
 
     The unroll loop uses this to tell two failure modes apart: a non-zero
     :func:`count_inline_invokes` with a zero ``count_unrollable_inline_invokes``
@@ -276,8 +271,8 @@ def count_unrollable_inline_invokes(operations: list[Operation]) -> int:
 
     Returns:
         int: Number of inlineable calls reachable without entering a
-            ``ControlledUOperation.block`` or ``InverseBlockOperation``
-            nested block.
+            ``ControlledUOperation.block``, ``InverseBlockOperation`` nested
+            block, or ``SelectOperation`` case block.
     """
     count = 0
     for op in operations:
@@ -352,7 +347,23 @@ class InlinePass(Pass[Block, Block]):
         value_map: dict[str, ValueBase],
         visiting_blocks: set[int],
     ) -> list[Operation]:
-        """Recursively serialize a list of operations."""
+        """Recursively inline calls in one same-scope operation list.
+
+        Operation-owned blocks are delegated to :meth:`_inline_nested_block`
+        so each keeps its independent formal-value namespace. Only the owning
+        operation's operands and results are substituted through ``value_map``.
+
+        Args:
+            operations (list[Operation]): Operations to rewrite in order.
+            value_map (dict[str, ValueBase]): Caller-scope substitutions
+                accumulated by prior inline calls.
+            visiting_blocks (set[int]): Block identities on the active
+                expansion path, used to stop recursive inlining.
+
+        Returns:
+            list[Operation]: Rewritten operations with reachable inline-policy
+                calls expanded as far as the recursion guard permits.
+        """
         result: list[Operation] = []
 
         for op in operations:
@@ -371,6 +382,18 @@ class InlinePass(Pass[Block, Block]):
                 else:
                     inlined = self._inline_invoke(op, body, value_map, visiting_blocks)
                     result.extend(inlined)
+
+            elif isinstance(op, SelectOperation):
+                case_blocks = [
+                    cast(
+                        Block,
+                        self._inline_nested_block(case_block, visiting_blocks),
+                    )
+                    for case_block in op.case_blocks
+                ]
+                new_op = dataclasses.replace(op, case_blocks=case_blocks)
+                substituted = self._substitute_values(new_op, value_map)
+                result.append(substituted)
 
             elif isinstance(op, HasNestedOps):
                 # Generic recursion for For/ForItems/While: recurse into

@@ -537,6 +537,54 @@ def _validate_returned_arrays(result: typing.Any) -> None:
     _visit(result)
 
 
+def _validate_return_shape(
+    result: typing.Any,
+    annotation: typing.Any,
+    path: str = "return",
+) -> None:
+    """Validate scalar, array, and tuple structure against an annotation.
+
+    Args:
+        result (Any): Traced Python return value.
+        annotation (Any): Resolved frontend return annotation.
+        path (str): Diagnostic path for nested tuple elements.
+
+    Raises:
+        TypeError: If an array is returned for a scalar annotation, a scalar
+            is returned for an array annotation, or tuple structure differs.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if getattr(annotation, "__origin__", None) is tuple:
+        expected = annotation.__args__
+        if not isinstance(result, tuple):
+            raise TypeError(
+                f"{path} annotation declares a tuple, but the kernel returned "
+                f"{type(result).__name__}."
+            )
+        if len(result) != len(expected):
+            raise TypeError(
+                f"{path} annotation declares {len(expected)} tuple elements, "
+                f"but the kernel returned {len(result)}."
+            )
+        for index, (item, item_annotation) in enumerate(zip(result, expected)):
+            _validate_return_shape(item, item_annotation, f"{path}[{index}]")
+        return
+
+    expects_array = is_array_type(annotation)
+    returns_array = isinstance(result, ArrayBase)
+    if expects_array and not returns_array:
+        raise TypeError(
+            f"{path} annotation declares an array, but the kernel returned "
+            f"{type(result).__name__}."
+        )
+    if not expects_array and returns_array:
+        raise TypeError(
+            f"{path} annotation declares a scalar, but the kernel returned "
+            f"{type(result).__name__}."
+        )
+
+
 def func_to_block(func: typing.Callable) -> Block:
     """Convert a function to a hierarchical Block.
 
@@ -604,6 +652,8 @@ def func_to_block(func: typing.Callable) -> Block:
     tracer = Tracer()
     with trace(tracer):
         result = func(**dummy_inputs)  # type: ignore
+
+    _validate_return_shape(result, return_type)
 
     # Validate that returned / live quantum arrays have no unreturned
     # borrows.  The existing ``validate_all_returned`` is consume-driven

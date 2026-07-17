@@ -32,7 +32,9 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
     validate_region_args,
 )
+from qamomile.circuit.ir.operation.control_value import control_pattern_for_value
 from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
     ControlledUOperation,
     GateOperation,
     GateOperationType,
@@ -46,6 +48,7 @@ from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types import (
     BitType,
     FloatType,
@@ -85,6 +88,27 @@ from qamomile.circuit.transpiler.prepared import PreparedModule
 
 _QuantumOrigin: TypeAlias = tuple[str, int | None]
 _QuantumFootprint: TypeAlias = frozenset[_QuantumOrigin]
+
+_BIT_COMPARISON_NAMES: Mapping[CompOpKind, str] = {
+    CompOpKind.EQ: "eq",
+    CompOpKind.NEQ: "xor",
+}
+_UINT_COMPARISON_NAMES: Mapping[CompOpKind, str] = {
+    CompOpKind.EQ: "ieq",
+    CompOpKind.NEQ: "ine",
+    CompOpKind.LT: "ilt_u",
+    CompOpKind.LE: "ile_u",
+    CompOpKind.GT: "igt_u",
+    CompOpKind.GE: "ige_u",
+}
+_FLOAT_COMPARISON_NAMES: Mapping[CompOpKind, str] = {
+    CompOpKind.EQ: "feq",
+    CompOpKind.NEQ: "fne",
+    CompOpKind.LT: "flt",
+    CompOpKind.LE: "fle",
+    CompOpKind.GT: "fgt",
+    CompOpKind.GE: "fge",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -579,6 +603,12 @@ def _lower_operation(
             environment[operation.results[0].uuid] = result
         case ReturnOperation():
             return
+        case SelectOperation():
+            raise EmitError(
+                "HUGR target does not support qmc.select in direct "
+                "PreparedModule lowering.",
+                operation="SelectOperation",
+            )
         case _:
             raise EmitError(
                 f"Unsupported direct HUGR lowering for "
@@ -2647,6 +2677,8 @@ def _lower_pauli_evolution(
     builder: Any,
     environment: dict[str, Any],
     live_qubits: dict[str, Any],
+    *,
+    inverse: bool = False,
 ) -> None:
     """Lower Pauli evolution at the HUGR target boundary.
 
@@ -2659,6 +2691,8 @@ def _lower_pauli_evolution(
         builder (Any): HUGR dataflow builder.
         environment (dict[str, Any]): UUID-to-wire mapping to update.
         live_qubits (dict[str, Any]): Live quantum mapping to update.
+        inverse (bool): Whether to emit the adjoint evolution. Defaults to
+            ``False``.
 
     Raises:
         EmitError: If the Hamiltonian is unbound, the qubit operand is not a
@@ -2670,9 +2704,11 @@ def _lower_pauli_evolution(
 
     qubit_operand = operation.qubits
     result = operation.evolved_qubits
-    if not isinstance(qubit_operand, ArrayValue) or not isinstance(result, ArrayValue):
+    source = result if inverse else qubit_operand
+    destination = qubit_operand if inverse else result
+    if not isinstance(source, ArrayValue) or not isinstance(destination, ArrayValue):
         raise EmitError("HUGR Pauli evolution requires a fixed qubit vector")
-    if qubit_operand.uuid not in environment:
+    if source.uuid not in environment:
         raise EmitError("HUGR Pauli evolution cannot resolve its qubit vector")
     hamiltonian = (
         cast(Any, operation.observable.get_const())
@@ -2685,14 +2721,15 @@ def _lower_pauli_evolution(
         raise EmitError("HUGR Pauli evolution binding is not a Hamiltonian")
     _validate_pauli_evolution_hamiltonian(hamiltonian)
 
-    qubits = list(environment[qubit_operand.uuid])
+    qubits = list(environment[source.uuid])
+    direction = -1.0 if inverse else 1.0
     constant_value = float(hamiltonian.constant.real)
     if constant_value:
         _lower_global_phase(
             operation.gamma,
             builder,
             environment,
-            scale=-constant_value,
+            scale=-direction * constant_value,
         )
     for operators, coefficient in hamiltonian:
         if not operators or is_close_zero(abs(coefficient)):
@@ -2720,7 +2757,7 @@ def _lower_pauli_evolution(
             builder,
             operation.gamma,
             environment,
-            scale=2.0 * float(coefficient.real),
+            scale=direction * 2.0 * float(coefficient.real),
         )
         [selected[-1]] = builder.add_op(quantum.Rz, selected[-1], rotation)
         for index in range(len(selected) - 2, -1, -1):
@@ -2739,11 +2776,11 @@ def _lower_pauli_evolution(
                 [wire] = builder.add_op(quantum.S, wire)
             qubits[item.index] = wire
 
-    environment[result.uuid] = qubits
-    environment[qubit_operand.uuid] = qubits
+    environment[source.uuid] = qubits
+    environment[destination.uuid] = qubits
     for index in range(len(qubits)):
-        live_qubits.pop(f"{qubit_operand.uuid}:{index}", None)
-        live_qubits[f"{result.uuid}:{index}"] = qubits[index]
+        live_qubits.pop(f"{source.uuid}:{index}", None)
+        live_qubits[f"{destination.uuid}:{index}"] = qubits[index]
 
 
 def _lower_measure(
@@ -3073,6 +3110,13 @@ def _lower_transformed_call(
     for value in controls:
         resolved = _resolve_wire(value, environment)
         control_wires.extend(resolved if isinstance(resolved, list) else [resolved])
+    control_value = _transformed_control_value(operation)
+    if control_value is not None:
+        control_wires = _toggle_zero_controls(
+            builder,
+            control_wires,
+            control_value,
+        )
     for _ in range(power):
         control_wires = _lower_transformed_operations(
             body.operations,
@@ -3080,6 +3124,13 @@ def _lower_transformed_call(
             local,
             control_wires,
             inverse,
+        )
+    if control_value is not None:
+        control_wires = _toggle_zero_controls(
+            builder,
+            control_wires,
+            control_value,
+            reverse=True,
         )
 
     quantum_exit = body_quantum_inputs if inverse else body_quantum_outputs
@@ -3115,6 +3166,72 @@ def _lower_transformed_call(
             wire = local[entry.uuid]
             local[formal.uuid] = wire
         _publish_transformed_result(source, result, wire, environment, live_qubits)
+
+
+def _transformed_control_value(
+    operation: InvokeOperation | ControlledUOperation | InverseBlockOperation,
+) -> int | None:
+    """Return the activation value carried by a transformed call.
+
+    Args:
+        operation (InvokeOperation | ControlledUOperation |
+            InverseBlockOperation): Transformed operation being lowered.
+
+    Returns:
+        int | None: LSB-first activation value, or ``None`` for all-ones.
+    """
+    if isinstance(operation, (ConcreteControlledU, InverseBlockOperation)):
+        return operation.control_value
+    if (
+        isinstance(operation, InvokeOperation)
+        and operation.transform is CallTransform.CONTROLLED
+    ):
+        return operation.control_value
+    return None
+
+
+def _toggle_zero_controls(
+    builder: Any,
+    control_wires: list[Any],
+    control_value: int,
+    *,
+    reverse: bool = False,
+) -> list[Any]:
+    """Apply X to control wires whose required activation bit is zero.
+
+    HUGR quantum wires are linear, so each X result replaces the consumed
+    wire. The returned list must be used both for the transformed body and for
+    the closing bracket.
+
+    Args:
+        builder (Any): HUGR dataflow builder.
+        control_wires (list[Any]): Current control wires in LSB-first order.
+        control_value (int): Required computational-basis value.
+        reverse (bool): Whether to visit bracket positions in reverse order.
+            Defaults to ``False``.
+
+    Returns:
+        list[Any]: Updated linear control wires after the X gates.
+
+    Raises:
+        EmitError: If no physical controls are available for the value.
+        TypeError: If ``control_value`` is not a Python ``int``.
+        ValueError: If the activation value does not fit the control width.
+    """
+    if not control_wires:
+        raise EmitError(
+            "HUGR transformed control_value requires physical control wires."
+        )
+    from tket_exts import quantum
+
+    pattern = control_pattern_for_value(control_value, len(control_wires))
+    positions = [index for index, required in enumerate(pattern) if required == 0]
+    if reverse:
+        positions.reverse()
+    updated = list(control_wires)
+    for position in positions:
+        [updated[position]] = builder.add_op(quantum.X, updated[position])
+    return updated
 
 
 def _lower_transformed_operations(
@@ -3193,6 +3310,15 @@ def _lower_transformed_operations(
                 )
             continue
         if isinstance(operation, PauliEvolveOp):
+            if not control_wires:
+                _lower_pauli_evolution(
+                    operation,
+                    builder,
+                    environment,
+                    {},
+                    inverse=inverse,
+                )
+                continue
             if len(control_wires) != 1:
                 raise EmitError(
                     "HUGR transformed Pauli evolution supports exactly one control"
@@ -3835,7 +3961,11 @@ def _lower_compop(
     builder: Any,
     environment: dict[str, Any],
 ) -> None:
-    """Lower Float and UInt comparisons to matching HUGR extensions.
+    """Lower Boolean and numeric comparisons to HUGR extensions.
+
+    Mixed operands stay abstract in Qamomile IR. This target converts a Bit to
+    the UInt width only for mixed equality, or a UInt to Float only for mixed
+    numeric comparisons, immediately before selecting the target operation.
 
     Args:
         operation (CompOp): Qamomile comparison operation.
@@ -3847,47 +3977,103 @@ def _lower_compop(
     """
     if operation.kind is None:
         raise EmitError("HUGR comparison has no comparison kind")
-    if all(isinstance(value.type, FloatType) for value in operation.operands):
-        from hugr.std.float import FLOAT_OPS_EXTENSION
 
-        names = {
-            CompOpKind.EQ: "feq",
-            CompOpKind.NEQ: "fne",
-            CompOpKind.LT: "flt",
-            CompOpKind.LE: "fle",
-            CompOpKind.GT: "fgt",
-            CompOpKind.GE: "fge",
-        }
-        extension = FLOAT_OPS_EXTENSION
-        arguments: list[Any] = []
-        concrete_signature = None
+    operands = [
+        _resolve_classical_argument(value, builder, environment)
+        for value in operation.operands
+    ]
+
+    if all(isinstance(value.type, BitType) for value in operation.operands):
+        import tket_exts
+
+        name = _BIT_COMPARISON_NAMES.get(operation.kind)
+        if name is None:
+            raise EmitError("HUGR Bit comparisons support only equality and inequality")
+        extension = tket_exts.bool()
+        [left] = builder.add_op(
+            extension.get_op("make_opaque").instantiate(),
+            operands[0],
+        )
+        [right] = builder.add_op(
+            extension.get_op("make_opaque").instantiate(),
+            operands[1],
+        )
+        [opaque_result] = builder.add_op(
+            extension.get_op(name).instantiate(),
+            left,
+            right,
+        )
+        [wire] = builder.add_op(
+            extension.get_op("read").instantiate(),
+            opaque_result,
+        )
     elif all(isinstance(value.type, UIntType) for value in operation.operands):
         from hugr import tys
         from hugr.std.int import INT_OPS_EXTENSION, INT_T
 
-        names = {
-            CompOpKind.EQ: "ieq",
-            CompOpKind.NEQ: "ine",
-            CompOpKind.LT: "ilt_u",
-            CompOpKind.LE: "ile_u",
-            CompOpKind.GT: "igt_u",
-            CompOpKind.GE: "ige_u",
-        }
-        extension = INT_OPS_EXTENSION
-        arguments = [tys.BoundedNatArg(5)]
-        concrete_signature = tys.FunctionType([INT_T, INT_T], [tys.Bool])
+        name = _UINT_COMPARISON_NAMES.get(operation.kind)
+        if name is None:
+            raise EmitError(f"Unsupported HUGR UInt comparison: {operation.kind}")
+        comparison = INT_OPS_EXTENSION.get_op(name).instantiate(
+            list(INT_T.args),
+            concrete_signature=tys.FunctionType([INT_T, INT_T], [tys.Bool]),
+        )
+        [wire] = builder.add_op(comparison, *operands)
+    elif all(
+        isinstance(value.type, (BitType, UIntType)) for value in operation.operands
+    ):
+        from hugr import tys
+        from hugr.std.int import (
+            CONVERSIONS_EXTENSION,
+            INT_OPS_EXTENSION,
+            INT_T,
+            int_t,
+        )
+
+        name = _UINT_COMPARISON_NAMES.get(operation.kind)
+        if name not in {"ieq", "ine"}:
+            raise EmitError(
+                "HUGR Bit and UInt comparisons support only equality and inequality"
+            )
+        bit_int_type = int_t(0)
+        converted = []
+        for value, operand in zip(operation.operands, operands, strict=True):
+            if isinstance(value.type, BitType):
+                from_bool = CONVERSIONS_EXTENSION.get_op("ifrombool").instantiate()
+                [operand] = builder.add_op(from_bool, operand)
+                widen = INT_OPS_EXTENSION.get_op("iwiden_u").instantiate(
+                    [*bit_int_type.args, *INT_T.args],
+                    concrete_signature=tys.FunctionType([bit_int_type], [INT_T]),
+                )
+                [operand] = builder.add_op(widen, operand)
+            converted.append(operand)
+        comparison = INT_OPS_EXTENSION.get_op(name).instantiate(
+            list(INT_T.args),
+            concrete_signature=tys.FunctionType([INT_T, INT_T], [tys.Bool]),
+        )
+        [wire] = builder.add_op(comparison, *converted)
+    elif all(
+        isinstance(value.type, (UIntType, FloatType)) for value in operation.operands
+    ):
+        from hugr import tys
+        from hugr.std.float import FLOAT_OPS_EXTENSION, FLOAT_T
+        from hugr.std.int import CONVERSIONS_EXTENSION, INT_T
+
+        converted = []
+        for value, operand in zip(operation.operands, operands, strict=True):
+            if isinstance(value.type, UIntType):
+                conversion = CONVERSIONS_EXTENSION.get_op("convert_u").instantiate(
+                    list(INT_T.args),
+                    concrete_signature=tys.FunctionType([INT_T], [FLOAT_T]),
+                )
+                [operand] = builder.add_op(conversion, operand)
+            converted.append(operand)
+        name = _FLOAT_COMPARISON_NAMES.get(operation.kind)
+        if name is None:
+            raise EmitError(f"Unsupported HUGR numeric comparison: {operation.kind}")
+        comparison = FLOAT_OPS_EXTENSION.get_op(name).instantiate()
+        [wire] = builder.add_op(comparison, *converted)
     else:
-        raise EmitError("HUGR comparison operands must share Float or UInt type")
-    name = names.get(operation.kind)
-    if name is None:
-        raise EmitError(f"Unsupported HUGR comparison: {operation.kind}")
-    op = extension.get_op(name).instantiate(
-        arguments,
-        concrete_signature=concrete_signature,
-    )
-    [wire] = builder.add_op(
-        op,
-        _resolve_classical_argument(operation.operands[0], builder, environment),
-        _resolve_classical_argument(operation.operands[1], builder, environment),
-    )
+        raise EmitError("HUGR comparison operands must both be Bit or numeric handles")
+
     environment[operation.results[0].uuid] = wire

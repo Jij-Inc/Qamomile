@@ -60,7 +60,7 @@ class VUnfoldedKind(enum.Enum):
 
 @dataclass
 class VGate:
-    """Pre-resolved gate, annotation, measurement, block-box, or expval node.
+    """Represent a pre-resolved gate, annotation, measurement, or block node.
 
     Carries all information needed for layout and rendering:
     - label: TeX-formatted display text (e.g. "$R_x(0.5)$")
@@ -91,6 +91,10 @@ class VGate:
             None. Defaults to None.
         control_count (int): Number of leading control wires for a controlled
             block. Defaults to 0.
+        control_pattern (tuple[int, ...]): Required basis bit for each leading
+            control wire, aligned with ``qubit_indices``. Zero denotes an open
+            control and one denotes a filled control. Defaults to an empty
+            tuple for non-controlled nodes.
         power (int): Exponent displayed for a controlled block. Defaults to 1.
         terminates_wire (bool): Whether a measurement ends its measured wire.
             Defaults to True.
@@ -105,6 +109,7 @@ class VGate:
     has_param: bool = False
     box_width: float | None = None
     control_count: int = 0  # For CONTROLLED_U_BOX: first N indices are controls
+    control_pattern: tuple[int, ...] = ()
     # For CONTROLLED_U_BOX: ``power`` value of the wrapped unitary.
     # When > 1, the renderer draws an outer ``pow=N`` wrapper box
     # around the inner controlled-U rectangle (matching the
@@ -120,10 +125,27 @@ class VGate:
 
 @dataclass
 class VInlineBlock:
-    """Inlined callable/control body with visible border.
+    """Represent an inlined callable or controlled body with a visible border.
 
     Carries pre-resolved children, affected qubits, and pre-computed widths
     so that Layout and Renderer need no Analyzer access.
+
+    Args:
+        node_key (tuple): Stable identifier used for layout coordinates.
+        label (str): Display label for the inlined body.
+        children (list[VisualNode]): Pre-resolved child visual nodes.
+        affected_qubits (list[int]): Every wire occupied by the body.
+        control_qubit_indices (list[int]): Leading coherent-control wires in
+            flattened operand order.
+        control_pattern (tuple[int, ...]): Required bit for each control wire;
+            zero denotes an open control and one a filled control.
+        power (int): Integral application count for controlled bodies.
+        depth (int): Visualization nesting depth.
+        border_padding (float): Padding around the inlined body border.
+        max_gate_width (float): Maximum child gate width.
+        label_width (float): Width required by the body label.
+        content_width (float): Width required by child nodes.
+        final_width (float): Final reserved width including wrappers.
     """
 
     node_key: tuple
@@ -131,6 +153,7 @@ class VInlineBlock:
     children: list[VisualNode]
     affected_qubits: list[int]
     control_qubit_indices: list[int]
+    control_pattern: tuple[int, ...]
     power: int
     depth: int
     border_padding: float

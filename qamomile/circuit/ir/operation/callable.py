@@ -19,6 +19,7 @@ from qamomile.circuit.ir.value import (
     remap_value_metadata_references,
 )
 
+from .control_value import normalize_control_value
 from .operation import Operation, OperationKind, ParamHint, Signature
 
 
@@ -669,7 +670,9 @@ class InvokeOperation(Operation):
         target (CallableRef): Callable identity.
         transform (CallTransform): Direct, inverse, or controlled invocation.
         attrs (dict[str, Any]): Compile-time attributes for strategy, arity,
-            and resource/lowering decisions. Values must be serializer-friendly.
+            and resource/lowering decisions. ``control_value`` is reserved for
+            a controlled invocation's LSB-first activation value. Values must
+            be serializer-friendly.
         definition (CallableDef | None): Optional callable definition.
     """
 
@@ -705,6 +708,12 @@ class InvokeOperation(Operation):
                 attributes. Defaults to an empty dict.
             definition (CallableDef | None): Callable definition. Defaults to
                 ``None``, in which case one is created from ``target``.
+
+        Raises:
+            TypeError: If a controlled invocation's ``control_value`` is not
+                a Python ``int`` or ``None``.
+            ValueError: If ``control_value`` is used on a non-controlled call
+                or does not fit the controlled invocation's width.
         """
         self.operands = cast(
             list[Value],
@@ -721,6 +730,18 @@ class InvokeOperation(Operation):
         )
         self.transform = transform
         self.attrs = dict(attrs) if attrs is not None else {}
+        raw_control_value = self.attrs.pop("control_value", None)
+        if raw_control_value is not None:
+            if self.transform is not CallTransform.CONTROLLED:
+                raise ValueError(
+                    "control_value is only valid for a controlled invocation."
+                )
+            normalized_control_value = normalize_control_value(
+                raw_control_value,
+                self.num_control_qubits,
+            )
+            if normalized_control_value is not None:
+                self.attrs["control_value"] = normalized_control_value
         self.definition = definition
         self._ensure_definition()
 
@@ -807,6 +828,16 @@ class InvokeOperation(Operation):
             int: Control arity recorded in ``attrs``. Defaults to ``0``.
         """
         return int(self.attrs.get("num_control_qubits", 0))
+
+    @property
+    def control_value(self) -> int | None:
+        """Return the controlled invocation's activation value.
+
+        Returns:
+            int | None: LSB-first activation value, or ``None`` for the
+            ordinary all-ones control state.
+        """
+        return cast(int | None, self.attrs.get("control_value"))
 
     @property
     def num_target_qubits(self) -> int:

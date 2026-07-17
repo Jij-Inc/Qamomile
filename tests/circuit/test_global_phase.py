@@ -23,6 +23,8 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit import qkernel
+from qamomile.circuit.ir.types.primitives import FloatType
+from qamomile.circuit.ir.value import ArrayValue, TupleValue
 
 
 # --------------------------------------------------------------------------- #
@@ -40,6 +42,49 @@ def _unitary(qc: Any) -> np.ndarray:
     from qiskit.quantum_info import Operator
 
     return Operator(qc.remove_final_measurements(inplace=False)).data
+
+
+def _assert_runtime_angle_unitary_preserved(
+    original: Any,
+    restored: Any,
+    qiskit_transpiler: Any,
+) -> None:
+    """Assert runtime-angle semantics survive a serialization round-trip.
+
+    Args:
+        original (Any): Source qkernel.
+        restored (Any): Deserialized qkernel.
+        qiskit_transpiler (Any): Qiskit transpiler used to emit both qkernels.
+
+    Raises:
+        AssertionError: If the bound unitaries differ.
+        ValueError: If either circuit does not expose exactly one parameter.
+    """
+    original_circuit = (
+        qiskit_transpiler.transpile(
+            original,
+            parameters=["angle"],
+        )
+        .compiled_quantum[0]
+        .circuit
+    )
+    restored_circuit = (
+        qiskit_transpiler.transpile(
+            restored,
+            parameters=["angle"],
+        )
+        .compiled_quantum[0]
+        .circuit
+    )
+    (original_parameter,) = original_circuit.parameters
+    (restored_parameter,) = restored_circuit.parameters
+
+    np.testing.assert_allclose(
+        _unitary(restored_circuit.assign_parameters({restored_parameter: 0.731})),
+        _unitary(original_circuit.assign_parameters({original_parameter: 0.731})),
+        rtol=0.0,
+        atol=1e-12,
+    )
 
 
 def _counts(result: Any) -> dict[Any, int]:
@@ -291,6 +336,51 @@ def _phase_call_from_loop_index(q: qmc.Qubit, index: qmc.UInt) -> qmc.Qubit:
         qmc.Qubit: Unchanged qubit with phase ``0.2 * index``.
     """
     return qmc.global_phase(_ident, 0.2 * index)(q)
+
+
+def _nested_phase_roundtrip_kernel() -> Any:
+    """Build a controlled qkernel whose callable body owns the phase.
+
+    Returns:
+        Any: qkernel-like object used to test nested-body phase serialization.
+    """
+
+    @qkernel
+    def phased_body(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
+        """Apply the test body with a global phase."""
+        return qmc.global_phase(_x_body, angle)(q)
+
+    @qkernel
+    def circ(angle: qmc.Float) -> qmc.Bit:
+        """Build a controlled call to the phased body."""
+        control = qmc.qubit("control")
+        target = qmc.qubit("target")
+        control, target = qmc.control(phased_body)(control, target, angle)
+        return qmc.measure(control)
+
+    return circ
+
+
+def _call_site_phase_roundtrip_kernel() -> Any:
+    """Build a controlled qkernel whose call site supplies the phase.
+
+    Returns:
+        Any: qkernel-like object used to test call-site phase serialization.
+    """
+
+    @qkernel
+    def circ(angle: qmc.Float) -> qmc.Bit:
+        """Build a directly phase-augmented controlled identity."""
+        control = qmc.qubit("control")
+        target = qmc.qubit("target")
+        control, target = qmc.control(_ident)(
+            control,
+            target,
+            global_phase=angle,
+        )
+        return qmc.measure(control)
+
+    return circ
 
 
 # --------------------------------------------------------------------------- #
@@ -1024,64 +1114,168 @@ class TestGlobalPhaseHandleTypes:
 
 
 # --------------------------------------------------------------------------- #
-# IR plumbing: serialization round-trip and content hashing
+# IR plumbing: qkernel serialization round-trip
 # --------------------------------------------------------------------------- #
 class TestGlobalPhaseSerialize:
-    """The op survives canonicalization, serialization, and content hashing."""
+    """The op survives a qkernel protobuf round-trip.
 
-    def test_serialize_roundtrip_and_content_hash(self, qiskit_transpiler):
-        """JSON round-trip preserves structure and a stable content hash."""
-        from qamomile.circuit.ir.canonical import content_hash
-        from qamomile.circuit.ir.serialize import dump_json, load_json
+    ``param_slots`` are rebuilt from the qkernel interface rather than carried
+    on the wire, so a reloaded body is compared through its encoded static IR
+    instead of ``content_hash``. Canonical content hashing of the op itself is
+    covered by ``tests/transpiler/test_global_phase_pipeline.py``.
+    """
 
-        @qkernel
-        def phased_body(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
-            """Apply the test body with a global phase."""
-            return qmc.global_phase(_x_body, angle)(q)
+    @pytest.mark.parametrize(
+        "kernel_factory",
+        [
+            pytest.param(_nested_phase_roundtrip_kernel, id="nested-body"),
+            pytest.param(_call_site_phase_roundtrip_kernel, id="call-site"),
+        ],
+    )
+    def test_serialize_roundtrip_preserves_runtime_phase(
+        self,
+        qiskit_transpiler,
+        kernel_factory,
+    ):
+        """Both runtime-phase layouts survive a semantic protobuf round-trip."""
+        from qamomile.circuit.serialization import deserialize, serialize
+        from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
 
-        @qkernel
-        def circ(angle: qmc.Float) -> qmc.Bit:
-            """Build the local circuit exercised by this test."""
-            ctrl = qmc.qubit("ctrl")
-            q = qmc.qubit("q")
-            ctrl, q = qmc.control(phased_body)(ctrl, q, angle)
-            return qmc.measure(ctrl)
-
-        block = qiskit_transpiler.inline(
-            qiskit_transpiler.to_block(circ, {}, ["angle"])
-        )
-        restored = load_json(dump_json(block))
-        assert [type(o).__name__ for o in block.operations] == [
-            type(o).__name__ for o in restored.operations
-        ]
-        assert content_hash(block) == content_hash(restored)
-
-    def test_control_call_phase_roundtrip_and_content_hash(self, qiskit_transpiler):
-        """A call-site phase formal and actual survive semantic IR round-trip."""
-        from qamomile.circuit.ir.canonical import content_hash
-        from qamomile.circuit.ir.serialize import dump_json, load_json
-
-        @qkernel
-        def circ(angle: qmc.Float) -> qmc.Bit:
-            """Build a directly phase-augmented controlled identity."""
-            control = qmc.qubit("control")
-            target = qmc.qubit("target")
-            control, target = qmc.control(_ident)(
-                control,
-                target,
-                global_phase=angle,
-            )
-            return qmc.measure(control)
-
-        block = qiskit_transpiler.inline(
-            qiskit_transpiler.to_block(circ, {}, ["angle"])
-        )
-        restored = load_json(dump_json(block))
+        circ = kernel_factory()
+        restored = deserialize(serialize(circ))
+        block = qiskit_transpiler.inline(circ.block)
+        restored_block = qiskit_transpiler.inline(restored.block)
 
         assert [type(operation).__name__ for operation in block.operations] == [
-            type(operation).__name__ for operation in restored.operations
+            type(operation).__name__ for operation in restored_block.operations
         ]
-        assert content_hash(block) == content_hash(restored)
+        assert (
+            kernel_to_dict(restored)["artifact"]["body"]
+            == kernel_to_dict(circ)["artifact"]["body"]
+        )
+        _assert_runtime_angle_unitary_preserved(circ, restored, qiskit_transpiler)
+
+    def test_roundtrip_preserves_zero_result_phase_operand(self, qiskit_transpiler):
+        """A constant phase keeps its angle and zero-result layout on reload."""
+        from qamomile.circuit.ir.operation import GlobalPhaseOperation
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        @qkernel
+        def circ() -> qmc.Bit:
+            """Apply a constant global phase to an otherwise plain body."""
+            q = qmc.qubit("q")
+            q = qmc.global_phase(_x_body, 0.1)(q)
+            return qmc.measure(q)
+
+        restored = qiskit_transpiler.inline(deserialize(serialize(circ)).block)
+
+        phase_ops = [
+            op for op in restored.operations if isinstance(op, GlobalPhaseOperation)
+        ]
+        assert len(phase_ops) == 1
+        assert phase_ops[0].results == []
+        assert phase_ops[0].phase.get_const() == pytest.approx(
+            0.1,
+            rel=0.0,
+            abs=0.0,
+        )
+
+    @pytest.mark.parametrize(
+        "invalid_phase",
+        [
+            pytest.param(
+                ArrayValue(type=FloatType(), name="phase_array"),
+                id="array",
+            ),
+            pytest.param(TupleValue(name="phase_tuple"), id="tuple"),
+        ],
+    )
+    def test_serialize_rejects_non_scalar_phase_operand(self, invalid_phase):
+        """The serialization boundary rejects every non-scalar phase value."""
+        from qamomile.circuit.ir.operation import GlobalPhaseOperation
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        @qkernel
+        def circ(angle: qmc.Float) -> qmc.Bit:
+            """Apply a runtime phase to a one-qubit identity body."""
+            q = qmc.qubit("q")
+            q = qmc.global_phase(_ident, angle)(q)
+            return qmc.measure(q)
+
+        restored = deserialize(serialize(circ))
+        phase = next(
+            operation
+            for operation in restored.block.operations
+            if isinstance(operation, GlobalPhaseOperation)
+        )
+        phase.operands[0] = invalid_phase
+
+        with pytest.raises(
+            ValueError,
+            match=r"GlobalPhaseOperation.*phase operand requires a scalar FloatType",
+        ):
+            serialize(restored)
+
+    def test_serialize_rejects_array_rotation_angle(self):
+        """A rotation gate cannot reference an array-valued angle."""
+        from qamomile.circuit.ir.operation import GateOperation, GateOperationType
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        @qkernel
+        def circ(angle: qmc.Float) -> qmc.Bit:
+            """Apply an RX gate with a runtime angle."""
+            q = qmc.qubit("q")
+            q = qmc.rx(q, angle)
+            return qmc.measure(q)
+
+        restored = deserialize(serialize(circ))
+        rotation = next(
+            operation
+            for operation in restored.block.operations
+            if isinstance(operation, GateOperation)
+            and operation.gate_type is GateOperationType.RX
+        )
+        rotation.operands[-1] = ArrayValue(
+            type=FloatType(),
+            name="angle_array",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"GateOperation.*angle operand requires a scalar FloatType",
+        ):
+            serialize(restored)
+
+    def test_serialize_rejects_array_pauli_evolve_angle(self):
+        """Pauli evolution cannot reference an array-valued angle."""
+        from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        @qkernel
+        def circ(
+            q: qmc.Vector[qmc.Qubit],
+            observable: qmc.Observable,
+            angle: qmc.Float,
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Apply Pauli evolution with scalar observable and angle inputs."""
+            return qmc.pauli_evolve(q, observable, angle)
+
+        restored = deserialize(serialize(circ))
+        evolution = next(
+            operation
+            for operation in restored.block.operations
+            if isinstance(operation, PauliEvolveOp)
+        )
+        evolution.operands[2] = ArrayValue(
+            type=FloatType(),
+            name="angle_array",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"PauliEvolveOp.*angle operand requires a scalar FloatType",
+        ):
+            serialize(restored)
 
 
 # --------------------------------------------------------------------------- #
@@ -1851,6 +2045,255 @@ class TestGlobalPhaseControlledCompositions:
         assert np.isclose(val, np.cos(theta), rtol=0.0, atol=atol), (
             f"{sdk_transpiler.backend_name} θ={theta}: <Z>={val} vs {np.cos(theta)}"
         )
+
+    @pytest.mark.parametrize("power", [1, 3])
+    @pytest.mark.parametrize("target_width", [1, 2, 3])
+    def test_controlled_scalar_phase_broadcast_matches_tensor_power(
+        self,
+        sdk_transpiler,
+        target_width,
+        power,
+    ):
+        """A scalar phase broadcast matches ``(exp(iφ) I) ** tensor N``."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def phased_ident(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply a half-pi phase to an identity body."""
+            return qmc.global_phase(_ident, np.pi / 2.0)(q)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Expose the element-wise broadcast phase on its control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_ident)(
+                control,
+                targets,
+                power=power,
+            )
+            return qmc.expval(control, obs)
+
+        transpiler = sdk_transpiler.transpiler
+        value = (
+            transpiler.transpile(htest, bindings={"obs": qm_o.Y(0)})
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        # The control state is (|0> + exp(i*N*p*pi/2)|1>)/sqrt(2), so
+        # its Y expectation is sin(N*p*pi/2).
+        expected_y = np.sin(target_width * power * np.pi / 2.0)
+        assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6), (
+            f"{sdk_transpiler.backend_name} width={target_width} "
+            f"power={power}: <Y>={value}"
+        )
+
+    @pytest.mark.parametrize("target_width", [2, 3])
+    def test_control_call_phase_keyword_broadcasts_per_element(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """The call-site phase is part of each broadcast scalar unitary."""
+        import qamomile.observable as qm_o
+
+        theta = 0.37
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Expose a call-site phase broadcast on one control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(_ident)(
+                control,
+                targets,
+                global_phase=theta,
+            )
+            return qmc.expval(control, obs)
+
+        value = (
+            sdk_transpiler.transpiler.transpile(
+                htest,
+                bindings={"obs": qm_o.Y(0)},
+            )
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        expected_y = np.sin(target_width * theta)
+        assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6)
+
+    @pytest.mark.parametrize("target_width", [2, 3])
+    def test_controlled_scalar_phase_broadcast_matches_explicit_loop(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """Scalar broadcast and a Vector body's explicit loop are equivalent."""
+        import qamomile.observable as qm_o
+
+        theta = 0.37
+
+        @qkernel
+        def phased_ident(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply a fixed phase to one target element."""
+            return qmc.global_phase(_ident, theta)(q)
+
+        @qkernel
+        def explicit_loop(
+            targets: qmc.Vector[qmc.Qubit],
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Apply the scalar phased body to every target explicitly."""
+            for i in qmc.range(target_width):
+                targets[i] = phased_ident(targets[i])
+            return targets
+
+        @qkernel
+        def broadcast_test(obs: qmc.Observable) -> qmc.Float:
+            """Expose the scalar-broadcast phase on one control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_ident)(control, targets)
+            return qmc.expval(control, obs)
+
+        @qkernel
+        def loop_test(obs: qmc.Observable) -> qmc.Float:
+            """Expose the explicit-loop phase on one control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(explicit_loop)(control, targets)
+            return qmc.expval(control, obs)
+
+        bindings = {"obs": qm_o.Y(0)}
+        broadcast_value = (
+            sdk_transpiler.transpiler.transpile(broadcast_test, bindings=bindings)
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        loop_value = (
+            sdk_transpiler.transpiler.transpile(loop_test, bindings=bindings)
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        # N explicit scalar phases give relative phase N*theta and <Y>=sin(N*theta).
+        expected_y = np.sin(target_width * theta)
+        assert np.isclose(broadcast_value, expected_y, rtol=0.0, atol=1e-6)
+        assert np.isclose(loop_value, broadcast_value, rtol=0.0, atol=1e-6)
+
+    @pytest.mark.parametrize("target_width", [1, 2, 3])
+    def test_controlled_phased_x_broadcasts_body_and_phase(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """A phased-X broadcast applies its complete unitary per element."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def phased_x(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply a half-pi phase to an X body."""
+            return qmc.global_phase(_x_body, np.pi / 2.0)(q)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Uncompute broadcast X gates and expose the remaining phase."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_x)(control, targets)
+            control, targets = qmc.control(_x_body)(control, targets)
+            return qmc.expval(control, obs)
+
+        value = (
+            sdk_transpiler.transpiler.transpile(
+                htest,
+                bindings={"obs": qm_o.Y(0)},
+            )
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        # Coherent X uncomputation leaves relative phase N*pi/2 on the control.
+        expected_y = np.sin(target_width * np.pi / 2.0)
+        assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6), (
+            f"{sdk_transpiler.backend_name} width={target_width}: <Y>={value}"
+        )
+
+    @pytest.mark.parametrize("target_width", [1, 2, 3])
+    def test_controlled_scalar_broadcast_preserves_unitary_equivalence(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """Equivalent scalar representations remain equal after broadcast."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def rx_pi(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply RX(pi), which equals minus i times X."""
+            return qmc.rx(q, np.pi)
+
+        @qkernel
+        def phased_rx_pi(q: qmc.Qubit) -> qmc.Qubit:
+            """Represent X exactly as exp(i*pi/2) times RX(pi)."""
+            return qmc.global_phase(rx_pi, np.pi / 2.0)(q)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Compose two equivalent controlled broadcasts to identity."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(_x_body)(control, targets)
+            control, targets = qmc.control(phased_rx_pi)(control, targets)
+            return qmc.expval(control, obs)
+
+        value = (
+            sdk_transpiler.transpiler.transpile(
+                htest,
+                bindings={"obs": qm_o.X(0)},
+            )
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        assert np.isclose(value, 1.0, rtol=0.0, atol=1e-6)
+
+    @pytest.mark.parametrize("target_width", [2, 3])
+    def test_controlled_vector_body_phase_applies_once(
+        self,
+        sdk_transpiler,
+        target_width,
+    ):
+        """A phase attached to a Vector body belongs to the whole register."""
+        import qamomile.observable as qm_o
+
+        @qkernel
+        def vector_ident(
+            targets: qmc.Vector[qmc.Qubit],
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Return a complete target register unchanged."""
+            return targets
+
+        @qkernel
+        def phased_vector_ident(
+            targets: qmc.Vector[qmc.Qubit],
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Apply one half-pi phase to a complete target register."""
+            return qmc.global_phase(vector_ident, np.pi / 2.0)(targets)
+
+        @qkernel
+        def htest(obs: qmc.Observable) -> qmc.Float:
+            """Expose one Vector-body phase on its control."""
+            control = qmc.h(qmc.qubit("control"))
+            targets = qmc.qubit_array(target_width, "targets")
+            control, targets = qmc.control(phased_vector_ident)(control, targets)
+            return qmc.expval(control, obs)
+
+        value = (
+            sdk_transpiler.transpiler.transpile(
+                htest,
+                bindings={"obs": qm_o.Y(0)},
+            )
+            .run(_executor(sdk_transpiler))
+            .result()
+        )
+        assert np.isclose(value, 1.0, rtol=0.0, atol=1e-6)
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_controlled_gate_bearing_body_is_applied(self, sdk_transpiler, seed):

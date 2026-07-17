@@ -620,6 +620,93 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return False
 
     @staticmethod
+    def _has_return_in_region(body_nodes: list[ast.stmt]) -> bool:
+        """Check whether a control-flow region contains a return statement.
+
+        Nested function, lambda, and class bodies introduce independent Python
+        scopes, so returns inside them do not exit the enclosing qkernel region
+        and are deliberately ignored.
+
+        Args:
+            body_nodes (list[ast.stmt]): Statements in the control-flow region.
+
+        Returns:
+            bool: ``True`` when the region contains a return that would exit
+                the enclosing qkernel.
+        """
+
+        def contains_return(node: ast.AST) -> bool:
+            """Recursively inspect one AST node without crossing scopes.
+
+            Args:
+                node (ast.AST): Node to inspect.
+
+            Returns:
+                bool: ``True`` when ``node`` contains an in-scope return.
+            """
+            if isinstance(node, ast.Return):
+                return True
+            if isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+            ):
+                return False
+            return any(contains_return(child) for child in ast.iter_child_nodes(node))
+
+        return any(contains_return(stmt) for stmt in body_nodes)
+
+    @staticmethod
+    def _reject_loop_control(body_nodes: list[ast.stmt], loop_kind: str) -> None:
+        """Reject Python break/continue before loop AST rewriting.
+
+        Args:
+            body_nodes (list[ast.stmt]): Original loop body statements.
+            loop_kind (str): User-facing loop kind for the diagnostic.
+
+        Raises:
+            SyntaxError: If the body contains ``break`` or ``continue``.
+        """
+        for statement in body_nodes:
+            for nested in ast.walk(statement):
+                if isinstance(nested, ast.Break):
+                    raise SyntaxError(
+                        f"'break' inside a {loop_kind} loop is not supported "
+                        "in @qkernel; express termination in the loop bound "
+                        "or while condition instead"
+                    )
+                if isinstance(nested, ast.Continue):
+                    raise SyntaxError(
+                        f"'continue' inside a {loop_kind} loop is not supported "
+                        "in @qkernel; guard the remaining body with an if instead"
+                    )
+
+    @staticmethod
+    def _reject_named_expression_in_condition(
+        condition: ast.expr,
+        *,
+        construct: str,
+    ) -> None:
+        """Reject assignment expressions whose scope changes after lowering.
+
+        Conditions are moved into generated helper functions or lambdas.
+        A walrus target would therefore bind inside the helper instead of the
+        surrounding qkernel, diverging from Python semantics.
+
+        Args:
+            condition (ast.expr): Condition expression to inspect.
+            construct (str): User-visible control-flow construct name.
+
+        Raises:
+            SyntaxError: If the condition contains a named expression.
+        """
+        if any(isinstance(node, ast.NamedExpr) for node in ast.walk(condition)):
+            raise SyntaxError(
+                f"Assignment expressions (':=') in {construct} conditions are "
+                "not supported in @qkernel. Assign the value on a separate "
+                "line before the condition."
+            )
+
+    @staticmethod
     def _transform_returns_to_assignments(
         body_nodes: list[ast.stmt], ret_var_name: str
     ) -> list[ast.stmt]:
@@ -995,6 +1082,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         """
         if node.orelse:
             raise SyntaxError("while ... else is not supported in @qkernel")
+        if self._has_return_in_region(node.body):
+            raise SyntaxError(
+                "'return' inside a while loop is not supported in @qkernel"
+            )
+        self._reject_loop_control(node.body, "while")
+        self._reject_named_expression_in_condition(
+            node.test,
+            construct="while",
+        )
         # Check for quantum operations in while condition
         self._check_no_quantum_ops_in_condition(node.test, node.lineno)
         self._reject_loop_local_escapes(node.body, set(), node.lineno, "while")
@@ -1330,6 +1426,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
         """
         if node.orelse:
             raise SyntaxError("for ... else is not supported in @qkernel")
+        if self._has_return_in_region(node.body):
+            raise SyntaxError("'return' inside a for loop is not supported in @qkernel")
+        self._reject_loop_control(node.body, "for")
 
         # Validate target per loop-kind BEFORE extracting binding names.
         # This raises SyntaxError for invalid placeholder-loop targets
@@ -1610,6 +1709,10 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )
 
     def visit_If(self, node: ast.If) -> Any:
+        self._reject_named_expression_in_condition(
+            node.test,
+            construct="if",
+        )
         # Collect variables from the pre-transform AST (post generic_visit would include generated names)
         collector_test = VariableCollector(global_names=self._global_names)
         collector_test.visit(node.test)
@@ -2013,23 +2116,22 @@ def transform_control_flow(func: Callable):
 
     # Inherit the original function's globals
     name_space = func.__globals__.copy()
-    name_space.update(
-        {
-            "while_loop": while_loop,
-            "for_loop": for_loop,
-            "should_trace_for_loop": should_trace_for_loop,
-            "should_trace_items_loop": should_trace_items_loop,
-            "for_items": for_items,
-            "emit_if": emit_if,
-            "branch_rebind_pre_bindings": branch_rebind_pre_bindings,
-            "dead_rebind_binding": dead_rebind_binding,
-            "loop_rebind_snapshot": loop_rebind_snapshot,
-            "loop_region_enter": loop_region_enter,
-            "loop_region_result": loop_region_result,
-            "record_loop_rebinds": record_loop_rebinds,
-            "Any": Any,  # For type annotations in generated code
-        }
-    )
+    generated_globals = {
+        "while_loop": while_loop,
+        "for_loop": for_loop,
+        "should_trace_for_loop": should_trace_for_loop,
+        "should_trace_items_loop": should_trace_items_loop,
+        "for_items": for_items,
+        "emit_if": emit_if,
+        "branch_rebind_pre_bindings": branch_rebind_pre_bindings,
+        "dead_rebind_binding": dead_rebind_binding,
+        "loop_rebind_snapshot": loop_rebind_snapshot,
+        "loop_region_enter": loop_region_enter,
+        "loop_region_result": loop_region_result,
+        "record_loop_rebinds": record_loop_rebinds,
+        "Any": Any,  # For type annotations in generated code
+    }
+    name_space.update(generated_globals)
 
     # Add closure variables (e.g. names imported inside the function).
     # Empty cells indicate forward references not yet bound at definition time.
@@ -2049,7 +2151,9 @@ def transform_control_flow(func: Callable):
     code_obj = compile(tree, filename=source_filename, mode="exec")
     exec(code_obj, name_space)
 
-    return name_space[func.__name__]
+    transformed = name_space[func.__name__]
+    transformed.__qamomile_generated_globals__ = generated_globals
+    return transformed
 
 
 # ---------------------------------------------------------------------------

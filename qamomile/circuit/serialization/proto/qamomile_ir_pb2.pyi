@@ -89,6 +89,9 @@ class OperationType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SYMBOLIC_CONTROLLED_OPERATION: _ClassVar[OperationType]
     INVOKE_OPERATION: _ClassVar[OperationType]
     INVERSE_BLOCK_OPERATION: _ClassVar[OperationType]
+    GLOBAL_PHASE_OPERATION: _ClassVar[OperationType]
+    SELECT_OPERATION: _ClassVar[OperationType]
+    RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: _ClassVar[OperationType]
 PARAMETER_KIND_UNSPECIFIED: ParameterKind
 POSITIONAL_ONLY: ParameterKind
 POSITIONAL_OR_KEYWORD: ParameterKind
@@ -158,6 +161,9 @@ CONCRETE_CONTROLLED_OPERATION: OperationType
 SYMBOLIC_CONTROLLED_OPERATION: OperationType
 INVOKE_OPERATION: OperationType
 INVERSE_BLOCK_OPERATION: OperationType
+GLOBAL_PHASE_OPERATION: OperationType
+SELECT_OPERATION: OperationType
+RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: OperationType
 
 class QKernel(_message.Message):
     __slots__ = ("qamomile_version", "name", "parameters", "results", "body", "value_table", "callable_table", "callable_definition", "return_annotation")
@@ -388,7 +394,7 @@ class RegisterWidth(_message.Message):
     def __init__(self, concrete: _Optional[int] = ..., value_ref: _Optional[str] = ...) -> None: ...
 
 class Operation(_message.Message):
-    __slots__ = ("operation_type", "operand_refs", "result_refs", "gate_type", "axis", "num_bits", "int_bits", "key_arity", "source_type", "target_type", "qubit_mapping", "expression_kind", "loop_var", "loop_var_value_ref", "key_vars", "value_var", "key_is_vector", "key_var_value_refs", "has_key_var_value_refs", "value_var_value_ref", "max_iterations", "loop_carried_rebinds", "region_args", "body", "true_body", "false_body", "true_yield_refs", "false_yield_refs", "branch_rebinds", "num_controls", "num_controls_ref", "power", "control_index_refs", "has_control_index_refs", "num_control_args", "unitary_block", "callable_ref", "callable_attrs", "target", "transform", "attrs", "definition_ref", "num_control_qubits", "num_target_qubits", "custom_name", "source_block", "implementation_block")
+    __slots__ = ("operation_type", "operand_refs", "result_refs", "gate_type", "axis", "num_bits", "int_bits", "key_arity", "source_type", "target_type", "qubit_mapping", "expression_kind", "loop_var", "loop_var_value_ref", "key_vars", "value_var", "key_is_vector", "key_var_value_refs", "has_key_var_value_refs", "value_var_value_ref", "max_iterations", "loop_carried_rebinds", "region_args", "body", "true_body", "false_body", "true_yield_refs", "false_yield_refs", "branch_rebinds", "num_controls", "num_controls_ref", "power", "control_index_refs", "has_control_index_refs", "num_control_args", "unitary_block", "callable_ref", "callable_attrs", "control_value", "target", "transform", "attrs", "definition_ref", "num_control_qubits", "num_target_qubits", "custom_name", "source_block", "implementation_block", "num_index_qubits", "case_blocks", "num_index_qubits_ref", "num_index_args")
     OPERATION_TYPE_FIELD_NUMBER: _ClassVar[int]
     OPERAND_REFS_FIELD_NUMBER: _ClassVar[int]
     RESULT_REFS_FIELD_NUMBER: _ClassVar[int]
@@ -427,6 +433,7 @@ class Operation(_message.Message):
     UNITARY_BLOCK_FIELD_NUMBER: _ClassVar[int]
     CALLABLE_REF_FIELD_NUMBER: _ClassVar[int]
     CALLABLE_ATTRS_FIELD_NUMBER: _ClassVar[int]
+    CONTROL_VALUE_FIELD_NUMBER: _ClassVar[int]
     TARGET_FIELD_NUMBER: _ClassVar[int]
     TRANSFORM_FIELD_NUMBER: _ClassVar[int]
     ATTRS_FIELD_NUMBER: _ClassVar[int]
@@ -436,6 +443,10 @@ class Operation(_message.Message):
     CUSTOM_NAME_FIELD_NUMBER: _ClassVar[int]
     SOURCE_BLOCK_FIELD_NUMBER: _ClassVar[int]
     IMPLEMENTATION_BLOCK_FIELD_NUMBER: _ClassVar[int]
+    NUM_INDEX_QUBITS_FIELD_NUMBER: _ClassVar[int]
+    CASE_BLOCKS_FIELD_NUMBER: _ClassVar[int]
+    NUM_INDEX_QUBITS_REF_FIELD_NUMBER: _ClassVar[int]
+    NUM_INDEX_ARGS_FIELD_NUMBER: _ClassVar[int]
     operation_type: OperationType
     operand_refs: _containers.RepeatedScalarFieldContainer[str]
     result_refs: _containers.RepeatedScalarFieldContainer[str]
@@ -474,6 +485,7 @@ class Operation(_message.Message):
     unitary_block: Block
     callable_ref: CallableRef
     callable_attrs: Payload
+    control_value: BigInteger
     target: CallableRef
     transform: str
     attrs: Payload
@@ -483,7 +495,11 @@ class Operation(_message.Message):
     custom_name: str
     source_block: Block
     implementation_block: Block
-    def __init__(self, operation_type: _Optional[_Union[OperationType, str]] = ..., operand_refs: _Optional[_Iterable[str]] = ..., result_refs: _Optional[_Iterable[str]] = ..., gate_type: _Optional[str] = ..., axis: _Optional[str] = ..., num_bits: _Optional[int] = ..., int_bits: _Optional[int] = ..., key_arity: _Optional[int] = ..., source_type: _Optional[_Union[ValueType, _Mapping]] = ..., target_type: _Optional[_Union[ValueType, _Mapping]] = ..., qubit_mapping: _Optional[_Iterable[str]] = ..., expression_kind: _Optional[str] = ..., loop_var: _Optional[str] = ..., loop_var_value_ref: _Optional[str] = ..., key_vars: _Optional[_Iterable[str]] = ..., value_var: _Optional[str] = ..., key_is_vector: bool = ..., key_var_value_refs: _Optional[_Iterable[str]] = ..., has_key_var_value_refs: bool = ..., value_var_value_ref: _Optional[str] = ..., max_iterations: _Optional[int] = ..., loop_carried_rebinds: _Optional[_Iterable[_Union[LoopCarriedRebind, _Mapping]]] = ..., region_args: _Optional[_Iterable[_Union[RegionArg, _Mapping]]] = ..., body: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ..., true_body: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ..., false_body: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ..., true_yield_refs: _Optional[_Iterable[str]] = ..., false_yield_refs: _Optional[_Iterable[str]] = ..., branch_rebinds: _Optional[_Iterable[_Union[BranchRebind, _Mapping]]] = ..., num_controls: _Optional[int] = ..., num_controls_ref: _Optional[str] = ..., power: _Optional[_Union[IntegerOrReference, _Mapping]] = ..., control_index_refs: _Optional[_Iterable[str]] = ..., has_control_index_refs: bool = ..., num_control_args: _Optional[int] = ..., unitary_block: _Optional[_Union[Block, _Mapping]] = ..., callable_ref: _Optional[_Union[CallableRef, _Mapping]] = ..., callable_attrs: _Optional[_Union[Payload, _Mapping]] = ..., target: _Optional[_Union[CallableRef, _Mapping]] = ..., transform: _Optional[str] = ..., attrs: _Optional[_Union[Payload, _Mapping]] = ..., definition_ref: _Optional[str] = ..., num_control_qubits: _Optional[int] = ..., num_target_qubits: _Optional[int] = ..., custom_name: _Optional[str] = ..., source_block: _Optional[_Union[Block, _Mapping]] = ..., implementation_block: _Optional[_Union[Block, _Mapping]] = ...) -> None: ...
+    num_index_qubits: int
+    case_blocks: _containers.RepeatedCompositeFieldContainer[Block]
+    num_index_qubits_ref: str
+    num_index_args: int
+    def __init__(self, operation_type: _Optional[_Union[OperationType, str]] = ..., operand_refs: _Optional[_Iterable[str]] = ..., result_refs: _Optional[_Iterable[str]] = ..., gate_type: _Optional[str] = ..., axis: _Optional[str] = ..., num_bits: _Optional[int] = ..., int_bits: _Optional[int] = ..., key_arity: _Optional[int] = ..., source_type: _Optional[_Union[ValueType, _Mapping]] = ..., target_type: _Optional[_Union[ValueType, _Mapping]] = ..., qubit_mapping: _Optional[_Iterable[str]] = ..., expression_kind: _Optional[str] = ..., loop_var: _Optional[str] = ..., loop_var_value_ref: _Optional[str] = ..., key_vars: _Optional[_Iterable[str]] = ..., value_var: _Optional[str] = ..., key_is_vector: bool = ..., key_var_value_refs: _Optional[_Iterable[str]] = ..., has_key_var_value_refs: bool = ..., value_var_value_ref: _Optional[str] = ..., max_iterations: _Optional[int] = ..., loop_carried_rebinds: _Optional[_Iterable[_Union[LoopCarriedRebind, _Mapping]]] = ..., region_args: _Optional[_Iterable[_Union[RegionArg, _Mapping]]] = ..., body: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ..., true_body: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ..., false_body: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ..., true_yield_refs: _Optional[_Iterable[str]] = ..., false_yield_refs: _Optional[_Iterable[str]] = ..., branch_rebinds: _Optional[_Iterable[_Union[BranchRebind, _Mapping]]] = ..., num_controls: _Optional[int] = ..., num_controls_ref: _Optional[str] = ..., power: _Optional[_Union[IntegerOrReference, _Mapping]] = ..., control_index_refs: _Optional[_Iterable[str]] = ..., has_control_index_refs: bool = ..., num_control_args: _Optional[int] = ..., unitary_block: _Optional[_Union[Block, _Mapping]] = ..., callable_ref: _Optional[_Union[CallableRef, _Mapping]] = ..., callable_attrs: _Optional[_Union[Payload, _Mapping]] = ..., control_value: _Optional[_Union[BigInteger, _Mapping]] = ..., target: _Optional[_Union[CallableRef, _Mapping]] = ..., transform: _Optional[str] = ..., attrs: _Optional[_Union[Payload, _Mapping]] = ..., definition_ref: _Optional[str] = ..., num_control_qubits: _Optional[int] = ..., num_target_qubits: _Optional[int] = ..., custom_name: _Optional[str] = ..., source_block: _Optional[_Union[Block, _Mapping]] = ..., implementation_block: _Optional[_Union[Block, _Mapping]] = ..., num_index_qubits: _Optional[int] = ..., case_blocks: _Optional[_Iterable[_Union[Block, _Mapping]]] = ..., num_index_qubits_ref: _Optional[str] = ..., num_index_args: _Optional[int] = ...) -> None: ...
 
 class IntegerOrReference(_message.Message):
     __slots__ = ("integer", "value_ref")

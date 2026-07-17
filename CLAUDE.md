@@ -82,7 +82,8 @@ never the reverse. Dependency direction is `optimization → circuit ← backend
 there are **no reverse dependencies**.
 
 - `qamomile/optimization/` — domain helpers for quantum optimization (QAOA, QRAO, FQAOA); consumes circuit's public transpiler/algorithm APIs.
-- `qamomile/core/` — mathematical modeling utilities (Pauli operators, Ising/QUBO conversion).
+- `qamomile/observable/` — backend-independent Hamiltonians and Pauli observables.
+- `qamomile/optimization/binary_model/` — Ising/QUBO/HUBO modeling utilities.
 - `qamomile/{qiskit,quri_parts,cudaq,...}/` — backend packages implementing emit passes and executors.
 
 Before editing each modules, you have to read `__init__.py`.

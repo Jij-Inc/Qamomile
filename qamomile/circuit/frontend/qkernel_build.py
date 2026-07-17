@@ -16,6 +16,9 @@ from qamomile.circuit.frontend.handle.primitives import Handle
 from qamomile.circuit.frontend.param_validation import (
     validate_bindings_parameters_disjoint,
 )
+from qamomile.circuit.frontend.qkernel_definition import (
+    refresh_qkernel_function_namespace,
+)
 from qamomile.circuit.frontend.qkernel_inputs import (
     auto_detect_parameters,
     create_bound_input,
@@ -99,6 +102,8 @@ def create_traced_block(
 
     tracer = Tracer()
     tracked_parameters: dict[str, Value] = {}
+
+    refresh_qkernel_function_namespace(kernel)
 
     with trace(tracer):
         dummy_inputs: dict[str, Handle] = {}

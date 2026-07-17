@@ -71,6 +71,7 @@ from qamomile.circuit.ir.operation.operation import (
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase, ValueLike
 from qamomile.circuit.ir.value_mapping import ValueSubstitutor
@@ -787,6 +788,8 @@ class _BlockInverter:
             return self._invert_pauli_evolve(op, value_map)
         if isinstance(op, ControlledUOperation):
             return self._invert_controlled_u(op, value_map)
+        if isinstance(op, SelectOperation):
+            return self._invert_select(op, value_map)
         if isinstance(op, ForOperation):
             return self._invert_for(op, value_map)
         if isinstance(op, (IfOperation, WhileOperation, ForItemsOperation)):
@@ -940,11 +943,12 @@ class _BlockInverter:
         target = op.target
         body = op.body
         opaque_cost = op.definition.opaque_cost if op.definition is not None else None
-        transform = (
-            CallTransform.DIRECT
-            if op.transform is CallTransform.INVERSE
-            else CallTransform.INVERSE
-        )
+        if op.transform is CallTransform.CONTROLLED:
+            transform = CallTransform.CONTROLLED
+        elif op.transform is CallTransform.INVERSE:
+            transform = CallTransform.DIRECT
+        else:
+            transform = CallTransform.INVERSE
 
         gate_type_name = str(attrs.get("gate_type", "CUSTOM"))
         source_block = None
@@ -960,7 +964,11 @@ class _BlockInverter:
                 version=op.target.version,
             )
             body = iqft.block
-            transform = CallTransform.DIRECT
+            transform = (
+                CallTransform.CONTROLLED
+                if op.transform is CallTransform.CONTROLLED
+                else CallTransform.DIRECT
+            )
         elif gate_type_name == CompositeGateType.IQFT.name:
             from qamomile.circuit.stdlib.qft import qft
 
@@ -972,7 +980,11 @@ class _BlockInverter:
                 version=op.target.version,
             )
             body = qft.block
-            transform = CallTransform.DIRECT
+            transform = (
+                CallTransform.CONTROLLED
+                if op.transform is CallTransform.CONTROLLED
+                else CallTransform.DIRECT
+            )
         elif op.body is not None:
             source_block = op.body
             body = self.invert_block(op.body)
@@ -1012,6 +1024,11 @@ class _BlockInverter:
                 custom_name=str(attrs.get("custom_name", op.name)),
                 source_block=source_block,
                 implementation_block=body,
+                callable_ref=op.target,
+                callable_attrs=(
+                    dict(op.definition.attrs) if op.definition is not None else {}
+                ),
+                control_value=op.control_value,
             )
         else:
             policy = op.default_policy if body is not None else CallPolicy.PRESERVE_BOX
@@ -1167,6 +1184,7 @@ class _BlockInverter:
             block=op.source_block,
             callable_ref=op.callable_ref,
             callable_attrs=dict(op.callable_attrs),
+            control_value=op.control_value,
         )
 
         self._update_quantum_value_map(value_map, op.control_qubits, new_controls)
@@ -1412,8 +1430,11 @@ class _BlockInverter:
                 operands=operands,
                 results=new_results,
                 num_controls=op.num_controls,
+                control_value=op.control_value,
                 power=power,
                 block=inverse_block,
+                callable_ref=op.callable_ref,
+                callable_attrs=dict(op.callable_attrs),
             )
         else:
             raise NotImplementedError(f"inverse() cannot invert {type(op).__name__}.")
@@ -1421,6 +1442,52 @@ class _BlockInverter:
         self._update_quantum_value_map(
             value_map,
             op.control_operands + op.target_operands,
+            new_results,
+        )
+        return [inverse_op]
+
+    def _invert_select(
+        self,
+        op: SelectOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert every callable body selected by a multiplexer.
+
+        Args:
+            op (SelectOperation): SELECT operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: One SELECT whose cases are the inverse bodies.
+        """
+        inverse_blocks = [self.invert_block(block) for block in op.case_blocks]
+        current_results = [
+            _as_value(_substitute_value(result, value_map), "Select result")
+            for result in op.results
+        ]
+        new_results = [result.next_version() for result in current_results]
+        mapped_params = [
+            _as_value(_substitute_value(param, value_map), "Select parameter")
+            for param in op.param_operands
+        ]
+        mapped_width = (
+            _as_value(
+                _substitute_value(op.num_index_qubits, value_map),
+                "Select index width",
+            )
+            if isinstance(op.num_index_qubits, Value)
+            else op.num_index_qubits
+        )
+        inverse_op = SelectOperation(
+            operands=[*current_results, *mapped_params],
+            results=new_results,
+            num_index_qubits=mapped_width,
+            case_blocks=inverse_blocks,
+            num_index_args=op.num_index_args,
+        )
+        self._update_quantum_value_map(
+            value_map,
+            op.index_operands + op.target_operands,
             new_results,
         )
         return [inverse_op]

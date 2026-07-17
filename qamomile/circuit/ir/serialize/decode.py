@@ -40,6 +40,7 @@ from qamomile.circuit.ir.operation import (
     ProjectOperation,
     ResetOperation,
     ReturnOperation,
+    SelectOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -56,6 +57,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -82,6 +84,7 @@ from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
 )
+from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -297,6 +300,35 @@ def _decode_block(d: dict[str, Any], ctx: _DecodeContext) -> Block:
 
     operations = [_decode_operation(op_dict, ctx) for op_dict in d["operations"]]
 
+    inferred_slots = [
+        ParamSlot(
+            name=name,
+            type=value.type,
+            kind=ParamKind.RUNTIME_PARAMETER,
+            ndim=len(value.shape) if isinstance(value, ArrayValue) else 0,
+        )
+        for name, value in parameters.items()
+    ]
+    inferred_names = set(parameters)
+    for name, value in zip(d.get("label_args", ()), input_values, strict=True):
+        if (
+            not isinstance(name, str)
+            or name in inferred_names
+            or isinstance(value, TupleValue)
+            or value.type.is_quantum()
+            or not value.is_parameter()
+        ):
+            continue
+        inferred_slots.append(
+            ParamSlot(
+                name=name,
+                type=value.type,
+                kind=ParamKind.RUNTIME_PARAMETER,
+                ndim=len(value.shape) if isinstance(value, ArrayValue) else 0,
+            )
+        )
+        inferred_names.add(name)
+
     return Block(
         name=d.get("name", ""),
         kind=kind,
@@ -306,7 +338,7 @@ def _decode_block(d: dict[str, Any], ctx: _DecodeContext) -> Block:
         output_names=list(d.get("output_names", ())),
         operations=operations,
         parameters=parameters,
-        param_slots=(),
+        param_slots=tuple(inferred_slots),
     )
 
 
@@ -764,12 +796,20 @@ def _decode_payload(value: Any) -> Any:
             raw_items = value["$set"]
             if not isinstance(raw_items, list):
                 raise ValueError("$set payload must contain a list")
-            return set(_decode_payload(item) for item in raw_items)
+            try:
+                return set(_decode_payload(item) for item in raw_items)
+            except TypeError as error:
+                raise ValueError("$set payload contains an unhashable item") from error
         if "$frozenset" in value:
             raw_items = value["$frozenset"]
             if not isinstance(raw_items, list):
                 raise ValueError("$frozenset payload must contain a list")
-            return frozenset(_decode_payload(item) for item in raw_items)
+            try:
+                return frozenset(_decode_payload(item) for item in raw_items)
+            except TypeError as error:
+                raise ValueError(
+                    "$frozenset payload contains an unhashable item"
+                ) from error
         if "$complex_number" in value:
             raw_parts = value["$complex_number"]
             if not isinstance(raw_parts, list) or len(raw_parts) != 2:
@@ -1193,6 +1233,22 @@ def _decode_store_array_element(
     """
     operands, results = _operands_results(d, ctx)
     return StoreArrayElementOperation(operands=operands, results=results)
+
+
+def _decode_return_quantum_array_element(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> ReturnQuantumArrayElementOperation:
+    """Decode :class:`ReturnQuantumArrayElementOperation`.
+
+    Args:
+        d (dict[str, Any]): Serialized operation dictionary.
+        ctx (_DecodeContext): Active decoding context.
+
+    Returns:
+        ReturnQuantumArrayElementOperation: Reconstructed operation.
+    """
+    operands, results = _operands_results(d, ctx)
+    return ReturnQuantumArrayElementOperation(operands=operands, results=results)
 
 
 def _decode_dict_getitem(
@@ -1713,6 +1769,28 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
     return op
 
 
+def _decode_control_value(d: dict[str, Any], operation_name: str) -> int | None:
+    """Decode an optional coherent-control activation value.
+
+    Args:
+        d (dict[str, Any]): Encoded operation payload.
+        operation_name (str): Operation name used in malformed-payload errors.
+
+    Returns:
+        int | None: Decoded activation value, or ``None`` for all-ones control.
+
+    Raises:
+        ValueError: If the encoded value is not a plain Python integer or null.
+    """
+    control_value = d.get("control_value")
+    if control_value is not None and not is_plain_int(control_value):
+        raise ValueError(
+            f"{operation_name}.control_value must be a Python int or null, "
+            f"got {control_value!r}."
+        )
+    return cast(int | None, control_value)
+
+
 def _decode_concrete_controlled(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> ConcreteControlledU:
@@ -1725,6 +1803,10 @@ def _decode_concrete_controlled(
     Returns:
         ConcreteControlledU: The reconstructed op, including its
             nested unitary block.
+
+    Raises:
+        ValueError: If ``control_value`` is present but is not a Python
+            ``int``. Width validation is performed by ``ConcreteControlledU``.
     """
     operands, results = _operands_results(d, ctx)
     block = (
@@ -1733,10 +1815,12 @@ def _decode_concrete_controlled(
         else None
     )
     callable_attrs = _decode_callable_attrs(d.get("callable_attrs"))
+    control_value = _decode_control_value(d, "ConcreteControlledU")
     return ConcreteControlledU(
         operands=operands,
         results=results,
         num_controls=int(d["num_controls"]),
+        control_value=control_value,
         power=_decode_power(d["power"], ctx),
         block=block,
         callable_ref=(
@@ -1745,6 +1829,64 @@ def _decode_concrete_controlled(
             else None
         ),
         callable_attrs=callable_attrs,
+    )
+
+
+def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
+    """Decode a quantum multiplexer and its callable bodies.
+
+    Args:
+        d (dict[str, Any]): Encoded operation payload.
+        ctx (_DecodeContext): Active decode context.
+
+    Returns:
+        SelectOperation: Reconstructed operation.
+
+    Raises:
+        ValueError: If the concrete/reference width union, index-argument
+            count, or case list is malformed.
+    """
+    operands, results = _operands_results(d, ctx)
+    has_concrete_width = "num_index_qubits" in d
+    has_symbolic_width = "num_index_qubits_ref" in d
+    if has_concrete_width == has_symbolic_width:
+        raise ValueError(
+            "SelectOperation requires exactly one of num_index_qubits and "
+            "num_index_qubits_ref."
+        )
+    if has_concrete_width:
+        num_index_qubits = d["num_index_qubits"]
+        if not is_plain_int(num_index_qubits):
+            raise ValueError(
+                "SelectOperation.num_index_qubits must be a Python int, "
+                f"got {num_index_qubits!r}."
+            )
+        num_index_args = d.get("num_index_args", num_index_qubits)
+    else:
+        width_ref = d["num_index_qubits_ref"]
+        if not isinstance(width_ref, str):
+            raise ValueError(
+                "SelectOperation.num_index_qubits_ref must be a string, "
+                f"got {width_ref!r}."
+            )
+        num_index_qubits = _materialize_as_value(ctx, width_ref)
+        if "num_index_args" not in d:
+            raise ValueError("A symbolic SelectOperation requires num_index_args.")
+        num_index_args = d["num_index_args"]
+    if not is_plain_int(num_index_args) or num_index_args < 1:
+        raise ValueError(
+            "SelectOperation.num_index_args must be a positive Python int, "
+            f"got {num_index_args!r}."
+        )
+    raw_case_blocks = d.get("case_blocks")
+    if not isinstance(raw_case_blocks, list):
+        raise ValueError("SelectOperation.case_blocks must be a list.")
+    return SelectOperation(
+        operands=operands,
+        results=results,
+        num_index_qubits=cast("int | Value", num_index_qubits),
+        case_blocks=[_decode_block(block, ctx) for block in raw_case_blocks],
+        num_index_args=cast(int, num_index_args),
     )
 
 
@@ -2075,6 +2217,7 @@ def _decode_inverse_block(
             else None
         ),
         callable_attrs=_decode_callable_attrs(d.get("callable_attrs")),
+        control_value=_decode_control_value(d, "InverseBlockOperation"),
     )
 
 
@@ -2104,6 +2247,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "DecodeQFixedOperation": _decode_decode_qfixed,
     "DictGetItemOperation": _decode_dict_getitem,
     "StoreArrayElementOperation": _decode_store_array_element,
+    "ReturnQuantumArrayElementOperation": _decode_return_quantum_array_element,
     "CastOperation": _decode_cast,
     "QInitOperation": _decode_qinit,
     "CInitOperation": _decode_cinit,
@@ -2123,6 +2267,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "IfOperation": _decode_if,
     "ConcreteControlledU": _decode_concrete_controlled,
     "SymbolicControlledU": _decode_symbolic_controlled,
+    "SelectOperation": _decode_select,
     "InvokeOperation": _decode_invoke_operation,
     "InverseBlockOperation": _decode_inverse_block,
     "GlobalPhaseOperation": _decode_global_phase_operation,

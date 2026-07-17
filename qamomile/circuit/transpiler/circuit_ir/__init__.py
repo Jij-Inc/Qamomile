@@ -65,6 +65,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     MULTI_CONTROLLED_X_SEMANTIC_KEY,
     QFT_SEMANTIC_KEY,
     RIPPLE_CARRY_ADD_SEMANTIC_KEY,
+    SELECT_SEMANTIC_KEY,
     STATE_PREPARATION_SEMANTIC_KEY,
     BarrierInstruction,
     BinaryExpr,
@@ -94,6 +95,7 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     UnaryOperator,
     WhileInstruction,
     WireId,
+    has_mid_circuit_measurement,
 )
 from qamomile.circuit.transpiler.circuit_ir.verify import verify_circuit
 
@@ -138,6 +140,7 @@ __all__ = [
     "IQFT_SEMANTIC_KEY",
     "MULTI_CONTROLLED_X_SEMANTIC_KEY",
     "RIPPLE_CARRY_ADD_SEMANTIC_KEY",
+    "SELECT_SEMANTIC_KEY",
     "STATE_PREPARATION_SEMANTIC_KEY",
     "ResetInstruction",
     "ReusableCircuit",
@@ -152,6 +155,7 @@ __all__ = [
     "WhileInstruction",
     "WireId",
     "legalize_program",
+    "has_mid_circuit_measurement",
     "verify_circuit",
     "verify_target_legal",
     "lower_circuit_plan",

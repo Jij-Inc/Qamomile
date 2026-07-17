@@ -3615,25 +3615,25 @@ class TestRound5Reviewer:
     # ----- R5-B: borrow keys must be namespaced per root array --------------
 
     def test_consume_view_on_one_register_does_not_block_other_register(self):
-        """``measure(a[1::2]); expval(b, Z(1))`` over disjoint registers must succeed."""
+        """Consuming a view on ``a`` must not block access to register ``b``."""
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
-        def kern(obs: qmc.Observable) -> qmc.Float:
+        def kern() -> qmc.Vector[qmc.Bit]:
             a = qmc.qubit_array(4, "a")
             b = qmc.qubit_array(4, "b")
             _ = qmc.measure(a[1::2])
             # b's slot 1 must remain accessible — the consumed-slot
             # markers from a's destructive view must not bleed into b.
-            return qmc.expval(b, obs)
+            b[1] = qmc.x(b[1])
+            return qmc.measure(b)
 
-        H = qm_o.Z(1)
         transpiler = QiskitTranspiler()
         # If borrow keys were not namespaced, this would raise
         # QubitConsumedError or a stage-later EmitError; we
         # only need the kernel to trace and transpile cleanly.
-        exe = transpiler.transpile(kern, bindings={"obs": H})
+        exe = transpiler.transpile(kern)
         assert exe is not None
 
     def test_disjoint_registers_can_each_consume_view_independently(self):
@@ -3687,19 +3687,19 @@ class TestRound5Reviewer:
         from qamomile.qiskit import QiskitTranspiler
 
         @qmc.qkernel
-        def kern(obs: qmc.Observable) -> qmc.Float:
+        def kern() -> qmc.Vector[qmc.Bit]:
             a = qmc.qubit_array(4, "a")
             b = qmc.qubit_array(4, "b")
             for _ in qmc.range(1):
                 _ = qmc.measure(a[1::2])  # destroys a[1], a[3]
-            # b is untouched — must stay valid.
-            return qmc.expval(b, obs)
+            # b is untouched — its identical-numbered slot must stay valid.
+            b[1] = qmc.x(b[1])
+            return qmc.measure(b)
 
-        H = qm_o.Z(1)
         transpiler = QiskitTranspiler()
         # b's expval must succeed despite a's destructive consume sharing
         # the same slot indices {1, 3}.
-        exe = transpiler.transpile(kern, bindings={"obs": H})
+        exe = transpiler.transpile(kern)
         assert exe is not None
 
 

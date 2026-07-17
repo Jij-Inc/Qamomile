@@ -74,6 +74,41 @@ def _hugr_identity(qubit: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _hugr_select() -> tuple[qmc.Bit, qmc.Bit]:
+    """Keep SELECT visible at HUGR's explicit support boundary."""
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    index, target = qmc.select([_hugr_identity, _hugr_helper])(index, target)
+    return qmc.measure(index), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_explicit_overwide_select() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Keep an explicit over-wide SELECT visible at HUGR's boundary."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_hugr_identity, _hugr_helper],
+        num_index_qubits=2,
+    )(index, target)
+    return qmc.measure(index), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_symbolic_width_select(
+    width: qmc.UInt,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Resolve a symbolic SELECT width before HUGR's support boundary."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_hugr_identity, _hugr_helper],
+        num_index_qubits=width,
+    )(index, target)
+    return qmc.measure(index), qmc.measure(target)
+
+
+@qmc.qkernel
 def _hugr_identity_vector(
     qubits: qmc.Vector[qmc.Qubit],
 ) -> qmc.Vector[qmc.Qubit]:
@@ -172,6 +207,21 @@ def _hugr_two_control_call_global_phase(
         target,
         global_phase=theta,
     )
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_control_value_global_phase(
+    theta: qmc.Float,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Apply a phase when two controls hold LSB-first value two."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _hugr_phased_helper,
+        num_controls=2,
+        control_value=2,
+    )(controls, target, theta)
     return qmc.measure(controls), qmc.measure(target)
 
 
@@ -822,6 +872,32 @@ def _hugr_controlled_program() -> tuple[qmc.Bit, qmc.Bit]:
 
 
 @qmc.qkernel
+def _hugr_control_value_program() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Control a qkernel X helper on LSB-first register value two."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _hugr_x_helper,
+        num_controls=2,
+        control_value=2,
+    )(controls, target)
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_composite_control_value_program() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+    """Control a boxed X helper on LSB-first register value two."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _hugr_same_name_x,
+        num_controls=2,
+        control_value=2,
+    )(controls, target)
+    return qmc.measure(controls), qmc.measure(target)
+
+
+@qmc.qkernel
 def _hugr_state_preparation() -> qmc.Vector[qmc.Bit]:
     """Exercise a semantic state-preparation callable in HUGR.
 
@@ -1304,6 +1380,134 @@ def _hugr_controlled_pauli_evolution(
     return qmc.measure(targets)
 
 
+@qmc.qkernel
+def _hugr_bit_comparisons() -> tuple[qmc.Bit, qmc.Bit]:
+    """Compare two measurement-derived bits.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit]: Equality and inequality results.
+    """
+    left = qmc.measure(qmc.qubit("left"))
+    right = qmc.measure(qmc.qubit("right"))
+    return left == right, left != right
+
+
+@qmc.qkernel
+def _hugr_bit_comparison_if() -> qmc.Bit:
+    """Use measurement-derived Bit equality as a conditional predicate.
+
+    Returns:
+        qmc.Bit: Measurement of the conditionally updated target qubit.
+    """
+    left = qmc.measure(qmc.qubit("left"))
+    right = qmc.measure(qmc.qubit("right"))
+    target = qmc.qubit("target")
+    if left == right:
+        target = qmc.x(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_bit_uint_comparisons(
+    integer: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]:
+    """Compare a measured Bit and runtime UInt in both operand orders.
+
+    Args:
+        integer (qmc.UInt): Runtime unsigned-integer comparison operand.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]: Equality and inequality
+            results in Bit-UInt and UInt-Bit order.
+    """
+    bit = qmc.measure(qmc.qubit("bit"))
+    return bit == integer, bit != integer, integer == bit, integer != bit
+
+
+@qmc.qkernel
+def _hugr_uint_comparisons(
+    left: qmc.UInt,
+    right: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]:
+    """Compare two runtime UInt values with every supported relation.
+
+    Args:
+        left (qmc.UInt): Left comparison operand.
+        right (qmc.UInt): Right comparison operand.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit, qmc.Bit]:
+            Equality, inequality, less-than, less-than-or-equal, greater-than,
+            and greater-than-or-equal results.
+    """
+    return (
+        left == right,
+        left != right,
+        left < right,
+        left <= right,
+        left > right,
+        left >= right,
+    )
+
+
+@qmc.qkernel
+def _hugr_mixed_numeric_comparisons(
+    integer: qmc.UInt,
+    real: qmc.Float,
+) -> tuple[
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+    qmc.Bit,
+]:
+    """Compare runtime UInt and Float values in both operand orders.
+
+    Args:
+        integer (qmc.UInt): Unsigned-integer comparison operand.
+        real (qmc.Float): Floating-point comparison operand.
+
+    Returns:
+        tuple[qmc.Bit, ...]: All six comparison results in each operand order.
+    """
+    return (
+        integer == real,
+        integer != real,
+        integer < real,
+        integer <= real,
+        integer > real,
+        integer >= real,
+        real == integer,
+        real != integer,
+        real < integer,
+        real <= integer,
+        real > integer,
+        real >= integer,
+    )
+
+
+@qmc.qkernel
+def _hugr_inverse_pauli_evolution(
+    hamiltonian: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Exercise an uncontrolled inverse Pauli evolution at the HUGR edge."""
+    targets = qmc.h(qmc.qubit_array(2, "targets"))
+    targets = qmc.inverse(_hugr_pauli_helper)(
+        targets,
+        hamiltonian,
+        gamma,
+    )
+    return qmc.measure(targets)
+
+
 def _explicit_inverse_zero_trip_for_kernel() -> SimpleNamespace:
     """Keep an empty ForOperation visible at the HUGR inverse boundary.
 
@@ -1452,6 +1656,100 @@ def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
     assert compiled.metadata.pipeline == "program_graph"
 
 
+@pytest.mark.parametrize(
+    ("kernel", "bindings"),
+    [
+        (_hugr_select, None),
+        (_hugr_explicit_overwide_select, None),
+        (_hugr_symbolic_width_select, {"width": 2}),
+    ],
+)
+def test_hugr_rejects_select_at_prepared_module_boundary(
+    kernel: qmc.QKernel,
+    bindings: dict[str, int] | None,
+) -> None:
+    """SELECT fails explicitly instead of disappearing from direct lowering.
+
+    Args:
+        kernel (qmc.QKernel): SELECT program reaching direct HUGR lowering.
+        bindings (dict[str, int] | None): Compile-time width bindings.
+    """
+    with pytest.raises(EmitError, match=r"does not support qmc\.select") as error:
+        HugrTranspiler().to_hugr(kernel, bindings=bindings)
+
+    assert error.value.operation == "SelectOperation"
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_bit_comparisons() -> None:
+    """Measurement-derived Bit equality uses validator-clean Bool operations."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(_hugr_bit_comparisons)
+
+    transpiler.target.validate(package)
+    operations = "\n".join(str(data.op) for _, data in package.modules[0].nodes())
+    assert "name='eq'" in operations
+    assert "name='xor'" in operations
+
+    conditional_package = transpiler.to_hugr(_hugr_bit_comparison_if)
+    transpiler.target.validate(conditional_package)
+    conditional_operations = [
+        data.op for _, data in conditional_package.modules[0].nodes()
+    ]
+    assert any(
+        type(operation).__name__ == "Conditional"
+        for operation in conditional_operations
+    )
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_bit_uint_comparisons() -> None:
+    """Mixed Bit and UInt equality widens the Boolean before comparison."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_bit_uint_comparisons,
+        parameters=["integer"],
+    )
+
+    transpiler.target.validate(package)
+    operations = "\n".join(str(data.op) for _, data in package.modules[0].nodes())
+    assert operations.count("name='ifrombool'") == 4
+    assert operations.count("name='iwiden_u'") == 4
+    assert operations.count("name='ieq'") == 2
+    assert operations.count("name='ine'") == 2
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_uint_comparisons() -> None:
+    """Runtime UInt relations use unsigned integer comparison operations."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_uint_comparisons,
+        parameters=["left", "right"],
+    )
+
+    transpiler.target.validate(package)
+    operations = "\n".join(str(data.op) for _, data in package.modules[0].nodes())
+    for name in ("ieq", "ine", "ilt_u", "ile_u", "igt_u", "ige_u"):
+        assert f"name='{name}'" in operations
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_mixed_numeric_comparisons() -> None:
+    """The HUGR target converts UInt wires immediately before Float comparison."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_mixed_numeric_comparisons,
+        parameters=["integer", "real"],
+    )
+
+    transpiler.target.validate(package)
+    operations = "\n".join(str(data.op) for _, data in package.modules[0].nodes())
+    assert operations.count("name='convert_u'") == 12
+    for name in ("feq", "fne", "flt", "fle", "fgt", "fge"):
+        assert operations.count(f"name='{name}'") == 2
+
+
 @pytest.mark.hugr
 def test_hugr_preserves_runtime_parameter_as_public_input() -> None:
     """A runtime angle remains a Float input of the public HUGR function."""
@@ -1522,11 +1820,19 @@ def test_hugr_executes_controlled_global_phase_kickback_on_selene(
         _hugr_global_phase_kickback,
         bindings={"theta": theta},
     )
-    runner = selene.build(
-        package,
-        name="qamomile_hugr_global_phase_kickback",
-        build_dir=tmp_path,
-    )
+    try:
+        runner = selene.build(
+            package,
+            name="qamomile_hugr_global_phase_kickback",
+            build_dir=tmp_path,
+        )
+    except RuntimeError as error:
+        if "No extension could emit extension op" in str(error):
+            pytest.skip(
+                "Installed Selene Helios plugin cannot lower the valid "
+                "tket.global_phase HUGR extension"
+            )
+        raise
     measurements = selene.MeasurementExtractor()
 
     results = list(
@@ -2161,6 +2467,22 @@ def test_hugr_lowers_controlled_inverse_pauli_evolution() -> None:
 
 
 @pytest.mark.hugr
+def test_hugr_lowers_uncontrolled_inverse_pauli_evolution() -> None:
+    """Uncontrolled inverse Pauli evolution emits adjoint TKET rotations."""
+    hamiltonian = 0.25 * qm_o.X(0) + 0.5 * qm_o.Y(0) * qm_o.Z(1) + 0.75
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_inverse_pauli_evolution,
+        bindings={"hamiltonian": hamiltonian, "gamma": 0.125},
+    )
+
+    transpiler.target.validate(package)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+    assert sum("name='Rz'" in str(operation) for operation in operations) == 2
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
+
+
+@pytest.mark.hugr
 def test_hugr_preserves_tiny_controlled_identity_phase() -> None:
     """A tiny nonzero identity coefficient remains an observable relative phase."""
     hamiltonian = qm_o.Hamiltonian.identity(1e-16)
@@ -2223,6 +2545,50 @@ def test_hugr_legalizes_controlled_x_calls_to_tket_cx() -> None:
     operations = [data.op for _, data in package.modules[0].nodes()]
 
     assert any("name='CX'" in str(op) for op in operations)
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("kernel", "expected_x_count"),
+    [
+        pytest.param(_hugr_control_value_program, 2, id="structural"),
+        pytest.param(_hugr_composite_control_value_program, 3, id="invoke"),
+    ],
+)
+def test_hugr_lowers_control_value_with_x_brackets(
+    kernel: qmc.QKernel,
+    expected_x_count: int,
+) -> None:
+    """Concrete and boxed controls lower value two as X-Toffoli-X.
+
+    Args:
+        kernel (qmc.QKernel): Patterned-control representation to lower.
+        expected_x_count (int): Total X operations, including boxed definitions.
+    """
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(kernel)
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.X") == expected_x_count
+    assert names.count("tket.quantum.Toffoli") == 1
+
+
+@pytest.mark.hugr
+def test_hugr_keeps_global_phase_inside_control_value_brackets() -> None:
+    """A patterned phase retains both its X brackets and exact phase terms."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_control_value_global_phase,
+        parameters=["theta"],
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert names.count("tket.quantum.X") == 2
+    assert names.count("tket.global_phase.global_phase") == 1
+    assert names.count("tket.quantum.Rz") == 1
+    assert names.count("tket.quantum.CRz") == 1
 
 
 @pytest.mark.hugr

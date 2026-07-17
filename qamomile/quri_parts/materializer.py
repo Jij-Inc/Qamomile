@@ -42,6 +42,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     UnaryOperator,
     WhileInstruction,
     WireId,
+    has_mid_circuit_measurement,
     verify_circuit,
 )
 from qamomile.circuit.transpiler.errors import EmitError
@@ -153,6 +154,13 @@ class QuriPartsMaterializer:
                 linear.
         """
         verify_circuit(program)
+        if has_mid_circuit_measurement(program.operations):
+            raise EmitError(
+                "QURI Parts static sampling cannot represent a mid-circuit "
+                "measurement whose post-measurement qubit is used again. "
+                "Use a backend with dynamic measurement support or make the "
+                "measurement terminal."
+            )
         ancilla_count = _ancilla_demand(program.operations)
         needs_phase_carrier = _requires_phase_carrier(program)
         phase_carrier = (
@@ -1040,7 +1048,11 @@ def _emit_controlled_gate(
     if kind in {GateKind.Y, GateKind.CY}:
         intrinsic_controls = qubits[:-1] if kind is GateKind.CY else ()
         target = qubits[-1]
-        emitter.emit_s(circuit, target)
+        # Y = S X Sdg. Circuit APIs append in execution order, so the
+        # controlled-X conjugation must be Sdg -> MCX -> S. Reversing these
+        # two phase gates realizes controlled(-Y), whose sign is observable
+        # on a superposed control.
+        emitter.emit_sdg(circuit, target)
         _emit_multi_controlled_x(
             emitter,
             circuit,
@@ -1048,7 +1060,7 @@ def _emit_controlled_gate(
             target,
             ancillas,
         )
-        emitter.emit_sdg(circuit, target)
+        emitter.emit_s(circuit, target)
         return
     if len(controls) > 1:
         required = len(controls) - 1

@@ -39,6 +39,11 @@ _FRONTEND_ANNOTATION_KIND_FROM_PROTO: dict[int, str] = {
     int(value): name for name, value in _FRONTEND_ANNOTATION_KIND_TO_PROTO.items()
 }
 
+# Protobuf's parser limits nested messages to roughly 100 levels. Each nested
+# semantic container adds both a Payload and a wrapper message, so keeping the
+# public payload depth at 40 leaves headroom for the surrounding qkernel schema.
+_MAX_PAYLOAD_DEPTH = 40
+
 
 def qkernel_from_graph_dict(envelope: dict[str, Any]) -> pb.QKernel:
     """Convert the internal static-qkernel graph record into protobuf.
@@ -373,7 +378,7 @@ def _float_from_bits(bits: int) -> float:
     return struct.unpack(">d", struct.pack(">Q", bits))[0]
 
 
-def _payload_to_proto(value: Any) -> pb.Payload:
+def _payload_to_proto(value: Any, *, _depth: int = 0) -> pb.Payload:
     """Encode one closed semantic payload into protobuf.
 
     Args:
@@ -385,8 +390,13 @@ def _payload_to_proto(value: Any) -> pb.Payload:
 
     Raises:
         TypeError: If the payload has no protobuf representation.
-        ValueError: If a tagged payload record is malformed.
+        ValueError: If a tagged payload record is malformed or exceeds the
+            supported nesting depth.
     """
+    if _depth > _MAX_PAYLOAD_DEPTH:
+        raise ValueError(
+            f"semantic payload nesting exceeds {_MAX_PAYLOAD_DEPTH} levels"
+        )
     message = pb.Payload()
     if value is None:
         message.null_value.SetInParent()
@@ -402,15 +412,17 @@ def _payload_to_proto(value: Any) -> pb.Payload:
         message.bytes_value = bytes(value)
     elif isinstance(value, list):
         message.list_value.SetInParent()
-        message.list_value.items.extend(_payload_to_proto(item) for item in value)
+        message.list_value.items.extend(
+            _payload_to_proto(item, _depth=_depth + 1) for item in value
+        )
     elif isinstance(value, dict):
-        _tagged_payload_to_proto(value, message)
+        _tagged_payload_to_proto(value, message, _depth=_depth)
     else:
         raise TypeError(f"protobuf payload cannot encode {type(value).__name__!r}")
     return message
 
 
-def _payload_from_proto(message: pb.Payload) -> Any:
+def _payload_from_proto(message: pb.Payload, *, _depth: int = 0) -> Any:
     """Decode one protobuf payload union into its semantic record.
 
     Args:
@@ -420,8 +432,13 @@ def _payload_from_proto(message: pb.Payload) -> Any:
         Any: Internal payload record accepted by the IR decoder.
 
     Raises:
-        ValueError: If the payload union is unset or malformed.
+        ValueError: If the payload union is unset, malformed, or exceeds the
+            supported nesting depth.
     """
+    if _depth > _MAX_PAYLOAD_DEPTH:
+        raise ValueError(
+            f"semantic payload nesting exceeds {_MAX_PAYLOAD_DEPTH} levels"
+        )
     kind = message.WhichOneof("value")
     if kind == "null_value":
         return None
@@ -436,7 +453,10 @@ def _payload_from_proto(message: pb.Payload) -> Any:
     if kind == "bytes_value":
         return bytes(message.bytes_value)
     if kind == "list_value":
-        return [_payload_from_proto(item) for item in message.list_value.items]
+        return [
+            _payload_from_proto(item, _depth=_depth + 1)
+            for item in message.list_value.items
+        ]
     if kind in {"tuple_value", "set_value", "frozenset_value"}:
         tag = {
             "tuple_value": "$tuple",
@@ -444,11 +464,14 @@ def _payload_from_proto(message: pb.Payload) -> Any:
             "frozenset_value": "$frozenset",
         }[kind]
         values = getattr(message, kind).items
-        return {tag: [_payload_from_proto(item) for item in values]}
+        return {tag: [_payload_from_proto(item, _depth=_depth + 1) for item in values]}
     if kind == "map_value":
         return {
             "$map": [
-                [_payload_from_proto(entry.key), _payload_from_proto(entry.value)]
+                [
+                    _payload_from_proto(entry.key, _depth=_depth + 1),
+                    _payload_from_proto(entry.value, _depth=_depth + 1),
+                ]
                 for entry in message.map_value.entries
             ]
         }
@@ -474,7 +497,12 @@ def _payload_from_proto(message: pb.Payload) -> Any:
     raise ValueError("protobuf Payload is missing its value union")
 
 
-def _tagged_payload_to_proto(value: dict[str, Any], message: pb.Payload) -> None:
+def _tagged_payload_to_proto(
+    value: dict[str, Any],
+    message: pb.Payload,
+    *,
+    _depth: int,
+) -> None:
     """Encode one tagged internal payload record into a protobuf union.
 
     Args:
@@ -488,20 +516,24 @@ def _tagged_payload_to_proto(value: dict[str, Any], message: pb.Payload) -> None
     if "$tuple" in value:
         message.tuple_value.SetInParent()
         message.tuple_value.items.extend(
-            _payload_to_proto(item) for item in _require_list(value["$tuple"], "$tuple")
+            _payload_to_proto(item, _depth=_depth + 1)
+            for item in _require_list(value["$tuple"], "$tuple")
         )
         return
     if "$set" in value:
         message.set_value.SetInParent()
         message.set_value.items.extend(
-            _canonical_unordered_payloads(_require_list(value["$set"], "$set"))
+            _canonical_unordered_payloads(
+                _require_list(value["$set"], "$set"), _depth=_depth + 1
+            )
         )
         return
     if "$frozenset" in value:
         message.frozenset_value.SetInParent()
         message.frozenset_value.items.extend(
             _canonical_unordered_payloads(
-                _require_list(value["$frozenset"], "$frozenset")
+                _require_list(value["$frozenset"], "$frozenset"),
+                _depth=_depth + 1,
             )
         )
         return
@@ -512,8 +544,8 @@ def _tagged_payload_to_proto(value: dict[str, Any], message: pb.Payload) -> None
             if not isinstance(raw_entry, list) or len(raw_entry) != 2:
                 raise ValueError("$map entries must be two-element lists")
             entry = message.map_value.entries.add()
-            entry.key.CopyFrom(_payload_to_proto(raw_entry[0]))
-            entry.value.CopyFrom(_payload_to_proto(raw_entry[1]))
+            entry.key.CopyFrom(_payload_to_proto(raw_entry[0], _depth=_depth + 1))
+            entry.value.CopyFrom(_payload_to_proto(raw_entry[1], _depth=_depth + 1))
         return
     if "$complex_number" in value:
         parts = _require_list(value["$complex_number"], "$complex_number")
@@ -545,7 +577,9 @@ def _tagged_payload_to_proto(value: dict[str, Any], message: pb.Payload) -> None
     raise ValueError(f"unknown semantic payload wrapper {sorted(value)}")
 
 
-def _canonical_unordered_payloads(values: list[Any]) -> list[pb.Payload]:
+def _canonical_unordered_payloads(
+    values: list[Any], *, _depth: int
+) -> list[pb.Payload]:
     """Encode and canonically order an unordered container's elements.
 
     Args:
@@ -556,7 +590,7 @@ def _canonical_unordered_payloads(values: list[Any]) -> list[pb.Payload]:
         list[pb.Payload]: Encoded elements sorted by deterministic protobuf
             bytes.
     """
-    messages = [_payload_to_proto(value) for value in values]
+    messages = [_payload_to_proto(value, _depth=_depth) for value in values]
     return sorted(
         messages,
         key=lambda message: message.SerializeToString(deterministic=True),
@@ -1120,6 +1154,9 @@ _OPERATION_TO_PROTO: dict[str, pb.OperationType] = {
     "SymbolicControlledU": pb.SYMBOLIC_CONTROLLED_OPERATION,
     "InvokeOperation": pb.INVOKE_OPERATION,
     "InverseBlockOperation": pb.INVERSE_BLOCK_OPERATION,
+    "GlobalPhaseOperation": pb.GLOBAL_PHASE_OPERATION,
+    "SelectOperation": pb.SELECT_OPERATION,
+    "ReturnQuantumArrayElementOperation": pb.RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION,
 }
 _OPERATION_FROM_PROTO: dict[pb.OperationType, str] = {
     value: key for key, value in _OPERATION_TO_PROTO.items()
@@ -1183,7 +1220,14 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
         }
     ),
     pb.CONCRETE_CONTROLLED_OPERATION: frozenset(
-        {"num_controls", "power", "unitary_block", "callable_ref", "callable_attrs"}
+        {
+            "num_controls",
+            "power",
+            "unitary_block",
+            "callable_ref",
+            "callable_attrs",
+            "control_value",
+        }
     ),
     pb.SYMBOLIC_CONTROLLED_OPERATION: frozenset(
         {
@@ -1207,8 +1251,20 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
             "implementation_block",
             "callable_ref",
             "callable_attrs",
+            "control_value",
         }
     ),
+    pb.GLOBAL_PHASE_OPERATION: frozenset(),
+    pb.SELECT_OPERATION: frozenset(
+        {
+            "num_index_qubits",
+            "case_blocks",
+            "num_index_qubits_ref",
+            "num_index_args",
+        }
+    ),
+    pb.GLOBAL_PHASE_OPERATION: frozenset(),
+    pb.RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: frozenset(),
 }
 
 _OPERATION_REQUIRED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
@@ -1231,6 +1287,8 @@ _OPERATION_REQUIRED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
     ),
     pb.INVOKE_OPERATION: frozenset({"target", "transform", "attrs", "definition_ref"}),
     pb.INVERSE_BLOCK_OPERATION: frozenset({"num_control_qubits", "num_target_qubits"}),
+    pb.GLOBAL_PHASE_OPERATION: frozenset(),
+    pb.SELECT_OPERATION: frozenset(),
 }
 
 
@@ -1267,6 +1325,16 @@ def _validate_operation_fields(message: pb.Operation) -> None:
     if message.operation_type == pb.SYMBOLIC_CONTROLLED_OPERATION:
         if message.control_index_refs and not message.has_control_index_refs:
             raise ValueError("control_index_refs contradict their presence marker")
+    if message.operation_type == pb.SELECT_OPERATION:
+        has_concrete_width = message.HasField("num_index_qubits")
+        has_symbolic_width = message.HasField("num_index_qubits_ref")
+        if has_concrete_width == has_symbolic_width:
+            raise ValueError(
+                "SELECT_OPERATION requires exactly one of num_index_qubits "
+                "and num_index_qubits_ref"
+            )
+        if has_symbolic_width and not message.HasField("num_index_args"):
+            raise ValueError("symbolic SELECT_OPERATION requires num_index_args")
 
 
 def _operation_to_proto(value: dict[str, Any]) -> pb.Operation:
@@ -1303,6 +1371,8 @@ def _operation_to_proto(value: dict[str, Any]) -> pb.Operation:
         "num_control_args",
         "num_control_qubits",
         "num_target_qubits",
+        "num_index_qubits",
+        "num_index_args",
     ):
         if field in value and value[field] is not None:
             setattr(message, field, value[field])
@@ -1314,6 +1384,7 @@ def _operation_to_proto(value: dict[str, Any]) -> pb.Operation:
         "loop_var_value_ref",
         "value_var_value_ref",
         "num_controls_ref",
+        "num_index_qubits_ref",
         "definition_ref",
         "custom_name",
     ):
@@ -1369,9 +1440,15 @@ def _operation_to_proto(value: dict[str, Any]) -> pb.Operation:
 
     if "power" in value:
         message.power.CopyFrom(_integer_or_reference_to_proto(value["power"]))
+    if "control_value" in value:
+        message.control_value.CopyFrom(_integer_to_proto(value["control_value"]))
     for field in ("unitary_block", "source_block", "implementation_block"):
         if value.get(field) is not None:
             getattr(message, field).CopyFrom(_block_to_proto(value[field]))
+    if "case_blocks" in value:
+        message.case_blocks.extend(
+            _block_to_proto(item) for item in value["case_blocks"]
+        )
     for field in ("callable_ref", "target"):
         if value.get(field) is not None:
             getattr(message, field).CopyFrom(_callable_ref_to_proto(value[field]))
@@ -1444,6 +1521,9 @@ def _decode_operation_scalars(
         "num_control_qubits",
         "num_target_qubits",
         "custom_name",
+        "num_index_qubits",
+        "num_index_qubits_ref",
+        "num_index_args",
     ):
         if message.HasField(field):
             result[field] = getattr(message, field)
@@ -1526,6 +1606,8 @@ def _decode_operation_structures(
             ]
     if message.HasField("power"):
         result["power"] = _integer_or_reference_from_proto(message.power)
+    if message.HasField("control_value"):
+        result["control_value"] = _integer_from_proto(message.control_value)
     for field in ("unitary_block", "source_block", "implementation_block"):
         if message.HasField(field):
             result[field] = _block_from_proto(getattr(message, field))
@@ -1535,6 +1617,10 @@ def _decode_operation_structures(
             pb.INVERSE_BLOCK_OPERATION,
         }:
             result[field] = None
+    if message.operation_type == pb.SELECT_OPERATION:
+        result["case_blocks"] = [
+            _block_from_proto(item) for item in message.case_blocks
+        ]
     for field in ("callable_ref", "target"):
         if message.HasField(field):
             result[field] = _callable_ref_from_proto(getattr(message, field))
