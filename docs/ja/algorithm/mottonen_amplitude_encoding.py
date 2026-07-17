@@ -87,12 +87,12 @@ ATOL_SHOT = 0.05
 
 
 def fidelity(prepared: np.ndarray, target: np.ndarray) -> float:
-    """Return the phase-invariant fidelity between two statevectors."""
+    """2つの状態ベクトル間の位相不変な忠実度を返します。"""
     return float(np.abs(np.vdot(prepared, target)) ** 2)
 
 
 def normalize(amplitudes: list[float] | list[complex]) -> np.ndarray:
-    """Return a unit-norm copy of an amplitude vector."""
+    """振幅ベクトルを単位ノルムに正規化したコピーを返します。"""
     if any(isinstance(value, complex) for value in amplitudes):
         array = np.asarray(amplitudes, dtype=complex)
     else:
@@ -101,7 +101,7 @@ def normalize(amplitudes: list[float] | list[complex]) -> np.ndarray:
 
 
 def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
-    """Transpile a kernel and return its final statevector."""
+    """量子カーネルをトランスパイルし、最終状態ベクトルを返します。"""
     circuit = transpiler.to_circuit(kernel, bindings=bindings or None)
     stripped = circuit.remove_final_measurements(inplace=False)
     assert stripped is not None
@@ -231,7 +231,7 @@ prepare_from_angles.draw(
 
 # %%
 def make_real_kernel(n_qubits: int) -> qmc.QKernel:
-    """Build a real-input Möttönen state-preparation kernel."""
+    """実数入力用のMöttönen状態準備量子カーネルを構築します。"""
     amplitudes = np.ones(2**n_qubits).tolist()
 
     @qmc.qkernel
@@ -244,7 +244,7 @@ def make_real_kernel(n_qubits: int) -> qmc.QKernel:
 
 
 def make_complex_kernel(n_qubits: int) -> qmc.QKernel:
-    """Build a complex-input Möttönen state-preparation kernel."""
+    """複素数入力用のMöttönen状態準備量子カーネルを構築します。"""
     amplitudes = (np.ones(2**n_qubits) + 1j * np.arange(2**n_qubits)).tolist()
 
     @qmc.qkernel

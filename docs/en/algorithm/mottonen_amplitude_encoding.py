@@ -438,7 +438,7 @@ print(f"<Z_0> = {float(expval_result):+.6f}")
 assert np.isclose(float(expval_result), -1.0 / 3.0, atol=ATOL_STATEVECTOR)
 
 # %% [markdown]
-# ## Qamomile Built-in
+# ## Qamomile Built-ins
 #
 # Qamomile provides both generic and method-specific state-preparation helpers.
 # Choose between them according to whether only the prepared state or also the
