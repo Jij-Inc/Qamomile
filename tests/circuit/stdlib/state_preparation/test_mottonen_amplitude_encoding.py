@@ -740,7 +740,7 @@ class TestSymbolicShapeQubitsRejected:
 
     def test_symbolic_shape_qubits_raise_clear_error(self) -> None:
         """A Vector[Qubit] without a compile-time-known size is rejected
-        with an ``mottonen_amplitude_encoding``-prefixed ValueError that names the
+        with a ``mottonen_amplitude_encoding``-prefixed ValueError that names the
         binding workaround, rather than the bare ``get_size`` message."""
         with pytest.raises(ValueError, match="mottonen_amplitude_encoding requires"):
             _amp_encode_with_symbolic_qubits.build()
