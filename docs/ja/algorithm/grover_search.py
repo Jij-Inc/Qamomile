@@ -345,7 +345,7 @@ print("ideal marked-state probability:", f"{ideal_marked_probability:.6f}")
 # %% [markdown]
 # ## リソース推定
 #
-# Grover反復では、位相オラクルを1回呼び出します。したがって、位相オラクルへの問い合わせ回数は`grover_iteration_count`が返す反復回数と一致します。ここでは、問題サイズとGrover探索における位相オラクルの問い合わせ回数の関係を見てましょう。
+# Grover反復では、位相オラクルを1回呼び出します。したがって、位相オラクルへの問い合わせ回数は`grover_iteration_count`が返す反復回数と一致します。ここでは、問題サイズとGrover探索における位相オラクルの問い合わせ回数の関係を見てみましょう。
 # %%
 # 検索レジスタの量子ビット数ごとに、位相オラクルへの問い合わせ回数を計算します。
 RESOURCE_SEARCH_QUBITS = [4, 6, 8, 10, 12, 14, 16]
