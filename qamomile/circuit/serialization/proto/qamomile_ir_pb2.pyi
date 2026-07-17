@@ -187,49 +187,23 @@ class QKernel(_message.Message):
     return_annotation: FrontendAnnotation
     def __init__(self, qamomile_version: _Optional[str] = ..., name: _Optional[str] = ..., parameters: _Optional[_Iterable[_Union[KernelParameter, _Mapping]]] = ..., results: _Optional[_Iterable[_Union[KernelType, _Mapping]]] = ..., body: _Optional[_Union[Block, _Mapping]] = ..., value_table: _Optional[_Iterable[_Union[ValueNode, _Mapping]]] = ..., callable_table: _Optional[_Iterable[_Union[CallableEntry, _Mapping]]] = ..., callable_definition: _Optional[_Union[CallableDefinition, _Mapping]] = ..., return_annotation: _Optional[_Union[FrontendAnnotation, _Mapping]] = ...) -> None: ...
 
-class PauliLCUBlockEncodingArtifact(_message.Message):
-    __slots__ = ("artifact_kind", "qamomile_version", "num_qubits", "terms")
-    ARTIFACT_KIND_FIELD_NUMBER: _ClassVar[int]
-    QAMOMILE_VERSION_FIELD_NUMBER: _ClassVar[int]
-    NUM_QUBITS_FIELD_NUMBER: _ClassVar[int]
-    TERMS_FIELD_NUMBER: _ClassVar[int]
-    artifact_kind: str
-    qamomile_version: str
-    num_qubits: BigInteger
-    terms: _containers.RepeatedCompositeFieldContainer[PauliLCUBlockEncodingTerm]
-    def __init__(self, artifact_kind: _Optional[str] = ..., qamomile_version: _Optional[str] = ..., num_qubits: _Optional[_Union[BigInteger, _Mapping]] = ..., terms: _Optional[_Iterable[_Union[PauliLCUBlockEncodingTerm, _Mapping]]] = ...) -> None: ...
-
-class PauliLCUBlockEncodingTerm(_message.Message):
-    __slots__ = ("coefficient", "operators")
-    COEFFICIENT_FIELD_NUMBER: _ClassVar[int]
-    OPERATORS_FIELD_NUMBER: _ClassVar[int]
-    coefficient: Complex64
-    operators: _containers.RepeatedCompositeFieldContainer[PauliLCUBlockEncodingOperator]
-    def __init__(self, coefficient: _Optional[_Union[Complex64, _Mapping]] = ..., operators: _Optional[_Iterable[_Union[PauliLCUBlockEncodingOperator, _Mapping]]] = ...) -> None: ...
-
-class PauliLCUBlockEncodingOperator(_message.Message):
-    __slots__ = ("pauli", "index")
-    PAULI_FIELD_NUMBER: _ClassVar[int]
-    INDEX_FIELD_NUMBER: _ClassVar[int]
-    pauli: str
-    index: BigInteger
-    def __init__(self, pauli: _Optional[str] = ..., index: _Optional[_Union[BigInteger, _Mapping]] = ...) -> None: ...
-
 class KernelParameter(_message.Message):
-    __slots__ = ("name", "type", "kind", "has_default", "default", "differentiable")
+    __slots__ = ("name", "type", "kind", "has_default", "default", "differentiable", "static_binding_type")
     NAME_FIELD_NUMBER: _ClassVar[int]
     TYPE_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
     HAS_DEFAULT_FIELD_NUMBER: _ClassVar[int]
     DEFAULT_FIELD_NUMBER: _ClassVar[int]
     DIFFERENTIABLE_FIELD_NUMBER: _ClassVar[int]
+    STATIC_BINDING_TYPE_FIELD_NUMBER: _ClassVar[int]
     name: str
     type: KernelType
     kind: ParameterKind
     has_default: bool
     default: Payload
     differentiable: bool
-    def __init__(self, name: _Optional[str] = ..., type: _Optional[_Union[KernelType, _Mapping]] = ..., kind: _Optional[_Union[ParameterKind, str]] = ..., has_default: bool = ..., default: _Optional[_Union[Payload, _Mapping]] = ..., differentiable: bool = ...) -> None: ...
+    static_binding_type: str
+    def __init__(self, name: _Optional[str] = ..., type: _Optional[_Union[KernelType, _Mapping]] = ..., kind: _Optional[_Union[ParameterKind, str]] = ..., has_default: bool = ..., default: _Optional[_Union[Payload, _Mapping]] = ..., differentiable: bool = ..., static_binding_type: _Optional[str] = ...) -> None: ...
 
 class KernelType(_message.Message):
     __slots__ = ("value_type", "ndim", "annotation")
@@ -250,7 +224,7 @@ class FrontendAnnotation(_message.Message):
     def __init__(self, kind: _Optional[_Union[FrontendAnnotationKind, str]] = ..., arguments: _Optional[_Iterable[_Union[FrontendAnnotation, _Mapping]]] = ...) -> None: ...
 
 class Block(_message.Message):
-    __slots__ = ("kind", "name", "label_args", "input_value_refs", "output_value_refs", "output_names", "parameters", "operations")
+    __slots__ = ("kind", "name", "label_args", "input_value_refs", "output_value_refs", "output_names", "parameters", "static_bindings", "operations")
     KIND_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     LABEL_ARGS_FIELD_NUMBER: _ClassVar[int]
@@ -258,6 +232,7 @@ class Block(_message.Message):
     OUTPUT_VALUE_REFS_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_NAMES_FIELD_NUMBER: _ClassVar[int]
     PARAMETERS_FIELD_NUMBER: _ClassVar[int]
+    STATIC_BINDINGS_FIELD_NUMBER: _ClassVar[int]
     OPERATIONS_FIELD_NUMBER: _ClassVar[int]
     kind: str
     name: str
@@ -266,8 +241,27 @@ class Block(_message.Message):
     output_value_refs: _containers.RepeatedScalarFieldContainer[str]
     output_names: _containers.RepeatedScalarFieldContainer[str]
     parameters: _containers.RepeatedCompositeFieldContainer[NamedReference]
+    static_bindings: _containers.RepeatedCompositeFieldContainer[StaticBindingSlot]
     operations: _containers.RepeatedCompositeFieldContainer[Operation]
-    def __init__(self, kind: _Optional[str] = ..., name: _Optional[str] = ..., label_args: _Optional[_Iterable[_Union[Payload, _Mapping]]] = ..., input_value_refs: _Optional[_Iterable[str]] = ..., output_value_refs: _Optional[_Iterable[str]] = ..., output_names: _Optional[_Iterable[str]] = ..., parameters: _Optional[_Iterable[_Union[NamedReference, _Mapping]]] = ..., operations: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ...) -> None: ...
+    def __init__(self, kind: _Optional[str] = ..., name: _Optional[str] = ..., label_args: _Optional[_Iterable[_Union[Payload, _Mapping]]] = ..., input_value_refs: _Optional[_Iterable[str]] = ..., output_value_refs: _Optional[_Iterable[str]] = ..., output_names: _Optional[_Iterable[str]] = ..., parameters: _Optional[_Iterable[_Union[NamedReference, _Mapping]]] = ..., static_bindings: _Optional[_Iterable[_Union[StaticBindingSlot, _Mapping]]] = ..., operations: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ...) -> None: ...
+
+class StaticBindingSlot(_message.Message):
+    __slots__ = ("name", "type_key", "fields")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    TYPE_KEY_FIELD_NUMBER: _ClassVar[int]
+    FIELDS_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    type_key: str
+    fields: _containers.RepeatedCompositeFieldContainer[StaticBindingField]
+    def __init__(self, name: _Optional[str] = ..., type_key: _Optional[str] = ..., fields: _Optional[_Iterable[_Union[StaticBindingField, _Mapping]]] = ...) -> None: ...
+
+class StaticBindingField(_message.Message):
+    __slots__ = ("name", "value_ref")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    VALUE_REF_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    value_ref: str
+    def __init__(self, name: _Optional[str] = ..., value_ref: _Optional[str] = ...) -> None: ...
 
 class NamedReference(_message.Message):
     __slots__ = ("name", "value_ref")

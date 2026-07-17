@@ -17,13 +17,19 @@ from qamomile.circuit.frontend.composite_gate import (
     configure_composite,
 )
 from qamomile.circuit.frontend.constructors import uint
-from qamomile.circuit.frontend.handle import Qubit, Vector
+from qamomile.circuit.frontend.handle import Float, Qubit, UInt, Vector
 from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.global_phase import global_phase
 from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x, y, z
 from qamomile.circuit.frontend.operation.select import select
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
+from qamomile.circuit.frontend.static_binding import (
+    StaticBindingFieldSpec,
+    StaticBindingMemberSpec,
+    StaticBindingSpec,
+    register_static_binding,
+)
 from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
@@ -630,6 +636,43 @@ def _semantic_arguments(lcu: PauliLCU) -> dict[str, Any]:
             for term in lcu.terms
         ],
     }
+
+
+register_static_binding(
+    StaticBindingSpec(
+        annotation=PauliLCUBlockEncoding,
+        type_key="qamomile.stdlib.pauli_lcu_block_encoding",
+        fields={
+            "normalization": StaticBindingFieldSpec(
+                handle_type=Float,
+                getter=lambda encoding: encoding.normalization,
+            ),
+            "num_signal_qubits": StaticBindingFieldSpec(
+                handle_type=UInt,
+                getter=lambda encoding: encoding.num_signal_qubits,
+            ),
+            "num_system_qubits": StaticBindingFieldSpec(
+                handle_type=UInt,
+                getter=lambda encoding: encoding.num_system_qubits,
+            ),
+        },
+        members={
+            "unitary": StaticBindingMemberSpec(
+                input_types={
+                    "signal": Vector[Qubit],
+                    "system": Vector[Qubit],
+                },
+                output_types=(Vector[Qubit], Vector[Qubit]),
+                return_annotation=tuple[Vector[Qubit], Vector[Qubit]],
+                getter=lambda encoding: encoding.unitary,
+                qubit_width_fields={
+                    "signal": "num_signal_qubits",
+                    "system": "num_system_qubits",
+                },
+            ),
+        },
+    )
+)
 
 
 __all__ = [

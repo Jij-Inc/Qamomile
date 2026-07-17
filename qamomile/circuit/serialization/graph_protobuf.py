@@ -91,8 +91,13 @@ def qkernel_from_graph_dict(envelope: dict[str, Any]) -> pb.QKernel:
         if not isinstance(parameter, dict):
             raise ValueError("QKernel parameter entries must be dictionaries")
         parameter_type = parameter.get("type")
-        if not isinstance(parameter_type, dict):
-            raise ValueError("QKernel parameter is missing its type")
+        static_binding_type = parameter.get("static_binding_type")
+        has_value_type = isinstance(parameter_type, dict)
+        has_static_type = isinstance(static_binding_type, str)
+        if has_value_type == has_static_type:
+            raise ValueError(
+                "QKernel parameter requires exactly one ordinary or static binding type"
+            )
         item = message.parameters.add(
             name=parameter.get("name", ""),
             has_default=parameter.get("has_default") is True,
@@ -102,7 +107,12 @@ def qkernel_from_graph_dict(envelope: dict[str, Any]) -> pb.QKernel:
         if kind not in _PARAMETER_KIND_TO_PROTO:
             raise ValueError(f"unknown qkernel parameter kind {kind!r}")
         item.kind = _PARAMETER_KIND_TO_PROTO[kind]
-        item.type.CopyFrom(_kernel_type_to_proto(parameter_type))
+        if has_value_type:
+            assert isinstance(parameter_type, dict)
+            item.type.CopyFrom(_kernel_type_to_proto(parameter_type))
+        else:
+            assert isinstance(static_binding_type, str)
+            item.static_binding_type = static_binding_type
         if item.has_default:
             item.default.CopyFrom(_payload_to_proto(parameter.get("default")))
     message.results.extend(_kernel_type_to_proto(item) for item in results)
@@ -154,22 +164,29 @@ def graph_dict_from_qkernel(message: pb.QKernel) -> dict[str, Any]:
         if parameter.name in seen_names:
             raise ValueError(f"duplicate qkernel parameter {parameter.name!r}")
         seen_names.add(parameter.name)
-        if not parameter.HasField("type"):
-            raise ValueError(f"qkernel parameter {parameter.name!r} has no type")
-        parameters.append(
-            {
-                "name": parameter.name,
-                "type": _kernel_type_from_proto(parameter.type),
-                "kind": _decode_parameter_kind(parameter.kind),
-                "has_default": parameter.has_default,
-                "default": (
-                    _payload_from_proto(parameter.default)
-                    if parameter.has_default
-                    else None
-                ),
-                "differentiable": parameter.differentiable,
-            }
-        )
+        has_value_type = parameter.HasField("type")
+        has_static_type = parameter.HasField("static_binding_type")
+        if has_value_type == has_static_type:
+            raise ValueError(
+                f"qkernel parameter {parameter.name!r} requires exactly one "
+                "ordinary or static binding type"
+            )
+        record = {
+            "name": parameter.name,
+            "kind": _decode_parameter_kind(parameter.kind),
+            "has_default": parameter.has_default,
+            "default": (
+                _payload_from_proto(parameter.default)
+                if parameter.has_default
+                else None
+            ),
+            "differentiable": parameter.differentiable,
+        }
+        if has_value_type:
+            record["type"] = _kernel_type_from_proto(parameter.type)
+        else:
+            record["static_binding_type"] = parameter.static_binding_type
+        parameters.append(record)
     return {
         "qamomile_version": message.qamomile_version,
         "artifact": {
@@ -1695,6 +1712,25 @@ def _block_to_proto(value: dict[str, Any]) -> pb.Block:
         item = message.parameters.add()
         item.name = name
         item.value_ref = value_ref
+    for slot in value.get("static_bindings", []):
+        if not isinstance(slot, dict):
+            raise ValueError("Block static binding entries must be dictionaries")
+        slot_message = message.static_bindings.add(
+            name=slot.get("name", ""),
+            type_key=slot.get("type_key", ""),
+        )
+        fields = slot.get("fields")
+        if not isinstance(fields, list):
+            raise ValueError("Block static binding fields must be a list")
+        for field in fields:
+            if not isinstance(field, dict):
+                raise ValueError(
+                    "Block static binding field entries must be dictionaries"
+                )
+            slot_message.fields.add(
+                name=field.get("name", ""),
+                value_ref=field.get("value_ref", ""),
+            )
     message.operations.extend(_operation_to_proto(item) for item in value["operations"])
     return message
 
@@ -1716,6 +1752,24 @@ def _block_from_proto(message: pb.Block) -> dict[str, Any]:
         if item.name in parameters:
             raise ValueError(f"duplicate Block parameter {item.name!r}")
         parameters[item.name] = item.value_ref
+    static_bindings: list[dict[str, Any]] = []
+    static_names: set[str] = set()
+    for slot in message.static_bindings:
+        if slot.name in static_names:
+            raise ValueError(f"duplicate static binding {slot.name!r}")
+        static_names.add(slot.name)
+        field_names: set[str] = set()
+        fields: list[dict[str, str]] = []
+        for field in slot.fields:
+            if field.name in field_names:
+                raise ValueError(
+                    f"duplicate field {field.name!r} in static binding {slot.name!r}"
+                )
+            field_names.add(field.name)
+            fields.append({"name": field.name, "value_ref": field.value_ref})
+        static_bindings.append(
+            {"name": slot.name, "type_key": slot.type_key, "fields": fields}
+        )
     return {
         "$type": "Block",
         "kind": message.kind,
@@ -1725,6 +1779,7 @@ def _block_from_proto(message: pb.Block) -> dict[str, Any]:
         "output_value_refs": list(message.output_value_refs),
         "output_names": list(message.output_names),
         "parameters": parameters,
+        "static_bindings": static_bindings,
         "operations": [_operation_from_proto(item) for item in message.operations],
     }
 

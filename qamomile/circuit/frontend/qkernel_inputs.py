@@ -19,6 +19,10 @@ from qamomile.circuit.frontend.handle.array import Vector
 from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
 from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
+from qamomile.circuit.frontend.static_binding import (
+    is_static_binding_annotation,
+    validate_static_binding,
+)
 from qamomile.circuit.ir.types import BitType, FloatType, ObservableType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 
@@ -95,6 +99,12 @@ def validate_parameters(
             raise ValueError(f"Unknown parameter: '{name}'")
 
         param_type = input_types[name]
+        if is_static_binding_annotation(param_type):
+            raise TypeError(
+                f"Parameter '{name}' has static binding type {param_type}; "
+                "static bindings must be supplied at compile time and cannot "
+                "be runtime parameters"
+            )
         if is_dict_type(param_type):
             args = getattr(param_type, "__args__", None)
             if not args or len(args) < 2:
@@ -139,6 +149,8 @@ def validate_kwargs(
     Raises:
         ValueError: If an unknown argument is supplied, or if a required
             non-parameter classical argument is missing.
+        TypeError: If a static binding has a default value or a supplied
+            object does not match its registered annotation.
     """
     known_names = set(signature.parameters.keys())
     unknown = set(kwargs.keys()) - known_names
@@ -150,10 +162,30 @@ def validate_kwargs(
         )
 
     for name, param in signature.parameters.items():
+        param_type = input_types.get(name, param.annotation)
+        if is_static_binding_annotation(param_type):
+            if param.default is not inspect.Parameter.empty:
+                raise TypeError(
+                    f"Static binding parameter {name!r} cannot have a "
+                    "default value; provide it through bindings when building "
+                    "or transpiling the qkernel."
+                )
+            if name in parameters:
+                raise TypeError(
+                    f"Static binding argument {name!r} must be supplied at "
+                    "compile time and cannot be a runtime parameter."
+                )
+            if name not in kwargs:
+                raise ValueError(
+                    f"Static binding argument {name!r} must be provided "
+                    "through bindings."
+                )
+            validate_static_binding(param_type, name, kwargs[name])
+            continue
+
         if name in parameters:
             continue
 
-        param_type = input_types.get(name, param.annotation)
         if param_type is Qubit:
             continue
         if is_array_type(param_type):

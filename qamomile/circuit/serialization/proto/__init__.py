@@ -1,1 +1,1 @@
-"""Generated protobuf schemas for target-neutral static artifacts."""
+"""Generated protobuf schema for one target-neutral static qkernel."""

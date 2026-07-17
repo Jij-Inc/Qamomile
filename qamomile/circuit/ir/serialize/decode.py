@@ -85,6 +85,7 @@ from qamomile.circuit.ir.operation.slice_array import (
     SliceArrayOperation,
 )
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
+from qamomile.circuit.ir.static_binding import StaticBindingField, StaticBindingSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -297,6 +298,36 @@ def _decode_block(d: dict[str, Any], ctx: _DecodeContext) -> Block:
         "dict[str, Value]",
         {k: _materialize_as_parameter(ctx, ref) for k, ref in d["parameters"].items()},
     )
+    static_bindings: list[StaticBindingSlot] = []
+    for raw_slot in d.get("static_bindings", ()):
+        if not isinstance(raw_slot, dict):
+            raise ValueError("static binding record must be a dictionary")
+        name = raw_slot.get("name")
+        type_key = raw_slot.get("type_key")
+        raw_fields = raw_slot.get("fields")
+        if (
+            not isinstance(name, str)
+            or not isinstance(type_key, str)
+            or not isinstance(raw_fields, list)
+        ):
+            raise ValueError("static binding record is malformed")
+        fields: list[StaticBindingField] = []
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, dict):
+                raise ValueError("static binding field must be a dictionary")
+            field_name = raw_field.get("name")
+            value_ref = raw_field.get("value_ref")
+            if not isinstance(field_name, str) or not isinstance(value_ref, str):
+                raise ValueError("static binding field is malformed")
+            fields.append(
+                StaticBindingField(
+                    name=field_name,
+                    value=_materialize_as_value(ctx, value_ref),
+                )
+            )
+        static_bindings.append(
+            StaticBindingSlot(name=name, type_key=type_key, fields=tuple(fields))
+        )
 
     operations = [_decode_operation(op_dict, ctx) for op_dict in d["operations"]]
 
@@ -339,6 +370,7 @@ def _decode_block(d: dict[str, Any], ctx: _DecodeContext) -> Block:
         operations=operations,
         parameters=parameters,
         param_slots=tuple(inferred_slots),
+        static_bindings=tuple(static_bindings),
     )
 
 

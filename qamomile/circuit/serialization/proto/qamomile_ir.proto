@@ -19,26 +19,6 @@ message QKernel {
   FrontendAnnotation return_annotation = 9;
 }
 
-// Canonical retained-Pauli recipe for one concrete block encoding. The
-// block-encoding unitary, normalization, and register widths are regenerated
-// by the installed factory rather than duplicated on the wire.
-message PauliLCUBlockEncodingArtifact {
-  string artifact_kind = 1;
-  string qamomile_version = 2;
-  BigInteger num_qubits = 3;
-  repeated PauliLCUBlockEncodingTerm terms = 4;
-}
-
-message PauliLCUBlockEncodingTerm {
-  Complex64 coefficient = 1;
-  repeated PauliLCUBlockEncodingOperator operators = 2;
-}
-
-message PauliLCUBlockEncodingOperator {
-  string pauli = 1;
-  BigInteger index = 2;
-}
-
 message KernelParameter {
   string name = 1;
   KernelType type = 2;
@@ -46,6 +26,7 @@ message KernelParameter {
   bool has_default = 4;
   Payload default = 5;
   bool differentiable = 6;
+  optional string static_binding_type = 7;
 }
 
 enum ParameterKind {
@@ -95,7 +76,19 @@ message Block {
   repeated string output_value_refs = 5;
   repeated string output_names = 6;
   repeated NamedReference parameters = 7;
+  repeated StaticBindingSlot static_bindings = 8;
   repeated Operation operations = 9;
+}
+
+message StaticBindingSlot {
+  string name = 1;
+  string type_key = 2;
+  repeated StaticBindingField fields = 3;
+}
+
+message StaticBindingField {
+  string name = 1;
+  string value_ref = 2;
 }
 
 message NamedReference {

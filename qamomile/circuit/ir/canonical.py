@@ -89,6 +89,7 @@ from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
+from qamomile.circuit.ir.static_binding import StaticBindingField, StaticBindingSlot
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -387,6 +388,20 @@ class _Canonicalizer:
             key: cast(Value, self.canonical_value(block.parameters[key]))
             for key in sorted(block.parameters)
         }
+        new_static_bindings = tuple(
+            StaticBindingSlot(
+                name=slot.name,
+                type_key=slot.type_key,
+                fields=tuple(
+                    StaticBindingField(
+                        name=field.name,
+                        value=cast(Value, self.canonical_value(field.value)),
+                    )
+                    for field in slot.fields
+                ),
+            )
+            for slot in block.static_bindings
+        )
         new_operations: list[Operation] = [
             self.canonical_operation(op) for op in block.operations
         ]
@@ -406,6 +421,7 @@ class _Canonicalizer:
             # ParamSlot is frozen and holds no Value/UUID references, so
             # the manifest is shared verbatim — there is nothing to remap.
             param_slots=block.param_slots,
+            static_bindings=new_static_bindings,
         )
         self._block_cache[id(block)] = new_block
         return new_block
@@ -959,6 +975,9 @@ def _collect_values(block: Block, out: list[ValueBase], seen: set[str]) -> None:
 
     for v in block.input_values:
         visit(v)
+    for slot in block.static_bindings:
+        for field in slot.fields:
+            visit(field.value)
     for key in sorted(block.parameters):
         visit(block.parameters[key])
     for op in block.operations:
@@ -1094,6 +1113,19 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     out.append(
         f"{pad}{_INLINE_INDENT}parameters="
         + _token({k: block.parameters[k].uuid for k in sorted(block.parameters)})
+    )
+    out.append(
+        f"{pad}{_INLINE_INDENT}static_bindings="
+        + _token(
+            [
+                {
+                    "name": slot.name,
+                    "type_key": slot.type_key,
+                    "fields": [(field.name, field.value.uuid) for field in slot.fields],
+                }
+                for slot in block.static_bindings
+            ]
+        )
     )
 
     out.append(f"{pad}{_INLINE_INDENT}operations:")
