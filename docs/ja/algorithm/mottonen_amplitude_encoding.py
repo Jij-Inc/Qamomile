@@ -54,17 +54,15 @@ from qamomile.qiskit import QiskitTranspiler
 # = \sum_{i=0}^{2^n - 1} a_i |i\rangle.
 # $$
 #
-# この状態準備の規約だけでは、ゲートの合成方法は定まりません。そのため、Qamomileでは2つのAPIを分けています。
+# Möttönenの振幅エンコーディングはこの状態準備を実現する一つのアルゴリズムです。一方で、このような状態準備を実現するアルゴリズムは他にも存在するため、Qamomileでは明示的にMöttönenの手法を指定するAPIと、方式は問わないが状態準備を行うAPIの二つを用意しています。
 #
-# - `amplitude_encoding(...)`は目標状態だけを表します。バックエンドは固有の状態準備操作を利用できます。バックエンド固有の状態準備が使われない場合、Qamomileは現在Möttönen構成を移植可能な実装として使います。ただし、この実装方式は汎用APIの保証ではありません。
 # - `mottonen_amplitude_encoding(...)`はQamomileのMöttönen構成を明示的に要求します。分解方法、リソース数、または合成方法がプログラムの意図に含まれる場合に使用します。
-#
-# 状態準備が固定するのは、全ゼロ入力に対する操作だけです。2つの合成方法が同じ状態を準備しても、他の入力に対する作用は異なる場合があるため、逆操作や制御操作も同一とは限りません。これらの変換後の操作もプログラムの意図に含まれる場合は、明示的なAPIを使用してください。
+# - `amplitude_encoding(...)`は目標状態だけを表します。バックエンドは固有の状態準備操作を利用できます。バックエンド固有の状態準備が使われない場合、Qamomileは現在Möttönen構成を移植可能な実装として使います。ただし、この実装方式は汎用APIの保証ではありません。
 #
 # 明示的な実装は、Möttönen、Vartiainen、Bergholm、Salomaaによる一様制御回転の構成{cite:p}`10.48550/arXiv.quant-ph/0407010`に従います。論文では、より一般的な任意状態変換$|a\rangle \to |b\rangle$を扱います。Qamomileでは入力を$|0\rangle^{\otimes n}$に固定し、状態準備に相当する片側を実装しています。
 #
 # :::{note}
-# 入力量子ビットは$|0\rangle^{\otimes n}$でなければなりません。`mottonen_amplitude_encoding(...)`は、全ゼロ状態から目標状態を準備するユニタリを出力します。他のゲートによって入力状態が変化した後に適用しても、通常は要求した振幅を得られません。
+# 入力量子ビットが$|0\rangle^{\otimes n}$でない場合、これらのAPIは一般に出力状態を保証しません。
 # :::
 
 # %% [markdown]
@@ -132,72 +130,47 @@ amps_complex = [1 + 0j, 1 + 1j, 1 - 1j, 0 + 2j]
 # %% [markdown]
 # ## 実装
 #
-# ### 振幅から状態を準備する
+# ### トランスパイル時に振幅をバインドする
 #
-# 明示的なAPIはPythonのシーケンスまたはNumPy配列を受け取り、自動的に正規化します。同じ呼び出しで、実数、符号付き実数、複素数のベクトルを扱えます。
+# 実数または符号付き実数の振幅ベクトルは、量子カーネルの`Vector[Float]`引数として宣言できます。トランスパイル時に`bindings`で具体値を渡すと、Qamomileは振幅を自動的に正規化し、Möttönen角度とゲート列を生成します。
 
 
 # %%
 @qmc.qkernel
-def prepare_real() -> qmc.Vector[qmc.Bit]:
+def prepare_from_amplitudes(
+    amplitudes: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(2, "q")
-    q = mottonen_amplitude_encoding(q, amps_real)
+    q = mottonen_amplitude_encoding(q, amplitudes)
     return qmc.measure(q)
 
 
-@qmc.qkernel
-def prepare_signed() -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(2, "q")
-    q = mottonen_amplitude_encoding(q, amps_signed)
-    return qmc.measure(q)
-
-
-@qmc.qkernel
-def prepare_complex() -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(2, "q")
-    q = mottonen_amplitude_encoding(q, amps_complex)
-    return qmc.measure(q)
-
-
-prepare_real.draw(fold_loops=False)
+prepare_from_amplitudes.draw(fold_loops=False, amplitudes=amps_real)
 
 # %% [markdown]
 # 展開前の回路では、手法を指定する操作を1つのコンポジットゲートとして保持します。`expand_composite=True`を渡すと、基本的な$R_y$、$R_z$、`CNOT`の列を確認できます。実数回路には$R_z$位相カスケードがありません。
 
 # %%
-prepare_real.draw(fold_loops=False, expand_composite=True)
-
-# %%
-prepare_complex.draw(fold_loops=False, expand_composite=True)
+prepare_from_amplitudes.draw(
+    fold_loops=False,
+    expand_composite=True,
+    amplitudes=amps_real,
+)
 
 # %% [markdown]
-# ### トランスパイル時に具体的な振幅をバインドする
+# `Vector[Float]`は実数のみを保持するため、複素数の振幅ベクトルは直接バインドできません。複素数の入力では、Möttönen角度を量子カーネルの外で計算し、以下の角度APIへ2本の`Vector[Float]`として渡します。
 #
-# 実数の振幅ベクトルは、量子カーネルに`Vector[Float]`として渡すこともできます。Qamomileは量子カーネルをトレースするときにMöttönen角度を計算するため、その値は`bindings`で指定する必要があります。
-
-
-# %%
-@qmc.qkernel
-def prepare_via_binding(amps: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(2, "q")
-    q = mottonen_amplitude_encoding(q, amps)
-    return qmc.measure(q)
-
-
-prepare_via_binding.draw(fold_loops=False, amps=amps_real)
-
-# %% [markdown]
-# `amps`を`parameters`に残すことはできません。`atan2(|a_1|, |a_0|)`などの演算では、トレース時に具体的な値が必要になるためです。実行時に再バインドできる回路を作るには、Möttönen角度を事前に計算し、以下の角度APIを使用します。
+# また、`amplitudes`を`parameters`に残すことはできません。`atan2(|a_1|, |a_0|)`などの演算では、トレース時に具体的な値が必要になるためです。実行時に再バインドできる回路を作るには、Möttönen角度を事前に計算し、以下の角度APIを使用します。
 
 # %%
 try:
-    transpiler.transpile(prepare_via_binding, parameters=["amps"])
+    transpiler.transpile(prepare_from_amplitudes, parameters=["amplitudes"])
 except ValueError as exc:
     print(f"ValueError: {exc}")
     raised = True
 else:
     raised = False
-assert raised, "expected ValueError when amps is a runtime parameter"
+assert raised, "expected ValueError when amplitudes is a runtime parameter"
 
 # %% [markdown]
 # ### 実行時に再バインド可能な角度で一度だけコンパイルする
@@ -217,10 +190,13 @@ def prepare_from_angles(
     return qmc.measure(q)
 
 
+complex_ry_angles = compute_mottonen_amplitude_encoding_ry_angles(amps_complex).tolist()
+complex_rz_angles = compute_mottonen_amplitude_encoding_rz_angles(amps_complex).tolist()
+
 prepare_from_angles.draw(
     fold_loops=False,
-    ry_angles=compute_mottonen_amplitude_encoding_ry_angles(amps_complex).tolist(),
-    rz_angles=compute_mottonen_amplitude_encoding_rz_angles(amps_complex).tolist(),
+    ry_angles=complex_ry_angles,
+    rz_angles=complex_rz_angles,
 )
 
 # %% [markdown]
@@ -232,10 +208,9 @@ prepare_from_angles.draw(
 # %%
 def make_real_kernel(n_qubits: int) -> qmc.QKernel:
     """実数入力用のMöttönen状態準備量子カーネルを構築します。"""
-    amplitudes = np.ones(2**n_qubits).tolist()
 
     @qmc.qkernel
-    def kernel() -> qmc.Vector[qmc.Bit]:
+    def kernel(amplitudes: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
         q = qmc.qubit_array(n_qubits, "q")
         q = mottonen_amplitude_encoding(q, amplitudes)
         return qmc.measure(q)
@@ -245,12 +220,14 @@ def make_real_kernel(n_qubits: int) -> qmc.QKernel:
 
 def make_complex_kernel(n_qubits: int) -> qmc.QKernel:
     """複素数入力用のMöttönen状態準備量子カーネルを構築します。"""
-    amplitudes = (np.ones(2**n_qubits) + 1j * np.arange(2**n_qubits)).tolist()
 
     @qmc.qkernel
-    def kernel() -> qmc.Vector[qmc.Bit]:
+    def kernel(
+        ry_angles: qmc.Vector[qmc.Float],
+        rz_angles: qmc.Vector[qmc.Float],
+    ) -> qmc.Vector[qmc.Bit]:
         q = qmc.qubit_array(n_qubits, "q")
-        q = mottonen_amplitude_encoding(q, amplitudes)
+        q = mottonen_amplitude_encoding_from_angles(q, ry_angles, rz_angles)
         return qmc.measure(q)
 
     return kernel
@@ -261,27 +238,30 @@ def make_complex_kernel(n_qubits: int) -> qmc.QKernel:
 #
 # ### 状態忠実度
 #
-# 3種類すべての具体的な入力について、グローバル位相を除いて正規化後の目標状態を再現できます。
+# 実数と符号付き実数は振幅の`bindings`を使い、複素数は角度の`bindings`を使って、グローバル位相を除いた正規化後の目標状態を再現できます。
 
 # %%
-for label, kernel, target_amplitudes in (
-    ("実数", prepare_real, amps_real),
-    ("符号付き実数", prepare_signed, amps_signed),
-    ("複素数", prepare_complex, amps_complex),
+for label, target_amplitudes in (
+    ("実数", amps_real),
+    ("符号付き実数", amps_signed),
 ):
-    prepared = statevector_of(kernel)
+    prepared = statevector_of(
+        prepare_from_amplitudes,
+        amplitudes=target_amplitudes,
+    )
     target = normalize(target_amplitudes)
     value = fidelity(prepared, target)
     print(f"{label:>11s} 忠実度 = {value:.8f}")
     assert np.isclose(value, 1.0, atol=ATOL_STATEVECTOR)
 
-# %%
-prepared_via_binding = statevector_of(prepare_via_binding, amps=amps_real)
-assert np.isclose(
-    fidelity(prepared_via_binding, normalize(amps_real)),
-    1.0,
-    atol=ATOL_STATEVECTOR,
+prepared_complex = statevector_of(
+    prepare_from_angles,
+    ry_angles=complex_ry_angles,
+    rz_angles=complex_rz_angles,
 )
+complex_fidelity = fidelity(prepared_complex, normalize(amps_complex))
+print(f"{'複素数':>11s} 忠実度 = {complex_fidelity:.8f}")
+assert np.isclose(complex_fidelity, 1.0, atol=ATOL_STATEVECTOR)
 
 # %% [markdown]
 # ### 実行時の再バインド
@@ -331,8 +311,21 @@ for trial_amplitudes in (
 print(f"{'n':>3s} | {'実数(回転/CNOT)':>16s} | {'複素数(回転/CNOT)':>20s}")
 print(f"{'---':>3s} | {'---':>16s} | {'---':>20s}")
 for n_qubits in (2, 3, 4, 5):
-    real_resources = make_real_kernel(n_qubits).estimate_resources()
-    complex_resources = make_complex_kernel(n_qubits).estimate_resources()
+    real_amplitudes = np.ones(2**n_qubits).tolist()
+    complex_amplitudes = (np.ones(2**n_qubits) + 1j * np.arange(2**n_qubits)).tolist()
+    real_resources = qmc.estimate_resources(
+        make_real_kernel(n_qubits).build(amplitudes=real_amplitudes)
+    )
+    complex_resources = qmc.estimate_resources(
+        make_complex_kernel(n_qubits).build(
+            ry_angles=compute_mottonen_amplitude_encoding_ry_angles(
+                complex_amplitudes
+            ).tolist(),
+            rz_angles=compute_mottonen_amplitude_encoding_rz_angles(
+                complex_amplitudes
+            ).tolist(),
+        )
+    )
     real_rotations = int(real_resources.gates.rotation_gates)
     real_cnots = int(real_resources.gates.two_qubit)
     complex_rotations = int(complex_resources.gates.rotation_gates)
@@ -365,15 +358,19 @@ for n_qubits in (2, 3, 4, 5):
 
 # %%
 @qmc.qkernel
-def expval_kernel(observable: qmc.Observable) -> qmc.Float:
+def expval_kernel(
+    amplitudes: qmc.Vector[qmc.Float],
+    observable: qmc.Observable,
+) -> qmc.Float:
     q = qmc.qubit_array(2, "q")
-    q = mottonen_amplitude_encoding(q, amps_real)
+    q = mottonen_amplitude_encoding(q, amplitudes)
     return qmc.expval(q, observable)
 
 
 hamiltonian = qm_o.Z(0) + 0.0 * qm_o.Z(1)
 expval_executable = transpiler.transpile(
-    expval_kernel, bindings={"observable": hamiltonian}
+    expval_kernel,
+    bindings={"amplitudes": amps_real, "observable": hamiltonian},
 )
 expval_result = expval_executable.run(executor).result()
 print(f"<Z_0> = {float(expval_result):+.6f}")
@@ -397,13 +394,15 @@ assert np.isclose(float(expval_result), -1.0 / 3.0, atol=ATOL_STATEVECTOR)
 
 # %%
 @qmc.qkernel
-def prepare_generic() -> qmc.Vector[qmc.Bit]:
+def prepare_generic(
+    amplitudes: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
     q = qmc.qubit_array(2, "q")
-    q = amplitude_encoding(q, amps_real)
+    q = amplitude_encoding(q, amplitudes)
     return qmc.measure(q)
 
 
-generic_state = statevector_of(prepare_generic)
+generic_state = statevector_of(prepare_generic, amplitudes=amps_real)
 assert np.isclose(
     fidelity(generic_state, normalize(amps_real)), 1.0, atol=ATOL_STATEVECTOR
 )
@@ -413,7 +412,7 @@ assert np.isclose(
 #
 # このノートブックでは、次のことを行いました。
 #
-# - 明示的なMöttönen APIで実数状態と複素数状態を準備し、忠実度が1であることを確認しました。
+# - 実数振幅とMöttönen角度を量子カーネル引数として渡し、実数状態と複素数状態の忠実度が1であることを確認しました。
 # - Qamomileの構成における回転と`CNOT`の数が$O(2^n)$で増加することを検証しました。
 # - 正式な`mottonen_amplitude_encoding_from_angles(...)` APIを使い、1つのコンパイル済み回路を再利用しました。
 # - 手法に依存しない`amplitude_encoding(...)`と、Möttönen合成を意図に含める場合に使う手法固有のAPIを区別しました。
