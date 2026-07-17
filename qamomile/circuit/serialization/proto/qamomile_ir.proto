@@ -19,6 +19,26 @@ message QKernel {
   FrontendAnnotation return_annotation = 9;
 }
 
+// Canonical retained-Pauli recipe for one concrete block encoding. The
+// block-encoding unitary, normalization, and register widths are regenerated
+// by the installed factory rather than duplicated on the wire.
+message PauliLCUBlockEncodingArtifact {
+  string artifact_kind = 1;
+  string qamomile_version = 2;
+  BigInteger num_qubits = 3;
+  repeated PauliLCUBlockEncodingTerm terms = 4;
+}
+
+message PauliLCUBlockEncodingTerm {
+  Complex64 coefficient = 1;
+  repeated PauliLCUBlockEncodingOperator operators = 2;
+}
+
+message PauliLCUBlockEncodingOperator {
+  string pauli = 1;
+  BigInteger index = 2;
+}
+
 message KernelParameter {
   string name = 1;
   KernelType type = 2;

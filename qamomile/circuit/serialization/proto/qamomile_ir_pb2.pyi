@@ -187,6 +187,34 @@ class QKernel(_message.Message):
     return_annotation: FrontendAnnotation
     def __init__(self, qamomile_version: _Optional[str] = ..., name: _Optional[str] = ..., parameters: _Optional[_Iterable[_Union[KernelParameter, _Mapping]]] = ..., results: _Optional[_Iterable[_Union[KernelType, _Mapping]]] = ..., body: _Optional[_Union[Block, _Mapping]] = ..., value_table: _Optional[_Iterable[_Union[ValueNode, _Mapping]]] = ..., callable_table: _Optional[_Iterable[_Union[CallableEntry, _Mapping]]] = ..., callable_definition: _Optional[_Union[CallableDefinition, _Mapping]] = ..., return_annotation: _Optional[_Union[FrontendAnnotation, _Mapping]] = ...) -> None: ...
 
+class PauliLCUBlockEncodingArtifact(_message.Message):
+    __slots__ = ("artifact_kind", "qamomile_version", "num_qubits", "terms")
+    ARTIFACT_KIND_FIELD_NUMBER: _ClassVar[int]
+    QAMOMILE_VERSION_FIELD_NUMBER: _ClassVar[int]
+    NUM_QUBITS_FIELD_NUMBER: _ClassVar[int]
+    TERMS_FIELD_NUMBER: _ClassVar[int]
+    artifact_kind: str
+    qamomile_version: str
+    num_qubits: BigInteger
+    terms: _containers.RepeatedCompositeFieldContainer[PauliLCUBlockEncodingTerm]
+    def __init__(self, artifact_kind: _Optional[str] = ..., qamomile_version: _Optional[str] = ..., num_qubits: _Optional[_Union[BigInteger, _Mapping]] = ..., terms: _Optional[_Iterable[_Union[PauliLCUBlockEncodingTerm, _Mapping]]] = ...) -> None: ...
+
+class PauliLCUBlockEncodingTerm(_message.Message):
+    __slots__ = ("coefficient", "operators")
+    COEFFICIENT_FIELD_NUMBER: _ClassVar[int]
+    OPERATORS_FIELD_NUMBER: _ClassVar[int]
+    coefficient: Complex64
+    operators: _containers.RepeatedCompositeFieldContainer[PauliLCUBlockEncodingOperator]
+    def __init__(self, coefficient: _Optional[_Union[Complex64, _Mapping]] = ..., operators: _Optional[_Iterable[_Union[PauliLCUBlockEncodingOperator, _Mapping]]] = ...) -> None: ...
+
+class PauliLCUBlockEncodingOperator(_message.Message):
+    __slots__ = ("pauli", "index")
+    PAULI_FIELD_NUMBER: _ClassVar[int]
+    INDEX_FIELD_NUMBER: _ClassVar[int]
+    pauli: str
+    index: BigInteger
+    def __init__(self, pauli: _Optional[str] = ..., index: _Optional[_Union[BigInteger, _Mapping]] = ...) -> None: ...
+
 class KernelParameter(_message.Message):
     __slots__ = ("name", "type", "kind", "has_default", "default", "differentiable")
     NAME_FIELD_NUMBER: _ClassVar[int]

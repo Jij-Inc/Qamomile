@@ -1,4 +1,4 @@
-"""Expose the exact-distribution version policy for qkernel serialization.
+"""Expose the exact-distribution version policy for artifact serialization.
 
 The protobuf payload stores Qamomile's complete installed distribution version
 rather than an independent integer schema counter. Development and local build
