@@ -741,9 +741,15 @@ class TestSymbolicShapeQubitsRejected:
     def test_symbolic_shape_qubits_raise_clear_error(self) -> None:
         """A Vector[Qubit] without a compile-time-known size is rejected
         with a ``mottonen_amplitude_encoding``-prefixed ValueError that names the
-        binding workaround, rather than the bare ``get_size`` message."""
-        with pytest.raises(ValueError, match="mottonen_amplitude_encoding requires"):
+        concrete-allocation requirement, rather than the bare ``get_size``
+        message."""
+        with pytest.raises(ValueError) as exc_info:
             _amp_encode_with_symbolic_qubits.build()
+
+        message = str(exc_info.value)
+        assert message.startswith("mottonen_amplitude_encoding requires")
+        assert "qmc.qubit_array" in message
+        assert "bindings" not in message
 
 
 # ---------------------------------------------------------------------------

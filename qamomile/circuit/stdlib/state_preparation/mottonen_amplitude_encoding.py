@@ -562,9 +562,10 @@ def _apply_amplitude_encoding(
     except ValueError as e:
         raise ValueError(
             f"{api_name} requires a Vector[Qubit] with a compile-time "
-            "known size; received a symbolic-shape vector. Bind the qubit "
-            "count via transpiler.transpile(kernel, bindings={...}) so the "
-            "amplitude encoding can be traced with a concrete register width."
+            "known size; received a symbolic-shape vector. Allocate the "
+            "register with qmc.qubit_array(...) in the calling kernel, or "
+            "call this API only after the qubit vector width is concrete at "
+            "trace time."
         ) from e
 
     if isinstance(amplitudes, Vector):

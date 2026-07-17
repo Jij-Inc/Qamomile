@@ -283,5 +283,6 @@ def test_generic_symbolic_shape_error_is_method_agnostic() -> None:
 
     message = str(exc_info.value)
     assert message.startswith("amplitude_encoding requires")
-    assert "concrete register width" in message
+    assert "qmc.qubit_array" in message
+    assert "bindings" not in message
     assert "Möttönen" not in message
