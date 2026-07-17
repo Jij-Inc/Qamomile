@@ -116,7 +116,7 @@ def _build_unitary_kernel(
     Returns:
         qmc.QKernel: Allocation-only kernel for exact unitary inspection.
     """
-    applied_unitary = qmc.inverse(encoding.unitary) if invert else encoding.unitary
+    applied_unitary = qmc.inverse(encoding.kernel) if invert else encoding.kernel
 
     @qmc.qkernel
     def kernel() -> qmc.Bit:
@@ -359,7 +359,7 @@ def test_multi_term_root_composite_round_trips_qkernel_serialization() -> None:
 
     encoding = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(1j * I2 + 0.5 * X))
 
-    payload = serialize(encoding.unitary)
+    payload = serialize(encoding.kernel)
     assert serialize(deserialize(payload)) == payload
 
 
@@ -388,8 +388,8 @@ def test_factory_builds_only_the_forward_multi_term_kernel(
     encoding = module.pauli_lcu_block_encoding(lcu)
 
     assert calls == [lcu]
-    assert encoding.unitary._block is None
-    assert qmc.inverse(qmc.inverse(encoding.unitary)) is encoding.unitary
+    assert encoding.kernel._block is None
+    assert qmc.inverse(qmc.inverse(encoding.kernel)) is encoding.kernel
 
 
 def test_descriptor_contract_is_frozen_noncallable_and_identity_based() -> None:
@@ -400,18 +400,18 @@ def test_descriptor_contract_is_frozen_noncallable_and_identity_based() -> None:
 
     assert isinstance(encoding, qmc.PauliLCUBlockEncoding)
     assert tuple(field.name for field in dataclasses.fields(encoding)) == (
-        "unitary",
+        "kernel",
         "normalization",
         "num_signal_qubits",
         "num_system_qubits",
     )
-    assert isinstance(encoding.unitary, qmc.QKernel)
-    assert tuple(encoding.unitary.signature.parameters) == ("signal", "system")
-    assert encoding.unitary.input_types == {
+    assert isinstance(encoding.kernel, qmc.QKernel)
+    assert tuple(encoding.kernel.signature.parameters) == ("signal", "system")
+    assert encoding.kernel.input_types == {
         "signal": qmc.Vector[qmc.Qubit],
         "system": qmc.Vector[qmc.Qubit],
     }
-    assert encoding.unitary.output_types == [
+    assert encoding.kernel.output_types == [
         qmc.Vector[qmc.Qubit],
         qmc.Vector[qmc.Qubit],
     ]
@@ -422,7 +422,7 @@ def test_descriptor_contract_is_frozen_noncallable_and_identity_based() -> None:
     assert encoding.num_system_qubits == 1
     assert not callable(encoding)
     assert not hasattr(encoding, "__dict__")
-    assert not hasattr(encoding, "kernel")
+    assert not hasattr(encoding, "unitary")
     assert not hasattr(encoding, "error_bound")
     assert encoding is not repeated
     assert encoding != repeated
@@ -436,7 +436,7 @@ def test_descriptor_contract_is_frozen_noncallable_and_identity_based() -> None:
 @pytest.mark.parametrize("normalization", [0.0, -1.0, math.inf, math.nan, 10**1000])
 def test_descriptor_rejects_invalid_normalization(normalization: float) -> None:
     """Descriptor construction rejects non-positive or non-finite scaling."""
-    unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).unitary
+    unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).kernel
 
     with pytest.raises(ValueError, match="normalization"):
         qmc.PauliLCUBlockEncoding(unitary, normalization, 1, 1)
@@ -444,15 +444,15 @@ def test_descriptor_rejects_invalid_normalization(normalization: float) -> None:
 
 def test_descriptor_rejects_invalid_field_types_and_widths() -> None:
     """Descriptor construction enforces its QKernel ABI and positive widths."""
-    unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).unitary
+    unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).kernel
 
-    with pytest.raises(TypeError, match="unitary must be a QKernel"):
+    with pytest.raises(TypeError, match="kernel must be a QKernel"):
         qmc.PauliLCUBlockEncoding(object(), 1.0, 1, 1)  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="unitary must have signature"):
+    with pytest.raises(TypeError, match="kernel must have signature"):
         qmc.PauliLCUBlockEncoding(_invalid_scalar_block_unitary, 1.0, 1, 1)
-    with pytest.raises(TypeError, match="unitary must have signature"):
+    with pytest.raises(TypeError, match="kernel must have signature"):
         qmc.PauliLCUBlockEncoding(_invalid_keyword_block_unitary, 1.0, 1, 1)
-    with pytest.raises(TypeError, match="unitary must have signature"):
+    with pytest.raises(TypeError, match="kernel must have signature"):
         qmc.PauliLCUBlockEncoding(_invalid_reversed_block_unitary, 1.0, 1, 1)
     with pytest.raises(TypeError, match="normalization"):
         qmc.PauliLCUBlockEncoding(unitary, "1", 1, 1)  # type: ignore[arg-type]
@@ -509,7 +509,7 @@ def test_numpy_integer_pauli_index_builds_block_encoding() -> None:
         ),
     )
 
-    assert qmc.pauli_lcu_block_encoding(lcu).unitary.block is not None
+    assert qmc.pauli_lcu_block_encoding(lcu).kernel.block is not None
 
 
 def test_signed_zero_does_not_change_block_compiler_identity() -> None:
@@ -520,10 +520,10 @@ def test_signed_zero_does_not_change_block_compiler_identity() -> None:
     negative_zero = PauliLCU(1, (PauliLCUTerm(complex(-1.0, -0.0), ()),))
 
     positive_ref = qkernel_callable_ref(
-        qmc.pauli_lcu_block_encoding(positive_zero).unitary
+        qmc.pauli_lcu_block_encoding(positive_zero).kernel
     )
     negative_ref = qkernel_callable_ref(
-        qmc.pauli_lcu_block_encoding(negative_zero).unitary
+        qmc.pauli_lcu_block_encoding(negative_zero).kernel
     )
     assert positive_ref == negative_ref
 
@@ -532,10 +532,10 @@ def test_composite_rejects_wrong_concrete_register_widths() -> None:
     """Plain, inverse, control, and SELECT share exact width diagnostics."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X + 0.25 * np.diag([1, -1]))
     encoding = qmc.pauli_lcu_block_encoding(lcu)
-    inverse_unitary = qmc.inverse(encoding.unitary)
-    controlled_unitary = qmc.control(encoding.unitary)
+    inverse_unitary = qmc.inverse(encoding.kernel)
+    controlled_unitary = qmc.control(encoding.kernel)
     selected_unitary = qmc.select(
-        (_identity_block_case, encoding.unitary),
+        (_identity_block_case, encoding.kernel),
         num_index_qubits=1,
     )
 
@@ -544,7 +544,7 @@ def test_composite_rejects_wrong_concrete_register_widths() -> None:
         """Call the plain unitary with one signal qubit."""
         signal = qmc.qubit_array(1, "signal")
         system = qmc.qubit_array(1, "system")
-        signal, _ = encoding.unitary(signal, system)
+        signal, _ = encoding.kernel(signal, system)
         return qmc.measure(signal[0])
 
     @qmc.qkernel
@@ -578,7 +578,7 @@ def test_composite_rejects_wrong_concrete_register_widths() -> None:
         """Call the plain unitary with two system qubits."""
         signal = qmc.qubit_array(2, "signal")
         system = qmc.qubit_array(2, "system")
-        signal, _ = encoding.unitary(signal, system)
+        signal, _ = encoding.kernel(signal, system)
         return qmc.measure(signal[0])
 
     @qmc.qkernel
@@ -659,7 +659,7 @@ def test_random_complex_two_term_lcu_samples_and_estimates_on_every_sdk(
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(num_qubits, "system")
         _prepare_basis(system, initial_basis, num_qubits)
-        signal, _ = encoding.unitary(signal, system)
+        signal, _ = encoding.kernel(signal, system)
         return qmc.measure(signal)
 
     @qmc.qkernel
@@ -668,7 +668,7 @@ def test_random_complex_two_term_lcu_samples_and_estimates_on_every_sdk(
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(num_qubits, "system")
         _prepare_basis(system, initial_basis, num_qubits)
-        signal, system = encoding.unitary(signal, system)
+        signal, system = encoding.kernel(signal, system)
         return qmc.expval((signal[0], system[0]), observable)
 
     shots = 2048
@@ -719,7 +719,7 @@ def test_three_term_lcu_executes_two_bit_select_on_every_sdk(
         """Apply the three-term encoding and measure its signal register."""
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        signal, _ = encoding.unitary(signal, system)
+        signal, _ = encoding.kernel(signal, system)
         return qmc.measure(signal)
 
     shots = 4096
@@ -755,7 +755,7 @@ def test_dense_two_qubit_lcu_executes_wide_select_on_every_sdk(
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
         _prepare_basis(system, basis_index, 2)
-        signal, _ = encoding.unitary(signal, system)
+        signal, _ = encoding.kernel(signal, system)
         return qmc.measure(signal)
 
     shots = 4096
@@ -777,8 +777,8 @@ def test_inverse_round_trip_executes_on_every_sdk(sdk_transpiler: Any) -> None:
     """The generated composite followed by its inverse restores both registers."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
     encoding = qmc.pauli_lcu_block_encoding(lcu)
-    double_inverse = qmc.inverse(qmc.inverse(encoding.unitary))
-    assert double_inverse is encoding.unitary
+    double_inverse = qmc.inverse(qmc.inverse(encoding.kernel))
+    assert double_inverse is encoding.kernel
 
     @qmc.qkernel
     def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
@@ -787,7 +787,7 @@ def test_inverse_round_trip_executes_on_every_sdk(sdk_transpiler: Any) -> None:
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
         system[0] = qmc.x(system[0])
         signal, system = double_inverse(signal, system)
-        signal, system = qmc.inverse(encoding.unitary)(signal, system)
+        signal, system = qmc.inverse(encoding.kernel)(signal, system)
         return qmc.measure(signal), qmc.measure(system)
 
     executable = sdk_transpiler.transpiler.transpile(circuit)
@@ -801,7 +801,7 @@ def test_inverse_alone_conjugates_complex_phase_on_every_sdk(
     """The lazy inverse transform independently exposes the adjoint block."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
     encoding = qmc.pauli_lcu_block_encoding(lcu)
-    inverse_unitary = qmc.inverse(encoding.unitary)
+    inverse_unitary = qmc.inverse(encoding.kernel)
 
     @qmc.qkernel
     def circuit(observable: qmc.Observable) -> qmc.Float:
@@ -850,7 +850,7 @@ def test_outer_control_observes_single_identity_term_phase(
         outer = qmc.h(qmc.qubit("outer"))
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        outer, signal, system = qmc.control(encoding.unitary)(
+        outer, signal, system = qmc.control(encoding.kernel)(
             outer,
             signal,
             system,
@@ -880,7 +880,7 @@ def test_outer_control_executes_multi_term_prepare_select_path(
         outer = qmc.h(qmc.qubit("outer"))
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        outer, signal, system = qmc.control(encoding.unitary)(
+        outer, signal, system = qmc.control(encoding.kernel)(
             outer,
             signal,
             system,
@@ -909,7 +909,7 @@ def test_outer_select_observes_single_identity_term_phase_on_every_sdk(
         PauliLCU.from_matrix(np.exp(1j * phase) * I2)
     )
     selected_unitary = qmc.select(
-        (_identity_block_case, encoding.unitary),
+        (_identity_block_case, encoding.kernel),
         num_index_qubits=1,
     )
 
@@ -985,7 +985,7 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
         system: qmc.Vector[qmc.Qubit],
     ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
         """Expose the forward composite through a fixed qkernel signature."""
-        return encoding.unitary(signal, system)
+        return encoding.kernel(signal, system)
 
     @qmc.qkernel
     def inverse_lcu(
@@ -993,7 +993,7 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
         system: qmc.Vector[qmc.Qubit],
     ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
         """Expose the inverse composite through a fixed qkernel signature."""
-        return qmc.inverse(encoding.unitary)(signal, system)
+        return qmc.inverse(encoding.kernel)(signal, system)
 
     applied_gate = inverse_lcu if invert else forward_lcu
     controlled_gate = qmc.control(
@@ -1068,7 +1068,7 @@ def test_zero_operator_path_samples_and_estimates_on_every_sdk(
         """Apply the zero encoding and measure its signal qubit."""
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        signal, _ = encoding.unitary(signal, system)
+        signal, _ = encoding.kernel(signal, system)
         return qmc.measure(signal[0])
 
     @qmc.qkernel
@@ -1076,7 +1076,7 @@ def test_zero_operator_path_samples_and_estimates_on_every_sdk(
         """Apply the zero encoding and estimate signal Z."""
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        signal, _ = encoding.unitary(signal, system)
+        signal, _ = encoding.kernel(signal, system)
         return qmc.expval(signal[0], observable)
 
     sample_executable = sdk_transpiler.transpiler.transpile(sample_kernel)

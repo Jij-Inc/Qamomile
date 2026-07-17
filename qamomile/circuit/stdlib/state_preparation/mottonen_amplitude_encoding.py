@@ -379,12 +379,18 @@ class _MottonenAngles:
 
 def _mottonen_composite(
     amplitudes: Sequence[float] | Sequence[complex] | np.ndarray,
+    *,
+    preserve_unitary_completion: bool = False,
 ) -> tuple[QKernel[..., Vector[Qubit]], int]:
     """Build a body-backed composite qkernel for concrete amplitudes.
 
     Args:
         amplitudes (Sequence[float] | Sequence[complex] | np.ndarray): Target
             amplitude vector.
+        preserve_unitary_completion (bool): Whether to preserve the portable
+            Möttönen circuit's action on the complete Hilbert space instead of
+            allowing a backend-native state-preparation replacement that need
+            only agree on the all-zero input. Defaults to ``False``.
 
     Returns:
         tuple[QKernel[..., Vector[Qubit]], int]: Named composite qkernel and its
@@ -409,11 +415,18 @@ def _mottonen_composite(
         return qubits
 
     normalized = np.asarray(angles.normalized_amplitudes, dtype=np.complex128)
+    callable_name = (
+        "mottonen_unitary" if preserve_unitary_completion else "state_preparation"
+    )
     configure_composite(
         kernel,
-        name="state_preparation",
+        name=callable_name,
         namespace="qamomile.stdlib",
-        policy=CallPolicy.NATIVE_FIRST,
+        policy=(
+            CallPolicy.PRESERVE_BOX
+            if preserve_unitary_completion
+            else CallPolicy.NATIVE_FIRST
+        ),
         semantic_arguments={
             "amplitudes": [
                 [float(amplitude.real), float(amplitude.imag)]

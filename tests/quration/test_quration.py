@@ -300,7 +300,7 @@ def _quration_two_term_pauli_lcu() -> qmc.Bit:
     """Apply the supported two-term Pauli LCU block encoding."""
     signal = qmc.qubit_array(1, "signal")
     system = qmc.qubit_array(1, "system")
-    signal, _ = _quration_two_term_encoding.unitary(signal, system)
+    signal, _ = _quration_two_term_encoding.kernel(signal, system)
     return qmc.measure(signal[0])
 
 
@@ -311,7 +311,7 @@ def _quration_two_term_pauli_lcu_expval(
     """Apply the supported complex LCU and evaluate an observable."""
     signal = qmc.qubit_array(1, "signal")
     system = qmc.qubit_array(1, "system")
-    signal, system = _quration_two_term_encoding.unitary(signal, system)
+    signal, system = _quration_two_term_encoding.kernel(signal, system)
     return qmc.expval((signal[0], system[0]), observable)
 
 
@@ -320,7 +320,7 @@ def _quration_three_term_pauli_lcu() -> qmc.Bit:
     """Build an LCU whose two-bit SELECT exceeds Quration's control bound."""
     signal = qmc.qubit_array(2, "signal")
     system = qmc.qubit_array(1, "system")
-    signal, _ = _quration_three_term_encoding.unitary(signal, system)
+    signal, _ = _quration_three_term_encoding.kernel(signal, system)
     return qmc.measure(signal[0])
 
 

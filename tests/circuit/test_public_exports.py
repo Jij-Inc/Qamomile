@@ -32,6 +32,16 @@ from qamomile.circuit.frontend.operation.measurement import (
     reset,
 )
 from qamomile.circuit.frontend.oracle import Oracle, opaque
+from qamomile.circuit.stdlib.ising_z_block_encoding import (
+    IsingZBlockEncoding,
+    ising_z_block_encoding,
+)
+from qamomile.circuit.stdlib.lcu_block_encoding import (
+    LCUBlockEncoding,
+    LCUBlockEncodingTerm,
+    identity_block_encoding,
+    lcu_block_encoding,
+)
 from qamomile.circuit.stdlib.pauli_lcu_block_encoding import (
     PauliLCUBlockEncoding,
     pauli_lcu_block_encoding,
@@ -122,6 +132,26 @@ def test_pauli_lcu_block_encoding_api_is_publicly_reexported() -> None:
         assert "PauliLCUBlockEncoding" in namespace.__all__
         assert "pauli_lcu_block_encoding" in namespace.__all__
         assert not hasattr(namespace, "pauli_lcu_num_selection_qubits")
+
+
+def test_recursive_block_encoding_apis_are_publicly_reexported() -> None:
+    """Scheme descriptors and recursive LCU factories keep one identity."""
+    public_symbols = {
+        "IsingZBlockEncoding": IsingZBlockEncoding,
+        "ising_z_block_encoding": ising_z_block_encoding,
+        "LCUBlockEncoding": LCUBlockEncoding,
+        "LCUBlockEncodingTerm": LCUBlockEncodingTerm,
+        "identity_block_encoding": identity_block_encoding,
+        "lcu_block_encoding": lcu_block_encoding,
+    }
+
+    for namespace in (qmc, stdlib):
+        for name, value in public_symbols.items():
+            assert getattr(namespace, name) is value
+            assert name in namespace.__all__
+
+        assert not hasattr(namespace, "BlockEncoding")
+        assert not hasattr(namespace, "BlockEncodingLike")
 
 
 def test_measurement_helpers_are_publicly_reexported():

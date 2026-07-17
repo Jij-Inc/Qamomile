@@ -29,6 +29,13 @@ from .arithmetic import (
     ripple_carry_add,
 )
 from .grover import grover_iteration_count, grover_search
+from .ising_z_block_encoding import IsingZBlockEncoding, ising_z_block_encoding
+from .lcu_block_encoding import (
+    LCUBlockEncoding,
+    LCUBlockEncodingTerm,
+    identity_block_encoding,
+    lcu_block_encoding,
+)
 from .multi_controlled_x import mcx, multi_controlled_x
 from .pauli_lcu_block_encoding import (
     PauliLCUBlockEncoding,
@@ -49,6 +56,12 @@ __all__ = [
     "qpe",
     "mcx",
     "multi_controlled_x",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
+    "LCUBlockEncoding",
+    "LCUBlockEncodingTerm",
+    "identity_block_encoding",
+    "lcu_block_encoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "computational_basis_state",

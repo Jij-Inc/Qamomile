@@ -119,6 +119,9 @@ from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
 from .stdlib import (
+    IsingZBlockEncoding,
+    LCUBlockEncoding,
+    LCUBlockEncodingTerm,
     PauliLCUBlockEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
@@ -126,7 +129,10 @@ from .stdlib import (
     controlled_modular_add,
     grover_iteration_count,
     grover_search,
+    identity_block_encoding,
     iqft,
+    ising_z_block_encoding,
+    lcu_block_encoding,
     mcx,
     modmul_const,
     modular_add,
@@ -252,6 +258,12 @@ __all__ = [
     "qpe",
     "mcx",
     "multi_controlled_x",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
+    "LCUBlockEncoding",
+    "LCUBlockEncodingTerm",
+    "identity_block_encoding",
+    "lcu_block_encoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "computational_basis_state",

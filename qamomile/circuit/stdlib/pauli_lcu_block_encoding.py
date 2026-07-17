@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import math
-import numbers
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,36 +16,37 @@ from qamomile.circuit.frontend.composite_gate import (
 )
 from qamomile.circuit.frontend.constructors import uint
 from qamomile.circuit.frontend.handle import Qubit, Vector
-from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.global_phase import global_phase
 from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x, y, z
 from qamomile.circuit.frontend.operation.select import select
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
 from qamomile.circuit.ir.operation.callable import CallPolicy
+from qamomile.circuit.stdlib._block_encoding import (
+    _BlockEncodingKernel,
+    _validate_block_encoding_kernel,
+    _validate_positive_integer,
+    _validate_positive_real,
+    _validate_register_widths,
+)
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
 )
 from qamomile.linalg import PauliLCU, PauliLCUTerm
 from qamomile.observable import Pauli, PauliOperator
 
-_BlockEncodingUnitary = QKernel[
-    ...,
-    tuple[Vector[Qubit], Vector[Qubit]],
-]
-
 
 @dataclass(frozen=True, slots=True, eq=False)
 class PauliLCUBlockEncoding:
     r"""Describe one static exact block encoding of a retained Pauli LCU.
 
-    ``unitary`` is the qkernel implementing the larger unitary ``U``; it is
+    ``kernel`` is the qkernel implementing the larger unitary ``U``; it is
     neither the encoded matrix ``A`` nor a dense matrix value. It has no
     classical arguments and its quantum ABI is
-    ``unitary(signal, system) -> (signal, system)``. ``system`` is the ordered
+    ``kernel(signal, system) -> (signal, system)``. ``system`` is the ordered
     logical data register on which ``A`` acts. ``signal`` is the complete
     source-level ancilla bundle whose all-zero state selects the encoded block.
-    The unitary returns the same logical wires in the same order and acts
+    The kernel returns the same logical wires in the same order and acts
     unitarily for arbitrary signal inputs; the signal may contain failure
     components rather than returning to zero after one application.
 
@@ -66,7 +65,7 @@ class PauliLCUBlockEncoding:
     values.
 
     Args:
-        unitary (QKernel): QKernel implementing the block-encoding unitary
+        kernel (QKernel): QKernel implementing the block-encoding unitary
             ``U`` with the static ``(signal, system)`` ABI.
         normalization (float): Finite positive block normalization.
         num_signal_qubits (int): Concrete positive width of the complete
@@ -76,14 +75,14 @@ class PauliLCUBlockEncoding:
             register.
 
     Raises:
-        TypeError: If ``unitary`` is not a ``QKernel`` with the exact static
+        TypeError: If ``kernel`` is not a ``QKernel`` with the exact static
             positional ABI above, normalization is not a real scalar, or
             either width is not an integer.
         ValueError: If normalization is non-finite or non-positive, or either
             width is non-positive.
     """
 
-    unitary: _BlockEncodingUnitary
+    kernel: _BlockEncodingKernel
     normalization: float
     num_signal_qubits: int
     num_system_qubits: int
@@ -92,34 +91,12 @@ class PauliLCUBlockEncoding:
         """Validate and normalize the immutable descriptor fields.
 
         Raises:
-            TypeError: If a field has an invalid runtime type or ``unitary``
+            TypeError: If a field has an invalid runtime type or ``kernel``
                 does not have the exact static positional block-encoding ABI.
             ValueError: If normalization or a register width is outside its
                 valid finite positive range.
         """
-        if not isinstance(self.unitary, QKernel):
-            raise TypeError("unitary must be a QKernel.")
-        parameters = tuple(self.unitary.signature.parameters.values())
-        expected_inputs = {
-            "signal": Vector[Qubit],
-            "system": Vector[Qubit],
-        }
-        expected_outputs = [Vector[Qubit], Vector[Qubit]]
-        if (
-            tuple(parameter.name for parameter in parameters) != ("signal", "system")
-            or any(
-                parameter.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
-                or parameter.default is not inspect.Parameter.empty
-                for parameter in parameters
-            )
-            or self.unitary.input_types != expected_inputs
-            or self.unitary.output_types != expected_outputs
-        ):
-            raise TypeError(
-                "unitary must have signature "
-                "(signal: Vector[Qubit], system: Vector[Qubit]) -> "
-                "tuple[Vector[Qubit], Vector[Qubit]]."
-            )
+        _validate_block_encoding_kernel(self.kernel, "kernel")
 
         object.__setattr__(
             self,
@@ -142,60 +119,6 @@ class PauliLCUBlockEncoding:
                 "num_system_qubits",
             ),
         )
-
-
-def _validate_positive_real(value: object, name: str) -> float:
-    """Validate one finite positive real scalar.
-
-    Args:
-        value (object): Candidate scalar value.
-        name (str): Field name used in diagnostics.
-
-    Returns:
-        float: Equivalent finite positive Python float.
-
-    Raises:
-        TypeError: If ``value`` is not a non-boolean real scalar.
-        ValueError: If conversion overflows or the value is non-finite or
-            non-positive.
-    """
-    if isinstance(value, (bool, np.bool_)) or not isinstance(
-        value,
-        (numbers.Real, np.integer, np.floating),
-    ):
-        raise TypeError(f"{name} must be a real numeric scalar.")
-    try:
-        normalized = float(value)
-    except OverflowError as exc:
-        raise ValueError(f"{name} must be finite and positive.") from exc
-    if not math.isfinite(normalized) or normalized <= 0.0:
-        raise ValueError(f"{name} must be finite and positive.")
-    return normalized
-
-
-def _validate_positive_integer(value: object, name: str) -> int:
-    """Validate one concrete positive integer width.
-
-    Args:
-        value (object): Candidate register width.
-        name (str): Field name used in diagnostics.
-
-    Returns:
-        int: Equivalent positive Python integer.
-
-    Raises:
-        TypeError: If ``value`` is not a non-boolean integer.
-        ValueError: If ``value`` is non-positive.
-    """
-    if isinstance(value, (bool, np.bool_)) or not isinstance(
-        value,
-        (int, np.integer),
-    ):
-        raise TypeError(f"{name} must be an integer.")
-    normalized = int(value)
-    if normalized <= 0:
-        raise ValueError(f"{name} must be positive.")
-    return normalized
 
 
 @qkernel
@@ -238,7 +161,7 @@ def pauli_lcu_block_encoding(lcu: PauliLCU) -> PauliLCUBlockEncoding:
 
         A = \sum_j c_j P_j, \qquad \alpha = \sum_j |c_j|,
 
-    the descriptor's qkernel ``unitary`` implements ``U`` and satisfies
+    the descriptor's qkernel ``kernel`` implements ``U`` and satisfies
 
     .. math::
 
@@ -269,7 +192,7 @@ def pauli_lcu_block_encoding(lcu: PauliLCU) -> PauliLCUBlockEncoding:
     Returns:
         PauliLCUBlockEncoding: Frozen non-callable descriptor. Allocate its
             registers with ``num_signal_qubits`` and ``num_system_qubits``,
-            then invoke ``unitary(signal, system)``.
+            then invoke ``kernel(signal, system)``.
 
     Raises:
         TypeError: If ``lcu`` is not a ``PauliLCU``.
@@ -285,7 +208,7 @@ def pauli_lcu_block_encoding(lcu: PauliLCU) -> PauliLCUBlockEncoding:
         ... def circuit() -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
         ...     signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         ...     system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        ...     return encoding.unitary(signal, system)
+        ...     return encoding.kernel(signal, system)
     """
     if not isinstance(lcu, PauliLCU):
         raise TypeError("lcu must be a PauliLCU.")
@@ -303,21 +226,21 @@ def pauli_lcu_block_encoding(lcu: PauliLCU) -> PauliLCUBlockEncoding:
         unitary = _build_multi_term_encoding(lcu)
     unitary = _configure_block_encoding(unitary, lcu)
     return PauliLCUBlockEncoding(
-        unitary=unitary,
+        kernel=unitary,
         normalization=lcu.alpha if lcu.num_terms else 1.0,
         num_signal_qubits=_pauli_lcu_num_signal_qubits(lcu),
         num_system_qubits=lcu.num_qubits,
     )
 
 
-def _build_zero_encoding(lcu: PauliLCU) -> _BlockEncodingUnitary:
+def _build_zero_encoding(lcu: PauliLCU) -> _BlockEncodingKernel:
     """Build the exact zero block using one signal-qubit bit flip.
 
     Args:
         lcu (PauliLCU): Zero Pauli linear combination.
 
     Returns:
-        _BlockEncodingUnitary: Zero block-encoding unitary.
+        _BlockEncodingKernel: Zero block-encoding unitary.
     """
     signal_width = _pauli_lcu_num_signal_qubits(lcu)
 
@@ -336,7 +259,13 @@ def _build_zero_encoding(lcu: PauliLCU) -> _BlockEncodingUnitary:
             tuple[Vector[Qubit], Vector[Qubit]]: Updated signal and system
                 registers.
         """
-        _validate_register_widths(signal, system, signal_width, lcu.num_qubits)
+        _validate_register_widths(
+            signal,
+            system,
+            signal_width,
+            lcu.num_qubits,
+            "Pauli LCU block encoding",
+        )
         signal[0] = x(signal[0])
         return signal, system
 
@@ -345,14 +274,14 @@ def _build_zero_encoding(lcu: PauliLCU) -> _BlockEncodingUnitary:
 
 def _build_single_term_encoding(
     lcu: PauliLCU,
-) -> _BlockEncodingUnitary:
+) -> _BlockEncodingKernel:
     """Build an unconditional phased-Pauli encoding for one term.
 
     Args:
         lcu (PauliLCU): One-term Pauli linear combination.
 
     Returns:
-        _BlockEncodingUnitary: Single-term block-encoding unitary.
+        _BlockEncodingKernel: Single-term block-encoding unitary.
     """
     signal_width = _pauli_lcu_num_signal_qubits(lcu)
     term = lcu.terms[0]
@@ -374,7 +303,13 @@ def _build_single_term_encoding(
             tuple[Vector[Qubit], Vector[Qubit]]: Preserved signal register
                 and transformed system register.
         """
-        _validate_register_widths(signal, system, signal_width, lcu.num_qubits)
+        _validate_register_widths(
+            signal,
+            system,
+            signal_width,
+            lcu.num_qubits,
+            "Pauli LCU block encoding",
+        )
         _apply_pauli_word(system, term.operators)
         system = global_phase(_identity_vector, phase)(system)
         return signal, system
@@ -384,7 +319,7 @@ def _build_single_term_encoding(
 
 def _build_multi_term_encoding(
     lcu: PauliLCU,
-) -> _BlockEncodingUnitary:
+) -> _BlockEncodingKernel:
     """Build a PREPARE-SELECT-PREPARE-dagger encoding.
 
     Args:
@@ -392,7 +327,7 @@ def _build_multi_term_encoding(
             terms.
 
     Returns:
-        _BlockEncodingUnitary: Multi-term block-encoding unitary.
+        _BlockEncodingKernel: Multi-term block-encoding unitary.
     """
     signal_width = _pauli_lcu_num_signal_qubits(lcu)
     amplitudes = np.zeros(1 << signal_width, dtype=np.float64)
@@ -401,7 +336,12 @@ def _build_multi_term_encoding(
     for index, term in enumerate(lcu.terms):
         amplitudes[index] = math.sqrt(abs(term.coefficient)) / sqrt_alpha
 
-    preparation, required_width = _mottonen_composite(amplitudes)
+    # PREPARE is used on arbitrary signal states and paired with its inverse,
+    # so both directions must share one full-space unitary completion.
+    preparation, required_width = _mottonen_composite(
+        amplitudes,
+        preserve_unitary_completion=True,
+    )
     if required_width != signal_width:
         raise RuntimeError(
             "Möttönen preparation width disagrees with the LCU signal width."
@@ -430,7 +370,13 @@ def _build_multi_term_encoding(
             tuple[Vector[Qubit], Vector[Qubit]]: Updated signal and system
                 registers.
         """
-        _validate_register_widths(signal, system, signal_width, lcu.num_qubits)
+        _validate_register_widths(
+            signal,
+            system,
+            signal_width,
+            lcu.num_qubits,
+            "Pauli LCU block encoding",
+        )
         signal = preparation(signal)
         signal, system = selector(signal, system)
         signal = unprepare(signal)
@@ -525,67 +471,18 @@ def _coefficient_phase(coefficient: complex) -> float:
     return phase if phase else 0.0
 
 
-def _validate_register_widths(
-    signal: Vector[Qubit],
-    system: Vector[Qubit],
-    expected_signal: int,
-    expected_system: int,
-) -> None:
-    """Validate concrete register widths while allowing symbolic cache traces.
-
-    Args:
-        signal (Vector[Qubit]): Complete signal register.
-        system (Vector[Qubit]): System register.
-        expected_signal (int): Required signal width.
-        expected_system (int): Required system width.
-
-    Raises:
-        TypeError: If either argument is not a vector register.
-        ValueError: If a concrete register width differs from its requirement.
-    """
-    _validate_register_width(signal, expected_signal, "signal")
-    _validate_register_width(system, expected_system, "system")
-
-
-def _validate_register_width(
-    register: Vector[Qubit],
-    expected: int,
-    name: str,
-) -> None:
-    """Validate one concrete vector width and defer symbolic-width checks.
-
-    Args:
-        register (Vector[Qubit]): Register to inspect.
-        expected (int): Required width.
-        name (str): Register name used in diagnostics.
-
-    Raises:
-        TypeError: If ``register`` is not a vector.
-        ValueError: If its concrete width differs from ``expected``.
-    """
-    try:
-        actual = get_size(register)
-    except ValueError:
-        return
-    if actual != expected:
-        unit = "qubit" if expected == 1 else "qubits"
-        raise ValueError(
-            f"Pauli LCU block encoding requires {expected} {name} {unit}, got {actual}."
-        )
-
-
 def _configure_block_encoding(
-    unitary: _BlockEncodingUnitary,
+    unitary: _BlockEncodingKernel,
     lcu: PauliLCU,
-) -> _BlockEncodingUnitary:
+) -> _BlockEncodingKernel:
     """Attach stable compiler identity and semantic LCU metadata.
 
     Args:
-        unitary (_BlockEncodingUnitary): Composite qkernel to configure.
+        unitary (_BlockEncodingKernel): Composite qkernel to configure.
         lcu (PauliLCU): Decomposition determining the composite unitary.
 
     Returns:
-        _BlockEncodingUnitary: The same configured qkernel.
+        _BlockEncodingKernel: The same configured qkernel.
     """
     semantic_arguments = _semantic_arguments(lcu)
     digest_input = json.dumps(
