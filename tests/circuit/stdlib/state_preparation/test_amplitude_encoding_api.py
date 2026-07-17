@@ -34,7 +34,7 @@ def _random_complex_amplitudes(n_qubits: int, seed: int) -> list[complex]:
         seed (int): Seed for ``numpy.random.default_rng``.
 
     Returns:
-        list[complex]: Non-zero complex vector of length ``2**n_qubits``.
+        list[complex]: Complex vector of length ``2**n_qubits``.
     """
     rng = np.random.default_rng(seed)
     real = rng.standard_normal(2**n_qubits)

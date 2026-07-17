@@ -100,7 +100,7 @@ def _nested_operations(operation: Any, *, depth: int = 0) -> list[Any]:
         depth (int): Current recursion depth.
 
     Returns:
-        list[Any]: Operation tree down to eight definition levels.
+        list[Any]: The root operation and up to eight nested definition levels.
     """
     operations = [operation]
     definition = getattr(operation, "definition", None)
