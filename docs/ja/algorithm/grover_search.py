@@ -148,7 +148,7 @@ transpiler = QiskitTranspiler()
 #
 # ### 問題設定
 #
-# ここからは、一般のアルゴリズムを4量子ビットの検索レジスタへ適用します。そのため$N=2^4=16$であり、$|0101\rangle$だけをマークします。Grover探索を実行する前は、一様重ね合わせに含まれる各状態の確率が$1/16$です。マークされた状態が1つの場合、`grover_iteration_count(4, 1)`は反復回数3を返します。3回反復した後、マークされた状態を測定する理想的な確率は約$0.9613$です。
+# ここからは、一般のアルゴリズムを4量子ビットの検索レジスタへ適用します。そのため$N=2^4=16$であり、$|0101\rangle$だけをマークします。Grover探索を実行する前は、一様重ね合わせに含まれる各状態の確率が$1/16$です。マークされた状態が1つの場合、`grover_iteration_count(4, 1)`は反復回数3を返します。3回反復した後、マークされた状態を測定する理想的な確率は約$0.9613$です。基底状態のラベルは通常の$|q_3q_2q_1q_0\rangle$の順に表示し、`search[0]`を右端の最下位ビット（LSB）として扱います。
 #
 # 5番目の量子ビットはオラクルの補助量子ビットです。オラクルを適用する前後で$|0\rangle$となるため、Grover反復ごとに同じ物理量子ビットを再利用できます。
 
@@ -187,9 +187,9 @@ def oracle_operator(
 ) -> qmc.Vector[qmc.Qubit]:
     oracle_aux = qmc.qubit(name="oracle_aux")
 
-    # |0101>を|1111>へ写し、すべて1の制御条件で検出できるようにします。
-    search[0] = qmc.x(search[0])
-    search[2] = qmc.x(search[2])
+    # |q3 q2 q1 q0> = |0101>を|1111>へ写します。
+    search[1] = qmc.x(search[1])
+    search[3] = qmc.x(search[3])
 
     # 補助量子ビットを|->へ準備します。
     oracle_aux = qmc.x(oracle_aux)
@@ -207,8 +207,8 @@ def oracle_operator(
     oracle_aux = qmc.x(oracle_aux)
 
     # もとの計算基底ラベルへ戻します。
-    search[0] = qmc.x(search[0])
-    search[2] = qmc.x(search[2])
+    search[1] = qmc.x(search[1])
+    search[3] = qmc.x(search[3])
     return search
 
 
@@ -284,10 +284,10 @@ after_result = sample_kernel(
 # 2つのサンプリング結果を検索レジスタの確率へ変換し、振幅増幅の前後の分布を比較します。
 
 # %%
-# 測定回数を検索レジスタ順のラベルが付いた確率へ変換します。
+# LSB-firstの測定タプルを通常の|q3 q2 q1 q0>表記の確率へ変換します。
 def state_probabilities(sample_result) -> dict[str, float]:
     return {
-        "".join(str(bit) for bit in state): count / sample_result.shots
+        "".join(str(bit) for bit in reversed(state)): count / sample_result.shots
         for state, count in sample_result.results
     }
 
@@ -295,6 +295,7 @@ def state_probabilities(sample_result) -> dict[str, float]:
 before_probabilities = state_probabilities(before_result)
 after_probabilities = state_probabilities(after_result)
 
+# q0が右端の最下位ビットになるように基底状態を表示します。
 basis_states = [
     format(index, f"0{SEARCH_QUBITS}b") for index in range(2**SEARCH_QUBITS)
 ]

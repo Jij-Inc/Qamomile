@@ -184,6 +184,8 @@ transpiler = QiskitTranspiler()
 # in the uniform superposition has probability $1/16$. For one marked state,
 # `grover_iteration_count(4, 1)` gives three iterations. The ideal
 # marked-state probability after those iterations is approximately $0.9613$.
+# Basis-state labels use the conventional $|q_3q_2q_1q_0\rangle$ display order,
+# so `search[0]` is the rightmost, least-significant bit.
 #
 # A fifth qubit serves as the oracle auxiliary qubit. It starts and ends every
 # oracle query in $|0\rangle$, so the same physical qubit can be reused in each
@@ -229,9 +231,9 @@ def oracle_operator(
 ) -> qmc.Vector[qmc.Qubit]:
     oracle_aux = qmc.qubit(name="oracle_aux")
 
-    # Map |0101> to |1111> so the all-ones control can detect it.
-    search[0] = qmc.x(search[0])
-    search[2] = qmc.x(search[2])
+    # Map |q3 q2 q1 q0> = |0101> to |1111>.
+    search[1] = qmc.x(search[1])
+    search[3] = qmc.x(search[3])
 
     # Prepare the auxiliary qubit in |->.
     oracle_aux = qmc.x(oracle_aux)
@@ -249,8 +251,8 @@ def oracle_operator(
     oracle_aux = qmc.x(oracle_aux)
 
     # Restore the original computational-basis labels.
-    search[0] = qmc.x(search[0])
-    search[2] = qmc.x(search[2])
+    search[1] = qmc.x(search[1])
+    search[3] = qmc.x(search[3])
     return search
 
 
@@ -336,10 +338,10 @@ after_result = sample_kernel(
 # the distributions before and after amplitude amplification.
 
 # %%
-# Convert sample counts to probabilities labeled in search-register order.
+# Convert LSB-first measurement tuples to conventional |q3 q2 q1 q0> labels.
 def state_probabilities(sample_result) -> dict[str, float]:
     return {
-        "".join(str(bit) for bit in state): count / sample_result.shots
+        "".join(str(bit) for bit in reversed(state)): count / sample_result.shots
         for state, count in sample_result.results
     }
 
@@ -347,6 +349,7 @@ def state_probabilities(sample_result) -> dict[str, float]:
 before_probabilities = state_probabilities(before_result)
 after_probabilities = state_probabilities(after_result)
 
+# Display basis states with q0 as the rightmost, least-significant bit.
 basis_states = [
     format(index, f"0{SEARCH_QUBITS}b") for index in range(2**SEARCH_QUBITS)
 ]
