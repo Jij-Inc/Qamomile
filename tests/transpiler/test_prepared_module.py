@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 import qamomile.circuit as qmc
@@ -117,6 +119,17 @@ def test_prepare_exposes_program_abi_before_segmentation() -> None:
 
     assert prepared.abi.public_inputs == {}
     assert prepared.abi.output_values == prepared.entrypoint.output_values
+
+
+def test_prepare_accepts_a_block_only_object_without_input_types() -> None:
+    """A legacy block-only frontend object needs no static-binding metadata."""
+    block = Block(name="block_only")
+    kernel = SimpleNamespace(block=block)
+
+    prepared = QamomileCompiler().prepare(kernel)
+
+    assert prepared.entrypoint is block
+    assert prepared.bindings == {}
 
 
 def test_prepare_definition_mapping_is_read_only() -> None:

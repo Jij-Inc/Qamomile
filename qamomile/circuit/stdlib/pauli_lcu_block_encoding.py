@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import math
-import numbers
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,191 +15,50 @@ from qamomile.circuit.frontend.composite_gate import (
     configure_composite,
 )
 from qamomile.circuit.frontend.constructors import uint
-from qamomile.circuit.frontend.handle import Float, Qubit, UInt, Vector
+from qamomile.circuit.frontend.handle import Qubit, Vector
 from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.global_phase import global_phase
 from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x, y, z
 from qamomile.circuit.frontend.operation.select import select
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
-from qamomile.circuit.frontend.static_binding import (
-    StaticBindingFieldSpec,
-    StaticBindingMemberSpec,
-    StaticBindingSpec,
-    register_static_binding,
-)
 from qamomile.circuit.ir.operation.callable import CallPolicy
+from qamomile.circuit.stdlib.lcu_block_encoding import (
+    LCUBlockEncoding,
+    _BlockEncodingUnitary,
+    _register_lcu_block_encoding_static_binding,
+)
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
 )
 from qamomile.linalg import PauliLCU, PauliLCUTerm
 from qamomile.observable import Pauli, PauliOperator
 
-_BlockEncodingUnitary = QKernel[
-    ...,
-    tuple[Vector[Qubit], Vector[Qubit]],
-]
-
 
 @dataclass(frozen=True, slots=True, eq=False)
-class PauliLCUBlockEncoding:
-    r"""Describe one static exact block encoding of a retained Pauli LCU.
+class PauliLCUBlockEncoding(LCUBlockEncoding):
+    """Identify an LCU block encoding produced from a Pauli decomposition.
 
-    ``unitary`` is the qkernel implementing the larger unitary ``U``; it is
-    neither the encoded matrix ``A`` nor a dense matrix value. It has no
-    classical arguments and its quantum ABI is
-    ``unitary(signal, system) -> (signal, system)``. ``system`` is the ordered
-    logical data register on which ``A`` acts. ``signal`` is the complete
-    source-level ancilla bundle whose all-zero state selects the encoded block.
-    The unitary returns the same logical wires in the same order and acts
-    unitarily for arbitrary signal inputs; after one application, the signal
-    may have non-zero components rather than returning entirely to zero.
-
-    For the all-zero signal isometry ``V0``, the exact retained LCU satisfies
-
-    .. math::
-
-        V_0^\dagger U V_0 = A / \mathtt{normalization}
-
-    including coefficient phase. ``normalization`` is finite and positive;
-    it is ``1.0`` for the zero operator. This implementation allocates no
-    hidden source-level logical qubits. A backend may still use temporary
-    decomposition scratch that is resource-accounted, exactly uncomputed for
-    every public input, and preserved under inverse and control.
-    Descriptor comparison and hashing use object identity rather than field
-    values.
+    The subtype adds no qkernel-visible fields. Reusable qkernels should
+    annotate encoding arguments with :class:`LCUBlockEncoding`; the Pauli
+    subtype remains available for producer-specific host-side code and
+    backward-compatible serialized templates.
 
     Args:
-        unitary (QKernel): QKernel implementing the block-encoding unitary
-            ``U`` with the static ``(signal, system)`` ABI.
+        unitary (QKernel): QKernel implementing the exact block-encoding
+            unitary with the static ``(signal, system)`` ABI.
         normalization (float): Finite positive block normalization.
         num_signal_qubits (int): Concrete positive width of the complete
-            signal register, including selectors, logical workspace, and
-            padding required by the producer.
+            signal register.
         num_system_qubits (int): Concrete positive width of the ordered system
             register.
 
     Raises:
-        TypeError: If ``unitary`` is not a ``QKernel`` with the exact static
-            positional ABI above, normalization is not a real scalar, or
-            either width is not an integer.
-        ValueError: If normalization is non-finite or non-positive, or either
-            width is non-positive.
+        TypeError: If an inherited descriptor field has an invalid type or the
+            unitary ABI is invalid.
+        ValueError: If normalization or a register width is non-positive or
+            non-finite.
     """
-
-    unitary: _BlockEncodingUnitary
-    normalization: float
-    num_signal_qubits: int
-    num_system_qubits: int
-
-    def __post_init__(self) -> None:
-        """Validate and normalize the immutable descriptor fields.
-
-        Raises:
-            TypeError: If a field has an invalid runtime type or ``unitary``
-                does not have the exact static positional block-encoding ABI.
-            ValueError: If normalization or a register width is outside its
-                valid finite positive range.
-        """
-        if not isinstance(self.unitary, QKernel):
-            raise TypeError("unitary must be a QKernel.")
-        parameters = tuple(self.unitary.signature.parameters.values())
-        expected_inputs = {
-            "signal": Vector[Qubit],
-            "system": Vector[Qubit],
-        }
-        expected_outputs = [Vector[Qubit], Vector[Qubit]]
-        if (
-            tuple(parameter.name for parameter in parameters) != ("signal", "system")
-            or any(
-                parameter.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
-                or parameter.default is not inspect.Parameter.empty
-                for parameter in parameters
-            )
-            or self.unitary.input_types != expected_inputs
-            or self.unitary.output_types != expected_outputs
-        ):
-            raise TypeError(
-                "unitary must have signature "
-                "(signal: Vector[Qubit], system: Vector[Qubit]) -> "
-                "tuple[Vector[Qubit], Vector[Qubit]]."
-            )
-
-        object.__setattr__(
-            self,
-            "normalization",
-            _validate_positive_real(self.normalization, "normalization"),
-        )
-        object.__setattr__(
-            self,
-            "num_signal_qubits",
-            _validate_positive_integer(
-                self.num_signal_qubits,
-                "num_signal_qubits",
-            ),
-        )
-        object.__setattr__(
-            self,
-            "num_system_qubits",
-            _validate_positive_integer(
-                self.num_system_qubits,
-                "num_system_qubits",
-            ),
-        )
-
-
-def _validate_positive_real(value: object, name: str) -> float:
-    """Validate one finite positive real scalar.
-
-    Args:
-        value (object): Candidate scalar value.
-        name (str): Field name used in diagnostics.
-
-    Returns:
-        float: Equivalent finite positive Python float.
-
-    Raises:
-        TypeError: If ``value`` is not a non-boolean real scalar.
-        ValueError: If conversion overflows or the value is non-finite or
-            non-positive.
-    """
-    if isinstance(value, (bool, np.bool_)) or not isinstance(
-        value,
-        (numbers.Real, np.integer, np.floating),
-    ):
-        raise TypeError(f"{name} must be a real numeric scalar.")
-    try:
-        normalized = float(value)
-    except OverflowError as exc:
-        raise ValueError(f"{name} must be finite and positive.") from exc
-    if not math.isfinite(normalized) or normalized <= 0.0:
-        raise ValueError(f"{name} must be finite and positive.")
-    return normalized
-
-
-def _validate_positive_integer(value: object, name: str) -> int:
-    """Validate one concrete positive integer width.
-
-    Args:
-        value (object): Candidate register width.
-        name (str): Field name used in diagnostics.
-
-    Returns:
-        int: Equivalent positive Python integer.
-
-    Raises:
-        TypeError: If ``value`` is not a non-boolean integer.
-        ValueError: If ``value`` is non-positive.
-    """
-    if isinstance(value, (bool, np.bool_)) or not isinstance(
-        value,
-        (int, np.integer),
-    ):
-        raise TypeError(f"{name} must be an integer.")
-    normalized = int(value)
-    if normalized <= 0:
-        raise ValueError(f"{name} must be positive.")
-    return normalized
 
 
 @qkernel
@@ -638,40 +495,9 @@ def _semantic_arguments(lcu: PauliLCU) -> dict[str, Any]:
     }
 
 
-register_static_binding(
-    StaticBindingSpec(
-        annotation=PauliLCUBlockEncoding,
-        type_key="qamomile.stdlib.pauli_lcu_block_encoding",
-        fields={
-            "normalization": StaticBindingFieldSpec(
-                handle_type=Float,
-                getter=lambda encoding: encoding.normalization,
-            ),
-            "num_signal_qubits": StaticBindingFieldSpec(
-                handle_type=UInt,
-                getter=lambda encoding: encoding.num_signal_qubits,
-            ),
-            "num_system_qubits": StaticBindingFieldSpec(
-                handle_type=UInt,
-                getter=lambda encoding: encoding.num_system_qubits,
-            ),
-        },
-        members={
-            "unitary": StaticBindingMemberSpec(
-                input_types={
-                    "signal": Vector[Qubit],
-                    "system": Vector[Qubit],
-                },
-                output_types=(Vector[Qubit], Vector[Qubit]),
-                return_annotation=tuple[Vector[Qubit], Vector[Qubit]],
-                getter=lambda encoding: encoding.unitary,
-                qubit_width_fields={
-                    "signal": "num_signal_qubits",
-                    "system": "num_system_qubits",
-                },
-            ),
-        },
-    )
+_register_lcu_block_encoding_static_binding(
+    PauliLCUBlockEncoding,
+    "qamomile.stdlib.pauli_lcu_block_encoding",
 )
 
 

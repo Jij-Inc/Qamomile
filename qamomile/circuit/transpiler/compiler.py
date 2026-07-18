@@ -120,7 +120,8 @@ class QamomileCompiler:
                 inputs or outputs.
         """
         block = self.to_block(kernel, bindings, parameters)
-        ordinary_bindings = without_static_bindings(kernel.input_types, bindings)
+        input_types = getattr(kernel, "input_types", {})
+        ordinary_bindings = without_static_bindings(input_types, bindings)
         EntrypointValidationPass().run(block)
         if self.config.substitutions.rules:
             block = SubstitutionPass(self.config.substitutions).run(block)

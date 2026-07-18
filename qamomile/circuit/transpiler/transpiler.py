@@ -625,7 +625,8 @@ class Transpiler(ABC, Generic[T]):
         validate_bindings_parameters_disjoint(bindings, parameters)
 
         prepared = self.prepare(kernel, bindings, parameters)
-        ordinary_bindings = without_static_bindings(kernel.input_types, bindings)
+        input_types = getattr(kernel, "input_types", {})
+        ordinary_bindings = without_static_bindings(input_types, bindings)
         separated = self.plan_circuit(prepared, ordinary_bindings)
         return self.emit(separated, ordinary_bindings, parameters)
 

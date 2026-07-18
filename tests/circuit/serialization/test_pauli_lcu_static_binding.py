@@ -41,6 +41,11 @@ X = np.array([[0, 1], [1, 0]], dtype=np.complex128)
 Z = np.array([[1, 0], [0, -1]], dtype=np.complex128)
 
 
+@dataclasses.dataclass(frozen=True, slots=True, eq=False)
+class _AlternativeLCUBlockEncoding(qmc.LCUBlockEncoding):
+    """Represent a non-Pauli producer using the common LCU contract."""
+
+
 @qmc.qkernel
 def _identity_case(
     signal: qmc.Vector[qmc.Qubit],
@@ -61,7 +66,7 @@ def _identity_case(
 
 @qmc.qkernel
 def _direct_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     """Apply a compile-time-bound encoding through its direct unitary."""
     signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
@@ -71,8 +76,19 @@ def _direct_template(
 
 
 @qmc.qkernel
-def _inverse_template(
+def _pauli_specific_template(
     encoding: qmc.PauliLCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+    """Retain compatibility with the original Pauli-specific annotation."""
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = encoding.unitary(signal, system)
+    return qmc.measure(signal), qmc.measure(system)
+
+
+@qmc.qkernel
+def _inverse_template(
+    encoding: qmc.LCUBlockEncoding,
 ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     """Apply the inverse of a compile-time-bound encoding unitary."""
     signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
@@ -83,7 +99,7 @@ def _inverse_template(
 
 @qmc.qkernel
 def _controlled_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> tuple[qmc.Bit, qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     """Apply a compile-time-bound encoding under an outer control."""
     outer = qmc.qubit("outer")
@@ -95,7 +111,7 @@ def _controlled_template(
 
 @qmc.qkernel
 def _select_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> tuple[
     qmc.Vector[qmc.Bit],
     qmc.Vector[qmc.Bit],
@@ -114,7 +130,7 @@ def _select_template(
 
 @qmc.qkernel
 def _nested_scalar_capture_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Vector[qmc.Bit]:
     """Capture a static width field in a nested qkernel allocation."""
 
@@ -142,7 +158,7 @@ def _identity_width(width: qmc.UInt) -> qmc.UInt:
 
 @qmc.qkernel
 def _nested_scalar_passthrough_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Vector[qmc.Bit]:
     """Use a static width returned by an ordinary nested qkernel."""
     width = _identity_width(encoding.num_signal_qubits)
@@ -152,7 +168,7 @@ def _nested_scalar_passthrough_template(
 
 @qmc.qkernel
 def _nested_scalar_passthrough_chain_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Vector[qmc.Bit]:
     """Use a static width passed through two ordered helper calls."""
     first = _identity_width(encoding.num_signal_qubits)
@@ -163,7 +179,7 @@ def _nested_scalar_passthrough_chain_template(
 
 @qmc.qkernel
 def _nested_width_argument_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     """Pass one static width through two ordinary nested qkernel calls."""
     first = _allocate_from_width(encoding.num_signal_qubits)
@@ -173,7 +189,7 @@ def _nested_width_argument_template(
 
 @qmc.qkernel
 def _loop_field_alias_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Bit:
     """Provide a loop-local UInt producer beside an unused static slot."""
     qubit = qmc.qubit("qubit")
@@ -184,7 +200,7 @@ def _loop_field_alias_template(
 
 @qmc.qkernel
 def _both_inverse_orders_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     """Apply direct-inverse and inverse-direct pairs in one template."""
     signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
@@ -198,7 +214,7 @@ def _both_inverse_orders_template(
 
 @qmc.qkernel
 def _double_inverse_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     """Apply a double inverse of a deferred encoding member."""
 
@@ -218,7 +234,7 @@ def _double_inverse_template(
 
 @qmc.qkernel
 def _controlled_inverse_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> tuple[qmc.Bit, qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     """Apply the inverse deferred member under an outer control."""
 
@@ -243,7 +259,7 @@ def _controlled_inverse_template(
 
 @qmc.qkernel
 def _inverse_select_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> tuple[
     qmc.Vector[qmc.Bit],
     qmc.Vector[qmc.Bit],
@@ -271,7 +287,7 @@ def _inverse_select_template(
 
 @qmc.qkernel
 def _wrong_signal_direct(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Vector[qmc.Bit]:
     """Call a two-signal encoding with one explicit signal qubit."""
     signal = qmc.qubit_array(1, "signal")
@@ -282,7 +298,7 @@ def _wrong_signal_direct(
 
 @qmc.qkernel
 def _wrong_signal_inverse(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Vector[qmc.Bit]:
     """Inverse-call a two-signal encoding with one explicit signal qubit."""
     signal = qmc.qubit_array(1, "signal")
@@ -293,7 +309,7 @@ def _wrong_signal_inverse(
 
 @qmc.qkernel
 def _wrong_signal_control(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Vector[qmc.Bit]:
     """Control-call a two-signal encoding with one explicit signal qubit."""
     outer = qmc.qubit("outer")
@@ -305,7 +321,7 @@ def _wrong_signal_control(
 
 @qmc.qkernel
 def _wrong_signal_select(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Vector[qmc.Bit]:
     """SELECT-call a two-signal encoding with one explicit signal qubit."""
     index = qmc.qubit_array(1, "index")
@@ -320,7 +336,7 @@ def _wrong_signal_select(
 
 @qmc.qkernel
 def _wrong_system_direct(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Vector[qmc.Bit]:
     """Call a one-system encoding with two explicit system qubits."""
     signal = qmc.qubit_array(2, "signal")
@@ -330,7 +346,7 @@ def _wrong_system_direct(
 
 
 @qmc.qkernel
-def _phase_sample_template(encoding: qmc.PauliLCUBlockEncoding) -> qmc.Bit:
+def _phase_sample_template(encoding: qmc.LCUBlockEncoding) -> qmc.Bit:
     """Detect a bound encoding's phase with an outer Hadamard test."""
     outer = qmc.h(qmc.qubit("outer"))
     signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
@@ -341,7 +357,7 @@ def _phase_sample_template(encoding: qmc.PauliLCUBlockEncoding) -> qmc.Bit:
 
 
 @qmc.qkernel
-def _semantic_sample_template(encoding: qmc.PauliLCUBlockEncoding) -> qmc.Bit:
+def _semantic_sample_template(encoding: qmc.LCUBlockEncoding) -> qmc.Bit:
     """Measure the system output of a statically bound encoding."""
     signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
     system = qmc.qubit_array(encoding.num_system_qubits, "system")
@@ -351,7 +367,7 @@ def _semantic_sample_template(encoding: qmc.PauliLCUBlockEncoding) -> qmc.Bit:
 
 @qmc.qkernel
 def _semantic_expval_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     observable: qmc.Observable,
 ) -> qmc.Float:
     """Evaluate an observable after a statically bound encoding."""
@@ -363,7 +379,7 @@ def _semantic_expval_template(
 
 @qmc.qkernel
 def _normalization_runtime_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     theta: qmc.Float,
 ) -> qmc.Bit:
     """Combine one static normalization field with a runtime parameter."""
@@ -374,7 +390,7 @@ def _normalization_runtime_template(
 
 @qmc.qkernel
 def _complex_inverse_sample_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Bit:
     """Convert deferred-inverse phase kickback into a population."""
 
@@ -397,7 +413,7 @@ def _complex_inverse_sample_template(
 
 @qmc.qkernel
 def _complex_inverse_expval_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     observable: qmc.Observable,
 ) -> qmc.Float:
     """Estimate conjugated phase kickback from a deferred inverse."""
@@ -419,7 +435,7 @@ def _complex_inverse_expval_template(
 
 @qmc.qkernel
 def _inverse_tuple_expval_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     observable: qmc.Observable,
 ) -> qmc.Float:
     """Estimate two qubits after applying a deferred inverse member."""
@@ -431,7 +447,7 @@ def _inverse_tuple_expval_template(
 
 @qmc.qkernel
 def _complex_control_sample_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Bit:
     """Convert outer-control phase kickback into a sampled population."""
     outer = qmc.h(qmc.qubit("outer"))
@@ -445,7 +461,7 @@ def _complex_control_sample_template(
 
 @qmc.qkernel
 def _complex_control_expval_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     observable: qmc.Observable,
 ) -> qmc.Float:
     """Estimate phase kickback from a deferred controlled member."""
@@ -458,7 +474,7 @@ def _complex_control_expval_template(
 
 @qmc.qkernel
 def _complex_select_sample_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> qmc.Bit:
     """Convert nested-SELECT phase interference into a population."""
     index = qmc.qubit_array(1, "index")
@@ -476,7 +492,7 @@ def _complex_select_sample_template(
 
 @qmc.qkernel
 def _complex_select_expval_template(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     observable: qmc.Observable,
 ) -> qmc.Float:
     """Estimate relative phase from a deferred nested-SELECT member."""
@@ -491,16 +507,55 @@ def _complex_select_expval_template(
     return qmc.expval(index[0], observable)
 
 
-def _encoding(matrix: np.ndarray) -> qmc.PauliLCUBlockEncoding:
+def _encoding(matrix: np.ndarray) -> qmc.LCUBlockEncoding:
     """Build a Pauli LCU block encoding from a one-qubit matrix.
 
     Args:
         matrix (np.ndarray): One-qubit matrix to decompose.
 
     Returns:
-        qmc.PauliLCUBlockEncoding: Static descriptor for ``matrix``.
+        qmc.LCUBlockEncoding: Static descriptor for ``matrix``.
     """
     return qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(matrix, atol=1e-12))
+
+
+def _alternative_encoding(matrix: np.ndarray) -> qmc.LCUBlockEncoding:
+    """Wrap one unitary as a distinct producer-specific LCU descriptor.
+
+    Args:
+        matrix (np.ndarray): One-qubit matrix whose Pauli unitary supplies the
+            test implementation.
+
+    Returns:
+        qmc.LCUBlockEncoding: Alternative nominal descriptor subtype with the
+            same exact block semantics.
+    """
+    encoding = _encoding(matrix)
+    return _AlternativeLCUBlockEncoding(
+        unitary=encoding.unitary,
+        normalization=encoding.normalization,
+        num_signal_qubits=encoding.num_signal_qubits,
+        num_system_qubits=encoding.num_system_qubits,
+    )
+
+
+def _generic_encoding(matrix: np.ndarray) -> qmc.LCUBlockEncoding:
+    """Erase producer identity while preserving an exact LCU implementation.
+
+    Args:
+        matrix (np.ndarray): One-qubit matrix whose Pauli unitary supplies the
+            test implementation.
+
+    Returns:
+        qmc.LCUBlockEncoding: Exact instance of the common descriptor class.
+    """
+    encoding = _encoding(matrix)
+    return qmc.LCUBlockEncoding(
+        unitary=encoding.unitary,
+        normalization=encoding.normalization,
+        num_signal_qubits=encoding.num_signal_qubits,
+        num_system_qubits=encoding.num_system_qubits,
+    )
 
 
 def _reachable_blocks(root: Block) -> Iterator[Block]:
@@ -690,7 +745,7 @@ def test_unbound_template_uses_only_a_typed_static_manifest_slot() -> None:
     assert len(block.static_bindings) == 1
     slot = block.static_bindings[0]
     assert slot.name == "encoding"
-    assert slot.type_key == "qamomile.stdlib.pauli_lcu_block_encoding"
+    assert slot.type_key == "qamomile.stdlib.lcu_block_encoding"
     assert [field.name for field in slot.fields] == [
         "normalization",
         "num_signal_qubits",
@@ -705,9 +760,22 @@ def test_static_manifest_serialization_is_deterministic() -> None:
 
     assert serialize(restored) == payload
     assert list(restored.signature.parameters) == ["encoding"]
-    assert restored.input_types == {"encoding": qmc.PauliLCUBlockEncoding}
+    assert restored.input_types == {"encoding": qmc.LCUBlockEncoding}
     assert restored.block.label_args == []
     assert len(restored.block.static_bindings) == 1
+
+
+def test_pauli_specific_static_manifest_remains_compatible() -> None:
+    """The original Pauli annotation keeps its stable serialized adapter."""
+    payload = serialize(_pauli_specific_template)
+    restored = deserialize(payload)
+
+    assert restored.input_types == {"encoding": qmc.PauliLCUBlockEncoding}
+    assert restored.block.static_bindings[0].type_key == (
+        "qamomile.stdlib.pauli_lcu_block_encoding"
+    )
+    specialized = restored.build(encoding=_encoding(I2))
+    _assert_static_binding_resolved(specialized)
 
 
 def test_deserialize_rejects_consistently_forged_static_member() -> None:
@@ -865,7 +933,7 @@ def test_deserialized_template_rejects_missing_wrong_and_runtime_bindings() -> N
 
     with pytest.raises(ValueError, match="must be provided through bindings"):
         restored.build()
-    with pytest.raises(TypeError, match="must be PauliLCUBlockEncoding"):
+    with pytest.raises(TypeError, match="must be LCUBlockEncoding"):
         restored.build(encoding=object())
     with pytest.raises(TypeError, match="cannot be runtime parameters"):
         restored.build(parameters=["encoding"])
@@ -890,6 +958,21 @@ def test_deserialized_template_is_reusable_without_mutation() -> None:
     assert [encoding.num_signal_qubits for encoding in encodings] == [1, 1, 2, 1]
     assert [encoding.num_system_qubits for encoding in encodings] == [1, 1, 1, 2]
     for encoding in encodings:
+        specialized = restored.build(encoding=encoding)
+        assert specialized.kind is BlockKind.TRACED
+        _assert_static_binding_resolved(specialized)
+        assert serialize(restored) == payload
+
+
+def test_generic_slot_accepts_an_alternative_lcu_descriptor_subclass() -> None:
+    """One generic payload accepts common and producer-specific descriptors."""
+    payload = serialize(_direct_template)
+    restored = deserialize(payload)
+    pauli = _encoding(1j * I2 + 0.5 * X)
+    generic = _generic_encoding(1j * I2 + 0.5 * X)
+    alternative = _alternative_encoding(1j * I2 + 0.5 * X)
+
+    for encoding in (generic, pauli, alternative):
         specialized = restored.build(encoding=encoding)
         assert specialized.kind is BlockKind.TRACED
         _assert_static_binding_resolved(specialized)
@@ -1223,7 +1306,7 @@ def test_nested_qkernel_rejects_direct_static_field_return() -> None:
 
         @qmc.qkernel
         def template(
-            encoding: qmc.PauliLCUBlockEncoding,
+            encoding: qmc.LCUBlockEncoding,
         ) -> qmc.Vector[qmc.Bit]:
             """Attempt to return a captured field through a helper."""
 
@@ -1250,8 +1333,7 @@ def test_prepared_module_does_not_retain_bound_descriptor() -> None:
 
     assert "encoding" not in prepared.bindings
     assert not any(
-        isinstance(value, qmc.PauliLCUBlockEncoding)
-        for value in prepared.bindings.values()
+        isinstance(value, qmc.LCUBlockEncoding) for value in prepared.bindings.values()
     )
     _assert_static_binding_resolved(prepared.entrypoint)
     for definition in prepared.definitions.values():
@@ -1378,7 +1460,8 @@ def test_same_serialized_payload_rebinds_sampling_on_every_sdk(
     sample_template = deserialize(serialize(_semantic_sample_template))
     encodings = (
         (_encoding(I2), 0),
-        (_encoding(X), 1),
+        (_generic_encoding(X), 1),
+        (_alternative_encoding(X), 1),
     )
     assert {
         (encoding.num_signal_qubits, encoding.num_system_qubits)
@@ -1404,7 +1487,8 @@ def test_same_serialized_payload_rebinds_expval_on_every_sdk(
     expval_template = deserialize(serialize(_semantic_expval_template))
     encodings = (
         (_encoding(I2), 1.0),
-        (_encoding(X), -1.0),
+        (_generic_encoding(X), -1.0),
+        (_alternative_encoding(X), -1.0),
     )
     executor = _executor(sdk_transpiler)
     for encoding, expected_expval in encodings:

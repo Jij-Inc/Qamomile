@@ -101,14 +101,14 @@ def _invalid_reversed_block_unitary(
 
 
 def _build_unitary_kernel(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     *,
     invert: bool = False,
 ) -> qmc.QKernel:
     """Build an allocation-only kernel exposing the block-encoding unitary.
 
     Args:
-        encoding (qmc.PauliLCUBlockEncoding): Descriptor whose unitary should
+        encoding (qmc.LCUBlockEncoding): Descriptor whose unitary should
             be exposed.
         invert (bool): Whether to apply the inverse transform.
             Defaults to ``False``.
@@ -130,14 +130,14 @@ def _build_unitary_kernel(
 
 
 def _qiskit_unitary(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     *,
     invert: bool = False,
 ) -> np.ndarray:
     """Transpile a block encoding and return its exact Qiskit unitary.
 
     Args:
-        encoding (qmc.PauliLCUBlockEncoding): Descriptor whose unitary should
+        encoding (qmc.LCUBlockEncoding): Descriptor whose unitary should
             be materialized.
         invert (bool): Whether to materialize the inverse transform.
             Defaults to ``False``.
@@ -161,13 +161,13 @@ def _qiskit_unitary(
 
 def _top_left_block(
     unitary: np.ndarray,
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> np.ndarray:
     """Extract the all-zero-signal block in Qamomile LSB order.
 
     Args:
         unitary (np.ndarray): Dense block-encoding unitary.
-        encoding (qmc.PauliLCUBlockEncoding): Descriptor defining the register
+        encoding (qmc.LCUBlockEncoding): Descriptor defining the register
             widths.
 
     Returns:
@@ -397,8 +397,17 @@ def test_descriptor_contract_is_frozen_noncallable_and_identity_based() -> None:
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
     encoding = qmc.pauli_lcu_block_encoding(lcu)
     repeated = qmc.pauli_lcu_block_encoding(lcu)
+    generic = qmc.LCUBlockEncoding(
+        unitary=encoding.unitary,
+        normalization=encoding.normalization,
+        num_signal_qubits=encoding.num_signal_qubits,
+        num_system_qubits=encoding.num_system_qubits,
+    )
 
+    assert issubclass(qmc.PauliLCUBlockEncoding, qmc.LCUBlockEncoding)
+    assert isinstance(encoding, qmc.LCUBlockEncoding)
     assert isinstance(encoding, qmc.PauliLCUBlockEncoding)
+    assert type(generic) is qmc.LCUBlockEncoding
     assert tuple(field.name for field in dataclasses.fields(encoding)) == (
         "unitary",
         "normalization",
@@ -426,44 +435,62 @@ def test_descriptor_contract_is_frozen_noncallable_and_identity_based() -> None:
     assert not hasattr(encoding, "error_bound")
     assert encoding is not repeated
     assert encoding != repeated
+    assert not callable(generic)
+    assert not hasattr(generic, "__dict__")
+    assert generic != encoding
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         encoding.normalization = 2.0  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        generic.normalization = 2.0  # type: ignore[misc]
     with pytest.raises(TypeError):
         encoding()  # type: ignore[operator]
 
 
+@pytest.mark.parametrize(
+    "descriptor_type",
+    [qmc.LCUBlockEncoding, qmc.PauliLCUBlockEncoding],
+)
 @pytest.mark.parametrize("normalization", [0.0, -1.0, math.inf, math.nan, 10**1000])
-def test_descriptor_rejects_invalid_normalization(normalization: float) -> None:
+def test_descriptor_rejects_invalid_normalization(
+    descriptor_type: type[qmc.LCUBlockEncoding],
+    normalization: float,
+) -> None:
     """Descriptor construction rejects non-positive or non-finite scaling."""
     unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).unitary
 
     with pytest.raises(ValueError, match="normalization"):
-        qmc.PauliLCUBlockEncoding(unitary, normalization, 1, 1)
+        descriptor_type(unitary, normalization, 1, 1)
 
 
-def test_descriptor_rejects_invalid_field_types_and_widths() -> None:
+@pytest.mark.parametrize(
+    "descriptor_type",
+    [qmc.LCUBlockEncoding, qmc.PauliLCUBlockEncoding],
+)
+def test_descriptor_rejects_invalid_field_types_and_widths(
+    descriptor_type: type[qmc.LCUBlockEncoding],
+) -> None:
     """Descriptor construction enforces its QKernel ABI and positive widths."""
     unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).unitary
 
     with pytest.raises(TypeError, match="unitary must be a QKernel"):
-        qmc.PauliLCUBlockEncoding(object(), 1.0, 1, 1)  # type: ignore[arg-type]
+        descriptor_type(object(), 1.0, 1, 1)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="unitary must have signature"):
-        qmc.PauliLCUBlockEncoding(_invalid_scalar_block_unitary, 1.0, 1, 1)
+        descriptor_type(_invalid_scalar_block_unitary, 1.0, 1, 1)
     with pytest.raises(TypeError, match="unitary must have signature"):
-        qmc.PauliLCUBlockEncoding(_invalid_keyword_block_unitary, 1.0, 1, 1)
+        descriptor_type(_invalid_keyword_block_unitary, 1.0, 1, 1)
     with pytest.raises(TypeError, match="unitary must have signature"):
-        qmc.PauliLCUBlockEncoding(_invalid_reversed_block_unitary, 1.0, 1, 1)
+        descriptor_type(_invalid_reversed_block_unitary, 1.0, 1, 1)
     with pytest.raises(TypeError, match="normalization"):
-        qmc.PauliLCUBlockEncoding(unitary, "1", 1, 1)  # type: ignore[arg-type]
+        descriptor_type(unitary, "1", 1, 1)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="num_signal_qubits"):
-        qmc.PauliLCUBlockEncoding(unitary, 1.0, True, 1)
+        descriptor_type(unitary, 1.0, True, 1)
     with pytest.raises(TypeError, match="num_system_qubits"):
-        qmc.PauliLCUBlockEncoding(unitary, 1.0, 1, 1.0)  # type: ignore[arg-type]
+        descriptor_type(unitary, 1.0, 1, 1.0)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="num_signal_qubits"):
-        qmc.PauliLCUBlockEncoding(unitary, 1.0, 0, 1)
+        descriptor_type(unitary, 1.0, 0, 1)
     with pytest.raises(ValueError, match="num_system_qubits"):
-        qmc.PauliLCUBlockEncoding(unitary, 1.0, 1, -1)
+        descriptor_type(unitary, 1.0, 1, -1)
 
 
 def test_signal_width_covers_zero_single_and_non_power_of_two_terms() -> None:
