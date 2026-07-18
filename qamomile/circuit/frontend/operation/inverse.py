@@ -31,6 +31,11 @@ from qamomile.circuit.frontend.qkernel_utils import (
     promote_literal_to_handle,
     reject_aliased_quantum_args,
 )
+from qamomile.circuit.frontend.static_binding import (
+    StaticBindingProxy,
+    is_static_binding_annotation,
+    validate_static_binding_argument,
+)
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
@@ -434,8 +439,18 @@ class _BlockInverter:
             TypeError: If the block output contract is not unitary-like.
         """
         self._reject_unsupported_control_flow(block.operations)
+        interface_substitutor = ValueSubstitutor(extra_value_map or {})
+        input_values = [
+            cast(ValueLike, interface_substitutor.substitute_value(value))
+            for value in block.input_values
+        ]
         value_map: dict[str, ValueBase] = {
-            value.uuid: value for value in block.input_values
+            original.uuid: specialized
+            for original, specialized in zip(
+                block.input_values,
+                input_values,
+                strict=True,
+            )
         }
         if extra_value_map is not None:
             value_map.update(extra_value_map)
@@ -449,12 +464,19 @@ class _BlockInverter:
         return Block(
             name=f"{block.name}_inverse",
             label_args=list(block.label_args),
-            input_values=list(block.input_values),
+            input_values=input_values,
             output_values=cast(list[ValueLike], output_values),
             operations=operations,
             kind=BlockKind.HIERARCHICAL,
-            parameters=dict(block.parameters),
+            parameters={
+                name: cast(
+                    Value,
+                    interface_substitutor.substitute_value(parameter),
+                )
+                for name, parameter in block.parameters.items()
+            },
             param_slots=block.param_slots,
+            static_bindings=block.static_bindings,
         )
 
     def invert_call_site(
@@ -966,6 +988,30 @@ class _BlockInverter:
 
         gate_type_name = str(attrs.get("gate_type", "CUSTOM"))
         source_block = None
+
+        body_ref = op.body_ref
+        if body_ref is not None and body_ref.kind == "static_binding":
+            if op.transform is CallTransform.CONTROLLED:
+                raise NotImplementedError(
+                    "inverse() cannot represent the inverse of a controlled "
+                    "deferred static-binding invocation directly. Control the "
+                    "inverse wrapper instead."
+                )
+            attrs["default_policy"] = CallPolicy.PRESERVE_BOX.name
+            deferred_inverse_op = InvokeOperation(
+                operands=[*current_qubits, *mapped_params],
+                results=new_results,
+                target=target,
+                transform=transform,
+                attrs=attrs,
+                definition=op.definition,
+            )
+            self._update_quantum_value_map(
+                value_map,
+                op.control_qubits + op.target_qubits,
+                new_results,
+            )
+            return [deferred_inverse_op]
 
         if gate_type_name == CompositeGateType.QFT.name:
             from qamomile.circuit.stdlib.qft import iqft
@@ -2032,8 +2078,10 @@ class InverseGate:
             BoundArguments: Bound and default-filled argument mapping.
 
         Raises:
-            TypeError: If any final argument is not a frontend `Handle`, or
-                if a bound `Handle` does not match its declared parameter
+            TypeError: If a static binding has the wrong registered type, an
+                unresolved static binding does not preserve the callee slot
+                identity, any ordinary argument is not a frontend `Handle`,
+                or a bound `Handle` does not match its declared parameter
                 type -- a quantum handle bound to a classical parameter, a
                 scalar `Qubit` bound to a `Vector[Qubit]` parameter (or the
                 reverse), or an array of the wrong rank. The latter checks
@@ -2043,12 +2091,22 @@ class InverseGate:
         bound_args.apply_defaults()
         for name, value in list(bound_args.arguments.items()):
             expected_type = self._qkernel.input_types.get(name)
+            if is_static_binding_annotation(expected_type):
+                bound_args.arguments[name] = validate_static_binding_argument(
+                    expected_type,
+                    name,
+                    value,
+                )
+                continue
             if expected_type is not None:
                 bound_args.arguments[name] = promote_literal_to_handle(
                     value,
                     expected_type,
                 )
         for name, value in bound_args.arguments.items():
+            expected_type = self._qkernel.input_types.get(name)
+            if is_static_binding_annotation(expected_type):
+                continue
             if not isinstance(value, Handle):
                 raise TypeError(
                     f"inverse(): argument {name!r} must be a Handle instance, "
@@ -2075,7 +2133,11 @@ class InverseGate:
         Returns:
             Block: Block whose operations should be inverted.
         """
-        return select_specialized_block(self._qkernel, arguments)
+        return select_specialized_block(
+            self._qkernel,
+            arguments,
+            require_handles=False,
+        )
 
     def _prepare_inputs(
         self,
@@ -2260,6 +2322,12 @@ class InverseGate:
                 ):
                     shape_value_map[block_dim.uuid] = actual_dim
         inverse_block = _BlockInverter().invert_block(block, shape_value_map)
+        # The source and fallback are independent callable regions in the
+        # serialized graph. Keep their value namespaces disjoint even when
+        # call-site shape specialization preserves the source UUIDs.
+        from qamomile.circuit.ir.uuid_remapper import UUIDRemapper
+
+        inverse_block = UUIDRemapper().clone_block(inverse_block)
         quantum_bindings = [binding for binding in bindings if binding.is_quantum]
         quantum_values = [
             _as_value(binding.active_handle.value, "inverse qkernel input")
@@ -2324,7 +2392,14 @@ class InverseGate:
         )
         block = self._select_block(bound_args.arguments)
         bindings = self._prepare_inputs(block, bound_args.arguments)
-        if self._can_emit_atomic_inverse(block, bindings):
+        has_symbolic_static_binding = any(
+            isinstance(value, StaticBindingProxy)
+            for value in bound_args.arguments.values()
+        )
+        if not has_symbolic_static_binding and self._can_emit_atomic_inverse(
+            block,
+            bindings,
+        ):
             operation, quantum_bindings, result_values = self._build_atomic_inverse(
                 block,
                 bindings,
@@ -2414,6 +2489,15 @@ class _InverseComposite:
         Returns:
             Any: Frontend handle or tuple matching the composite signature.
         """
+        if any(
+            is_static_binding_annotation(annotation)
+            for annotation in self.kernel.input_types.values()
+        ):
+            # A static binding is not an IR operand, so the ordinary named
+            # composite invocation protocol cannot carry it. Specialize and
+            # structurally invert the body through the same path as a regular
+            # qkernel.
+            return InverseGate(self.kernel)(*args, **kwargs)
         factory = partial(_inverse_composite_operation, self.kernel)
         return invoke_qkernel_with_operation(self.kernel, factory, *args, **kwargs)
 

@@ -9,7 +9,7 @@ Example:
     config = SubstitutionConfig(
         rules=[
             SubstitutionRule(source_name="my_oracle", target=optimized_oracle),
-            SubstitutionRule(source_name="qft", strategy="approximate"),
+            SubstitutionRule(source_name="qft", strategy="approximate_k2"),
         ]
     )
     pass = SubstitutionPass(config)
@@ -297,7 +297,6 @@ class SubstitutionPass(Pass[Block, Block]):
         gate_names = [
             str(op.attrs.get("custom_name", "")),
             op.target.name,
-            str(op.attrs.get("gate_type", "")).lower(),
         ]
         rule = next(
             (
@@ -379,7 +378,7 @@ def create_substitution_pass(
     Example:
         pass = create_substitution_pass(
             block_replacements={"my_oracle": optimized_oracle},
-            strategy_overrides={"qft": "approximate", "iqft": "approximate"},
+            strategy_overrides={"qft": "approximate_k2", "iqft": "approximate_k2"},
         )
     """
     rules: list[SubstitutionRule] = []

@@ -492,6 +492,32 @@ class TestOmmxInput:
         assert len(inst.constraints) == constraints_before
         assert ls.num_bits >= len(dvs_before)
 
+    def test_penalty_weight_controls_constraint_absorption(self):
+        """A sufficiently large explicit penalty avoids an infeasible minimum."""
+        x0 = ommx.v1.DecisionVariable.binary(id=0)
+        x1 = ommx.v1.DecisionVariable.binary(id=1)
+        inst = ommx.v1.Instance.from_components(
+            decision_variables=[x0, x1],
+            objective=-10 * x0 - 10 * x1,
+            constraints=[(x0 + x1 <= 1).set_id(0)],
+            sense=ommx.v1.Instance.MINIMIZE,
+        )
+
+        low = LocalSearch(inst, uniform_penalty_weight=1.0)
+        high = LocalSearch(inst, uniform_penalty_weight=20.0)
+        low_result = low.run([0] * low.num_bits)
+        high_result = high.run([0] * high.num_bits)
+
+        assert isinstance(low_result, ommx.v1.Solution)
+        assert isinstance(high_result, ommx.v1.Solution)
+        assert not low_result.feasible
+        assert high_result.feasible
+
+    def test_penalty_weights_rejected_for_binary_model(self, binary_model):
+        """Penalty options require an OMMX instance with constraints."""
+        with pytest.raises(ValueError, match="only be used with"):
+            LocalSearch(binary_model, uniform_penalty_weight=2.0)
+
     @pytest.mark.parametrize("method", ["best", "first"])
     def test_initial_state_accepts_ommx_solution(self, quadratic_ommx, method):
         """`run` accepts an :class:`ommx.v1.Solution` as initial_state.

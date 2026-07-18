@@ -521,7 +521,8 @@ class MeasureQFixedOperation(Operation):
 
     Encoding:
         For QPE phase (int_bits=0):
-            float_value = 0.b0b1b2... = b0*0.5 + b1*0.25 + b2*0.125 + ...
+            Qubits are stored least-significant first. For ``n`` qubits,
+            bit ``i`` has weight ``2**(-n + i)``.
     """
 
     num_bits: int = 0

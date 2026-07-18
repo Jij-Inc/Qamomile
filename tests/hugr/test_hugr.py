@@ -1493,6 +1493,21 @@ def _hugr_mixed_numeric_comparisons(
     )
 
 
+@qmc.qkernel
+def _hugr_inverse_pauli_evolution(
+    hamiltonian: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Bit]:
+    """Exercise an uncontrolled inverse Pauli evolution at the HUGR edge."""
+    targets = qmc.h(qmc.qubit_array(2, "targets"))
+    targets = qmc.inverse(_hugr_pauli_helper)(
+        targets,
+        hamiltonian,
+        gamma,
+    )
+    return qmc.measure(targets)
+
+
 def _explicit_inverse_zero_trip_for_kernel() -> SimpleNamespace:
     """Keep an empty ForOperation visible at the HUGR inverse boundary.
 
@@ -1805,11 +1820,19 @@ def test_hugr_executes_controlled_global_phase_kickback_on_selene(
         _hugr_global_phase_kickback,
         bindings={"theta": theta},
     )
-    runner = selene.build(
-        package,
-        name="qamomile_hugr_global_phase_kickback",
-        build_dir=tmp_path,
-    )
+    try:
+        runner = selene.build(
+            package,
+            name="qamomile_hugr_global_phase_kickback",
+            build_dir=tmp_path,
+        )
+    except RuntimeError as error:
+        if "No extension could emit extension op" in str(error):
+            pytest.skip(
+                "Installed Selene Helios plugin cannot lower the valid "
+                "tket.global_phase HUGR extension"
+            )
+        raise
     measurements = selene.MeasurementExtractor()
 
     results = list(
@@ -2441,6 +2464,22 @@ def test_hugr_lowers_controlled_inverse_pauli_evolution() -> None:
     operations = [data.op for _, data in package.modules[0].nodes()]
     assert sum("name='CRz'" in str(operation) for operation in operations) == 2
     assert sum("name='Rz'" in str(operation) for operation in operations) == 1
+
+
+@pytest.mark.hugr
+def test_hugr_lowers_uncontrolled_inverse_pauli_evolution() -> None:
+    """Uncontrolled inverse Pauli evolution emits adjoint TKET rotations."""
+    hamiltonian = 0.25 * qm_o.X(0) + 0.5 * qm_o.Y(0) * qm_o.Z(1) + 0.75
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_inverse_pauli_evolution,
+        bindings={"hamiltonian": hamiltonian, "gamma": 0.125},
+    )
+
+    transpiler.target.validate(package)
+    operations = [data.op for _, data in package.modules[0].nodes()]
+    assert sum("name='Rz'" in str(operation) for operation in operations) == 2
+    assert "tket.global_phase.global_phase" in _hugr_operation_names(package)
 
 
 @pytest.mark.hugr

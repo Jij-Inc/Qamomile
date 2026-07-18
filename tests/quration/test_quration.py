@@ -886,14 +886,20 @@ def test_quration_samples_two_term_complex_pauli_lcu() -> None:
     assert sum(counts.values()) == shots
     assert set(counts) <= {0, 1}
 
-    expected_success = (
+    expected_zero_signal_probability = (
         abs(1j) ** 2 + abs(0.5) ** 2
     ) / _quration_two_term_encoding.normalization**2
     tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
     assert counts.get(0, 0) / shots == pytest.approx(
-        expected_success,
+        expected_zero_signal_probability,
         abs=tolerance,
     )
 
@@ -1091,6 +1097,17 @@ def test_quration_transpiles_semantic_composites(kernel: qmc.QKernel) -> None:
 
     result = executable.sample(transpiler.executor(seed=11), shots=4).result()
     assert sum(count for _, count in result.results) == 4
+
+
+@pytest.mark.quration
+def test_quration_multi_controlled_x_uses_target_first_abi() -> None:
+    """Native MCX flips its target when every control is one."""
+    pytest.importorskip("pyqret")
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(_quration_multi_controlled_x)
+
+    result = executable.sample(transpiler.executor(seed=11), shots=8).result()
+    assert dict(result.results) == {1: 8}
 
 
 @pytest.mark.quration

@@ -27,7 +27,7 @@ def _smart_floordiv(lhs: sp.Expr, r: sp.Expr) -> sp.Expr:
         return quotient
     if isinstance(quotient, sp.Pow):
         _, exp = quotient.as_base_exp()
-        if exp.is_nonnegative is not False:
+        if exp.is_nonnegative is True:
             return quotient
     return sp.floor(lhs / r)
 

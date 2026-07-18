@@ -36,7 +36,7 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %% [markdown]
 # ## 1. The Pipeline at a Glance
@@ -800,7 +800,7 @@ except ModuleNotFoundError:
 #    `QiskitQFTEmitter` would drop in a `QFTGate` box, whereas the QURI Parts
 #    backend decomposes via the library pass — same IR, different realised
 #    circuit. You can override this per kernel via
-#    `TranspilerConfig.with_strategies({"qft": "approximate"})`.
+#    `TranspilerConfig.with_strategies({"qft": "approximate_k2"})`.
 
 # %% [markdown]
 # ## 8. Pointers for Contributors

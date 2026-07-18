@@ -153,8 +153,14 @@ def emit_gate(
             if v.element_indices:
                 for idx in v.element_indices:
                     if idx.parent_array is not None:
+                        nested_index = idx.element_indices[0]
+                        display_index = nested_index.name or (
+                            str(nested_index.get_const())
+                            if nested_index.is_constant()
+                            else "?"
+                        )
                         element_indices_names.append(
-                            f"{idx.parent_array.name}[{idx.element_indices[0].name if idx.element_indices else '?'}]"
+                            f"{idx.parent_array.name}[{display_index}]"
                         )
                     else:
                         element_indices_names.append(idx.name)
@@ -179,8 +185,14 @@ def emit_gate(
                 if v.element_indices:
                     for idx in v.element_indices:
                         if idx.parent_array is not None:
+                            nested_index = idx.element_indices[0]
+                            display_index = nested_index.name or (
+                                str(nested_index.get_const())
+                                if nested_index.is_constant()
+                                else "?"
+                            )
                             element_indices_names.append(
-                                f"{idx.parent_array.name}[{idx.element_indices[0].name if idx.element_indices else '?'}]"
+                                f"{idx.parent_array.name}[{display_index}]"
                             )
                         else:
                             element_indices_names.append(idx.name)

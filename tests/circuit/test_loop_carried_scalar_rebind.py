@@ -1932,11 +1932,11 @@ class TestRejectedRebinds:
 
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Bit]:
-            index = qmc.bit(False)
+            index = qmc.uint(0)
             q = qmc.qubit_array(2, "q")
             for _i in qmc.range(2):
                 q[index] = qmc.x(q[index])
-                index = qmc.uint(1)
+                index = qmc.bit(False)
             return qmc.measure(q)
 
         with pytest.raises(ValidationError, match=LOOP_CARRIED):

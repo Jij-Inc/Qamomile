@@ -32,6 +32,7 @@ from qamomile.circuit.frontend.operation.measurement import (
     reset,
 )
 from qamomile.circuit.frontend.oracle import Oracle, opaque
+from qamomile.circuit.stdlib.lcu_block_encoding import LCUBlockEncoding
 from qamomile.circuit.stdlib.pauli_lcu_block_encoding import (
     PauliLCUBlockEncoding,
     pauli_lcu_block_encoding,
@@ -112,13 +113,16 @@ def test_global_phase_is_publicly_reexported() -> None:
 
 
 def test_pauli_lcu_block_encoding_api_is_publicly_reexported() -> None:
-    """The scheme-specific descriptor and factory retain one public identity."""
+    """The common descriptor, Pauli subtype, and factory are public."""
+    assert qmc.LCUBlockEncoding is LCUBlockEncoding
+    assert stdlib.LCUBlockEncoding is LCUBlockEncoding
     assert qmc.PauliLCUBlockEncoding is PauliLCUBlockEncoding
     assert stdlib.PauliLCUBlockEncoding is PauliLCUBlockEncoding
     assert qmc.pauli_lcu_block_encoding is pauli_lcu_block_encoding
     assert stdlib.pauli_lcu_block_encoding is pauli_lcu_block_encoding
 
     for namespace in (qmc, stdlib):
+        assert "LCUBlockEncoding" in namespace.__all__
         assert "PauliLCUBlockEncoding" in namespace.__all__
         assert "pauli_lcu_block_encoding" in namespace.__all__
         assert not hasattr(namespace, "pauli_lcu_num_selection_qubits")

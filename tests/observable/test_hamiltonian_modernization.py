@@ -93,6 +93,18 @@ class TestFactoryMethods:
         assert ops[0].index == 2
         assert coeff == 1j
 
+    @pytest.mark.parametrize("index", [-1, -100])
+    def test_negative_pauli_index_is_rejected(self, index):
+        """Pauli operators cannot address qubits from the end."""
+        with pytest.raises(ValueError, match="must be non-negative"):
+            PauliOperator(Pauli.Z, index)
+
+    @pytest.mark.parametrize("index", [True, 1.5, "1"])
+    def test_non_integer_pauli_index_is_rejected(self, index):
+        """Pauli indices require explicit non-boolean integers."""
+        with pytest.raises(TypeError, match="non-negative integer"):
+            PauliOperator(Pauli.Z, index)
+
 
 class TestIteratorProtocol:
     """Test iterator protocol implementation."""
@@ -140,6 +152,13 @@ class TestIteratorProtocol:
         """Test __len__ with multi-qubit terms."""
         h = X(0) * Y(1) + Z(2) * X(3)
         assert len(h) == 2
+
+    def test_cancelled_terms_are_removed(self):
+        """Exact cancellation removes term keys and their apparent width."""
+        h = Z(0) + X(5) - X(5)
+
+        assert h == Z(0)
+        assert h.num_qubits == 1
 
 
 class TestRemapQubits:

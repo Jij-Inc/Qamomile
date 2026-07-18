@@ -134,6 +134,7 @@ def qubit_array(
             size.
 
     Raises:
+        TypeError: If ``shape`` or ``name`` has the wrong type.
         ValueError: If ``shape`` is an empty tuple.
         NotImplementedError: If ``shape`` has more than one dimension.
             The quantum addressing path is rank-1, so a higher-rank
@@ -143,13 +144,28 @@ def qubit_array(
             (e.g. ``q[i * ncols + j]``).
     """
 
-    if not isinstance(shape, tuple):
-        shape = (shape,)
+    raw_shape: typing.Any = shape
+    raw_name: typing.Any = name
+    if not isinstance(raw_name, str):
+        if isinstance(raw_shape, str):
+            raise TypeError(
+                "qubit_array expects (shape, name), but received arguments "
+                f"that look swapped: ({raw_shape!r}, {raw_name!r})."
+            )
+        raise TypeError(
+            f"qubit_array name must be a str, got {type(raw_name).__name__}."
+        )
+    if isinstance(raw_shape, bool) or not isinstance(raw_shape, (int, UInt, tuple)):
+        raise TypeError(
+            "qubit_array shape must be an int, UInt, or a tuple containing "
+            f"one such value, got {type(raw_shape).__name__}."
+        )
+    normalized_shape = raw_shape if isinstance(raw_shape, tuple) else (raw_shape,)
 
     # ``len()`` is read into a variable so zuban does not narrow the
     # variadic tuple to fixed-length forms that make ``shape[0]`` look
     # out of range below.
-    ndim = len(shape)
+    ndim = len(normalized_shape)
 
     if ndim == 0:
         raise ValueError("Shape must have at least one dimension.")
@@ -163,7 +179,23 @@ def qubit_array(
             f"compute flat indices explicitly (e.g. q[i * ncols + j])."
         )
 
-    dim = shape[0] if isinstance(shape[0], UInt) else uint(shape[0])
+    if isinstance(normalized_shape[0], bool) or not isinstance(
+        normalized_shape[0], (int, UInt)
+    ):
+        raise TypeError(
+            "qubit_array shape tuple must contain one int or UInt, got "
+            f"{type(normalized_shape[0]).__name__}."
+        )
+    if isinstance(normalized_shape[0], int) and normalized_shape[0] < 0:
+        raise ValueError(
+            f"qubit_array shape must be non-negative, got {normalized_shape[0]}."
+        )
+
+    dim = (
+        normalized_shape[0]
+        if isinstance(normalized_shape[0], UInt)
+        else uint(normalized_shape[0])
+    )
 
     array_value = ArrayValue(type=ir_type.QubitType(), name=name, shape=(dim.value,))
 

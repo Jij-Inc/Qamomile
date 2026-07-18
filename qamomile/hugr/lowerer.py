@@ -2677,6 +2677,8 @@ def _lower_pauli_evolution(
     builder: Any,
     environment: dict[str, Any],
     live_qubits: dict[str, Any],
+    *,
+    inverse: bool = False,
 ) -> None:
     """Lower Pauli evolution at the HUGR target boundary.
 
@@ -2689,6 +2691,8 @@ def _lower_pauli_evolution(
         builder (Any): HUGR dataflow builder.
         environment (dict[str, Any]): UUID-to-wire mapping to update.
         live_qubits (dict[str, Any]): Live quantum mapping to update.
+        inverse (bool): Whether to emit the adjoint evolution. Defaults to
+            ``False``.
 
     Raises:
         EmitError: If the Hamiltonian is unbound, the qubit operand is not a
@@ -2700,9 +2704,11 @@ def _lower_pauli_evolution(
 
     qubit_operand = operation.qubits
     result = operation.evolved_qubits
-    if not isinstance(qubit_operand, ArrayValue) or not isinstance(result, ArrayValue):
+    source = result if inverse else qubit_operand
+    destination = qubit_operand if inverse else result
+    if not isinstance(source, ArrayValue) or not isinstance(destination, ArrayValue):
         raise EmitError("HUGR Pauli evolution requires a fixed qubit vector")
-    if qubit_operand.uuid not in environment:
+    if source.uuid not in environment:
         raise EmitError("HUGR Pauli evolution cannot resolve its qubit vector")
     hamiltonian = (
         cast(Any, operation.observable.get_const())
@@ -2715,14 +2721,15 @@ def _lower_pauli_evolution(
         raise EmitError("HUGR Pauli evolution binding is not a Hamiltonian")
     _validate_pauli_evolution_hamiltonian(hamiltonian)
 
-    qubits = list(environment[qubit_operand.uuid])
+    qubits = list(environment[source.uuid])
+    direction = -1.0 if inverse else 1.0
     constant_value = float(hamiltonian.constant.real)
     if constant_value:
         _lower_global_phase(
             operation.gamma,
             builder,
             environment,
-            scale=-constant_value,
+            scale=-direction * constant_value,
         )
     for operators, coefficient in hamiltonian:
         if not operators or is_close_zero(abs(coefficient)):
@@ -2750,7 +2757,7 @@ def _lower_pauli_evolution(
             builder,
             operation.gamma,
             environment,
-            scale=2.0 * float(coefficient.real),
+            scale=direction * 2.0 * float(coefficient.real),
         )
         [selected[-1]] = builder.add_op(quantum.Rz, selected[-1], rotation)
         for index in range(len(selected) - 2, -1, -1):
@@ -2769,11 +2776,11 @@ def _lower_pauli_evolution(
                 [wire] = builder.add_op(quantum.S, wire)
             qubits[item.index] = wire
 
-    environment[result.uuid] = qubits
-    environment[qubit_operand.uuid] = qubits
+    environment[source.uuid] = qubits
+    environment[destination.uuid] = qubits
     for index in range(len(qubits)):
-        live_qubits.pop(f"{qubit_operand.uuid}:{index}", None)
-        live_qubits[f"{result.uuid}:{index}"] = qubits[index]
+        live_qubits.pop(f"{source.uuid}:{index}", None)
+        live_qubits[f"{destination.uuid}:{index}"] = qubits[index]
 
 
 def _lower_measure(
@@ -3303,6 +3310,15 @@ def _lower_transformed_operations(
                 )
             continue
         if isinstance(operation, PauliEvolveOp):
+            if not control_wires:
+                _lower_pauli_evolution(
+                    operation,
+                    builder,
+                    environment,
+                    {},
+                    inverse=inverse,
+                )
+                continue
             if len(control_wires) != 1:
                 raise EmitError(
                     "HUGR transformed Pauli evolution supports exactly one control"

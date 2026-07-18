@@ -101,14 +101,14 @@ def _invalid_reversed_block_unitary(
 
 
 def _build_unitary_kernel(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     *,
     invert: bool = False,
 ) -> qmc.QKernel:
     """Build an allocation-only kernel exposing the block-encoding unitary.
 
     Args:
-        encoding (qmc.PauliLCUBlockEncoding): Descriptor whose unitary should
+        encoding (qmc.LCUBlockEncoding): Descriptor whose unitary should
             be exposed.
         invert (bool): Whether to apply the inverse transform.
             Defaults to ``False``.
@@ -130,14 +130,14 @@ def _build_unitary_kernel(
 
 
 def _qiskit_unitary(
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
     *,
     invert: bool = False,
 ) -> np.ndarray:
     """Transpile a block encoding and return its exact Qiskit unitary.
 
     Args:
-        encoding (qmc.PauliLCUBlockEncoding): Descriptor whose unitary should
+        encoding (qmc.LCUBlockEncoding): Descriptor whose unitary should
             be materialized.
         invert (bool): Whether to materialize the inverse transform.
             Defaults to ``False``.
@@ -161,13 +161,13 @@ def _qiskit_unitary(
 
 def _top_left_block(
     unitary: np.ndarray,
-    encoding: qmc.PauliLCUBlockEncoding,
+    encoding: qmc.LCUBlockEncoding,
 ) -> np.ndarray:
     """Extract the all-zero-signal block in Qamomile LSB order.
 
     Args:
         unitary (np.ndarray): Dense block-encoding unitary.
-        encoding (qmc.PauliLCUBlockEncoding): Descriptor defining the register
+        encoding (qmc.LCUBlockEncoding): Descriptor defining the register
             widths.
 
     Returns:
@@ -339,6 +339,28 @@ def test_inverse_top_left_block_is_adjoint_matrix() -> None:
     )
 
 
+def test_qiskit_inverse_is_full_adjoint_for_wide_prepare() -> None:
+    """PREPARE and UNPREPARE remain adjoints on the full signal space."""
+    encoding = qmc.pauli_lcu_block_encoding(
+        PauliLCU.from_matrix(DENSE_TWO_QUBIT_MATRIX)
+    )
+    forward = _qiskit_unitary(encoding)
+    adjoint = _qiskit_unitary(encoding, invert=True)
+
+    np.testing.assert_allclose(
+        adjoint,
+        forward.conj().T,
+        atol=1e-10,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        adjoint @ forward,
+        np.eye(forward.shape[0]),
+        atol=1e-10,
+        rtol=0.0,
+    )
+
+
 def test_lazy_inverse_select_has_stable_conjugated_case_fingerprints() -> None:
     """Lowered identity-case phases distinguish forward and inverse bodies."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
@@ -397,8 +419,17 @@ def test_descriptor_contract_is_frozen_noncallable_and_identity_based() -> None:
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
     encoding = qmc.pauli_lcu_block_encoding(lcu)
     repeated = qmc.pauli_lcu_block_encoding(lcu)
+    generic = qmc.LCUBlockEncoding(
+        unitary=encoding.unitary,
+        normalization=encoding.normalization,
+        num_signal_qubits=encoding.num_signal_qubits,
+        num_system_qubits=encoding.num_system_qubits,
+    )
 
+    assert issubclass(qmc.PauliLCUBlockEncoding, qmc.LCUBlockEncoding)
+    assert isinstance(encoding, qmc.LCUBlockEncoding)
     assert isinstance(encoding, qmc.PauliLCUBlockEncoding)
+    assert type(generic) is qmc.LCUBlockEncoding
     assert tuple(field.name for field in dataclasses.fields(encoding)) == (
         "unitary",
         "normalization",
@@ -426,44 +457,62 @@ def test_descriptor_contract_is_frozen_noncallable_and_identity_based() -> None:
     assert not hasattr(encoding, "error_bound")
     assert encoding is not repeated
     assert encoding != repeated
+    assert not callable(generic)
+    assert not hasattr(generic, "__dict__")
+    assert generic != encoding
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         encoding.normalization = 2.0  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        generic.normalization = 2.0  # type: ignore[misc]
     with pytest.raises(TypeError):
         encoding()  # type: ignore[operator]
 
 
+@pytest.mark.parametrize(
+    "descriptor_type",
+    [qmc.LCUBlockEncoding, qmc.PauliLCUBlockEncoding],
+)
 @pytest.mark.parametrize("normalization", [0.0, -1.0, math.inf, math.nan, 10**1000])
-def test_descriptor_rejects_invalid_normalization(normalization: float) -> None:
+def test_descriptor_rejects_invalid_normalization(
+    descriptor_type: type[qmc.LCUBlockEncoding],
+    normalization: float,
+) -> None:
     """Descriptor construction rejects non-positive or non-finite scaling."""
     unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).unitary
 
     with pytest.raises(ValueError, match="normalization"):
-        qmc.PauliLCUBlockEncoding(unitary, normalization, 1, 1)
+        descriptor_type(unitary, normalization, 1, 1)
 
 
-def test_descriptor_rejects_invalid_field_types_and_widths() -> None:
+@pytest.mark.parametrize(
+    "descriptor_type",
+    [qmc.LCUBlockEncoding, qmc.PauliLCUBlockEncoding],
+)
+def test_descriptor_rejects_invalid_field_types_and_widths(
+    descriptor_type: type[qmc.LCUBlockEncoding],
+) -> None:
     """Descriptor construction enforces its QKernel ABI and positive widths."""
     unitary = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(I2)).unitary
 
     with pytest.raises(TypeError, match="unitary must be a QKernel"):
-        qmc.PauliLCUBlockEncoding(object(), 1.0, 1, 1)  # type: ignore[arg-type]
+        descriptor_type(object(), 1.0, 1, 1)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="unitary must have signature"):
-        qmc.PauliLCUBlockEncoding(_invalid_scalar_block_unitary, 1.0, 1, 1)
+        descriptor_type(_invalid_scalar_block_unitary, 1.0, 1, 1)
     with pytest.raises(TypeError, match="unitary must have signature"):
-        qmc.PauliLCUBlockEncoding(_invalid_keyword_block_unitary, 1.0, 1, 1)
+        descriptor_type(_invalid_keyword_block_unitary, 1.0, 1, 1)
     with pytest.raises(TypeError, match="unitary must have signature"):
-        qmc.PauliLCUBlockEncoding(_invalid_reversed_block_unitary, 1.0, 1, 1)
+        descriptor_type(_invalid_reversed_block_unitary, 1.0, 1, 1)
     with pytest.raises(TypeError, match="normalization"):
-        qmc.PauliLCUBlockEncoding(unitary, "1", 1, 1)  # type: ignore[arg-type]
+        descriptor_type(unitary, "1", 1, 1)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="num_signal_qubits"):
-        qmc.PauliLCUBlockEncoding(unitary, 1.0, True, 1)
+        descriptor_type(unitary, 1.0, True, 1)
     with pytest.raises(TypeError, match="num_system_qubits"):
-        qmc.PauliLCUBlockEncoding(unitary, 1.0, 1, 1.0)  # type: ignore[arg-type]
+        descriptor_type(unitary, 1.0, 1, 1.0)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="num_signal_qubits"):
-        qmc.PauliLCUBlockEncoding(unitary, 1.0, 0, 1)
+        descriptor_type(unitary, 1.0, 0, 1)
     with pytest.raises(ValueError, match="num_system_qubits"):
-        qmc.PauliLCUBlockEncoding(unitary, 1.0, 1, -1)
+        descriptor_type(unitary, 1.0, 1, -1)
 
 
 def test_descriptor_normalizes_numpy_integer_widths() -> None:
@@ -679,7 +728,7 @@ def test_random_complex_two_term_lcu_samples_and_estimates_on_every_sdk(
 
     @qmc.qkernel
     def expval_kernel(observable: qmc.Observable) -> qmc.Float:
-        """Estimate the success-projected phase-sensitive system observable."""
+        """Estimate a phase-sensitive observable on the all-zero signal block."""
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(num_qubits, "system")
         _prepare_basis(system, initial_basis, num_qubits)
@@ -689,14 +738,20 @@ def test_random_complex_two_term_lcu_samples_and_estimates_on_every_sdk(
     shots = 2048
     sample_executable = sdk_transpiler.transpiler.transpile(sample_kernel)
     results = sample_executable.sample(_executor(sdk_transpiler), shots=shots).result()
-    observed_success = _zero_probability(results.results)
+    observed_zero_signal_probability = _zero_probability(results.results)
 
-    expected_success = (1.0 + x_weight**2) / encoding.normalization**2
+    expected_zero_signal_probability = (1.0 + x_weight**2) / encoding.normalization**2
     sampling_tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
-    assert observed_success == pytest.approx(
-        expected_success,
+    assert observed_zero_signal_probability == pytest.approx(
+        expected_zero_signal_probability,
         abs=sampling_tolerance,
     )
 
@@ -740,14 +795,20 @@ def test_three_term_lcu_executes_two_bit_select_on_every_sdk(
     shots = 4096
     executable = sdk_transpiler.transpiler.transpile(circuit)
     result = executable.sample(_executor(sdk_transpiler), shots=shots).result()
-    expected_success = float(
+    expected_zero_signal_probability = float(
         np.linalg.norm(matrix[:, 0]) ** 2 / encoding.normalization**2
     )
     tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
     assert _zero_probability(result.results) == pytest.approx(
-        expected_success,
+        expected_zero_signal_probability,
         abs=tolerance,
     )
 
@@ -776,14 +837,20 @@ def test_dense_two_qubit_lcu_executes_wide_select_on_every_sdk(
     shots = 4096
     executable = sdk_transpiler.transpiler.transpile(circuit)
     result = executable.sample(_executor(sdk_transpiler), shots=shots).result()
-    expected_success = float(
+    expected_zero_signal_probability = float(
         np.linalg.norm(matrix[:, basis_index]) ** 2 / encoding.normalization**2
     )
     tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
     assert _zero_probability(result.results) == pytest.approx(
-        expected_success,
+        expected_zero_signal_probability,
         abs=tolerance,
     )
 
@@ -986,10 +1053,10 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
     """An LSB-first zero control composes with the phase-bearing inner SELECT.
 
     With ``alpha = 3 / 2``, the active branch has signal-zero amplitude
-    ``2j / 3`` and success probability ``5 / 9``. The inactive identity branch
-    succeeds with probability one, so their equal superposition succeeds with
-    probability ``7 / 9`` and has control-Y expectation ``-2 / 3`` (conjugated
-    by inverse).
+    ``2j / 3`` and all-zero signal projection probability ``5 / 9``. The
+    inactive identity branch has projection probability one, so their equal
+    superposition has projection probability ``7 / 9`` and control-Y
+    expectation ``-2 / 3`` (conjugated by inverse).
     """
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
     encoding = qmc.pauli_lcu_block_encoding(lcu)
@@ -1019,7 +1086,7 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
 
     @qmc.qkernel
     def sample_kernel() -> qmc.Vector[qmc.Bit]:
-        """Measure LCU success across active and inactive control branches."""
+        """Measure the all-zero signal component across both control branches."""
         controls = qmc.qubit_array(2, "controls")
         controls[0] = qmc.h(controls[0])
         controls[1] = qmc.x(controls[1])
@@ -1053,12 +1120,18 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
         _executor(sdk_transpiler),
         shots=shots,
     ).result()
-    expected_success = 7.0 / 9.0
+    expected_zero_signal_probability = 7.0 / 9.0
     sampling_tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
     assert _zero_probability(sample_result.results) == pytest.approx(
-        expected_success,
+        expected_zero_signal_probability,
         abs=sampling_tolerance,
     )
 

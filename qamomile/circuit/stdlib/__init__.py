@@ -29,6 +29,7 @@ from .arithmetic import (
     ripple_carry_add,
 )
 from .grover import grover_iteration_count, grover_search
+from .lcu_block_encoding import LCUBlockEncoding
 from .multi_controlled_x import mcx, multi_controlled_x
 from .pauli_lcu_block_encoding import (
     PauliLCUBlockEncoding,
@@ -41,6 +42,8 @@ from .state_preparation import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
     computational_basis_state,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
 )
 
 __all__ = [
@@ -49,11 +52,14 @@ __all__ = [
     "qpe",
     "mcx",
     "multi_controlled_x",
+    "LCUBlockEncoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "computational_basis_state",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
+    "mottonen_amplitude_encoding",
+    "mottonen_amplitude_encoding_from_angles",
     # Arithmetic
     "ripple_carry_add",
     "modular_add",

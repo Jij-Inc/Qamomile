@@ -10,23 +10,24 @@ from typing import Any
 
 import numpy as np
 
-from qamomile.circuit._block_encoding import (
-    BlockEncodingUnitary as _BlockEncodingUnitary,
-    validate_block_encoding_fields,
-    validate_block_encoding_registers,
-)
 from qamomile.circuit.frontend.composite_gate import (
     composite_gate,
     configure_composite,
 )
 from qamomile.circuit.frontend.constructors import uint
 from qamomile.circuit.frontend.handle import Qubit, Vector
+from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.global_phase import global_phase
 from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x, y, z
 from qamomile.circuit.frontend.operation.select import select
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
 from qamomile.circuit.ir.operation.callable import CallPolicy
+from qamomile.circuit.stdlib.lcu_block_encoding import (
+    LCUBlockEncoding,
+    _BlockEncodingUnitary,
+    _register_lcu_block_encoding_static_binding,
+)
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
 )
@@ -35,77 +36,29 @@ from qamomile.observable import Pauli, PauliOperator
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class PauliLCUBlockEncoding:
-    r"""Describe one static exact block encoding of a retained Pauli LCU.
+class PauliLCUBlockEncoding(LCUBlockEncoding):
+    """Identify an LCU block encoding produced from a Pauli decomposition.
 
-    ``unitary`` is the qkernel implementing the larger unitary ``U``; it is
-    neither the encoded matrix ``A`` nor a dense matrix value. It has no
-    classical arguments and its quantum ABI is
-    ``unitary(signal, system) -> (signal, system)``. ``system`` is the ordered
-    logical data register on which ``A`` acts. ``signal`` is the complete
-    source-level ancilla bundle whose all-zero state selects the encoded block.
-    The unitary returns the same logical wires in the same order and acts
-    unitarily for arbitrary signal inputs; the signal may contain failure
-    components rather than returning to zero after one application.
-
-    For the all-zero signal isometry ``V0``, the exact retained LCU satisfies
-
-    .. math::
-
-        V_0^\dagger U V_0 = A / \mathtt{normalization}
-
-    including coefficient phase. ``normalization`` is finite and positive;
-    it is ``1.0`` for the zero operator. This implementation allocates no
-    hidden source-level logical qubits. A backend may still use temporary
-    decomposition scratch that is resource-accounted, exactly uncomputed for
-    every public input, and preserved under inverse and control.
-    Descriptor comparison and hashing use object identity rather than field
-    values.
+    The subtype adds no qkernel-visible fields. Reusable qkernels should
+    annotate encoding arguments with :class:`LCUBlockEncoding`; the Pauli
+    subtype remains available for producer-specific host-side code and
+    backward-compatible serialized templates.
 
     Args:
-        unitary (QKernel): QKernel implementing the block-encoding unitary
-            ``U`` with the static ``(signal, system)`` ABI.
+        unitary (QKernel): QKernel implementing the exact block-encoding
+            unitary with the static ``(signal, system)`` ABI.
         normalization (float): Finite positive block normalization.
         num_signal_qubits (int): Concrete positive width of the complete
-            signal register, including selectors, logical workspace, and
-            padding required by the producer.
+            signal register.
         num_system_qubits (int): Concrete positive width of the ordered system
             register.
 
     Raises:
-        TypeError: If ``unitary`` is not a ``QKernel`` with the exact static
-            positional ABI above, normalization is not a real scalar, or
-            either width is not an integer.
-        ValueError: If normalization is non-finite or non-positive, or either
-            width is non-positive.
+        TypeError: If an inherited descriptor field has an invalid type or the
+            unitary ABI is invalid.
+        ValueError: If normalization or a register width is non-positive or
+            non-finite.
     """
-
-    unitary: _BlockEncodingUnitary
-    normalization: float
-    num_signal_qubits: int
-    num_system_qubits: int
-
-    def __post_init__(self) -> None:
-        """Validate and normalize the immutable descriptor fields.
-
-        Raises:
-            TypeError: If a field has an invalid runtime type or ``unitary``
-                does not have the exact static positional block-encoding ABI.
-            ValueError: If normalization or a register width is outside its
-                valid finite positive range.
-        """
-        unitary, normalization, num_signal_qubits, num_system_qubits = (
-            validate_block_encoding_fields(
-                self.unitary,
-                self.normalization,
-                self.num_signal_qubits,
-                self.num_system_qubits,
-            )
-        )
-        object.__setattr__(self, "unitary", unitary)
-        object.__setattr__(self, "normalization", normalization)
-        object.__setattr__(self, "num_signal_qubits", num_signal_qubits)
-        object.__setattr__(self, "num_system_qubits", num_system_qubits)
 
 
 @qkernel
@@ -311,7 +264,11 @@ def _build_multi_term_encoding(
     for index, term in enumerate(lcu.terms):
         amplitudes[index] = math.sqrt(abs(term.coefficient)) / sqrt_alpha
 
-    preparation, required_width = _mottonen_composite(amplitudes)
+    preparation, required_width = _mottonen_composite(
+        amplitudes,
+        name="mottonen_amplitude_encoding",
+        policy=CallPolicy.PRESERVE_BOX,
+    )
     if required_width != signal_width:
         raise RuntimeError(
             "Möttönen preparation width disagrees with the LCU signal width."
@@ -453,13 +410,35 @@ def _validate_register_widths(
         TypeError: If either argument is not a vector register.
         ValueError: If a concrete register width differs from its requirement.
     """
-    validate_block_encoding_registers(
-        signal,
-        system,
-        expected_signal,
-        expected_system,
-        "Pauli LCU block encoding",
-    )
+    _validate_register_width(signal, expected_signal, "signal")
+    _validate_register_width(system, expected_system, "system")
+
+
+def _validate_register_width(
+    register: Vector[Qubit],
+    expected: int,
+    name: str,
+) -> None:
+    """Validate one concrete vector width and defer symbolic-width checks.
+
+    Args:
+        register (Vector[Qubit]): Register to inspect.
+        expected (int): Required width.
+        name (str): Register name used in diagnostics.
+
+    Raises:
+        TypeError: If ``register`` is not a vector.
+        ValueError: If its concrete width differs from ``expected``.
+    """
+    try:
+        actual = get_size(register)
+    except ValueError:
+        return
+    if actual != expected:
+        unit = "qubit" if expected == 1 else "qubits"
+        raise ValueError(
+            f"Pauli LCU block encoding requires {expected} {name} {unit}, got {actual}."
+        )
 
 
 def _configure_block_encoding(
@@ -518,6 +497,12 @@ def _semantic_arguments(lcu: PauliLCU) -> dict[str, Any]:
             for term in lcu.terms
         ],
     }
+
+
+_register_lcu_block_encoding_static_binding(
+    PauliLCUBlockEncoding,
+    "qamomile.stdlib.pauli_lcu_block_encoding",
+)
 
 
 __all__ = [

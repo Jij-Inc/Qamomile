@@ -119,6 +119,7 @@ from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
 from .stdlib import (
+    LCUBlockEncoding,
     PauliLCUBlockEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
@@ -130,6 +131,8 @@ from .stdlib import (
     mcx,
     modmul_const,
     modular_add,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
     multi_controlled_x,
     pauli_lcu_block_encoding,
     qft,
@@ -258,11 +261,14 @@ __all__ = [
     "qpe",
     "mcx",
     "multi_controlled_x",
+    "LCUBlockEncoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "computational_basis_state",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
+    "mottonen_amplitude_encoding",
+    "mottonen_amplitude_encoding_from_angles",
     "ripple_carry_add",
     "modular_add",
     "controlled_modular_add",

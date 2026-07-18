@@ -32,6 +32,7 @@ from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import ArrayValue, Value, array_static_length
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.param_keys import dict_param_key
+from qamomile.circuit.transpiler.parameter_binding import ParameterContainerKind
 
 from .cast_binop_emission import _set_emit_value
 from .condition_resolution import (
@@ -90,9 +91,7 @@ def resolve_condition_address(
         QubitAddress: Key suitable for looking up the condition in
             ``clbit_map``.
 
-    Raises:
-        No exceptions for any well-formed IR. See
-        ``resolve_condition_address_detailed`` for the resolution contract.
+    See ``resolve_condition_address_detailed`` for the resolution contract.
     """
     return resolve_condition_address_detailed(condition, bindings, resolver)[0]
 
@@ -963,7 +962,10 @@ def evaluate_dict_getitem(
     dict_name = getattr(dict_value, "name", None)
     if dict_name and dict_name in emit_pass._resolver.parameters:
         param = emit_pass._get_or_create_parameter(
-            dict_param_key(dict_name, lookup_key), op.results[0].uuid
+            dict_param_key(dict_name, lookup_key),
+            op.results[0].uuid,
+            container_kind=ParameterContainerKind.DICT,
+            container_name=dict_name,
         )
         _set_emit_value(bindings, op.results[0].uuid, param)
         return
