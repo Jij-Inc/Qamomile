@@ -633,7 +633,7 @@ class _StaticBindingResolver:
         self._seen_blocks: set[int] = set()
 
     def resolve(self, block: Block) -> None:
-        """Resolve every reachable static-member marker in a block graph.
+        """Resolve static members and materialize final call-site widths.
 
         Args:
             block (Block): Root block to rewrite in place.
@@ -645,10 +645,14 @@ class _StaticBindingResolver:
             ValueError: If a marker is inconsistent with its static slot or
                 if an owned block declares an unknown static slot.
         """
-        if not self._contexts:
-            return
+        if self._contexts:
+            self._validate_block_call_widths(block, {}, {})
+            self._resolve_block(block)
+        # Value substitution can leave owned-block formals symbolic even when
+        # their enclosing call operands are concrete. Walk the final graph
+        # after member resolution so inverse metadata uses those call-site
+        # widths, including kernels without static binding contexts.
         self._validate_block_call_widths(block, {}, {})
-        self._resolve_block(block)
 
     def _validate_block_call_widths(
         self,

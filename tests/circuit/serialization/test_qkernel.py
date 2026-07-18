@@ -249,6 +249,65 @@ def _controlled_static_inverse(
 
 
 @qmc.qkernel
+def _symbolic_pair_inverse_helper(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Route two symbolic registers through one preserved system operation.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Pass-through symbolic register.
+        system (qmc.Vector[qmc.Qubit]): Symbolic register whose first qubit is
+            flipped.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Preserved signal
+            and updated system registers.
+    """
+    system = _symbolic_width_box(system)
+    return signal, system
+
+
+@qmc.qkernel
+def _controlled_bound_symbolic_pair_inverse(
+    signal_width: qmc.UInt,
+    system_width: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Control a nested inverse after two register widths are bound.
+
+    Args:
+        signal_width (qmc.UInt): Compile-time signal width.
+        system_width (qmc.UInt): Compile-time system width.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured system register.
+    """
+
+    @qmc.qkernel
+    def inverse_member(
+        signal: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Expose a symbolic two-register inverse through outer control.
+
+        Args:
+            signal (qmc.Vector[qmc.Qubit]): Symbolic signal register.
+            system (qmc.Vector[qmc.Qubit]): Symbolic system register.
+
+        Returns:
+            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Inverted
+                signal and system registers.
+        """
+        return qmc.inverse(_symbolic_pair_inverse_helper)(signal, system)
+
+    outer = qmc.x(qmc.qubit("outer"))
+    signal = qmc.qubit_array(signal_width, "signal")
+    system = qmc.qubit_array(system_width, "system")
+    outer, signal, system = qmc.control(inverse_member)(outer, signal, system)
+    return qmc.measure(system)
+
+
+@qmc.qkernel
 def _vector_rotation_layer(
     qubits: qmc.Vector[qmc.Qubit],
     angles: qmc.Vector[qmc.Float],
@@ -1808,6 +1867,26 @@ def test_serialized_controlled_static_inverse_refreshes_call_site_width() -> Non
     )
     result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
     assert result.results == [((1,), 16)]
+
+
+@pytest.mark.parametrize(("signal_width", "system_width"), [(2, 1), (2, 3)])
+def test_serialized_controlled_inverse_materializes_owned_block_widths(
+    signal_width: int,
+    system_width: int,
+) -> None:
+    """Bound call edges materialize inverse widths without static bindings."""
+    restored = deserialize(serialize(_controlled_bound_symbolic_pair_inverse))
+
+    executable = QiskitTranspiler().transpile(
+        restored,
+        bindings={
+            "signal_width": signal_width,
+            "system_width": system_width,
+        },
+    )
+    result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
+    expected = (1, *(0 for _ in range(system_width - 1)))
+    assert result.results == [(expected, 16)]
 
 
 def test_inverse_round_trip_preserves_free_classical_capture() -> None:
