@@ -122,6 +122,52 @@ def _atomic_symbolic_vector_inverse() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(qubits)
 
 
+@qmc.composite_gate(name="symbolic_width_box")
+def _symbolic_width_box(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply X to the first qubit of a symbolic-width register.
+
+    Args:
+        qubits (qmc.Vector[qmc.Qubit]): Nonempty symbolic-width register.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Register with its first qubit flipped.
+    """
+    qubits[0] = qmc.x(qubits[0])
+    return qubits
+
+
+@qmc.qkernel
+def _symbolic_width_inverse_helper(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Route a symbolic-width register through a preserved composite.
+
+    Args:
+        qubits (qmc.Vector[qmc.Qubit]): Symbolic-width register to update.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated register from the preserved composite.
+    """
+    return _symbolic_width_box(qubits)
+
+
+@qmc.qkernel
+def _bound_symbolic_vector_inverse(width: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Inverse-call a symbolic-vector kernel at a bound width.
+
+    Args:
+        width (qmc.UInt): Compile-time vector width.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured inverted all-zero register.
+    """
+    qubits = qmc.qubit_array(width, "qubits")
+    qubits = qmc.inverse(_symbolic_width_inverse_helper)(qubits)
+    return qmc.measure(qubits)
+
+
 @qmc.qkernel
 def _vector_rotation_layer(
     qubits: qmc.Vector[qmc.Qubit],
@@ -1648,6 +1694,22 @@ def test_symbolic_vector_inverse_round_trips_with_disjoint_fallback_values() -> 
     result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
 
     assert result.results == [((1, 1), 16)]
+
+
+def test_serialized_symbolic_inverse_refreshes_bound_scalar_width() -> None:
+    """Value replacement refreshes inverse scalar-width metadata before emit."""
+    restored = deserialize(serialize(_bound_symbolic_vector_inverse))
+    specialized = restored.build(width=3)
+    inverse_operation = next(
+        operation
+        for operation in specialized.operations
+        if isinstance(operation, InverseBlockOperation)
+    )
+
+    assert inverse_operation.num_target_qubits == 3
+    executable = QiskitTranspiler().transpile(restored, bindings={"width": 3})
+    result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
+    assert result.results == [((1, 0, 0), 16)]
 
 
 def test_inverse_round_trip_preserves_free_classical_capture() -> None:

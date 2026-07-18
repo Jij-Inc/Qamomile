@@ -852,15 +852,7 @@ class _StaticBindingResolver:
         inherited = widths.get(value.logical_id)
         if inherited is not None:
             return inherited
-        if not value.shape:
-            return None
-        width = 1
-        for dimension in value.shape:
-            concrete = dimension.get_const()
-            if type(concrete) is not int:
-                return None
-            width *= concrete
-        return width
+        return _concrete_quantum_width(value)
 
     def _validate_static_invoke_widths(
         self,
@@ -1321,6 +1313,29 @@ def _collect_formal_replacements(
             _collect_formal_replacements(formal_value, concrete_value, replacements)
 
 
+def _concrete_quantum_width(value: ValueBase) -> int | None:
+    """Return the scalar qubit width of one concrete quantum value.
+
+    Args:
+        value (ValueBase): Scalar or array quantum value to inspect.
+
+    Returns:
+        int | None: Scalar qubit width, or ``None`` when an array dimension
+            remains symbolic.
+    """
+    if not isinstance(value, ArrayValue):
+        return 1
+    if not value.shape:
+        return None
+    width = 1
+    for dimension in value.shape:
+        concrete = dimension.get_const()
+        if type(concrete) is not int:
+            return None
+        width *= concrete
+    return width
+
+
 def _replace_operations(
     operations: list[Operation],
     substitutor: ValueSubstitutor,
@@ -1363,6 +1378,15 @@ def _replace_operations(
                 for items in new_operation.nested_op_lists()
             ]
             new_operation = new_operation.rebuild_nested(nested)
+        if isinstance(new_operation, InverseBlockOperation):
+            target_widths = [
+                _concrete_quantum_width(target)
+                for target in new_operation.target_qubits
+            ]
+            if target_widths and all(width is not None for width in target_widths):
+                new_operation.num_target_qubits = sum(
+                    cast(int, width) for width in target_widths
+                )
         _replace_owned_blocks(new_operation, replacements, block_cache)
         rewritten.append(new_operation)
     return rewritten
