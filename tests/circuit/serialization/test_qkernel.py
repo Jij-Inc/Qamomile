@@ -169,6 +169,86 @@ def _bound_symbolic_vector_inverse(width: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
+def _asymmetric_block_encoding_unitary(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Flip one system qubit while preserving an independent signal.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Pass-through signal register.
+        system (qmc.Vector[qmc.Qubit]): One-qubit system register.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Preserved signal
+            and flipped system registers.
+    """
+    system[0] = qmc.x(system[0])
+    return signal, system
+
+
+@qmc.qkernel
+def _apply_static_block_encoding(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+    encoding: qmc.LCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Apply a unitary reached through a static block-encoding slot.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Descriptor-sized signal register.
+        system (qmc.Vector[qmc.Qubit]): Descriptor-sized system register.
+        encoding (qmc.LCUBlockEncoding): Compile-time block encoding.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Registers after
+            the bound unitary.
+    """
+    return encoding.unitary(signal, system)
+
+
+@qmc.qkernel
+def _controlled_static_inverse(
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Vector[qmc.Bit]:
+    """Control an inverse helper after static descriptor specialization.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Compile-time block encoding.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured system register.
+    """
+
+    @qmc.qkernel
+    def inverse_member(
+        signal: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Expose the static-argument inverse through outer control.
+
+        Args:
+            signal (qmc.Vector[qmc.Qubit]): Descriptor-sized signal register.
+            system (qmc.Vector[qmc.Qubit]): Descriptor-sized system register.
+
+        Returns:
+            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Inverted
+                signal and system registers.
+        """
+        return qmc.inverse(_apply_static_block_encoding)(
+            signal,
+            system,
+            encoding,
+        )
+
+    outer = qmc.x(qmc.qubit("outer"))
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    outer, signal, system = qmc.control(inverse_member)(outer, signal, system)
+    return qmc.measure(system)
+
+
+@qmc.qkernel
 def _vector_rotation_layer(
     qubits: qmc.Vector[qmc.Qubit],
     angles: qmc.Vector[qmc.Float],
@@ -1710,6 +1790,24 @@ def test_serialized_symbolic_inverse_refreshes_bound_scalar_width() -> None:
     executable = QiskitTranspiler().transpile(restored, bindings={"width": 3})
     result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
     assert result.results == [((1, 0, 0), 16)]
+
+
+def test_serialized_controlled_static_inverse_refreshes_call_site_width() -> None:
+    """Call-site widths refresh nested inverse metadata before outer control."""
+    encoding = qmc.LCUBlockEncoding(
+        unitary=_asymmetric_block_encoding_unitary,
+        normalization=1.0,
+        num_signal_qubits=2,
+        num_system_qubits=1,
+    )
+    restored = deserialize(serialize(_controlled_static_inverse))
+
+    executable = QiskitTranspiler().transpile(
+        restored,
+        bindings={"encoding": encoding},
+    )
+    result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
+    assert result.results == [((1,), 16)]
 
 
 def test_inverse_round_trip_preserves_free_classical_capture() -> None:
