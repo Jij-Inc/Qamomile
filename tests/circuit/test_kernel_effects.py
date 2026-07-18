@@ -228,7 +228,11 @@ def test_measurement_plus_expval_is_rejected_as_sample_only(
 
 
 def test_explicit_modmul_control_path_still_executes(sdk_transpiler: object) -> None:
-    """Explicit stdlib control remains executable on every SDK backend."""
+    """Explicit stdlib control executes on reset-capable SDK backends."""
+    _ = _explicit_controlled_modmul.block
+    if sdk_transpiler.backend_name == "quri_parts":
+        pytest.skip("QURI Parts cannot represent modmul's mid-circuit reset")
+
     transpiler = sdk_transpiler.transpiler
     result = (
         transpiler.transpile(_explicit_controlled_modmul)
