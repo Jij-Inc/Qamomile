@@ -262,6 +262,7 @@ def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
             the quantum input wires it received, or if its reachable body
             contains non-unitary behavior or internal ancilla allocation.
     """
+    seen_blocks: set[int] = set()
     for position, block in enumerate(case_blocks):
         quantum_inputs = [
             value for value in block.input_values if value.type.is_quantum()
@@ -288,10 +289,14 @@ def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
                 f"not valid selectable unitaries; use explicit gates such "
                 f"as qmc.swap for physical permutations."
             )
-        _validate_case_operations_are_unitary(block, position)
+        _validate_case_operations_are_unitary(block, position, seen_blocks)
 
 
-def _validate_case_operations_are_unitary(block: Block, position: int) -> None:
+def _validate_case_operations_are_unitary(
+    block: Block,
+    position: int,
+    seen_blocks: set[int],
+) -> None:
     """Reject non-unitary behavior and internal ancillas in a SELECT case.
 
     Classical arithmetic and control-flow nodes are allowed because a
@@ -306,6 +311,8 @@ def _validate_case_operations_are_unitary(block: Block, position: int) -> None:
     Args:
         block (Block): Case block to inspect recursively.
         position (int): Case index used in diagnostics.
+        seen_blocks (set[int]): Block identities already inspected during the
+            current SELECT validation.
 
     Returns:
         None: The function returns nothing when the case is unitary.
@@ -314,7 +321,6 @@ def _validate_case_operations_are_unitary(block: Block, position: int) -> None:
         ValueError: If a reachable operation is hybrid, resets a qubit, or
             allocates an internal ancilla.
     """
-    seen_blocks: set[int] = set()
 
     def visit_block(candidate: Block) -> None:
         """Inspect one block once and recurse through owned bodies.

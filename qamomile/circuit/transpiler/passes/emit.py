@@ -611,24 +611,15 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                 )
 
             if root_av is qubits_value:
-                # Non-view case: match legacy direct element_uuid lookup
-                # so arrays whose elements were registered under explicit
-                # UUIDs (e.g. tuple-packed expval qubits) still resolve.
-                #
-                # On a miss, fall back to the element's root
-                # ``(root_uuid, index)`` address captured at trace time: the
-                # root array's QInitOperation always registers that composite
-                # key, so this resolves a Vector element whose own (per-version)
-                # UUID was never registered in the quantum segment -- e.g. an
-                # ungated ancilla, or an element that is a gate/composite
-                # result.  Standalone qubits carry the ``("", -1)`` sentinel
-                # (``None`` here) and stay on the flat-lookup path above.
+                # A recorded root address is the canonical physical identity
+                # for an array element, so resolve it before the per-version
+                # element UUID. This prevents stale or inconsistent flat UUID
+                # metadata from silently redirecting an observable. Standalone
+                # qubits carry the ``("", -1)`` sentinel (``None`` here) and
+                # use the flat lookup. If a valid root is absent from an older
+                # segment map, the flat UUID remains a compatibility fallback.
                 parent_addrs = qubits_value.get_element_parent_addresses()
                 for i, qubit_uuid in enumerate(qubits_value.get_element_uuids()):
-                    addr = QubitAddress(qubit_uuid)
-                    if addr in uuid_to_physical:
-                        qubit_map[i] = uuid_to_physical[addr]
-                        continue
                     # ``get_element_parent_addresses()`` returns exactly one
                     # entry per ``get_element_uuids()`` element, so indexing by
                     # ``i`` here is always in range.
@@ -638,6 +629,10 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                         root_addr = QubitAddress(root_uuid, root_idx)
                         if root_addr in uuid_to_physical:
                             qubit_map[i] = uuid_to_physical[root_addr]
+                            continue
+                    addr = QubitAddress(qubit_uuid)
+                    if addr in uuid_to_physical:
+                        qubit_map[i] = uuid_to_physical[addr]
 
                 # Whole Vector[Qubit] operands created by
                 # ``qubit_array(...)`` do not carry explicit

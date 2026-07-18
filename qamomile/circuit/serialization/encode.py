@@ -30,6 +30,10 @@ from qamomile.circuit.frontend.qkernel_callable import (
     qkernel_callable_ref,
 )
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
+from qamomile.circuit.frontend.static_binding import (
+    get_static_binding_by_annotation,
+    validate_static_binding_slot,
+)
 from qamomile.circuit.ir.block import BlockKind
 from qamomile.circuit.ir.operation.callable import CallableDef, CallPolicy
 from qamomile.circuit.ir.parameter import ParamKind
@@ -84,25 +88,59 @@ def to_dict(kernel: QKernelLike) -> dict[str, Any]:
             "Cannot serialize compile-time bindings; serialize the unbound "
             "qkernel and provide bindings after deserialization"
         )
-    if block.label_args != list(kernel.signature.parameters):
-        raise ValueError("qkernel signature does not match Block.label_args")
+    static_specs = {
+        name: get_static_binding_by_annotation(kernel.input_types[name])
+        for name in kernel.signature.parameters
+    }
+    ordinary_names = [name for name, spec in static_specs.items() if spec is None]
+    if block.label_args != ordinary_names:
+        raise ValueError(
+            "qkernel ordinary-value signature does not match Block.label_args"
+        )
+    static_slots = {slot.name: slot for slot in block.static_bindings}
+    expected_static_names = [
+        name for name, spec in static_specs.items() if spec is not None
+    ]
+    if list(static_slots) != expected_static_names:
+        raise ValueError(
+            "qkernel static binding signature order does not match "
+            "Block.static_bindings"
+        )
+    for name in expected_static_names:
+        spec = static_specs[name]
+        assert spec is not None
+        validate_static_binding_slot(spec, static_slots[name])
     if len(kernel.output_types) != len(block.output_values):
         raise ValueError("qkernel return annotations do not match Block outputs")
     validate_qkernel_ir(block)
 
     ctx = _EncodeContext()
-    parameters = []
+    parameters: list[dict[str, Any]] = []
     slots = {slot.name: slot for slot in block.param_slots}
-    for (name, parameter), formal in zip(
-        kernel.signature.parameters.items(),
-        block.input_values,
-        strict=True,
-    ):
+    formals = dict(zip(block.label_args, block.input_values, strict=True))
+    for name, parameter in kernel.signature.parameters.items():
         annotation = kernel.input_types[name]
+        spec = static_specs[name]
+        if spec is not None:
+            if parameter.default is not inspect.Parameter.empty:
+                raise TypeError(
+                    f"Static binding parameter {name!r} cannot have a default."
+                )
+            parameters.append(
+                {
+                    "name": name,
+                    "static_binding_type": spec.type_key,
+                    "kind": parameter.kind.name,
+                    "has_default": False,
+                    "default": None,
+                    "differentiable": False,
+                }
+            )
+            continue
         parameters.append(
             {
                 "name": name,
-                "type": _encode_kernel_type(annotation, formal),
+                "type": _encode_kernel_type(annotation, formals[name]),
                 "kind": parameter.kind.name,
                 "has_default": parameter.default is not inspect.Parameter.empty,
                 "default": (

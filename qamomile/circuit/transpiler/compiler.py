@@ -8,6 +8,7 @@ from qamomile.circuit.frontend.param_validation import (
     validate_bindings_parameters_disjoint,
 )
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
+from qamomile.circuit.frontend.static_binding import without_static_bindings
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.artifact import CompiledProgram
 from qamomile.circuit.transpiler.config import CompilerConfig
@@ -92,6 +93,7 @@ class QamomileCompiler:
             kind=BlockKind.HIERARCHICAL,
             parameters=traced.parameters,
             param_slots=traced.param_slots,
+            static_bindings=traced.static_bindings,
         )
 
     def prepare(
@@ -118,11 +120,13 @@ class QamomileCompiler:
                 inputs or outputs.
         """
         block = self.to_block(kernel, bindings, parameters)
+        input_types = getattr(kernel, "input_types", {})
+        ordinary_bindings = without_static_bindings(input_types, bindings)
         EntrypointValidationPass().run(block)
         if self.config.substitutions.rules:
             block = SubstitutionPass(self.config.substitutions).run(block)
-        block = ParameterShapeResolutionPass(bindings).run(block)
-        return prepare_module(block, bindings)
+        block = ParameterShapeResolutionPass(ordinary_bindings).run(block)
+        return prepare_module(block, ordinary_bindings)
 
     def compile(
         self,

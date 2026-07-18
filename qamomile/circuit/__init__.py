@@ -11,9 +11,10 @@ passes, and a backend package emits an executable program. This module
 re-exports everything a user program needs to be written: the decorator,
 the handle types (``Qubit``, ``Vector``, ``Float``, ...), gate /
 measurement / control-flow builders, meta-operations (``control`` /
-``inverse``), the stdlib and algorithm kernels (QFT, QPE, Grover, Shor,
-modular arithmetic), symbolic resource estimation (``estimator/``), and
-the job / result types returned by ``ExecutableProgram.sample`` / ``run``.
+``inverse``), stdlib and algorithm kernels (QFT, QPE, Grover, Shor, modular
+arithmetic), scheme-specific descriptors returned by circuit factories,
+symbolic resource estimation (``estimator/``), and the job / result types
+returned by ``ExecutableProgram.sample`` / ``run``.
 
 Dependency direction (hard constraint)
 --------------------------------------
@@ -118,6 +119,8 @@ from .frontend.qkernel import QKernel, qkernel
 
 # Standard library circuits
 from .stdlib import (
+    LCUBlockEncoding,
+    PauliLCUBlockEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
     computational_basis_state,
@@ -131,6 +134,7 @@ from .stdlib import (
     mottonen_amplitude_encoding,
     mottonen_amplitude_encoding_from_angles,
     multi_controlled_x,
+    pauli_lcu_block_encoding,
     qft,
     qpe,
     ripple_carry_add,
@@ -251,6 +255,9 @@ __all__ = [
     "qpe",
     "mcx",
     "multi_controlled_x",
+    "LCUBlockEncoding",
+    "PauliLCUBlockEncoding",
+    "pauli_lcu_block_encoding",
     "computational_basis_state",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
