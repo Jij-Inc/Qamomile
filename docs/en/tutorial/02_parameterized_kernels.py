@@ -29,7 +29,7 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %% [markdown]
 # ## Typical Roles of `UInt` and `Float`

@@ -53,8 +53,7 @@ class CallableSignature:
             hints.
 
         Raises:
-            TypeError: If any frontend type cannot be mapped to an IR value
-            type.
+            TypeError: If a frontend type cannot map to an IR value type.
         """
         return Signature(
             operands=[

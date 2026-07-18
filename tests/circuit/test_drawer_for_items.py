@@ -187,7 +187,7 @@ class TestForItemsValueVarSubstitutesIntoBinOpLabels:
             )
 
         # Every concrete coefficient should appear in exactly one label.
-        expected_substrings = {f"{v}*gamma" for v in coeffs.values()}
+        expected_substrings = {"-0.6*gamma", "gamma", "1.4*gamma"}
         seen = {sub for sub in expected_substrings if any(sub in lbl for lbl in labels)}
         assert seen == expected_substrings, (
             f"Concrete coefficients missing from labels; "

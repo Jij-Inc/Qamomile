@@ -91,6 +91,7 @@ class OperationType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     INVERSE_BLOCK_OPERATION: _ClassVar[OperationType]
     GLOBAL_PHASE_OPERATION: _ClassVar[OperationType]
     SELECT_OPERATION: _ClassVar[OperationType]
+    RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: _ClassVar[OperationType]
 PARAMETER_KIND_UNSPECIFIED: ParameterKind
 POSITIONAL_ONLY: ParameterKind
 POSITIONAL_OR_KEYWORD: ParameterKind
@@ -162,6 +163,7 @@ INVOKE_OPERATION: OperationType
 INVERSE_BLOCK_OPERATION: OperationType
 GLOBAL_PHASE_OPERATION: OperationType
 SELECT_OPERATION: OperationType
+RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: OperationType
 
 class QKernel(_message.Message):
     __slots__ = ("qamomile_version", "name", "parameters", "results", "body", "value_table", "callable_table", "callable_definition", "return_annotation")
@@ -186,20 +188,22 @@ class QKernel(_message.Message):
     def __init__(self, qamomile_version: _Optional[str] = ..., name: _Optional[str] = ..., parameters: _Optional[_Iterable[_Union[KernelParameter, _Mapping]]] = ..., results: _Optional[_Iterable[_Union[KernelType, _Mapping]]] = ..., body: _Optional[_Union[Block, _Mapping]] = ..., value_table: _Optional[_Iterable[_Union[ValueNode, _Mapping]]] = ..., callable_table: _Optional[_Iterable[_Union[CallableEntry, _Mapping]]] = ..., callable_definition: _Optional[_Union[CallableDefinition, _Mapping]] = ..., return_annotation: _Optional[_Union[FrontendAnnotation, _Mapping]] = ...) -> None: ...
 
 class KernelParameter(_message.Message):
-    __slots__ = ("name", "type", "kind", "has_default", "default", "differentiable")
+    __slots__ = ("name", "type", "kind", "has_default", "default", "differentiable", "static_binding_type")
     NAME_FIELD_NUMBER: _ClassVar[int]
     TYPE_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
     HAS_DEFAULT_FIELD_NUMBER: _ClassVar[int]
     DEFAULT_FIELD_NUMBER: _ClassVar[int]
     DIFFERENTIABLE_FIELD_NUMBER: _ClassVar[int]
+    STATIC_BINDING_TYPE_FIELD_NUMBER: _ClassVar[int]
     name: str
     type: KernelType
     kind: ParameterKind
     has_default: bool
     default: Payload
     differentiable: bool
-    def __init__(self, name: _Optional[str] = ..., type: _Optional[_Union[KernelType, _Mapping]] = ..., kind: _Optional[_Union[ParameterKind, str]] = ..., has_default: bool = ..., default: _Optional[_Union[Payload, _Mapping]] = ..., differentiable: bool = ...) -> None: ...
+    static_binding_type: str
+    def __init__(self, name: _Optional[str] = ..., type: _Optional[_Union[KernelType, _Mapping]] = ..., kind: _Optional[_Union[ParameterKind, str]] = ..., has_default: bool = ..., default: _Optional[_Union[Payload, _Mapping]] = ..., differentiable: bool = ..., static_binding_type: _Optional[str] = ...) -> None: ...
 
 class KernelType(_message.Message):
     __slots__ = ("value_type", "ndim", "annotation")
@@ -220,7 +224,7 @@ class FrontendAnnotation(_message.Message):
     def __init__(self, kind: _Optional[_Union[FrontendAnnotationKind, str]] = ..., arguments: _Optional[_Iterable[_Union[FrontendAnnotation, _Mapping]]] = ...) -> None: ...
 
 class Block(_message.Message):
-    __slots__ = ("kind", "name", "label_args", "input_value_refs", "output_value_refs", "output_names", "parameters", "operations")
+    __slots__ = ("kind", "name", "label_args", "input_value_refs", "output_value_refs", "output_names", "parameters", "static_bindings", "operations")
     KIND_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     LABEL_ARGS_FIELD_NUMBER: _ClassVar[int]
@@ -228,6 +232,7 @@ class Block(_message.Message):
     OUTPUT_VALUE_REFS_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_NAMES_FIELD_NUMBER: _ClassVar[int]
     PARAMETERS_FIELD_NUMBER: _ClassVar[int]
+    STATIC_BINDINGS_FIELD_NUMBER: _ClassVar[int]
     OPERATIONS_FIELD_NUMBER: _ClassVar[int]
     kind: str
     name: str
@@ -236,8 +241,27 @@ class Block(_message.Message):
     output_value_refs: _containers.RepeatedScalarFieldContainer[str]
     output_names: _containers.RepeatedScalarFieldContainer[str]
     parameters: _containers.RepeatedCompositeFieldContainer[NamedReference]
+    static_bindings: _containers.RepeatedCompositeFieldContainer[StaticBindingSlot]
     operations: _containers.RepeatedCompositeFieldContainer[Operation]
-    def __init__(self, kind: _Optional[str] = ..., name: _Optional[str] = ..., label_args: _Optional[_Iterable[_Union[Payload, _Mapping]]] = ..., input_value_refs: _Optional[_Iterable[str]] = ..., output_value_refs: _Optional[_Iterable[str]] = ..., output_names: _Optional[_Iterable[str]] = ..., parameters: _Optional[_Iterable[_Union[NamedReference, _Mapping]]] = ..., operations: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ...) -> None: ...
+    def __init__(self, kind: _Optional[str] = ..., name: _Optional[str] = ..., label_args: _Optional[_Iterable[_Union[Payload, _Mapping]]] = ..., input_value_refs: _Optional[_Iterable[str]] = ..., output_value_refs: _Optional[_Iterable[str]] = ..., output_names: _Optional[_Iterable[str]] = ..., parameters: _Optional[_Iterable[_Union[NamedReference, _Mapping]]] = ..., static_bindings: _Optional[_Iterable[_Union[StaticBindingSlot, _Mapping]]] = ..., operations: _Optional[_Iterable[_Union[Operation, _Mapping]]] = ...) -> None: ...
+
+class StaticBindingSlot(_message.Message):
+    __slots__ = ("name", "type_key", "fields")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    TYPE_KEY_FIELD_NUMBER: _ClassVar[int]
+    FIELDS_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    type_key: str
+    fields: _containers.RepeatedCompositeFieldContainer[StaticBindingField]
+    def __init__(self, name: _Optional[str] = ..., type_key: _Optional[str] = ..., fields: _Optional[_Iterable[_Union[StaticBindingField, _Mapping]]] = ...) -> None: ...
+
+class StaticBindingField(_message.Message):
+    __slots__ = ("name", "value_ref")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    VALUE_REF_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    value_ref: str
+    def __init__(self, name: _Optional[str] = ..., value_ref: _Optional[str] = ...) -> None: ...
 
 class NamedReference(_message.Message):
     __slots__ = ("name", "value_ref")

@@ -1530,6 +1530,7 @@ def _reconnect_merge_owners(
     merges: typing.Sequence[tuple[typing.Any, typing.Any, Handle]],
     merged_by_branch_pair: dict[tuple[int, int], Handle],
     canonical_by_branch_id: dict[int, Handle],
+    if_operation: IfOperation,
 ) -> None:
     """Reconnect merged element and view handles to canonical ownership nodes.
 
@@ -1547,6 +1548,8 @@ def _reconnect_merge_owners(
             selected for each pair of true- and false-branch handles.
         canonical_by_branch_id (dict[int, Handle]): Canonical handle selected
             for each copied branch handle identity.
+        if_operation (IfOperation): Conditional receiving any auxiliary
+            source-index merge needed to defer a quantum return check.
 
     Returns:
         None
@@ -1617,6 +1620,34 @@ def _reconnect_merge_owners(
                 ):
                     merged_handle.parent = merged_parent
                     merged_handle.indices = true_indices
+                elif (
+                    len(true_indices) == len(false_indices)
+                    and len(true_indices) > 0
+                    and merged_handle.value.type.is_quantum()
+                ):
+                    merged_indices: list[UInt] = []
+                    for index, (true_index, false_index) in enumerate(
+                        zip(true_indices, false_indices, strict=True)
+                    ):
+                        merge_value = Value(
+                            type=UIntType(),
+                            name=f"quantum_return_index_merge_{index}",
+                        )
+                        if_operation.add_merge(
+                            true_index.value,
+                            false_index.value,
+                            merge_value,
+                        )
+                        merged_indices.append(UInt(value=merge_value))
+
+                    for branch_indices in (true_indices, false_indices):
+                        branch_key = merged_parent._make_indices_key(branch_indices)
+                        merged_parent._borrowed_indices.pop(branch_key, None)
+                    merged_handle.parent = merged_parent
+                    merged_handle.indices = tuple(merged_indices)
+                    merged_parent._borrowed_indices[
+                        merged_parent._make_indices_key(merged_handle.indices)
+                    ] = merged_handle
 
         if not (
             isinstance(true_val, VectorView)
@@ -2382,6 +2413,7 @@ def emit_if(
         owner_merges,
         ownership_targets,
         canonical_by_branch_id,
+        if_op,
     )
 
     # 5. Add IfOperation to parent tracer

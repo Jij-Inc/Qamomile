@@ -7,7 +7,8 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.parameter import ParamSlot
-from qamomile.circuit.ir.value import Value, ValueLike
+from qamomile.circuit.ir.static_binding import StaticBindingSlot
+from qamomile.circuit.ir.value import Value, ValueLike, collect_value_like_uuids
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.operation import Operation
@@ -52,29 +53,94 @@ class Block:
     # (e.g., nested composite-gate implementation blocks).
     param_slots: tuple[ParamSlot, ...] = dataclasses.field(default_factory=tuple)
 
+    # Compile-time object dependencies that are deliberately absent from the
+    # runtime/quantum Block ABI. Hierarchical qkernels may carry unresolved
+    # slots; build() materializes and removes them before compilation.
+    static_bindings: tuple[StaticBindingSlot, ...] = dataclasses.field(
+        default_factory=tuple
+    )
+
     def __post_init__(self):
-        """Validate label_args / input_values agreement and param_slots disjointness.
+        """Validate the block interface and compile-time manifests.
 
         Raises:
-            ValueError: If ``label_args`` is non-empty and its length
-                does not match ``input_values``, or if any
-                ``ParamSlot.name`` appears more than once across
-                ``param_slots``.
+            ValueError: If labels and inputs disagree, names or field UUIDs
+                overlap, parameter slots are duplicated, or a static binding
+                is malformed or attached to a non-hierarchical block.
         """
         if self.label_args and len(self.label_args) != len(self.input_values):
             raise ValueError(
                 f"label_args length ({len(self.label_args)}) must match "
                 f"input_values length ({len(self.input_values)})"
             )
+        seen: set[str] = set(self.label_args)
+        if len(seen) != len(self.label_args):
+            raise ValueError("Block.label_args must contain unique names")
+        seen_param_slots: set[str] = set()
         if self.param_slots:
-            seen: set[str] = set()
             for slot in self.param_slots:
-                if slot.name in seen:
+                if slot.name in seen_param_slots:
                     raise ValueError(
                         f"Duplicate ParamSlot name {slot.name!r} in Block.param_slots; "
                         f"every classical kernel argument may appear at most once."
                     )
-                seen.add(slot.name)
+                seen_param_slots.add(slot.name)
+        formal_uuids: set[str] = set()
+        for value in (*self.input_values, *self.parameters.values()):
+            formal_uuids.update(collect_value_like_uuids(value))
+        static_names: set[str] = set()
+        static_field_uuids: set[str] = set()
+        for slot in self.static_bindings:
+            if self.kind is not BlockKind.HIERARCHICAL:
+                raise ValueError(
+                    "Static bindings are only valid on HIERARCHICAL Blocks."
+                )
+            if not slot.name or not slot.type_key:
+                raise ValueError(
+                    "Static binding names and type keys must be non-empty."
+                )
+            if slot.name in static_names:
+                raise ValueError(
+                    f"Duplicate static binding name {slot.name!r} in Block."
+                )
+            if slot.name in seen:
+                raise ValueError(
+                    f"Static binding {slot.name!r} must not appear in Block.label_args."
+                )
+            if slot.name in seen_param_slots or slot.name in self.parameters:
+                raise ValueError(
+                    f"Static binding {slot.name!r} overlaps a classical parameter."
+                )
+            field_names = [field.name for field in slot.fields]
+            if len(set(field_names)) != len(field_names):
+                raise ValueError(
+                    f"Static binding {slot.name!r} has duplicate field names."
+                )
+            if any(
+                not field.name
+                or type(field.value) is not Value
+                or field.value.parent_array is not None
+                or field.value.element_indices
+                or not field.value.type.is_classical()
+                for field in slot.fields
+            ):
+                raise ValueError(
+                    f"Static binding {slot.name!r} fields must be named "
+                    "classical scalar Values."
+                )
+            for field in slot.fields:
+                if field.value.uuid in formal_uuids:
+                    raise ValueError(
+                        f"Static binding {slot.name!r} field {field.name!r} "
+                        "must not alias an ordinary Block formal."
+                    )
+                if field.value.uuid in static_field_uuids:
+                    raise ValueError(
+                        f"Static binding field UUID {field.value.uuid!r} is "
+                        "used more than once."
+                    )
+                static_field_uuids.add(field.value.uuid)
+            static_names.add(slot.name)
 
     def unbound_parameters(self) -> list[str]:
         """Return list of unbound parameter names."""

@@ -29,6 +29,7 @@ _ALLOWED_DTYPE_LAYOUTS: frozenset[tuple[str, int]] = frozenset(
         ("u", 2),
         ("u", 4),
         ("u", 8),
+        ("f", 2),
         ("f", 4),
         ("f", 8),
         ("c", 8),
@@ -123,12 +124,15 @@ def array_to_dict(arr: np.ndarray) -> dict[str, Any]:
         )
     dtype_spec = arr.dtype.str
     _validated_dtype(dtype_spec, "array")
-    # Ensure contiguous bytes so np.frombuffer + reshape round-trips.
-    contiguous = np.ascontiguousarray(arr)
+    # Ensure contiguous bytes so np.frombuffer + reshape round-trips without
+    # copying arrays that are already in C order. Zero-dimensional arrays are
+    # C-contiguous, so they retain their rank on the no-copy path instead of
+    # being promoted to shape ``(1,)`` by ``np.ascontiguousarray``.
+    contiguous = arr if arr.flags.c_contiguous else np.ascontiguousarray(arr)
     return {
         _NP_ARRAY_TAG: True,
         "dtype": dtype_spec,
-        "shape": list(contiguous.shape),
+        "shape": list(arr.shape),
         "data": contiguous.tobytes(),
     }
 

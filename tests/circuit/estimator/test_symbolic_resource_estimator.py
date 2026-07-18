@@ -63,9 +63,31 @@ def test_clifford_t_basis_lowers_body_gates_and_reports_quality() -> None:
     assert logical.gates.total == 2
     assert logical.quality is qm.EstimateQuality.EXACT
     assert lowered.gates.total == 26
+    assert lowered.gates.single_qubit == 20
+    assert lowered.gates.two_qubit == 6
     assert lowered.gates.t == 16
     assert lowered.gates.rotation == 0
     assert lowered.quality is qm.EstimateQuality.UPPER_BOUND
+
+
+def test_pauli_evolve_depth_tracks_gadget_structure() -> None:
+    """Pauli evolution depth grows with term support and basis changes."""
+    import qamomile.observable as qm_o
+
+    @qm.qkernel
+    def circuit(hamiltonian: qm.Observable) -> qm.Vector[qm.Qubit]:
+        """Apply one bound two-term Pauli evolution."""
+        qubits = qm.qubit_array(2, "qubits")
+        return qm.pauli_evolve(qubits, hamiltonian, qm.float_(0.5))
+
+    estimate = circuit.estimate_resources(
+        inputs={"hamiltonian": qm_o.X(0) + qm_o.Z(0) * qm_o.Z(1)}
+    )
+
+    assert estimate.gates.total == 6
+    assert estimate.depth.depth == 6
+    assert estimate.depth.clifford_depth == 4
+    assert estimate.depth.rotation_depth == 2
 
 
 def test_gate_basis_accepts_strings_and_rejects_unknown_values() -> None:
@@ -124,6 +146,26 @@ def test_clifford_t_basis_rejects_missing_controlled_gate_lowering() -> None:
         return controlled_hadamard(control, target)
 
     with pytest.raises(ValueError, match="controlled gate 'h'"):
+        circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+
+
+def test_clifford_t_basis_rejects_controlled_rotation_lowering() -> None:
+    """Controlled rotations fail when no decomposition contract is defined."""
+
+    @qm.composite_gate
+    def rotate(target: qm.Qubit, theta: qm.Float) -> qm.Qubit:
+        """Apply one arbitrary Y rotation."""
+        return qm.ry(target, theta)
+
+    @qm.qkernel
+    def circuit(theta: qm.Float) -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply an arbitrary rotation under one control."""
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        controlled_rotate = qm.control(rotate)
+        return controlled_rotate(control, target, theta)
+
+    with pytest.raises(ValueError, match="controlled gate 'ry'"):
         circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
 
 
@@ -832,6 +874,32 @@ def test_controlled_composite_body_counts_own_control() -> None:
     # The control turns the single-qubit H into a two-qubit controlled gate.
     assert ctrl.gates.single_qubit == 0
     assert ctrl.gates.two_qubit == 1
+
+
+def test_controlled_three_qubit_primitive_is_not_implicitly_toffoli() -> None:
+    """Three-qubit arity alone cannot classify a controlled gate as Toffoli."""
+
+    @qm.composite_gate(name="one_swap")
+    def one_swap(
+        left: qm.Qubit,
+        right: qm.Qubit,
+    ) -> tuple[qm.Qubit, qm.Qubit]:
+        """Swap two target qubits."""
+        return qm.swap(left, right)
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Apply SWAP under one surrounding control."""
+        control = qm.qubit("control")
+        left = qm.qubit("left")
+        right = qm.qubit("right")
+        return qm.control(one_swap)(control, left, right)
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 1
+    assert estimate.gates.multi_qubit == 1
+    assert estimate.gates.toffoli == 0
 
 
 def test_for_items_width_reuses_wires_across_entries() -> None:

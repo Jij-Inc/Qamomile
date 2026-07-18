@@ -8,6 +8,7 @@ from qamomile.circuit.frontend.param_validation import (
     validate_bindings_parameters_disjoint,
 )
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
+from qamomile.circuit.frontend.static_binding import without_static_bindings
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.artifact import CompiledProgram
 from qamomile.circuit.transpiler.config import CompilerConfig
@@ -63,22 +64,37 @@ class QamomileCompiler:
         Raises:
             ValueError: If ``bindings`` and ``parameters`` overlap or frontend
                 argument construction fails.
+            TypeError: If specialization is requested for a block-only
+                qkernel-like object that has no ``build`` method.
         """
         validate_bindings_parameters_disjoint(bindings, parameters)
-        if bindings or parameters:
-            traced = kernel.build(parameters=parameters, **(bindings or {}))
-            return Block(
-                name=traced.name,
-                label_args=traced.label_args,
-                input_values=traced.input_values,
-                output_values=traced.output_values,
-                output_names=traced.output_names,
-                operations=traced.operations,
-                kind=BlockKind.HIERARCHICAL,
-                parameters=traced.parameters,
-                param_slots=traced.param_slots,
-            )
-        return kernel.block
+        build = getattr(kernel, "build", None)
+        if not callable(build):
+            if bindings or parameters:
+                raise TypeError(
+                    "Cannot specialize a block-only qkernel-like object; "
+                    "provide an object with build(parameters=..., **bindings)."
+                )
+            block = getattr(kernel, "block", None)
+            if not isinstance(block, Block):
+                raise TypeError(
+                    "Expected a qkernel-like object with build() or a Block "
+                    "in its .block attribute."
+                )
+            return block
+        traced = build(parameters=parameters, **(bindings or {}))
+        return Block(
+            name=traced.name,
+            label_args=traced.label_args,
+            input_values=traced.input_values,
+            output_values=traced.output_values,
+            output_names=traced.output_names,
+            operations=traced.operations,
+            kind=BlockKind.HIERARCHICAL,
+            parameters=traced.parameters,
+            param_slots=traced.param_slots,
+            static_bindings=traced.static_bindings,
+        )
 
     def prepare(
         self,
@@ -104,11 +120,13 @@ class QamomileCompiler:
                 inputs or outputs.
         """
         block = self.to_block(kernel, bindings, parameters)
+        input_types = getattr(kernel, "input_types", {})
+        ordinary_bindings = without_static_bindings(input_types, bindings)
         EntrypointValidationPass().run(block)
         if self.config.substitutions.rules:
             block = SubstitutionPass(self.config.substitutions).run(block)
-        block = ParameterShapeResolutionPass(bindings).run(block)
-        return prepare_module(block, bindings)
+        block = ParameterShapeResolutionPass(ordinary_bindings).run(block)
+        return prepare_module(block, ordinary_bindings)
 
     def compile(
         self,

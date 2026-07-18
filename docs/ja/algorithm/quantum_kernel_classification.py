@@ -40,7 +40,7 @@
 # $|0^n\rangle$に$U(x')^\dagger U(x)$を適用し、全ゼロビット列が得られる確率を測定することでこのオーバーラップを推定します。得られたカーネル行列はSVMなどの任意のカーネルベース分類器に渡すことができます。
 
 # %%
-# # !pip install qamomile scikit-learn
+# # !pip install "qamomile[qiskit,visualization]" scikit-learn
 
 # %% [markdown]
 # ## ハイパーパラメータ

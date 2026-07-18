@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import math
-from typing import cast
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.composite_gate import configure_composite
 from qamomile.circuit.frontend.handle import Qubit, UInt, Vector
+from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.ir.operation.callable import CallPolicy
 
 
@@ -405,6 +405,25 @@ def controlled_modular_add(
 
 
 @qmc.qkernel
+def _xor_bit(target: Qubit, bit: UInt) -> Qubit:
+    """Apply an exact X power selected by a classical bit.
+
+    ``RX(pi)`` equals ``-i X`` rather than ``X``.  The compensating global
+    phase is irrelevant for a standalone call but becomes observable when
+    this helper is controlled, as modular multiplication is in order finding.
+
+    Args:
+        target (Qubit): Qubit to update.
+        bit (UInt): Zero or one selecting identity or X.
+
+    Returns:
+        Qubit: Updated qubit.
+    """
+    target = qmc.rx(target, math.pi * bit)
+    return target
+
+
+@qmc.qkernel
 def _xor_constant(register: Vector[Qubit], value: UInt) -> Vector[Qubit]:
     """XOR a classical integer into a little-endian quantum register.
 
@@ -417,8 +436,8 @@ def _xor_constant(register: Vector[Qubit], value: UInt) -> Vector[Qubit]:
     """
     for index in qmc.range(register.shape[0]):
         bit = (value // (2**index)) % 2
-        angle = cast(qmc.Float, math.pi * bit)
-        register[index] = qmc.rx(register[index], angle)
+        exact_x_power = qmc.global_phase(_xor_bit, 0.5 * math.pi * bit)
+        register[index] = exact_x_power(register[index], bit)
     return register
 
 
@@ -666,6 +685,17 @@ def modmul_const(
             "the reversible workspace can be uncomputed."
         )
     assert inverse_multiplier is not None
+
+    if isinstance(modulus, int):
+        try:
+            register_size = get_size(reg)
+        except ValueError:
+            register_size = None
+        if register_size is not None and modulus >= 2**register_size:
+            raise ValueError(
+                f"modulus={modulus} does not fit in a {register_size}-qubit "
+                "register; require modulus < 2**register_size."
+            )
 
     size = reg.shape[0]
     accumulator = qmc.qubit_array(size, name="modmul_accumulator")

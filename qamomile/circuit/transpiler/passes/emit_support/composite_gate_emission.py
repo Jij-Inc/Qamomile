@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.callable import (
@@ -87,7 +88,7 @@ def emit_composite_gate(
         EmitError: If any control or target qubit operand fails to
             resolve to a physical qubit index.
     """
-    from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
         _expand_quantum_operands_to_phys,
     )
 
@@ -316,7 +317,7 @@ def emit_qft_with_strategy(
 ) -> None:
     """Emit QFT considering strategy selection.
 
-    If a strategy is specified and 'approximate', uses truncated rotations.
+    If ``approximate_kN`` is selected, omits rotations beyond depth ``N``.
     Otherwise falls back to standard QFT.
 
     Args:
@@ -332,17 +333,8 @@ def emit_qft_with_strategy(
     """
     _ensure_composite_gate_type(op, CompositeGateType.QFT, "emit_qft_with_strategy")
 
-    strategy_name = op.strategy_name
-
-    # Check if using approximate strategy
-    if strategy_name and "approximate" in strategy_name:
-        # Extract truncation depth from strategy name (e.g., "approximate_k3")
-        truncation_depth = 3  # default
-        if "_k" in strategy_name:
-            try:
-                truncation_depth = int(strategy_name.split("_k")[1])
-            except (ValueError, IndexError):
-                pass
+    truncation_depth = _qft_truncation_depth(op.strategy_name, "QFT")
+    if truncation_depth is not None:
         emit_approximate_qft(emit_pass, circuit, qubit_indices, truncation_depth)
     else:
         emit_qft_manual(emit_pass, circuit, qubit_indices)
@@ -356,7 +348,7 @@ def emit_iqft_with_strategy(
 ) -> None:
     """Emit IQFT considering strategy selection.
 
-    If a strategy is specified and 'approximate', uses truncated rotations.
+    If ``approximate_kN`` is selected, omits rotations beyond depth ``N``.
     Otherwise falls back to standard IQFT.
 
     Args:
@@ -372,18 +364,38 @@ def emit_iqft_with_strategy(
     """
     _ensure_composite_gate_type(op, CompositeGateType.IQFT, "emit_iqft_with_strategy")
 
-    strategy_name = op.strategy_name
-
-    if strategy_name and "approximate" in strategy_name:
-        truncation_depth = 3
-        if "_k" in strategy_name:
-            try:
-                truncation_depth = int(strategy_name.split("_k")[1])
-            except (ValueError, IndexError):
-                pass
+    truncation_depth = _qft_truncation_depth(op.strategy_name, "IQFT")
+    if truncation_depth is not None:
         emit_approximate_iqft(emit_pass, circuit, qubit_indices, truncation_depth)
     else:
         emit_iqft_manual(emit_pass, circuit, qubit_indices)
+
+
+def _qft_truncation_depth(strategy_name: str | None, operation: str) -> int | None:
+    """Validate a QFT strategy and return its truncation depth.
+
+    Args:
+        strategy_name (str | None): Strategy metadata from the invocation.
+        operation (str): ``"QFT"`` or ``"IQFT"`` for diagnostics.
+
+    Returns:
+        int | None: Positive approximate depth, or ``None`` for exact
+        emission.
+
+    Raises:
+        EmitError: If the strategy is not ``exact`` or
+            ``approximate_k<positive integer>``.
+    """
+    if strategy_name in (None, "exact"):
+        return None
+    match = re.fullmatch(r"approximate_k([1-9][0-9]*)", strategy_name)
+    if match is None:
+        raise EmitError(
+            f"Invalid {operation} strategy {strategy_name!r}; expected "
+            "'exact' or 'approximate_k<positive integer>'.",
+            operation=f"InvokeOperation[{operation}]",
+        )
+    return int(match.group(1))
 
 
 def emit_approximate_qft(

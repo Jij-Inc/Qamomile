@@ -11,7 +11,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     ProjectOperation,
 )
-from qamomile.circuit.ir.types.primitives import BitType
+from qamomile.circuit.ir.types.primitives import BitType, UIntType
 from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
@@ -469,7 +469,10 @@ def remap_static_merge_outputs(
         is_scalar_bit = isinstance(output.type, BitType) and not isinstance(
             output, ArrayValue
         )
-        if not is_scalar_bit and (
+        is_scalar_quantum = output.type.is_quantum() and not isinstance(
+            output, ArrayValue
+        )
+        if not (is_scalar_bit or is_scalar_quantum) and (
             QubitAddress(output.uuid) in qubit_map
             or QubitAddress(output.uuid) in clbit_map
         ):
@@ -491,6 +494,11 @@ def remap_static_merge_outputs(
                     phys = qubit_map.get(key)
                 if phys is not None:
                     qubit_map[QubitAddress(output.uuid)] = phys
+        elif isinstance(output.type, UIntType):
+            if resolver is not None and bindings is not None:
+                resolved_index = resolver.resolve_int_value(selected_val, bindings)
+                if resolved_index is not None:
+                    bindings[output.uuid] = resolved_index
         else:
             # Scalar Bit source: resolve vector-element sources (``s[i]``
             # from a measured ``Vector[Bit]``) to their root clbit key, not

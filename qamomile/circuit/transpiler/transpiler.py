@@ -10,6 +10,7 @@ from qamomile.circuit.frontend.param_validation import (
     validate_bindings_parameters_disjoint,
 )
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
+from qamomile.circuit.frontend.static_binding import without_static_bindings
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.config import TranspilerConfig
@@ -57,29 +58,14 @@ class Transpiler(ABC, Generic[T]):
     Provides the full compilation pipeline from qkernel-like frontend objects
     to executable programs.
 
-    Usage:
-        transpiler = QiskitTranspiler()
-
-        # Option 1: Full pipeline
-        executable = transpiler.compile(kernel, bindings={"theta": 0.5})
-        results = executable.run(transpiler.executor())
-
-        # Option 2: Step-by-step
-        block = transpiler.to_block(kernel)
-        substituted = transpiler.substitute(block)
-        affine = transpiler.inline(substituted)
-        validated = transpiler.affine_validate(affine)
-        folded = transpiler.constant_fold(validated, bindings={"theta": 0.5})
-        analyzed = transpiler.analyze(folded)
-        plan = transpiler.plan(analyzed)
-        executable = transpiler.emit(plan, bindings={"theta": 0.5})
-
-        # Option 3: Just get the circuit (no execution)
-        circuit = transpiler.to_circuit(kernel, bindings={"theta": 0.5})
-
-        # With configuration (strategy overrides)
-        config = TranspilerConfig.with_strategies({"qft": "approximate"})
-        transpiler = QiskitTranspiler(config=config)
+    Example:
+        >>> from qamomile.circuit.transpiler import TranspilerConfig
+        >>> from qamomile.qiskit import QiskitTranspiler
+        >>> transpiler = QiskitTranspiler()
+        >>> executable = transpiler.transpile(kernel, bindings={"theta": 0.5})
+        >>> circuit = executable.get_first_circuit()
+        >>> config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
+        >>> transpiler.set_config(config)
     """
 
     # Generic passes (can be overridden by subclasses)
@@ -162,21 +148,14 @@ class Transpiler(ABC, Generic[T]):
                 ``parameters`` (propagated from ``kernel.build``), violating
                 the bindings/parameters disjointness rule.
 
-        When bindings or parameters are provided, uses kernel.build() to properly
-        resolve array shapes from the bound data. Otherwise uses the cached
-        hierarchical block for efficiency.
+        Always uses ``kernel.build()`` so Python defaults, required arguments,
+        runtime parameters, and array shapes follow one validated entry path.
         """
-        if bindings or parameters:
-            # Use build() to properly handle bindings and parameters
-            # This resolves array shapes from bound data (e.g., bias.shape[0])
-            traced = kernel.build(parameters=parameters, **(bindings or {}))
-            return replace(
-                traced,
-                kind=BlockKind.HIERARCHICAL,
-            )
-        else:
-            # Original behavior for no bindings
-            return kernel.block
+        traced = kernel.build(parameters=parameters, **(bindings or {}))
+        return replace(
+            traced,
+            kind=BlockKind.HIERARCHICAL,
+        )
 
     # === Pipeline Passes ===
 
@@ -646,8 +625,10 @@ class Transpiler(ABC, Generic[T]):
         validate_bindings_parameters_disjoint(bindings, parameters)
 
         prepared = self.prepare(kernel, bindings, parameters)
-        separated = self.plan_circuit(prepared, bindings)
-        return self.emit(separated, bindings, parameters)
+        input_types = getattr(kernel, "input_types", {})
+        ordinary_bindings = without_static_bindings(input_types, bindings)
+        separated = self.plan_circuit(prepared, ordinary_bindings)
+        return self.emit(separated, ordinary_bindings, parameters)
 
     def to_circuit(
         self,

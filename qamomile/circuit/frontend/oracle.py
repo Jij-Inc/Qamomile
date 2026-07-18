@@ -123,6 +123,12 @@ class Oracle:
                 raise TypeError(
                     "Oracle vector calls do not accept controls or control_value yet."
                 )
+            if self.num_control_qubits:
+                raise ValueError(
+                    f"Oracle '{self.name}' requires {self.num_control_qubits} "
+                    "explicit control qubits; use the scalar call form until "
+                    "vector calls support a separate controls argument."
+                )
             return self._call_vector(qubits[0])
         return self._call_scalars(
             *qubits,
