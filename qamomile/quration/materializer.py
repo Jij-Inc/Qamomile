@@ -698,9 +698,9 @@ def _emit_call(
         if target_width != 1 or control_width not in (1, 2):
             raise EmitError("PyQret supports one or two controls for native MCX")
         if control_width == 1:
-            context.intrinsic.cx(current[0], current[1])
+            context.intrinsic.cx(current[1], current[0])
         else:
-            context.intrinsic.ccx(current[0], current[1], current[2])
+            context.intrinsic.ccx(current[2], current[0], current[1])
         for output, qubit in zip(operation.outputs, current, strict=True):
             environment[output] = qubit
         return

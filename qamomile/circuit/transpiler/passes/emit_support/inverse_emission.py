@@ -21,7 +21,7 @@ from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.passes.emit_support.control_value_emission import (
     bracket_control_value,
 )
-from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
     _bind_and_populate_block_inputs,
     _emitter_supports_reusable_gates,
     _expand_quantum_operands_to_phys,

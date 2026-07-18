@@ -9,7 +9,7 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qmc
-from qamomile.circuit.stdlib.arithmetic import modmul_const
+from qamomile.circuit.stdlib.arithmetic import _xor_constant, modmul_const
 
 
 def _value_of(bits: tuple[int, ...]) -> int:
@@ -94,6 +94,44 @@ def test_modmul_const_rejects_non_coprime_multiplier() -> None:
 
     with pytest.raises(ValueError, match="coprime"):
         bad.build()
+
+
+def test_modmul_const_rejects_modulus_wider_than_register() -> None:
+    """A modulus that cannot be represented by the register is rejected."""
+
+    @qmc.qkernel
+    def bad() -> qmc.Vector[qmc.Qubit]:
+        """Attempt multiplication modulo five in a two-qubit register."""
+        reg = qmc.qubit_array(2, name="reg")
+        return modmul_const(reg, multiplier=3, modulus=5)
+
+    with pytest.raises(ValueError, match="does not fit"):
+        bad.build()
+
+
+@qmc.qkernel
+def _controlled_xor_phase_probe() -> qmc.Bit:
+    """Kick an exact controlled XOR against an X-eigenstate target."""
+    control = qmc.qubit("control")
+    target = qmc.qubit_array(1, name="target")
+    control = qmc.h(control)
+    target[0] = qmc.h(target[0])
+    controlled_xor = qmc.control(_xor_constant)
+    control, target = controlled_xor(control, target, 1)
+    control = qmc.h(control)
+    return qmc.measure(control)
+
+
+def test_xor_constant_preserves_controlled_phase(sdk_transpiler) -> None:
+    """Controlled XOR uses X, not the relative-phase ``RX(pi)`` surrogate."""
+    transpiler = sdk_transpiler.transpiler
+    result = (
+        transpiler.transpile(_controlled_xor_phase_probe)
+        .sample(transpiler.executor(), shots=64)
+        .result()
+    )
+
+    assert result.results == [(0, 64)]
 
 
 def test_modmul_const_symbolic_body_estimate() -> None:

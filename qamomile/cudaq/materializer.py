@@ -41,6 +41,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
     UnaryOperator,
     WhileInstruction,
     WireId,
+    has_mid_circuit_measurement,
     verify_circuit,
 )
 from qamomile.circuit.transpiler.errors import EmitError
@@ -180,7 +181,9 @@ class CudaqMaterializer:
             EmitError: If CUDA-Q cannot represent an instruction.
         """
         verify_circuit(program)
-        runtime = _has_runtime_control(program.operations)
+        runtime = _has_runtime_control(
+            program.operations
+        ) or has_mid_circuit_measurement(program.operations)
         mode = ExecutionMode.RUNNABLE if runtime else ExecutionMode.STATIC
         emitter = CudaqKernelEmitter()
         emitter.measurement_mode = (
@@ -1084,7 +1087,9 @@ def _has_runtime_control(operations: tuple[CircuitInstruction, ...]) -> bool:
         operations (tuple[CircuitInstruction, ...]): Instructions to scan.
 
     Returns:
-        bool: True when runtime if/while control is present.
+        bool: True when runtime if/while control is present. Mid-circuit
+            measurement is detected separately by
+            :func:`has_mid_circuit_measurement`.
     """
     for operation in operations:
         if isinstance(operation, (IfInstruction, WhileInstruction)):

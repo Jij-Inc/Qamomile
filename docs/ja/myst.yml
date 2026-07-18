@@ -40,6 +40,7 @@ project:
     - title: リリースノート
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_13_0.md
         - file: release_notes/v0_12_7.md
         - file: release_notes/v0_12_6.md
         - file: release_notes/v0_12_5.md
@@ -62,8 +63,10 @@ project:
             - file: api/circuit/estimator
             - file: api/circuit/frontend
             - file: api/circuit/ir
+            - file: api/circuit/multi_controlled_x
             - file: api/circuit/qft
             - file: api/circuit/qpe
+            - file: api/circuit/serialization
             - file: api/circuit/stdlib
             - file: api/circuit/transpiler
             - file: api/circuit/visualization

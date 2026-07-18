@@ -26,7 +26,7 @@
 
 # %%
 # Install the latest Qamomile from pip.
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import math

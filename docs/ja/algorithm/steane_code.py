@@ -34,9 +34,9 @@
 
 # %%
 # 最新のQamomileをpipからインストールします。
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit]"
 # # or
-# # !uv add qamomile
+# # !uv add "qamomile[qiskit]"
 
 # %% [markdown]
 # ## 1. スタビライザ形式論

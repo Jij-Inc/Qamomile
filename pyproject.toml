@@ -12,8 +12,6 @@ dependencies = [
     "jijmodeling>=2.1.0",
     "ommx>=2.3.3",
     "protobuf>=5.29,<7",
-    "qiskit>=2.3.0",
-    "qiskit-aer>=0.17.2",
     "sympy>=1.14.0",
 ]
 
@@ -21,6 +19,7 @@ dependencies = [
 include = ["qamomile*"]
 
 [tool.setuptools.package-data]
+"qamomile" = ["py.typed"]
 "qamomile.circuit.serialization.proto" = ["*.proto", "*.pyi"]
 
 [[tool.mypy.overrides]]
@@ -38,6 +37,13 @@ ignore = ["E501"]  # To ignore errors for documentations
 combine-as-imports = true
 
 [project.optional-dependencies]
+qiskit = [
+    "qiskit>=2.3.0",
+    "qiskit-aer>=0.17.2",
+]
+visualization = [
+    "matplotlib>=3.10.8",
+]
 cudaq-cu12 = [
     "cuda-quantum-cu12>=0.14,<0.15; sys_platform == 'linux'",
 ]
@@ -70,6 +76,8 @@ dev = [
     "networkx>=3.0",
     "pytest>=9.0.2",
     "pylatexenc>=2.10",
+    "qiskit>=2.3.0",
+    "qiskit-aer>=0.17.2",
     "pytest-mpl>=0.17.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.14.11",

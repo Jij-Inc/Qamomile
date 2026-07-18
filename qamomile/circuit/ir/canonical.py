@@ -89,6 +89,7 @@ from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
+from qamomile.circuit.ir.static_binding import StaticBindingField, StaticBindingSlot
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -239,6 +240,47 @@ def content_hash(block: Block) -> str:
     return hashlib.sha256(to_canonical_bytes(block)).hexdigest()
 
 
+def content_fingerprint(obj: Any) -> str:
+    """Compute a deterministic fingerprint for supported lowered IR content.
+
+    Unlike the legacy canonical ``content_hash`` encoder, this function rejects
+    values that would require a ``repr`` fallback. Its accepted values are the
+    stable scalar, collection, enum, array, Hamiltonian, type, and dataclass
+    forms used by lowered circuit programs.
+
+    Args:
+        obj (Any): Lowered IR content composed exclusively of supported stable
+            values.
+
+    Returns:
+        str: SHA-256 hexadecimal digest of the structural content token.
+
+    Raises:
+        TypeError: If ``obj`` contains a value without a stable structural
+            encoding.
+    """
+    return hashlib.sha256(_token(obj, strict=True).encode("utf-8")).hexdigest()
+
+
+def collect_reachable_values(block: Block) -> tuple[ValueBase, ...]:
+    """Collect values reachable from an IR block in canonical walk order.
+
+    The traversal includes values referenced by operation-owned nested blocks
+    and returns each value UUID at most once. Its ordering is the same stable
+    ordering used by canonical byte emission.
+
+    Args:
+        block (Block): Root block whose reachable values to collect.
+
+    Returns:
+        tuple[ValueBase, ...]: Reachable values in deterministic canonical
+            declaration order.
+    """
+    values: list[ValueBase] = []
+    _collect_values(block, values, set())
+    return tuple(values)
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
@@ -365,6 +407,20 @@ class _Canonicalizer:
             key: cast(Value, self.canonical_value(block.parameters[key]))
             for key in sorted(block.parameters)
         }
+        new_static_bindings = tuple(
+            StaticBindingSlot(
+                name=slot.name,
+                type_key=slot.type_key,
+                fields=tuple(
+                    StaticBindingField(
+                        name=field.name,
+                        value=cast(Value, self.canonical_value(field.value)),
+                    )
+                    for field in slot.fields
+                ),
+            )
+            for slot in block.static_bindings
+        )
         new_operations: list[Operation] = [
             self.canonical_operation(op) for op in block.operations
         ]
@@ -384,6 +440,7 @@ class _Canonicalizer:
             # ParamSlot is frozen and holds no Value/UUID references, so
             # the manifest is shared verbatim — there is nothing to remap.
             param_slots=block.param_slots,
+            static_bindings=new_static_bindings,
         )
         self._block_cache[id(block)] = new_block
         return new_block
@@ -643,11 +700,11 @@ class _Canonicalizer:
 
 
 # ---------------------------------------------------------------------------
-# Deterministic byte serialization (for content_hash only)
+# Deterministic serialization for content hashes and fingerprints
 # ---------------------------------------------------------------------------
 
 
-def _token(obj: Any) -> str:
+def _token(obj: Any, *, strict: bool = False) -> str:
     """Render an arbitrary Python value into a stable string token.
 
     Handles the small set of types appearing in IR metadata: scalars
@@ -661,19 +718,24 @@ def _token(obj: Any) -> str:
     full state is emitted in the value-declaration section), and
     ``ValueType`` instances (rendered via ``.label()`` to avoid
     embedding memory addresses from the default ``object.__repr__``).
-    Falls back to ``repr`` only for object types outside that set;
-    callers that store such opaque Python objects in metadata must
-    ensure those objects have a stable ``repr`` for the hash to be
-    reliable.
+    Falls back to ``repr`` only for object types outside that set unless
+    ``strict`` is true. Legacy canonical hashes retain this fallback, while
+    lowered-IR fingerprints reject it.
 
     Args:
         obj (Any): A Python value reachable from canonical IR data
             (Value metadata field, operation dataclass field,
             ``ParamSlot`` payload, etc.).
+        strict (bool): Whether to reject values that require the legacy
+            ``repr`` fallback. Defaults to ``False``.
 
     Returns:
         str: A deterministic string token suitable for inclusion in
             ``to_canonical_bytes``.
+
+    Raises:
+        TypeError: If ``strict`` is true and ``obj`` has no stable structural
+            encoding.
     """
     if obj is None:
         return "None"
@@ -685,7 +747,7 @@ def _token(obj: Any) -> str:
         # Checked before the int/float branch because numpy float64 /
         # int scalar types subclass the Python primitives, whose repr
         # differs (e.g. ``np.float64(0.5)`` vs ``0.5`` under numpy 2).
-        return _token(obj.item())
+        return _token(obj.item(), strict=strict)
     if isinstance(obj, (int, float, str)):
         return repr(obj)
     if isinstance(obj, complex):
@@ -696,6 +758,10 @@ def _token(obj: Any) -> str:
         return f"bytes<sha256={hashlib.sha256(bytes(obj)).hexdigest()}>"
     if isinstance(obj, enum.Enum):
         return f"{type(obj).__name__}.{obj.name}"
+    if isinstance(obj, range):
+        if strict:
+            return f"range({obj.start},{obj.stop},{obj.step})"
+        return repr(obj)
     if isinstance(obj, np.ndarray) and not obj.dtype.hasobject:
         # ``repr`` is unusable as array identity: it truncates large
         # arrays (different arrays collide) and obeys process-global
@@ -708,10 +774,15 @@ def _token(obj: Any) -> str:
         # potentially large array is allocated; ``ascontiguousarray``
         # already guarantees a C-contiguous buffer.
         digest = hashlib.sha256(memoryview(data.reshape(-1)).cast("B")).hexdigest()
-        return f"ndarray<dtype={data.dtype.str},shape={data.shape},sha256={digest}>"
+        return f"ndarray<dtype={data.dtype.str},shape={obj.shape},sha256={digest}>"
     if isinstance(obj, Hamiltonian):
-        return _hamiltonian_token(obj)
+        return _hamiltonian_token(obj, strict=strict)
     if isinstance(obj, Block):
+        if strict:
+            raise TypeError(
+                "content_fingerprint() does not accept Block values; "
+                "use content_hash() instead."
+            )
         # Blocks can appear inside CallableDef dataclass fields. Their normal
         # dataclass repr includes display-only names and would reintroduce
         # build-local identity after canonicalization, so render them through
@@ -720,6 +791,11 @@ def _token(obj: Any) -> str:
         _emit_block(obj, block_lines, indent=0)
         return "Block<" + "\n".join(block_lines) + ">"
     if isinstance(obj, ValueBase):
+        if strict:
+            raise TypeError(
+                "content_fingerprint() does not accept ValueBase values with "
+                "build-local identities."
+            )
         return _value_token(obj)
     if isinstance(obj, ValueType):
         return f"Type<{obj.label()}>"
@@ -730,28 +806,42 @@ def _token(obj: Any) -> str:
         # added later is hashed automatically instead of being silently
         # ignored by a hand-frozen list.
         parts = ",".join(
-            f"{field.name}={_token(getattr(obj, field.name))}"
+            f"{field.name}={_token(getattr(obj, field.name), strict=strict)}"
             for field in dataclasses.fields(obj)
             if field.name != "var_name"
         )
         return f"{type(obj).__name__}({parts})"
     if isinstance(obj, (list, tuple)):
-        return "[" + ",".join(_token(x) for x in obj) + "]"
+        return "[" + ",".join(_token(x, strict=strict) for x in obj) + "]"
     if isinstance(obj, dict):
-        items = sorted(obj.items(), key=lambda kv: _token(kv[0]))
-        return "{" + ",".join(f"{_token(k)}:{_token(v)}" for k, v in items) + "}"
+        items = sorted(obj.items(), key=lambda kv: _token(kv[0], strict=strict))
+        return (
+            "{"
+            + ",".join(
+                f"{_token(k, strict=strict)}:{_token(v, strict=strict)}"
+                for k, v in items
+            )
+            + "}"
+        )
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         # Dataclass instances get serialized field-by-field in name-sorted
         # order so canonical bytes are independent of the declared-field order
         # and of any nested ``dict``'s insertion order (handled transitively
         # via the dict branch above).
         fields = sorted(dataclasses.fields(obj), key=lambda f: f.name)
-        body = ",".join(f"{f.name}={_token(getattr(obj, f.name))}" for f in fields)
+        body = ",".join(
+            f"{f.name}={_token(getattr(obj, f.name), strict=strict)}" for f in fields
+        )
         return f"{type(obj).__name__}({body})"
+    if strict:
+        raise TypeError(
+            "content_fingerprint() does not support values of type "
+            f"{type(obj).__name__}."
+        )
     return repr(obj)
 
 
-def _hamiltonian_token(h: Hamiltonian) -> str:
+def _hamiltonian_token(h: Hamiltonian, *, strict: bool = False) -> str:
     """Render a ``Hamiltonian`` payload into a structural, stable token.
 
     Reuses the wire encoding (``hamiltonian_to_dict``) so the token is
@@ -768,16 +858,18 @@ def _hamiltonian_token(h: Hamiltonian) -> str:
         h (Hamiltonian): The Hamiltonian payload (e.g. a bound
             ``Observable`` parameter stored in ``ParamSlot.bound_value``
             or ``ArrayRuntimeMetadata.const_array``).
+        strict (bool): Whether nested wire-format values must use stable
+            structural encodings. Defaults to ``False``.
 
     Returns:
         str: A deterministic ``Hamiltonian(...)`` token.
     """
     wire = hamiltonian_to_dict(h)
-    term_tokens = sorted(_token(entry) for entry in wire["terms"])
+    term_tokens = sorted(_token(entry, strict=strict) for entry in wire["terms"])
     return (
         "Hamiltonian(terms=[" + ",".join(term_tokens) + "],"
-        f"constant={_token(wire['constant'])},"
-        f"num_qubits={_token(wire['num_qubits'])})"
+        f"constant={_token(wire['constant'], strict=strict)},"
+        f"num_qubits={_token(wire['num_qubits'], strict=strict)})"
     )
 
 
@@ -902,6 +994,9 @@ def _collect_values(block: Block, out: list[ValueBase], seen: set[str]) -> None:
 
     for v in block.input_values:
         visit(v)
+    for slot in block.static_bindings:
+        for field in slot.fields:
+            visit(field.value)
     for key in sorted(block.parameters):
         visit(block.parameters[key])
     for op in block.operations:
@@ -967,6 +1062,9 @@ def _collect_from_subblock(sub: Block, visit: Any) -> None:
     """
     for v in sub.input_values:
         visit(v)
+    for slot in sub.static_bindings:
+        for field in slot.fields:
+            visit(field.value)
     for key in sorted(sub.parameters):
         visit(sub.parameters[key])
     for nested_op in sub.operations:
@@ -1021,11 +1119,8 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     out.append(f"{pad}{_INLINE_INDENT}label_args={_token(block.label_args)}")
     out.append(f"{pad}{_INLINE_INDENT}param_slots={_token(block.param_slots)}")
 
-    declared: list[ValueBase] = []
-    seen: set[str] = set()
-    _collect_values(block, declared, seen)
     out.append(f"{pad}{_INLINE_INDENT}values:")
-    for v in declared:
+    for v in collect_reachable_values(block):
         out.append(f"{pad}{_INLINE_INDENT * 2}{_value_declaration(v)}")
 
     out.append(
@@ -1037,6 +1132,19 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     out.append(
         f"{pad}{_INLINE_INDENT}parameters="
         + _token({k: block.parameters[k].uuid for k in sorted(block.parameters)})
+    )
+    out.append(
+        f"{pad}{_INLINE_INDENT}static_bindings="
+        + _token(
+            [
+                {
+                    "name": slot.name,
+                    "type_key": slot.type_key,
+                    "fields": [(field.name, field.value.uuid) for field in slot.fields],
+                }
+                for slot in block.static_bindings
+            ]
+        )
     )
 
     out.append(f"{pad}{_INLINE_INDENT}operations:")

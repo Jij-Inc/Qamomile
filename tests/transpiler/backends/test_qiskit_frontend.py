@@ -1599,7 +1599,7 @@ class TestGateCombinations:
         """
 
         @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
+        def circuit() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
             # Alice's qubit to teleport (prepared in |1>)
             alice = qmc.qubit("alice")
             alice = qmc.x(alice)
@@ -1614,12 +1614,13 @@ class TestGateCombinations:
             alice, bell0 = qmc.cx(alice, bell0)
             alice = qmc.h(alice)
 
-            # Measure all three qubits
-            q = qmc.qubit_array(3, "out")
-            q[0] = alice
-            q[1] = bell0
-            q[2] = bell1
-            return qmc.measure(q)
+            # Measure all three independently. Quantum array assignment is a
+            # borrow return, so it cannot assemble unrelated resources.
+            return (
+                qmc.measure(alice),
+                qmc.measure(bell0),
+                qmc.measure(bell1),
+            )
 
         _, qc = _transpile_and_get_circuit(circuit)
         # Structure: X(alice=q0) H(bell0) CX(bell0,bell1) CX(alice,bell0) H(alice) + 3 Measure = 8
@@ -3027,6 +3028,48 @@ class TestLoopIndexedMeasuredBitMerge:
             assert value == (0, 1), result.results
             assert count > 0
         assert sum(count for _, count in result.results) == 100
+
+    def test_static_if_selects_quantum_array_slot_per_iteration(self):
+        """A branch-selected qubit returns to its matching loop-indexed slot."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qubits = qmc.qubit_array(2, "qubits")
+            for index in qmc.range(2):
+                if index == 0:
+                    selected = qubits[0]
+                else:
+                    selected = qubits[1]
+                selected = qmc.x(selected)
+                qubits[index] = selected
+            return qmc.measure(qubits)
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=32)
+            .result()
+        )
+
+        assert result.results == [((1, 1), 32)]
+
+    def test_static_if_quantum_return_rejects_wrong_target(self):
+        """Emit rejects a branch-selected qubit returned to another slot."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qubits = qmc.qubit_array(2, "qubits")
+            for index in qmc.range(2):
+                if index == 0:
+                    selected = qubits[0]
+                else:
+                    selected = qubits[1]
+                selected = qmc.x(selected)
+                qubits[1] = selected
+            return qmc.measure(qubits)
+
+        with pytest.raises(EmitError, match="target does not match"):
+            QiskitTranspiler().transpile(circuit)
 
 
 class TestIdentityMergeBackstop:
@@ -6001,29 +6044,29 @@ class TestAlgorithmQAOAModules:
         assert isinstance(qc.data[0].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
         assert np.isclose(
-            float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10
+            float(qc.data[0].operation.params[0]), 2.0 * gamma * 1.0, atol=1e-10
         )
         assert isinstance(qc.data[1].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [1, 2]
         assert np.isclose(
-            float(qc.data[1].operation.params[0]), gamma * (-0.5), atol=1e-10
+            float(qc.data[1].operation.params[0]), 2.0 * gamma * (-0.5), atol=1e-10
         )
         assert isinstance(qc.data[2].operation, RZGate)
         assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [0]
         assert np.isclose(
-            float(qc.data[2].operation.params[0]), gamma * 0.3, atol=1e-10
+            float(qc.data[2].operation.params[0]), 2.0 * gamma * 0.3, atol=1e-10
         )
         assert isinstance(qc.data[3].operation, RZGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [2]
         assert np.isclose(
-            float(qc.data[3].operation.params[0]), gamma * (-0.1), atol=1e-10
+            float(qc.data[3].operation.params[0]), 2.0 * gamma * (-0.1), atol=1e-10
         )
         for i in range(3):
             assert isinstance(qc.data[4 + i].operation, Measure)
             assert [qc.find_bit(q).index for q in qc.data[4 + i].qubits] == [i]
 
     def test_ising_cost_statevector(self):
-        """ising_cost on 2 qubits matches RZZ(gamma*J) on |00>."""
+        """ising_cost on 2 qubits matches RZZ(2*gamma*J) on |00>."""
 
         @qmc.qkernel
         def circuit(
@@ -6043,7 +6086,7 @@ class TestAlgorithmQAOAModules:
             circuit, bindings={"n": 2, "quad": quad, "linear": linear, "gamma": gamma}
         )
         sv = _run_statevector(qc)
-        expected = GATE_SPECS["RZZ"].matrix_fn(gamma * 1.0) @ all_zeros_state(2)
+        expected = GATE_SPECS["RZZ"].matrix_fn(2.0 * gamma * 1.0) @ all_zeros_state(2)
         assert statevectors_equal(sv, expected)
 
     @pytest.mark.parametrize("n_qubits", [2, 3, 4])
@@ -6123,7 +6166,7 @@ class TestAlgorithmQAOAModules:
         assert isinstance(qc.data[0].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
         assert np.isclose(
-            float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10
+            float(qc.data[0].operation.params[0]), 2.0 * gamma * 1.0, atol=1e-10
         )
         assert isinstance(qc.data[1].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0]
@@ -6166,7 +6209,7 @@ class TestAlgorithmQAOAModules:
         )
         sv = _run_statevector(qc)
         H = GATE_SPECS["H"].matrix_fn()
-        RZZ = GATE_SPECS["RZZ"].matrix_fn(gamma * 1.0)
+        RZZ = GATE_SPECS["RZZ"].matrix_fn(2.0 * gamma * 1.0)
         RX = GATE_SPECS["RX"].matrix_fn(2.0 * beta)
         state = all_zeros_state(2)
         state = tensor_product(H, H) @ state
@@ -6227,7 +6270,7 @@ class TestAlgorithmQAOAModules:
                 assert [qc.find_bit(q).index for q in qc.data[idx].qubits] == [qi, qj]
                 assert np.isclose(
                     float(qc.data[idx].operation.params[0]),
-                    gamma * quad_vals[e],
+                    2.0 * gamma * quad_vals[e],
                     atol=1e-10,
                 )
                 idx += 1

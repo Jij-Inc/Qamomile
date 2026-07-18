@@ -27,8 +27,15 @@
 # %%
 # QamomileをCUDA-Q用の追加依存と一緒にpipからインストールします。
 # CUDA-Qの利用環境に合うオプション依存グループを選んでください。
-# # !pip install "qamomile[cudaq-cu12]"  # CUDA 12.x, Linux
-# # !pip install "qamomile[cudaq-cu13]"  # CUDA 13.x, Linux or macOS ARM64
+# # !pip install "qamomile[cudaq-cu12,visualization]"  # CUDA 12.x, Linux
+# # !pip install "qamomile[cudaq-cu13,visualization]"  # CUDA 13.x, Linux or macOS ARM64
+
+# %% [markdown]
+# :::{warning}
+# macOS ARM64では、CUDA-Qの量子カーネルとQiskit Aerを同じPythonプロセス内で実行しないでください。
+# 両者のネイティブ依存関係が互換性のないOpenMPランタイムを読み込み、Python例外ではなくプロセス終了を引き起こす場合があります。
+# 2つのシミュレータを比較するときは、別々のノートブックカーネルまたはPythonプロセスを使ってください。
+# :::
 
 # %%
 import os

@@ -15,6 +15,7 @@ re-imported here, so the test also documents the back-compat contract.
 from __future__ import annotations
 
 import qamomile.circuit as qmc
+import qamomile.circuit.stdlib as stdlib
 from qamomile.circuit.estimator.resource_estimator import (
     OpaqueCallContext,
     ResourceEstimator,
@@ -31,6 +32,11 @@ from qamomile.circuit.frontend.operation.measurement import (
     reset,
 )
 from qamomile.circuit.frontend.oracle import Oracle, opaque
+from qamomile.circuit.stdlib.lcu_block_encoding import LCUBlockEncoding
+from qamomile.circuit.stdlib.pauli_lcu_block_encoding import (
+    PauliLCUBlockEncoding,
+    pauli_lcu_block_encoding,
+)
 from qamomile.circuit.transpiler import job as _job_module
 
 
@@ -104,6 +110,22 @@ def test_global_phase_is_publicly_reexported() -> None:
     """The global-phase combinator is part of the curated circuit API."""
     assert qmc.global_phase is global_phase
     assert "global_phase" in qmc.__all__
+
+
+def test_pauli_lcu_block_encoding_api_is_publicly_reexported() -> None:
+    """The common descriptor, Pauli subtype, and factory are public."""
+    assert qmc.LCUBlockEncoding is LCUBlockEncoding
+    assert stdlib.LCUBlockEncoding is LCUBlockEncoding
+    assert qmc.PauliLCUBlockEncoding is PauliLCUBlockEncoding
+    assert stdlib.PauliLCUBlockEncoding is PauliLCUBlockEncoding
+    assert qmc.pauli_lcu_block_encoding is pauli_lcu_block_encoding
+    assert stdlib.pauli_lcu_block_encoding is pauli_lcu_block_encoding
+
+    for namespace in (qmc, stdlib):
+        assert "LCUBlockEncoding" in namespace.__all__
+        assert "PauliLCUBlockEncoding" in namespace.__all__
+        assert "pauli_lcu_block_encoding" in namespace.__all__
+        assert not hasattr(namespace, "pauli_lcu_num_selection_qubits")
 
 
 def test_measurement_helpers_are_publicly_reexported():
