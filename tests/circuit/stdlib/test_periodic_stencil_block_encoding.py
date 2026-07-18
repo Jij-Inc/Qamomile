@@ -686,6 +686,31 @@ def test_periodic_stencil_rejects_invalid_descriptions(
         qmc.periodic_stencil_block_encoding(coefficients, register_sizes)
 
 
+def test_periodic_stencil_normalizes_numpy_integer_widths() -> None:
+    """NumPy integer axis widths become plain immutable Python integers."""
+    encoding = qmc.periodic_stencil_block_encoding(
+        {(0, 0): 1.0, (1, 0): -0.5j},
+        register_sizes=(np.int64(2), np.int32(1)),
+    )
+    replaced = dataclasses.replace(
+        encoding,
+        register_sizes=(np.int32(2), np.int64(1)),
+    )
+
+    assert encoding.register_sizes == (2, 1)
+    assert all(type(width) is int for width in encoding.register_sizes)
+    assert type(encoding.num_system_qubits) is int
+    assert replaced.register_sizes == (2, 1)
+    assert all(type(width) is int for width in replaced.register_sizes)
+
+
+@pytest.mark.parametrize("width", [True, np.bool_(False)])
+def test_periodic_stencil_rejects_boolean_widths(width: Any) -> None:
+    """Boolean scalar types never act as periodic axis widths."""
+    with pytest.raises(TypeError, match="must be an int"):
+        qmc.periodic_stencil_block_encoding({0: 1.0}, (width,))
+
+
 def test_periodic_stencil_factory_is_publicly_exported() -> None:
     """The factory is public in stdlib with its legacy algorithm export."""
     from qamomile.circuit.algorithm import (

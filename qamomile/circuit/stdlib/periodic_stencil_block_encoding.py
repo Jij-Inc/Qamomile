@@ -169,19 +169,24 @@ def _validate_register_sizes(register_sizes: Sequence[Any]) -> tuple[int, ...]:
 
     Raises:
         ValueError: If no axis is supplied or an axis has non-positive width.
-        TypeError: If a width is not a plain integer.
+        TypeError: If a width is not a non-Boolean integer.
     """
-    sizes = tuple(register_sizes)
-    if not sizes:
+    raw_sizes = tuple(register_sizes)
+    if not raw_sizes:
         raise ValueError("register_sizes must contain at least one axis")
-    for axis, width in enumerate(sizes):
-        if type(width) is not int:
+    sizes: list[int] = []
+    for axis, width in enumerate(raw_sizes):
+        if not _is_integer(width):
             raise TypeError(
                 f"register_sizes[{axis}] must be an int, got {type(width).__name__}"
             )
-        if width <= 0:
-            raise ValueError(f"register_sizes[{axis}] must be positive, got {width}")
-    return cast(tuple[int, ...], sizes)
+        normalized = int(width)
+        if normalized <= 0:
+            raise ValueError(
+                f"register_sizes[{axis}] must be positive, got {normalized}"
+            )
+        sizes.append(normalized)
+    return tuple(sizes)
 
 
 def _validate_descriptor_metadata(
