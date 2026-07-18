@@ -1,8 +1,8 @@
-"""Structured block-encoding factories for quantum algorithms.
+"""Compatibility exports for structured block-encoding factories.
 
-This package contains method-specific constructions.  It intentionally does
-not define a universal block-encoding base class because different data-access
-models have different signal-register and workspace contracts.
+The implementations live in :mod:`qamomile.circuit.stdlib`. Qamomile does not
+define one universal base for every block-encoding data-access model, while
+static exact LCU producers share :class:`qamomile.circuit.LCUBlockEncoding`.
 """
 
 from .periodic_stencil import (

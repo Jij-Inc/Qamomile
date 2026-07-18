@@ -1,4 +1,4 @@
-"""Tests for modular arithmetic algorithm primitives."""
+"""Tests for modular arithmetic standard-library primitives."""
 
 from __future__ import annotations
 
@@ -11,6 +11,21 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit import modular_decrement, modular_increment
+
+
+def test_modular_primitives_are_stdlib_exports_with_legacy_aliases() -> None:
+    """Stdlib and legacy algorithm paths expose the same qkernels."""
+    from qamomile.circuit.algorithm.arithmetic import (
+        modular_decrement as legacy_decrement,
+        modular_increment as legacy_increment,
+    )
+    from qamomile.circuit.stdlib import (
+        modular_decrement as stdlib_decrement,
+        modular_increment as stdlib_increment,
+    )
+
+    assert modular_increment is stdlib_increment is legacy_increment
+    assert modular_decrement is stdlib_decrement is legacy_decrement
 
 
 @qmc.qkernel
@@ -278,9 +293,12 @@ def _run_shift_case(
     )
 
     _assert_deterministic(sample_results, expected, shots, context=context)
-    assert np.isclose(observed, _exact_z_expval(coeffs, expected), atol=1e-8), (
-        f"{context}: expval={observed}, expected={_exact_z_expval(coeffs, expected)}"
-    )
+    assert np.isclose(
+        observed,
+        _exact_z_expval(coeffs, expected),
+        atol=1e-8,
+        rtol=0.0,
+    ), f"{context}: expval={observed}, expected={_exact_z_expval(coeffs, expected)}"
 
 
 @pytest.mark.parametrize(("n", "seed"), _RANDOM_CASES)

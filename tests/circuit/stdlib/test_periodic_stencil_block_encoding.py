@@ -12,6 +12,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler.circuit_ir import (
     SELECT_SEMANTIC_KEY,
     CallInstruction,
@@ -55,6 +56,148 @@ def _identity_registers(
         registers.
     """
     return signal, system
+
+
+@qmc.qkernel
+def _apply_static_encoding(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+    encoding: qmc.LCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Apply a block encoding supplied through a generic static slot.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Complete signal register.
+        system (qmc.Vector[qmc.Qubit]): Ordered system register.
+        encoding (qmc.LCUBlockEncoding): Compile-time exact LCU descriptor.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated signal and
+            system registers.
+    """
+    return encoding.unitary(signal, system)
+
+
+@qmc.qkernel
+def _static_direct_template(
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Vector[qmc.Bit]:
+    """Apply a generic statically bound encoding directly.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Compile-time exact LCU descriptor.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured system register.
+    """
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = encoding.unitary(signal, system)
+    return qmc.measure(system)
+
+
+@qmc.qkernel
+def _static_inverse_template(
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Vector[qmc.Bit]:
+    """Invert a helper carrying a generic static encoding argument.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Compile-time exact LCU descriptor.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured system register.
+    """
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = qmc.inverse(_apply_static_encoding)(
+        signal,
+        system,
+        encoding,
+    )
+    return qmc.measure(system)
+
+
+@qmc.qkernel
+def _static_control_template(
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Vector[qmc.Bit]:
+    """Control a unitary reached through a generic static encoding slot.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Compile-time exact LCU descriptor.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured system register.
+    """
+    outer = qmc.x(qmc.qubit("outer"))
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    outer, signal, system = qmc.control(encoding.unitary)(outer, signal, system)
+    return qmc.measure(system)
+
+
+@qmc.qkernel
+def _static_select_template(
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Vector[qmc.Bit]:
+    """Select a unitary reached through a generic static encoding slot.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Compile-time exact LCU descriptor.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured system register.
+    """
+    index = qmc.x(qmc.qubit("index"))
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    index, signal, system = qmc.select(
+        (_identity_registers, encoding.unitary),
+        num_index_qubits=1,
+    )(index, signal, system)
+    return qmc.measure(system)
+
+
+@qmc.qkernel
+def _static_round_trip_sample_template(
+    encoding: qmc.LCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+    """Apply and unapply a statically bound generic LCU encoding.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Compile-time exact LCU descriptor.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measured signal and
+            system registers.
+    """
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = encoding.unitary(signal, system)
+    signal, system = qmc.inverse(encoding.unitary)(signal, system)
+    return qmc.measure(signal), qmc.measure(system)
+
+
+@qmc.qkernel
+def _static_round_trip_expval_template(
+    encoding: qmc.LCUBlockEncoding,
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Evaluate an observable after a statically bound LCU round trip.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Compile-time exact LCU descriptor.
+        observable (qmc.Observable): System observable to evaluate.
+
+    Returns:
+        qmc.Float: Expectation value after applying the unitary and inverse.
+    """
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = encoding.unitary(signal, system)
+    signal, system = qmc.inverse(encoding.unitary)(signal, system)
+    return qmc.expval(system, observable)
 
 
 def _stencil_matrix(
@@ -258,7 +401,10 @@ def _qiskit_unitary(
     circuit = executable.compiled_quantum[0].circuit.remove_final_measurements(
         inplace=False
     )
-    return np.asarray(Operator(circuit).data, dtype=np.complex128)
+    unitary = np.asarray(Operator(circuit).data, dtype=np.complex128)
+    expected_dimension = 1 << (encoding.num_signal_qubits + encoding.num_system_qubits)
+    assert unitary.shape == (expected_dimension, expected_dimension)
+    return unitary
 
 
 def _top_left_block(
@@ -319,6 +465,7 @@ def _nested_calls(program: CircuitProgram) -> tuple[CallInstruction, ...]:
 @pytest.mark.parametrize(
     ("register_sizes", "coefficients"),
     [
+        ((2,), {(0,): complex(0.5, math.sqrt(3.0) / 2.0)}),
         ((2,), {(-1,): 0.7 - 0.2j, (0,): -1.3, (1,): 0.4 + 0.8j}),
         ((3,), {(-2,): -0.6j, (0,): 0.25, (3,): -0.4 + 0.1j}),
         (
@@ -359,6 +506,8 @@ def test_periodic_stencil_top_left_block_matches_dense_matrix(
         ).data,
         dtype=np.complex128,
     )
+    expected_dimension = 1 << (encoding.num_signal_qubits + encoding.num_system_qubits)
+    assert unitary.shape == (expected_dimension, expected_dimension)
     system_dimension = 1 << encoding.num_system_qubits
     signal_dimension = 1 << encoding.num_signal_qubits
     zero_signal_indices = np.arange(system_dimension) * signal_dimension
@@ -538,14 +687,20 @@ def test_periodic_stencil_rejects_invalid_descriptions(
 
 
 def test_periodic_stencil_factory_is_publicly_exported() -> None:
-    """The descriptor class and factory are available at both API levels."""
+    """The factory is public in stdlib with its legacy algorithm export."""
     from qamomile.circuit.algorithm import (
+        PeriodicStencilBlockEncoding as AlgorithmPeriodicStencilBlockEncoding,
+        periodic_stencil_block_encoding as algorithm_periodic_stencil,
+    )
+    from qamomile.circuit.stdlib import (
         PeriodicStencilBlockEncoding,
         periodic_stencil_block_encoding,
     )
 
     assert qmc.periodic_stencil_block_encoding is periodic_stencil_block_encoding
     assert qmc.PeriodicStencilBlockEncoding is PeriodicStencilBlockEncoding
+    assert algorithm_periodic_stencil is periodic_stencil_block_encoding
+    assert AlgorithmPeriodicStencilBlockEncoding is PeriodicStencilBlockEncoding
 
 
 def test_periodic_stencil_descriptor_is_frozen_noncallable_and_identity_based() -> None:
@@ -554,6 +709,7 @@ def test_periodic_stencil_descriptor_is_frozen_noncallable_and_identity_based() 
     repeated = qmc.periodic_stencil_block_encoding({0: 1j, 1: 0.5}, (2,))
 
     assert isinstance(encoding, qmc.PeriodicStencilBlockEncoding)
+    assert isinstance(encoding, qmc.LCUBlockEncoding)
     assert tuple(field.name for field in dataclasses.fields(encoding)) == (
         "unitary",
         "normalization",
@@ -576,6 +732,10 @@ def test_periodic_stencil_descriptor_is_frozen_noncallable_and_identity_based() 
     assert type(encoding.normalization) is float
     assert type(encoding.num_signal_qubits) is int
     assert type(encoding.num_system_qubits) is int
+    assert isinstance(encoding.register_sizes, tuple)
+    assert isinstance(encoding.offsets, tuple)
+    assert all(isinstance(offset, tuple) for offset in encoding.offsets)
+    assert isinstance(encoding.coefficients, tuple)
     assert not callable(encoding)
     assert not hasattr(encoding, "__dict__")
     assert not hasattr(encoding, "kernel")
@@ -587,6 +747,56 @@ def test_periodic_stencil_descriptor_is_frozen_noncallable_and_identity_based() 
         encoding.normalization = 2.0  # type: ignore[misc]
     with pytest.raises(TypeError):
         encoding()  # type: ignore[operator]
+
+
+def test_periodic_descriptor_metadata_is_deeply_immutable() -> None:
+    """Mutable factory inputs cannot mutate stored canonical metadata."""
+    register_sizes = [2, 1]
+    coefficients = {(0, 0): 1j, (1, -1): 0.5}
+    encoding = qmc.periodic_stencil_block_encoding(coefficients, register_sizes)
+    expected = (
+        encoding.register_sizes,
+        encoding.offsets,
+        encoding.coefficients,
+    )
+
+    register_sizes[0] = 7
+    coefficients.clear()
+
+    assert (
+        encoding.register_sizes,
+        encoding.offsets,
+        encoding.coefficients,
+    ) == expected
+    with pytest.raises(TypeError):
+        encoding.offsets[0][0] = 1  # type: ignore[index]
+    with pytest.raises(TypeError):
+        encoding.coefficients[0] = 0j  # type: ignore[index]
+    with pytest.raises(TypeError, match="register_sizes must be a tuple"):
+        dataclasses.replace(
+            encoding,
+            register_sizes=list(encoding.register_sizes),
+        )
+
+
+def test_generic_lcu_template_rebinds_periodic_encodings_after_round_trip() -> None:
+    """One serialized generic slot accepts Periodic descriptors of new widths."""
+    payload = serialize(_static_direct_template)
+    restored = deserialize(payload)
+    encodings = (
+        qmc.periodic_stencil_block_encoding({1: 1.0}, (1,)),
+        qmc.periodic_stencil_block_encoding({1: 1.0}, (2,)),
+        qmc.periodic_stencil_block_encoding({0: 1.0, 1: 0.5, 2: -0.25j}, (2,)),
+    )
+
+    assert restored.input_types == {"encoding": qmc.LCUBlockEncoding}
+    assert restored.block.static_bindings[0].type_key == (
+        "qamomile.stdlib.lcu_block_encoding"
+    )
+    for encoding in encodings:
+        specialized = restored.build(encoding=encoding)
+        assert specialized.static_bindings == ()
+        assert serialize(restored) == payload
 
 
 def test_periodic_descriptor_canonicalizes_equivalent_normalization() -> None:
@@ -851,6 +1061,79 @@ def test_distinct_periodic_instances_compose_in_one_caller(
     assert result.results == [((1, 1), 16)]
 
 
+@pytest.mark.parametrize(
+    ("template", "expected_bits"),
+    [
+        (_static_direct_template, (1, 0)),
+        (_static_inverse_template, (1, 1)),
+        (_static_control_template, (1, 0)),
+        (_static_select_template, (1, 0)),
+    ],
+    ids=["direct", "inverse-helper", "outer-control", "nested-select"],
+)
+def test_generic_static_binding_composes_and_executes_on_every_sdk(
+    sdk_transpiler: Any,
+    template: qmc.QKernel,
+    expected_bits: tuple[int, ...],
+) -> None:
+    """Serialized generic LCU slots materialize Periodic encodings everywhere."""
+    restored = deserialize(serialize(template))
+    encoding = qmc.periodic_stencil_block_encoding({1: 1.0}, (2,))
+
+    sampled = _sample_only_outcome(
+        sdk_transpiler,
+        restored,
+        {"encoding": encoding},
+    )
+
+    assert tuple(sampled) == expected_bits
+
+
+def test_serialized_generic_lcu_template_rebinds_periodic_on_every_sdk(
+    sdk_transpiler: Any,
+) -> None:
+    """One generic payload executes Periodic encodings through both SDK APIs."""
+    sample_payload = serialize(_static_round_trip_sample_template)
+    expval_payload = serialize(_static_round_trip_expval_template)
+    sample_template = deserialize(sample_payload)
+    expval_template = deserialize(expval_payload)
+    encodings = (
+        qmc.periodic_stencil_block_encoding({1: np.exp(0.37j)}, (1,)),
+        qmc.periodic_stencil_block_encoding(
+            {0: 1j, 1: 0.5, 2: -0.25j},
+            (2,),
+        ),
+    )
+
+    assert {
+        (encoding.num_signal_qubits, encoding.num_system_qubits)
+        for encoding in encodings
+    } == {(1, 1), (2, 2)}
+    for encoding in encodings:
+        sampled = _sample_only_outcome(
+            sdk_transpiler,
+            sample_template,
+            {"encoding": encoding},
+        )
+        assert _is_all_zero(sampled)
+
+        weights = tuple(
+            1.0 / (index + 1) for index in range(encoding.num_system_qubits)
+        )
+        observed = _run_expval(
+            sdk_transpiler,
+            expval_template,
+            {
+                "encoding": encoding,
+                "observable": _z_hamiltonian(weights),
+            },
+        )
+        tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        assert observed == pytest.approx(sum(weights), abs=tolerance)
+        assert serialize(sample_template) == sample_payload
+        assert serialize(expval_template) == expval_payload
+
+
 @pytest.mark.parametrize("num_system_qubits", [1, 2])
 @pytest.mark.parametrize("seed", [0, 42])
 def test_two_term_periodic_encoding_samples_and_estimates_on_every_sdk(
@@ -997,19 +1280,30 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
 
 
 @pytest.mark.parametrize("composition", ["control", "select"])
-def test_nontrivial_lcu_phase_composes_cross_backend(
+@pytest.mark.parametrize(
+    "shift_weight",
+    [None, 0.5],
+    ids=["single-term", "multi-term"],
+)
+def test_periodic_phase_composes_cross_backend(
     sdk_transpiler: Any,
     composition: str,
+    shift_weight: float | None,
 ) -> None:
-    """Outer control and nested SELECT preserve an inner non-Clifford phase.
+    """Outer control and nested SELECT preserve a non-Clifford block phase.
 
     On the all-zero input only the identity term overlaps the initial state,
     so outer-branch interference directly measures ``a / normalization``.
+    The single-term case exercises the optimized path without PREPARE or the
+    inner SELECT, while the multi-term case exercises the complete LCU path.
     """
     phase = math.pi / 3.0
     identity_weight = np.exp(1j * phase)
+    coefficients = {0: identity_weight}
+    if shift_weight is not None:
+        coefficients[1] = shift_weight
     encoding = qmc.periodic_stencil_block_encoding(
-        {0: identity_weight, 1: 0.5},
+        coefficients,
         (1,),
     )
 
