@@ -42,6 +42,8 @@ from .state_preparation import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
     computational_basis_state,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
 )
 
 __all__ = [
@@ -56,6 +58,8 @@ __all__ = [
     "computational_basis_state",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
+    "mottonen_amplitude_encoding",
+    "mottonen_amplitude_encoding_from_angles",
     # Arithmetic
     "ripple_carry_add",
     "modular_add",

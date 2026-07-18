@@ -11,7 +11,7 @@ for the gate-emission side and the all-zero-state pre-condition.
 The math here is intentionally separated from gate emission so it
 can also be used standalone — e.g., by hybrid-optimisation loops
 that pre-compute angle vectors outside any kernel and then feed
-them into ``amplitude_encoding_from_angles`` via
+them into ``mottonen_amplitude_encoding_from_angles`` via
 ``parameters=[...]``.
 
 Reference

@@ -339,6 +339,28 @@ def test_inverse_top_left_block_is_adjoint_matrix() -> None:
     )
 
 
+def test_qiskit_inverse_is_full_adjoint_for_wide_prepare() -> None:
+    """PREPARE and UNPREPARE remain adjoints on the full signal space."""
+    encoding = qmc.pauli_lcu_block_encoding(
+        PauliLCU.from_matrix(DENSE_TWO_QUBIT_MATRIX)
+    )
+    forward = _qiskit_unitary(encoding)
+    adjoint = _qiskit_unitary(encoding, invert=True)
+
+    np.testing.assert_allclose(
+        adjoint,
+        forward.conj().T,
+        atol=1e-10,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        adjoint @ forward,
+        np.eye(forward.shape[0]),
+        atol=1e-10,
+        rtol=0.0,
+    )
+
+
 def test_lazy_inverse_select_has_stable_conjugated_case_fingerprints() -> None:
     """Lowered identity-case phases distinguish forward and inverse bodies."""
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)

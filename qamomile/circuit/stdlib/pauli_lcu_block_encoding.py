@@ -264,7 +264,11 @@ def _build_multi_term_encoding(
     for index, term in enumerate(lcu.terms):
         amplitudes[index] = math.sqrt(abs(term.coefficient)) / sqrt_alpha
 
-    preparation, required_width = _mottonen_composite(amplitudes)
+    preparation, required_width = _mottonen_composite(
+        amplitudes,
+        name="mottonen_amplitude_encoding",
+        policy=CallPolicy.PRESERVE_BOX,
+    )
     if required_width != signal_width:
         raise RuntimeError(
             "Möttönen preparation width disagrees with the LCU signal width."

@@ -58,9 +58,9 @@ from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 from qamomile.circuit.stdlib.state_preparation import (
-    amplitude_encoding,
-    amplitude_encoding_from_angles,
     computational_basis_state,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
 )
 from qamomile.circuit.transpiler.errors import QubitConsumedError
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
@@ -3276,8 +3276,8 @@ def _computational_basis_state_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKe
     return sample_circuit, expval_circuit
 
 
-def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
-    """Build state-preparation amplitude_encoding inverse roundtrip kernels.
+def _mottonen_amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build state-preparation mottonen_amplitude_encoding inverse roundtrip kernels.
 
     Both legs go through a register-parameterized qkernel wrapper,
     exercising Möttönen custom-composite inlining and inversion.
@@ -3292,7 +3292,7 @@ def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     @qmc.qkernel
     def amplitude_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply Mottonen amplitude encoding to the whole register."""
-        qs = amplitude_encoding(qs, amplitudes)
+        qs = mottonen_amplitude_encoding(qs, amplitudes)
         return qs
 
     @qmc.qkernel
@@ -3312,15 +3312,15 @@ def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     return sample_circuit, expval_circuit
 
 
-def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
+def _mottonen_amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     qmc.QKernel, qmc.QKernel
 ]:
-    """Build state-preparation amplitude_encoding_from_angles roundtrip kernels.
+    """Build state-preparation mottonen_amplitude_encoding_from_angles roundtrip kernels.
 
-    The parametric companion to `amplitude_encoding`: pre-computed Mottonen
+    The parametric companion to `mottonen_amplitude_encoding`: pre-computed Mottonen
     Ry angles are emitted as elementary gates rather than through a custom
     composite operation. The wrapper path is included for symmetry with
-    `amplitude_encoding`, but it does not exercise `_inline_composite`.
+    `mottonen_amplitude_encoding`, but it does not exercise `_inline_composite`.
 
     Returns:
         tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
@@ -3335,7 +3335,7 @@ def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     @qmc.qkernel
     def amplitude_angles_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply angle-driven Mottonen amplitude encoding to the register."""
-        qs = amplitude_encoding_from_angles(qs, ry_angles)
+        qs = mottonen_amplitude_encoding_from_angles(qs, ry_angles)
         return qs
 
     @qmc.qkernel
@@ -3605,16 +3605,16 @@ STDLIB_ALGO_ROUNDTRIP_CASES = [
         id="algorithm-computational-basis-state",
     ),
     pytest.param(
-        _amplitude_encoding_roundtrip_kernels,
+        _mottonen_amplitude_encoding_roundtrip_kernels,
         2,
         {},
-        id="algorithm-amplitude-encoding",
+        id="algorithm-mottonen-amplitude-encoding",
     ),
     pytest.param(
-        _amplitude_encoding_from_angles_roundtrip_kernels,
+        _mottonen_amplitude_encoding_from_angles_roundtrip_kernels,
         2,
         {},
-        id="algorithm-amplitude-encoding-from-angles",
+        id="algorithm-mottonen-amplitude-encoding-from-angles",
     ),
     pytest.param(
         _initial_occupations_roundtrip_kernels,
