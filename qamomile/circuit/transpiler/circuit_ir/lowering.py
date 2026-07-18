@@ -7,7 +7,10 @@ from typing import Any
 
 from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.canonical import _collect_values, content_fingerprint
+from qamomile.circuit.ir.canonical import (
+    collect_reachable_values,
+    content_fingerprint,
+)
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CompOpKind,
@@ -28,7 +31,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.select import SelectOperation
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.circuit_ir.emitter import CircuitGateEmitter
 from qamomile.circuit.transpiler.circuit_ir.model import (
     SELECT_SEMANTIC_KEY,
@@ -726,10 +729,8 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
         if cached is not None and cached[0] is case_block:
             return cached[1]
 
-        values: list[ValueBase] = []
-        _collect_values(case_block, values, set())
         keys: set[str] = set()
-        for value in values:
+        for value in collect_reachable_values(case_block):
             keys.add(value.uuid)
             if value.is_parameter():
                 parameter_name = value.parameter_name()

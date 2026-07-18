@@ -262,6 +262,25 @@ def content_fingerprint(obj: Any) -> str:
     return hashlib.sha256(_token(obj, strict=True).encode("utf-8")).hexdigest()
 
 
+def collect_reachable_values(block: Block) -> tuple[ValueBase, ...]:
+    """Collect values reachable from an IR block in canonical walk order.
+
+    The traversal includes values referenced by operation-owned nested blocks
+    and returns each value UUID at most once. Its ordering is the same stable
+    ordering used by canonical byte emission.
+
+    Args:
+        block (Block): Root block whose reachable values to collect.
+
+    Returns:
+        tuple[ValueBase, ...]: Reachable values in deterministic canonical
+            declaration order.
+    """
+    values: list[ValueBase] = []
+    _collect_values(block, values, set())
+    return tuple(values)
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
@@ -1043,6 +1062,9 @@ def _collect_from_subblock(sub: Block, visit: Any) -> None:
     """
     for v in sub.input_values:
         visit(v)
+    for slot in sub.static_bindings:
+        for field in slot.fields:
+            visit(field.value)
     for key in sorted(sub.parameters):
         visit(sub.parameters[key])
     for nested_op in sub.operations:
@@ -1097,11 +1119,8 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     out.append(f"{pad}{_INLINE_INDENT}label_args={_token(block.label_args)}")
     out.append(f"{pad}{_INLINE_INDENT}param_slots={_token(block.param_slots)}")
 
-    declared: list[ValueBase] = []
-    seen: set[str] = set()
-    _collect_values(block, declared, seen)
     out.append(f"{pad}{_INLINE_INDENT}values:")
-    for v in declared:
+    for v in collect_reachable_values(block):
         out.append(f"{pad}{_INLINE_INDENT * 2}{_value_declaration(v)}")
 
     out.append(
