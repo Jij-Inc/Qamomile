@@ -58,9 +58,9 @@ from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 from qamomile.circuit.stdlib.state_preparation import (
-    amplitude_encoding,
-    amplitude_encoding_from_angles,
     computational_basis_state,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
 )
 from qamomile.circuit.transpiler.errors import QubitConsumedError
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
@@ -1134,6 +1134,51 @@ def test_inverse_pauli_evolve_matches_manual_negative_time(qiskit_transpiler) ->
 # ---------------------------------------------------------------------------
 # Inverse of inverse
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("with_body", [True, False], ids=["body", "opaque"])
+def test_block_inverter_cancels_inverse_invoke_transform(with_body: bool) -> None:
+    """An inverse invocation returns to its direct callable definition."""
+    callee_input = Value(type=QubitType(), name="callee_input")
+    callee_output = callee_input.next_version()
+    callee_body = Block(
+        name="callee",
+        input_values=[callee_input],
+        output_values=[callee_output],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [callee_input],
+                [callee_output],
+            )
+        ],
+    )
+    ref = CallableRef(namespace="test", name="inverse_call")
+    definition = CallableDef(ref=ref, body=callee_body if with_body else None)
+    source = Value(type=QubitType(), name="source")
+    transformed = source.next_version()
+    inverse_call = InvokeOperation(
+        operands=[source],
+        results=[transformed],
+        target=ref,
+        transform=CallTransform.INVERSE,
+        definition=definition,
+    )
+    block = Block(
+        name="inverse_invoke",
+        input_values=[source],
+        output_values=[transformed],
+        operations=[inverse_call],
+        kind=BlockKind.HIERARCHICAL,
+    )
+
+    inverted = _BlockInverter().invert_block(block)
+    [direct_call] = inverted.operations
+
+    assert isinstance(direct_call, InvokeOperation)
+    assert direct_call.transform is CallTransform.DIRECT
+    assert direct_call.definition is definition
+    assert direct_call.body is (callee_body if with_body else None)
 
 
 def test_inverse_of_inverse_restores_source_operations() -> None:
@@ -2238,8 +2283,8 @@ def test_inverse_vector_qkernel_uses_cudaq_adjoint_helper() -> None:
 
 
 @pytest.mark.cudaq
-def test_inverse_of_inverse_cudaq_uses_explicit_late_fallback() -> None:
-    """Nested adjoint uses the SDK-safe fallback at materialization only.
+def test_inverse_of_inverse_cudaq_collapses_transparent_fallback() -> None:
+    """Nested adjoint collapses its transparent late-fallback wrapper.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2270,7 +2315,7 @@ def test_inverse_of_inverse_cudaq_uses_explicit_late_fallback() -> None:
         maxsplit=1,
     )
     assert helper_source.count("cudaq.adjoint(") == 1
-    assert "def _qamomile_U_inverse_" in helper_source
+    assert "def _qamomile_U_inverse_" not in helper_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -3231,8 +3276,8 @@ def _computational_basis_state_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKe
     return sample_circuit, expval_circuit
 
 
-def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
-    """Build state-preparation amplitude_encoding inverse roundtrip kernels.
+def _mottonen_amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build state-preparation mottonen_amplitude_encoding inverse roundtrip kernels.
 
     Both legs go through a register-parameterized qkernel wrapper,
     exercising Möttönen custom-composite inlining and inversion.
@@ -3247,7 +3292,7 @@ def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     @qmc.qkernel
     def amplitude_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply Mottonen amplitude encoding to the whole register."""
-        qs = amplitude_encoding(qs, amplitudes)
+        qs = mottonen_amplitude_encoding(qs, amplitudes)
         return qs
 
     @qmc.qkernel
@@ -3267,15 +3312,15 @@ def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     return sample_circuit, expval_circuit
 
 
-def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
+def _mottonen_amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     qmc.QKernel, qmc.QKernel
 ]:
-    """Build state-preparation amplitude_encoding_from_angles roundtrip kernels.
+    """Build state-preparation mottonen_amplitude_encoding_from_angles roundtrip kernels.
 
-    The parametric companion to `amplitude_encoding`: pre-computed Mottonen
+    The parametric companion to `mottonen_amplitude_encoding`: pre-computed Mottonen
     Ry angles are emitted as elementary gates rather than through a custom
     composite operation. The wrapper path is included for symmetry with
-    `amplitude_encoding`, but it does not exercise `_inline_composite`.
+    `mottonen_amplitude_encoding`, but it does not exercise `_inline_composite`.
 
     Returns:
         tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
@@ -3290,7 +3335,7 @@ def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     @qmc.qkernel
     def amplitude_angles_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply angle-driven Mottonen amplitude encoding to the register."""
-        qs = amplitude_encoding_from_angles(qs, ry_angles)
+        qs = mottonen_amplitude_encoding_from_angles(qs, ry_angles)
         return qs
 
     @qmc.qkernel
@@ -3560,16 +3605,16 @@ STDLIB_ALGO_ROUNDTRIP_CASES = [
         id="algorithm-computational-basis-state",
     ),
     pytest.param(
-        _amplitude_encoding_roundtrip_kernels,
+        _mottonen_amplitude_encoding_roundtrip_kernels,
         2,
         {},
-        id="algorithm-amplitude-encoding",
+        id="algorithm-mottonen-amplitude-encoding",
     ),
     pytest.param(
-        _amplitude_encoding_from_angles_roundtrip_kernels,
+        _mottonen_amplitude_encoding_from_angles_roundtrip_kernels,
         2,
         {},
-        id="algorithm-amplitude-encoding-from-angles",
+        id="algorithm-mottonen-amplitude-encoding-from-angles",
     ),
     pytest.param(
         _initial_occupations_roundtrip_kernels,

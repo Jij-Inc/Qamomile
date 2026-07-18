@@ -41,7 +41,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %% [markdown]
 # ## インストール
@@ -49,7 +49,7 @@
 # 通常の使用：
 #
 # ```bash
-# pip install qamomile
+# pip install "qamomile[qiskit,visualization]"
 # ```
 #
 # このチュートリアルでは、具体的な量子SDKとしてQiskitを使用します。QuriPartsもサポートされており、トランスパイル可能な量子SDKは今後も増えていく予定です。

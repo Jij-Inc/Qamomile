@@ -21,6 +21,7 @@ from qamomile.circuit.transpiler.gate_emitter import GateKind  # noqa: E402
 from qamomile.quri_parts import (  # noqa: E402
     QuriPartsExecutor,
     QuriPartsGateEmitter,
+    QuriPartsTranspiler,
 )
 from qamomile.quri_parts.materializer import QuriPartsMaterializer  # noqa: E402
 
@@ -230,6 +231,25 @@ class TestQuriPartsGateEmitter:
         gates = list(circuit.gates)
         assert len(gates) > 5  # Each gate decomposes to multiple gates
 
+    def test_controlled_y_decomposition_preserves_conditional_sign(self) -> None:
+        """Controlled Y uses Sdag-CNOT-S rather than controlled negative Y."""
+
+        @qmc.qkernel
+        def y_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply a Pauli Y gate."""
+            return qmc.y(target)
+
+        @qmc.qkernel
+        def controlled_y() -> qmc.Vector[qmc.Bit]:
+            """Apply the reusable Y body under one control."""
+            qubits = qmc.qubit_array(2, "q")
+            qubits[0], qubits[1] = qmc.control(y_body)(qubits[0], qubits[1])
+            return qmc.measure(qubits)
+
+        executable = QuriPartsTranspiler().transpile(controlled_y)
+        gates = list(executable.get_first_circuit().gates)
+        assert [gate.name for gate in gates] == ["Sdag", "CNOT", "S"]
+
     def test_measure_is_noop(self) -> None:
         """Test that measure is a no-op (doesn't add gates)."""
         emitter = QuriPartsGateEmitter()
@@ -310,6 +330,30 @@ class TestQuriPartsTranspiler:
         # Custom sampler can be passed to executor
         executor = transpiler.executor(sampler=None, estimator=None)
         assert executor is not None
+
+    def test_static_if_selects_quantum_array_slot_per_iteration(self) -> None:
+        """Branch-selected qubits retain the right slot across unrolling."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qubits = qmc.qubit_array(2, "qubits")
+            for index in qmc.range(2):
+                if index == 0:
+                    selected = qubits[0]
+                else:
+                    selected = qubits[1]
+                selected = qmc.x(selected)
+                qubits[index] = selected
+            return qmc.measure(qubits)
+
+        transpiler = QuriPartsTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(seed=17), shots=32)
+            .result()
+        )
+
+        assert result.results == [((1, 1), 32)]
 
     def test_standalone_phase_is_preserved_without_changing_the_abi(self) -> None:
         """A root phase reaches QURI exactly and keeps its parameter ABI."""

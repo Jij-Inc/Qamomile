@@ -124,6 +124,16 @@ Element-granularity consumption (`if sel: _ = qmc.measure(qs[0])` followed by re
 
 **Future fix**: materialize the native inverse as a directly controllable Qiskit gate, or decompose the annotated inverse before controlling the reusable circuit.
 
+## Qiskit Aer execution may apply an extra lowering pass for empty-parameter multiplexers
+
+**When it bites**: a Qiskit circuit sent through `QiskitExecutor` targets Qiskit Aer and, after Qiskit transpilation, contains a `multiplexer` instruction with an empty `params` list. This shape can be produced by Qiskit's native state-preparation inverse path, including Qamomile's native Qiskit realization of concrete amplitude encoding followed by an inverse inside retained control flow. A params-bearing `multiplexer` is a valid Aer instruction and is left unchanged.
+
+**Why this trade-off was chosen**: Aer treats the operation name `multiplexer` as a native instruction and reads its unitary matrices from `operation.params`. Qiskit can also produce a generic gate named `multiplexer` whose matrices live only in the gate definition, leaving `params` empty. Passing that empty-parameter form to Aer can crash native assembly. To keep Qamomile's public Qiskit circuit as high-level as possible while avoiding an Aer crash at execution time, `QiskitExecutor` recursively inspects the Aer-transpiled circuit, including nested control-flow blocks, and decomposes only empty-parameter multiplexers immediately before `backend.run`.
+
+**Workaround**: if exact Qiskit-native state-preparation structure is not needed, `QiskitTranspiler(use_native_composite=False)` avoids the native `StatePreparation` path and emits Qamomile's explicit fallback decomposition instead. Users who build Qiskit circuits manually can also transpile against a backend target that does not include `multiplexer`, such as a suitable fake backend target, before executing on Aer.
+
+**Future fix**: remove the executor-side lowering once Qiskit and Aer agree on a memory-safe representation for inverse-derived multiplexers, either by keeping the generic empty-parameter form away from Aer-native basis instructions or by having Aer reject/decompose it through the gate definition instead of entering native assembly.
+
 ## `qmc.inverse` requires trace-time-resolvable control flow
 
 **When it bites**: `qmc.inverse(layer)(...)` is traced for a `layer` qkernel whose quantum body contains control flow the eager inverse builder cannot resolve while constructing the fallback `implementation_block`:

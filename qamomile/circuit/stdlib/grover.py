@@ -23,7 +23,6 @@ straight from one estimate call::
 
 from __future__ import annotations
 
-import math
 import numbers
 from typing import Any, Callable, cast
 
@@ -71,7 +70,12 @@ def grover_iteration_count(
     if isinstance(n_val, int) and isinstance(m_val, int):
         if n_val <= 0 or m_val <= 0:
             raise ValueError("num_qubits and num_marked must be positive.")
-        return int(math.floor((math.pi / 4.0) * math.sqrt((2**n_val) / m_val)))
+        expression = (sp.pi / 4) * sp.sqrt(sp.Rational(2**n_val, m_val))
+        # Evaluate with precision proportional to the result magnitude. This
+        # avoids both float overflow at n>=1024 and loss of integer accuracy
+        # for much smaller but still large search spaces.
+        decimal_digits = max(50, n_val // 6 + 30)
+        return int(sp.floor(sp.N(expression, decimal_digits)))
     n = sp.sympify(n_val)
     m = sp.sympify(m_val)
     return sp.floor((sp.pi / 4) * sp.sqrt(sp.Integer(2) ** n / m))

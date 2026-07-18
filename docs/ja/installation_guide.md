@@ -6,7 +6,11 @@ Qamomileは、pipなどの標準的なパッケージマネージャでインス
 pip install qamomile
 ```
 
-Qiskitはデフォルトの量子SDK連携として含まれています。
+オプションの連携機能は明示的にインストールします。チュートリアルで使うQiskitバックエンドと回路描画を利用する場合は、次を実行してください。
+
+```bash
+pip install "qamomile[qiskit,visualization]"
+```
 
 ```python
 from qamomile.qiskit import QiskitTranspiler, QiskitExecutor
@@ -14,7 +18,7 @@ from qamomile.qiskit import QiskitTranspiler, QiskitExecutor
 
 ## 対応する量子SDK
 
-Qamomileは、複数の量子SDK連携をサポートしています。追加の量子SDKを使う場合は、必要な依存関係をオプションとしてインストールします。
+Qamomileは、複数の量子SDK連携をサポートしています。利用するSDKごとに必要なオプション依存関係をインストールしてください。
 
 ::::{tab-set}
 

@@ -98,6 +98,32 @@ class TestSubstitutionPass:
         # Block should be transformed (even if no QFT in this simple case)
         assert result is not None
 
+    def test_gate_type_name_does_not_match_every_custom_operation(self):
+        """A rule named ``custom`` targets a callable name, not its type."""
+
+        @qmc.composite_gate(name="specific_gate")
+        def specific_gate(q: qmc.Qubit) -> qmc.Qubit:
+            """Apply one named custom gate."""
+            return qmc.h(q)
+
+        @qmc.qkernel
+        def circuit(q: qmc.Qubit) -> qmc.Qubit:
+            """Call the named custom gate."""
+            return specific_gate(q)
+
+        result = SubstitutionPass(
+            SubstitutionConfig(
+                rules=[SubstitutionRule(source_name="custom", strategy="wrong")]
+            )
+        ).run(circuit.block)
+        invocation = next(
+            operation
+            for operation in result.operations
+            if isinstance(operation, InvokeOperation)
+        )
+
+        assert invocation.strategy_name is None
+
 
 class TestCreateSubstitutionPass:
     """Tests for create_substitution_pass factory."""

@@ -15,6 +15,7 @@ discipline (see :mod:`qamomile.circuit.ir.serialize.decode`).
 
 from __future__ import annotations
 
+import struct
 from typing import Any, Callable
 
 import numpy as np
@@ -53,6 +54,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -125,6 +127,7 @@ class _EncodeContext:
         """Initialize an empty encode context."""
         self.value_table_dicts: list[dict[str, Any]] = []
         self._seen_uuids: set[str] = set()
+        self._values_by_uuid: dict[str, ValueBase] = {}
         self._definition_ids: dict[int, str] = {}
         self._definitions: list[CallableDef] = []
 
@@ -137,16 +140,26 @@ class _EncodeContext:
         Returns:
             str: ``v.uuid``. Always returns the UUID so callers can use
                 the result inline in a ``_ref`` field.
+
+        Raises:
+            ValueError: If the same UUID is attached to two structurally
+                different values anywhere in the callable graph.
         """
         if v.uuid in self._seen_uuids:
+            if not _value_structures_match(self._values_by_uuid[v.uuid], v):
+                raise ValueError(
+                    f"Value UUID {v.uuid!r} refers to conflicting structures"
+                )
             return v.uuid
         self._seen_uuids.add(v.uuid)
+        self._values_by_uuid[v.uuid] = v
         # Reserve a slot before recursing so cycles (defensive) and
         # multiple references resolve to a single entry. The slot is
         # filled in-place after the encoder returns.
         slot_index = len(self.value_table_dicts)
         self.value_table_dicts.append({})
-        self.value_table_dicts[slot_index] = _encode_value(v, self)
+        encoded = _encode_value(v, self)
+        self.value_table_dicts[slot_index] = encoded
         return v.uuid
 
     def register_definition(self, definition: CallableDef | None) -> str | None:
@@ -220,6 +233,9 @@ def _encode_block(block: Block, ctx: _EncodeContext) -> dict[str, Any]:
     # not semantically load-bearing — references are by UUID.
     for v in block.input_values:
         ctx.register_value(v)
+    for slot in block.static_bindings:
+        for field in slot.fields:
+            ctx.register_value(field.value)
     for v in block.parameters.values():
         ctx.register_value(v)
     for op in block.operations:
@@ -236,6 +252,17 @@ def _encode_block(block: Block, ctx: _EncodeContext) -> dict[str, Any]:
         "output_value_refs": [v.uuid for v in block.output_values],
         "output_names": list(block.output_names),
         "parameters": {k: v.uuid for k, v in block.parameters.items()},
+        "static_bindings": [
+            {
+                "name": slot.name,
+                "type_key": slot.type_key,
+                "fields": [
+                    {"name": field.name, "value_ref": field.value.uuid}
+                    for field in slot.fields
+                ],
+            }
+            for slot in block.static_bindings
+        ],
         "operations": [_encode_operation(op, ctx) for op in block.operations],
     }
 
@@ -285,6 +312,9 @@ def _walk_block_values(sub: Block, ctx: _EncodeContext) -> None:
     """
     for v in sub.input_values:
         ctx.register_value(v)
+    for slot in sub.static_bindings:
+        for field in slot.fields:
+            ctx.register_value(field.value)
     for v in sub.parameters.values():
         ctx.register_value(v)
     for op in sub.operations:
@@ -384,6 +414,200 @@ def _encode_value(v: ValueBase, ctx: _EncodeContext) -> dict[str, Any]:
         f"Cannot encode value of type {type(v).__name__}; "
         f"expected Value / ArrayValue / TupleValue / DictValue"
     )
+
+
+def _value_structures_match(
+    left: ValueBase,
+    right: ValueBase,
+    *,
+    _nested: bool = False,
+    _seen: set[tuple[int, int]] | None = None,
+) -> bool:
+    """Compare two occurrences that would share one wire-table entry.
+
+    UUIDs identify one serialized value across the complete callable graph.
+    Repeated occurrences may contain independently allocated but equal literal
+    shape values, so nested constants and parameters compare by content. Other
+    nested values must retain exact identity to avoid merging distinct qubits
+    or classical SSA producers.
+
+    Args:
+        left (ValueBase): First value occurrence.
+        right (ValueBase): Later value occurrence with the same root UUID.
+        _nested (bool): Whether the values are structural children of the
+            repeated root. Defaults to ``False``.
+        _seen (set[tuple[int, int]] | None): Object pairs already compared for
+            cycle safety. Defaults to a new set.
+
+    Returns:
+        bool: Whether both occurrences encode the same wire value.
+    """
+    if _seen is None:
+        _seen = set()
+    pair = (id(left), id(right))
+    if pair in _seen:
+        return True
+    _seen.add(pair)
+
+    if type(left) is not type(right) or left.type != right.type:
+        return False
+    if left.name != right.name or getattr(left, "version", None) != getattr(
+        right,
+        "version",
+        None,
+    ):
+        return False
+    if left.uuid != right.uuid:
+        if not _nested or not (
+            isinstance(left, Value)
+            and isinstance(right, Value)
+            and (
+                (
+                    left.is_constant()
+                    and right.is_constant()
+                    and _encoded_payloads_match(
+                        _encode_payload(left.get_const()),
+                        _encode_payload(right.get_const()),
+                    )
+                )
+                or (
+                    left.is_parameter()
+                    and right.is_parameter()
+                    and left.parameter_name() == right.parameter_name()
+                )
+            )
+        ):
+            return False
+    elif left.logical_id != right.logical_id:
+        return False
+    if not _encoded_payloads_match(
+        _encode_metadata(left.metadata),
+        _encode_metadata(right.metadata),
+    ):
+        return False
+
+    def optional_match(
+        left_value: ValueBase | None,
+        right_value: ValueBase | None,
+    ) -> bool:
+        """Compare one optional structural child.
+
+        Args:
+            left_value (ValueBase | None): Left child.
+            right_value (ValueBase | None): Right child.
+
+        Returns:
+            bool: Whether both children are absent or structurally equal.
+        """
+        if left_value is None or right_value is None:
+            return left_value is right_value
+        return _value_structures_match(
+            left_value,
+            right_value,
+            _nested=True,
+            _seen=_seen,
+        )
+
+    if isinstance(left, TupleValue) and isinstance(right, TupleValue):
+        return len(left.elements) == len(right.elements) and all(
+            _value_structures_match(
+                left_element,
+                right_element,
+                _nested=True,
+                _seen=_seen,
+            )
+            for left_element, right_element in zip(
+                left.elements,
+                right.elements,
+                strict=True,
+            )
+        )
+    if isinstance(left, DictValue) and isinstance(right, DictValue):
+        return len(left.entries) == len(right.entries) and all(
+            _value_structures_match(
+                left_key,
+                right_key,
+                _nested=True,
+                _seen=_seen,
+            )
+            and _value_structures_match(
+                left_value,
+                right_value,
+                _nested=True,
+                _seen=_seen,
+            )
+            for (left_key, left_value), (right_key, right_value) in zip(
+                left.entries,
+                right.entries,
+                strict=True,
+            )
+        )
+    if isinstance(left, ArrayValue) and isinstance(right, ArrayValue):
+        return (
+            len(left.shape) == len(right.shape)
+            and all(
+                _value_structures_match(
+                    left_dimension,
+                    right_dimension,
+                    _nested=True,
+                    _seen=_seen,
+                )
+                for left_dimension, right_dimension in zip(
+                    left.shape,
+                    right.shape,
+                    strict=True,
+                )
+            )
+            and optional_match(left.slice_of, right.slice_of)
+            and optional_match(left.slice_start, right.slice_start)
+            and optional_match(left.slice_step, right.slice_step)
+        )
+    if isinstance(left, Value) and isinstance(right, Value):
+        return (
+            optional_match(left.parent_array, right.parent_array)
+            and len(left.element_indices) == len(right.element_indices)
+            and all(
+                _value_structures_match(
+                    left_index,
+                    right_index,
+                    _nested=True,
+                    _seen=_seen,
+                )
+                for left_index, right_index in zip(
+                    left.element_indices,
+                    right.element_indices,
+                    strict=True,
+                )
+            )
+        )
+    return True
+
+
+def _encoded_payloads_match(left: Any, right: Any) -> bool:
+    """Compare closed wire payloads without losing floating-point bits.
+
+    Args:
+        left (Any): First value produced by the semantic payload encoder.
+        right (Any): Second encoded value.
+
+    Returns:
+        bool: Whether the payloads have identical types, container structure,
+            and binary64 bit patterns.
+    """
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, float):
+        return struct.pack(">d", left) == struct.pack(">d", right)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _encoded_payloads_match(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _encoded_payloads_match(left[key], right[key]) for key in left
+        )
+    return bool(left == right)
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +1089,22 @@ def _encode_store_array_element(
         dict[str, Any]: Base op dict (the op carries no extra fields).
     """
     return _base_op_dict("StoreArrayElementOperation", op)
+
+
+def _encode_return_quantum_array_element(
+    op: ReturnQuantumArrayElementOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`ReturnQuantumArrayElementOperation`.
+
+    Args:
+        op (ReturnQuantumArrayElementOperation): The operation to encode.
+        ctx (_EncodeContext): Active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary.
+    """
+    del ctx
+    return _base_op_dict("ReturnQuantumArrayElementOperation", op)
 
 
 def _encode_dict_getitem(
@@ -1588,6 +1828,7 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     DecodeQFixedOperation: _encode_decode_qfixed,
     DictGetItemOperation: _encode_dict_getitem,
     StoreArrayElementOperation: _encode_store_array_element,
+    ReturnQuantumArrayElementOperation: _encode_return_quantum_array_element,
     CastOperation: _encode_cast,
     QInitOperation: _encode_qinit,
     CInitOperation: _encode_cinit,

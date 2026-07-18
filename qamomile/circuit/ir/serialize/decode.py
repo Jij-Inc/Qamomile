@@ -57,6 +57,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -83,6 +84,8 @@ from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
 )
+from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
+from qamomile.circuit.ir.static_binding import StaticBindingField, StaticBindingSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -295,8 +298,67 @@ def _decode_block(d: dict[str, Any], ctx: _DecodeContext) -> Block:
         "dict[str, Value]",
         {k: _materialize_as_parameter(ctx, ref) for k, ref in d["parameters"].items()},
     )
+    static_bindings: list[StaticBindingSlot] = []
+    for raw_slot in d.get("static_bindings", ()):
+        if not isinstance(raw_slot, dict):
+            raise ValueError("static binding record must be a dictionary")
+        name = raw_slot.get("name")
+        type_key = raw_slot.get("type_key")
+        raw_fields = raw_slot.get("fields")
+        if (
+            not isinstance(name, str)
+            or not isinstance(type_key, str)
+            or not isinstance(raw_fields, list)
+        ):
+            raise ValueError("static binding record is malformed")
+        fields: list[StaticBindingField] = []
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, dict):
+                raise ValueError("static binding field must be a dictionary")
+            field_name = raw_field.get("name")
+            value_ref = raw_field.get("value_ref")
+            if not isinstance(field_name, str) or not isinstance(value_ref, str):
+                raise ValueError("static binding field is malformed")
+            fields.append(
+                StaticBindingField(
+                    name=field_name,
+                    value=_materialize_as_value(ctx, value_ref),
+                )
+            )
+        static_bindings.append(
+            StaticBindingSlot(name=name, type_key=type_key, fields=tuple(fields))
+        )
 
     operations = [_decode_operation(op_dict, ctx) for op_dict in d["operations"]]
+
+    inferred_slots = [
+        ParamSlot(
+            name=name,
+            type=value.type,
+            kind=ParamKind.RUNTIME_PARAMETER,
+            ndim=len(value.shape) if isinstance(value, ArrayValue) else 0,
+        )
+        for name, value in parameters.items()
+    ]
+    inferred_names = set(parameters)
+    for name, value in zip(d.get("label_args", ()), input_values, strict=True):
+        if (
+            not isinstance(name, str)
+            or name in inferred_names
+            or isinstance(value, TupleValue)
+            or value.type.is_quantum()
+            or not value.is_parameter()
+        ):
+            continue
+        inferred_slots.append(
+            ParamSlot(
+                name=name,
+                type=value.type,
+                kind=ParamKind.RUNTIME_PARAMETER,
+                ndim=len(value.shape) if isinstance(value, ArrayValue) else 0,
+            )
+        )
+        inferred_names.add(name)
 
     return Block(
         name=d.get("name", ""),
@@ -307,7 +369,8 @@ def _decode_block(d: dict[str, Any], ctx: _DecodeContext) -> Block:
         output_names=list(d.get("output_names", ())),
         operations=operations,
         parameters=parameters,
-        param_slots=(),
+        param_slots=tuple(inferred_slots),
+        static_bindings=tuple(static_bindings),
     )
 
 
@@ -765,12 +828,20 @@ def _decode_payload(value: Any) -> Any:
             raw_items = value["$set"]
             if not isinstance(raw_items, list):
                 raise ValueError("$set payload must contain a list")
-            return set(_decode_payload(item) for item in raw_items)
+            try:
+                return set(_decode_payload(item) for item in raw_items)
+            except TypeError as error:
+                raise ValueError("$set payload contains an unhashable item") from error
         if "$frozenset" in value:
             raw_items = value["$frozenset"]
             if not isinstance(raw_items, list):
                 raise ValueError("$frozenset payload must contain a list")
-            return frozenset(_decode_payload(item) for item in raw_items)
+            try:
+                return frozenset(_decode_payload(item) for item in raw_items)
+            except TypeError as error:
+                raise ValueError(
+                    "$frozenset payload contains an unhashable item"
+                ) from error
         if "$complex_number" in value:
             raw_parts = value["$complex_number"]
             if not isinstance(raw_parts, list) or len(raw_parts) != 2:
@@ -1194,6 +1265,22 @@ def _decode_store_array_element(
     """
     operands, results = _operands_results(d, ctx)
     return StoreArrayElementOperation(operands=operands, results=results)
+
+
+def _decode_return_quantum_array_element(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> ReturnQuantumArrayElementOperation:
+    """Decode :class:`ReturnQuantumArrayElementOperation`.
+
+    Args:
+        d (dict[str, Any]): Serialized operation dictionary.
+        ctx (_DecodeContext): Active decoding context.
+
+    Returns:
+        ReturnQuantumArrayElementOperation: Reconstructed operation.
+    """
+    operands, results = _operands_results(d, ctx)
+    return ReturnQuantumArrayElementOperation(operands=operands, results=results)
 
 
 def _decode_dict_getitem(
@@ -2192,6 +2279,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "DecodeQFixedOperation": _decode_decode_qfixed,
     "DictGetItemOperation": _decode_dict_getitem,
     "StoreArrayElementOperation": _decode_store_array_element,
+    "ReturnQuantumArrayElementOperation": _decode_return_quantum_array_element,
     "CastOperation": _decode_cast,
     "QInitOperation": _decode_qinit,
     "CInitOperation": _decode_cinit,

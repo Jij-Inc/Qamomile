@@ -76,6 +76,9 @@ class FQAOAConverter(MathematicalProblemConverter):
         instance: ommx.v1.Instance,
         num_fermions: int,
         normalize_ising: typ.Optional[typ.Literal["abs_max", "rms"]] = None,
+        *,
+        uniform_penalty_weight: float | None = None,
+        penalty_weights: dict[int, float] | None = None,
     ):
         """
         Initialize the FQAOAConverter.
@@ -90,10 +93,23 @@ class FQAOAConverter(MathematicalProblemConverter):
                 - "abs_max": Normalize by absolute maximum value
                 - "rms": Normalize by root mean square
                 Defaults to None.
+            uniform_penalty_weight (float | None): Uniform penalty for OMMX
+                constraints. The fermion-number constraint is already
+                satisfied by construction, while all other constraints remain
+                represented in the cost Hamiltonian. ``None`` delegates
+                weight selection to OMMX.
+            penalty_weights (dict[int, float] | None): Optional per-constraint
+                penalty weights keyed by constraint ID.
 
         """
+        if isinstance(num_fermions, bool) or not isinstance(num_fermions, int):
+            raise TypeError("num_fermions must be an integer")
+        if num_fermions < 0:
+            raise ValueError("num_fermions must be nonnegative")
         if instance.objective.degree() > 2:
             raise ValueError("FQAOAConverter supports only QUBO instances.")
+
+        self._validate_particle_number_constraints(instance, num_fermions)
 
         self.num_fermions = num_fermions
         self.normalize_ising = normalize_ising
@@ -103,15 +119,18 @@ class FQAOAConverter(MathematicalProblemConverter):
         # Run the mutation on a throwaway copy so the caller's instance is
         # left untouched, and store the copy for evaluate_samples — it still
         # carries original-constraint metadata for feasibility reporting.
+        original = ommx.v1.Instance.from_bytes(instance.to_bytes())
         working = ommx.v1.Instance.from_bytes(instance.to_bytes())
-        # FQAOA uses uniform_penalty_weight=0.0 (constraints handled by fermion number conservation)
-        qubo, constant = working.to_qubo(uniform_penalty_weight=0.0)
+        qubo, constant = working.to_qubo(
+            uniform_penalty_weight=uniform_penalty_weight,
+            penalty_weights=dict(penalty_weights or {}),
+        )
         binary_model = BinaryModel.from_qubo(qubo, constant)
 
         # Keep the caller's original (untouched) instance for cyclic_mapping
         # and index labeling — its decision_variables list is the user-facing
         # one, not the post-qubo working copy.
-        self._original_instance = instance
+        self._original_instance = original
 
         # Pass the BinaryModel to the base class (which converts to SPIN internally)
         super().__init__(binary_model)
@@ -120,13 +139,81 @@ class FQAOAConverter(MathematicalProblemConverter):
         # to ommx.v1.SampleSet (feasibility evaluated against the user's
         # original constraints, which OMMX retains internally).
         self.instance = working
+        self.original_instance = original
+
+    @staticmethod
+    def _validate_particle_number_constraints(
+        instance: ommx.v1.Instance,
+        num_fermions: int,
+    ) -> None:
+        """Reject cardinality constraints inconsistent with the FQAOA sector.
+
+        Args:
+            instance (ommx.v1.Instance): Original optimization instance.
+            num_fermions (int): Particle-number sector prepared by FQAOA.
+
+        Raises:
+            ValueError: If an equality constraint is exactly the sum of all
+                decision variables but its right-hand side differs from
+                ``num_fermions``.
+        """
+        variable_ids = {variable.id for variable in instance.decision_variables}
+        for constraint in instance.constraints:
+            function = constraint.function
+            if (
+                constraint.equality != ommx.v1.Constraint.EQUAL_TO_ZERO
+                or function.degree() > 1
+                or set(function.linear_terms) != variable_ids
+            ):
+                continue
+            coefficients = list(function.linear_terms.values())
+            if not coefficients:
+                continue
+            coefficient = coefficients[0]
+            if not np.isclose(abs(coefficient), 1.0) or not all(
+                np.isclose(item, coefficient) for item in coefficients
+            ):
+                continue
+            cardinality = -function.constant_term / coefficient
+            if not np.isclose(cardinality, num_fermions):
+                raise ValueError(
+                    "num_fermions is inconsistent with cardinality constraint "
+                    f"{constraint.id}: expected {cardinality:g}, got "
+                    f"{num_fermions}."
+                )
 
     def __post_init__(self) -> None:
-        last_var = self._original_instance.decision_variables[-1]
-        n, d = last_var.subscripts
-        self.num_integers, self.num_bits = n + 1, d + 1
+        positions: list[tuple[int, int]] = []
+        for variable in self._original_instance.decision_variables:
+            if len(variable.subscripts) != 2:
+                raise ValueError(
+                    "FQAOA variables must each have exactly two integer "
+                    "subscripts (site, orbital)"
+                )
+            site, orbital = variable.subscripts
+            if site < 0 or orbital < 0:
+                raise ValueError("FQAOA variable subscripts must be nonnegative")
+            positions.append((site, orbital))
+        if not positions:
+            raise ValueError("FQAOA requires at least one decision variable")
+        self.num_integers = max(site for site, _ in positions) + 1
+        self.num_bits = max(orbital for _, orbital in positions) + 1
+        expected_positions = {
+            (site, orbital)
+            for site in range(self.num_integers)
+            for orbital in range(self.num_bits)
+        }
+        if set(positions) != expected_positions or len(positions) != len(
+            expected_positions
+        ):
+            raise ValueError(
+                "FQAOA variables must form a unique, dense rectangular "
+                "grid of (site, orbital) subscripts"
+            )
         self.var_map = self.cyclic_mapping()
         self.num_qubits = self.spin_model.num_bits
+        if self.num_fermions > self.num_qubits:
+            raise ValueError("num_fermions cannot exceed the number of encoded qubits")
 
         # Apply normalization if requested
         if isinstance(self.normalize_ising, str):
@@ -177,7 +264,7 @@ class FQAOAConverter(MathematicalProblemConverter):
                 orbital[0, i] = np.sqrt(1.0 / self.num_qubits)
                 for k in range(int(self.num_fermions / 2)):
                     angle = 2.0 * np.pi * (k + 1) * (i + 1) / self.num_qubits
-                    orbital[k, i] = np.sqrt(2.0 / self.num_qubits) * np.sin(angle)
+                    orbital[k + 1, i] = np.sqrt(2.0 / self.num_qubits) * np.sin(angle)
                     orbital[int(self.num_fermions - 1 - k), i] = np.sqrt(
                         2.0 / self.num_qubits
                     ) * np.cos(angle)
@@ -242,7 +329,11 @@ class FQAOAConverter(MathematicalProblemConverter):
         """
         indices_ij: list[list[int]] = []
         angles: list[float] = []
-        for (i, j), theta in givens_angles:
+        # ``_givens_decomposition`` records the rotations that eliminate the
+        # orbital matrix.  State preparation applies the inverse product, so
+        # the recorded rotations must be replayed in reverse order.  Each
+        # elementary circuit rotation already has the inverse sign convention.
+        for (i, j), theta in reversed(givens_angles):
             indices_ij.append([i, j])
             angles.append(float(theta))
         return np.array(indices_ij, dtype=np.uint64), angles

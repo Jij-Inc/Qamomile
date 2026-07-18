@@ -61,6 +61,7 @@ from .cast import CastOperation
 from .classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from .control_flow import (
@@ -117,6 +118,7 @@ __all__ = [
     "SelectOperation",
     "DecodeQFixedOperation",
     "DictGetItemOperation",
+    "ReturnQuantumArrayElementOperation",
     "StoreArrayElementOperation",
     "CastOperation",
     # Control flow operations

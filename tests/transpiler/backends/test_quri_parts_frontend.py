@@ -1702,7 +1702,7 @@ class TestGateCombinations:
         """
 
         @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
+        def circuit() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
             # Alice's qubit to teleport (prepared in |1>)
             alice = qmc.qubit("alice")
             alice = qmc.x(alice)
@@ -1717,12 +1717,13 @@ class TestGateCombinations:
             alice, bell0 = qmc.cx(alice, bell0)
             alice = qmc.h(alice)
 
-            # Measure all three qubits
-            q = qmc.qubit_array(3, "out")
-            q[0] = alice
-            q[1] = bell0
-            q[2] = bell1
-            return qmc.measure(q)
+            # Measure all three independent resources without pretending a
+            # fresh array owns them.
+            return (
+                qmc.measure(alice),
+                qmc.measure(bell0),
+                qmc.measure(bell1),
+            )
 
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
@@ -2568,7 +2569,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         assert block is not None
-        assert len(block.operations) == 4
+        assert len(block.operations) == 3
 
     def test_inline(self, transpiler):
         """inline() flattens inline invocations from sub-kernel calls."""
@@ -3715,6 +3716,43 @@ class TestControlledGate:
             _multi_controlled_unitary(
                 GATE_SPECS["RY"].matrix_fn(ry_angle), num_controls
             )
+            @ initial
+        )
+        assert statevectors_equal(sv, expected)
+
+    @pytest.mark.parametrize("num_controls", [1, 4])
+    def test_multi_controlled_y_preserves_relative_phase_statevector(
+        self, num_controls
+    ):
+        """A coherently controlled Y has ``+i`` rather than ``-i`` phase.
+
+        Every control is put in superposition so an erroneous ``-Y`` cannot
+        hide as an unobservable global phase. The four-control case also
+        exercises the clean-ancilla conjunction used by wide SELECT calls.
+        """
+
+        @qmc.qkernel
+        def y_gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.y(q)
+
+        controlled_y = qmc.control(y_gate, num_controls=num_controls)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+            ctrl = qmc.qubit_array(num_controls, "ctrl")
+            target = qmc.qubit("target")
+            for i in qmc.range(num_controls):
+                ctrl[i] = qmc.h(ctrl[i])
+            ctrl, target = controlled_y(ctrl, target)
+            return qmc.measure(ctrl), qmc.measure(target)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        sv = _strip_zero_ancillas(_run_statevector(circ), num_controls + 1)
+        hadamard = GATE_SPECS["H"].matrix_fn()
+        preparation = tensor_product(identity(2), *([hadamard] * num_controls))
+        initial = preparation @ all_zeros_state(num_controls + 1)
+        expected = (
+            _multi_controlled_unitary(GATE_SPECS["Y"].matrix_fn(), num_controls)
             @ initial
         )
         assert statevectors_equal(sv, expected)

@@ -271,6 +271,30 @@ class Handle(abc.ABC):
     # (which triggers the conditional-move rule).
     _consumed_pre_branch: bool = False
 
+    def __bool__(self) -> bool:
+        """Reject implicit Python truth-value testing of symbolic handles.
+
+        Python's ``not``, ``and``, ``or``, conditional expressions, and
+        chained comparisons all invoke ``bool`` internally. Allowing that
+        protocol to fall back to object truthiness would silently treat every
+        symbolic handle as true and discard part of the quantum program.
+
+        Returns:
+            bool: This method never returns.
+
+        Raises:
+            TypeError: Always, because a symbolic handle has no trace-time
+                Python truth value.
+        """
+        raise TypeError(
+            f"{type(self).__name__} is a symbolic Qamomile handle and cannot "
+            "be converted to a Python bool. Inside a qkernel body, use "
+            "'if handle:' for control flow; outside qkernel tracing, symbolic "
+            "handles cannot be used as Python conditions. For compound "
+            "conditions, use '&', '|', and '~' instead of 'and', 'or', and "
+            "'not'."
+        )
+
     def _should_enforce_linear(self) -> bool:
         """Check if this handle type requires linear enforcement.
 
