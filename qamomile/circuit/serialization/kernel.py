@@ -656,7 +656,7 @@ class _StaticBindingResolver:
         widths: dict[str, int],
         active_blocks: dict[int, dict[str, int]],
     ) -> None:
-        """Validate deferred member call widths in one reachable block.
+        """Validate calls and materialize reachable inverse target widths.
 
         Args:
             block (Block): Block whose operation graph should be inspected.
@@ -699,7 +699,7 @@ class _StaticBindingResolver:
         widths: dict[str, int],
         active_blocks: dict[int, dict[str, int]],
     ) -> None:
-        """Validate deferred calls reachable from one operation.
+        """Validate deferred calls and materialize inverse call-site widths.
 
         Args:
             operation (Operation): Operation and owned blocks to inspect.
@@ -762,6 +762,15 @@ class _StaticBindingResolver:
             return
 
         if isinstance(operation, InverseBlockOperation):
+            _materialize_inverse_target_width(
+                operation,
+                [
+                    self._concrete_array_width(target, widths)
+                    if isinstance(target, ArrayValue)
+                    else 1
+                    for target in operation.target_qubits
+                ],
+            )
             actuals = [*operation.target_qubits, *operation.parameters]
             for owned_block in (
                 operation.source_block,
@@ -1336,6 +1345,22 @@ def _concrete_quantum_width(value: ValueBase) -> int | None:
     return width
 
 
+def _materialize_inverse_target_width(
+    operation: InverseBlockOperation,
+    target_widths: list[int | None],
+) -> None:
+    """Refresh inverse scalar-width metadata when every target is concrete.
+
+    Args:
+        operation (InverseBlockOperation): Inverse operation to update in
+            place.
+        target_widths (list[int | None]): Scalar widths resolved from the
+            operation values or their enclosing call-site environment.
+    """
+    if target_widths and all(width is not None for width in target_widths):
+        operation.num_target_qubits = sum(cast(int, width) for width in target_widths)
+
+
 def _replace_operations(
     operations: list[Operation],
     substitutor: ValueSubstitutor,
@@ -1379,14 +1404,13 @@ def _replace_operations(
             ]
             new_operation = new_operation.rebuild_nested(nested)
         if isinstance(new_operation, InverseBlockOperation):
-            target_widths = [
-                _concrete_quantum_width(target)
-                for target in new_operation.target_qubits
-            ]
-            if target_widths and all(width is not None for width in target_widths):
-                new_operation.num_target_qubits = sum(
-                    cast(int, width) for width in target_widths
-                )
+            _materialize_inverse_target_width(
+                new_operation,
+                [
+                    _concrete_quantum_width(target)
+                    for target in new_operation.target_qubits
+                ],
+            )
         _replace_owned_blocks(new_operation, replacements, block_cache)
         rewritten.append(new_operation)
     return rewritten
