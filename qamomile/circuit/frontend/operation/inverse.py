@@ -31,6 +31,11 @@ from qamomile.circuit.frontend.qkernel_utils import (
     promote_literal_to_handle,
     reject_aliased_quantum_args,
 )
+from qamomile.circuit.frontend.static_binding import (
+    StaticBindingProxy,
+    is_static_binding_annotation,
+    validate_static_binding_argument,
+)
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
@@ -2072,8 +2077,10 @@ class InverseGate:
             BoundArguments: Bound and default-filled argument mapping.
 
         Raises:
-            TypeError: If any final argument is not a frontend `Handle`, or
-                if a bound `Handle` does not match its declared parameter
+            TypeError: If a static binding has the wrong registered type, an
+                unresolved static binding does not preserve the callee slot
+                identity, any ordinary argument is not a frontend `Handle`,
+                or a bound `Handle` does not match its declared parameter
                 type -- a quantum handle bound to a classical parameter, a
                 scalar `Qubit` bound to a `Vector[Qubit]` parameter (or the
                 reverse), or an array of the wrong rank. The latter checks
@@ -2083,12 +2090,22 @@ class InverseGate:
         bound_args.apply_defaults()
         for name, value in list(bound_args.arguments.items()):
             expected_type = self._qkernel.input_types.get(name)
+            if is_static_binding_annotation(expected_type):
+                bound_args.arguments[name] = validate_static_binding_argument(
+                    expected_type,
+                    name,
+                    value,
+                )
+                continue
             if expected_type is not None:
                 bound_args.arguments[name] = promote_literal_to_handle(
                     value,
                     expected_type,
                 )
         for name, value in bound_args.arguments.items():
+            expected_type = self._qkernel.input_types.get(name)
+            if is_static_binding_annotation(expected_type):
+                continue
             if not isinstance(value, Handle):
                 raise TypeError(
                     f"inverse(): argument {name!r} must be a Handle instance, "
@@ -2115,7 +2132,11 @@ class InverseGate:
         Returns:
             Block: Block whose operations should be inverted.
         """
-        return select_specialized_block(self._qkernel, arguments)
+        return select_specialized_block(
+            self._qkernel,
+            arguments,
+            require_handles=False,
+        )
 
     def _prepare_inputs(
         self,
@@ -2370,7 +2391,14 @@ class InverseGate:
         )
         block = self._select_block(bound_args.arguments)
         bindings = self._prepare_inputs(block, bound_args.arguments)
-        if self._can_emit_atomic_inverse(block, bindings):
+        has_symbolic_static_binding = any(
+            isinstance(value, StaticBindingProxy)
+            for value in bound_args.arguments.values()
+        )
+        if not has_symbolic_static_binding and self._can_emit_atomic_inverse(
+            block,
+            bindings,
+        ):
             operation, quantum_bindings, result_values = self._build_atomic_inverse(
                 block,
                 bindings,
@@ -2460,6 +2488,15 @@ class _InverseComposite:
         Returns:
             Any: Frontend handle or tuple matching the composite signature.
         """
+        if any(
+            is_static_binding_annotation(annotation)
+            for annotation in self.kernel.input_types.values()
+        ):
+            # A static binding is not an IR operand, so the ordinary named
+            # composite invocation protocol cannot carry it. Specialize and
+            # structurally invert the body through the same path as a regular
+            # qkernel.
+            return InverseGate(self.kernel)(*args, **kwargs)
         factory = partial(_inverse_composite_operation, self.kernel)
         return invoke_qkernel_with_operation(self.kernel, factory, *args, **kwargs)
 

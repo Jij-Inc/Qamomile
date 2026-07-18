@@ -29,7 +29,7 @@ from qamomile.circuit.frontend.qkernel_metadata import extract_return_names
 from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
 from qamomile.circuit.frontend.static_binding import (
     is_static_binding_annotation,
-    validate_static_binding,
+    validate_static_binding_argument,
 )
 from qamomile.circuit.frontend.tracer import Tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -51,7 +51,7 @@ def build_specialized_block(
         parameters (list[str]): Classical argument names that remain symbolic
             in the specialized block.
         bindings (dict[str, Any]): Concrete Python values for classical
-            arguments.
+            arguments and caller-owned proxies for unresolved static bindings.
         qubit_sizes (dict[str, int]): First-axis sizes for ``Vector[Qubit]``
             arguments supplied by the caller.
 
@@ -86,7 +86,8 @@ def create_traced_block(
     Args:
         kernel (Any): QKernel-like object to trace.
         parameters (list[str]): Argument names to keep as unbound parameters.
-        kwargs (dict[str, Any]): Concrete values for non-parameter arguments.
+        kwargs (dict[str, Any]): Concrete values for non-parameter arguments
+            and caller-owned proxies for unresolved static bindings.
         qubit_sizes (dict[str, int] | None): Optional mapping from
             ``Vector[Qubit]`` parameter names to integer sizes. Defaults to
             ``None``.
@@ -101,8 +102,9 @@ def create_traced_block(
         parameter slots populated.
 
     Raises:
-        TypeError: If a static binding declares a default or a concrete static
-            binding has the wrong registered type.
+        TypeError: If a static binding declares a default, a concrete static
+            binding has the wrong registered type, or a symbolic static
+            binding does not preserve the parameter's slot identity.
         ValueError: If a required static binding is absent from ``kwargs``.
     """
     if qubit_sizes is None:
@@ -131,7 +133,11 @@ def create_traced_block(
                         f"Static binding argument {name!r} must be provided "
                         "through bindings."
                     )
-                handle = validate_static_binding(param_type, name, kwargs[name])
+                handle = validate_static_binding_argument(
+                    param_type,
+                    name,
+                    kwargs[name],
+                )
             elif param_type is Observable or (
                 is_array_type(param_type)
                 and get_array_element_type(param_type) is Observable

@@ -271,6 +271,46 @@ def validate_static_binding(annotation: Any, name: str, value: Any) -> Any:
     return value
 
 
+def validate_static_binding_argument(
+    annotation: Any,
+    name: str,
+    value: Any,
+) -> Any:
+    """Validate a concrete binding or caller-owned symbolic binding proxy.
+
+    Args:
+        annotation (Any): Registered qkernel parameter annotation.
+        name (str): Callee parameter name used as the binding-slot identity.
+        value (Any): Concrete registered object or symbolic binding proxy.
+
+    Returns:
+        Any: The validated concrete object or unchanged symbolic proxy.
+
+    Raises:
+        TypeError: If a concrete object has the wrong type, or a symbolic
+            proxy does not preserve the callee parameter's slot name and type
+            key.
+    """
+    if not isinstance(value, StaticBindingProxy):
+        return validate_static_binding(annotation, name, value)
+
+    expected_spec = get_static_binding_by_annotation(annotation)
+    if expected_spec is None:
+        raise TypeError(f"{annotation!r} is not a registered static binding type")
+    slot = value.slot
+    if slot.name != name:
+        raise TypeError(
+            f"Symbolic static binding argument {name!r} must come from the "
+            f"same-named slot, got {slot.name!r}."
+        )
+    if slot.type_key != expected_spec.type_key:
+        raise TypeError(
+            f"Symbolic static binding argument {name!r} must have type key "
+            f"{expected_spec.type_key!r}, got {slot.type_key!r}."
+        )
+    return value
+
+
 def validate_static_binding_slot(
     spec: StaticBindingSpec,
     slot: StaticBindingSlot,
@@ -767,6 +807,7 @@ __all__ = [
     "materialize_static_member",
     "register_static_binding",
     "validate_static_binding",
+    "validate_static_binding_argument",
     "validate_static_binding_slot",
     "without_static_bindings",
 ]

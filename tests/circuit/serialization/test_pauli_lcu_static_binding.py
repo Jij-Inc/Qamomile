@@ -65,6 +65,84 @@ def _identity_case(
 
 
 @qmc.qkernel
+def _apply_static_encoding(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+    encoding: qmc.LCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Apply a descriptor received as this nested qkernel's static binding.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Signal register.
+        system (qmc.Vector[qmc.Qubit]): System register.
+        encoding (qmc.LCUBlockEncoding): Compile-time descriptor to apply.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated signal and
+            system registers.
+    """
+    return encoding.unitary(signal, system)
+
+
+@qmc.composite_gate(name="static_encoding_box")
+def _apply_static_encoding_composite(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+    encoding: qmc.LCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Apply a static descriptor through the named composite protocol.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Signal register.
+        system (qmc.Vector[qmc.Qubit]): System register.
+        encoding (qmc.LCUBlockEncoding): Compile-time descriptor to apply.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated signal and
+            system registers.
+    """
+    return encoding.unitary(signal, system)
+
+
+@qmc.qkernel
+def _apply_static_normalization(
+    qubit: qmc.Qubit,
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Qubit:
+    """Use a scalar field from a nested qkernel's static binding.
+
+    Args:
+        qubit (qmc.Qubit): Target qubit.
+        encoding (qmc.LCUBlockEncoding): Descriptor whose normalization sets
+            the rotation angle.
+
+    Returns:
+        qmc.Qubit: Rotated target qubit.
+    """
+    return qmc.rz(qubit, encoding.normalization)
+
+
+@qmc.qkernel
+def _apply_two_static_normalizations(
+    qubit: qmc.Qubit,
+    first: qmc.LCUBlockEncoding,
+    second: qmc.LCUBlockEncoding,
+) -> qmc.Qubit:
+    """Use two descriptors supplied through independent static arguments.
+
+    Args:
+        qubit (qmc.Qubit): Target qubit.
+        first (qmc.LCUBlockEncoding): Descriptor supplying the first angle.
+        second (qmc.LCUBlockEncoding): Descriptor supplying the second angle.
+
+    Returns:
+        qmc.Qubit: Qubit after both descriptor-derived rotations.
+    """
+    qubit = qmc.rz(qubit, first.normalization)
+    return qmc.rz(qubit, second.normalization)
+
+
+@qmc.qkernel
 def _direct_template(
     encoding: qmc.LCUBlockEncoding,
 ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
@@ -95,6 +173,46 @@ def _inverse_template(
     system = qmc.qubit_array(encoding.num_system_qubits, "system")
     signal, system = qmc.inverse(encoding.unitary)(signal, system)
     return qmc.measure(signal), qmc.measure(system)
+
+
+@qmc.qkernel
+def _inverse_static_argument_template(
+    encoding: qmc.LCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+    """Invert a nested qkernel that receives the descriptor as an argument."""
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = qmc.inverse(_apply_static_encoding)(
+        signal,
+        system,
+        encoding,
+    )
+    return qmc.measure(signal), qmc.measure(system)
+
+
+@qmc.qkernel
+def _inverse_static_composite_template(
+    encoding: qmc.LCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+    """Invert a named composite that receives a static descriptor argument."""
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = qmc.inverse(_apply_static_encoding_composite)(
+        signal,
+        system,
+        encoding,
+    )
+    return qmc.measure(signal), qmc.measure(system)
+
+
+@qmc.qkernel
+def _inverse_static_field_template(
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Bit:
+    """Invert a nested qkernel that reads a static descriptor field."""
+    qubit = qmc.qubit("qubit")
+    qubit = qmc.inverse(_apply_static_normalization)(qubit, encoding)
+    return qmc.measure(qubit)
 
 
 @qmc.qkernel
@@ -425,6 +543,51 @@ def _complex_inverse_expval_template(
     ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
         """Expose the deferred inverse through a controllable qkernel."""
         return qmc.inverse(encoding.unitary)(signal, system)
+
+    outer = qmc.h(qmc.qubit("outer"))
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    outer, _, _ = qmc.control(inverse_member)(outer, signal, system)
+    return qmc.expval(outer, observable)
+
+
+@qmc.qkernel
+def _complex_static_argument_inverse_sample_template(
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Bit:
+    """Sample phase from an inverted qkernel with a static descriptor input."""
+
+    @qmc.qkernel
+    def inverse_member(
+        signal: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Expose the nested static-argument inverse under outer control."""
+        return qmc.inverse(_apply_static_encoding)(signal, system, encoding)
+
+    outer = qmc.h(qmc.qubit("outer"))
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    outer, _, _ = qmc.control(inverse_member)(outer, signal, system)
+    outer = qmc.sdg(outer)
+    outer = qmc.h(outer)
+    return qmc.measure(outer)
+
+
+@qmc.qkernel
+def _complex_static_argument_inverse_expval_template(
+    encoding: qmc.LCUBlockEncoding,
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Estimate phase from an inverted static-descriptor qkernel."""
+
+    @qmc.qkernel
+    def inverse_member(
+        signal: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Expose the nested static-argument inverse under outer control."""
+        return qmc.inverse(_apply_static_encoding)(signal, system, encoding)
 
     outer = qmc.h(qmc.qubit("outer"))
     signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
@@ -1371,6 +1534,9 @@ def test_build_rejects_mutated_replacement_member_abi() -> None:
     [
         _direct_template,
         _inverse_template,
+        _inverse_static_argument_template,
+        _inverse_static_composite_template,
+        _inverse_static_field_template,
         _controlled_template,
         _select_template,
         _both_inverse_orders_template,
@@ -1381,6 +1547,9 @@ def test_build_rejects_mutated_replacement_member_abi() -> None:
     ids=[
         "direct",
         "inverse",
+        "inverse_static_argument",
+        "inverse_static_composite",
+        "inverse_static_field",
         "control",
         "nested_select",
         "both_inverse_orders",
@@ -1397,6 +1566,90 @@ def test_static_member_transforms_resolve_after_deserialization(template: Any) -
     specialized = restored.build(encoding=encoding)
 
     _assert_static_binding_resolved(specialized)
+
+
+def test_inverse_qkernel_executes_with_a_concrete_static_binding_argument(
+    sdk_transpiler: Any,
+) -> None:
+    """Every SDK executes a nested inverse specialized by a concrete object."""
+    encoding = _encoding(X)
+
+    @qmc.qkernel
+    def template() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+        """Invert a qkernel using a descriptor captured at trace time."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, system = qmc.inverse(_apply_static_encoding)(
+            signal,
+            system,
+            encoding,
+        )
+        return qmc.measure(signal), qmc.measure(system)
+
+    assert template.block.static_bindings == ()
+    _assert_static_binding_resolved(template.block)
+
+    executable = sdk_transpiler.transpiler.transpile(template)
+    result = executable.sample(
+        _executor(sdk_transpiler),
+        shots=128,
+    ).result()
+    assert result.results == [(((0,), (1,)), 128)]
+
+
+def test_inverse_static_composite_executes_after_binding(
+    sdk_transpiler: Any,
+) -> None:
+    """Every SDK executes a statically bound named-composite inverse."""
+    restored = deserialize(serialize(_inverse_static_composite_template))
+    executable = sdk_transpiler.transpiler.transpile(
+        restored,
+        bindings={"encoding": _encoding(X)},
+    )
+
+    result = executable.sample(
+        _executor(sdk_transpiler),
+        shots=128,
+    ).result()
+    assert result.results == [(((0,), (1,)), 128)]
+
+
+def test_inverse_qkernel_mixes_symbolic_and_concrete_static_bindings() -> None:
+    """One inverse call may combine a payload slot with a captured object."""
+    second = _encoding(X)
+
+    @qmc.qkernel
+    def template(first: qmc.LCUBlockEncoding) -> qmc.Bit:
+        """Invert a helper whose descriptors resolve at different times."""
+        qubit = qmc.qubit("qubit")
+        qubit = qmc.inverse(_apply_two_static_normalizations)(
+            qubit,
+            first,
+            second,
+        )
+        return qmc.measure(qubit)
+
+    restored = deserialize(serialize(template))
+    specialized = restored.build(first=_encoding(I2))
+
+    _assert_static_binding_resolved(specialized)
+
+
+def test_inverse_qkernel_rejects_a_renamed_symbolic_static_slot() -> None:
+    """Deferred static arguments require explicit same-name slot identity."""
+
+    @qmc.qkernel
+    def template(descriptor: qmc.LCUBlockEncoding) -> qmc.Bit:
+        """Pass a differently named root slot to the nested qkernel."""
+        qubit = qmc.qubit("qubit")
+        qubit = qmc.inverse(_apply_static_normalization)(qubit, descriptor)
+        return qmc.measure(qubit)
+
+    with pytest.raises(
+        TypeError,
+        match="must come from the same-named slot",
+    ):
+        _ = template.block
 
 
 @pytest.mark.parametrize(
@@ -1561,6 +1814,12 @@ def test_static_normalization_and_runtime_parameter_execute_on_every_sdk(
             -2.0 / 3.0,
         ),
         (
+            _complex_static_argument_inverse_sample_template,
+            _complex_static_argument_inverse_expval_template,
+            1.0 / 6.0,
+            -2.0 / 3.0,
+        ),
+        (
             _complex_control_sample_template,
             _complex_control_expval_template,
             5.0 / 6.0,
@@ -1573,7 +1832,12 @@ def test_static_normalization_and_runtime_parameter_execute_on_every_sdk(
             2.0 / 3.0,
         ),
     ],
-    ids=["inverse", "outer_control", "nested_select"],
+    ids=[
+        "inverse",
+        "inverse_static_argument",
+        "outer_control",
+        "nested_select",
+    ],
 )
 def test_serialized_complex_transforms_execute_on_every_sdk(
     sdk_transpiler: Any,
