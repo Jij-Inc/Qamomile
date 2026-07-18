@@ -476,6 +476,7 @@ class _BlockInverter:
                 for name, parameter in block.parameters.items()
             },
             param_slots=block.param_slots,
+            static_bindings=block.static_bindings,
         )
 
     def invert_call_site(

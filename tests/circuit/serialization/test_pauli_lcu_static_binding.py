@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.frontend.operation.inverse import _BlockInverter
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import ExpvalOp
 from qamomile.circuit.ir.operation.callable import InvokeOperation
@@ -1653,6 +1654,21 @@ def test_inverse_qkernel_mixes_symbolic_and_concrete_static_bindings() -> None:
     restored = deserialize(serialize(template))
     specialized = restored.build(first=_encoding(I2))
 
+    _assert_static_binding_resolved(specialized)
+
+
+def test_inverted_block_preserves_static_bindings_through_serialization() -> None:
+    """A standalone inverse retains the manifest needed for later binding."""
+    restored = deserialize(serialize(_apply_static_normalization))
+    inverted = _BlockInverter().invert_block(restored.block)
+
+    assert inverted.static_bindings == restored.block.static_bindings
+
+    inverse_kernel = dataclasses.replace(restored, _block=inverted)
+    round_tripped = deserialize(serialize(inverse_kernel))
+    assert round_tripped.block.static_bindings == restored.block.static_bindings
+
+    specialized = round_tripped.build(encoding=_encoding(I2))
     _assert_static_binding_resolved(specialized)
 
 
