@@ -100,6 +100,7 @@ def from_dict(envelope: dict[str, Any]) -> SerializedQKernel:
     if not isinstance(raw_callable_definition, dict):
         raise ValueError("QKernel artifact is missing its callable definition")
     callable_definition = _decode_callable_def(raw_callable_definition, ctx)
+    ctx.refresh_block_effects()
     validate_qkernel_ir(body)
 
     raw_parameters = artifact.get("parameters")

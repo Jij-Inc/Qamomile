@@ -6,6 +6,7 @@ import inspect
 from typing import Any, Protocol
 
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.effect import KernelEffect
 
 
 class QKernelLike(Protocol):
@@ -22,6 +23,7 @@ class QKernelLike(Protocol):
         input_types (dict[str, Any]): Frontend input type annotations by name.
         output_types (list[Any]): Frontend output type annotations.
         block (Block): Cached hierarchical body block.
+        effects (KernelEffect): Cached semantic effect set.
     """
 
     @property
@@ -66,6 +68,15 @@ class QKernelLike(Protocol):
 
         Returns:
             Block: Body block for compiler passes.
+        """
+        ...
+
+    @property
+    def effects(self) -> KernelEffect:
+        """Return cached semantic effects of the qkernel body.
+
+        Returns:
+            KernelEffect: Aggregated non-unitary effects.
         """
         ...
 

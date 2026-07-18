@@ -11,6 +11,9 @@ from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.artifact import CompiledProgram
 from qamomile.circuit.transpiler.config import CompilerConfig
+from qamomile.circuit.transpiler.passes.effect_validation import (
+    EffectValidationPass,
+)
 from qamomile.circuit.transpiler.passes.entrypoint_validation import (
     EntrypointValidationPass,
 )
@@ -122,6 +125,7 @@ class QamomileCompiler:
         if self.config.substitutions.rules:
             block = SubstitutionPass(self.config.substitutions).run(block)
         block = ParameterShapeResolutionPass(bindings).run(block)
+        EffectValidationPass().run(block)
         return prepare_module(block, bindings)
 
     def compile(
