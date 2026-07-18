@@ -32,6 +32,8 @@ from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import BitType, QubitType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import deserialize, serialize
+from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
+from qamomile.circuit.serialization.graph_protobuf import qkernel_from_graph_dict
 from qamomile.circuit.serialization.proto import qamomile_ir_pb2 as pb
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.linalg import PauliLCU
@@ -939,6 +941,25 @@ def test_pauli_specific_static_manifest_remains_compatible() -> None:
     )
     specialized = restored.build(encoding=_encoding(I2))
     _assert_static_binding_resolved(specialized)
+
+
+def test_graph_encoder_rejects_an_empty_static_binding_type() -> None:
+    """An empty type key cannot satisfy the graph parameter type union."""
+    envelope = kernel_to_dict(_direct_template)
+    envelope["artifact"]["parameters"][0]["static_binding_type"] = ""
+
+    with pytest.raises(ValueError, match="requires exactly one"):
+        qkernel_from_graph_dict(envelope)
+
+
+def test_protobuf_decoder_rejects_an_empty_static_binding_type() -> None:
+    """A present-but-empty optional protobuf string is still malformed."""
+    message = _protobuf_message(_direct_template)
+    message.parameters[0].static_binding_type = ""
+    assert message.parameters[0].HasField("static_binding_type")
+
+    with pytest.raises(ValueError, match="requires exactly one"):
+        deserialize(message.SerializeToString(deterministic=True))
 
 
 def test_deserialize_rejects_consistently_forged_static_member() -> None:

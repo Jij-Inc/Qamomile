@@ -93,7 +93,9 @@ def qkernel_from_graph_dict(envelope: dict[str, Any]) -> pb.QKernel:
         parameter_type = parameter.get("type")
         static_binding_type = parameter.get("static_binding_type")
         has_value_type = isinstance(parameter_type, dict)
-        has_static_type = isinstance(static_binding_type, str)
+        has_static_type = isinstance(static_binding_type, str) and bool(
+            static_binding_type
+        )
         if has_value_type == has_static_type:
             raise ValueError(
                 "QKernel parameter requires exactly one ordinary or static binding type"
@@ -165,7 +167,9 @@ def graph_dict_from_qkernel(message: pb.QKernel) -> dict[str, Any]:
             raise ValueError(f"duplicate qkernel parameter {parameter.name!r}")
         seen_names.add(parameter.name)
         has_value_type = parameter.HasField("type")
-        has_static_type = parameter.HasField("static_binding_type")
+        has_static_type = parameter.HasField("static_binding_type") and bool(
+            parameter.static_binding_type
+        )
         if has_value_type == has_static_type:
             raise ValueError(
                 f"qkernel parameter {parameter.name!r} requires exactly one "

@@ -138,7 +138,9 @@ def from_dict(envelope: dict[str, Any]) -> SerializedQKernel:
         raw_type = item.get("type")
         static_binding_type = item.get("static_binding_type")
         has_value_type = isinstance(raw_type, dict)
-        has_static_type = isinstance(static_binding_type, str)
+        has_static_type = isinstance(static_binding_type, str) and bool(
+            static_binding_type
+        )
         if has_value_type == has_static_type:
             raise ValueError(
                 f"QKernel parameter {name!r} requires exactly one ordinary "
