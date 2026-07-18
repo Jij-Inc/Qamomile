@@ -11,6 +11,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.frontend.composite_gate import configure_composite
 
 
 @qmc.qkernel
@@ -357,6 +358,42 @@ def test_recursive_unitary_has_stable_identity_and_serialization() -> None:
 
     assert first.unitary._callable_namespace == second.unitary._callable_namespace
     assert payload == serialize(second.unitary)
+    assert payload == serialize(deserialize(payload))
+
+
+def test_recursive_identity_accepts_rich_serializable_child_metadata() -> None:
+    """Parent fingerprints accept every stable metadata form used by the IR."""
+    from qamomile.circuit.serialization import deserialize, serialize
+
+    @qmc.composite_gate(name="rich_semantic_child")
+    def rich_child(
+        signal: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Preserve registers for a child carrying rich semantic metadata.
+
+        Args:
+            signal (qmc.Vector[qmc.Qubit]): Pass-through signal register.
+            system (qmc.Vector[qmc.Qubit]): Pass-through system register.
+
+        Returns:
+            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Unchanged
+                signal and system registers.
+        """
+        return signal, system
+
+    configure_composite(
+        rich_child,
+        namespace="tests.block_encoding.rich_semantic_child",
+        semantic_arguments={
+            "phase": 1j,
+            "weights": np.array([0.25, 0.75], dtype=np.float64),
+        },
+    )
+    child = qmc.LCUBlockEncoding(rich_child, 1.0, 1, 1)
+    parent = qmc.lcu_block_encoding((qmc.LCUBlockEncodingTerm(1.0, child),))
+
+    payload = serialize(parent.unitary)
     assert payload == serialize(deserialize(payload))
 
 

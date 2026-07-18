@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
-import json
 import math
 import numbers
 from collections.abc import Sequence
@@ -35,6 +33,7 @@ from qamomile.circuit.frontend.static_binding import (
     StaticBindingSpec,
     register_static_binding,
 )
+from qamomile.circuit.ir.canonical import content_fingerprint
 from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
@@ -489,9 +488,7 @@ def lcu_block_encoding(
         2.5
     """
     validated_terms = _validate_terms(terms)
-    active_terms = tuple(
-        term for term in validated_terms if term.coefficient != 0.0j
-    )
+    active_terms = tuple(term for term in validated_terms if term.coefficient != 0.0j)
     domain_terms = active_terms if active_terms else validated_terms
     system_width = _common_system_width(domain_terms)
 
@@ -757,8 +754,7 @@ def _build_multi_term_encoding(
     sqrt_normalization = math.sqrt(normalization)
     for index, term in enumerate(terms):
         amplitudes[index] = (
-            math.sqrt(abs(term.coefficient) * term.normalization)
-            / sqrt_normalization
+            math.sqrt(abs(term.coefficient) * term.normalization) / sqrt_normalization
         )
 
     preparation, required_width = _mottonen_composite(
@@ -995,12 +991,7 @@ def _configure_generated_unitary(
     Returns:
         _BlockEncodingUnitary: The same configured qkernel.
     """
-    digest_input = json.dumps(
-        semantic_arguments,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    digest = hashlib.sha256(digest_input).hexdigest()[:16]
+    digest = content_fingerprint(semantic_arguments)[:16]
     configure_composite(
         unitary,
         name=name,

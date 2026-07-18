@@ -1793,9 +1793,7 @@ def test_recursive_static_member_reports_concrete_signal_width() -> None:
     with pytest.raises(ValueError) as error:
         restored.build(encoding=_recursive_ising_encoding())
 
-    assert str(error.value) == (
-        "LCU block encoding requires 2 signal qubits, got 1."
-    )
+    assert str(error.value) == ("LCU block encoding requires 2 signal qubits, got 1.")
 
 
 def test_serialized_static_binding_executes_phase_sample_on_every_sdk(
