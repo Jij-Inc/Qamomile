@@ -756,9 +756,12 @@ class _StaticBindingResolver:
 
         if isinstance(operation, ControlledUOperation):
             if operation.block is not None:
+                actuals_without_controls = list(
+                    operation.operands[len(operation.control_operands) :]
+                )
                 self._validate_owned_block_call_widths(
                     operation.block,
-                    [*operation.target_operands, *operation.param_operands],
+                    actuals_without_controls,
                     list(operation.operands),
                     widths,
                     active_blocks,
