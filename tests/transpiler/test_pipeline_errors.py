@@ -12,7 +12,11 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.transpiler.errors import DependencyError, SeparationError
+from qamomile.circuit.transpiler.errors import (
+    DependencyError,
+    SeparationError,
+    ValidationError,
+)
 from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
@@ -124,16 +128,13 @@ class TestMultipleQuantumSegmentsErrorContract:
 
         assert issubclass(MultipleQuantumSegmentsError, QamomileCompileError)
 
-    def test_true_multi_segment_program_keeps_segment_count_message(
+    def test_expval_and_measurement_report_sample_only_effects_early(
         self, qiskit_transpiler
     ) -> None:
-        """A genuinely multi-quantum-segment program keeps the original message.
+        """Expval mixed with measurement fails during effect validation.
 
-        Quantum operations resuming after ``qmc.expval`` produce a second
-        quantum segment. This must keep raising ``MultipleQuantumSegmentsError``
-        with the segment-count / measurement-dependence wording — the
-        runtime-loop-bound case is diagnosed earlier by
-        ``SymbolicShapeValidationPass`` and must not have changed this path.
+        The first-class effect summary identifies the entrypoint as sample-only
+        before segmentation, replacing the backend-shaped multi-segment error.
         """
 
         @qmc.qkernel
@@ -146,10 +147,10 @@ class TestMultipleQuantumSegmentsErrorContract:
             return e, qmc.measure(q2)
 
         with pytest.raises(
-            MultipleQuantumSegmentsError, match="Found 2 quantum segments"
-        ) as exc_info:
+            ValidationError,
+            match="MEASUREMENT.*sample-only.*qmc.expval",
+        ):
             qiskit_transpiler.transpile(kernel, bindings={"obs": qm_o.Z(0)})
-        assert "measurement results" in str(exc_info.value)
 
 
 class TestMeasurementFeedbackWithNativeControlFlow:

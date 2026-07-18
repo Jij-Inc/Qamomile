@@ -857,7 +857,7 @@ class TestSelectValidation:
         target = _make_qubit("target")
 
         with trace():
-            with pytest.raises(ValueError, match="non-unitary ResetOperation"):
+            with pytest.raises(ValueError, match=r"kernel effects \[RESET\]"):
                 qmc.select(
                     [_identity, reset_case],
                     num_index_qubits=width,
@@ -912,7 +912,7 @@ class TestSelectValidation:
         target = _make_qubit("target")
 
         with trace():
-            with pytest.raises(ValueError, match="non-unitary ResetOperation"):
+            with pytest.raises(ValueError, match=r"kernel effects \[RESET\]"):
                 qmc.select([_identity, reset_case])(index, target)
 
         assert not index._consumed
@@ -975,7 +975,7 @@ class TestSelectValidation:
             index, target = qmc.select([_identity, ancilla_case])(index, target)
             return qmc.measure(target)
 
-        with pytest.raises(ValueError, match="non-unitary ResetOperation"):
+        with pytest.raises(ValueError, match=r"kernel effects \[RESET\]"):
             _ = with_reset.block
         with pytest.raises(ValueError, match="internal QInitOperation"):
             _ = with_ancilla.block

@@ -10,8 +10,20 @@ from qamomile.circuit.ir.parameter import ParamSlot
 from qamomile.circuit.ir.value import Value, ValueLike
 
 if TYPE_CHECKING:
+    from qamomile.circuit.ir.effect import KernelEffect
     from qamomile.circuit.ir.operation import Operation
     from qamomile.circuit.ir.operation.callable import InvokeOperation
+
+
+def _empty_kernel_effect() -> "KernelEffect":
+    """Return the empty effect set without introducing an import cycle.
+
+    Returns:
+        KernelEffect: ``KernelEffect.NONE``.
+    """
+    from qamomile.circuit.ir.effect import KernelEffect
+
+    return KernelEffect.NONE
 
 
 class BlockKind(Enum):
@@ -52,6 +64,18 @@ class Block:
     # (e.g., nested composite-gate implementation blocks).
     param_slots: tuple[ParamSlot, ...] = dataclasses.field(default_factory=tuple)
 
+    # Derived semantic metadata. Both fields are computed once whenever a
+    # Block is constructed; callers can inspect them without walking the body.
+    effects: "KernelEffect" = dataclasses.field(
+        default_factory=_empty_kernel_effect,
+        init=False,
+    )
+    measurement_result_indices: frozenset[int] = dataclasses.field(
+        default_factory=frozenset,
+        init=False,
+        repr=False,
+    )
+
     def __post_init__(self):
         """Validate label_args / input_values agreement and param_slots disjointness.
 
@@ -75,6 +99,10 @@ class Block:
                         f"every classical kernel argument may appear at most once."
                     )
                 seen.add(slot.name)
+
+        from qamomile.circuit.ir.effect import refresh_block_effects
+
+        refresh_block_effects(self)
 
     def unbound_parameters(self) -> list[str]:
         """Return list of unbound parameter names."""

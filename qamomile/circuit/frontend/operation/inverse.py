@@ -19,6 +19,7 @@ from qamomile.circuit.frontend.param_validation import _validate_bound_handles
 from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.frontend.qkernel_callable import (
     qkernel_callable_attrs,
+    qkernel_callable_def,
     qkernel_callable_ref,
     qkernel_invoke_block,
 )
@@ -33,6 +34,7 @@ from qamomile.circuit.frontend.qkernel_utils import (
 )
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.effect import require_unitary_effects
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -2063,6 +2065,27 @@ class InverseGate:
         """
         return select_specialized_block(self._qkernel, arguments)
 
+    def _validate_target_effects(self, block: Block) -> None:
+        """Reject effects unsupported by generic structural inversion.
+
+        Args:
+            block (Block): Call-site-specialized direct target body.
+
+        Raises:
+            ValueError: If generic inversion would reach non-unitary effects,
+                or an explicit inverse body is itself non-unitary.
+        """
+        definition = qkernel_callable_def(self._qkernel, block)
+        require_unitary_effects(
+            definition.effects_for(CallTransform.INVERSE),
+            operation="qmc.inverse()",
+            target=self._qkernel.name,
+            alternative=(
+                "Provide an explicit inverse implementation, or move "
+                "measurement, reset, and feed-forward outside qmc.inverse()."
+            ),
+        )
+
     def _prepare_inputs(
         self,
         block: Block,
@@ -2309,6 +2332,7 @@ class InverseGate:
             caller="inverse()",
         )
         block = self._select_block(bound_args.arguments)
+        self._validate_target_effects(block)
         bindings = self._prepare_inputs(block, bound_args.arguments)
         if self._can_emit_atomic_inverse(block, bindings):
             operation, quantum_bindings, result_values = self._build_atomic_inverse(
@@ -2362,6 +2386,15 @@ def _inverse_composite_operation(
     operation.transform = CallTransform.INVERSE
     definition = operation.definition
     assert definition is not None
+    require_unitary_effects(
+        definition.effects_for(CallTransform.INVERSE),
+        operation="qmc.inverse()",
+        target=kernel.name,
+        alternative=(
+            "Provide a unitary explicit inverse implementation, or move "
+            "measurement, reset, and feed-forward outside qmc.inverse()."
+        ),
+    )
     if definition.implementation_for(transform=CallTransform.INVERSE) is None:
         try:
             inverse_body = _BlockInverter().invert_block(block)
