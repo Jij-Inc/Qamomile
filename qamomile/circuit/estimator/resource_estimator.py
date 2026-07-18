@@ -2940,6 +2940,7 @@ class ResourceInterpreter:
         return ResourceEstimate.primitive(
             "pauli_evolve",
             _classify_pauli_evolve(hamiltonian),
+            depth=_classify_pauli_evolve_depth(hamiltonian),
         )
 
     def _strategy_for(self, operation: InvokeOperation) -> str | None:
@@ -3655,29 +3656,36 @@ def _classify_clifford_t_gate(
             two_qubit=sp.Integer(3),
             clifford=sp.Integer(3),
         )
+    if num_controls != 0 and gate_name in _ROTATION_GATES:
+        raise ValueError(
+            "No canonical Clifford+T lowering is defined for controlled "
+            f"gate '{gate_name}' with {num_controls} surrounding control(s)."
+        )
     rotation_t = sp.Integer(math.ceil(3 * math.log2(1 / precision)))
     rotation_multiplicity = 0
-    extra_clifford = 0
+    extra_single_clifford = 0
+    extra_two_clifford = 0
     if gate_name in {"rz", "p"}:
         rotation_multiplicity = 1
     elif gate_name == "rx":
         rotation_multiplicity = 1
-        extra_clifford = 2
+        extra_single_clifford = 2
     elif gate_name == "ry":
         rotation_multiplicity = 1
-        extra_clifford = 4
+        extra_single_clifford = 4
     elif gate_name == "cp":
         rotation_multiplicity = 3
-        extra_clifford = 2
+        extra_two_clifford = 2
     elif gate_name == "rzz":
         rotation_multiplicity = 1
-        extra_clifford = 2
+        extra_two_clifford = 2
     if rotation_multiplicity:
         t_count = rotation_multiplicity * rotation_t
+        extra_clifford = extra_single_clifford + extra_two_clifford
         return GateResources(
             total=t_count + extra_clifford,
-            single_qubit=t_count,
-            two_qubit=sp.Integer(extra_clifford),
+            single_qubit=t_count + extra_single_clifford,
+            two_qubit=sp.Integer(extra_two_clifford),
             clifford=sp.Integer(extra_clifford),
             t=t_count,
             non_clifford=t_count,
@@ -3824,6 +3832,11 @@ def _clifford_t_gate_depth(
             depth=middle.depth + 2,
             clifford_depth=middle.clifford_depth + 2,
         )
+    if surrounding_controls != 0 and name in _ROTATION_GATES:
+        raise ValueError(
+            "No canonical Clifford+T lowering is defined for controlled "
+            f"gate '{name}' with {surrounding_controls} surrounding control(s)."
+        )
     rotation_t = sp.Integer(math.ceil(3 * math.log2(1 / precision)))
     extra_clifford = {
         "rz": 0,
@@ -3940,6 +3953,20 @@ def _classify_controlled_gate(
     else:
         clifford = _ZERO
     rotation = _ONE if gate_name in _ROTATION_GATES else _ZERO
+    inherent_controls = {"x": 0, "cx": 1, "toffoli": 2}
+    effective_x_controls = num_controls + inherent_controls.get(gate_name, 0)
+    is_x_family = gate_name in inherent_controls
+    toffoli = (
+        cast(
+            ResourceExpr,
+            sp.Piecewise(
+                (_ONE, sp.Eq(effective_x_controls, 2)),
+                (_ZERO, True),
+            ),
+        )
+        if is_x_family
+        else _ZERO
+    )
     return GateResources(
         total=_ONE,
         single_qubit=_ZERO,
@@ -3948,7 +3975,7 @@ def _classify_controlled_gate(
         clifford=clifford,
         rotation=rotation,
         t=_ZERO,
-        toffoli=multi,
+        toffoli=toffoli,
         non_clifford=_ONE - clifford,
     )
 
@@ -3993,6 +4020,43 @@ def _classify_pauli_evolve(hamiltonian: Any) -> GateResources:
         t=_ZERO,
         toffoli=_ZERO,
         non_clifford=total - total_clifford,
+    )
+
+
+def _classify_pauli_evolve_depth(hamiltonian: Any) -> DepthResources:
+    """Estimate sequential Pauli-gadget depth for a Hamiltonian evolution.
+
+    Terms are conservatively scheduled one after another. Within one term,
+    basis changes on distinct qubits are parallel, while the CNOT parity
+    ladder, axial rotation, and inverse ladder are sequential.
+
+    Args:
+        hamiltonian (Any): Concrete Qamomile Hamiltonian.
+
+    Returns:
+        DepthResources: Upper-bound depth of the Pauli-gadget decomposition.
+    """
+    import qamomile.observable as qm_o
+
+    total_depth = _ZERO
+    clifford_depth = _ZERO
+    rotation_depth = _ZERO
+    for operators, coeff in hamiltonian:
+        if abs(complex(coeff)) < 1e-15 or not operators:
+            continue
+        size = len(operators)
+        has_y = any(operator.pauli == qm_o.Pauli.Y for operator in operators)
+        has_x = any(operator.pauli == qm_o.Pauli.X for operator in operators)
+        basis_depth = sp.Integer(4 if has_y else 2 if has_x else 0)
+        parity_depth = sp.Integer(2 * max(0, size - 1))
+        total_depth += basis_depth + parity_depth + 1
+        clifford_depth += basis_depth + parity_depth
+        rotation_depth += 1
+    return DepthResources(
+        depth=total_depth,
+        clifford_depth=clifford_depth,
+        rotation_depth=rotation_depth,
+        non_clifford_depth=rotation_depth,
     )
 
 

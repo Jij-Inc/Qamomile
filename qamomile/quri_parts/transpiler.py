@@ -94,17 +94,23 @@ class QuriPartsExecutor(
         sampler: Any = None,
         estimator: Any = None,
         seed: int | None = None,
+        *,
+        bound_estimator: Any = None,
     ):
         """Initialize the executor.
 
         Args:
             sampler: Optional QURI Parts sampler.
-            estimator: Optional QURI Parts parametric estimator.
+            estimator: Optional QURI Parts parametric estimator, used only
+                with unbound parametric circuit states.
             seed: Optional seed for the default Qulacs sampler.
+            bound_estimator: Optional non-parametric estimator for circuits
+                that have already been bound by ``ExecutableProgram``.
         """
         self._sampler = sampler
         self._estimator = estimator
-        self._non_parametric_estimator: Any = None
+        self._estimator_was_supplied = estimator is not None
+        self._bound_estimator = bound_estimator
         self._seed = seed
 
     @property
@@ -147,19 +153,19 @@ class QuriPartsExecutor(
     @property
     def non_parametric_estimator(self) -> Any:
         """Return the non-parametric estimator, creating it lazily."""
-        if self._non_parametric_estimator is None:
+        if self._bound_estimator is None:
             try:
                 from quri_parts.qulacs.estimator import (  # type: ignore[import-not-found]
                     create_qulacs_vector_estimator,
                 )
 
-                self._non_parametric_estimator = create_qulacs_vector_estimator()
+                self._bound_estimator = create_qulacs_vector_estimator()
             except ImportError as error:
                 raise ImportError(
                     "quri-parts-qulacs is required for QuriPartsExecutor. "
                     "Install with: pip install quri-parts-qulacs"
                 ) from error
-        return self._non_parametric_estimator
+        return self._bound_estimator
 
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
         """Sample a circuit and return bitstring counts.
@@ -233,7 +239,8 @@ class QuriPartsExecutor(
             from qamomile.quri_parts.observable import hamiltonian_to_quri_operator
 
             hamiltonian = hamiltonian_to_quri_operator(hamiltonian)  # type: ignore[assignment]
-        return self.estimate_expectation(circuit, hamiltonian, params or [])  # type: ignore[arg-type]
+        param_values = [] if params is None else params
+        return self.estimate_expectation(circuit, hamiltonian, param_values)  # type: ignore[arg-type]
 
     def estimate_expectation(
         self,
@@ -263,6 +270,14 @@ class QuriPartsExecutor(
         if hasattr(state, "parametric_circuit"):
             estimate = self.parametric_estimator(hamiltonian, state, param_values)
         else:
+            if self._estimator_was_supplied and self._bound_estimator is None:
+                raise QamomileQuriPartsTranspileError(
+                    "The configured 'estimator' follows QURI Parts' "
+                    "three-argument parametric-estimator protocol, but this "
+                    "circuit has already been bound and requires a two-argument "
+                    "non-parametric estimator. Pass bound_estimator=... as well, "
+                    "or omit estimator to use the default Qulacs estimators."
+                )
             estimate = self.non_parametric_estimator(hamiltonian, state)
         return estimate.value.real
 
@@ -301,15 +316,24 @@ class QuriPartsTranspiler(
         sampler: Any = None,
         estimator: Any = None,
         seed: int | None = None,
+        *,
+        bound_estimator: Any = None,
     ) -> QuriPartsExecutor:
         """Create a QURI Parts executor.
 
         Args:
             sampler: Optional custom sampler.
-            estimator: Optional custom estimator.
+            estimator: Optional custom parametric estimator for unbound states.
             seed: Optional seed for the default sampler.
+            bound_estimator: Optional custom non-parametric estimator for
+                circuits already bound by ``ExecutableProgram``.
 
         Returns:
             Configured QURI Parts executor.
         """
-        return QuriPartsExecutor(sampler, estimator, seed=seed)
+        return QuriPartsExecutor(
+            sampler,
+            estimator,
+            seed=seed,
+            bound_estimator=bound_estimator,
+        )

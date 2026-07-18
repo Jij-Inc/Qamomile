@@ -50,13 +50,13 @@ def promote_literal_to_handle(value: Any, expected_type: Any) -> Any:
     if isinstance(value, Handle):
         return value
     is_bool = isinstance(value, bool)
-    if expected_type is UInt:
+    if expected_type in (UInt, int):
         if isinstance(value, int) and not is_bool:
             return uint(value)
-    elif expected_type is Float:
+    elif expected_type in (Float, float):
         if isinstance(value, float) or (isinstance(value, int) and not is_bool):
             return float_(float(value))
-    elif expected_type is Bit:
+    elif expected_type in (Bit, bool):
         if is_bool:
             return bit(value)
     return value

@@ -20,7 +20,7 @@ Exposes:
   :mod:`qamomile.circuit.stdlib.state_preparation`; this module
   provides only the classical angle math so that hybrid loops can
   pre-compute angle vectors outside any kernel and feed them to
-  ``amplitude_encoding_from_angles`` via ``parameters=[...]``.
+  ``mottonen_amplitude_encoding_from_angles`` via ``parameters=[...]``.
 * :class:`PauliLCU`, which decomposes any finite complex power-of-two square
   matrix into immutable complex-weighted Pauli terms for LCU algorithms.
 """

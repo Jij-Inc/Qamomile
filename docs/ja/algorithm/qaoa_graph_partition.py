@@ -35,7 +35,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %% [markdown]
 # ## 問題の定式化

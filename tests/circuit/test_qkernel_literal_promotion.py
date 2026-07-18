@@ -94,6 +94,28 @@ BACKENDS = [
 ]
 
 
+def test_plain_python_annotations_promote_nested_literals():
+    """Nested calls promote literals for plain Python scalar annotations."""
+
+    @qmc.qkernel
+    def callee(q: qmc.Qubit, count: int, angle: float, flag: bool) -> qmc.Qubit:
+        if flag:
+            q = qmc.rx(q, angle * count)
+        return q
+
+    @qmc.qkernel
+    def caller() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = callee(q, 2, math.pi / 2, True)
+        return qmc.measure(q)
+
+    transpiler = QiskitTranspiler()
+    executable = transpiler.transpile(caller)
+    result = executable.sample(transpiler.executor(), shots=32).result()
+
+    assert result.results == [(1, 32)]
+
+
 def _sum_z_hamiltonian(n: int):
     """Build H = sum_{i=0}^{n-1} Z_i over an n-qubit register."""
     H = qm_o.Hamiltonian.zero(num_qubits=n)

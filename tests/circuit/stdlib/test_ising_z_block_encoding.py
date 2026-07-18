@@ -69,7 +69,7 @@ def _build_unitary_kernel(
     invert: bool = False,
 ) -> qmc.QKernel:
     """Build an allocation-only kernel exposing an Ising-Z unitary."""
-    applied = qmc.inverse(encoding.kernel) if invert else encoding.kernel
+    applied = qmc.inverse(encoding.unitary) if invert else encoding.unitary
 
     @qmc.qkernel
     def kernel() -> qmc.Bit:
@@ -118,15 +118,17 @@ def test_descriptor_is_frozen_noncallable_and_identity_based() -> None:
     repeated = qmc.ising_z_block_encoding({(): 1.0}, 1)
 
     assert tuple(field.name for field in dataclasses.fields(encoding)) == (
-        "kernel",
+        "unitary",
         "normalization",
         "num_signal_qubits",
         "num_system_qubits",
     )
-    assert tuple(encoding.kernel.signature.parameters) == ("signal", "system")
+    assert tuple(encoding.unitary.signature.parameters) == ("signal", "system")
     assert encoding.normalization == 1.0
     assert encoding.num_signal_qubits == 1
     assert encoding.num_system_qubits == 1
+    assert isinstance(encoding, qmc.LCUBlockEncoding)
+    assert issubclass(qmc.IsingZBlockEncoding, qmc.LCUBlockEncoding)
     assert not callable(encoding)
     assert not hasattr(encoding, "__dict__")
     assert encoding is not repeated
@@ -222,6 +224,19 @@ def test_canonical_aggregation_is_mapping_order_invariant() -> None:
     )
 
 
+def test_canonical_mapping_has_stable_identity_and_serialization() -> None:
+    """Equivalent Ising mappings produce one round-trippable composite."""
+    from qamomile.circuit.serialization import deserialize, serialize
+
+    forward = qmc.ising_z_block_encoding({(): 1.0j, (0,): 0.5}, 1)
+    reverse = qmc.ising_z_block_encoding({(0,): 0.5, (): 1.0j}, 1)
+    payload = serialize(forward.unitary)
+
+    assert forward.unitary._callable_namespace == reverse.unitary._callable_namespace
+    assert payload == serialize(reverse.unitary)
+    assert payload == serialize(deserialize(payload))
+
+
 def test_single_term_preserves_every_signal_state_in_the_full_unitary() -> None:
     """The one-term optimization leaves its positive-width signal untouched."""
     phase = math.pi / 3.0
@@ -272,16 +287,16 @@ def test_factory_does_not_delegate_to_pauli_lcu(
 def test_register_width_errors_survive_inverse_control_and_outer_select() -> None:
     """Every composition path retains the Ising-Z signal-width diagnostic."""
     encoding = qmc.ising_z_block_encoding({(): 1.0, (0,): 0.5}, 1)
-    inverse = qmc.inverse(encoding.kernel)
-    controlled = qmc.control(encoding.kernel)
-    selected = qmc.select((_identity_case, encoding.kernel), num_index_qubits=1)
+    inverse = qmc.inverse(encoding.unitary)
+    controlled = qmc.control(encoding.unitary)
+    selected = qmc.select((_identity_case, encoding.unitary), num_index_qubits=1)
 
     @qmc.qkernel
     def plain() -> qmc.Bit:
         """Call the encoding with a wide signal register."""
         signal = qmc.qubit_array(2, "signal")
         system = qmc.qubit_array(1, "system")
-        signal, _ = encoding.kernel(signal, system)
+        signal, _ = encoding.unitary(signal, system)
         return qmc.measure(signal[0])
 
     @qmc.qkernel
@@ -340,7 +355,7 @@ def test_random_complex_ising_lcu_samples_and_estimates_on_every_sdk(
         system = qmc.qubit_array(1, "system")
         if basis:
             system[0] = qmc.x(system[0])
-        signal, _ = encoding.kernel(signal, system)
+        signal, _ = encoding.unitary(signal, system)
         return qmc.measure(signal[0])
 
     @qmc.qkernel
@@ -350,7 +365,7 @@ def test_random_complex_ising_lcu_samples_and_estimates_on_every_sdk(
         system = qmc.qubit_array(1, "system")
         if basis:
             system[0] = qmc.x(system[0])
-        signal, _ = encoding.kernel(signal, system)
+        signal, _ = encoding.unitary(signal, system)
         return qmc.expval(signal[0], observable)
 
     shots = 2048
@@ -382,7 +397,7 @@ def test_zero_encoding_samples_and_estimates_on_every_sdk(
         """Apply the zero encoding and measure its signal."""
         signal = qmc.qubit_array(1, "signal")
         system = qmc.qubit_array(1, "system")
-        signal, _ = encoding.kernel(signal, system)
+        signal, _ = encoding.unitary(signal, system)
         return qmc.measure(signal[0])
 
     @qmc.qkernel
@@ -390,7 +405,7 @@ def test_zero_encoding_samples_and_estimates_on_every_sdk(
         """Apply the zero encoding and estimate signal Z."""
         signal = qmc.qubit_array(1, "signal")
         system = qmc.qubit_array(1, "system")
-        signal, _ = encoding.kernel(signal, system)
+        signal, _ = encoding.unitary(signal, system)
         return qmc.expval(signal[0], observable)
 
     sample = sdk_transpiler.transpiler.transpile(sample_kernel)

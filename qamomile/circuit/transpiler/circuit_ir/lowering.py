@@ -7,7 +7,10 @@ from typing import Any
 
 from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.canonical import content_fingerprint
+from qamomile.circuit.ir.canonical import (
+    collect_reachable_values,
+    content_fingerprint,
+)
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CompOpKind,
@@ -74,11 +77,13 @@ from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission impor
 from qamomile.circuit.transpiler.passes.emit_support.control_value_emission import (
     bracket_control_value,
 )
-from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
     _bind_quantum_input_shapes,
     _expand_quantum_operands_to_phys,
-    _map_operand_result_groups,
     _prepare_nested_block_for_emit,
+)
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    _map_operand_result_groups,
     _should_emit_single_target_block_per_vector_element,
     build_controlled_block_qubit_map,
 )
@@ -297,6 +302,24 @@ def _normalize_scalar_expression(
     return expression
 
 
+@dataclasses.dataclass(frozen=True)
+class _LoweredSelectCase:
+    """Store one verified SELECT case lowering for pass-local reuse.
+
+    Args:
+        source_block (Block): Source block retained to prevent ``id`` reuse
+            while this cache entry is live.
+        program (CircuitProgram): Immutable verified local case program.
+        broadcast (bool): Whether the scalar case is broadcast over a vector.
+        fingerprint (str): Normalized behavior fingerprint of ``program``.
+    """
+
+    source_block: Block
+    program: CircuitProgram
+    broadcast: bool
+    fingerprint: str
+
+
 class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
     """Lower a segmented circuit program into target-neutral builders.
 
@@ -327,6 +350,31 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             backend_name="circuit_ir",
         )
         self._composite_emitters.append(_SemanticCompositeEmitter(self))
+        self._select_case_cache: dict[
+            tuple[int, int, tuple[tuple[bool, int], ...], str],
+            _LoweredSelectCase,
+        ] = {}
+        self._select_case_binding_keys: dict[
+            int,
+            tuple[Block, frozenset[str]],
+        ] = {}
+
+    def run(self, input: ProgramPlan) -> ExecutableProgram[CircuitBuilder]:
+        """Lower one program plan with a fresh SELECT case cache.
+
+        Args:
+            input (ProgramPlan): Segmented program plan to lower.
+
+        Returns:
+            ExecutableProgram[CircuitBuilder]: Lowered executable builders.
+        """
+        self._select_case_cache.clear()
+        self._select_case_binding_keys.clear()
+        try:
+            return super().run(input)
+        finally:
+            self._select_case_cache.clear()
+            self._select_case_binding_keys.clear()
 
     def _emit_select(
         self,
@@ -410,17 +458,28 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
         )
         local_indices = tuple(range(index_width))
         local_targets = tuple(range(index_width, index_width + len(target_indices)))
+        target_shape = tuple(
+            (isinstance(operand, ArrayValue), width)
+            for operand, width in zip(
+                op.target_operands,
+                target_widths,
+                strict=True,
+            )
+        )
         case_fingerprints: list[str] = []
         for case_index, case_block in enumerate(op.case_blocks):
-            case_program, broadcast = self._lower_select_case(
+            lowered_case = self._lower_select_case_cached(
                 case_block,
                 op.target_operands,
                 op.param_operands,
                 target_indices,
+                target_shape,
                 bindings,
                 case_index,
             )
-            case_fingerprints.append(_circuit_program_fingerprint(case_program))
+            case_program = lowered_case.program
+            broadcast = lowered_case.broadcast
+            case_fingerprints.append(lowered_case.fingerprint)
             if not case_program.operations and _is_zero_scalar(
                 case_program.global_phase
             ):
@@ -539,34 +598,39 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             )
         return concrete_width
 
-    def _lower_select_case(
+    def _lower_select_case_cached(
         self,
         case_block: Block,
         target_operands: list[Value],
         parameter_operands: list[Value],
         target_indices: list[int],
+        target_shape: tuple[tuple[bool, int], ...],
         bindings: dict[str, Any],
         case_index: int,
-    ) -> tuple[CircuitProgram, bool]:
-        """Lower one SELECT case into an independent reusable program.
+    ) -> _LoweredSelectCase:
+        """Return one lowered SELECT case, reusing a safe specialization.
+
+        Only the case's formal parameters and quantum input shapes contribute
+        to its body. Unrelated outer-loop bindings are deliberately excluded,
+        so a parameter-free case is lowered once across a statically unrolled
+        loop. Values without a stable structural fingerprint bypass the cache.
 
         Args:
             case_block (Block): Specialized semantic case block.
-            target_operands (list[Value]): Shared quantum operands supplied at
-                the SELECT call site.
+            target_operands (list[Value]): Shared quantum call-site operands.
             parameter_operands (list[Value]): Shared classical operands.
-            target_indices (list[int]): Flattened parent target slots, used only
-                to determine scalar-to-vector broadcast shape.
+            target_indices (list[int]): Flattened parent target slots.
+            target_shape (tuple[tuple[bool, int], ...]): Per-target array flag
+                and concrete width.
             bindings (dict[str, Any]): Parent compile-time and loop bindings.
             case_index (int): Case position used in names and diagnostics.
 
         Returns:
-            tuple[CircuitProgram, bool]: Lowered body and whether it represents
-            a scalar case broadcast over every target element.
+            _LoweredSelectCase: Verified program, broadcast mode, and digest.
 
         Raises:
-            EmitError: If the case allocates hidden quantum/classical resources
-                or cannot be lowered into its declared target width.
+            EmitError: If the case cannot be lowered as a unitary reusable
+                body.
         """
         local_bindings = self._resolver.bind_block_params(
             case_block,
@@ -581,6 +645,130 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             bindings,
             local_bindings,
         )
+        cache_key = None
+        if not self._counting_emission:
+            cache_key = self._select_case_cache_key(
+                case_block,
+                case_index,
+                target_shape,
+                local_bindings,
+            )
+        if cache_key is not None:
+            cached = self._select_case_cache.get(cache_key)
+            if cached is not None and cached.source_block is case_block:
+                return cached
+
+        program, broadcast = self._lower_select_case(
+            case_block,
+            target_operands,
+            target_indices,
+            local_bindings,
+            case_index,
+        )
+        lowered = _LoweredSelectCase(
+            source_block=case_block,
+            program=program,
+            broadcast=broadcast,
+            fingerprint=_circuit_program_fingerprint(program),
+        )
+        if cache_key is not None:
+            self._select_case_cache[cache_key] = lowered
+        return lowered
+
+    def _select_case_cache_key(
+        self,
+        case_block: Block,
+        case_index: int,
+        target_shape: tuple[tuple[bool, int], ...],
+        local_bindings: dict[str, Any],
+    ) -> tuple[int, int, tuple[tuple[bool, int], ...], str] | None:
+        """Build a stable key for one SELECT case specialization.
+
+        Args:
+            case_block (Block): Source case block.
+            case_index (int): Case position determining its fallback name.
+            target_shape (tuple[tuple[bool, int], ...]): Per-target array flag
+                and concrete width.
+            local_bindings (dict[str, Any]): Case-local parameter and shape
+                bindings.
+
+        Returns:
+            tuple[int, int, tuple[tuple[bool, int], ...], str] | None: Cache
+                key, or ``None`` when a binding has no deterministic token.
+        """
+        reachable_keys = self._select_case_reachable_binding_keys(case_block)
+        specialization = {
+            key: value for key, value in local_bindings.items() if key in reachable_keys
+        }
+        try:
+            binding_fingerprint = content_fingerprint(specialization)
+        except TypeError:
+            return None
+        return id(case_block), case_index, target_shape, binding_fingerprint
+
+    def _select_case_reachable_binding_keys(
+        self,
+        case_block: Block,
+    ) -> frozenset[str]:
+        """Return binding keys reachable from one SELECT case block.
+
+        The projection includes formal inputs, captured legacy values, shape
+        and slice descriptors, and values inside operation-owned nested blocks.
+        This lets the cache ignore unrelated outer-loop bindings without
+        assuming that every accepted legacy block is closed over formals only.
+
+        Args:
+            case_block (Block): Case block whose reachable values to inspect.
+
+        Returns:
+            frozenset[str]: UUID, parameter-name, and legacy display-name keys
+                that can affect lowering of the block.
+        """
+        block_id = id(case_block)
+        cached = self._select_case_binding_keys.get(block_id)
+        if cached is not None and cached[0] is case_block:
+            return cached[1]
+
+        keys: set[str] = set()
+        for value in collect_reachable_values(case_block):
+            keys.add(value.uuid)
+            if value.is_parameter():
+                parameter_name = value.parameter_name()
+                if parameter_name:
+                    keys.add(parameter_name)
+            if value.name:
+                keys.add(value.name)
+        result = frozenset(keys)
+        self._select_case_binding_keys[block_id] = (case_block, result)
+        return result
+
+    def _lower_select_case(
+        self,
+        case_block: Block,
+        target_operands: list[Value],
+        target_indices: list[int],
+        local_bindings: dict[str, Any],
+        case_index: int,
+    ) -> tuple[CircuitProgram, bool]:
+        """Lower one SELECT case into an independent reusable program.
+
+        Args:
+            case_block (Block): Specialized semantic case block.
+            target_operands (list[Value]): Shared quantum operands supplied at
+                the SELECT call site.
+            target_indices (list[int]): Flattened parent target slots, used only
+                to determine scalar-to-vector broadcast shape.
+            local_bindings (dict[str, Any]): Case-local parameters and shapes.
+            case_index (int): Case position used in names and diagnostics.
+
+        Returns:
+            tuple[CircuitProgram, bool]: Lowered body and whether it represents
+            a scalar case broadcast over every target element.
+
+        Raises:
+            EmitError: If the case allocates hidden quantum/classical resources
+                or cannot be lowered into its declared target width.
+        """
         prepared = _prepare_nested_block_for_emit(case_block, local_bindings)
         broadcast = _should_emit_single_target_block_per_vector_element(
             prepared,

@@ -300,7 +300,7 @@ def _quration_two_term_pauli_lcu() -> qmc.Bit:
     """Apply the supported two-term Pauli LCU block encoding."""
     signal = qmc.qubit_array(1, "signal")
     system = qmc.qubit_array(1, "system")
-    signal, _ = _quration_two_term_encoding.kernel(signal, system)
+    signal, _ = _quration_two_term_encoding.unitary(signal, system)
     return qmc.measure(signal[0])
 
 
@@ -311,7 +311,7 @@ def _quration_two_term_pauli_lcu_expval(
     """Apply the supported complex LCU and evaluate an observable."""
     signal = qmc.qubit_array(1, "signal")
     system = qmc.qubit_array(1, "system")
-    signal, system = _quration_two_term_encoding.kernel(signal, system)
+    signal, system = _quration_two_term_encoding.unitary(signal, system)
     return qmc.expval((signal[0], system[0]), observable)
 
 
@@ -320,7 +320,7 @@ def _quration_three_term_pauli_lcu() -> qmc.Bit:
     """Build an LCU whose two-bit SELECT exceeds Quration's control bound."""
     signal = qmc.qubit_array(2, "signal")
     system = qmc.qubit_array(1, "system")
-    signal, _ = _quration_three_term_encoding.kernel(signal, system)
+    signal, _ = _quration_three_term_encoding.unitary(signal, system)
     return qmc.measure(signal[0])
 
 
@@ -821,14 +821,20 @@ def test_quration_samples_two_term_complex_pauli_lcu() -> None:
     assert sum(counts.values()) == shots
     assert set(counts) <= {0, 1}
 
-    expected_success = (
+    expected_zero_signal_probability = (
         abs(1j) ** 2 + abs(0.5) ** 2
     ) / _quration_two_term_encoding.normalization**2
     tolerance = (
-        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+        6.0
+        * math.sqrt(
+            expected_zero_signal_probability
+            * (1.0 - expected_zero_signal_probability)
+            / shots
+        )
+        + 0.02
     )
     assert counts.get(0, 0) / shots == pytest.approx(
-        expected_success,
+        expected_zero_signal_probability,
         abs=tolerance,
     )
 
@@ -965,6 +971,17 @@ def test_quration_transpiles_semantic_composites(kernel: qmc.QKernel) -> None:
 
     result = executable.sample(transpiler.executor(seed=11), shots=4).result()
     assert sum(count for _, count in result.results) == 4
+
+
+@pytest.mark.quration
+def test_quration_multi_controlled_x_uses_target_first_abi() -> None:
+    """Native MCX flips its target when every control is one."""
+    pytest.importorskip("pyqret")
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(_quration_multi_controlled_x)
+
+    result = executable.sample(transpiler.executor(seed=11), shots=8).result()
+    assert dict(result.results) == {1: 8}
 
 
 @pytest.mark.quration

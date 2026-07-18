@@ -48,6 +48,8 @@ from .state_preparation import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
     computational_basis_state,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
 )
 
 __all__ = [
@@ -56,17 +58,19 @@ __all__ = [
     "qpe",
     "mcx",
     "multi_controlled_x",
-    "IsingZBlockEncoding",
-    "ising_z_block_encoding",
     "LCUBlockEncoding",
     "LCUBlockEncodingTerm",
     "identity_block_encoding",
     "lcu_block_encoding",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "computational_basis_state",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
+    "mottonen_amplitude_encoding",
+    "mottonen_amplitude_encoding_from_angles",
     # Arithmetic
     "ripple_carry_add",
     "modular_add",

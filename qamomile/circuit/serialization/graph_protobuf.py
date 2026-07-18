@@ -39,6 +39,11 @@ _FRONTEND_ANNOTATION_KIND_FROM_PROTO: dict[int, str] = {
     int(value): name for name, value in _FRONTEND_ANNOTATION_KIND_TO_PROTO.items()
 }
 
+# Protobuf's parser limits nested messages to roughly 100 levels. Each nested
+# semantic container adds both a Payload and a wrapper message, so keeping the
+# public payload depth at 40 leaves headroom for the surrounding qkernel schema.
+_MAX_PAYLOAD_DEPTH = 40
+
 
 def qkernel_from_graph_dict(envelope: dict[str, Any]) -> pb.QKernel:
     """Convert the internal static-qkernel graph record into protobuf.
@@ -86,8 +91,15 @@ def qkernel_from_graph_dict(envelope: dict[str, Any]) -> pb.QKernel:
         if not isinstance(parameter, dict):
             raise ValueError("QKernel parameter entries must be dictionaries")
         parameter_type = parameter.get("type")
-        if not isinstance(parameter_type, dict):
-            raise ValueError("QKernel parameter is missing its type")
+        static_binding_type = parameter.get("static_binding_type")
+        has_value_type = isinstance(parameter_type, dict)
+        has_static_type = isinstance(static_binding_type, str) and bool(
+            static_binding_type
+        )
+        if has_value_type == has_static_type:
+            raise ValueError(
+                "QKernel parameter requires exactly one ordinary or static binding type"
+            )
         item = message.parameters.add(
             name=parameter.get("name", ""),
             has_default=parameter.get("has_default") is True,
@@ -97,7 +109,12 @@ def qkernel_from_graph_dict(envelope: dict[str, Any]) -> pb.QKernel:
         if kind not in _PARAMETER_KIND_TO_PROTO:
             raise ValueError(f"unknown qkernel parameter kind {kind!r}")
         item.kind = _PARAMETER_KIND_TO_PROTO[kind]
-        item.type.CopyFrom(_kernel_type_to_proto(parameter_type))
+        if has_value_type:
+            assert isinstance(parameter_type, dict)
+            item.type.CopyFrom(_kernel_type_to_proto(parameter_type))
+        else:
+            assert isinstance(static_binding_type, str)
+            item.static_binding_type = static_binding_type
         if item.has_default:
             item.default.CopyFrom(_payload_to_proto(parameter.get("default")))
     message.results.extend(_kernel_type_to_proto(item) for item in results)
@@ -149,22 +166,31 @@ def graph_dict_from_qkernel(message: pb.QKernel) -> dict[str, Any]:
         if parameter.name in seen_names:
             raise ValueError(f"duplicate qkernel parameter {parameter.name!r}")
         seen_names.add(parameter.name)
-        if not parameter.HasField("type"):
-            raise ValueError(f"qkernel parameter {parameter.name!r} has no type")
-        parameters.append(
-            {
-                "name": parameter.name,
-                "type": _kernel_type_from_proto(parameter.type),
-                "kind": _decode_parameter_kind(parameter.kind),
-                "has_default": parameter.has_default,
-                "default": (
-                    _payload_from_proto(parameter.default)
-                    if parameter.has_default
-                    else None
-                ),
-                "differentiable": parameter.differentiable,
-            }
+        has_value_type = parameter.HasField("type")
+        has_static_type = parameter.HasField("static_binding_type") and bool(
+            parameter.static_binding_type
         )
+        if has_value_type == has_static_type:
+            raise ValueError(
+                f"qkernel parameter {parameter.name!r} requires exactly one "
+                "ordinary or static binding type"
+            )
+        record = {
+            "name": parameter.name,
+            "kind": _decode_parameter_kind(parameter.kind),
+            "has_default": parameter.has_default,
+            "default": (
+                _payload_from_proto(parameter.default)
+                if parameter.has_default
+                else None
+            ),
+            "differentiable": parameter.differentiable,
+        }
+        if has_value_type:
+            record["type"] = _kernel_type_from_proto(parameter.type)
+        else:
+            record["static_binding_type"] = parameter.static_binding_type
+        parameters.append(record)
     return {
         "qamomile_version": message.qamomile_version,
         "artifact": {
@@ -373,7 +399,7 @@ def _float_from_bits(bits: int) -> float:
     return struct.unpack(">d", struct.pack(">Q", bits))[0]
 
 
-def _payload_to_proto(value: Any) -> pb.Payload:
+def _payload_to_proto(value: Any, *, _depth: int = 0) -> pb.Payload:
     """Encode one closed semantic payload into protobuf.
 
     Args:
@@ -385,8 +411,13 @@ def _payload_to_proto(value: Any) -> pb.Payload:
 
     Raises:
         TypeError: If the payload has no protobuf representation.
-        ValueError: If a tagged payload record is malformed.
+        ValueError: If a tagged payload record is malformed or exceeds the
+            supported nesting depth.
     """
+    if _depth > _MAX_PAYLOAD_DEPTH:
+        raise ValueError(
+            f"semantic payload nesting exceeds {_MAX_PAYLOAD_DEPTH} levels"
+        )
     message = pb.Payload()
     if value is None:
         message.null_value.SetInParent()
@@ -402,15 +433,17 @@ def _payload_to_proto(value: Any) -> pb.Payload:
         message.bytes_value = bytes(value)
     elif isinstance(value, list):
         message.list_value.SetInParent()
-        message.list_value.items.extend(_payload_to_proto(item) for item in value)
+        message.list_value.items.extend(
+            _payload_to_proto(item, _depth=_depth + 1) for item in value
+        )
     elif isinstance(value, dict):
-        _tagged_payload_to_proto(value, message)
+        _tagged_payload_to_proto(value, message, _depth=_depth)
     else:
         raise TypeError(f"protobuf payload cannot encode {type(value).__name__!r}")
     return message
 
 
-def _payload_from_proto(message: pb.Payload) -> Any:
+def _payload_from_proto(message: pb.Payload, *, _depth: int = 0) -> Any:
     """Decode one protobuf payload union into its semantic record.
 
     Args:
@@ -420,8 +453,13 @@ def _payload_from_proto(message: pb.Payload) -> Any:
         Any: Internal payload record accepted by the IR decoder.
 
     Raises:
-        ValueError: If the payload union is unset or malformed.
+        ValueError: If the payload union is unset, malformed, or exceeds the
+            supported nesting depth.
     """
+    if _depth > _MAX_PAYLOAD_DEPTH:
+        raise ValueError(
+            f"semantic payload nesting exceeds {_MAX_PAYLOAD_DEPTH} levels"
+        )
     kind = message.WhichOneof("value")
     if kind == "null_value":
         return None
@@ -436,7 +474,10 @@ def _payload_from_proto(message: pb.Payload) -> Any:
     if kind == "bytes_value":
         return bytes(message.bytes_value)
     if kind == "list_value":
-        return [_payload_from_proto(item) for item in message.list_value.items]
+        return [
+            _payload_from_proto(item, _depth=_depth + 1)
+            for item in message.list_value.items
+        ]
     if kind in {"tuple_value", "set_value", "frozenset_value"}:
         tag = {
             "tuple_value": "$tuple",
@@ -444,11 +485,14 @@ def _payload_from_proto(message: pb.Payload) -> Any:
             "frozenset_value": "$frozenset",
         }[kind]
         values = getattr(message, kind).items
-        return {tag: [_payload_from_proto(item) for item in values]}
+        return {tag: [_payload_from_proto(item, _depth=_depth + 1) for item in values]}
     if kind == "map_value":
         return {
             "$map": [
-                [_payload_from_proto(entry.key), _payload_from_proto(entry.value)]
+                [
+                    _payload_from_proto(entry.key, _depth=_depth + 1),
+                    _payload_from_proto(entry.value, _depth=_depth + 1),
+                ]
                 for entry in message.map_value.entries
             ]
         }
@@ -474,7 +518,12 @@ def _payload_from_proto(message: pb.Payload) -> Any:
     raise ValueError("protobuf Payload is missing its value union")
 
 
-def _tagged_payload_to_proto(value: dict[str, Any], message: pb.Payload) -> None:
+def _tagged_payload_to_proto(
+    value: dict[str, Any],
+    message: pb.Payload,
+    *,
+    _depth: int,
+) -> None:
     """Encode one tagged internal payload record into a protobuf union.
 
     Args:
@@ -488,20 +537,24 @@ def _tagged_payload_to_proto(value: dict[str, Any], message: pb.Payload) -> None
     if "$tuple" in value:
         message.tuple_value.SetInParent()
         message.tuple_value.items.extend(
-            _payload_to_proto(item) for item in _require_list(value["$tuple"], "$tuple")
+            _payload_to_proto(item, _depth=_depth + 1)
+            for item in _require_list(value["$tuple"], "$tuple")
         )
         return
     if "$set" in value:
         message.set_value.SetInParent()
         message.set_value.items.extend(
-            _canonical_unordered_payloads(_require_list(value["$set"], "$set"))
+            _canonical_unordered_payloads(
+                _require_list(value["$set"], "$set"), _depth=_depth + 1
+            )
         )
         return
     if "$frozenset" in value:
         message.frozenset_value.SetInParent()
         message.frozenset_value.items.extend(
             _canonical_unordered_payloads(
-                _require_list(value["$frozenset"], "$frozenset")
+                _require_list(value["$frozenset"], "$frozenset"),
+                _depth=_depth + 1,
             )
         )
         return
@@ -512,8 +565,8 @@ def _tagged_payload_to_proto(value: dict[str, Any], message: pb.Payload) -> None
             if not isinstance(raw_entry, list) or len(raw_entry) != 2:
                 raise ValueError("$map entries must be two-element lists")
             entry = message.map_value.entries.add()
-            entry.key.CopyFrom(_payload_to_proto(raw_entry[0]))
-            entry.value.CopyFrom(_payload_to_proto(raw_entry[1]))
+            entry.key.CopyFrom(_payload_to_proto(raw_entry[0], _depth=_depth + 1))
+            entry.value.CopyFrom(_payload_to_proto(raw_entry[1], _depth=_depth + 1))
         return
     if "$complex_number" in value:
         parts = _require_list(value["$complex_number"], "$complex_number")
@@ -545,7 +598,9 @@ def _tagged_payload_to_proto(value: dict[str, Any], message: pb.Payload) -> None
     raise ValueError(f"unknown semantic payload wrapper {sorted(value)}")
 
 
-def _canonical_unordered_payloads(values: list[Any]) -> list[pb.Payload]:
+def _canonical_unordered_payloads(
+    values: list[Any], *, _depth: int
+) -> list[pb.Payload]:
     """Encode and canonically order an unordered container's elements.
 
     Args:
@@ -556,7 +611,7 @@ def _canonical_unordered_payloads(values: list[Any]) -> list[pb.Payload]:
         list[pb.Payload]: Encoded elements sorted by deterministic protobuf
             bytes.
     """
-    messages = [_payload_to_proto(value) for value in values]
+    messages = [_payload_to_proto(value, _depth=_depth) for value in values]
     return sorted(
         messages,
         key=lambda message: message.SerializeToString(deterministic=True),
@@ -1122,6 +1177,7 @@ _OPERATION_TO_PROTO: dict[str, pb.OperationType] = {
     "InverseBlockOperation": pb.INVERSE_BLOCK_OPERATION,
     "GlobalPhaseOperation": pb.GLOBAL_PHASE_OPERATION,
     "SelectOperation": pb.SELECT_OPERATION,
+    "ReturnQuantumArrayElementOperation": pb.RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION,
 }
 _OPERATION_FROM_PROTO: dict[pb.OperationType, str] = {
     value: key for key, value in _OPERATION_TO_PROTO.items()
@@ -1228,6 +1284,8 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
             "num_index_args",
         }
     ),
+    pb.GLOBAL_PHASE_OPERATION: frozenset(),
+    pb.RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: frozenset(),
 }
 
 _OPERATION_REQUIRED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
@@ -1658,6 +1716,25 @@ def _block_to_proto(value: dict[str, Any]) -> pb.Block:
         item = message.parameters.add()
         item.name = name
         item.value_ref = value_ref
+    for slot in value.get("static_bindings", []):
+        if not isinstance(slot, dict):
+            raise ValueError("Block static binding entries must be dictionaries")
+        slot_message = message.static_bindings.add(
+            name=slot.get("name", ""),
+            type_key=slot.get("type_key", ""),
+        )
+        fields = slot.get("fields")
+        if not isinstance(fields, list):
+            raise ValueError("Block static binding fields must be a list")
+        for field in fields:
+            if not isinstance(field, dict):
+                raise ValueError(
+                    "Block static binding field entries must be dictionaries"
+                )
+            slot_message.fields.add(
+                name=field.get("name", ""),
+                value_ref=field.get("value_ref", ""),
+            )
     message.operations.extend(_operation_to_proto(item) for item in value["operations"])
     return message
 
@@ -1679,6 +1756,24 @@ def _block_from_proto(message: pb.Block) -> dict[str, Any]:
         if item.name in parameters:
             raise ValueError(f"duplicate Block parameter {item.name!r}")
         parameters[item.name] = item.value_ref
+    static_bindings: list[dict[str, Any]] = []
+    static_names: set[str] = set()
+    for slot in message.static_bindings:
+        if slot.name in static_names:
+            raise ValueError(f"duplicate static binding {slot.name!r}")
+        static_names.add(slot.name)
+        field_names: set[str] = set()
+        fields: list[dict[str, str]] = []
+        for field in slot.fields:
+            if field.name in field_names:
+                raise ValueError(
+                    f"duplicate field {field.name!r} in static binding {slot.name!r}"
+                )
+            field_names.add(field.name)
+            fields.append({"name": field.name, "value_ref": field.value_ref})
+        static_bindings.append(
+            {"name": slot.name, "type_key": slot.type_key, "fields": fields}
+        )
     return {
         "$type": "Block",
         "kind": message.kind,
@@ -1688,6 +1783,7 @@ def _block_from_proto(message: pb.Block) -> dict[str, Any]:
         "output_value_refs": list(message.output_value_refs),
         "output_names": list(message.output_names),
         "parameters": parameters,
+        "static_bindings": static_bindings,
         "operations": [_operation_from_proto(item) for item in message.operations],
     }
 

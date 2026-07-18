@@ -94,7 +94,7 @@ def _build_unitary_kernel(
     invert: bool = False,
 ) -> qmc.QKernel:
     """Build an allocation-only kernel exposing an encoding unitary."""
-    applied = qmc.inverse(encoding.kernel) if invert else encoding.kernel
+    applied = qmc.inverse(encoding.unitary) if invert else encoding.unitary
 
     @qmc.qkernel
     def kernel() -> qmc.Bit:
@@ -169,7 +169,7 @@ def test_descriptor_and_term_are_frozen_noncallable_identity_objects() -> None:
     term = qmc.LCUBlockEncodingTerm(1.0 + 2.0j, encoding)
 
     assert tuple(field.name for field in dataclasses.fields(encoding)) == (
-        "kernel",
+        "unitary",
         "normalization",
         "num_signal_qubits",
         "num_system_qubits",
@@ -178,7 +178,7 @@ def test_descriptor_and_term_are_frozen_noncallable_identity_objects() -> None:
         "coefficient",
         "encoding",
     )
-    assert tuple(encoding.kernel.signature.parameters) == ("signal", "system")
+    assert tuple(encoding.unitary.signature.parameters) == ("signal", "system")
     assert encoding.normalization == 1.0
     assert encoding.num_signal_qubits == 1
     assert encoding.num_system_qubits == 1
@@ -203,10 +203,10 @@ def test_descriptor_rejects_invalid_normalization(normalization: float) -> None:
 
 
 def test_descriptor_and_term_reject_invalid_values() -> None:
-    """Static metadata, kernel ABI, coefficients, and children are validated."""
+    """Static metadata, unitary ABI, coefficients, and children are validated."""
     identity = qmc.identity_block_encoding(1)
 
-    with pytest.raises(TypeError, match="kernel"):
+    with pytest.raises(TypeError, match="unitary"):
         qmc.LCUBlockEncoding(object(), 1.0, 1, 1)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="signature"):
         qmc.LCUBlockEncoding(_invalid_scalar_kernel, 1.0, 1, 1)
@@ -347,6 +347,19 @@ def test_two_level_recursion_and_inverse_have_exact_projected_blocks() -> None:
     )
 
 
+def test_recursive_unitary_has_stable_identity_and_serialization() -> None:
+    """Equivalent stdlib children produce one round-trippable composite."""
+    from qamomile.circuit.serialization import deserialize, serialize
+
+    first, _ = _recursive_encoding()
+    second, _ = _recursive_encoding()
+    payload = serialize(first.unitary)
+
+    assert first.unitary._callable_namespace == second.unitary._callable_namespace
+    assert payload == serialize(second.unitary)
+    assert payload == serialize(deserialize(payload))
+
+
 def test_shifted_ising_composes_recursively_with_child_normalizations() -> None:
     """The intended Ising shift workflow uses each child's non-unit alpha."""
     h_coefficients = {
@@ -402,16 +415,16 @@ def test_composite_rejects_wrong_widths_through_all_composition_paths() -> None:
             qmc.LCUBlockEncodingTerm(1.0j, _z_encoding()),
         )
     )
-    inverse = qmc.inverse(encoding.kernel)
-    controlled = qmc.control(encoding.kernel)
-    selected = qmc.select((_identity_case, encoding.kernel), num_index_qubits=1)
+    inverse = qmc.inverse(encoding.unitary)
+    controlled = qmc.control(encoding.unitary)
+    selected = qmc.select((_identity_case, encoding.unitary), num_index_qubits=1)
 
     @qmc.qkernel
     def plain() -> qmc.Bit:
         """Call the encoding with a short signal."""
         signal = qmc.qubit_array(2, "signal")
         system = qmc.qubit_array(1, "system")
-        signal, _ = encoding.kernel(signal, system)
+        signal, _ = encoding.unitary(signal, system)
         return qmc.measure(signal[0])
 
     @qmc.qkernel
@@ -450,7 +463,7 @@ def test_recursive_inverse_round_trip_samples_and_estimates_on_every_sdk(
 ) -> None:
     """Recursive U followed by U dagger restores arbitrary signal and system bits."""
     encoding, _ = _recursive_encoding()
-    inverse = qmc.inverse(encoding.kernel)
+    inverse = qmc.inverse(encoding.unitary)
     marked_signal = encoding.num_signal_qubits - 1
 
     @qmc.qkernel
@@ -460,7 +473,7 @@ def test_recursive_inverse_round_trip_samples_and_estimates_on_every_sdk(
         system = qmc.qubit_array(1, "system")
         signal[marked_signal] = qmc.x(signal[marked_signal])
         system[0] = qmc.x(system[0])
-        signal, system = encoding.kernel(signal, system)
+        signal, system = encoding.unitary(signal, system)
         signal, system = inverse(signal, system)
         return qmc.measure(signal), qmc.measure(system)
 
@@ -471,7 +484,7 @@ def test_recursive_inverse_round_trip_samples_and_estimates_on_every_sdk(
         system = qmc.qubit_array(1, "system")
         signal[marked_signal] = qmc.x(signal[marked_signal])
         system[0] = qmc.x(system[0])
-        signal, system = encoding.kernel(signal, system)
+        signal, system = encoding.unitary(signal, system)
         signal, _ = inverse(signal, system)
         return qmc.expval(signal[marked_signal], observable)
 
@@ -496,7 +509,7 @@ def test_recursive_lcu_control_samples_and_estimates_on_every_sdk(
     """Two-level LCU recursion executes through control, sample, and estimator."""
     encoding, matrix = _recursive_encoding()
     overlap = matrix[0, 0] / encoding.normalization
-    controlled = qmc.control(encoding.kernel)
+    controlled = qmc.control(encoding.unitary)
 
     @qmc.qkernel
     def sample_kernel() -> qmc.Bit:
@@ -549,7 +562,7 @@ def test_outer_select_of_lcu_samples_and_estimates_phase_on_every_sdk(
             ),
         )
     )
-    selected = qmc.select((_identity_case, encoding.kernel), num_index_qubits=1)
+    selected = qmc.select((_identity_case, encoding.unitary), num_index_qubits=1)
 
     @qmc.qkernel
     def sample_kernel() -> qmc.Bit:

@@ -21,14 +21,14 @@
 # # Qiskitサポート
 #
 # このページでは、具体的な最適化問題を通して、Qamomileの[Qiskit](https://quantum-computing.ibm.com/docs/)量子SDK連携を紹介します。
-# QiskitはQamomileの標準の量子SDK連携です。`qamomile`をインストールすれば、`QiskitTranspiler`と`QiskitExecutor`をすぐに使えます。
+# Qiskit連携はオプションです。`QiskitTranspiler`と`QiskitExecutor`を使うには`qiskit` extraをインストールします。
 # このチュートリアルでは、小さなMaxCutインスタンスに対するQAOA最適化を例に、Qamomileの量子カーネルをQiskit回路へトランスパイルし、Qiskitシミュレータ上でサンプリングと期待値評価を行います。
 # さらに、Qiskitの高度な回路機能も紹介します。
 
 # %%
 # 最新のQamomileをpipからインストールします。
-# Qiskitとqiskit-aerはコア依存なので、追加の依存グループは不要です。
-# # !pip install qamomile
+# 以下で使うQiskitバックエンドと回路描画の依存関係をインストールします。
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import os
@@ -364,8 +364,8 @@ assert np.isfinite(energy_via_run)
 # %% [markdown]
 # ## Qiskitの高度な機能
 #
-# Qamomileでは、Qiskitを標準の量子SDK連携として使えます。
-# そのため、Qiskitが持つ高度な回路機能を活用するための入口も用意しています。
+# Qamomileでは、オプションのQiskit連携を利用できます。
+# Qiskitが持つ高度な回路機能を活用するための入口も用意しています。
 #
 # このセクションでは、生成した回路をQiskitの実行対象へ渡すときに便利な機能を3つ示します。
 #

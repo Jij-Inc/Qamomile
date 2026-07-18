@@ -122,36 +122,35 @@ def test_global_phase_is_publicly_reexported() -> None:
 
 
 def test_pauli_lcu_block_encoding_api_is_publicly_reexported() -> None:
-    """The scheme-specific descriptor and factory retain one public identity."""
+    """The common descriptor, Pauli subtype, and factory are public."""
+    assert qmc.LCUBlockEncoding is LCUBlockEncoding
+    assert stdlib.LCUBlockEncoding is LCUBlockEncoding
     assert qmc.PauliLCUBlockEncoding is PauliLCUBlockEncoding
     assert stdlib.PauliLCUBlockEncoding is PauliLCUBlockEncoding
     assert qmc.pauli_lcu_block_encoding is pauli_lcu_block_encoding
     assert stdlib.pauli_lcu_block_encoding is pauli_lcu_block_encoding
 
     for namespace in (qmc, stdlib):
+        assert "LCUBlockEncoding" in namespace.__all__
         assert "PauliLCUBlockEncoding" in namespace.__all__
         assert "pauli_lcu_block_encoding" in namespace.__all__
         assert not hasattr(namespace, "pauli_lcu_num_selection_qubits")
 
 
-def test_recursive_block_encoding_apis_are_publicly_reexported() -> None:
-    """Scheme descriptors and recursive LCU factories keep one identity."""
-    public_symbols = {
-        "IsingZBlockEncoding": IsingZBlockEncoding,
-        "ising_z_block_encoding": ising_z_block_encoding,
+def test_recursive_lcu_block_encoding_api_is_publicly_reexported() -> None:
+    """Recursive LCU and Ising-Z construction APIs are public."""
+    exports = {
         "LCUBlockEncoding": LCUBlockEncoding,
         "LCUBlockEncodingTerm": LCUBlockEncodingTerm,
         "identity_block_encoding": identity_block_encoding,
         "lcu_block_encoding": lcu_block_encoding,
+        "IsingZBlockEncoding": IsingZBlockEncoding,
+        "ising_z_block_encoding": ising_z_block_encoding,
     }
-
     for namespace in (qmc, stdlib):
-        for name, value in public_symbols.items():
+        for name, value in exports.items():
             assert getattr(namespace, name) is value
             assert name in namespace.__all__
-
-        assert not hasattr(namespace, "BlockEncoding")
-        assert not hasattr(namespace, "BlockEncodingLike")
 
 
 def test_measurement_helpers_are_publicly_reexported():

@@ -89,6 +89,7 @@ from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
+from qamomile.circuit.ir.static_binding import StaticBindingField, StaticBindingSlot
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -261,6 +262,25 @@ def content_fingerprint(obj: Any) -> str:
     return hashlib.sha256(_token(obj, strict=True).encode("utf-8")).hexdigest()
 
 
+def collect_reachable_values(block: Block) -> tuple[ValueBase, ...]:
+    """Collect values reachable from an IR block in canonical walk order.
+
+    The traversal includes values referenced by operation-owned nested blocks
+    and returns each value UUID at most once. Its ordering is the same stable
+    ordering used by canonical byte emission.
+
+    Args:
+        block (Block): Root block whose reachable values to collect.
+
+    Returns:
+        tuple[ValueBase, ...]: Reachable values in deterministic canonical
+            declaration order.
+    """
+    values: list[ValueBase] = []
+    _collect_values(block, values, set())
+    return tuple(values)
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
@@ -387,6 +407,20 @@ class _Canonicalizer:
             key: cast(Value, self.canonical_value(block.parameters[key]))
             for key in sorted(block.parameters)
         }
+        new_static_bindings = tuple(
+            StaticBindingSlot(
+                name=slot.name,
+                type_key=slot.type_key,
+                fields=tuple(
+                    StaticBindingField(
+                        name=field.name,
+                        value=cast(Value, self.canonical_value(field.value)),
+                    )
+                    for field in slot.fields
+                ),
+            )
+            for slot in block.static_bindings
+        )
         new_operations: list[Operation] = [
             self.canonical_operation(op) for op in block.operations
         ]
@@ -406,6 +440,7 @@ class _Canonicalizer:
             # ParamSlot is frozen and holds no Value/UUID references, so
             # the manifest is shared verbatim — there is nothing to remap.
             param_slots=block.param_slots,
+            static_bindings=new_static_bindings,
         )
         self._block_cache[id(block)] = new_block
         return new_block
@@ -739,7 +774,7 @@ def _token(obj: Any, *, strict: bool = False) -> str:
         # potentially large array is allocated; ``ascontiguousarray``
         # already guarantees a C-contiguous buffer.
         digest = hashlib.sha256(memoryview(data.reshape(-1)).cast("B")).hexdigest()
-        return f"ndarray<dtype={data.dtype.str},shape={data.shape},sha256={digest}>"
+        return f"ndarray<dtype={data.dtype.str},shape={obj.shape},sha256={digest}>"
     if isinstance(obj, Hamiltonian):
         return _hamiltonian_token(obj, strict=strict)
     if isinstance(obj, Block):
@@ -959,6 +994,9 @@ def _collect_values(block: Block, out: list[ValueBase], seen: set[str]) -> None:
 
     for v in block.input_values:
         visit(v)
+    for slot in block.static_bindings:
+        for field in slot.fields:
+            visit(field.value)
     for key in sorted(block.parameters):
         visit(block.parameters[key])
     for op in block.operations:
@@ -1024,6 +1062,9 @@ def _collect_from_subblock(sub: Block, visit: Any) -> None:
     """
     for v in sub.input_values:
         visit(v)
+    for slot in sub.static_bindings:
+        for field in slot.fields:
+            visit(field.value)
     for key in sorted(sub.parameters):
         visit(sub.parameters[key])
     for nested_op in sub.operations:
@@ -1078,11 +1119,8 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     out.append(f"{pad}{_INLINE_INDENT}label_args={_token(block.label_args)}")
     out.append(f"{pad}{_INLINE_INDENT}param_slots={_token(block.param_slots)}")
 
-    declared: list[ValueBase] = []
-    seen: set[str] = set()
-    _collect_values(block, declared, seen)
     out.append(f"{pad}{_INLINE_INDENT}values:")
-    for v in declared:
+    for v in collect_reachable_values(block):
         out.append(f"{pad}{_INLINE_INDENT * 2}{_value_declaration(v)}")
 
     out.append(
@@ -1094,6 +1132,19 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     out.append(
         f"{pad}{_INLINE_INDENT}parameters="
         + _token({k: block.parameters[k].uuid for k in sorted(block.parameters)})
+    )
+    out.append(
+        f"{pad}{_INLINE_INDENT}static_bindings="
+        + _token(
+            [
+                {
+                    "name": slot.name,
+                    "type_key": slot.type_key,
+                    "fields": [(field.name, field.value.uuid) for field in slot.fields],
+                }
+                for slot in block.static_bindings
+            ]
+        )
     )
 
     out.append(f"{pad}{_INLINE_INDENT}operations:")

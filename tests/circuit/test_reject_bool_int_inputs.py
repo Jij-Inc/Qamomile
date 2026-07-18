@@ -51,7 +51,7 @@ class TestUIntBindingRequiresIntegralScalar:
     )
     def test_qkernel_build_rejects_non_integral_uint_binding(self, value):
         """QKernel.build never truncates or boolean-coerces a UInt binding."""
-        with pytest.raises(TypeError, match="requires an integer scalar"):
+        with pytest.raises(TypeError, match=r"UInt binding 'n'.*integer"):
             _bound_uint_entry.build(n=value)
 
     @pytest.mark.parametrize(

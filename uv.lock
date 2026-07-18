@@ -3628,8 +3628,6 @@ dependencies = [
     { name = "jijmodeling" },
     { name = "ommx" },
     { name = "protobuf" },
-    { name = "qiskit" },
-    { name = "qiskit-aer" },
     { name = "sympy" },
 ]
 
@@ -3648,10 +3646,17 @@ hugr = [
 qbraid = [
     { name = "qbraid", extra = ["qiskit"] },
 ]
+qiskit = [
+    { name = "qiskit" },
+    { name = "qiskit-aer" },
+]
 quri-parts = [
     { name = "quri-parts-circuit" },
     { name = "quri-parts-core" },
     { name = "quri-parts-qulacs" },
+]
+visualization = [
+    { name = "matplotlib" },
 ]
 
 [package.dev-dependencies]
@@ -3672,6 +3677,8 @@ dev = [
     { name = "pytest" },
     { name = "pytest-mock" },
     { name = "pytest-mpl" },
+    { name = "qiskit" },
+    { name = "qiskit-aer" },
     { name = "ruff" },
     { name = "scikit-learn" },
     { name = "torch" },
@@ -3686,11 +3693,12 @@ requires-dist = [
     { name = "cuda-quantum-cu13", marker = "sys_platform == 'linux' and extra == 'cudaq-cu13'", specifier = ">=0.14,<0.15" },
     { name = "hugr", marker = "extra == 'hugr'", specifier = ">=0.16,<0.17" },
     { name = "jijmodeling", specifier = ">=2.1.0" },
+    { name = "matplotlib", marker = "extra == 'visualization'", specifier = ">=3.10.8" },
     { name = "ommx", specifier = ">=2.3.3" },
     { name = "protobuf", specifier = ">=5.29,<7" },
     { name = "qbraid", extras = ["qiskit"], marker = "extra == 'qbraid'", specifier = ">=0.11.0" },
-    { name = "qiskit", specifier = ">=2.3.0" },
-    { name = "qiskit-aer", specifier = ">=0.17.2" },
+    { name = "qiskit", marker = "extra == 'qiskit'", specifier = ">=2.3.0" },
+    { name = "qiskit-aer", marker = "extra == 'qiskit'", specifier = ">=0.17.2" },
     { name = "quri-parts-circuit", marker = "extra == 'quri-parts'", specifier = ">=0.21.1" },
     { name = "quri-parts-core", marker = "extra == 'quri-parts'", specifier = ">=0.21.1" },
     { name = "quri-parts-qulacs", marker = "extra == 'quri-parts'", specifier = ">=0.21.1" },
@@ -3698,7 +3706,7 @@ requires-dist = [
     { name = "sympy", specifier = ">=1.14.0" },
     { name = "tket-exts", marker = "extra == 'hugr'", specifier = ">=0.12,<0.13" },
 ]
-provides-extras = ["cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr"]
+provides-extras = ["qiskit", "visualization", "cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3718,6 +3726,8 @@ dev = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-mock", specifier = ">=3.14.0" },
     { name = "pytest-mpl", specifier = ">=0.17.0" },
+    { name = "qiskit", specifier = ">=2.3.0" },
+    { name = "qiskit-aer", specifier = ">=0.17.2" },
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "scikit-learn", specifier = ">=1.6.0" },
     { name = "torch", specifier = ">=2.0.0" },

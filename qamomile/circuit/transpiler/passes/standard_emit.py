@@ -13,7 +13,6 @@ subclass this engine; they consume the resulting immutable circuit program.
 from __future__ import annotations
 
 import contextlib
-import re
 from collections.abc import Iterator
 from typing import Any, Generic, TypeVar, cast
 
@@ -33,6 +32,7 @@ from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -62,6 +62,10 @@ from qamomile.circuit.transpiler.emit_context import EmitContext
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import ParameterInfo, ParameterMetadata
 from qamomile.circuit.transpiler.gate_emitter import GateEmitter
+from qamomile.circuit.transpiler.parameter_binding import (
+    ParameterContainerKind,
+    split_parameter_key,
+)
 from qamomile.circuit.transpiler.passes.emit import CompositeGateEmitter, EmitPass
 from qamomile.circuit.transpiler.passes.emit_support import (
     ClbitMap,
@@ -89,8 +93,10 @@ from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission impor
     mark_updated_while_condition,
     reject_stale_runtime_condition,
 )
-from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
     blockvalue_to_gate,
+)
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     emit_controlled_fallback,
     emit_controlled_u,
 )
@@ -108,6 +114,9 @@ from qamomile.circuit.transpiler.passes.emit_support.measurement_emission import
     emit_measure,
     emit_measure_qfixed,
     emit_measure_vector,
+)
+from qamomile.circuit.transpiler.passes.emit_support.multi_control_gate_emission import (
+    emit_multi_controlled_on_clean_ancillas,
 )
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     emit_pauli_evolve,
@@ -190,6 +199,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # Cache for backend parameter objects
         self._parameter_map: dict[str, Any] = {}
         self._parameter_sources: dict[str, str] = {}
+        self._parameter_container_kinds: dict[str, ParameterContainerKind] = {}
+        self._parameter_container_names: dict[str, str] = {}
+        self._parameter_declaration_order = tuple(parameters or ())
 
         # Mapping from classical bit index to physical qubit index.
         # Populated during measurement emission to support backends
@@ -201,6 +213,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         # quantum segment when ``_reserves_multi_control_ancillas()``
         # is True; None on backends with native multi-control support.
         self._mc_ancilla_pool: MultiControlAncillaPool | None = None
+
+        # Complete map for the segment currently being emitted. Controlled
+        # fallback decomposition consults it for private workspace wires that
+        # were reserved before the backend circuit width was fixed.
+        self._active_qubit_map: QubitMap | None = None
 
         # True only during the count-only dry-run walk in
         # ``_count_multi_control_ancilla_demand``. Backend paths that build
@@ -218,16 +235,49 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
     # ------------------------------------------------------------------
 
     def _build_parameter_metadata(self) -> ParameterMetadata:
-        """Build parameter metadata from created parameter objects."""
-        params = []
-        for name, backend_param in self._parameter_map.items():
-            match = re.match(r"(\w+)\[(\d+)\]", name)
-            if match:
-                array_name = match.group(1)
-                index = int(match.group(2))
-            else:
-                array_name = name
-                index = None
+        """Build the ordered scalar and array runtime parameter ABI.
+
+        Returns:
+            ParameterMetadata: Parameter manifest with explicit index tuples,
+                array rank, and every shape dimension known at emit time.
+        """
+        params: list[ParameterInfo] = []
+        declared_positions = {
+            name: position
+            for position, name in enumerate(self._parameter_declaration_order)
+        }
+
+        def sort_key(name: str) -> tuple[int, tuple[int, ...]]:
+            """Order a scalar slot by declaration and concrete array index.
+
+            Args:
+                name (str): Full emitted scalar parameter key.
+
+            Returns:
+                tuple[int, tuple[int, ...]]: Declaration position and array
+                    index tuple used for deterministic backend ABI ordering.
+            """
+            root, indices = split_parameter_key(name)
+            return (
+                declared_positions.get(
+                    self._parameter_container_names.get(name, root),
+                    len(declared_positions),
+                ),
+                () if indices is None else indices,
+            )
+
+        ordered_names = sorted(
+            self._parameter_map,
+            key=sort_key,
+        )
+        for name in ordered_names:
+            backend_param = self._parameter_map[name]
+            parsed_name, indices = split_parameter_key(name)
+            array_name = self._parameter_container_names.get(name, parsed_name)
+            container_kind = self._parameter_container_kinds[name]
+            if container_kind is ParameterContainerKind.DICT:
+                indices = None
+            index = indices[0] if indices is not None and len(indices) == 1 else None
 
             params.append(
                 ParameterInfo(
@@ -236,6 +286,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     index=index,
                     backend_param=backend_param,
                     source_ref=self._parameter_sources.get(name),
+                    indices=indices,
+                    container_kind=container_kind,
                 )
             )
 
@@ -245,10 +297,38 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         self,
         name: str,
         source_ref: str | None = None,
+        container_kind: ParameterContainerKind | None = None,
+        container_name: str | None = None,
     ) -> Any:
-        """Get or create a backend parameter while tracking its IR source."""
+        """Get or create a backend parameter while tracking its public ABI.
+
+        Args:
+            name (str): Full emitted scalar parameter key.
+            source_ref (str | None): IR value UUID providing the runtime
+                value. Defaults to ``None``.
+            container_kind (ParameterContainerKind | None): Explicit public
+                owner kind. Defaults to array when ``name`` has numeric
+                indices, otherwise scalar.
+            container_name (str | None): Explicit public owner name. Defaults
+                to the root parsed from ``name``.
+
+        Returns:
+            Any: Backend-specific parameter object for ``name``.
+        """
         if name not in self._parameter_map:
             self._parameter_map[name] = self._emitter.create_parameter(name)
+        parsed_name, indices = split_parameter_key(name)
+        if container_kind is None:
+            container_kind = (
+                ParameterContainerKind.ARRAY
+                if indices is not None
+                else ParameterContainerKind.SCALAR
+            )
+        self._parameter_container_kinds.setdefault(name, container_kind)
+        self._parameter_container_names.setdefault(
+            name,
+            parsed_name if container_name is None else container_name,
+        )
         if source_ref is not None:
             self._parameter_sources.setdefault(name, source_ref)
         return self._parameter_map[name]
@@ -417,6 +497,18 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             bindings,
             public_output_uuids=self._allocator_live_output_refs(),
         )
+        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+            allocate_controlled_workspaces,
+        )
+
+        allocate_controlled_workspaces(
+            self,
+            operations,
+            qubit_map,
+            clbit_map,
+            bindings,
+        )
+        self._active_qubit_map = qubit_map
         self._safe_mixed_bit_merge_outputs = (
             self._allocator.safe_mixed_bit_merge_outputs
         )
@@ -525,6 +617,68 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 bindings.clear()
                 bindings.update(saved_context)
         return counting_pool.peak
+
+    def _validate_quantum_array_element_return(
+        self,
+        operation: ReturnQuantumArrayElementOperation,
+        qubit_map: QubitMap,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Validate one branch-selected quantum borrow return.
+
+        The frontend emits this marker only when an if-expression selected
+        different array indices on its branches. Static loop/condition replay
+        has populated ``bindings`` with the selected source index by this
+        point, allowing the return target and physical carrier to be checked
+        without emitting a backend instruction.
+
+        Args:
+            operation (ReturnQuantumArrayElementOperation): Deferred return
+                marker.
+            qubit_map (QubitMap): Active logical-to-physical qubit aliases.
+            bindings (dict[str, Any]): Iteration-local resolved values.
+
+        Raises:
+            EmitError: If an index is unresolved, target and selected source
+                differ, or the returned qubit is not the target slot's
+                physical resource.
+        """
+        from qamomile.circuit.transpiler.errors import EmitError
+
+        target = self._resolver.resolve_int_value(operation.target_indices[0], bindings)
+        source = self._resolver.resolve_int_value(operation.source_indices[0], bindings)
+        if target is None or source is None:
+            raise EmitError(
+                "Cannot resolve a branch-selected quantum array return. "
+                "The condition and target index must be compile-time "
+                "resolvable in each unrolled iteration.",
+                operation="ReturnQuantumArrayElementOperation",
+            )
+        if target != source:
+            raise EmitError(
+                "Quantum array return target does not match the element "
+                f"selected by the compile-time branch (target={target}, "
+                f"selected source={source}). Return the qubit to the exact "
+                "slot selected by that branch.",
+                operation="ReturnQuantumArrayElementOperation",
+            )
+
+        returned_physical = qubit_map.get(QubitAddress(operation.returned_value.uuid))
+        target_physical = qubit_map.get(QubitAddress(operation.array.uuid, target))
+        if returned_physical is None or target_physical is None:
+            raise EmitError(
+                "Cannot resolve the physical resource for a branch-selected "
+                "quantum array return.",
+                operation="ReturnQuantumArrayElementOperation",
+            )
+        if returned_physical != target_physical:
+            raise EmitError(
+                "Quantum array return would place a different physical "
+                f"resource into slot {target}; the selected qubit maps to "
+                f"{returned_physical}, while the slot maps to "
+                f"{target_physical}.",
+                operation="ReturnQuantumArrayElementOperation",
+            )
 
     def _emit_operations(
         self,
@@ -683,6 +837,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     f"the stored value via `bindings` instead of "
                     f"`parameters`, or restructure the kernel so the "
                     f"stored elements are not used as gate parameters."
+                )
+            elif isinstance(op, ReturnQuantumArrayElementOperation):
+                self._validate_quantum_array_element_return(
+                    op,
+                    qubit_map,
+                    bindings,
                 )
             elif isinstance(op, CastOperation):
                 handle_cast(self, op, qubit_map)
@@ -1258,11 +1418,6 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 or the pool is smaller than ``len(control_indices) - 1``
                 (a bug in ``_count_multi_control_ancilla_demand``).
         """
-        from qamomile.circuit.transpiler.errors import EmitError
-        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
-            emit_multi_controlled_on_clean_ancillas,
-        )
-
         if self._mc_ancilla_pool is None:
             raise EmitError(
                 f"Cannot emit {len(control_indices)}-controlled "

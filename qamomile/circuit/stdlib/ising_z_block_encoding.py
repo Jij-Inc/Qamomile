@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import numbers
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
+from qamomile.circuit.frontend.composite_gate import (
+    composite_gate,
+    configure_composite,
+)
 from qamomile.circuit.frontend.constructors import uint
 from qamomile.circuit.frontend.handle import Qubit, Vector
 from qamomile.circuit.frontend.operation.global_phase import global_phase
@@ -16,11 +23,12 @@ from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x, z
 from qamomile.circuit.frontend.operation.select import select
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
-from qamomile.circuit.stdlib._block_encoding import (
-    _BlockEncodingKernel,
-    _validate_block_encoding_kernel,
+from qamomile.circuit.ir.operation.callable import CallPolicy
+from qamomile.circuit.stdlib.lcu_block_encoding import (
+    LCUBlockEncoding,
+    _BlockEncodingUnitary,
+    _register_lcu_block_encoding_static_binding,
     _validate_positive_integer,
-    _validate_positive_real,
     _validate_register_widths,
 )
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
@@ -31,11 +39,11 @@ _CanonicalTerm = tuple[tuple[int, ...], complex]
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class IsingZBlockEncoding:
+class IsingZBlockEncoding(LCUBlockEncoding):
     r"""Describe one static exact block encoding of an Ising-Z operator.
 
-    The ``kernel`` field implements a unitary with the quantum ABI
-    ``kernel(signal, system) -> (signal, system)`` and no classical
+    The inherited ``unitary`` field has the quantum ABI
+    ``unitary(signal, system) -> (signal, system)`` and no classical
     arguments. For the isometry ``V0`` that initializes the complete signal
     register to zero, it satisfies
 
@@ -43,12 +51,16 @@ class IsingZBlockEncoding:
 
         V_0^\dagger U V_0 = A / \mathtt{normalization}
 
-    including the complex phases of the Ising-Z coefficients. The kernel
+    including the complex phases of the Ising-Z coefficients. The unitary
     allocates no hidden logical qubits and preserves the order of all input
     wires. Descriptor equality and hashing use object identity.
 
+    This producer-specific subtype adds no qkernel-visible fields. Reusable
+    qkernels should annotate inputs with :class:`LCUBlockEncoding` so Ising-Z,
+    Pauli, and recursively composed descriptors share one static binding slot.
+
     Args:
-        kernel (_BlockEncodingKernel): QKernel implementing the static
+        unitary (QKernel): QKernel implementing the static
             block-encoding unitary.
         normalization (float): Finite positive LCU coefficient one-norm. The
             exact zero operator uses ``1.0``.
@@ -57,48 +69,11 @@ class IsingZBlockEncoding:
         num_system_qubits (int): Positive ordered system-register width.
 
     Raises:
-        TypeError: If a field has an invalid runtime type or ``kernel`` does
+        TypeError: If a field has an invalid runtime type or ``unitary`` does
             not have the required static block-encoding ABI.
         ValueError: If normalization is non-finite or non-positive, or a
             register width is non-positive.
     """
-
-    kernel: _BlockEncodingKernel
-    normalization: float
-    num_signal_qubits: int
-    num_system_qubits: int
-
-    def __post_init__(self) -> None:
-        """Validate and normalize the immutable descriptor fields.
-
-        Raises:
-            TypeError: If a field has an invalid runtime type or ``kernel``
-                does not have the required static block-encoding ABI.
-            ValueError: If normalization or a register width is outside its
-                finite positive domain.
-        """
-        _validate_block_encoding_kernel(self.kernel, "kernel")
-        object.__setattr__(
-            self,
-            "normalization",
-            _validate_positive_real(self.normalization, "normalization"),
-        )
-        object.__setattr__(
-            self,
-            "num_signal_qubits",
-            _validate_positive_integer(
-                self.num_signal_qubits,
-                "num_signal_qubits",
-            ),
-        )
-        object.__setattr__(
-            self,
-            "num_system_qubits",
-            _validate_positive_integer(
-                self.num_system_qubits,
-                "num_system_qubits",
-            ),
-        )
 
 
 @qkernel
@@ -164,33 +139,38 @@ def ising_z_block_encoding(
         ... def circuit() -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
         ...     signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         ...     system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        ...     return encoding.kernel(signal, system)
+        ...     return encoding.unitary(signal, system)
     """
     width = _validate_positive_integer(num_system_qubits, "num_system_qubits")
     terms = _canonicalize_coefficients(coefficients, width)
 
     if not terms:
-        kernel = _build_zero_encoding(width)
+        unitary = _build_zero_encoding(width)
         normalization = 1.0
         signal_width = 1
     elif len(terms) == 1:
-        kernel = _build_single_term_encoding(terms[0], width)
+        unitary = _build_single_term_encoding(terms[0], width)
         normalization = _coefficient_one_norm(terms)
         signal_width = 1
     else:
         normalization = _coefficient_one_norm(terms)
         signal_width = (len(terms) - 1).bit_length()
-        kernel = _build_multi_term_encoding(
+        unitary = _build_multi_term_encoding(
             terms,
             width,
             signal_width,
             normalization,
         )
 
-    # Display and diagnostics only; this is not a stable semantic identity.
-    kernel.name = "ising_z_block_encoding"
+    _configure_block_encoding(
+        unitary,
+        terms,
+        width,
+        signal_width,
+        normalization,
+    )
     return IsingZBlockEncoding(
-        kernel=kernel,
+        unitary=unitary,
         normalization=normalization,
         num_signal_qubits=signal_width,
         num_system_qubits=width,
@@ -375,18 +355,18 @@ def _coefficient_one_norm(terms: tuple[_CanonicalTerm, ...]) -> float:
     return normalization
 
 
-def _build_zero_encoding(num_system_qubits: int) -> _BlockEncodingKernel:
+def _build_zero_encoding(num_system_qubits: int) -> _BlockEncodingUnitary:
     """Build the exact zero block using one signal-qubit bit flip.
 
     Args:
         num_system_qubits (int): Required system-register width.
 
     Returns:
-        _BlockEncodingKernel: Zero block-encoding kernel.
+        _BlockEncodingUnitary: Zero block-encoding unitary.
     """
 
-    @qkernel
-    def kernel(
+    @composite_gate(name="ising_z_block_encoding")
+    def unitary(
         signal: Vector[Qubit],
         system: Vector[Qubit],
     ) -> tuple[Vector[Qubit], Vector[Qubit]]:
@@ -414,13 +394,13 @@ def _build_zero_encoding(num_system_qubits: int) -> _BlockEncodingKernel:
         signal[0] = x(signal[0])
         return signal, system
 
-    return kernel
+    return unitary
 
 
 def _build_single_term_encoding(
     term: _CanonicalTerm,
     num_system_qubits: int,
-) -> _BlockEncodingKernel:
+) -> _BlockEncodingUnitary:
     """Build an unconditional phased Z-word encoding for one term.
 
     Args:
@@ -428,13 +408,13 @@ def _build_single_term_encoding(
         num_system_qubits (int): Required system-register width.
 
     Returns:
-        _BlockEncodingKernel: Single-term block-encoding kernel.
+        _BlockEncodingUnitary: Single-term block-encoding unitary.
     """
     word, coefficient = term
     phase = _coefficient_phase(coefficient)
 
-    @qkernel
-    def kernel(
+    @composite_gate(name="ising_z_block_encoding")
+    def unitary(
         signal: Vector[Qubit],
         system: Vector[Qubit],
     ) -> tuple[Vector[Qubit], Vector[Qubit]]:
@@ -463,7 +443,7 @@ def _build_single_term_encoding(
         system = global_phase(_identity_vector, phase)(system)
         return signal, system
 
-    return kernel
+    return unitary
 
 
 def _build_multi_term_encoding(
@@ -471,7 +451,7 @@ def _build_multi_term_encoding(
     num_system_qubits: int,
     signal_width: int,
     normalization: float,
-) -> _BlockEncodingKernel:
+) -> _BlockEncodingUnitary:
     """Build a PREPARE-SELECT-PREPARE-dagger Ising-Z encoding.
 
     Args:
@@ -482,7 +462,7 @@ def _build_multi_term_encoding(
         normalization (float): Positive coefficient one-norm.
 
     Returns:
-        _BlockEncodingKernel: Multi-term block-encoding kernel.
+        _BlockEncodingUnitary: Multi-term block-encoding unitary.
 
     Raises:
         RuntimeError: If state preparation reports an unexpected register
@@ -495,7 +475,8 @@ def _build_multi_term_encoding(
 
     preparation, required_width = _mottonen_composite(
         amplitudes,
-        preserve_unitary_completion=True,
+        name="mottonen_amplitude_encoding",
+        policy=CallPolicy.PRESERVE_BOX,
     )
     if required_width != signal_width:
         raise RuntimeError(
@@ -507,8 +488,8 @@ def _build_multi_term_encoding(
         num_index_qubits=uint(signal_width),
     )
 
-    @qkernel
-    def kernel(
+    @composite_gate(name="ising_z_block_encoding")
+    def unitary(
         signal: Vector[Qubit],
         system: Vector[Qubit],
     ) -> tuple[Vector[Qubit], Vector[Qubit]]:
@@ -540,7 +521,7 @@ def _build_multi_term_encoding(
         signal = unprepare(signal)
         return signal, system
 
-    return kernel
+    return unitary
 
 
 def _build_phased_z_case(
@@ -613,6 +594,87 @@ def _coefficient_phase(coefficient: complex) -> float:
     """
     phase = math.atan2(coefficient.imag, coefficient.real)
     return phase if phase else 0.0
+
+
+def _configure_block_encoding(
+    unitary: _BlockEncodingUnitary,
+    terms: tuple[_CanonicalTerm, ...],
+    num_system_qubits: int,
+    num_signal_qubits: int,
+    normalization: float,
+) -> _BlockEncodingUnitary:
+    """Attach stable compiler identity and canonical Ising-Z metadata.
+
+    Args:
+        unitary (_BlockEncodingUnitary): Composite qkernel to configure.
+        terms (tuple[_CanonicalTerm, ...]): Canonical nonzero Ising-Z terms.
+        num_system_qubits (int): Ordered system-register width.
+        num_signal_qubits (int): Complete physical signal-register width.
+        normalization (float): Positive block normalization.
+
+    Returns:
+        _BlockEncodingUnitary: The same configured qkernel.
+    """
+    semantic_arguments = _semantic_arguments(
+        terms,
+        num_system_qubits,
+        num_signal_qubits,
+        normalization,
+    )
+    digest_input = json.dumps(
+        semantic_arguments,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(digest_input).hexdigest()[:16]
+    configure_composite(
+        unitary,
+        name="ising_z_block_encoding",
+        namespace=f"qamomile.stdlib.ising_z.{digest}",
+        policy=CallPolicy.PRESERVE_BOX,
+        semantic_arguments=semantic_arguments,
+    )
+    return unitary
+
+
+def _semantic_arguments(
+    terms: tuple[_CanonicalTerm, ...],
+    num_system_qubits: int,
+    num_signal_qubits: int,
+    normalization: float,
+) -> dict[str, Any]:
+    """Return serializer-safe arguments determining an Ising-Z unitary.
+
+    Args:
+        terms (tuple[_CanonicalTerm, ...]): Canonical nonzero Ising-Z terms.
+        num_system_qubits (int): Ordered system-register width.
+        num_signal_qubits (int): Complete physical signal-register width.
+        normalization (float): Positive block normalization.
+
+    Returns:
+        dict[str, Any]: Stable primitive semantic argument mapping.
+    """
+    return {
+        "normalization": normalization,
+        "num_signal_qubits": num_signal_qubits,
+        "num_system_qubits": num_system_qubits,
+        "terms": [
+            {
+                "word": list(word),
+                "coefficient": [
+                    float(coefficient.real),
+                    float(coefficient.imag),
+                ],
+            }
+            for word, coefficient in terms
+        ],
+    }
+
+
+_register_lcu_block_encoding_static_binding(
+    IsingZBlockEncoding,
+    "qamomile.stdlib.ising_z_block_encoding",
+)
 
 
 __all__ = [

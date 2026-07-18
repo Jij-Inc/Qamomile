@@ -19,6 +19,7 @@ from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.canonical import (
     canonicalize,
     canonicalize_and_remap,
+    collect_reachable_values,
     content_fingerprint,
     content_hash,
     to_canonical_bytes,
@@ -36,6 +37,7 @@ from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
+from qamomile.circuit.ir.static_binding import StaticBindingField, StaticBindingSlot
 from qamomile.circuit.ir.types.primitives import (
     FloatType,
     QubitType,
@@ -577,6 +579,49 @@ def test_content_fingerprint_rejects_unsupported_nested_values(
 def test_content_fingerprint_accepts_structural_range_values() -> None:
     """Concrete loop index ranges have a stable strict representation."""
     assert len(content_fingerprint(range(1, 7, 2))) == 64
+
+
+def test_collect_reachable_values_includes_select_owned_blocks() -> None:
+    """Reachable-value traversal includes nested SELECT case values once."""
+    static_value = Value(type=FloatType(), name="normalization")
+    body = dataclasses.replace(
+        _callable_body_x_a.block,
+        static_bindings=(
+            StaticBindingSlot(
+                name="encoding",
+                type_key="test.BlockEncoding",
+                fields=(StaticBindingField(name="normalization", value=static_value),),
+            ),
+        ),
+    )
+    block = _select_with_boxed_case(
+        body,
+        _callable_impl_h_a.block,
+    )
+    select = cast(SelectOperation, block.operations[0])
+    boxed_case = select.case_blocks[1]
+    invoke = cast(InvokeOperation, boxed_case.operations[0])
+    assert invoke.definition is not None
+    assert invoke.definition.body is not None
+
+    values = collect_reachable_values(block)
+    value_uuids = [value.uuid for value in values]
+
+    assert len(value_uuids) == len(set(value_uuids))
+    assert static_value.uuid in value_uuids
+    owned_blocks = [
+        *select.case_blocks,
+        invoke.definition.body,
+        *(
+            implementation.body
+            for implementation in invoke.definition.implementations
+            if implementation.body is not None
+        ),
+    ]
+    for owned_block in owned_blocks:
+        for owned_value in (*owned_block.input_values, *owned_block.output_values):
+            assert owned_value.uuid in value_uuids
+    assert value_uuids == [value.uuid for value in collect_reachable_values(block)]
 
 
 class TestCanonicalizeIdempotence:
@@ -1275,6 +1320,15 @@ class TestParamSlotsHashParticipation:
         hash_a = content_hash(_block_with_bound_slot(np.array([0.1, 0.2, 0.3])))
         hash_b = content_hash(_block_with_bound_slot(np.array([0.1, 0.2, 0.3])))
         assert hash_a == hash_b
+
+    def test_numpy_bound_value_shape_changes_hash(self):
+        """A scalar array and a length-one array have distinct identities."""
+        scalar = np.array(0.5)
+        vector = np.array([0.5])
+        assert scalar.tobytes() == vector.tobytes()
+        assert content_hash(_block_with_bound_slot(scalar)) != content_hash(
+            _block_with_bound_slot(vector)
+        )
 
     def test_large_numpy_bound_values_hash_by_content(self):
         """Arrays indistinguishable under truncated ``repr`` still hash apart."""

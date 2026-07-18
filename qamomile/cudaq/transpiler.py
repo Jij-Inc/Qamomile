@@ -300,6 +300,11 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
             spin_op = hamiltonian  # type: ignore[unreachable]
 
         if isinstance(circuit, BoundCudaqKernelArtifact):
+            if params is not None:
+                raise ValueError(
+                    "params must be omitted for a BoundCudaqKernelArtifact; "
+                    "its runtime parameter values are already fixed."
+                )
             result: Any = cudaq.observe(
                 circuit.kernel_func, spin_op, circuit.param_values
             )  # type: ignore[operator]

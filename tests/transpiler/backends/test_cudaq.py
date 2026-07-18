@@ -349,6 +349,31 @@ class TestCudaqGlobalPhaseMaterialization:
         assert all(correction.endswith(", q[0])") for correction in corrections)
 
 
+class TestCudaqHelperReferences:
+    """Helper-local gate emission never falls back to entry-kernel names."""
+
+    @pytest.mark.parametrize("axis", ["rx", "ry", "rz"])
+    def test_multi_controlled_rotation_uses_helper_qubit_arguments(
+        self,
+        axis: str,
+    ) -> None:
+        """Multi-controlled rotations reference q0/q1 inside helpers."""
+        emitter = CudaqKernelEmitter()
+        artifact = emitter.create_circuit(2, 0)
+        emit_rotation = getattr(emitter, f"emit_multi_controlled_{axis}")
+        emitter.define_helper(
+            ("rotation", axis),
+            f"controlled_{axis}",
+            2,
+            lambda: emit_rotation(artifact, [0], 1, 0.25),
+        )
+
+        finalized = emitter.finalize(artifact, ExecutionMode.STATIC)
+
+        assert f"{axis}.ctrl(0.25, q0, q1)" in finalized.source
+        assert f"{axis}.ctrl(0.25, q[0], q[1])" not in finalized.source
+
+
 class TestCudaqTranspiler(TranspilerTestSuite):
     """Test suite for CUDA-Q transpiler.
 

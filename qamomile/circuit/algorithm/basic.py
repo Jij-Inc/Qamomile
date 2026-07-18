@@ -161,7 +161,8 @@ def phase_gadget(
         q[left], q[right] = qmc.cx(q[left], q[right])
 
     # Apply RZ on the last qubit
-    q[indices[last]] = qmc.rz(q[indices[last]], angle=angle)
+    target = indices[last]
+    q[target] = qmc.rz(q[target], angle=angle)
 
     # CX reverse ladder (using positive-step range for qkernel compatibility)
     for step in qmc.range(last):

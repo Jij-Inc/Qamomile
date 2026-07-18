@@ -312,7 +312,17 @@ class ConstantFoldingPass(Pass[Block, Block]):
         op: BinOp,
         folded_values: dict[str, Value],
     ) -> Value | None:
-        """Try to fold a BinOp to a constant. Returns None if not foldable."""
+        """Try to fold a scalar binary operation to a constant.
+
+        Args:
+            op (BinOp): Binary operation to inspect.
+            folded_values (dict[str, Value]): Constants produced earlier in
+                the same traversal.
+
+        Returns:
+            Value | None: Constant replacement, or ``None`` when operands are
+            unresolved or are not Python scalar values.
+        """
         if len(op.operands) != 2:
             return None
 
@@ -320,6 +330,9 @@ class ConstantFoldingPass(Pass[Block, Block]):
         right = self._resolve_value(op.operands[1], folded_values)
 
         if left is None or right is None:
+            return None
+
+        if not all(isinstance(value, (bool, int, float)) for value in (left, right)):
             return None
 
         # Both operands are constants, evaluate
@@ -381,10 +394,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
             # ``container`` unresolved keeps the store as a correct
             # runtime operation.  Mirrors the version guard in
             # ``value_resolver._resolve_array_element``.
-            name = array_value.name
-            if name and name in self._bindings:
-                container = self._bindings[name]
-            elif array_value.is_parameter():
+            if array_value.is_parameter():
                 param_name = array_value.parameter_name()
                 if param_name and param_name in self._bindings:
                     container = self._bindings[param_name]

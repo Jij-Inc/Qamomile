@@ -129,6 +129,14 @@ class _BlockPrinter:
             self.lines.append(
                 f"{pad}{_INDENT}parameters: [{', '.join(block.parameters)}]"
             )
+        for slot in block.static_bindings:
+            fields = ", ".join(
+                f"{field.name}={_format_value(field.value)}" for field in slot.fields
+            )
+            suffix = f" ({fields})" if fields else ""
+            self.lines.append(
+                f"{pad}{_INDENT}static binding {slot.name}: {slot.type_key}{suffix}"
+            )
         body_indent = indent + 1
         self._emit_ops(block.operations, indent=body_indent)
         self.lines.append(f"{pad}}}")

@@ -42,6 +42,15 @@ def test_shor_factory_returns_one_executable_qkernel() -> None:
     assert concrete.gates.toffoli == estimate.gates.toffoli.subs(n, 2048)
 
 
+def test_shor_default_width_builds_and_too_narrow_width_fails() -> None:
+    """The execution default fits the modulus and explicit narrow widths fail."""
+    kernel = qmc.shor_order_finding(base=2, modulus=3)
+
+    assert kernel.build().operations
+    with pytest.raises(ValueError, match="too small.*require n >= 2"):
+        kernel.build(n=1)
+
+
 @pytest.mark.parametrize(
     ("base", "modulus", "message"),
     [
