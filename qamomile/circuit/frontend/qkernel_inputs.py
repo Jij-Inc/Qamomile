@@ -243,6 +243,14 @@ def _array_binding_payload(
         TypeError: If the array element type or rank is unsupported.
     """
     element_type = get_array_element_type(param_type)
+    if element_type in (Bit, bool):
+        arr = np.asarray(value, dtype=object)
+        normalized_bits = [
+            _coerce_bit_binding(name, item, index=index)
+            for index, item in enumerate(arr.flat)
+        ]
+        payload = np.asarray(normalized_bits, dtype=object).reshape(arr.shape).tolist()
+        return BitType(), arr.shape, payload
     if element_type in (Float, float):
         arr = np.asarray(value)
         return FloatType(), arr.shape, arr.tolist()
@@ -274,6 +282,38 @@ def _array_binding_payload(
                 )
         return ObservableType(), (len(items),), items
     raise TypeError(f"Unsupported element type for array binding: {element_type}")
+
+
+def _coerce_bit_binding(name: str, value: Any, *, index: int | None = None) -> bool:
+    """Validate and normalize one compile-time Bit binding.
+
+    Args:
+        name (str): QKernel parameter name used in diagnostics.
+        value (Any): Candidate scalar binding.
+        index (int | None): Optional flattened array index. Defaults to
+            ``None`` for a scalar binding.
+
+    Returns:
+        bool: Normalized boolean value.
+
+    Raises:
+        TypeError: If ``value`` is neither boolean nor integral.
+        ValueError: If an integral value is not zero or one.
+    """
+    location = f" at flattened index {index}" if index is not None else ""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if not isinstance(value, numbers.Integral):
+        raise TypeError(
+            f"Bit binding '{name}'{location} must be bool, 0, or 1, got "
+            f"{type(value).__name__} ({value!r})."
+        )
+    normalized = int(value)
+    if normalized not in (0, 1):
+        raise ValueError(
+            f"Bit binding '{name}'{location} must be 0 or 1, got {normalized}."
+        )
+    return bool(normalized)
 
 
 def create_bound_input(param_type: Any, name: str, value: Any) -> Handle:

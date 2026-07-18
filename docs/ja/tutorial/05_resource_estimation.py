@@ -244,7 +244,7 @@ assert window_est.qubits == 3 * 4 + 2 + 7
 #
 # `qmc.ekera_hastad_factoring()`は、同程度のビット長を持つ2素数の積を対象とする[Ekerå–Håstad法](https://arxiv.org/abs/1702.00249)のshort discrete logarithm量子段を構築します。Qamomileでは`m = ceil(n / 2) + 1`とし、長さ`2*m`と`m`の位相スケジュールを順番に測定します。
 #
-# 2つの指数レジスタをcoherentに保持するのではなく、同じphase qubitと算術workspaceを再利用します。そのため幅はShorと同じ`3*n + w + 7`で、違いはcontrolled modular multiplicationの回数です。返り値は先頭`2*m`ビットが長いスケジュール、残り`m`ビットが短いスケジュールで、それぞれlittle-endianです。
+# 2つの指数レジスタをcoherentに保持するのではなく、同じphase qubitと算術workspaceを再利用します。そのため幅はShorと同じ`3*n + w + 7`で、違いはcontrolled modular multiplicationの回数です。返される`Vector[Bit]`は、先頭`2*m`ビットが長いスケジュール、残り`m`ビットが短いスケジュールで、それぞれlittle-endianです。
 
 # %%
 short_dlp = qmc.ekera_hastad_factoring(
@@ -257,7 +257,7 @@ short_dlp_est = short_dlp.estimate_resources()
 print("Ekerå–Håstad logical qubits:", short_dlp_est.qubits)
 print("Ekerå–Håstad total logical gates:", short_dlp_est.gates.total)
 assert short_dlp_est.qubits == 3 * 3 + 2 + 7
-assert len(short_dlp.output_types) == 9
+assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 
 
 # %% [markdown]

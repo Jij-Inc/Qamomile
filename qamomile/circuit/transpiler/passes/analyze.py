@@ -3519,6 +3519,13 @@ class AnalyzePass(Pass[Block, Block]):
         # Build dependency graph
         dependency_graph = self._build_dependency_graph(input.operations)
 
+        # Stored Bit slots retain measurement provenance for output
+        # materialization, but are not yet valid in-circuit conditions.
+        self._reject_stored_bit_array_conditions(
+            input.operations,
+            dependency_graph,
+        )
+
         # Validate quantum-classical dependencies
         self._validate_quantum_dependencies(
             input.operations,
@@ -3608,6 +3615,108 @@ class AnalyzePass(Pass[Block, Block]):
             elif isinstance(op, HasNestedOps):
                 for body in op.nested_op_lists():
                     self._reject_stores_in_if_branches(body)
+
+    def _reject_stored_bit_array_conditions(
+        self,
+        operations: list[Operation],
+        dependency_graph: dict[str, set[str]],
+    ) -> None:
+        """Reject runtime control flow sourced from an assigned Bit array slot.
+
+        Store operations retain the exact source value and destination index,
+        which is sufficient for host-side materialization and return values.
+        Backends do not yet allocate or alias a destination clbit for a
+        user-created Bit array, so using a stored slot as an in-circuit
+        condition would otherwise risk reading the wrong physical clbit.
+
+        Args:
+            operations (list[Operation]): Operations to inspect recursively.
+            dependency_graph (dict[str, set[str]]): Result-to-input dependency
+                graph for the same block.
+
+        Raises:
+            ValidationError: If an ``if`` or ``while`` condition transitively
+                depends on a ``StoreArrayElementOperation`` for ``Bit``
+                elements.
+        """
+        stored_bit_arrays: set[str] = set()
+
+        class StoreCollector(ControlFlowVisitor):
+            """Collect result UUIDs of Bit array stores."""
+
+            def visit_operation(self, op: Operation) -> None:
+                """Record a Bit array store result.
+
+                Args:
+                    op (Operation): Operation visited by the recursive walker.
+                """
+                if isinstance(op, StoreArrayElementOperation) and isinstance(
+                    op.array.type, BitType
+                ):
+                    stored_bit_arrays.update(result.uuid for result in op.results)
+
+        collector = StoreCollector()
+        collector.visit_operations(operations)
+        if not stored_bit_arrays:
+            return
+
+        def depends_on_stored_array(value: ValueBase) -> bool:
+            """Return whether a value transitively reads a stored Bit array.
+
+            Args:
+                value (ValueBase): Candidate control-flow condition.
+
+            Returns:
+                bool: ``True`` when the dependency closure reaches a stored
+                    Bit array version.
+            """
+            pending = [value.uuid]
+            visited: set[str] = set()
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                if current in stored_bit_arrays:
+                    return True
+                pending.extend(dependency_graph.get(current, ()))
+            return False
+
+        class ConditionValidator(ControlFlowVisitor):
+            """Reject control-flow conditions backed by stored Bit slots."""
+
+            def visit_operation(self, op: Operation) -> None:
+                """Validate one control-flow operation.
+
+                Args:
+                    op (Operation): Operation visited by the recursive walker.
+
+                Raises:
+                    ValidationError: If a condition depends on a stored Bit
+                        array version.
+                """
+                conditions: list[ValueBase] = []
+                if isinstance(op, IfOperation) and op.operands:
+                    condition = op.operands[0]
+                    if isinstance(condition, ValueBase):
+                        conditions.append(condition)
+                elif isinstance(op, WhileOperation):
+                    conditions.extend(
+                        operand
+                        for operand in op.operands[:2]
+                        if isinstance(operand, ValueBase)
+                    )
+                if any(depends_on_stored_array(value) for value in conditions):
+                    raise ValidationError(
+                        "Using an assigned Bit array element as a runtime "
+                        "if/while condition is not supported yet. Bit arrays "
+                        "currently support storing and returning values only; "
+                        "keep and use the original measurement Bit handle for "
+                        "feed-forward control."
+                    )
+
+        validator = ConditionValidator()
+        validator.visit_operations(operations)
 
     def _reject_self_referential_loop_stores(
         self,

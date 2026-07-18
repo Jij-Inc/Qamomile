@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import types
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.qkernel import QKernel
@@ -165,11 +164,11 @@ def _iterative_order_finding_body(
     precision: int,
     register_size: int,
     window_size: int,
-) -> tuple[qmc.Bit, ...]:
+) -> qmc.Vector[qmc.Bit]:
     """Execute iterative phase estimation for modular multiplication.
 
     Controlled powers are visited from largest to smallest. Each round first
-    yields the next least-significant phase bit, so the returned tuple keeps
+    yields the next least-significant phase bit, so the returned vector keeps
     Qamomile's usual little-endian measurement order.
 
     Args:
@@ -191,7 +190,7 @@ def _iterative_order_finding_body(
         window_size (int): Lookup address width.
 
     Returns:
-        tuple[qmc.Bit, ...]: Measured phase bits, least significant first.
+        qmc.Vector[qmc.Bit]: Measured phase bits, least significant first.
     """
     work[0] = qmc.x(work[0])
     multipliers = tuple(
@@ -214,25 +213,36 @@ def _iterative_order_finding_body(
         register_size=register_size,
         window_size=window_size,
     )
-    return measured_bits
+    output = qmc.bit_array(precision, name="phase_bits")
+    for index, measured in enumerate(measured_bits):
+        output[index] = measured
+    return output
 
 
-def _fixed_bit_tuple_type(length: int) -> object:
-    """Construct a fixed-length tuple annotation for measured bits.
+def _store_measured_bits(
+    output: qmc.Vector[qmc.Bit],
+    measured_bits: tuple[qmc.Bit, ...],
+    *,
+    offset: int,
+) -> qmc.Vector[qmc.Bit]:
+    """Store a trace-time tuple of measurements into a Bit vector.
+
+    This helper deliberately performs Python iteration outside the decorated
+    qkernel AST. The tuple length and offset are factory-time constants, so
+    the frontend emits one explicit classical store per destination slot.
 
     Args:
-        length (int): Number of tuple elements.
+        output (qmc.Vector[qmc.Bit]): Destination Bit vector.
+        measured_bits (tuple[qmc.Bit, ...]): Measurement handles in output
+            order.
+        offset (int): First destination index.
 
     Returns:
-        object: Runtime ``tuple[Bit, ...]`` annotation with exactly ``length``
-            element slots.
-
-    Raises:
-        ValueError: If ``length`` is not positive.
+        qmc.Vector[qmc.Bit]: The destination after all stores.
     """
-    if length < 1:
-        raise ValueError(f"bit tuple length must be positive, got {length}.")
-    return types.GenericAlias(tuple, tuple(qmc.Bit for _ in range(length)))
+    for index, measured in enumerate(measured_bits):
+        output[offset + index] = measured
+    return output
 
 
 def shor_order_finding(
@@ -241,7 +251,7 @@ def shor_order_finding(
     *,
     window_size: int = 2,
     precision: int | None = None,
-) -> QKernel[..., tuple[qmc.Bit, ...]]:
+) -> QKernel[..., qmc.Vector[qmc.Bit]]:
     """Create an executable order-finding qkernel for ``base mod modulus``.
 
     The modulus fixes the work-register width, so the returned kernel has no
@@ -259,7 +269,7 @@ def shor_order_finding(
             twice ``modulus.bit_length()``.
 
     Returns:
-        QKernel[..., tuple[qmc.Bit, ...]]: Argument-free executable kernel
+        QKernel[..., qmc.Vector[qmc.Bit]]: Argument-free executable kernel
             returning little-endian phase bits.
 
     Raises:
@@ -289,11 +299,11 @@ def shor_order_finding(
     if precision < 1:
         raise ValueError(f"precision must be positive, got {precision}.")
 
-    def entrypoint() -> tuple[qmc.Bit, ...]:
+    def entrypoint() -> qmc.Vector[qmc.Bit]:
         """Execute low-width iterative order finding.
 
         Returns:
-            tuple[qmc.Bit, ...]: Little-endian phase-estimation bits.
+            qmc.Vector[qmc.Bit]: Little-endian phase-estimation bits.
         """
         phase = qmc.qubit("phase")
         work = qmc.qubit_array(register_size, name="work")
@@ -325,7 +335,6 @@ def shor_order_finding(
             window_size=window_size,
         )
 
-    entrypoint.__annotations__["return"] = _fixed_bit_tuple_type(precision)
     return qmc.qkernel(entrypoint)
 
 
@@ -334,7 +343,7 @@ def ekera_hastad_factoring(
     modulus: int,
     *,
     window_size: int = 2,
-) -> QKernel[..., tuple[qmc.Bit, ...]]:
+) -> QKernel[..., qmc.Vector[qmc.Bit]]:
     """Create the quantum short-DLP stage for Ekerå–Håstad factoring.
 
     For a balanced semiprime ``N = p*q``, this measures the two modular phase
@@ -351,7 +360,7 @@ def ekera_hastad_factoring(
             to 2.
 
     Returns:
-        QKernel[..., tuple[qmc.Bit, ...]]: Argument-free kernel returning the
+        QKernel[..., qmc.Vector[qmc.Bit]]: Argument-free kernel returning the
             ``2m`` long-schedule bits followed by the ``m`` short-schedule
             bits. Each group is little-endian.
 
@@ -377,11 +386,11 @@ def ekera_hastad_factoring(
     y = pow(generator, modulus + 1, modulus)
     inverse_y = pow(y, -1, modulus)
 
-    def entrypoint() -> tuple[qmc.Bit, ...]:
+    def entrypoint() -> qmc.Vector[qmc.Bit]:
         """Execute the low-width short-DLP quantum stage.
 
         Returns:
-            tuple[qmc.Bit, ...]: Concatenated long and short phase samples.
+            qmc.Vector[qmc.Bit]: Concatenated long and short phase samples.
         """
         phase = qmc.qubit("phase")
         work = qmc.qubit_array(register_size, name="work")
@@ -463,10 +472,18 @@ def ekera_hastad_factoring(
             register_size=register_size,
             window_size=window_size,
         )
-        return long_bits + short_bits
+        output = qmc.bit_array(
+            long_precision + short_precision,
+            name="phase_bits",
+        )
+        output = _store_measured_bits(output, long_bits, offset=0)
+        output = _store_measured_bits(
+            output,
+            short_bits,
+            offset=long_precision,
+        )
+        return output
 
-    total_precision = long_precision + short_precision
-    entrypoint.__annotations__["return"] = _fixed_bit_tuple_type(total_precision)
     return qmc.qkernel(entrypoint)
 
 

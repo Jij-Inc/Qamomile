@@ -61,7 +61,7 @@ from .estimator import (
 # Frontend API
 from .frontend.callable_signature import CallableSignature
 from .frontend.composite_gate import composite_gate as composite_gate
-from .frontend.constructors import bit, float_, qubit, qubit_array, uint
+from .frontend.constructors import bit, bit_array, float_, qubit, qubit_array, uint
 from .frontend.handle import (
     Bit,
     Dict,
@@ -206,6 +206,7 @@ __all__ = [
     "global_phase",
     "cast",
     "bit",
+    "bit_array",
     "float_",
     "qubit",
     "uint",

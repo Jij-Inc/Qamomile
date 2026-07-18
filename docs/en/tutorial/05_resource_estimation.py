@@ -242,7 +242,7 @@ assert window_est.qubits == 3 * 4 + 2 + 7
 #
 # `qmc.ekera_hastad_factoring()` constructs the short-discrete-logarithm quantum stage of the [Ekerå–Håstad method](https://arxiv.org/abs/1702.00249) for factoring a product of two similarly sized primes. Qamomile sets `m = ceil(n / 2) + 1` and measures schedules of lengths `2*m` and `m` sequentially.
 #
-# Rather than retain two exponent registers coherently, it reuses the same phase qubit and arithmetic workspace. Its width is consequently the same `3*n + w + 7` as Shor's order finding; the number of controlled modular multiplications differs. The first `2*m` little-endian return bits are the long schedule and the remaining `m` bits are the short schedule.
+# Rather than retain two exponent registers coherently, it reuses the same phase qubit and arithmetic workspace. Its width is consequently the same `3*n + w + 7` as Shor's order finding; the number of controlled modular multiplications differs. The returned `Vector[Bit]` contains the first `2*m` little-endian bits from the long schedule and the remaining `m` bits from the short schedule.
 
 # %%
 short_dlp = qmc.ekera_hastad_factoring(
@@ -255,7 +255,7 @@ short_dlp_est = short_dlp.estimate_resources()
 print("Ekerå–Håstad logical qubits:", short_dlp_est.qubits)
 print("Ekerå–Håstad total logical gates:", short_dlp_est.gates.total)
 assert short_dlp_est.qubits == 3 * 3 + 2 + 7
-assert len(short_dlp.output_types) == 9
+assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 
 # %% [markdown]
 # ## Summary

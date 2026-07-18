@@ -148,7 +148,8 @@ def test_ekera_hastad_uses_two_short_exponent_registers() -> None:
     assert isinstance(kernel, QKernel)
     assert estimate.qubits == 18
     assert "modmul_const" not in estimate.calls.calls_by_name
-    assert len(kernel.output_types) == 9
+    assert len(kernel.output_types) == 1
+    assert kernel.output_types[0] == qmc.Vector[qmc.Bit]
 
 
 def test_small_ekera_hastad_schedule_executes(qiskit_transpiler) -> None:
