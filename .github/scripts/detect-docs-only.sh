@@ -21,9 +21,13 @@ if [[ -n "${base_sha}" && -n "${head_sha}" ]]; then
   fi
 fi
 
+# A random heredoc delimiter so no repository path in the diff can terminate
+# the block early and inject extra outputs such as docs_only=true.
+delimiter="changed_files_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+
 {
   echo "docs_only=${docs_only}"
-  echo "changed_files<<__CHANGED_FILES__"
+  echo "changed_files<<${delimiter}"
   printf '%s\n' "${changed_files}"
-  echo "__CHANGED_FILES__"
+  echo "${delimiter}"
 } >> "${GITHUB_OUTPUT}"
