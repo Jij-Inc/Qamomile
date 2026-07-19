@@ -22,9 +22,9 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation.expval import ExpvalOp
-from qamomile.circuit.ir.serialize import dump_json, load_json
 from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler.passes.inline import InlinePass
 
 _EXPVAL_ATOL = 1e-6
@@ -315,7 +315,7 @@ def _find_expval(block) -> ExpvalOp:
 
 
 def test_expval_vector_element_root_metadata_round_trips():
-    """Tuple-form expval root ``(uuid, index)`` metadata survives JSON round-trip."""
+    """Canonical protobuf preserves tuple-form expval root relationships."""
     block = InlinePass().run(_expval_two_vec_elems.block)
     rt = _find_expval(block).qubits.metadata.array_runtime
     assert rt is not None
@@ -323,10 +323,19 @@ def test_expval_vector_element_root_metadata_round_trips():
     assert all(u for u in rt.element_parent_uuids)  # no standalone sentinel
     assert tuple(rt.element_parent_indices) == (0, 1)
 
-    restored = load_json(dump_json(block))
+    restored = InlinePass().run(deserialize(serialize(_expval_two_vec_elems)).block)
     r_rt = _find_expval(restored).qubits.metadata.array_runtime
     assert r_rt is not None
-    assert r_rt.element_parent_uuids == rt.element_parent_uuids
+    assert len(r_rt.element_parent_uuids) == len(rt.element_parent_uuids)
+    for left_index in range(len(rt.element_parent_uuids)):
+        for right_index in range(len(rt.element_parent_uuids)):
+            assert (
+                rt.element_parent_uuids[left_index]
+                == rt.element_parent_uuids[right_index]
+            ) == (
+                r_rt.element_parent_uuids[left_index]
+                == r_rt.element_parent_uuids[right_index]
+            )
     assert r_rt.element_parent_indices == rt.element_parent_indices
 
 

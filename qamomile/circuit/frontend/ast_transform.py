@@ -15,6 +15,8 @@ from qamomile.circuit.frontend.operation.control_flow import (
     for_items,
     for_loop,
     loop_rebind_snapshot,
+    loop_region_enter,
+    loop_region_result,
     record_loop_rebinds,
     should_trace_for_loop,
     should_trace_items_loop,
@@ -32,12 +34,19 @@ class VariableCollector(ast.NodeVisitor):
     """
 
     def __init__(self, global_names: set[str] | None = None):
+        """Initialize an empty variable/dataflow collector.
+
+        Args:
+            global_names (set[str] | None): Names treated as globals rather
+                than function-local dataflow. Defaults to None.
+        """
         self.vars = set()
         self._exclude = set()  # names to exclude
         self._global_names = global_names or set()
         self._first_context: dict[str, str] = {}  # name -> "Store" | "Load"
         self._load_names: set[str] = set()
         self._store_names: set[str] = set()
+        self._store_order: list[str] = []
 
     def visit_Call(self, node: ast.Call):
         """Exclude the function name of a call."""
@@ -83,11 +92,44 @@ class VariableCollector(ast.NodeVisitor):
         for target in node.targets:
             self.visit(target)
 
+    def visit_AnnAssign(self, node: ast.AnnAssign):
+        """Visit the RHS first, like ``visit_Assign``.
+
+        `total: qmc.UInt = total + i` reads the RHS before storing, so
+        the generic (target-first) traversal would misclassify the
+        first context as "Store" and drop the read-before-write
+        evidence the loop-carry candidate analysis needs. The
+        annotation itself is type syntax, not dataflow, and is skipped.
+
+        Args:
+            node (ast.AnnAssign): Annotated assignment to visit.
+        """
+        if node.value is not None:
+            self.visit(node.value)
+        self.visit(node.target)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr):
+        """Visit a named expression in Python evaluation order.
+
+        A walrus assignment such as ``total := total + i`` evaluates the
+        value before storing the target. Preserving that order keeps the
+        read-before-write evidence used to identify loop-carry candidates.
+
+        Args:
+            node (ast.NamedExpr): The named-expression node to visit.
+        """
+        self.visit(node.value)
+        self.visit(node.target)
+
     def visit_AugAssign(self, node: ast.AugAssign):
         """AugAssign (e.g. x += 1) is an implicit Read-before-Write.
 
         Visit the RHS first and record Name targets as both Load and Store.
         first_context is "Load" (the existing value is read first).
+
+        Args:
+            node (ast.AugAssign): Augmented assignment to visit in Python
+                evaluation order.
         """
         self.visit(node.value)
         target = node.target
@@ -96,6 +138,8 @@ class VariableCollector(ast.NodeVisitor):
             if name not in self._exclude and name not in self._global_names:
                 self.vars.add(name)
                 self._load_names.add(name)
+                if name not in self._store_names:
+                    self._store_order.append(name)
                 self._store_names.add(name)
                 if name not in self._first_context:
                     self._first_context[name] = "Load"
@@ -108,13 +152,20 @@ class VariableCollector(ast.NodeVisitor):
         pass
 
     def visit_Name(self, node: ast.Name):
-        """Collect variable names (only those not in the exclude list)."""
+        """Collect a non-excluded variable name and its access context.
+
+        Args:
+            node (ast.Name): Name occurrence whose load/store context should
+                contribute to variable dataflow.
+        """
         if isinstance(node.id, str):
             if node.id not in self._exclude and node.id not in self._global_names:
                 self.vars.add(node.id)
                 if isinstance(node.ctx, ast.Load):
                     self._load_names.add(node.id)
                 if isinstance(node.ctx, ast.Store):
+                    if node.id not in self._store_names:
+                        self._store_order.append(node.id)
                     self._store_names.add(node.id)
                 if node.id not in self._first_context:
                     if isinstance(node.ctx, ast.Store):
@@ -141,6 +192,15 @@ class VariableCollector(ast.NodeVisitor):
     def store_vars(self) -> set[str]:
         """Variables assigned in Store context."""
         return self._store_names & self.vars
+
+    @property
+    def store_order(self) -> tuple[str, ...]:
+        """Return assigned variable names in first-source-store order.
+
+        Returns:
+            tuple[str, ...]: Unique stored names in source order.
+        """
+        return tuple(name for name in self._store_order if name in self.vars)
 
 
 class ControlFlowTransformer(ast.NodeTransformer):
@@ -560,10 +620,106 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return False
 
     @staticmethod
+    def _has_return_in_region(body_nodes: list[ast.stmt]) -> bool:
+        """Check whether a control-flow region contains a return statement.
+
+        Nested function, lambda, and class bodies introduce independent Python
+        scopes, so returns inside them do not exit the enclosing qkernel region
+        and are deliberately ignored.
+
+        Args:
+            body_nodes (list[ast.stmt]): Statements in the control-flow region.
+
+        Returns:
+            bool: ``True`` when the region contains a return that would exit
+                the enclosing qkernel.
+        """
+
+        def contains_return(node: ast.AST) -> bool:
+            """Recursively inspect one AST node without crossing scopes.
+
+            Args:
+                node (ast.AST): Node to inspect.
+
+            Returns:
+                bool: ``True`` when ``node`` contains an in-scope return.
+            """
+            if isinstance(node, ast.Return):
+                return True
+            if isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+            ):
+                return False
+            return any(contains_return(child) for child in ast.iter_child_nodes(node))
+
+        return any(contains_return(stmt) for stmt in body_nodes)
+
+    @staticmethod
+    def _reject_loop_control(body_nodes: list[ast.stmt], loop_kind: str) -> None:
+        """Reject Python break/continue before loop AST rewriting.
+
+        Args:
+            body_nodes (list[ast.stmt]): Original loop body statements.
+            loop_kind (str): User-facing loop kind for the diagnostic.
+
+        Raises:
+            SyntaxError: If the body contains ``break`` or ``continue``.
+        """
+        for statement in body_nodes:
+            for nested in ast.walk(statement):
+                if isinstance(nested, ast.Break):
+                    raise SyntaxError(
+                        f"'break' inside a {loop_kind} loop is not supported "
+                        "in @qkernel; express termination in the loop bound "
+                        "or while condition instead"
+                    )
+                if isinstance(nested, ast.Continue):
+                    raise SyntaxError(
+                        f"'continue' inside a {loop_kind} loop is not supported "
+                        "in @qkernel; guard the remaining body with an if instead"
+                    )
+
+    @staticmethod
+    def _reject_named_expression_in_condition(
+        condition: ast.expr,
+        *,
+        construct: str,
+    ) -> None:
+        """Reject assignment expressions whose scope changes after lowering.
+
+        Conditions are moved into generated helper functions or lambdas.
+        A walrus target would therefore bind inside the helper instead of the
+        surrounding qkernel, diverging from Python semantics.
+
+        Args:
+            condition (ast.expr): Condition expression to inspect.
+            construct (str): User-visible control-flow construct name.
+
+        Raises:
+            SyntaxError: If the condition contains a named expression.
+        """
+        if any(isinstance(node, ast.NamedExpr) for node in ast.walk(condition)):
+            raise SyntaxError(
+                f"Assignment expressions (':=') in {construct} conditions are "
+                "not supported in @qkernel. Assign the value on a separate "
+                "line before the condition."
+            )
+
+    @staticmethod
     def _transform_returns_to_assignments(
         body_nodes: list[ast.stmt], ret_var_name: str
     ) -> list[ast.stmt]:
-        """Replace top-level ``return expr`` with ``ret_var_name = expr``."""
+        """Replace top-level returns with assignments to one result name.
+
+        Args:
+            body_nodes (list[ast.stmt]): Statements to rewrite.
+            ret_var_name (str): Synthetic local receiving each return value.
+
+        Returns:
+            list[ast.stmt]: Statements with value-return nodes replaced by
+                assignments while all other nodes are preserved.
+        """
         new_body: list[ast.stmt] = []
         for stmt in body_nodes:
             if isinstance(stmt, ast.Return) and stmt.value is not None:
@@ -579,12 +735,29 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return new_body
 
     def _collect_load_vars_set(self, node: ast.AST) -> set[str]:
+        """Collect non-global variable names loaded by an AST node.
+
+        Args:
+            node (ast.AST): Syntax tree to inspect.
+
+        Returns:
+            set[str]: Loaded local or closure variable names.
+        """
         collector = VariableCollector(global_names=self._global_names)
         collector.visit(node)
         return set(collector.load_vars)
 
     def _stmt_live_in(self, stmt: ast.stmt, live_out: set[str]) -> set[str]:
-        """Compute variables that must be live before executing *stmt*."""
+        """Compute variables live before one statement.
+
+        Args:
+            stmt (ast.stmt): Statement whose transfer function is applied.
+            live_out (set[str]): Variables required after the statement.
+
+        Returns:
+            set[str]: Variables required before the statement, including
+                control predicates and loop back-edge dependencies.
+        """
         if isinstance(stmt, ast.If):
             test_loads = self._collect_load_vars_set(stmt.test)
             true_live_in = self._block_live_in(stmt.body, live_out)
@@ -626,6 +799,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return set(collector.load_vars) | (set(live_out) - set(collector.store_vars))
 
     def _block_live_in(self, body: list[ast.stmt], live_out: set[str]) -> set[str]:
+        """Compute variables live at entry to a statement block.
+
+        Args:
+            body (list[ast.stmt]): Statements in execution order.
+            live_out (set[str]): Variables required after the block.
+
+        Returns:
+            set[str]: Variables required before the first statement.
+        """
         live = set(live_out)
         for stmt in reversed(body):
             live = self._stmt_live_in(stmt, live)
@@ -637,7 +819,19 @@ class ControlFlowTransformer(ast.NodeTransformer):
         exit_live: set[str],
         bound_vars: set[str] | None = None,
     ) -> set[str]:
-        """Compute loop self-edge liveness at the start of the loop body."""
+        """Compute the loop-body entry liveness fixed point.
+
+        Args:
+            body (list[ast.stmt]): Loop-body statements.
+            exit_live (set[str]): Variables required after loop exit or by the
+                condition.
+            bound_vars (set[str] | None): Names rebound by loop iteration and
+                therefore excluded from the carried fixed point. Defaults to
+                None.
+
+        Returns:
+            set[str]: Variables live on entry and across the back edge.
+        """
         bound = set(bound_vars or ())
         live = set()
         while True:
@@ -663,11 +857,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
         bound. The probes resolve names tolerantly (unbound candidates
         drop out), so over-approximating here is safe.
 
-        The classical subset — candidates the body also reads before
-        writing, the ``total = total + i`` shape — is returned separately:
-        only those may produce classical rebind records, while quantum
-        rebind records are collected for every candidate (a store-only
-        quantum reassignment is a state discard, not a recomputation).
+        The classical subset contains candidates that either enter the
+        loop body live (the ``total = total + i`` back-edge shape) or
+        leave the loop live (a store-only value read after the loop).
+        Both need formal loop results: the former threads values between
+        iterations, while the latter preserves the last body value and
+        the initializer on a zero-trip path. Quantum rebind records are
+        collected for every candidate because a store-only quantum
+        reassignment is a state discard, not a recomputation.
 
         Args:
             body (list[ast.stmt]): The ORIGINAL (untransformed) loop body
@@ -677,17 +874,76 @@ class ControlFlowTransformer(ast.NodeTransformer):
 
         Returns:
             tuple[list[str], list[str]]: ``(candidates, classical_candidates)``,
-                each sorted; ``classical_candidates`` is a subset of
-                ``candidates``. Both empty when the body reassigns no
-                pre-existing variable.
+                in first-store source order; ``classical_candidates`` is a
+                subset of ``candidates``. Both are empty when the body
+                reassigns no pre-existing variable.
         """
         collector = VariableCollector(global_names=self._global_names)
         for stmt in body:
             collector.visit(stmt)
-        pre_existing = set(self._outer_defined_vars) | self._lexical_defined_vars
+        outer_defined = set(self._outer_defined_vars)
+        pre_existing = outer_defined | self._lexical_defined_vars
         candidates = (collector.store_vars - bound_names) & pre_existing
-        classical_candidates = candidates & collector.incoming_vars
-        return sorted(candidates), sorted(classical_candidates)
+        loop_entry_live = self._loop_body_entry_live_in(
+            body, set(), bound_vars=bound_names
+        )
+        backedge_candidates = candidates & loop_entry_live
+        live_out_candidates = (
+            (collector.store_vars - bound_names)
+            & set(self._after_stmt_load_vars)
+            & outer_defined
+        )
+        classical_candidate_set = backedge_candidates | live_out_candidates
+        ordered_candidates = [
+            name for name in collector.store_order if name in candidates
+        ]
+        classical_candidates = [
+            name for name in ordered_candidates if name in classical_candidate_set
+        ]
+        return ordered_candidates, classical_candidates
+
+    def _reject_loop_local_escapes(
+        self,
+        body: list[ast.stmt],
+        bound_names: set[str],
+        lineno: int,
+        loop_kind: str,
+    ) -> None:
+        """Reject names first defined in a loop and read after it.
+
+        Qamomile has no formal loop result or zero-trip initializer for a name
+        first defined in the body. Letting such a name escape would therefore
+        leak the value produced by the one trace-time body invocation instead
+        of modeling Python's conditionally-bound local.
+
+        Args:
+            body (list[ast.stmt]): Original loop body statements.
+            bound_names (set[str]): Names bound by the loop target itself.
+            lineno (int): Source line used in the diagnostic.
+            loop_kind (str): Human-readable loop kind.
+
+        Raises:
+            SyntaxError: If a body-local name is live after the loop.
+        """
+        collector = VariableCollector(global_names=self._global_names)
+        for stmt in body:
+            collector.visit(stmt)
+        escaping = (
+            (collector.store_vars - bound_names) - set(self._outer_defined_vars)
+        ) & set(self._after_stmt_load_vars)
+        if escaping:
+            name = next(
+                candidate
+                for candidate in collector.store_order
+                if candidate in escaping
+            )
+            raise SyntaxError(
+                f"Variable '{name}' is first defined inside a {loop_kind} loop "
+                f"at line {lineno} and read after it. Qamomile cannot represent "
+                "that body-local binding as a formal loop result with a "
+                "zero-trip initializer, so initialize the variable before "
+                "the loop."
+            )
 
     def _wrap_body_with_rebind_probes(
         self,
@@ -695,19 +951,35 @@ class ControlFlowTransformer(ast.NodeTransformer):
         candidates: list[str],
         classical_candidates: list[str],
         lineno: int,
+        region_bind: bool = False,
     ) -> list[ast.stmt]:
         """Wrap a transformed loop body with rebind snapshot/record probes.
 
-        Prepends ``_qm_rebind_snap_N = loop_rebind_snapshot(locals(), (...))``
-        and appends ``record_loop_rebinds(_qm_rebind_snap_N, locals(), (...),
-        (...))`` so the tracer can compare pre/post handle identities for
-        each candidate. Candidates are passed as name tuples and resolved
-        tolerantly through ``locals()`` plus the if-branch pre-binding
-        stack — never as direct name loads, which would ``NameError`` for
-        a store-only candidate that is unbound in the current frame (e.g.
-        inside an if branch that only stores the variable). Both probes
-        live inside the loop's ``with`` body, so the zero-trip trace
-        guard skips them together with the body.
+        Prepends ``_qm_rebind_snap_N =
+        loop_rebind_snapshot(locals(), (...))``,
+        and appends ``record_loop_rebinds(_qm_rebind_snap_N, locals(),
+        (...), (...))`` so the tracer can compare pre/post handle
+        identities for each candidate. Snapshot/record candidates are
+        passed as name tuples and resolved tolerantly through
+        ``locals()`` plus the if-branch pre-binding stack — never as
+        direct name loads, which would ``NameError`` for a store-only
+        candidate that is unbound in the current frame (e.g. inside an
+        if branch that only stores the variable). The promotion
+        assignments DO load the name directly, which is safe for
+        classical candidates: back-edge candidates are incoming values,
+        while store-only live-outs are restricted to names already defined
+        in the enclosing scope. All
+        probes live inside the loop's ``with`` body, so the zero-trip
+        trace guard skips them together with the body.
+
+        When ``region_bind`` is true (``for`` / ``for-items`` loops), a
+        ``name = loop_region_enter(_qm_rebind_snap_N, "name")``
+        assignment is additionally injected after the snapshot for each
+        read-before-write classical candidate, so the body's carried
+        reads go through an explicit region argument (see
+        ``loop_region_enter``). ``while`` loops keep ``region_bind``
+        false — a runtime while loop cannot be unrolled, so its
+        non-condition classical carries keep the record-based rejection.
 
         Args:
             flattened_body (list[ast.stmt]): The already-transformed loop
@@ -718,6 +990,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 of ``candidates`` eligible for classical rebind records.
             lineno (int): Source line of the loop statement, used for the
                 generated nodes.
+            region_bind (bool): Inject region-argument entry assignments
+                for the classical candidates. Defaults to False.
 
         Returns:
             list[ast.stmt]: The wrapped body; ``flattened_body`` itself
@@ -774,13 +1048,52 @@ class ControlFlowTransformer(ast.NodeTransformer):
             ),
             lineno=lineno,
         )
-        return [snap_stmt, *flattened_body, record_stmt]
+        entry_stmts: list[ast.stmt] = []
+        if region_bind:
+            entry_stmts = [
+                ast.Assign(
+                    targets=[ast.Name(id=name, ctx=ast.Store())],
+                    value=ast.Call(
+                        func=ast.Name(id="loop_region_enter", ctx=ast.Load()),
+                        args=[
+                            ast.Name(id=snap_name, ctx=ast.Load()),
+                            ast.Constant(value=name),
+                        ],
+                        keywords=[],
+                    ),
+                    lineno=lineno,
+                )
+                for name in classical_candidates
+            ]
+        return [snap_stmt, *entry_stmts, *flattened_body, record_stmt]
 
     def visit_While(self, node: ast.While) -> Any:
+        """Transform a qkernel while loop into a traced context-manager body.
+
+        Args:
+            node (ast.While): While statement to validate and transform.
+
+        Returns:
+            Any: Replacement ``ast.With`` node invoking ``while_loop``.
+
+        Raises:
+            SyntaxError: If the loop has an ``else`` clause, its condition
+                performs a quantum operation, or a body-local value escapes.
+        """
         if node.orelse:
             raise SyntaxError("while ... else is not supported in @qkernel")
+        if self._has_return_in_region(node.body):
+            raise SyntaxError(
+                "'return' inside a while loop is not supported in @qkernel"
+            )
+        self._reject_loop_control(node.body, "while")
+        self._reject_named_expression_in_condition(
+            node.test,
+            construct="while",
+        )
         # Check for quantum operations in while condition
         self._check_no_quantum_ops_in_condition(node.test, node.lineno)
+        self._reject_loop_local_escapes(node.body, set(), node.lineno, "while")
         # Compute rebind-probe candidates on the ORIGINAL body, before
         # nested transforms rewrite assignments into emit_if calls.
         rebind_candidates, classical_rebind_candidates = self._loop_rebind_candidates(
@@ -1054,6 +1367,17 @@ class ControlFlowTransformer(ast.NodeTransformer):
         shadowing.  Raises ``SyntaxError`` for invalid patterns so that
         ``QKernel.__init__`` propagates them instead of falling back to
         the original function.
+
+        Args:
+            node (ast.For): Loop node to validate.
+
+        Returns:
+            list[str]: Names bound by the range or items loop target.
+
+        Raises:
+            SyntaxError: If the loop kind or target is unsupported, a
+                binding shadows a parameter, or a loop binding is read
+                after the loop.
         """
         if self._is_items_call(node.iter):
             binding_names = self._validate_items_loop(node)
@@ -1069,12 +1393,42 @@ class ControlFlowTransformer(ast.NodeTransformer):
                     f"Loop variable '{var_name}' shadows a function parameter. "
                     f"Use a different variable name to avoid silent value loss."
                 )
+            if var_name in self._after_stmt_load_vars:
+                raise SyntaxError(
+                    f"Loop variable '{var_name}' is read after the loop. "
+                    "Post-loop loop-target values are not supported in "
+                    "@qkernel functions; assign the value you need to a "
+                    "separate variable inside the loop."
+                )
+
+        self._reject_loop_local_escapes(
+            node.body,
+            set(binding_names),
+            node.lineno,
+            "for",
+        )
 
         return binding_names
 
     def visit_For(self, node: ast.For) -> Any:
+        """Transform a supported qkernel for loop and attach rebind probes.
+
+        Args:
+            node (ast.For): Range or items loop to validate and transform.
+
+        Returns:
+            Any: Guarded AST statement implementing the range or items loop.
+
+        Raises:
+            SyntaxError: If the loop form, target, shadowing, or escaping
+                bindings violate qkernel loop rules.
+            AssertionError: If validated dispatch reaches an unknown loop kind.
+        """
         if node.orelse:
             raise SyntaxError("for ... else is not supported in @qkernel")
+        if self._has_return_in_region(node.body):
+            raise SyntaxError("'return' inside a for loop is not supported in @qkernel")
+        self._reject_loop_control(node.body, "for")
 
         # Validate target per loop-kind BEFORE extracting binding names.
         # This raises SyntaxError for invalid placeholder-loop targets
@@ -1108,16 +1462,24 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_load_vars = saved_after_load
 
         flattened_body = self._wrap_body_with_rebind_probes(
-            flattened_body, rebind_candidates, classical_rebind_candidates, node.lineno
+            flattened_body,
+            rebind_candidates,
+            classical_rebind_candidates,
+            node.lineno,
+            region_bind=True,
         )
 
         # Dispatch to the appropriate transform.
         # Sequence iteration is already rejected by _validate_for_loop.
         if self._is_items_call(node.iter):
-            return self._transform_for_items(node, flattened_body)
+            return self._transform_for_items(
+                node, flattened_body, classical_rebind_candidates
+            )
 
         if self._is_range_call(node.iter):
-            return self._transform_for_range(node, flattened_body)
+            return self._transform_for_range(
+                node, flattened_body, classical_rebind_candidates
+            )
 
         # [FOR DEVELOPER]
         # Since _validate_for_loop should have rejected any non-items, non-range loops,
@@ -1129,18 +1491,69 @@ class ControlFlowTransformer(ast.NodeTransformer):
             f"iter={ast.dump(node.iter)}"
         )
 
+    def _region_result_stmts(
+        self, classical_candidates: list[str], lineno: int
+    ) -> list[ast.stmt]:
+        """Build post-loop ``loop_region_result`` rebinding assignments.
+
+        One ``name = loop_region_result("name", name)`` statement per
+        loop-carried classical candidate, to run immediately after
+        the loop's ``with`` block (inside the zero-trip guard) so
+        post-loop reads reference the loop operation's region-argument
+        result value instead of the body's final yielded value.
+
+        Args:
+            classical_candidates (list[str]): Read-before-write and
+                store-only-live-out classical candidate names of the loop.
+            lineno (int): Source line of the loop statement.
+
+        Returns:
+            list[ast.stmt]: The rebinding assignments (empty when there
+                are no candidates).
+        """
+        return [
+            ast.Assign(
+                targets=[ast.Name(id=name, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name(id="loop_region_result", ctx=ast.Load()),
+                    args=[
+                        ast.Constant(value=name),
+                        ast.Name(id=name, ctx=ast.Load()),
+                    ],
+                    keywords=[],
+                ),
+                lineno=lineno,
+            )
+            for name in classical_candidates
+        ]
+
     def _transform_for_range(
-        self, node: ast.For, flattened_body: list[ast.stmt]
+        self,
+        node: ast.For,
+        flattened_body: list[ast.stmt],
+        classical_candidates: list[str],
     ) -> ast.stmt:
-        """Transform 'for i in range(...)' to 'with for_loop(...)'.
+        """Transform a range loop into a guarded ``for_loop`` context.
 
         Supports patterns:
             for i in range(stop):  ->  for_loop(0, stop, 1)
             for i in range(start, stop):  ->  for_loop(start, stop, 1)
             for i in range(start, stop, step):  ->  for_loop(start, stop, step)
+
+        When the body has classical rebind candidates, post-loop
+        ``loop_region_result`` assignments follow the with-statement
+        inside the zero-trip trace guard.
+
+        Args:
+            node (ast.For): Validated range-loop AST node.
+            flattened_body (list[ast.stmt]): Transformed body statements.
+            classical_candidates (list[str]): Candidate names that may
+                receive formal loop results.
+
+        Returns:
+            ast.stmt: Guarded context-manager statement implementing the loop.
         """
 
-        # Read range() arguments (arity already validated in _validate_for_loop)
         num_args = len(node.iter.args)  # type: ignore
         # range(stop) -> for_loop(0, stop, 1)
         # range(start, stop) -> for_loop(start, stop, 1)
@@ -1192,26 +1605,43 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 ],
                 keywords=[],
             ),
-            body=[with_stmt],
+            body=[
+                with_stmt,
+                *self._region_result_stmts(classical_candidates, node.lineno),
+            ],
             orelse=[],
             lineno=node.lineno,
             col_offset=node.col_offset,
         )
 
     def _transform_for_items(
-        self, node: ast.For, flattened_body: list[ast.stmt]
+        self,
+        node: ast.For,
+        flattened_body: list[ast.stmt],
+        classical_candidates: list[str],
     ) -> ast.stmt:
         """Transform 'for (k, v) in items(d)' or 'for (k, v) in d.items()' to 'with for_items(d, [...], "v")'.
 
         The with-statement is wrapped in ``if should_trace_items_loop(d):``
         so a compile-time-known EMPTY dict skips tracing the body, exactly
-        like the ``qmc.range`` zero-trip guard.
+        like the ``qmc.range`` zero-trip guard. When the body has
+        classical rebind candidates, post-loop ``loop_region_result``
+        assignments follow the with-statement inside that guard.
 
         Supports patterns:
             for key, value in items(d):  ->  for_items(d, ["key"], "value")
             for key, value in d.items():  ->  for_items(d, ["key"], "value")
             for (i, j), value in items(d):  ->  for_items(d, ["i", "j"], "value")
             for (i, j), value in d.items():  ->  for_items(d, ["i", "j"], "value")
+
+        Args:
+            node (ast.For): Validated items-loop AST node.
+            flattened_body (list[ast.stmt]): Transformed body statements.
+            classical_candidates (list[str]): Candidate names that
+                may receive loop carry results.
+
+        Returns:
+            ast.stmt: Guarded with-statement implementing the items loop.
         """
         # Extract the dict argument from items(d) or d.items() call
         # (_validate_for_loop guarantees one of these patterns)
@@ -1269,13 +1699,20 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 args=[copy.deepcopy(dict_arg)],
                 keywords=[],
             ),
-            body=[with_stmt],
+            body=[
+                with_stmt,
+                *self._region_result_stmts(classical_candidates, node.lineno),
+            ],
             orelse=[],
             lineno=node.lineno,
             col_offset=node.col_offset,
         )
 
     def visit_If(self, node: ast.If) -> Any:
+        self._reject_named_expression_in_condition(
+            node.test,
+            construct="if",
+        )
         # Collect variables from the pre-transform AST (post generic_visit would include generated names)
         collector_test = VariableCollector(global_names=self._global_names)
         collector_test.visit(node.test)
@@ -1452,7 +1889,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
         rebind_record_existing = (
             collector_body.store_vars | collector_orelse.store_vars
         ) & (outer_defined | self._lexical_defined_vars)
-        dead_rebind_candidates = sorted(rebind_record_existing - set(output_vars))
+        branch_store_order = tuple(
+            dict.fromkeys((*collector_body.store_order, *collector_orelse.store_order))
+        )
+        dead_rebind_candidates = [
+            name
+            for name in branch_store_order
+            if name in rebind_record_existing - set(output_vars)
+        ]
 
         def _dead_probe_exprs() -> list[ast.expr]:
             """Build fresh probe expressions for the dead candidates.
@@ -1518,7 +1962,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # ``output_names`` gives ``emit_if`` the positional mapping of
         # the branch-result tuples; ``dead_names`` names the probe tail
         # appended after the outputs (see the dead-rebind probes above).
-        record_candidates = sorted(rebind_record_existing & set(output_vars))
+        record_candidates = [
+            name
+            for name in branch_store_order
+            if name in rebind_record_existing & set(output_vars)
+        ]
         pre_binding_names = record_candidates + dead_rebind_candidates
         call_keywords: list[ast.keyword] = []
         if pre_binding_names:
@@ -1615,6 +2063,19 @@ def transform_control_flow(func: Callable):
         ) from e
     src = textwrap.dedent(src)
     tree = ast.parse(src)
+    # Re-anchor the tree to the original source file before any transform
+    # runs, so that (a) transform-time diagnostics report absolute line
+    # numbers and (b) frames executing the traced kernel body carry the
+    # user's real ``file:line``. ``getsource`` yields line numbers relative
+    # to the decorator line, so shifting by ``co_firstlineno - 1`` restores
+    # absolute positions (``dedent`` only changes columns, never lines).
+    # Nodes synthesized by the transformer inherit these absolute positions
+    # via ``fix_missing_locations`` below. This gives readable tracebacks
+    # for any error raised while tracing — and lets trace-time diagnostics
+    # such as ``Handle.consume`` report the offending source line — instead
+    # of pointing into an opaque ``<qamomile-dsl>`` buffer.
+    ast.increment_lineno(tree, func.__code__.co_firstlineno - 1)
+    source_filename = inspect.getsourcefile(func) or "<qamomile-dsl>"
 
     # Collect global names (modules, builtins, etc.)
     global_names = set(func.__globals__.keys())
@@ -1655,21 +2116,22 @@ def transform_control_flow(func: Callable):
 
     # Inherit the original function's globals
     name_space = func.__globals__.copy()
-    name_space.update(
-        {
-            "while_loop": while_loop,
-            "for_loop": for_loop,
-            "should_trace_for_loop": should_trace_for_loop,
-            "should_trace_items_loop": should_trace_items_loop,
-            "for_items": for_items,
-            "emit_if": emit_if,
-            "branch_rebind_pre_bindings": branch_rebind_pre_bindings,
-            "dead_rebind_binding": dead_rebind_binding,
-            "loop_rebind_snapshot": loop_rebind_snapshot,
-            "record_loop_rebinds": record_loop_rebinds,
-            "Any": Any,  # For type annotations in generated code
-        }
-    )
+    generated_globals = {
+        "while_loop": while_loop,
+        "for_loop": for_loop,
+        "should_trace_for_loop": should_trace_for_loop,
+        "should_trace_items_loop": should_trace_items_loop,
+        "for_items": for_items,
+        "emit_if": emit_if,
+        "branch_rebind_pre_bindings": branch_rebind_pre_bindings,
+        "dead_rebind_binding": dead_rebind_binding,
+        "loop_rebind_snapshot": loop_rebind_snapshot,
+        "loop_region_enter": loop_region_enter,
+        "loop_region_result": loop_region_result,
+        "record_loop_rebinds": record_loop_rebinds,
+        "Any": Any,  # For type annotations in generated code
+    }
+    name_space.update(generated_globals)
 
     # Add closure variables (e.g. names imported inside the function).
     # Empty cells indicate forward references not yet bound at definition time.
@@ -1686,10 +2148,12 @@ def transform_control_flow(func: Callable):
                     f"This typically happens with forward references in nested functions."
                 ) from None
 
-    code_obj = compile(tree, filename="<qamomile-dsl>", mode="exec")
+    code_obj = compile(tree, filename=source_filename, mode="exec")
     exec(code_obj, name_space)
 
-    return name_space[func.__name__]
+    transformed = name_space[func.__name__]
+    transformed.__qamomile_generated_globals__ = generated_globals
+    return transformed
 
 
 # ---------------------------------------------------------------------------

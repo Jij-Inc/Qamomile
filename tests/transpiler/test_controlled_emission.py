@@ -3,9 +3,13 @@
 from typing import Any
 
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallTransform,
     CompositeGateType,
+    InvokeOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
     GateOperation,
@@ -22,6 +26,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _gate_matches_qubit_count,
+    emit_controlled_composite_at_indices,
     emit_controlled_operations,
     emit_multi_controlled_gate,
 )
@@ -111,23 +116,31 @@ def test_controlled_dispatch_accepts_inverse_block(monkeypatch) -> None:
     assert qubit_map[QubitAddress(q_out.uuid)] == 3
 
 
-def test_controlled_dispatch_accepts_composite_gate(monkeypatch) -> None:
-    """Controlled dispatch resolves composite operands via the map."""
+def test_controlled_dispatch_accepts_composite_invocation(monkeypatch) -> None:
+    """Controlled dispatch resolves composite invocation operands via the map."""
     q = Value(type=QubitType(), name="q")
     q_out = q.next_version()
-    op = CompositeGateOperation(
+    ref = CallableRef(namespace="user.composite", name="custom")
+    attrs = {
+        "kind": "composite",
+        "gate_type": CompositeGateType.CUSTOM.name,
+        "num_control_qubits": 0,
+        "num_target_qubits": 1,
+        "custom_name": "custom",
+    }
+    op = InvokeOperation(
         operands=[q],
         results=[q_out],
-        gate_type=CompositeGateType.CUSTOM,
-        num_target_qubits=1,
-        implementation_block=Block(),
+        target=ref,
+        attrs=attrs,
+        definition=CallableDef(ref=ref, body=Block(), attrs=attrs),
     )
     calls: list[tuple[list[int], list[int]]] = []
 
     def fake_emit_composite(
         emit_pass: Any,
         circuit: Any,
-        op: CompositeGateOperation,
+        op: InvokeOperation,
         control_indices: list[int],
         qubit_indices: list[int],
         bindings: dict[str, Any],
@@ -149,6 +162,144 @@ def test_controlled_dispatch_accepts_composite_gate(monkeypatch) -> None:
 
     assert calls == [([7], [3])]
     assert qubit_map[QubitAddress(q_out.uuid)] == 3
+
+
+def test_selected_controlled_implementation_keeps_outer_controls() -> None:
+    """A transform-specific body remains guarded by enclosing controls."""
+
+    class RecordingEmitter:
+        """Record reusable-gate control and append operations."""
+
+        def __init__(self) -> None:
+            """Initialize empty emission logs."""
+            self.control_calls: list[int] = []
+            self.append_calls: list[list[int]] = []
+
+        def gate_controlled(
+            self,
+            gate: _GateWithQubitCount,
+            num_controls: int,
+        ) -> _GateWithQubitCount:
+            """Wrap a fake gate and record its added control count.
+
+            Args:
+                gate (_GateWithQubitCount): Fake body gate.
+                num_controls (int): Number of enclosing controls to add.
+
+            Returns:
+                _GateWithQubitCount: Fake controlled gate with expanded width.
+            """
+            self.control_calls.append(num_controls)
+            assert gate.num_qubits is not None
+            return _GateWithQubitCount(gate.num_qubits + num_controls)
+
+        def append_gate(
+            self,
+            circuit: Any,
+            gate: _GateWithQubitCount,
+            qubit_indices: list[int],
+        ) -> None:
+            """Record the physical qubits used by a fake append.
+
+            Args:
+                circuit (Any): Ignored fake circuit.
+                gate (_GateWithQubitCount): Fake controlled gate.
+                qubit_indices (list[int]): Physical append order.
+            """
+            del circuit, gate
+            self.append_calls.append(qubit_indices)
+
+    class EmitPass:
+        """Provide the reusable-gate surface used by controlled invocation emit."""
+
+        backend_name = "test"
+
+        def __init__(self) -> None:
+            """Initialize a recording emitter."""
+            self._emitter = RecordingEmitter()
+
+        def _blockvalue_to_gate(
+            self,
+            block: Block,
+            num_qubits: int,
+            bindings: dict[str, Any],
+            input_operands: list[Any] | None = None,
+            operation_name: str = "InvokeOperation",
+        ) -> _GateWithQubitCount:
+            """Return a reusable fake gate for the selected body.
+
+            Args:
+                block (Block): Selected implementation body.
+                num_qubits (int): Body qubit width.
+                bindings (dict[str, Any]): Active bindings.
+                input_operands (list[Any] | None): Call-site operands.
+                    Defaults to ``None``.
+                operation_name (str): Diagnostic operation name. Defaults to
+                    ``"InvokeOperation"``.
+
+            Returns:
+                _GateWithQubitCount: Fake gate with ``num_qubits`` width.
+            """
+            del block, bindings, input_operands, operation_name
+            return _GateWithQubitCount(num_qubits)
+
+    own_control = Value(type=QubitType(), name="own_control")
+    target = Value(type=QubitType(), name="target")
+    ref = CallableRef(namespace="test", name="controlled_impl")
+    implementation = CallableImplementation(
+        transform=CallTransform.CONTROLLED,
+        body=Block(input_values=[own_control, target]),
+    )
+    op = InvokeOperation(
+        operands=[own_control, target],
+        results=[own_control.next_version(), target.next_version()],
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+        definition=CallableDef(ref=ref, implementations=[implementation]),
+    )
+    emit_pass = EmitPass()
+
+    emit_controlled_composite_at_indices(
+        emit_pass,
+        object(),
+        op,
+        control_indices=[7],
+        qubit_indices=[3, 5],
+        bindings={},
+    )
+
+    assert emit_pass._emitter.control_calls == [1]
+    assert emit_pass._emitter.append_calls == [[7, 3, 5]]
+
+
+def test_nested_inverse_invoke_without_implementation_raises() -> None:
+    """Nested inverse invocation never falls back to its forward body."""
+    import pytest
+
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    target = Value(type=QubitType(), name="target")
+    ref = CallableRef(namespace="test", name="forward_only")
+    op = InvokeOperation(
+        operands=[target],
+        results=[target.next_version()],
+        transform=CallTransform.INVERSE,
+        attrs={"num_target_qubits": 1},
+        definition=CallableDef(
+            ref=ref,
+            body=Block(input_values=[Value(type=QubitType(), name="inner")]),
+        ),
+    )
+
+    with pytest.raises(EmitError, match="has no inverse implementation body"):
+        emit_controlled_composite_at_indices(
+            _ResolverOnlyEmitPass(),
+            object(),
+            op,
+            control_indices=[7],
+            qubit_indices=[3],
+            bindings={},
+        )
 
 
 def test_controlled_dispatch_accepts_pauli_evolve(monkeypatch) -> None:
@@ -306,6 +457,144 @@ def test_multi_controlled_x_two_controls_uses_toffoli() -> None:
     op = _fixed_gate(GateOperationType.X, 1)
     emit_multi_controlled_gate(emit_pass, object(), op, [4, 5], [9], {})
     assert emit_pass._emitter.calls == [("toffoli", 4, 5, 9)]
+
+
+def test_controlled_walker_resolves_if_from_loop_iteration() -> None:
+    """A loop-bound predicate selects one controlled branch per iteration."""
+    from qamomile.circuit.ir.operation.arithmetic_operations import (
+        CompOp,
+        CompOpKind,
+    )
+    from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
+    from qamomile.circuit.ir.types.primitives import BitType, UIntType
+
+    target = Value(type=QubitType(), name="target")
+    target_after_x = target.next_version()
+    target_after_if = target.next_version()
+    loop_var = Value(type=UIntType(), name="i")
+    zero = Value(type=UIntType(), name="zero").with_const(0)
+    condition = Value(type=BitType(), name="condition")
+    comparison = CompOp(
+        operands=[loop_var, zero],
+        results=[condition],
+        kind=CompOpKind.EQ,
+    )
+    x_gate = GateOperation.fixed(
+        GateOperationType.X,
+        [target],
+        [target_after_x],
+    )
+    branch = IfOperation(
+        operands=[condition],
+        true_operations=[x_gate],
+        false_operations=[],
+    )
+    branch.add_merge(target_after_x, target, target_after_if)
+    loop = ForOperation(
+        operands=[
+            Value(type=UIntType(), name="start").with_const(0),
+            Value(type=UIntType(), name="stop").with_const(2),
+            Value(type=UIntType(), name="step").with_const(1),
+        ],
+        loop_var="i",
+        loop_var_value=loop_var,
+        operations=[comparison, branch],
+    )
+    emit_pass = _MultiControlEmitPass()
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        [loop],
+        [7],
+        {QubitAddress(target.uuid): 3},
+        {},
+    )
+
+    assert emit_pass._emitter.calls == [("cx", 7, 3)]
+
+
+def test_controlled_walker_binds_static_bit_merge_for_following_if() -> None:
+    """A static Bit merge can select a subsequent controlled branch."""
+    from qamomile.circuit.ir.operation.arithmetic_operations import (
+        CompOp,
+        CompOpKind,
+    )
+    from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
+    from qamomile.circuit.ir.types.primitives import BitType, UIntType
+
+    target = Value(type=QubitType(), name="target")
+    target_after_x = target.next_version()
+    target_after_if = target.next_version()
+    loop_var = Value(type=UIntType(), name="i")
+    loop_condition = Value(type=BitType(), name="loop_condition")
+    comparison = CompOp(
+        operands=[loop_var, Value(type=UIntType(), name="zero").with_const(0)],
+        results=[loop_condition],
+        kind=CompOpKind.EQ,
+    )
+    true_flag = Value(type=BitType(), name="true_flag").with_const(True)
+    false_flag = Value(type=BitType(), name="false_flag").with_const(False)
+    merged_flag = Value(type=BitType(), name="merged_flag")
+    flag_if = IfOperation(operands=[loop_condition])
+    flag_if.add_merge(true_flag, false_flag, merged_flag)
+    x_gate = GateOperation.fixed(
+        GateOperationType.X,
+        [target],
+        [target_after_x],
+    )
+    gate_if = IfOperation(
+        operands=[merged_flag],
+        true_operations=[x_gate],
+        false_operations=[],
+    )
+    gate_if.add_merge(target_after_x, target, target_after_if)
+    loop = ForOperation(
+        operands=[
+            Value(type=UIntType(), name="start").with_const(0),
+            Value(type=UIntType(), name="stop").with_const(2),
+            Value(type=UIntType(), name="step").with_const(1),
+        ],
+        loop_var="i",
+        loop_var_value=loop_var,
+        operations=[comparison, flag_if, gate_if],
+    )
+    emit_pass = _MultiControlEmitPass()
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        [loop],
+        [7],
+        {QubitAddress(target.uuid): 3},
+        {},
+    )
+
+    assert emit_pass._emitter.calls == [("cx", 7, 3)]
+
+
+def test_controlled_walker_rejects_runtime_while() -> None:
+    """A measurement-dependent While remains non-unitary under control."""
+    import pytest
+
+    from qamomile.circuit.ir.operation.control_flow import WhileOperation
+    from qamomile.circuit.ir.types.primitives import BitType
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    while_op = WhileOperation(
+        operands=[Value(type=BitType(), name="runtime_condition")],
+        operations=[],
+    )
+
+    with pytest.raises(EmitError, match="Unsupported control flow WhileOperation"):
+        emit_controlled_operations(
+            _MultiControlEmitPass(),
+            object(),
+            [while_op],
+            [7],
+            {},
+            {},
+        )
 
 
 def test_multi_controlled_z_two_controls_conjugates_toffoli() -> None:

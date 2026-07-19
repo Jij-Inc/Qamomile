@@ -1599,7 +1599,7 @@ class TestGateCombinations:
         """
 
         @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
+        def circuit() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
             # Alice's qubit to teleport (prepared in |1>)
             alice = qmc.qubit("alice")
             alice = qmc.x(alice)
@@ -1614,12 +1614,13 @@ class TestGateCombinations:
             alice, bell0 = qmc.cx(alice, bell0)
             alice = qmc.h(alice)
 
-            # Measure all three qubits
-            q = qmc.qubit_array(3, "out")
-            q[0] = alice
-            q[1] = bell0
-            q[2] = bell1
-            return qmc.measure(q)
+            # Measure all three independently. Quantum array assignment is a
+            # borrow return, so it cannot assemble unrelated resources.
+            return (
+                qmc.measure(alice),
+                qmc.measure(bell0),
+                qmc.measure(bell1),
+            )
 
         _, qc = _transpile_and_get_circuit(circuit)
         # Structure: X(alice=q0) H(bell0) CX(bell0,bell1) CX(alice,bell0) H(alice) + 3 Measure = 8
@@ -2448,45 +2449,28 @@ class TestControlFlowIfElse:
 
 
 class TestLoopIndexedMeasuredBitMerge:
-    """Loop-indexed / measured Bit merges: representable ones run, the mux is rejected.
+    """Exercise loop-indexed measured Bit merges across selection modes.
 
-    A runtime (measurement-conditioned) if-else that merges two DISTINCT
-    ``Vector[Bit]`` elements both measured BEFORE the branch
-    (``if sel[j]: r = a[j] else: r = b[j]``) is an at-runtime multiplexing
-    of two pre-existing clbits. The clbit-aliasing emit model cannot
-    represent it — it would bind the merged bit to the true-branch source
-    unconditionally and silently return the wrong value whenever the
-    condition selects the false branch — so emit rejects it with
-    ``EmitError`` (``map_merge_outputs(reject_runtime_bit_mux=True)`` from
-    ``register_merge_outputs``). Representable merges still work: a
-    compile-time-selected branch re-points its merged bit per unrolled
-    iteration (one reused merge-output UUID across iterations), and a merge
-    of branch-local fresh measurements aliases both onto one shared clbit.
+    A measurement-conditioned merge over two pre-existing clbits lowers to
+    a runtime SELECT expression. Compile-time selection re-points the merge
+    result per unrolled iteration, while branch-local fresh measurements
+    alias both branch results onto one shared clbit.
     """
 
-    def test_runtime_pre_measured_bit_mux_is_rejected(self):
-        """A runtime mux of two pre-measured elements raises EmitError.
-
-        ``a`` and ``b`` are measured before the loop; a runtime selector
-        ``sel[j]`` chooses between ``a[j]`` and ``b[j]``. Clbit aliasing
-        would silently bind the merged bit to ``a[j]`` regardless of
-        ``sel[j]`` (returning a wrong measurement), so emit must reject the
-        shape loudly. The always-true selector here would have masked the
-        bug by coincidence, which is exactly why a value-based test cannot
-        guard it — the rejection must be structural.
-        """
+    def test_runtime_pre_measured_bit_mux_executes(self):
+        """A runtime SELECT multiplexes two pre-measured vector elements."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             a = qmc.qubit_array(2, "a")
-            a[1] = qmc.x(a[1])
-            abits = qmc.measure(a)  # (0, 1)
+            a[0] = qmc.x(a[0])
+            abits = qmc.measure(a)  # (1, 0)
             bb = qmc.qubit_array(2, "bb")
-            bbits = qmc.measure(bb)  # (0, 0)
+            bb[1] = qmc.x(bb[1])
+            bbits = qmc.measure(bb)  # (0, 1)
             sel = qmc.qubit_array(2, "sel")
             sel[0] = qmc.x(sel[0])
-            sel[1] = qmc.x(sel[1])
-            selbits = qmc.measure(sel)  # (1, 1)
+            selbits = qmc.measure(sel)  # (1, 0)
             q = qmc.qubit_array(2, "q")
             for j in qmc.range(2):
                 if selbits[j]:
@@ -2498,8 +2482,259 @@ class TestLoopIndexedMeasuredBitMerge:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises(EmitError, match="multiplex two already-measured"):
+        exe = transpiler.transpile(circuit)
+        results = exe.sample(transpiler.executor(), shots=200).result().results
+        assert results == [((1, 1), 200)]
+
+    def test_runtime_constant_index_pre_measured_bit_mux_executes(self):
+        """A runtime SELECT preserves constant-index measured elements."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            a = qmc.qubit_array(1, "a")
+            a[0] = qmc.x(a[0])
+            abits = qmc.measure(a)
+            b = qmc.qubit_array(1, "b")
+            bbits = qmc.measure(b)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = abits[0]
+            else:
+                work = qmc.z(work)
+                selected = bbits[0]
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        transpiler = QiskitTranspiler()
+        result = (
             transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(0, 50)]
+
+    def test_runtime_scalar_pre_measured_bit_mux_executes(self):
+        """A runtime SELECT preserves independent scalar measurements."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            true_q = qmc.qubit("true")
+            true_q = qmc.x(true_q)
+            true_bit = qmc.measure(true_q)
+            false_q = qmc.qubit("false")
+            false_bit = qmc.measure(false_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = true_bit
+            else:
+                work = qmc.z(work)
+                selected = false_bit
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(0, 50)]
+
+    def test_runtime_measured_bit_and_constant_mux_executes(self):
+        """A runtime SELECT combines a measured Bit and a constant."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            measured_q = qmc.qubit("measured")
+            measured_q = qmc.x(measured_q)
+            measured = qmc.measure(measured_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = measured
+            else:
+                work = qmc.z(work)
+                selected = qmc.bit(False)
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(0, 50)]
+
+    def test_runtime_pre_measured_bit_vector_mux_is_rejected(self):
+        """A whole-vector mux of pre-measured regions is rejected."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            a = qmc.qubit_array(2, "a")
+            a[0] = qmc.x(a[0])
+            abits = qmc.measure(a)
+            b = qmc.qubit_array(2, "b")
+            bbits = qmc.measure(b)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = abits
+            else:
+                work = qmc.z(work)
+                selected = bbits
+            if selected[0]:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        with pytest.raises(EmitError, match="multiplex two already-measured"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_branch_local_bit_vector_length_mismatch_is_rejected(self):
+        """Runtime branches cannot merge fresh vectors of different lengths."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            selector = qmc.measure(qmc.qubit("selector"))
+            if selector:
+                selected = qmc.measure(qmc.qubit_array(1, "short"))
+            else:
+                long = qmc.qubit_array(2, "long")
+                long[1] = qmc.x(long[1])
+                selected = qmc.measure(long)
+            return selected
+
+        with pytest.raises(EmitError, match="different vector lengths"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_pre_measured_bit_mux_nested_in_while_executes(self):
+        """A runtime SELECT remains valid inside a measurement while."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            true_q = qmc.qubit("true")
+            true_q = qmc.x(true_q)
+            true_bit = qmc.measure(true_q)
+            false_q = qmc.qubit("false")
+            false_bit = qmc.measure(false_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.h(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            while run:
+                if selector:
+                    work = qmc.x(work)
+                    selected = true_bit
+                else:
+                    work = qmc.z(work)
+                    selected = false_bit
+                if selected:
+                    work = qmc.x(work)
+                stop_q = qmc.qubit("stop")
+                run = qmc.measure(stop_q)
+            return qmc.measure(work)
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(0, 50)]
+
+    def test_nested_pre_measured_bit_select_executes(self):
+        """Nested SELECT expressions preserve pre-measured Bit provenance."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            a = qmc.qubit_array(1, "a")
+            a[0] = qmc.x(a[0])
+            abits = qmc.measure(a)
+            b = qmc.qubit_array(1, "b")
+            bbits = qmc.measure(b)
+
+            inner_q = qmc.qubit("inner")
+            inner_q = qmc.h(inner_q)
+            inner = qmc.measure(inner_q)
+            outer_q = qmc.qubit("outer")
+            outer_q = qmc.h(outer_q)
+            outer = qmc.measure(outer_q)
+
+            work = qmc.qubit("work")
+            if outer:
+                work = qmc.x(work)
+                if inner:
+                    selected = abits[0]
+                else:
+                    selected = abits[0]
+            else:
+                work = qmc.z(work)
+                selected = bbits[0]
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(0, 50)]
+
+    def test_nested_branch_local_measurements_remain_supported(self):
+        """Nested merges of freshly measured branch values still execute."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            inner_q = qmc.qubit("inner")
+            inner_q = qmc.h(inner_q)
+            inner = qmc.measure(inner_q)
+            outer_q = qmc.qubit("outer")
+            outer_q = qmc.h(outer_q)
+            outer = qmc.measure(outer_q)
+
+            if outer:
+                if inner:
+                    true_q = qmc.qubit("true")
+                    selected = qmc.measure(true_q)
+                else:
+                    false_q = qmc.qubit("false")
+                    selected = qmc.measure(false_q)
+            else:
+                outer_false_q = qmc.qubit("outer_false")
+                selected = qmc.measure(outer_false_q)
+            return selected
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(
+            transpiler.executor(),
+            bindings={},
+            shots=100,
+        ).result()
+
+        assert result.results == [(0, 100)]
 
     def test_branch_local_runtime_bit_merge_executes(self):
         """A merge of branch-local fresh measurements still executes correctly.
@@ -2534,6 +2769,226 @@ class TestLoopIndexedMeasuredBitMerge:
             assert value == 1, result.results
             assert count > 0
         assert sum(count for _, count in result.results) == 100
+
+    def test_branch_local_multi_output_selects_preserve_alias_partition(self):
+        """Independent SELECTs preserve different source-sharing patterns."""
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            selector_q = qmc.qubit("selector")
+            selector = qmc.measure(selector_q)
+            if selector:
+                true_q = qmc.qubit("true")
+                shared = qmc.measure(true_q)
+                first = shared
+                second = shared
+            else:
+                first_q = qmc.qubit("first")
+                first = qmc.measure(first_q)
+                second_q = qmc.qubit("second")
+                second_q = qmc.x(second_q)
+                second = qmc.measure(second_q)
+            return first, second
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [((0, 1), 50)]
+
+    def test_preexisting_and_branch_local_bit_select_executes(self):
+        """A SELECT keeps a live prior clbit separate from a fresh result."""
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            prior_q = qmc.qubit("prior")
+            prior_q = qmc.x(prior_q)
+            prior = qmc.measure(prior_q)
+            selector_q = qmc.qubit("selector")
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = prior
+            else:
+                work = qmc.z(work)
+                fresh_q = qmc.qubit("fresh")
+                selected = qmc.measure(fresh_q)
+            if selected:
+                work = qmc.x(work)
+            return prior, qmc.measure(work)
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [((1, 0), 50)]
+
+    def test_dead_preexisting_and_branch_local_bit_merge_executes(self):
+        """A dead prior measurement may safely become the merge clbit."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            prior_q = qmc.qubit("prior")
+            prior_q = qmc.x(prior_q)
+            prior = qmc.measure(prior_q)
+            selector = qmc.measure(qmc.qubit("selector"))
+            work = qmc.qubit("work")
+            if selector:
+                work = qmc.x(work)
+                selected = prior
+            else:
+                work = qmc.z(work)
+                selected = qmc.measure(qmc.qubit("fresh"))
+            if selected:
+                work = qmc.x(work)
+            return qmc.measure(work)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [(0, 50)]
+
+    def test_dead_preexisting_and_branch_local_bit_vector_merge_executes(self):
+        """A dead prior measured region may back a fresh vector merge."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            prior_q = qmc.qubit_array(2, "prior")
+            prior_q[0] = qmc.x(prior_q[0])
+            prior = qmc.measure(prior_q)
+            selector = qmc.measure(qmc.qubit("selector"))
+            if selector:
+                selected = prior
+            else:
+                fresh_q = qmc.qubit_array(2, "fresh")
+                fresh_q[1] = qmc.x(fresh_q[1])
+                selected = qmc.measure(fresh_q)
+            return selected
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [((0, 1), 50)]
+
+    def test_branch_local_project_bit_merge_executes(self):
+        """Projection results created in both branches have fresh provenance."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            selector = qmc.measure(qmc.qubit("selector"))
+            probe = qmc.qubit("probe")
+            if selector:
+                probe, selected = qmc.project_z(probe)
+            else:
+                probe, selected = qmc.project_z(probe)
+            return selected
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [(0, 50)]
+
+    def test_branch_local_measured_vector_element_merge_executes(self):
+        """Elements of branch-local measured vectors retain fresh provenance."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            selector = qmc.measure(qmc.qubit("selector"))
+            if selector:
+                true_q = qmc.qubit_array(2, "true")
+                true_bits = qmc.measure(true_q)
+                selected = true_bits[1]
+            else:
+                false_q = qmc.qubit_array(2, "false")
+                false_q[1] = qmc.x(false_q[1])
+                false_bits = qmc.measure(false_q)
+                selected = false_bits[1]
+            return selected
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [(1, 50)]
+
+    def test_classical_boundary_keeps_prior_measurement_live(self):
+        """Post-quantum SELECT and Boolean ops keep the prior input live."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            prior_q = qmc.qubit("prior")
+            prior_q = qmc.x(prior_q)
+            prior = qmc.measure(prior_q)
+            selector = qmc.measure(qmc.qubit("selector"))
+            if selector:
+                selected = prior
+            else:
+                selected = qmc.measure(qmc.qubit("fresh"))
+            return prior & selected
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(0, 50)]
+
+    def test_nested_loop_prefix_keeps_prior_measurement_live(self):
+        """An outer next-iteration prefix remains valid across an inner SELECT."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            prior_q = qmc.qubit("prior")
+            prior_q = qmc.x(prior_q)
+            prior = qmc.measure(prior_q)
+            selector = qmc.measure(qmc.qubit("selector"))
+            work = qmc.qubit("work")
+            for _i in qmc.range(2):
+                if prior:
+                    work = qmc.x(work)
+                for _j in qmc.range(2):
+                    if selector:
+                        work = qmc.z(work)
+                        selected = prior
+                    else:
+                        work = qmc.z(work)
+                        selected = qmc.measure(qmc.qubit("fresh"))
+                    if selected:
+                        work = qmc.x(work)
+            return qmc.measure(work)
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=50)
+            .result()
+        )
+        assert result.results == [(0, 50)]
+
+    def test_preexisting_and_branch_local_bit_vector_merge_is_rejected(self):
+        """A fresh vector measurement cannot overwrite a live prior region."""
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            prior_q = qmc.qubit_array(2, "prior")
+            prior_q[0] = qmc.x(prior_q[0])
+            prior = qmc.measure(prior_q)
+            selector_q = qmc.qubit("selector")
+            selector = qmc.measure(selector_q)
+            if selector:
+                selected = prior
+            else:
+                fresh_q = qmc.qubit_array(2, "fresh")
+                selected = qmc.measure(fresh_q)
+            return prior[0], selected[0]
+
+        with pytest.raises(EmitError, match="mixes a pre-existing clbit"):
+            QiskitTranspiler().transpile(circuit)
 
     def test_static_if_loop_indexed_merge_reregisters_per_iteration(self):
         """A compile-time-if per unrolled iteration re-points its merged bit.
@@ -2573,6 +3028,48 @@ class TestLoopIndexedMeasuredBitMerge:
             assert value == (0, 1), result.results
             assert count > 0
         assert sum(count for _, count in result.results) == 100
+
+    def test_static_if_selects_quantum_array_slot_per_iteration(self):
+        """A branch-selected qubit returns to its matching loop-indexed slot."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qubits = qmc.qubit_array(2, "qubits")
+            for index in qmc.range(2):
+                if index == 0:
+                    selected = qubits[0]
+                else:
+                    selected = qubits[1]
+                selected = qmc.x(selected)
+                qubits[index] = selected
+            return qmc.measure(qubits)
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(circuit)
+            .sample(transpiler.executor(), shots=32)
+            .result()
+        )
+
+        assert result.results == [((1, 1), 32)]
+
+    def test_static_if_quantum_return_rejects_wrong_target(self):
+        """Emit rejects a branch-selected qubit returned to another slot."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            qubits = qmc.qubit_array(2, "qubits")
+            for index in qmc.range(2):
+                if index == 0:
+                    selected = qubits[0]
+                else:
+                    selected = qubits[1]
+                selected = qmc.x(selected)
+                qubits[1] = selected
+            return qmc.measure(qubits)
+
+        with pytest.raises(EmitError, match="target does not match"):
+            QiskitTranspiler().transpile(circuit)
 
 
 class TestIdentityMergeBackstop:
@@ -2700,7 +3197,7 @@ class TestControlFlowWhileStructure:
         assert isinstance(qc.data[2].operation, WhileLoopOp)
 
     def test_while_loop_structure(self):
-        """While loop body sub-circuit: H(q0) → Measure(q0→c)."""
+        """While loop body sub-circuit: reset → H(q0) → Measure(q0→c)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2720,17 +3217,22 @@ class TestControlFlowWhileStructure:
         assert isinstance(while_inst.operation, WhileLoopOp)
         body = while_inst.operation.params[0]
 
-        # Body has exactly 2 instructions
-        assert len(body.data) == 2
+        # Body has exactly 3 instructions. The leading reset prepares a
+        # nested fresh allocation as |0> on every runtime iteration.
+        assert len(body.data) == 3
         assert body.num_qubits == 1
 
-        # Body[0]: H on body-qubit 0
-        assert isinstance(body.data[0].operation, HGate)
+        # Body[0]: reset on body-qubit 0
+        assert body.data[0].operation.name == "reset"
         assert [body.find_bit(q).index for q in body.data[0].qubits] == [0]
 
-        # Body[1]: Measure on body-qubit 0
-        assert isinstance(body.data[1].operation, Measure)
+        # Body[1]: H on body-qubit 0
+        assert isinstance(body.data[1].operation, HGate)
         assert [body.find_bit(q).index for q in body.data[1].qubits] == [0]
+
+        # Body[2]: Measure on body-qubit 0
+        assert isinstance(body.data[2].operation, Measure)
+        assert [body.find_bit(q).index for q in body.data[2].qubits] == [0]
 
     def test_while_loop_circuit_structure(self):
         """Top-level resource counts for a while-loop circuit."""
@@ -2789,7 +3291,7 @@ class TestControlFlowWhileStructure:
         assert isinstance(qc.data[2].operation, WhileLoopOp)
 
     def test_while_loop_body_gate_verification(self):
-        """Body sub-circuit has H then Measure, both targeting body-qubit 0."""
+        """Body sub-circuit resets, gates, and measures body-qubit 0."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2808,21 +3310,26 @@ class TestControlFlowWhileStructure:
         assert isinstance(qc.data[2].operation, WhileLoopOp)
         body = qc.data[2].operation.params[0]
 
-        # Body has exactly 2 instructions
-        assert len(body.data) == 2
+        # Body has exactly 3 instructions
+        assert len(body.data) == 3
 
-        # Body[0]: H on body-qubit 0
-        assert isinstance(body.data[0].operation, HGate)
+        # Body[0]: reset on body-qubit 0
+        assert body.data[0].operation.name == "reset"
         assert [body.find_bit(q).index for q in body.data[0].qubits] == [0]
 
-        # Body[1]: Measure on body-qubit 0
-        assert isinstance(body.data[1].operation, Measure)
+        # Body[1]: H on body-qubit 0
+        assert isinstance(body.data[1].operation, HGate)
         assert [body.find_bit(q).index for q in body.data[1].qubits] == [0]
 
-        # H and Measure target the same qubit
-        h_target = [body.find_bit(q).index for q in body.data[0].qubits]
-        m_target = [body.find_bit(q).index for q in body.data[1].qubits]
-        assert h_target == m_target
+        # Body[2]: Measure on body-qubit 0
+        assert isinstance(body.data[2].operation, Measure)
+        assert [body.find_bit(q).index for q in body.data[2].qubits] == [0]
+
+        # Reset, H and Measure target the same qubit
+        reset_target = [body.find_bit(q).index for q in body.data[0].qubits]
+        h_target = [body.find_bit(q).index for q in body.data[1].qubits]
+        m_target = [body.find_bit(q).index for q in body.data[2].qubits]
+        assert reset_target == h_target == m_target
 
     # -- clbit aliasing (the root cause of the infinite-loop bug) ----------
     # NOTE: clbit aliasing and single-clbit tests are in the X-body section
@@ -2831,7 +3338,7 @@ class TestControlFlowWhileStructure:
     # -- body gate ordering -----------------------------------------------
 
     def test_while_loop_body_gate_order(self):
-        """Body gates must appear in source order: H → measure."""
+        """Body gates must appear in emitted order: reset → H → measure."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2847,9 +3354,10 @@ class TestControlFlowWhileStructure:
         _, qc = _transpile_and_get_circuit(circuit)
         assert isinstance(qc.data[2].operation, WhileLoopOp)
         body = qc.data[2].operation.params[0]
-        assert len(body.data) == 2
-        assert isinstance(body.data[0].operation, HGate)
-        assert isinstance(body.data[1].operation, Measure)
+        assert len(body.data) == 3
+        assert body.data[0].operation.name == "reset"
+        assert isinstance(body.data[1].operation, HGate)
+        assert isinstance(body.data[2].operation, Measure)
 
     # -- outer circuit gate ordering --------------------------------------
 
@@ -2906,7 +3414,7 @@ class TestControlFlowWhileStructure:
     # -- X-body structure: initial X, body has H + measure ----------------
 
     def test_while_loop_x_init_body_contains_expected_gates(self):
-        """X-initialized while loop body must contain H and measure."""
+        """X-initialized while loop body must contain reset, H and measure."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2922,9 +3430,10 @@ class TestControlFlowWhileStructure:
         _, qc = _transpile_and_get_circuit(circuit)
         assert isinstance(qc.data[2].operation, WhileLoopOp)
         body = qc.data[2].operation.params[0]
-        assert len(body.data) == 2
-        assert isinstance(body.data[0].operation, HGate)
-        assert isinstance(body.data[1].operation, Measure)
+        assert len(body.data) == 3
+        assert body.data[0].operation.name == "reset"
+        assert isinstance(body.data[1].operation, HGate)
+        assert isinstance(body.data[2].operation, Measure)
 
     def test_while_loop_body_measure_same_clbit(self):
         """Body measurement must write to the same clbit as the condition.
@@ -3327,8 +3836,9 @@ class TestControlFlowWhileStructure:
         assert isinstance(while_body.data[0].operation, IfElseOp)
         if_inst = while_body.data[0]
         if_body = if_inst.operation.blocks[0]
-        assert len(if_body.data) == 1  # measure
-        assert isinstance(if_body.data[0].operation, Measure)
+        assert len(if_body.data) == 2  # reset + measure
+        assert if_body.data[0].operation.name == "reset"
+        assert isinstance(if_body.data[1].operation, Measure)
 
         # Test if the initial measurement writes to the clbit used by the while condition.
         while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
@@ -3343,7 +3853,7 @@ class TestControlFlowWhileStructure:
         assert if_cond_clbit_idx == second_measure_clbit_idx
 
         # Test if the third measurement (in the if body) writes to the same clbit as the while condition.
-        if_body_measure = if_body.data[0]
+        if_body_measure = if_body.data[1]
         if_body_measure_clbit_idx = qc.clbits.index(if_body_measure.clbits[0])
         assert if_body_measure_clbit_idx == while_cond_clbit_idx
 
@@ -3358,6 +3868,120 @@ class TestControlFlowWhileStructure:
                 f"Expected all shots to return 0 but got value={value} "
                 f"({count} shots). While + if-only loop is not terminating."
             )
+
+    def test_while_condition_cannot_select_foreign_measured_bit(self):
+        """A loop condition cannot copy a pre-measured foreign clbit."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            other = qmc.measure(qmc.qubit("other"))
+            work = qmc.qubit("work")
+            while run:
+                work = qmc.x(work)
+                run = other
+            return qmc.measure(work)
+
+        with pytest.raises(ValidationError, match="updated by measurements"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_while_condition_merge_cannot_hide_foreign_measured_bit(self):
+        """A branch merge cannot disguise a foreign condition source."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            other = qmc.measure(qmc.qubit("other"))
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            work = qmc.qubit("work")
+            while run:
+                work = qmc.x(work)
+                if selector:
+                    run = other
+                else:
+                    run = qmc.measure(qmc.qubit("stop"))
+            return qmc.measure(work)
+
+        with pytest.raises(ValidationError, match="updated by measurements"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_while_condition_snapshot_live_after_update_is_rejected(self):
+        """A condition update cannot mutate an independently live snapshot."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            out = qmc.qubit("out")
+            while run:
+                old = run
+                if selector:
+                    run = qmc.measure(qmc.qubit("stop"))
+                if old:
+                    out = qmc.x(out)
+            return qmc.measure(out)
+
+        with pytest.raises(ValidationError, match="Loop-carried while-condition"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_while_condition_expression_snapshot_after_update_is_rejected(self):
+        """Lazy expressions of the old condition keep its clbit live."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            run_q = qmc.qubit("run")
+            run_q = qmc.x(run_q)
+            run = qmc.measure(run_q)
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            out = qmc.qubit("out")
+            while run:
+                old_not = ~run
+                if selector:
+                    run = qmc.measure(qmc.qubit("stop"))
+                if old_not:
+                    out = qmc.x(out)
+            return qmc.measure(out)
+
+        with pytest.raises(ValidationError, match="Loop-carried while-condition"):
+            QiskitTranspiler().transpile(circuit)
+
+    def test_while_condition_element_update_keeps_sibling_element_live(self):
+        """Updating flags[0] does not make a later flags[1] read stale."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            flag_q = qmc.qubit_array(2, "flags")
+            flag_q[0] = qmc.x(flag_q[0])
+            flag_q[1] = qmc.x(flag_q[1])
+            flags = qmc.measure(flag_q)
+            run = flags[0]
+            selector_q = qmc.qubit("selector")
+            selector_q = qmc.x(selector_q)
+            selector = qmc.measure(selector_q)
+            out = qmc.qubit("out")
+            while run:
+                if selector:
+                    run = qmc.measure(qmc.qubit("stop"))
+                if flags[1]:
+                    out = qmc.x(out)
+            return qmc.measure(out)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=50).result()
+        assert result.results == [(1, 50)]
 
     def test_while_loop_with_nested_if_only_no_else(self):
         """While loop with nested if-only (no else): clbit count must not leak.
@@ -3418,8 +4042,9 @@ class TestControlFlowWhileStructure:
         inner_if_body = inner_if_inst.operation.blocks[0]
         inner_else_body = inner_if_inst.operation.blocks[1]
         assert len(inner_else_body.data) == 0  # no else
-        assert len(inner_if_body.data) == 1  # measure
-        assert isinstance(inner_if_body.data[0].operation, Measure)
+        assert len(inner_if_body.data) == 2  # reset + measure
+        assert inner_if_body.data[0].operation.name == "reset"
+        assert isinstance(inner_if_body.data[1].operation, Measure)
 
         # Clbit mapping checks
         while_cond_clbit_idx = qc.clbits.index(while_inst.clbits[0])
@@ -3437,7 +4062,7 @@ class TestControlFlowWhileStructure:
         third_measure_clbit_idx = qc.clbits.index(third_measure.clbits[0])
         assert inner_if_cond_clbit_idx == third_measure_clbit_idx
 
-        inner_if_body_measure = inner_if_body.data[0]
+        inner_if_body_measure = inner_if_body.data[1]
         inner_if_body_measure_clbit_idx = qc.clbits.index(
             inner_if_body_measure.clbits[0]
         )
@@ -3946,7 +4571,7 @@ class TestTranspilerPassesPipeline:
         assert len(block.operations) > 0
 
     def test_inline(self, transpiler):
-        """inline() flattens CallBlockOperations from sub-kernel calls."""
+        """inline() flattens inline invocations from sub-kernel calls."""
 
         @qmc.qkernel
         def sub_kernel(q: qmc.Qubit) -> qmc.Qubit:
@@ -4135,7 +4760,7 @@ class TestTranspilerConfigAndSubstitution:
         assert transpiler.config is config
 
     def test_substitute_pass_sets_strategy(self):
-        """substitute() pass sets strategy_name on CompositeGateOperation."""
+        """substitute() pass sets strategy_name on InvokeOperation."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4165,150 +4790,59 @@ class TestTranspilerConfigAndSubstitution:
         transpiler_std = QiskitTranspiler(use_native_composite=False)
         exe_std = transpiler_std.transpile(circuit)
         qc_std = exe_std.compiled_quantum[0].circuit
+        assert qc_std.data[0].operation.name == "qft"
+        qc_std = qc_std.decompose(reps=1)
         # Standard QFT 5q: 5H + 10CP + 2SWAP + 5M = 22
         assert len(qc_std.data) == 22
-        # Verify structure (stdlib high-to-low): H(4) 4CP H(3) 3CP H(2) 2CP H(1) 1CP H(0) 2SWAP 5M
-        idx = 0
-        for qubit in range(4, -1, -1):
-            assert isinstance(qc_std.data[idx].operation, HGate)
-            idx += 1
-            for k in range(qubit - 1, -1, -1):
-                assert isinstance(qc_std.data[idx].operation, CPhaseGate)
-                idx += 1
-        # 2 SWAP gates
-        assert isinstance(qc_std.data[idx].operation, SwapGate)
-        assert [qc_std.find_bit(q).index for q in qc_std.data[idx].qubits] == [0, 4]
-        idx += 1
-        assert isinstance(qc_std.data[idx].operation, SwapGate)
-        assert [qc_std.find_bit(q).index for q in qc_std.data[idx].qubits] == [1, 3]
-        idx += 1
-        for i in range(5):
-            assert isinstance(qc_std.data[idx].operation, Measure)
-            idx += 1
+        standard_names = [instruction.operation.name for instruction in qc_std.data]
+        assert standard_names.count("h") == 5
+        assert standard_names.count("cp") == 10
+        assert standard_names.count("swap") == 2
+        assert standard_names.count("measure") == 5
 
         # Approximate QFT (k=2)
         transpiler_approx = QiskitTranspiler(use_native_composite=False)
         config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
         transpiler_approx.set_config(config)
         exe_approx = transpiler_approx.transpile(circuit)
-        qc_approx = exe_approx.compiled_quantum[0].circuit
+        qc_approx = exe_approx.compiled_quantum[0].circuit.decompose(reps=1)
         # Approximate QFT k=2 5q: 5H + 7CP + 2SWAP + 5M = 19
-        # Each qubit gets at most k=2 CP gates after its H (stdlib high-to-low)
         assert len(qc_approx.data) == 19
-        # Verify structure: H(4) 2CP H(3) 2CP H(2) 2CP H(1) 1CP H(0) 2SWAP 5M
-        idx = 0
-
-        # qubit 4: H + CP(4,3,π/2) + CP(4,2,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [4]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            4,
-            3,
+        approximate_names = [
+            instruction.operation.name for instruction in qc_approx.data
         ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            4,
-            2,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 3: H + CP(3,2,π/2) + CP(3,1,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [3]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            3,
-            2,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            3,
-            1,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 2: H + CP(2,1,π/2) + CP(2,0,π/4)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [2]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            2,
-            1,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            2,
-            0,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 4, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 1: H + CP(1,0,π/2)
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [1]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, CPhaseGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            1,
-            0,
-        ]
-        assert np.isclose(
-            float(qc_approx.data[idx].operation.params[0]), np.pi / 2, atol=1e-10
-        )
-        idx += 1
-
-        # qubit 0: H only
-        assert isinstance(qc_approx.data[idx].operation, HGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [0]
-        idx += 1
-
-        # 2 SWAP gates for bit reversal
-        assert isinstance(qc_approx.data[idx].operation, SwapGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            0,
-            4,
-        ]
-        idx += 1
-        assert isinstance(qc_approx.data[idx].operation, SwapGate)
-        assert [qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits] == [
-            1,
-            3,
-        ]
-        idx += 1
-
-        for i in range(5):
-            assert isinstance(qc_approx.data[idx].operation, Measure)
-            assert [
-                qc_approx.find_bit(q).index for q in qc_approx.data[idx].qubits
-            ] == [i]
-            idx += 1
+        assert approximate_names.count("h") == 5
+        assert approximate_names.count("cp") == 7
+        assert approximate_names.count("swap") == 2
+        assert approximate_names.count("measure") == 5
 
         # Approximate has strictly fewer total gates
         assert len(qc_approx.data) < len(qc_std.data)
+
+    def test_approximate_qft_overrides_native_preference(self):
+        """An approximate strategy is never relabeled as exact native QFT."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            q = qmc.qft(q)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler(use_native_composite=True)
+        transpiler.set_config(
+            TranspilerConfig.with_strategies({"qft": "approximate_k1"})
+        )
+        circuit_artifact = transpiler.transpile(circuit).quantum_circuit
+        [qft_instruction] = [
+            instruction
+            for instruction in circuit_artifact.data
+            if instruction.operation.name == "qft"
+        ]
+        decomposed = circuit_artifact.decompose(reps=1)
+        names = [instruction.operation.name for instruction in decomposed.data]
+
+        assert type(qft_instruction.operation).__name__ != "QFTGate"
+        assert names.count("cp") == 3
 
     def test_approximate_qft_cp_count(self):
         """Approximate QFT (k=2) on 5 qubits has fewer CP gates than standard."""
@@ -4322,7 +4856,7 @@ class TestTranspilerConfigAndSubstitution:
         # Standard QFT
         transpiler_std = QiskitTranspiler(use_native_composite=False)
         exe_std = transpiler_std.transpile(circuit)
-        qc_std = exe_std.compiled_quantum[0].circuit
+        qc_std = exe_std.compiled_quantum[0].circuit.decompose(reps=1)
         # Standard: 5H + 10CP + 2SWAP + 5M = 22
         assert len(qc_std.data) == 22
         cp_std = sum(1 for i in qc_std.data if isinstance(i.operation, CPhaseGate))
@@ -4333,7 +4867,7 @@ class TestTranspilerConfigAndSubstitution:
         config = TranspilerConfig.with_strategies({"qft": "approximate_k2"})
         transpiler_approx.set_config(config)
         exe_approx = transpiler_approx.transpile(circuit)
-        qc_approx = exe_approx.compiled_quantum[0].circuit
+        qc_approx = exe_approx.compiled_quantum[0].circuit.decompose(reps=1)
         # Approximate: 5H + 7CP + 2SWAP + 5M = 19
         assert len(qc_approx.data) == 19
         cp_approx = sum(
@@ -4341,19 +4875,6 @@ class TestTranspilerConfigAndSubstitution:
         )
         assert cp_approx == 7  # truncated to k=2 neighbors
         assert cp_approx < cp_std
-
-    def test_qft_strategy_resources(self):
-        """QFT strategy resource metadata is consistent."""
-        from qamomile.circuit.stdlib.qft import QFT
-
-        qft_gate = QFT(5)
-        standard_resources = qft_gate.get_resources_for_strategy("standard")
-        approx_resources = qft_gate.get_resources_for_strategy("approximate_k2")
-
-        assert standard_resources.custom_metadata["num_cp_gates"] == 10
-        assert approx_resources.custom_metadata["num_cp_gates"] < 10
-        assert standard_resources.custom_metadata["num_h_gates"] == 5
-        assert approx_resources.custom_metadata["num_h_gates"] == 5
 
     def test_substitute_no_rules_is_noop(self):
         """substitute() with no config rules returns block unchanged."""
@@ -4704,14 +5225,20 @@ class TestStdlibQFT:
         transpiler = QiskitTranspiler(use_native_composite=False)
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
-        sv = _run_statevector(qc)
+        sv = _run_statevector(qc.decompose(reps=1))
         # QFT -> IQFT must recover the input state X(q[0]) = |01> in Qiskit
         # convention (qubit 0 is LSB), statevector index 1 = [0, 1, 0, 0]
         expected = np.array([0, 1, 0, 0], dtype=complex)
         assert np.allclose(sv, expected, atol=1e-10)
 
     def test_qft_native_emission(self):
-        """Native QFT emitter uses Qiskit's QFT library gate."""
+        """Native emission preserves QFT identity as Qiskit's QFTGate.
+
+        The semantic identity must survive lowering and legalization so the
+        materializer can emit the single native library gate, and the native
+        realization must be unitarily equivalent to the decomposed fallback.
+        """
+        from qiskit.quantum_info import Operator
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4722,10 +5249,48 @@ class TestStdlibQFT:
         transpiler = QiskitTranspiler(use_native_composite=True)
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
-        assert len(qc.data) > 0
+        names = [instruction.operation.name for instruction in qc.data]
+        assert names.count("qft") == 1
+        assert names.count("measure") == 3
+
+        decomposed_exe = QiskitTranspiler(use_native_composite=False).transpile(circuit)
+        decomposed = decomposed_exe.compiled_quantum[0].circuit
+        native_unitary = qc.copy()
+        native_unitary.remove_final_measurements()
+        decomposed_unitary = decomposed.copy()
+        decomposed_unitary.remove_final_measurements()
+        assert Operator(native_unitary).equiv(Operator(decomposed_unitary))
+
+    def test_iqft_native_emission_matches_decomposed(self):
+        """Native IQFT emission is unitarily equivalent to the fallback."""
+        from qiskit.quantum_info import Operator
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(3, "q")
+            q = qmc.iqft(q)
+            return qmc.measure(q)
+
+        native = (
+            QiskitTranspiler(use_native_composite=True)
+            .transpile(circuit)
+            .compiled_quantum[0]
+            .circuit
+        )
+        decomposed = (
+            QiskitTranspiler(use_native_composite=False)
+            .transpile(circuit)
+            .compiled_quantum[0]
+            .circuit
+        )
+        native_unitary = native.copy()
+        native_unitary.remove_final_measurements()
+        decomposed_unitary = decomposed.copy()
+        decomposed_unitary.remove_final_measurements()
+        assert Operator(native_unitary).equiv(Operator(decomposed_unitary))
 
     def test_qft_decomposed_emission(self):
-        """Decomposed QFT uses primitive gates (H, CP) in stdlib high-to-low order."""
+        """Fallback QFT keeps its box and decomposes at the SDK boundary."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -4736,22 +5301,21 @@ class TestStdlibQFT:
         transpiler = QiskitTranspiler(use_native_composite=False)
         exe = transpiler.transpile(circuit)
         qc = exe.compiled_quantum[0].circuit
+        assert [instruction.operation.name for instruction in qc.data] == [
+            "qft",
+            "measure",
+            "measure",
+            "measure",
+        ]
+        qc = qc.decompose(reps=1)
         # Decomposed QFT 3q (stdlib high-to-low):
         #   H(2) CP(2,1) CP(2,0) H(1) CP(1,0) H(0) SWAP(0,2) + 3M = 10
         assert len(qc.data) == 10
-        assert isinstance(qc.data[0].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [2]
-        assert isinstance(qc.data[1].operation, CPhaseGate)
-        assert isinstance(qc.data[2].operation, CPhaseGate)
-        assert isinstance(qc.data[3].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [1]
-        assert isinstance(qc.data[4].operation, CPhaseGate)
-        assert isinstance(qc.data[5].operation, HGate)
-        assert [qc.find_bit(q).index for q in qc.data[5].qubits] == [0]
-        assert isinstance(qc.data[6].operation, SwapGate)
-        assert [qc.find_bit(q).index for q in qc.data[6].qubits] == [0, 2]
-        for i in range(3):
-            assert isinstance(qc.data[7 + i].operation, Measure)
+        names = [instruction.operation.name for instruction in qc.data]
+        assert names.count("h") == 3
+        assert names.count("cp") == 3
+        assert names.count("swap") == 1
+        assert names.count("measure") == 3
 
 
 class TestStdlibQPE:
@@ -4853,41 +5417,39 @@ class TestControlledGate:
         assert qc.num_qubits == 2
 
 
+@qmc.composite_gate(name="bell_pair")
+def _custom_bell_pair(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Prepare a Bell pair through the public composite API.
+
+    Args:
+        q0 (qmc.Qubit): Control qubit.
+        q1 (qmc.Qubit): Target qubit.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Updated Bell-pair qubits.
+    """
+    q0 = qmc.h(q0)
+    return qmc.cx(q0, q1)
+
+
 class TestCustomCompositeGate:
-    """Test custom CompositeGate through the full pipeline."""
+    """Test a custom composite qkernel through the full pipeline."""
 
     def test_custom_gate_transpiles(self):
-        """Custom CompositeGate decomposes and transpiles."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return (q0, q1)
-
-        bell = BellPair()
+        """A custom composite is boxed, decomposable, and executable."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit)
-        sv = _run_statevector(qc)
-        # CompositeGate may allocate extra qubits internally
+        sv = _run_statevector(qc, decompose=True)
         num_q = qc.num_qubits
-        # This test assumes the Bell pair occupies the only two qubits.
-        # If CompositeGate ever allocates ancillas, update the expected-state
-        # construction instead of relaxing this assertion.
         assert num_q == 2
         expected = np.zeros(2**num_q, dtype=complex)
         expected[0] = 1.0 / np.sqrt(2)  # |00>
@@ -5482,29 +6044,29 @@ class TestAlgorithmQAOAModules:
         assert isinstance(qc.data[0].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
         assert np.isclose(
-            float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10
+            float(qc.data[0].operation.params[0]), 2.0 * gamma * 1.0, atol=1e-10
         )
         assert isinstance(qc.data[1].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [1, 2]
         assert np.isclose(
-            float(qc.data[1].operation.params[0]), gamma * (-0.5), atol=1e-10
+            float(qc.data[1].operation.params[0]), 2.0 * gamma * (-0.5), atol=1e-10
         )
         assert isinstance(qc.data[2].operation, RZGate)
         assert [qc.find_bit(q).index for q in qc.data[2].qubits] == [0]
         assert np.isclose(
-            float(qc.data[2].operation.params[0]), gamma * 0.3, atol=1e-10
+            float(qc.data[2].operation.params[0]), 2.0 * gamma * 0.3, atol=1e-10
         )
         assert isinstance(qc.data[3].operation, RZGate)
         assert [qc.find_bit(q).index for q in qc.data[3].qubits] == [2]
         assert np.isclose(
-            float(qc.data[3].operation.params[0]), gamma * (-0.1), atol=1e-10
+            float(qc.data[3].operation.params[0]), 2.0 * gamma * (-0.1), atol=1e-10
         )
         for i in range(3):
             assert isinstance(qc.data[4 + i].operation, Measure)
             assert [qc.find_bit(q).index for q in qc.data[4 + i].qubits] == [i]
 
     def test_ising_cost_statevector(self):
-        """ising_cost on 2 qubits matches RZZ(gamma*J) on |00>."""
+        """ising_cost on 2 qubits matches RZZ(2*gamma*J) on |00>."""
 
         @qmc.qkernel
         def circuit(
@@ -5524,7 +6086,7 @@ class TestAlgorithmQAOAModules:
             circuit, bindings={"n": 2, "quad": quad, "linear": linear, "gamma": gamma}
         )
         sv = _run_statevector(qc)
-        expected = GATE_SPECS["RZZ"].matrix_fn(gamma * 1.0) @ all_zeros_state(2)
+        expected = GATE_SPECS["RZZ"].matrix_fn(2.0 * gamma * 1.0) @ all_zeros_state(2)
         assert statevectors_equal(sv, expected)
 
     @pytest.mark.parametrize("n_qubits", [2, 3, 4])
@@ -5604,7 +6166,7 @@ class TestAlgorithmQAOAModules:
         assert isinstance(qc.data[0].operation, RZZGate)
         assert [qc.find_bit(q).index for q in qc.data[0].qubits] == [0, 1]
         assert np.isclose(
-            float(qc.data[0].operation.params[0]), gamma * 1.0, atol=1e-10
+            float(qc.data[0].operation.params[0]), 2.0 * gamma * 1.0, atol=1e-10
         )
         assert isinstance(qc.data[1].operation, RXGate)
         assert [qc.find_bit(q).index for q in qc.data[1].qubits] == [0]
@@ -5647,7 +6209,7 @@ class TestAlgorithmQAOAModules:
         )
         sv = _run_statevector(qc)
         H = GATE_SPECS["H"].matrix_fn()
-        RZZ = GATE_SPECS["RZZ"].matrix_fn(gamma * 1.0)
+        RZZ = GATE_SPECS["RZZ"].matrix_fn(2.0 * gamma * 1.0)
         RX = GATE_SPECS["RX"].matrix_fn(2.0 * beta)
         state = all_zeros_state(2)
         state = tensor_product(H, H) @ state
@@ -5708,7 +6270,7 @@ class TestAlgorithmQAOAModules:
                 assert [qc.find_bit(q).index for q in qc.data[idx].qubits] == [qi, qj]
                 assert np.isclose(
                     float(qc.data[idx].operation.params[0]),
-                    gamma * quad_vals[e],
+                    2.0 * gamma * quad_vals[e],
                     atol=1e-10,
                 )
                 idx += 1
@@ -8717,92 +9279,3 @@ class TestWhileIfSharedLocalMerge:
 
         with pytest.raises((DependencyError, EmitError)):
             _transpile_and_get_circuit(circuit)
-
-
-class TestCommonFallbackMappedWalker:
-    """Exercise the shared controlled fallback via a gateless Qiskit pass.
-
-    Monkeypatching ``QiskitEmitPass._blockvalue_to_gate`` to return None
-    forces the shared mapped walker (the path QURI Parts-like backends
-    take), so its output can be statevector-compared against Qiskit's
-    native custom-controlled-gate emission of the same kernel.
-    """
-
-    @staticmethod
-    def _force_fallback(monkeypatch) -> None:
-        """Disable block-to-gate conversion on the Qiskit emit pass."""
-        from qamomile.qiskit.transpiler import QiskitEmitPass
-
-        monkeypatch.setattr(
-            QiskitEmitPass,
-            "_blockvalue_to_gate",
-            lambda self, *args, **kwargs: None,
-        )
-
-    def test_multi_target_inner_block_matches_native_gate_path(
-        self, monkeypatch
-    ) -> None:
-        """Multi-target controlled sub-kernel: fallback equals native path."""
-
-        @qmc.qkernel
-        def multi_target(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-            qs[0] = qmc.h(qs[0])
-            qs[1] = qmc.x(qs[1])
-            qs[0], qs[2] = qmc.cx(qs[0], qs[2])
-            qs[1] = qmc.rz(qs[1], 0.375)
-            return qs
-
-        controlled = qmc.control(multi_target)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            c = qmc.qubit("c")
-            qs = qmc.qubit_array(3, "qs")
-            c = qmc.h(c)
-            qs[1] = qmc.x(qs[1])
-            c, qs = controlled(c, qs)
-            bits = qmc.measure(qs)
-            return bits
-
-        _, native_circuit = _transpile_and_get_circuit(circuit)
-        native_sv = _run_statevector(native_circuit, decompose=True)
-
-        self._force_fallback(monkeypatch)
-        _, fallback_circuit = _transpile_and_get_circuit(circuit)
-        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
-
-        assert statevectors_equal(fallback_sv, native_sv)
-
-    def test_controlled_modular_increment_matches_native_gate_path(
-        self, monkeypatch
-    ) -> None:
-        """Nested symbolic MCX composition: fallback equals native path.
-
-        ``modular_increment`` wraps ``qmc.control(qmc.x,
-        num_controls=k)`` inside a ``qmc.range`` loop, so the shared
-        walker must unroll the loop, resolve the loop-dependent nested
-        ``SymbolicControlledU``, and compose its controls with the
-        outer one (the 1D periodic Poisson shift shape).
-        """
-        from qamomile.circuit import modular_increment
-
-        controlled_shift = qmc.control(modular_increment)
-
-        @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
-            c = qmc.qubit("c")
-            qs = qmc.qubit_array(2, "qs")
-            c = qmc.h(c)
-            qs[0] = qmc.x(qs[0])
-            c, qs = controlled_shift(c, qs)
-            bits = qmc.measure(qs)
-            return bits
-
-        _, native_circuit = _transpile_and_get_circuit(circuit)
-        native_sv = _run_statevector(native_circuit, decompose=True)
-
-        self._force_fallback(monkeypatch)
-        _, fallback_circuit = _transpile_and_get_circuit(circuit)
-        fallback_sv = _run_statevector(fallback_circuit, decompose=True)
-
-        assert statevectors_equal(fallback_sv, native_sv)

@@ -148,6 +148,42 @@ jobs:
           set -eux
           uv run pytest -m quri_parts tests -v
 
+  hugr-test:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: *python_versions
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies with HUGR
+        shell: bash
+        run: |
+          set -eux
+          uv sync --frozen --group dev --extra hugr
+
+      - name: Run HUGR related tests
+        shell: bash
+        run: |
+          set -eux
+          uv run pytest -m hugr tests -v
+
   cudaq-test-macos:
     needs: changes
     if: ${{ needs.changes.outputs.docs_only != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}

@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -20,14 +21,14 @@
 # # Qiskitサポート
 #
 # このページでは、具体的な最適化問題を通して、Qamomileの[Qiskit](https://quantum-computing.ibm.com/docs/)量子SDK連携を紹介します。
-# QiskitはQamomileの標準の量子SDK連携です。`qamomile`をインストールすれば、`QiskitTranspiler`と`QiskitExecutor`をすぐに使えます。
+# Qiskit連携はオプションです。`QiskitTranspiler`と`QiskitExecutor`を使うには`qiskit` extraをインストールします。
 # このチュートリアルでは、小さなMaxCutインスタンスに対するQAOA最適化を例に、Qamomileの量子カーネルをQiskit回路へトランスパイルし、Qiskitシミュレータ上でサンプリングと期待値評価を行います。
 # さらに、Qiskitの高度な回路機能も紹介します。
 
 # %%
 # 最新のQamomileをpipからインストールします。
-# Qiskitとqiskit-aerはコア依存なので、追加の依存グループは不要です。
-# # !pip install qamomile
+# 以下で使うQiskitバックエンドと回路描画の依存関係をインストールします。
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import os
@@ -363,8 +364,8 @@ assert np.isfinite(energy_via_run)
 # %% [markdown]
 # ## Qiskitの高度な機能
 #
-# Qamomileでは、Qiskitを標準の量子SDK連携として使えます。
-# そのため、Qiskitが持つ高度な回路機能を活用するための入口も用意しています。
+# Qamomileでは、オプションのQiskit連携を利用できます。
+# Qiskitが持つ高度な回路機能を活用するための入口も用意しています。
 #
 # このセクションでは、生成した回路をQiskitの実行対象へ渡すときに便利な機能を3つ示します。
 #
@@ -442,14 +443,14 @@ print("if_else condition:", if_op.condition)
 
 # %% [markdown]
 # Qiskitの古典式システムは現在、Qamomileが扱うことのできる多くの論理演算、比較演算、算術演算に対応しています。
-# ただし、`FLOORDIV`と`POW`には対応するQiskitの古典式がないため、どちらかが回路実行時に評価する式として残ると、Qamomileは回路生成時に`NotImplementedError`を発生させます。
+# ただし、`FLOORDIV`と`POW`には対応するQiskitの古典式がないため、どちらかが回路実行時に評価する式として残ると、Qiskit回路を構築する前のtarget legality検証で`TargetCapabilityError`が発生します。
 # これらが必要な場合は、トランスパイル前に具体値として決まる形にしてください。
 
 # %% [markdown]
 # ### ネイティブ`PauliEvolutionGate`
 #
 # `qmc.pauli_evolve(q, H, gamma)`は、Qamomileの中間表現では$e^{-i\gamma H}$を表します。
-# Qiskit連携は、`use_native_composite=True`(デフォルト)の場合、この操作を`PauliEvolutionGate`として出力します。
+# Qiskit連携は、`use_native_pauli_evolution=True`(デフォルト)の場合、この操作を`PauliEvolutionGate`として出力します。
 # 未バインドの`gamma`はQiskitの`Parameter`になるため、同じ回路を変分パラメータを変えながら評価する用途に再利用できます。
 
 # %%
@@ -482,15 +483,15 @@ assert "PauliEvolution" in evolution_ops
 assert {str(param) for param in evolution_circuit.parameters} == {"gamma"}
 
 # %% [markdown]
-# 量子SDKに依存しないゲート分解を確認したい場合は、`QiskitTranspiler(use_native_composite=False)`を渡します。
-# 同じフラグでネイティブQFT/IQFT出力も無効化できるため、デバッグや量子SDK非依存のゲート数比較に便利です。
+# 量子SDKに依存しないゲート分解を確認したい場合は、`QiskitTranspiler(use_native_pauli_evolution=False)`を渡します。
+# このフラグが制御するのはPauli発展だけです。ネイティブQFT/IQFT出力は`use_native_composite`で独立に制御します。
 
 # %% [markdown]
 # ### ネイティブ`QFTGate`
 #
 # Qamomileには、QFTや逆QFTを`qmc.qft(...)` / `qmc.iqft(...)`で表す高水準の操作があります。
 # Qiskit連携では、これらの量子カーネルを量子ゲートへ分解せず、Qiskitネイティブな`QFTGate`として直接出力できます。
-# 量子ゲートに分解された回路が必要な場合は、`use_native_composite=False`を指定すると、H/controlled-phase/SWAPに展開されます。
+# `use_native_composite=False`では、移植可能なfallback本体を持つ名前付きQiskitゲートが残ります。H/controlled-phase/SWAPの実装を確認したい場合は、Qiskitの`decompose()`を呼び出します。
 # %%
 # QiskitのネイティブQFTゲートと、ゲート分解された回路を比較します。
 @qmc.qkernel
@@ -509,12 +510,14 @@ qft_decomposed = QiskitTranspiler(use_native_composite=False).to_circuit(
     bindings={"n": 3},
 )
 native_ops = [inst.operation.name for inst in qft_native.data]
-decomposed_ops = [inst.operation.name for inst in qft_decomposed.data]
+decomposed_ops = [
+    inst.operation.name for inst in qft_decomposed.decompose(reps=1).data
+]
 print("native QFT ops    :", native_ops)
 print("decomposed QFT ops:", decomposed_ops)
 assert any("qft" in name.lower() for name in native_ops)
 assert "cp" in decomposed_ops
-assert len(qft_native.data) < len(qft_decomposed.data)
+assert len(qft_native.data) < len(decomposed_ops)
 
 # %% [markdown]
 # ## 他のQiskit実行対象の利用

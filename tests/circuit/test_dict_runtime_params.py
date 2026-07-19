@@ -20,6 +20,7 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation.classical_ops import DictGetItemOperation
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.executable import ParameterContainerKind
 from tests.circuit.conftest import run_statevector
 
 # ---------------------------------------------------------------------------
@@ -444,6 +445,16 @@ class TestDictParameterEmit:
             "quad[(0, 1)]",
             "quad[(1, 2)]",
         ]
+        metadata = exe.compiled_quantum[0].parameter_metadata
+        assert metadata.arrays == {}
+        assert all(
+            parameter.container_kind is ParameterContainerKind.DICT
+            for parameter in metadata.parameters
+        )
+        assert {parameter.array_name for parameter in metadata.parameters} == {
+            "linear",
+            "quad",
+        }
 
     def test_same_key_shares_one_parameter(self, qiskit_transpiler):
         """Repeated lookups of one key reuse a single backend parameter."""

@@ -10,18 +10,47 @@ import pytest
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle import QFixed, Qubit
 from qamomile.circuit.frontend.tracer import get_current_tracer
-from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableRef,
     CompositeGateType,
+    InvokeOperation,
+)
+from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.gate import (
+    ControlledUOperation,
+    MeasureQFixedOperation,
+    MeasureVectorOperation,
 )
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.passes.separate import lower_operations
 
 
 def _decode_phase(bits: list) -> float:
     """Decode measurement bits into a phase estimate."""
     return sum(bit * (1 / (2 ** (i + 1))) for i, bit in enumerate(reversed(bits)))
+
+
+def _collect_controlled_u_ops(operations: list[Any]) -> list[ControlledUOperation]:
+    """Collect controlled-U operations from a nested operation list.
+
+    Args:
+        operations (list[Any]): Operations to traverse.
+
+    Returns:
+        list[ControlledUOperation]: Controlled-U operations found at any
+        nesting depth.
+    """
+    collected: list[ControlledUOperation] = []
+    for op in operations:
+        if isinstance(op, ControlledUOperation):
+            collected.append(op)
+        if isinstance(op, HasNestedOps):
+            for body in op.nested_op_lists():
+                collected.extend(_collect_controlled_u_ops(list(body)))
+    return collected
 
 
 @pytest.fixture
@@ -81,12 +110,54 @@ def _p_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
     return qmc.p(q, theta)
 
 
+@qmc.composite_gate(name="boxed_p_gate")
+def _boxed_p_gate(q: qmc.Qubit, theta: float) -> qmc.Qubit:
+    return qmc.p(q, theta)
+
+
 @qmc.qkernel
 def builtin_qpe(n: int, phase: float) -> qmc.Float:
     q_phase = qmc.qubit_array(n, name="phase_reg")
     target = qmc.qubit(name="target")
     target = qmc.x(target)
     phase_q: qmc.QFixed = qmc.qpe(target, q_phase, _p_gate, theta=phase)
+    return qmc.measure(phase_q)
+
+
+@qmc.qkernel
+def _mul_two_mod_three(work: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply multiplication by two modulo three using private workspace.
+
+    Args:
+        work (qmc.Vector[qmc.Qubit]): Two-qubit modular value register.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated modular value register.
+    """
+    return qmc.modmul_const(work, multiplier=2, modulus=3)
+
+
+@qmc.qkernel
+def qpe_with_private_workspace_unitary() -> qmc.Float:
+    """Estimate the order-two phase of a workspace-allocating unitary.
+
+    Returns:
+        qmc.Float: Two-bit phase estimate, either zero or one half.
+    """
+    counting = qmc.qubit_array(2, name="counting")
+    work = qmc.qubit_array(2, name="work")
+    work[0] = qmc.x(work[0])
+    phase = qmc.qpe(work, counting, _mul_two_mod_three)
+    return qmc.measure(phase)
+
+
+@qmc.qkernel
+def builtin_qpe_with_composite_unitary(n: int, phase: float) -> qmc.Float:
+    """Run QPE with a qkernel-backed composite gate callable as U."""
+    q_phase = qmc.qubit_array(n, name="phase_reg")
+    target = qmc.qubit(name="target")
+    target = qmc.x(target)
+    phase_q: qmc.QFixed = qmc.qpe(target, q_phase, _boxed_p_gate, theta=phase)
     return qmc.measure(phase_q)
 
 
@@ -138,13 +209,20 @@ def _fallback_qpe_phase(
             name=handle.name,
         )
 
-    op = CompositeGateOperation(
+    ref = CallableRef(namespace="qamomile.stdlib", name="qpe")
+    attrs = {
+        "kind": "composite",
+        "gate_type": CompositeGateType.QPE.name,
+        "num_control_qubits": 3,
+        "num_target_qubits": 1,
+        "custom_name": "qpe",
+    }
+    op = InvokeOperation(
         operands=[*counting_operands, target_operand, theta.value],
         results=[*counting_results, target_result],
-        gate_type=CompositeGateType.QPE,
-        num_control_qubits=3,
-        num_target_qubits=1,
-        has_implementation=False,
+        target=ref,
+        attrs=attrs,
+        definition=CallableDef(ref=ref, attrs=attrs),
     )
     get_current_tracer().add_operation(op)
 
@@ -274,6 +352,91 @@ class TestQPENaive:
 class TestQPEBuiltin:
     """Built-in QPE (qmc.qpe()) tests."""
 
+    def test_symbolic_counting_size_keeps_deferred_iqft_and_cast(self):
+        """Symbolic-size QPE keeps IQFT and QFixed cast as deferred aliases."""
+        block = builtin_qpe.block
+
+        iqft_ops = [
+            op
+            for op in block.operations
+            if isinstance(op, InvokeOperation)
+            and op.gate_type == CompositeGateType.IQFT
+        ]
+        assert len(iqft_ops) == 1
+        assert iqft_ops[0].num_target_qubits == 0
+        assert len(iqft_ops[0].target_qubits) == 1
+        assert iqft_ops[0].target_qubits[0].shape
+
+        cast_ops = [op for op in block.operations if isinstance(op, CastOperation)]
+        assert len(cast_ops) == 1
+        assert cast_ops[0].qubit_mapping == []
+
+        assert any(isinstance(op, MeasureQFixedOperation) for op in block.operations)
+
+        lowered = lower_operations(block)
+        measure_vector_ops = [
+            op for op in lowered.operations if isinstance(op, MeasureVectorOperation)
+        ]
+        assert len(measure_vector_ops) == 1
+        assert measure_vector_ops[0].operands[0].uuid == cast_ops[0].operands[0].uuid
+
+    def test_qpe_controlled_unitary_carries_callable_ref_and_attrs(self):
+        """Built-in QPE records the target unitary identity and attrs in IR.
+
+        QPE accepts a qkernel as its unitary argument. The IR must not only
+        embed the unitary body; it should also retain the callable reference
+        and attrs so compiler-side lowering and resource logic can identify the
+        target.
+        """
+        block = builtin_qpe.build(n=3, phase=math.pi / 2)
+
+        controlled_ops = _collect_controlled_u_ops(block.operations)
+
+        assert controlled_ops
+        assert all(op.callable_ref is not None for op in controlled_ops)
+        assert {op.callable_ref.name for op in controlled_ops if op.callable_ref} == {
+            "_p_gate"
+        }
+        assert all(
+            op.callable_ref.namespace.startswith("user.qkernel.")
+            for op in controlled_ops
+            if op.callable_ref
+        )
+        assert {op.callable_attrs["kind"] for op in controlled_ops} == {"qkernel"}
+        assert {op.callable_attrs["default_policy"] for op in controlled_ops} == {
+            "INLINE"
+        }
+
+    def test_qpe_accepts_composite_gate_unitary_and_preserves_identity(self):
+        """QPE accepts qkernel-like composite gate callables as U.
+
+        Higher-order algorithms should not be restricted to concrete QKernel
+        instances. Passing a qkernel-backed composite gate callable must retain
+        the composite callable identity, not collapse it to the wrapped qkernel
+        name.
+        """
+        block = builtin_qpe_with_composite_unitary.build(n=3, phase=math.pi / 2)
+
+        controlled_ops = _collect_controlled_u_ops(block.operations)
+
+        assert controlled_ops
+        assert all(op.callable_ref is not None for op in controlled_ops)
+        assert all(
+            op.callable_ref.namespace.startswith("user.composite.")
+            for op in controlled_ops
+            if op.callable_ref
+        )
+        assert {op.callable_ref.name for op in controlled_ops if op.callable_ref} == {
+            "boxed_p_gate"
+        }
+        assert {op.callable_attrs["kind"] for op in controlled_ops} == {"composite"}
+        assert {op.callable_attrs["custom_name"] for op in controlled_ops} == {
+            "boxed_p_gate"
+        }
+        assert {op.callable_attrs["default_policy"] for op in controlled_ops} == {
+            "PRESERVE_BOX"
+        }
+
     def test_builtin_qpe_pi_over_2(self, qiskit_transpiler):
         """theta=pi/2 -> phase=0.25."""
         executable = qiskit_transpiler.transpile(
@@ -299,6 +462,15 @@ class TestQPEBuiltin:
             assert value == pytest.approx(0.125), (
                 f"Built-in QPE: expected 0.125, got {value} (count={count})"
             )
+
+    def test_qpe_controls_unitary_with_private_workspace(self, qiskit_transpiler):
+        """QPE reserves and controls a unitary's internal ancilla wires."""
+        executable = qiskit_transpiler.transpile(qpe_with_private_workspace_unitary)
+        result = executable.sample(qiskit_transpiler.executor(), shots=64).result()
+
+        phases = {value for value, _ in result.results}
+        assert phases <= {0.0, 0.5}
+        assert phases == {0.0, 0.5}
 
 
 class TestQPEFallbackVectorViewPhase:

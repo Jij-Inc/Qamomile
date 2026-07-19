@@ -41,6 +41,7 @@ from qamomile.circuit.visualization.drawer import (
 )
 from qamomile.circuit.visualization.geometry import compute_border_padding
 from qamomile.circuit.visualization.layout import CircuitLayoutEngine
+from qamomile.circuit.visualization.renderer import MatplotlibRenderer
 from qamomile.circuit.visualization.style import DEFAULT_STYLE
 from qamomile.circuit.visualization.visual_ir import (
     VFoldedBlock,
@@ -304,7 +305,7 @@ def _visual_circuit(
     Args:
         kernel (Any): QKernel-like object to trace.
         style (Any): Visual style configuration used by the analyzer.
-        inline (bool): Whether CallBlockOperation contents should be inlined.
+        inline (bool): Whether inline callable contents should be inlined.
         fold_loops (bool): Whether loop operations should be folded.
         fold_ifs (bool): Whether if operations should be folded.
         **bindings (Any): Concrete draw-time bindings for kernel parameters.
@@ -650,6 +651,51 @@ class TestUnfoldedIfSpacing:
         # spacing must grow to keep the box from overlapping q0's measurement.
         gap = layout.qubit_y[0] - layout.qubit_y[1]
         assert gap > DEFAULT_STYLE.qubit_base_spacing
+
+    def test_folded_if_ignores_qubits_outside_display_range(self):
+        """Folded block spacing tolerates stale affected qubits outside the view."""
+        folded = VFoldedBlock(
+            node_key=("folded",),
+            header_label="if cond:",
+            body_lines=["X", "H"],
+            affected_qubits=[0, 4],
+            folded_width=DEFAULT_STYLE.gate_width,
+            kind=VFoldedKind.IF,
+        )
+        vc = VisualCircuit(
+            children=[folded],
+            qubit_map={"q": 0},
+            qubit_names={0: "q"},
+            num_qubits=1,
+        )
+
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(vc)
+
+        assert layout.qubit_y == [0.0]
+        assert set(layout.max_above) == {0}
+        assert set(layout.max_below) == {0}
+
+    def test_renderer_ignores_qubits_outside_display_range(self):
+        """Renderer tolerates visual nodes that mention qubits outside the view."""
+        folded = VFoldedBlock(
+            node_key=("folded",),
+            header_label="if cond:",
+            body_lines=["X", "H"],
+            affected_qubits=[0, 4],
+            folded_width=DEFAULT_STYLE.gate_width,
+            kind=VFoldedKind.IF,
+        )
+        vc = VisualCircuit(
+            children=[folded],
+            qubit_map={"q": 0},
+            qubit_names={0: "q"},
+            num_qubits=1,
+        )
+        layout = CircuitLayoutEngine(DEFAULT_STYLE).compute_layout(vc)
+
+        fig = MatplotlibRenderer(DEFAULT_STYLE).render(vc, layout)
+
+        assert isinstance(fig, Figure)
 
     def test_plain_two_qubit_circuit_keeps_base_spacing(self):
         """Without an if header, adjacent wires keep the default spacing."""

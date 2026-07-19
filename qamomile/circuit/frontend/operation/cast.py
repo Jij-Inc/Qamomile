@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast as type_cast
 
 from qamomile.circuit.frontend.handle.array import Vector, VectorView
 from qamomile.circuit.frontend.handle.primitives import QFixed, Qubit
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.types.q_register import QFixedType
 from qamomile.circuit.ir.value import Value
 
@@ -87,12 +88,27 @@ def _cast_vector_qubit_to_qfixed(
     # Ensure all borrowed elements have been returned before casting
     source.validate_all_returned()
 
-    # Get the number of qubits
+    source_any: Any = source
+    if isinstance(source_any, VectorView) and source_any._slice_covered_indices is None:
+        raise ValueError(
+            f"cast() on a view with symbolic slice bounds is not supported "
+            f"(view of '{source_any._slice_parent.value.name}'). Use "
+            f"literal-bounded slicing for cast operands."
+        )
+
+    # Get the number of qubits.  Symbolic-size vectors are allowed only for
+    # pure-fractional QFixed aliases; their carrier list is resolved later
+    # from the CastOperation source vector rather than enumerated here.
     size = source.shape[0]
+    size_value: Value | None = None
     if isinstance(size, int):
         num_qubits = size
     elif hasattr(size, "value") and size.value.is_constant():
         num_qubits = int(size.value.get_const())
+        size_value = size.value
+    elif hasattr(size, "value"):
+        num_qubits = None
+        size_value = size.value
     elif hasattr(size, "init_value"):
         num_qubits = int(size.init_value)
     else:
@@ -103,12 +119,20 @@ def _cast_vector_qubit_to_qfixed(
     # Validate int_bits
     if int_bits < 0:
         raise ValueError(f"int_bits must be non-negative, got {int_bits}")
-    if int_bits > num_qubits:
+    if num_qubits is not None and int_bits > num_qubits:
         raise ValueError(
             f"int_bits ({int_bits}) cannot exceed number of qubits ({num_qubits})"
         )
+    if num_qubits is None and int_bits != 0:
+        raise ValueError(
+            "cast with symbolic Vector[Qubit] length supports only int_bits=0."
+        )
 
-    frac_bits = num_qubits - int_bits
+    if num_qubits is not None:
+        frac_bits: int | Value[UIntType] = num_qubits - int_bits
+    else:
+        assert size_value is not None
+        frac_bits = type_cast(Value[UIntType], size_value)
 
     # Compose carrier keys in **root-space**.  When ``source`` is a
     # ``VectorView`` over ``q[start::step]`` (possibly nested), the
@@ -125,7 +149,10 @@ def _cast_vector_qubit_to_qfixed(
     # symbolic bounds and we cannot enumerate carriers at trace time;
     # cast on such a view is rejected here rather than producing a
     # silently broken QFixed downstream.
-    if isinstance(source, VectorView):  # type: ignore[unreachable]
+    if num_qubits is None:
+        root_av = source.value
+        root_indices: tuple[int, ...] = ()
+    elif isinstance(source, VectorView):  # type: ignore[unreachable]
         covered = source._slice_covered_indices  # type: ignore[unreachable]
         if covered is None:
             raise ValueError(
@@ -168,7 +195,7 @@ def _cast_vector_qubit_to_qfixed(
         )
         .with_qfixed_metadata(
             qubit_uuids=qubit_uuids,
-            num_bits=num_qubits,
+            num_bits=num_qubits or 0,
             int_bits=int_bits,
         )
     )

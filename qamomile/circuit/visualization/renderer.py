@@ -54,6 +54,10 @@ class MatplotlibRenderer:
 
     Takes pre-computed layout coordinates and draws the circuit
     using matplotlib primitives.
+
+    Args:
+        style (CircuitStyle): Visual style configuration used for all drawing
+            primitives.
     """
 
     def __init__(self, style: CircuitStyle):
@@ -71,11 +75,16 @@ class MatplotlibRenderer:
         Uses the Visual IR tree which carries all pre-resolved information.
 
         Args:
-            vc: VisualCircuit containing pre-resolved Visual IR nodes.
-            layout: Pre-computed layout result.
+            vc (VisualCircuit): Circuit containing pre-resolved visual nodes.
+            layout (LayoutResult): Pre-computed layout coordinates and wire
+                metadata.
 
         Returns:
-            matplotlib Figure.
+            Figure: Rendered matplotlib figure.
+
+        Raises:
+            ValueError: If an inline block's control indices and activation
+                pattern have inconsistent lengths.
         """
         self.layout = layout
         self.qubit_y = layout.qubit_y
@@ -89,6 +98,17 @@ class MatplotlibRenderer:
         self._draw_operations(fig, vc)
         self._add_jupyter_display_support(fig)
         return fig
+
+    def _visible_qubits(self, qubits: list[int]) -> list[int]:
+        """Return qubit indices that exist in the current rendered view.
+
+        Args:
+            qubits (list[int]): Qubit indices carried by the visual node.
+
+        Returns:
+            list[int]: Indices that can safely index ``self.qubit_y``.
+        """
+        return [q for q in qubits if 0 <= q < len(self.qubit_y)]
 
     def _draw_operations(self, fig: Figure, vc: VisualCircuit) -> None:
         """Draw all operations from Visual IR nodes.
@@ -169,8 +189,33 @@ class MatplotlibRenderer:
         # Group blocks by topmost qubit for overlap calculation
         qubit_blocks: dict[int, list[dict]] = defaultdict(list)
         for block_info in block_ranges:
-            top_qubit = min(block_info["qubit_indices"])
-            qubit_blocks[top_qubit].append(block_info)
+            visible_qubits = self._visible_qubits(block_info["qubit_indices"])
+            if not visible_qubits:
+                continue
+            visible_block_info = dict(block_info)
+            visible_block_info["qubit_indices"] = visible_qubits
+            raw_controls = block_info.get("control_qubit_indices", [])
+            raw_pattern = tuple(
+                block_info.get("control_pattern") or (1,) * len(raw_controls)
+            )
+            visible_controls = set(self._visible_qubits(raw_controls))
+            control_pairs = [
+                (control, required)
+                for control, required in zip(
+                    raw_controls,
+                    raw_pattern,
+                    strict=True,
+                )
+                if control in visible_controls
+            ]
+            visible_block_info["control_qubit_indices"] = [
+                control for control, _ in control_pairs
+            ]
+            visible_block_info["control_pattern"] = tuple(
+                required for _, required in control_pairs
+            )
+            top_qubit = min(visible_qubits)
+            qubit_blocks[top_qubit].append(visible_block_info)
 
         for qubit, blocks in qubit_blocks.items():
             blocks.sort(key=lambda b: b["start_x"])
@@ -216,7 +261,8 @@ class MatplotlibRenderer:
                     power=block_info.get("power", 1),
                 )
 
-                # Draw control dots and vertical line for ControlledUOperation
+                # Draw control circles and the connector for any coherent-
+                # controlled inline body (ControlledU, Invoke, or inverse).
                 if ctrl_indices:
                     ax = fig._qm_ax  # type: ignore[attr-defined]
                     mgw = block_info.get("max_gate_width", self.style.gate_width)
@@ -271,9 +317,21 @@ class MatplotlibRenderer:
                             )
                         )
 
-                    for ctrl_idx in ctrl_indices:
+                    ctrl_pattern = block_info.get(
+                        "control_pattern", (1,) * len(ctrl_indices)
+                    ) or (1,) * len(ctrl_indices)
+                    for ctrl_idx, required in zip(
+                        ctrl_indices,
+                        ctrl_pattern,
+                        strict=True,
+                    ):
                         ctrl_y = self.qubit_y[ctrl_idx]
-                        self._draw_control_dot(ax, block_center_x, ctrl_y)
+                        self._draw_control_dot(
+                            ax,
+                            block_center_x,
+                            ctrl_y,
+                            filled=required == 1,
+                        )
 
         # Draw operations from Visual IR tree
         self._draw_visual_nodes(fig, vc.children, positions, block_widths, gate_widths)
@@ -299,6 +357,10 @@ class MatplotlibRenderer:
         """
         if max_gate_width is None:
             max_gate_width = self.style.gate_width
+
+        qubit_indices = self._visible_qubits(qubit_indices)
+        if not qubit_indices:
+            return 0.0, 0.0
 
         y_coords = [self.qubit_y[q] for q in qubit_indices]
         min_y = min(y_coords)
@@ -507,7 +569,7 @@ class MatplotlibRenderer:
         Returns:
             None
         """
-        affected_qubits = node.affected_qubits
+        affected_qubits = self._visible_qubits(node.affected_qubits)
         if not affected_qubits:
             return
 
@@ -886,9 +948,34 @@ class MatplotlibRenderer:
         block_width: float | None = None,
         layout_width: float | None = None,
     ) -> None:
-        """Draw a VGate node using pre-resolved fields."""
+        """Draw a gate node using its pre-resolved visual fields.
+
+        Args:
+            fig (Figure): Matplotlib figure containing the circuit axes.
+            node (VGate): Visual gate node to draw.
+            x_pos (float): Horizontal center of the node.
+            block_width (float | None): Width of a block-style gate, or None
+                to use the node's resolved width. Defaults to None.
+            layout_width (float | None): Width reserved by layout, or None to
+                use the node's estimated width. Defaults to None.
+        """
         ax = fig._qm_ax  # type: ignore[attr-defined]
-        qubit_indices = node.qubit_indices
+        qubit_indices = self._visible_qubits(node.qubit_indices)
+
+        if node.kind == VGateKind.GLOBAL_PHASE:
+            top_wire_y = (
+                max(self.qubit_y[q] for q in qubit_indices)
+                if qubit_indices
+                else max(self.qubit_y, default=0.0)
+            )
+            self._draw_vglobal_phase(
+                ax,
+                node,
+                x_pos,
+                top_wire_y,
+                layout_width or node.estimated_width,
+            )
+            return
 
         if not qubit_indices:
             return
@@ -921,6 +1008,56 @@ class MatplotlibRenderer:
 
         elif node.kind == VGateKind.EXPVAL:
             self._draw_vexpval(ax, node, x_pos, block_width)
+
+    def _draw_vglobal_phase(
+        self,
+        ax: Axes,
+        node: VGate,
+        x: float,
+        top_wire_y: float,
+        width: float,
+    ) -> None:
+        """Draw a global-phase badge without interrupting a qubit wire.
+
+        The badge floats entirely above the top wire in the surrounding
+        quantum scope. Its horizontal position preserves source order, while
+        the absence of an on-wire gate glyph reflects the operation's
+        zero-qubit semantics.
+
+        Args:
+            ax (Axes): Matplotlib axes to draw on.
+            node (VGate): ``GLOBAL_PHASE`` visual node carrying the label.
+            x (float): Horizontal center of the phase annotation.
+            top_wire_y (float): Vertical coordinate of the scope's top wire.
+            width (float): Reserved annotation width.
+
+        """
+        height = self.style.gate_height / 3
+        y = top_wire_y + self.style.gate_height / 4
+        badge = mpatches.FancyBboxPatch(
+            (x - width / 2, y - height / 2),
+            width,
+            height,
+            boxstyle=mpatches.BoxStyle.Round(
+                pad=0, rounding_size=self.style.gate_corner_radius / 2
+            ),
+            facecolor=self.style.background_color,
+            edgecolor=self.style.block_border_color,
+            linewidth=1,
+            linestyle=":",
+            zorder=PORDER_GATE,
+        )
+        ax.add_patch(badge)
+        ax.text(
+            x,
+            y,
+            node.label,
+            ha="center",
+            va="center",
+            color=self.style.block_border_color,
+            fontsize=self.style.subfont_size,
+            zorder=PORDER_TEXT,
+        )
 
     def _draw_vgate_single(
         self, ax: Axes, node: VGate, x: float, y: float, width: float
@@ -1050,8 +1187,8 @@ class MatplotlibRenderer:
         block_width: float | None,
         is_call_block: bool,
     ) -> None:
-        """Draw a block-box (CallBlock or CompositeGate) from VGate."""
-        qubit_indices = node.qubit_indices
+        """Draw a callable/control block box from VGate."""
+        qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
@@ -1107,14 +1244,39 @@ class MatplotlibRenderer:
         x_pos: float,
         block_width: float | None,
     ) -> None:
-        """Draw a ControlledU box from VGate with control dots."""
-        qubit_indices = node.qubit_indices
+        """Draw a controlled visual node with open or filled controls.
+
+        Args:
+            ax (Axes): Matplotlib axes receiving the controlled node.
+            node (VGate): Controlled visual node whose leading qubits and
+                control pattern are aligned.
+            x_pos (float): Horizontal center of the operation.
+            block_width (float | None): Optional target-box width.
+
+        Raises:
+            ValueError: If the control indices and activation pattern have
+                inconsistent lengths.
+        """
+        qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
         # Split control and target indices
-        control_indices = qubit_indices[: node.control_count]
-        target_indices = qubit_indices[node.control_count :]
+        raw_control_indices = node.qubit_indices[: node.control_count]
+        raw_control_pattern = node.control_pattern or (1,) * len(raw_control_indices)
+        visible_control_indices = set(self._visible_qubits(raw_control_indices))
+        control_pairs = [
+            (control, required)
+            for control, required in zip(
+                raw_control_indices,
+                raw_control_pattern,
+                strict=True,
+            )
+            if control in visible_control_indices
+        ]
+        control_indices = [control for control, _ in control_pairs]
+        control_pattern = tuple(required for _, required in control_pairs)
+        target_indices = self._visible_qubits(node.qubit_indices[node.control_count :])
 
         control_y = [self.qubit_y[q] for q in control_indices]
         target_y = [self.qubit_y[q] for q in target_indices]
@@ -1134,13 +1296,18 @@ class MatplotlibRenderer:
         ax.add_line(line)
 
         if self._draw_vcontrolled_u_special_gate(
-            ax, node.gate_type, x_pos, control_y, target_y
+            ax,
+            node.gate_type,
+            x_pos,
+            control_y,
+            control_pattern,
+            target_y,
         ):
             return
 
         # Draw control dots
-        for y in control_y:
-            self._draw_control_dot(ax, x_pos, y)
+        for y, required in zip(control_y, control_pattern, strict=True):
+            self._draw_control_dot(ax, x_pos, y, filled=required == 1)
 
         # Draw target box
         if target_y:
@@ -1243,6 +1410,7 @@ class MatplotlibRenderer:
         gate_type: GateOperationType | None,
         x_pos: float,
         control_y: list[float],
+        control_pattern: tuple[int, ...],
         target_y: list[float],
     ) -> bool:
         """Draw a controlled built-in gate without falling back to a box.
@@ -1253,11 +1421,17 @@ class MatplotlibRenderer:
                 by the `ControlledUOperation`.
             x_pos (float): X coordinate of the operation.
             control_y (list[float]): Y coordinates of explicit control wires.
+            control_pattern (tuple[int, ...]): Required zero/one state for
+                each explicit control wire.
             target_y (list[float]): Y coordinates of wrapped-gate operands.
 
         Returns:
             bool: True when a dedicated symbol was drawn; False when the
                 caller should draw the generic controlled-U box.
+
+        Raises:
+            ValueError: If the control coordinates and activation pattern have
+                inconsistent lengths.
         """
         if gate_type is None or not target_y:
             return False
@@ -1265,8 +1439,8 @@ class MatplotlibRenderer:
         if gate_type == GateOperationType.SWAP:
             if len(target_y) != 2:
                 return False
-            for y in control_y:
-                self._draw_control_dot(ax, x_pos, y)
+            for y, required in zip(control_y, control_pattern, strict=True):
+                self._draw_control_dot(ax, x_pos, y, filled=required == 1)
             for y in target_y:
                 self._draw_swap_x(ax, x_pos, y)
             return True
@@ -1276,13 +1450,17 @@ class MatplotlibRenderer:
             GateOperationType.CX,
             GateOperationType.TOFFOLI,
         }:
-            for y in control_y + target_y[:-1]:
+            for y, required in zip(control_y, control_pattern, strict=True):
+                self._draw_control_dot(ax, x_pos, y, filled=required == 1)
+            for y in target_y[:-1]:
                 self._draw_control_dot(ax, x_pos, y)
             self._draw_target_x(ax, x_pos, target_y[-1])
             return True
 
         if gate_type in {GateOperationType.Z, GateOperationType.CZ}:
-            for y in control_y + target_y:
+            for y, required in zip(control_y, control_pattern, strict=True):
+                self._draw_control_dot(ax, x_pos, y, filled=required == 1)
+            for y in target_y:
                 self._draw_control_dot(ax, x_pos, y)
             return True
 
@@ -1296,7 +1474,7 @@ class MatplotlibRenderer:
         block_width: float | None,
     ) -> None:
         """Draw an expectation value operation from VGate."""
-        qubit_indices = node.qubit_indices
+        qubit_indices = self._visible_qubits(node.qubit_indices)
         if not qubit_indices:
             return
 
@@ -1358,7 +1536,7 @@ class MatplotlibRenderer:
         Returns:
             None
         """
-        affected_qubits = node.affected_qubits
+        affected_qubits = self._visible_qubits(node.affected_qubits)
         if not affected_qubits:
             return
 
@@ -1610,14 +1788,38 @@ class MatplotlibRenderer:
             fig = Figure(figsize=(4, 2))
             FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
-            ax.text(
-                0.5,
-                0.5,
-                "Empty circuit",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
+            assert self.layout is not None
+            if self.layout.gate_widths:
+                wire_ext = self.style.wire_extension
+                x_left = (
+                    self.layout.first_gate_x
+                    - self.layout.first_gate_half_width
+                    - wire_ext
+                    - 0.7
+                )
+                x_right = max(
+                    self.layout.width + 0.5,
+                    self.layout.actual_width + wire_ext + 0.2,
+                )
+                phase_height = self.style.gate_height / 3
+                phase_y = self.style.gate_height / 4
+                y_bottom = -0.6
+                y_top = max(0.8, phase_y + phase_height / 2 + 0.3)
+                ax.set_xlim(x_left, x_right)
+                ax.set_ylim(y_bottom, y_top)
+                fig.set_size_inches(
+                    max(4, x_right - x_left),
+                    max(2, (y_top - y_bottom) * 0.8),
+                )
+            else:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "Empty circuit",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
             ax.axis("off")
             fig._qm_ax = ax  # type: ignore[attr-defined]
             return fig
@@ -1693,7 +1895,7 @@ class MatplotlibRenderer:
         for key, info in self.layout.folded_block_extents.items():
             if key not in positions:
                 continue
-            qubits = info["affected_qubits"]
+            qubits = self._visible_qubits(info["affected_qubits"])
             if not qubits:
                 continue
             y_coords = [self.qubit_y[q] for q in qubits]
@@ -1792,19 +1994,31 @@ class MatplotlibRenderer:
         # Output labels on the right side are intentionally not drawn
         # to keep the circuit diagram cleaner
 
-    def _draw_control_dot(self, ax: Axes, x: float, y: float) -> None:
-        """Draw a control dot for controlled gates.
+    def _draw_control_dot(
+        self,
+        ax: Axes,
+        x: float,
+        y: float,
+        *,
+        filled: bool = True,
+    ) -> None:
+        """Draw an open or filled coherent-control circle.
 
         Args:
-            ax: matplotlib Axes.
-            x: X coordinate of the dot center.
-            y: Y coordinate of the dot center.
+            ax (Axes): Matplotlib axes receiving the circle.
+            x (float): X coordinate of the circle center.
+            y (float): Y coordinate of the circle center.
+            filled (bool): Whether to draw a filled one-control. ``False``
+                draws an open zero-control. Defaults to ``True``.
         """
         circle = mpatches.Circle(
             (x, y),
             radius=0.1,
-            facecolor=self.style.wire_color,
+            facecolor=(
+                self.style.wire_color if filled else self.style.background_color
+            ),
             edgecolor=self.style.wire_color,
+            linewidth=1.5,
             zorder=PORDER_GATE,
         )
         ax.add_patch(circle)

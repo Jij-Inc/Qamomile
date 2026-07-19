@@ -16,6 +16,7 @@ from qamomile.circuit.transpiler.errors import (
     ExecutionError,
     QubitBorrowConflictError,
 )
+from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 
 pytest.importorskip("qiskit")
 
@@ -65,6 +66,71 @@ class TestDivergentSliceMergeDiagnostics:
         ):
             QiskitTranspiler().transpile(kernel, bindings={"dummy": 0})
 
+    @pytest.mark.parametrize("transform", ["reslice", "broadcast"])
+    def test_transform_does_not_hide_divergent_merge(self, transform):
+        """Ownership-preserving view transforms retain divergence metadata."""
+
+        if transform == "reslice":
+
+            @qmc.qkernel
+            def kernel() -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(3, "qs")
+                probe = qmc.h(qmc.qubit("probe"))
+                bit = qmc.measure(probe)
+                if bit:
+                    view = qs[0:2]
+                else:
+                    view = qs[1:3]
+                view = view[:]
+                view[0] = qmc.x(view[0])
+                return qmc.measure(view)
+
+        else:
+
+            @qmc.qkernel
+            def kernel() -> qmc.Vector[qmc.Bit]:
+                qs = qmc.qubit_array(3, "qs")
+                probe = qmc.h(qmc.qubit("probe"))
+                bit = qmc.measure(probe)
+                if bit:
+                    view = qs[0:2]
+                else:
+                    view = qs[1:3]
+                view = qmc.h(view)
+                view[0] = qmc.x(view[0])
+                return qmc.measure(view)
+
+        with pytest.raises(
+            QubitBorrowConflictError,
+            match="merges different slices across if/else branches",
+        ):
+            _ = kernel.block
+
+    def test_nested_merge_does_not_hide_existing_divergence(self):
+        """A later view merge retains divergence inherited from its input."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            probe = qmc.h(qmc.qubit("probe"))
+            bit = qmc.measure(probe)
+            if bit:
+                view = qs[0:2]
+            else:
+                view = qs[1:3]
+            if True:
+                view = view[:]
+            else:
+                view = qmc.h(view)
+            view[0] = qmc.x(view[0])
+            return qmc.measure(view)
+
+        with pytest.raises(
+            QubitBorrowConflictError,
+            match="merges different slices across if/else branches",
+        ):
+            _ = kernel.block
+
     def test_classical_divergent_view_merge_names_the_cause(self):
         """Executing a divergent classical view merge explains the merge."""
 
@@ -88,6 +154,60 @@ class TestDivergentSliceMergeDiagnostics:
             ExecutionError, match="merging different slices across if/else"
         ):
             executable.sample(transpiler.executor(), shots=50).result()
+
+    def test_runtime_quantum_view_selection_is_rejected_by_nisq_plan(self):
+        """A runtime branch cannot dynamically select a measured qubit view."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            probe = qmc.qubit("probe")
+            probe = qmc.h(probe)
+            bit = qmc.measure(probe)
+            work = qmc.qubit("work")
+            if bit:
+                work = qmc.x(work)
+                view = qs[0:2]
+            else:
+                work = qmc.z(work)
+                view = qs[1:3]
+            return qmc.measure(view)
+
+        with pytest.raises(
+            MultipleQuantumSegmentsError,
+            match="different physical qubit regions",
+        ):
+            QiskitTranspiler().transpile(kernel)
+
+    def test_nested_runtime_quantum_view_selection_is_rejected(self):
+        """A divergent view merge is found through nested runtime ifs."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            outer_q = qmc.qubit("outer")
+            outer_q = qmc.h(outer_q)
+            outer = qmc.measure(outer_q)
+            inner_q = qmc.qubit("inner")
+            inner_q = qmc.h(inner_q)
+            inner = qmc.measure(inner_q)
+            work = qmc.qubit("work")
+            if outer:
+                work = qmc.x(work)
+                if inner:
+                    view = qs[0:2]
+                else:
+                    view = qs[1:3]
+            else:
+                work = qmc.z(work)
+                view = qs[0:2]
+            return qmc.measure(view)
+
+        with pytest.raises(
+            MultipleQuantumSegmentsError,
+            match="different physical qubit regions",
+        ):
+            QiskitTranspiler().transpile(kernel)
 
 
 class TestSliceMergePatternsKeepWorking:
@@ -144,3 +264,40 @@ class TestSliceMergePatternsKeepWorking:
 
         outcomes = _sample_outcomes(kernel, bindings={"dummy": 0})
         assert outcomes == {(1, 0, 0), (0, 0, 0)}
+
+    def test_root_and_full_view_runtime_merge_share_one_region(self):
+        """A root vector and its full view are the same physical region."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(2, "qs")
+            qs[0] = qmc.x(qs[0])
+            probe = qmc.qubit("probe")
+            probe = qmc.h(probe)
+            bit = qmc.measure(probe)
+            work = qmc.qubit("work")
+            if bit:
+                work = qmc.x(work)
+                view = qs
+            else:
+                work = qmc.z(work)
+                view = qs[:]
+            return qmc.measure(view)
+
+        assert _sample_outcomes(kernel) == {(1, 0)}
+
+    def test_compile_time_divergent_view_selects_one_region(self):
+        """A compile-time branch may select either concrete qubit view."""
+        choose_tail = True
+
+        @qmc.qkernel
+        def kernel() -> qmc.Vector[qmc.Bit]:
+            qs = qmc.qubit_array(3, "qs")
+            qs[1] = qmc.x(qs[1])
+            if choose_tail:
+                view = qs[1:3]
+            else:
+                view = qs[0:2]
+            return qmc.measure(view)
+
+        assert _sample_outcomes(kernel) == {(1, 0)}

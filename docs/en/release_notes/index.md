@@ -4,6 +4,7 @@ slug: release-notes
 
 # Release Notes
 
+- [v0.13.0](v0_13_0) — semantic `qmc.select`, exact `qmc.global_phase`, loop-carried scalars, and generic versus explicit Möttönen amplitude encoding; Qiskit moved to the `qiskit` extra
 - [v0.12.7](v0_12_7) — `Dict[K, Float]` coefficients as runtime parameters with `d[key]` subscript, `%` operator on `UInt`, and a batch of new compile-time errors (`QubitRebindError`, `QubitConsumedError`, `TypeError` on `bool` / mismatched args) that reject previously silent miscompiles
 - [v0.12.6](v0_12_6) — circuit inversion with `qmc.inverse` (built-in gates, `@qkernel`s, QFT/IQFT), `qmc.modular_increment` / `qmc.modular_decrement` basis-state arithmetic, job/result types importable from `qamomile.circuit`
 - [v0.12.5](v0_12_5) — `PCEConverter` / `PCEEncoder` for Pauli Correlation Encoding, seeded QURI Parts sampling, measured `Vector[Bit]` condition fixes, and `qmc.expval` fixes for `Vector` elements

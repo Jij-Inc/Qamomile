@@ -30,7 +30,7 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import qamomile.circuit as qmc
@@ -95,18 +95,20 @@ est = scalable_circuit.estimate_resources()
 print("qubits:", est.qubits)
 assert str(est.qubits) == "n"
 print("total gates:", est.gates.total)
-assert str(est.gates.total) == "3*n - 1"
+assert str(est.gates.total) == "2*n + Max(0, n - 1)"
 print("single-qubit gates:", est.gates.single_qubit)
 assert str(est.gates.single_qubit) == "2*n"
 print("two-qubit gates:", est.gates.two_qubit)
-assert str(est.gates.two_qubit) == "n - 1"
+assert str(est.gates.two_qubit) == "Max(0, n - 1)"
 print("rotation gates:", est.gates.rotation_gates)
 assert str(est.gates.rotation_gates) == "n"
 print("parameters:", est.parameters)
 assert set(est.parameters.keys()) == {"n"}
 
 # %% [markdown]
-# The output contains SymPy expressions like `n` for qubits and `3*n - 1` for total gates. These are exact — not approximations.
+# The output contains SymPy expressions like `n` for qubits and `2*n + Max(0, n - 1)` for total gates. These are exact — not approximations.
+#
+# The `Max(0, ...)` comes from the trip count of `qmc.range(n - 1)`. Since `n` is unbound, the estimator cannot assume `n >= 1`, so it clamps the count at zero rather than letting `n = 0` contribute `-1` iterations. Substituting any concrete `n >= 1` collapses the guard, which is why the totals below come out as plain integers.
 
 # %% [markdown]
 # ## `ResourceEstimate` Fields Reference

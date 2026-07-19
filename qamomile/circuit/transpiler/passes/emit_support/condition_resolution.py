@@ -4,18 +4,194 @@ from __future__ import annotations
 
 from typing import Any
 
-from qamomile.circuit.ir.operation.control_flow import IfOperation
-from qamomile.circuit.ir.types.primitives import BitType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
+from qamomile.circuit.ir.operation.gate import (
+    MeasureOperation,
+    MeasureVectorOperation,
+    ProjectOperation,
+)
+from qamomile.circuit.ir.types.primitives import BitType, UIntType
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    ValueBase,
+    array_physical_region,
+)
+from qamomile.circuit.transpiler.errors import EmitError
 
 from .physical_index_map import (
     array_element_mapping,
-    array_element_mappings,
-    copy_array_element_aliases,
     map_array_element_aliases,
 )
 from .qubit_address import ClbitMap, QubitAddress, QubitMap
 from .value_resolver import ValueResolver, resolve_qubit_key
+
+
+def _array_value_mapping(
+    source: ArrayValue,
+    index_map: QubitMap | ClbitMap,
+) -> dict[int, int]:
+    """Resolve an array value's local elements to physical indices.
+
+    Direct aliases under ``source.uuid`` are authoritative. When a sliced
+    view has not been registered under its own UUID, supplement them from its
+    statically known root-space coverage. This is what lets a root register
+    and ``root[:]`` participate in a runtime merge without looking divergent
+    merely because only the root owns allocation keys.
+
+    Args:
+        source (ArrayValue): Root array or sliced view to resolve.
+        index_map (QubitMap | ClbitMap): Physical resource map to read.
+
+    Returns:
+        dict[int, int]: Source-local element indices mapped to physical
+            indices. Unresolved symbolic coverage contributes no fallback
+            entries; any direct aliases remain present.
+    """
+    mapping = array_element_mapping(source.uuid, index_map)
+    region = array_physical_region(source)
+    if region is None:
+        return mapping
+
+    root = source
+    while root.slice_of is not None:
+        root = root.slice_of
+    for local_index, root_index in enumerate(region[1]):
+        if local_index in mapping:
+            continue
+        physical = index_map.get(QubitAddress(root.uuid, root_index))
+        if physical is not None:
+            mapping[local_index] = physical
+    return mapping
+
+
+def _value_reference_chain(value: ValueBase) -> list[str]:
+    """Collect a value and its structural array ancestors in proximity order.
+
+    Args:
+        value (ValueBase): Scalar value, array, element, or sliced view.
+
+    Returns:
+        list[str]: UUIDs beginning with ``value`` and followed by its parent
+            array / slice ancestors, without duplicates.
+    """
+    references: list[str] = []
+    seen: set[str] = set()
+    pending: list[ValueBase] = [value]
+    while pending:
+        current = pending.pop()
+        if current.uuid in seen:
+            continue
+        seen.add(current.uuid)
+        references.append(current.uuid)
+        parent = getattr(current, "parent_array", None)
+        if isinstance(parent, ValueBase):
+            pending.append(parent)
+        slice_of = getattr(current, "slice_of", None)
+        if isinstance(slice_of, ValueBase):
+            pending.append(slice_of)
+    return references
+
+
+def _reference_measurement_provenance(
+    reference_uuid: str,
+    operations: list[Operation],
+    seen: set[str],
+    root_operations: list[Operation] | None = None,
+) -> bool | None:
+    """Classify one reference's producer within an outer branch tree.
+
+    A nested ``IfOperation`` result is fresh only when both of its runtime
+    sources recursively originate at measurements in the same outer branch.
+    Merely being defined by the nested if is insufficient: both sources may be
+    pre-existing clbits from before the outer branch.
+
+    Args:
+        reference_uuid (str): UUID whose producer should be located.
+        operations (list[Operation]): Current operation list being searched.
+        seen (set[str]): Merge-result UUIDs already followed on this path.
+        root_operations (list[Operation] | None): Complete outer branch tree
+            used when recursively resolving a nested merge's sources. Defaults
+            to ``operations``.
+
+    Returns:
+        bool | None: True for branch-local measurement provenance, False for a
+            nested merge with any external source, or None when no relevant
+            producer exists in this tree.
+    """
+    root = operations if root_operations is None else root_operations
+    for operation in operations:
+        if isinstance(operation, IfOperation):
+            for merge in operation.iter_merges():
+                if merge.result.uuid != reference_uuid:
+                    continue
+                if reference_uuid in seen:
+                    return False
+                next_seen = {*seen, reference_uuid}
+                return _merge_source_is_branch_local_measurement(
+                    merge.true_value,
+                    root,
+                    next_seen,
+                ) and _merge_source_is_branch_local_measurement(
+                    merge.false_value,
+                    root,
+                    next_seen,
+                )
+
+        if isinstance(operation, (MeasureOperation, MeasureVectorOperation)) and any(
+            result.uuid == reference_uuid for result in operation.results
+        ):
+            return True
+
+        if (
+            isinstance(operation, ProjectOperation)
+            and len(operation.results) > 1
+            and operation.results[1].uuid == reference_uuid
+        ):
+            return True
+
+        if isinstance(operation, HasNestedOps):
+            for body in operation.nested_op_lists():
+                provenance = _reference_measurement_provenance(
+                    reference_uuid,
+                    body,
+                    seen,
+                    root,
+                )
+                if provenance is not None:
+                    return provenance
+    return None
+
+
+def _merge_source_is_branch_local_measurement(
+    source: Value,
+    operations: list[Operation],
+    seen: set[str] | None = None,
+) -> bool:
+    """Return whether every source path starts at a branch-local measurement.
+
+    Args:
+        source (Value): Merge source selected by the branch.
+        operations (list[Operation]): Complete operation tree of that branch.
+        seen (set[str] | None): Nested merge results already followed while
+            checking provenance. Defaults to None.
+
+    Returns:
+        bool: True only when the source, measured-vector parent, or nested
+            merge recursively resolves exclusively to measurements executed
+            inside this branch.
+    """
+    active = set() if seen is None else seen
+    for reference_uuid in _value_reference_chain(source):
+        provenance = _reference_measurement_provenance(
+            reference_uuid,
+            operations,
+            active,
+        )
+        if provenance is not None:
+            return provenance
+    return False
 
 
 def resolve_condition_address_detailed(
@@ -127,6 +303,83 @@ def _is_unresolved_bit_element(value: Any, resolved_as_element: bool) -> bool:
     )
 
 
+def _validate_runtime_bit_merge_partitions(
+    if_op: IfOperation,
+    clbit_map: ClbitMap,
+    bindings: dict[str, Any],
+    resolver: ValueResolver | None,
+) -> None:
+    """Validate that all runtime Bit merges preserve source alias partitions.
+
+    The clbit implementation realizes a runtime merge by making corresponding
+    sources on both branches share one physical clbit. This is sound only when
+    equality between source slots is identical on both sides. For example,
+    ``(t, t)`` cannot be merged with ``(f1, f2)``: aliasing both slots would
+    collapse ``f1`` and ``f2``, so the later measurement would overwrite the
+    earlier output.
+
+    Args:
+        if_op (IfOperation): Runtime if whose Bit merge slots are validated.
+        clbit_map (ClbitMap): Current source-address-to-physical-clbit map.
+        bindings (dict[str, Any]): Active bindings used to resolve symbolic
+            measured-vector element indices.
+        resolver (ValueResolver | None): Resolver for non-constant element
+            indices, or None when only constant addresses are available.
+
+    Raises:
+        EmitError: If one branch reuses a physical source across merge slots
+            whose sources are distinct on the opposite branch.
+    """
+    true_to_false: dict[int, int] = {}
+    false_to_true: dict[int, int] = {}
+
+    for merge in if_op.iter_merges():
+        if not isinstance(merge.result.type, BitType):
+            continue
+
+        physical_pairs: list[tuple[int | None, int | None]] = []
+        if isinstance(merge.result, ArrayValue):
+            if not isinstance(merge.true_value, ArrayValue) or not isinstance(
+                merge.false_value, ArrayValue
+            ):
+                continue
+            true_mapping = _array_value_mapping(merge.true_value, clbit_map)
+            false_mapping = _array_value_mapping(merge.false_value, clbit_map)
+            for index in sorted(set(true_mapping) | set(false_mapping)):
+                physical_pairs.append(
+                    (true_mapping.get(index), false_mapping.get(index))
+                )
+        else:
+            true_addr, true_resolved = resolve_condition_address_detailed(
+                merge.true_value, bindings, resolver
+            )
+            false_addr, false_resolved = resolve_condition_address_detailed(
+                merge.false_value, bindings, resolver
+            )
+            if _is_unresolved_bit_element(
+                merge.true_value, true_resolved
+            ) or _is_unresolved_bit_element(merge.false_value, false_resolved):
+                continue
+            physical_pairs.append((clbit_map.get(true_addr), clbit_map.get(false_addr)))
+
+        for true_clbit, false_clbit in physical_pairs:
+            if true_clbit is None or false_clbit is None:
+                continue
+            previous_false = true_to_false.setdefault(true_clbit, false_clbit)
+            previous_true = false_to_true.setdefault(false_clbit, true_clbit)
+            if previous_false != false_clbit or previous_true != true_clbit:
+                raise EmitError(
+                    "Runtime if-merge of measured Bits has an incompatible "
+                    "clbit alias pattern across multiple outputs; one branch "
+                    "reuses a source where the other branch has distinct "
+                    "values. The clbit-aliasing model cannot preserve both "
+                    "outputs. Use distinct measurements with the same alias "
+                    "pattern in both branches, or make the condition "
+                    "compile-time.",
+                    operation="IfOperation",
+                )
+
+
 def _coerce_to_bool(value: Any) -> bool | None:
     """Coerce a Python scalar to bool; return None for non-scalar values.
 
@@ -160,8 +413,15 @@ def resolve_if_condition(
         return _coerce_to_bool(condition.get_const())
     if condition.uuid in bindings:
         return _coerce_to_bool(bindings[condition.uuid])
-    if hasattr(condition, "name") and condition.name and condition.name in bindings:
-        return _coerce_to_bool(bindings[condition.name])
+    # Resolve against ``bindings`` only via UUID (above) or the sanctioned
+    # parameter-name provenance (below) — never the display ``Value.name``. A
+    # bare-name lookup would mis-resolve an inlined callee-local condition that
+    # happened to share a name with a caller binding key, silently pruning a
+    # live branch.
+    if hasattr(condition, "is_parameter") and condition.is_parameter():
+        param_name = condition.parameter_name()
+        if param_name and param_name in bindings:
+            return _coerce_to_bool(bindings[param_name])
     return None
 
 
@@ -209,7 +469,10 @@ def remap_static_merge_outputs(
         is_scalar_bit = isinstance(output.type, BitType) and not isinstance(
             output, ArrayValue
         )
-        if not is_scalar_bit and (
+        is_scalar_quantum = output.type.is_quantum() and not isinstance(
+            output, ArrayValue
+        )
+        if not (is_scalar_bit or is_scalar_quantum) and (
             QubitAddress(output.uuid) in qubit_map
             or QubitAddress(output.uuid) in clbit_map
         ):
@@ -218,8 +481,10 @@ def remap_static_merge_outputs(
         if output.type.is_quantum():
             if isinstance(output, ArrayValue):
                 if isinstance(selected_val, ArrayValue):
-                    copy_array_element_aliases(
-                        selected_val.uuid, output.uuid, qubit_map
+                    map_array_element_aliases(
+                        output.uuid,
+                        _array_value_mapping(selected_val, qubit_map),
+                        qubit_map,
                     )
             else:
                 key, _ = resolve_qubit_key(selected_val)
@@ -229,6 +494,11 @@ def remap_static_merge_outputs(
                     phys = qubit_map.get(key)
                 if phys is not None:
                     qubit_map[QubitAddress(output.uuid)] = phys
+        elif isinstance(output.type, UIntType):
+            if resolver is not None and bindings is not None:
+                resolved_index = resolver.resolve_int_value(selected_val, bindings)
+                if resolved_index is not None:
+                    bindings[output.uuid] = resolved_index
         else:
             # Scalar Bit source: resolve vector-element sources (``s[i]``
             # from a measured ``Vector[Bit]``) to their root clbit key, not
@@ -262,14 +532,16 @@ def map_merge_outputs(
     bindings: dict[str, Any] | None = None,
     resolver: ValueResolver | None = None,
     reject_runtime_bit_mux: bool = False,
+    allowed_mixed_bit_outputs: frozenset[str] | set[str] | None = None,
 ) -> None:
     """Register merge output UUIDs to the same physical resources as their sources.
 
     Runtime-``if`` counterpart of :func:`remap_static_merge_outputs`: both
     branches may execute, so quantum merges are validated to sit on
     identical physical resources, and classical Bit merges consolidate
-    both branches' clbits onto one physical slot. Outputs already
-    registered are left untouched.
+    both branches' clbits only when the complete source-alias partition is
+    representable without overwriting an independently live value. Outputs
+    already registered are left untouched.
 
     Args:
         if_op (IfOperation): The runtime if-else whose merged outputs need
@@ -293,27 +565,36 @@ def map_merge_outputs(
             to fold non-constant element indices; ``None`` restricts to
             constants. Defaults to None.
         reject_runtime_bit_mux (bool): When True, raise ``EmitError`` for a
-            runtime scalar ``Bit`` merge whose two branch sources resolve to
-            two distinct, already-registered clbits. That shape is an
-            at-runtime multiplexing of two pre-existing measured bits, which
-            the clbit-aliasing model cannot represent: it would silently
-            bind the merged bit to the true-branch source regardless of the
-            condition. Enable only at emit time (``register_merge_outputs``),
-            where representable merges — branch-local fresh measurements and
-            while-loop-carried conditions — have already been aliased onto a
-            single shared clbit and therefore resolve to equal clbits. Leave
-            False at resource-allocation time, where those representable
-            merges still hold distinct clbits and would be wrongly rejected.
-            Defaults to False.
+            runtime ``Bit`` merge that requires an at-runtime mux, mixes a
+            pre-existing source with a branch-local measurement, or has
+            incompatible source-sharing partitions across multiple outputs.
+            Two all-branch-local source sets remain eligible only when their
+            alias partitions match. Defaults to False.
+        allowed_mixed_bit_outputs (frozenset[str] | set[str] | None): Merge
+            result UUIDs whose pre-existing source is proven dead after the
+            merge. This includes safe ordinary-if updates and phi-like loop
+            condition remeasurements. Defaults to None.
 
     Raises:
         EmitError: If a quantum merge's branches resolve to different
             physical resources (or only one branch resolves), which a
             single-execution branch cannot realize; or, when
-            ``reject_runtime_bit_mux`` is True, if a runtime scalar ``Bit``
-            merge multiplexes two distinct pre-existing measured clbits
-            (unrepresentable in the clbit-aliasing model).
+            ``reject_runtime_bit_mux`` is True, if a runtime ``Bit`` merge
+            multiplexes two distinct pre-existing measured clbits/regions or
+            has a non-identity branch source with no physical clbit
+            (unrepresentable in the clbit-aliasing model), mixes external and
+            branch-local provenance, or would collapse distinct merge slots.
     """
+    active_bindings = bindings or {}
+    mixed_output_allowlist = allowed_mixed_bit_outputs or frozenset()
+    if reject_runtime_bit_mux:
+        _validate_runtime_bit_merge_partitions(
+            if_op,
+            clbit_map,
+            active_bindings,
+            resolver,
+        )
+
     for merge in if_op.iter_merges():
         output = merge.result
         true_val = merge.true_value
@@ -336,14 +617,16 @@ def map_merge_outputs(
 
         if output.type.is_quantum():
             if isinstance(output, ArrayValue):
-                array_sources = {
-                    source.uuid
-                    for source in (true_val, false_val)
-                    if isinstance(source, ArrayValue)
-                }
-                mappings = array_element_mappings(array_sources, qubit_map)
-                true_mapping = mappings.get(true_val.uuid, {})
-                false_mapping = mappings.get(false_val.uuid, {})
+                true_mapping = (
+                    _array_value_mapping(true_val, qubit_map)
+                    if isinstance(true_val, ArrayValue)
+                    else {}
+                )
+                false_mapping = (
+                    _array_value_mapping(false_val, qubit_map)
+                    if isinstance(false_val, ArrayValue)
+                    else {}
+                )
 
                 if true_mapping or false_mapping:
                     all_indices = set(true_mapping) | set(false_mapping)
@@ -356,8 +639,6 @@ def map_merge_outputs(
                             or false_idx is None
                             or true_idx != false_idx
                         ):
-                            from qamomile.circuit.transpiler.errors import EmitError
-
                             raise EmitError(
                                 "Quantum if-merge requires identical physical "
                                 "resources across branches",
@@ -383,8 +664,6 @@ def map_merge_outputs(
 
                 if true_phys is not None and false_phys is not None:
                     if true_phys != false_phys:
-                        from qamomile.circuit.transpiler.errors import EmitError
-
                         raise EmitError(
                             "Quantum if-merge requires identical physical "
                             "resources across branches",
@@ -392,8 +671,6 @@ def map_merge_outputs(
                         )
                     qubit_map[QubitAddress(output.uuid)] = true_phys
                 elif true_phys is not None or false_phys is not None:
-                    from qamomile.circuit.transpiler.errors import EmitError
-
                     raise EmitError(
                         "Quantum if-merge requires identical physical "
                         "resources across branches",
@@ -401,6 +678,28 @@ def map_merge_outputs(
                     )
 
         elif isinstance(output.type, BitType):
+            true_is_local_measurement = _merge_source_is_branch_local_measurement(
+                true_val, if_op.true_operations
+            )
+            false_is_local_measurement = _merge_source_is_branch_local_measurement(
+                false_val, if_op.false_operations
+            )
+            if (
+                reject_runtime_bit_mux
+                and true_val.uuid != false_val.uuid
+                and true_is_local_measurement != false_is_local_measurement
+                and output.uuid not in mixed_output_allowlist
+            ):
+                raise EmitError(
+                    "Runtime if-merge of measured Bits mixes a pre-existing "
+                    "clbit with a branch-local measurement; sharing the "
+                    "pre-existing clbit would overwrite that independently "
+                    "live value when the measuring branch executes. Measure "
+                    "the merged bit inside both branches, or make the "
+                    "condition compile-time.",
+                    operation="IfOperation",
+                )
+
             if isinstance(output, ArrayValue):
                 true_src = true_val if isinstance(true_val, ArrayValue) else None
                 false_src = false_val if isinstance(false_val, ArrayValue) else None
@@ -408,7 +707,44 @@ def map_merge_outputs(
                 secondary = false_src if true_src is not None else true_src
 
                 if primary is not None:
-                    primary_mapping = array_element_mapping(primary.uuid, clbit_map)
+                    primary_mapping = _array_value_mapping(primary, clbit_map)
+                    secondary_mapping = (
+                        _array_value_mapping(secondary, clbit_map)
+                        if secondary is not None
+                        else {}
+                    )
+                    if (
+                        reject_runtime_bit_mux
+                        and true_src is not None
+                        and false_src is not None
+                        and set(primary_mapping) != set(secondary_mapping)
+                    ):
+                        raise EmitError(
+                            "Runtime if-merge of measured Bit vectors requires "
+                            "equal, fully resolved local clbit domains on both "
+                            "branches; different vector lengths cannot share "
+                            "one merge result.",
+                            operation="IfOperation",
+                        )
+                    if (
+                        reject_runtime_bit_mux
+                        and true_src is not None
+                        and false_src is not None
+                        and not true_is_local_measurement
+                        and not false_is_local_measurement
+                        and primary_mapping
+                        and secondary_mapping
+                        and primary_mapping != secondary_mapping
+                    ):
+                        raise EmitError(
+                            "Runtime if-merge of measured Bits selects between "
+                            "two distinct pre-existing clbit regions; the "
+                            "clbit-aliasing model cannot multiplex two "
+                            "already-measured values at runtime. Measure the "
+                            "merged bits inside each branch, or make the "
+                            "condition compile-time.",
+                            operation="IfOperation",
+                        )
                     map_array_element_aliases(
                         output.uuid,
                         primary_mapping,
@@ -430,10 +766,10 @@ def map_merge_outputs(
                 # leaves it at the unregistered element UUID and mis-aliases
                 # the merge output to the wrong clbit.
                 true_addr, true_resolved = resolve_condition_address_detailed(
-                    true_val, bindings or {}, resolver
+                    true_val, active_bindings, resolver
                 )
                 false_addr, false_resolved = resolve_condition_address_detailed(
-                    false_val, bindings or {}, resolver
+                    false_val, active_bindings, resolver
                 )
                 # If a source is still a symbolic ``Vector[Bit]`` element
                 # (rolled loop at allocation time), its clbit is only known
@@ -457,42 +793,42 @@ def map_merge_outputs(
                 true_clbit = clbit_map.get(true_addr)
                 false_clbit = clbit_map.get(false_addr)
 
+                if (
+                    reject_runtime_bit_mux
+                    and true_val.uuid != false_val.uuid
+                    and (true_clbit is None or false_clbit is None)
+                ):
+                    raise EmitError(
+                        "Runtime if-merge of a measured Bit has a branch "
+                        "source without a physical clbit; the clbit-aliasing "
+                        "model cannot materialize a constant or symbolic Bit "
+                        "assignment on only one runtime branch. Measure the "
+                        "merged bit inside each branch, or make the condition "
+                        "compile-time.",
+                        operation="IfOperation",
+                    )
+
                 # A runtime scalar-Bit merge whose two sources resolve to
                 # two distinct already-registered clbits is an at-runtime
                 # multiplexing of two pre-existing measured bits. The
                 # aliasing below binds the merged bit to the true-branch
                 # clbit unconditionally, so it would silently return the
                 # wrong value whenever the condition selects the false
-                # branch. This fires precisely and NEVER on a representable
-                # merge: branch-local fresh measurements and
-                # while-loop-carried conditions have, by emit time, already
-                # been aliased onto one shared clbit at allocation, so they
-                # resolve to EQUAL clbits here. The still-distinct pair is
-                # the loop-indexed pre-measured mux, whose sources were
-                # symbolic at allocation and never got that aliasing — the
-                # narrow shape that was silently miscompiling. This is a
-                # precision guard, NOT a completeness one: a constant-index
-                # or whole-vector pre-measured mux is aliased at allocation,
-                # so it already resolves to EQUAL clbits here and skips this
-                # check. That family is only rejected loudly (by
-                # segmentation / the classical executor) when the mux is a
-                # standalone classical control op; when the if body keeps
-                # the segment quantum (a branch quantum op) it stays in the
-                # quantum segment and STILL silently miscompiles. That is a
-                # pre-existing clbit-aliasing limitation (identical on main)
-                # this guard does not close — only the loop-indexed shape is
-                # covered here; the broader family is tracked as a follow-up
-                # that needs the pre-aliasing source identities. The guard is
-                # enabled at emit time only; at allocation the representable
-                # merges still hold distinct clbits and must not be rejected.
+                # branch. Branch-local fresh measurements are representable:
+                # only one branch executes, so its write can target the shared
+                # output clbit. They are detected structurally and exempted.
+                # Constant-index and whole-vector pre-measured muxes are
+                # rejected during allocation, before aliasing erases their
+                # distinct source maps; this emit-time check covers sources
+                # such as loop-indexed elements that only resolve now.
                 if (
                     reject_runtime_bit_mux
+                    and not true_is_local_measurement
+                    and not false_is_local_measurement
                     and true_clbit is not None
                     and false_clbit is not None
                     and true_clbit != false_clbit
                 ):
-                    from qamomile.circuit.transpiler.errors import EmitError
-
                     raise EmitError(
                         "Runtime if-merge of a measured Bit selects between "
                         f"two distinct pre-existing clbits (true={true_clbit}, "

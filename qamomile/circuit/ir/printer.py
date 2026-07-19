@@ -22,17 +22,23 @@ from typing import Any
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import (
+    CallTransform,
     CastOperation,
-    CompositeGateOperation,
+    ConcreteControlledU,
     ControlledUOperation,
     ForItemsOperation,
     GateOperation,
+    GlobalPhaseOperation,
     InverseBlockOperation,
+    InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
     Operation,
+    ProjectOperation,
+    ResetOperation,
     ReturnOperation,
+    SelectOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -40,7 +46,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
 )
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
@@ -50,7 +55,13 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueLike,
+)
 
 __all__ = ["pretty_print_block", "format_value"]
 
@@ -68,11 +79,11 @@ def pretty_print_block(block: Block, *, depth: int = 0) -> str:
 
     Args:
         block: The ``Block`` to format.  Works on any ``BlockKind``.
-        depth: How many levels of ``CallBlockOperation`` to expand inline.
-            ``0`` (default) shows only the callee name and I/O.  Positive
-            values expand the called block's body recursively, decrementing
-            the allowance at each step.  Useful for seeing what ``inline``
-            will produce without actually running the pass.
+        depth: How many levels of callable bodies to expand inline.
+            ``0`` (default) shows only the callable name and I/O. Positive
+            values expand ``InvokeOperation`` bodies recursively, decrementing
+            the allowance at each step. Useful for seeing what ``inline`` will
+            produce without actually running the pass.
 
     Returns:
         A newline-separated string.  The format is for human debugging and
@@ -118,6 +129,14 @@ class _BlockPrinter:
             self.lines.append(
                 f"{pad}{_INDENT}parameters: [{', '.join(block.parameters)}]"
             )
+        for slot in block.static_bindings:
+            fields = ", ".join(
+                f"{field.name}={_format_value(field.value)}" for field in slot.fields
+            )
+            suffix = f" ({fields})" if fields else ""
+            self.lines.append(
+                f"{pad}{_INDENT}static binding {slot.name}: {slot.type_key}{suffix}"
+            )
         body_indent = indent + 1
         self._emit_ops(block.operations, indent=body_indent)
         self.lines.append(f"{pad}}}")
@@ -148,30 +167,55 @@ class _BlockPrinter:
             self._emit_if(op, indent=indent, pad=pad)
         elif isinstance(op, WhileOperation):
             self._emit_while(op, indent=indent, pad=pad)
-        elif isinstance(op, CallBlockOperation):
-            self._emit_call(op, indent=indent, pad=pad)
+        elif isinstance(op, InvokeOperation):
+            self._emit_invoke(op, indent=indent, pad=pad)
+        elif isinstance(op, SelectOperation):
+            self._emit_select(op, indent=indent, pad=pad)
         else:
             self.lines.append(pad + _format_flat_op(op))
 
     # -- control flow ----------------------------------------------------
+
+    def _region_args_suffix(self, op) -> str:
+        """Format a loop's region arguments as a header suffix.
+
+        Args:
+            op: A loop operation (``ForOperation`` / ``ForItemsOperation``
+                / ``WhileOperation``) carrying ``region_args``.
+
+        Returns:
+            str: `` iter_args(name = %init -> %result, ...)`` when the
+                loop carries region arguments, or ``""`` otherwise.
+        """
+        if not getattr(op, "region_args", ()):
+            return ""
+        parts = [
+            f"{a.var_name or '_'} = {_format_value(a.init)} -> {_format_value(a.result)}"
+            for a in op.region_args
+        ]
+        return " iter_args(" + ", ".join(parts) + ")"
 
     def _emit_for(self, op: ForOperation, *, indent: int, pad: str) -> None:
         start = _format_value(op.operands[0]) if len(op.operands) > 0 else "?"
         stop = _format_value(op.operands[1]) if len(op.operands) > 1 else "?"
         step = _format_value(op.operands[2]) if len(op.operands) > 2 else "?"
         lv = op.loop_var or "_"
-        self.lines.append(f"{pad}for %{lv} in range({start}, {stop}, {step}) {{")
+        iter_args = self._region_args_suffix(op)
+        self.lines.append(
+            f"{pad}for %{lv} in range({start}, {stop}, {step}){iter_args} {{"
+        )
         self._emit_ops(op.operations, indent=indent + 1)
-        self.lines.append(f"{pad}}}")
+        self.lines.append(f"{pad}}}{_format_region_yields(op)}")
 
     def _emit_for_items(self, op: ForItemsOperation, *, indent: int, pad: str) -> None:
         keys = ", ".join(f"%{k}" for k in op.key_vars) if op.key_vars else "%k"
         val = f"%{op.value_var}" if op.value_var else "%v"
         iterable = _format_value(op.operands[0]) if op.operands else "<iterable>"
-        header = f"{pad}for ({keys}), {val} in items({iterable}) {{"
+        iter_args = self._region_args_suffix(op)
+        header = f"{pad}for ({keys}), {val} in items({iterable}){iter_args} {{"
         self.lines.append(header)
         self._emit_ops(op.operations, indent=indent + 1)
-        self.lines.append(f"{pad}}}")
+        self.lines.append(f"{pad}}}{_format_region_yields(op)}")
 
     def _emit_if(self, op: IfOperation, *, indent: int, pad: str) -> None:
         cond = _format_value(op.operands[0]) if op.operands else "<cond>"
@@ -192,28 +236,71 @@ class _BlockPrinter:
             if op.max_iterations is not None
             else ""
         )
-        self.lines.append(f"{pad}while {cond}{max_iter} {{")
+        iter_args = self._region_args_suffix(op)
+        self.lines.append(f"{pad}while {cond}{max_iter}{iter_args} {{")
         self._emit_ops(op.operations, indent=indent + 1)
-        self.lines.append(f"{pad}}}")
+        self.lines.append(f"{pad}}}{_format_region_yields(op)}")
 
-    # -- call block ------------------------------------------------------
+    def _emit_invoke(self, op: InvokeOperation, *, indent: int, pad: str) -> None:
+        """Emit one invocation with transform and activation metadata.
 
-    def _emit_call(self, op: CallBlockOperation, *, indent: int, pad: str) -> None:
-        target = op.block
-        name = target.name if target is not None and target.name else "<unresolved>"
+        Args:
+            op (InvokeOperation): Invocation to print.
+            indent (int): Current indentation depth for an expanded body.
+            pad (str): Precomputed indentation prefix for the invocation line.
+        """
+        target = op.body
+        name = op.name
         args = ", ".join(_format_value(v) for v in op.operands)
         rets = ", ".join(_format_value(v) for v in op.results)
         arrow = f" -> ({rets})" if rets else ""
+        metadata = _format_invoke_metadata(op)
         if self.depth > 0 and target is not None:
-            self.lines.append(f"{pad}call {name}({args}){arrow} {{")
+            self.lines.append(f"{pad}invoke {name}({args}){arrow}{metadata} {{")
             child = _BlockPrinter(depth=self.depth - 1)
-            # Render the target block body only (not its outer header — we
-            # already emitted the ``call`` line with signature info).
             child._emit_ops(target.operations, indent=indent + 1)
             self.lines.extend(child.lines)
             self.lines.append(f"{pad}}}")
         else:
-            self.lines.append(f"{pad}call {name}({args}){arrow}")
+            self.lines.append(f"{pad}invoke {name}({args}){arrow}{metadata}")
+
+    def _emit_select(self, op: SelectOperation, *, indent: int, pad: str) -> None:
+        """Emit a SELECT with structural metadata and optional case bodies.
+
+        Args:
+            op (SelectOperation): SELECT operation to print.
+            indent (int): Current indentation depth for expanded case bodies.
+            pad (str): Precomputed indentation prefix for the SELECT line.
+
+        Returns:
+            None: Appends the formatted SELECT to ``self.lines``.
+        """
+        width = op.num_index_qubits
+        width_text = _format_value(width) if isinstance(width, Value) else str(width)
+        cases = ", ".join(
+            f"{index}:{block.name or '<anonymous>'}"
+            for index, block in enumerate(op.case_blocks)
+        )
+        args = ", ".join(_format_value(value) for value in op.operands)
+        header = (
+            f"{_format_results(op.results)} = select({args}) "
+            f"[index_width={width_text}, index_args={op.num_index_args}, "
+            f"cases=[{cases}]]"
+        )
+        if self.depth <= 0:
+            self.lines.append(pad + header)
+            return
+
+        self.lines.append(pad + header + " {")
+        case_pad = _INDENT * (indent + 1)
+        for index, block in enumerate(op.case_blocks):
+            name = block.name or "<anonymous>"
+            self.lines.append(f"{case_pad}case {index} {name} {{")
+            child = _BlockPrinter(depth=self.depth - 1)
+            child._emit_ops(block.operations, indent=indent + 2)
+            self.lines.extend(child.lines)
+            self.lines.append(f"{case_pad}}}")
+        self.lines.append(f"{pad}}}")
 
 
 # ---------------------------------------------------------------------------
@@ -222,17 +309,30 @@ class _BlockPrinter:
 
 
 def _format_flat_op(op: Operation) -> str:
-    """Format a non-control-flow operation as a single line."""
+    """Format a non-control-flow operation as a single line.
+
+    Args:
+        op (Operation): Operation to render.
+
+    Returns:
+        str: Single-line textual representation of the operation.
+    """
     if isinstance(op, GateOperation):
         return _format_gate(op)
     if isinstance(op, ControlledUOperation):
         return _format_controlled(op)
-    if isinstance(op, CompositeGateOperation):
-        return _format_composite(op)
+    if isinstance(op, InvokeOperation):
+        return _format_invoke(op)
     if isinstance(op, InverseBlockOperation):
         return _format_inverse_block(op)
+    if isinstance(op, GlobalPhaseOperation):
+        return _format_global_phase(op)
     if isinstance(op, MeasureOperation):
         return _format_measure(op, "measure")
+    if isinstance(op, ProjectOperation):
+        return _format_measure(op, f"project_{op.axis}")
+    if isinstance(op, ResetOperation):
+        return _format_measure(op, "reset")
     if isinstance(op, MeasureVectorOperation):
         return _format_measure(op, "measure_vector")
     if isinstance(op, MeasureQFixedOperation):
@@ -315,6 +415,15 @@ def _format_gate(op: GateOperation) -> str:
 
 
 def _format_controlled(op: ControlledUOperation) -> str:
+    """Format a structural controlled-unitary operation.
+
+    Args:
+        op (ControlledUOperation): Controlled operation to format.
+
+    Returns:
+        str: Single-line controlled-unitary representation including a
+            non-default activation value when present.
+    """
     block_name = op.block.name if op.block is not None and op.block.name else "<block>"
     power = op.power
     power_str = (
@@ -322,18 +431,85 @@ def _format_controlled(op: ControlledUOperation) -> str:
         if isinstance(power, Value)
         else f", power={power}"
     )
+    control_value = (
+        f", control_value={op.control_value}"
+        if isinstance(op, ConcreteControlledU) and op.control_value is not None
+        else ""
+    )
     args = ", ".join(_format_value(v) for v in op.operands)
-    return f"{_format_results(op.results)} = controlled {block_name}({args}{power_str})"
+    return (
+        f"{_format_results(op.results)} = controlled "
+        f"{block_name}({args}{power_str}{control_value})"
+    )
 
 
-def _format_composite(op: CompositeGateOperation) -> str:
+def _format_invoke(op: InvokeOperation) -> str:
+    """Format a flat callable invocation.
+
+    Args:
+        op (InvokeOperation): Invocation to format.
+
+    Returns:
+        str: Single-line invocation including transform metadata.
+    """
     args = ", ".join(_format_value(v) for v in op.operands)
-    return f"{_format_results(op.results)} = composite {op.name}({args})"
+    return (
+        f"{_format_results(op.results)} = invoke {op.name}({args})"
+        f"{_format_invoke_metadata(op)}"
+    )
+
+
+def _format_invoke_metadata(op: InvokeOperation) -> str:
+    """Format transform metadata that changes invocation semantics.
+
+    Args:
+        op (InvokeOperation): Invocation whose transform metadata should be
+            rendered.
+
+    Returns:
+        str: Bracketed transform metadata, or an empty string for a direct
+            invocation.
+    """
+    if op.transform is CallTransform.DIRECT:
+        return ""
+    fields = [f"transform={op.transform.name}"]
+    if op.transform is CallTransform.CONTROLLED:
+        fields.append(f"controls={op.num_control_qubits}")
+        if op.control_value is not None:
+            fields.append(f"control_value={op.control_value}")
+    return " [" + ", ".join(fields) + "]"
 
 
 def _format_inverse_block(op: InverseBlockOperation) -> str:
+    """Format a first-class inverse block operation.
+
+    Args:
+        op (InverseBlockOperation): Inverse operation to format.
+
+    Returns:
+        str: Single-line inverse representation including coherent-control
+            metadata when present.
+    """
     args = ", ".join(_format_value(v) for v in op.operands)
-    return f"{_format_results(op.results)} = inverse {op.name}({args})"
+    fields: list[str] = []
+    if op.num_control_qubits:
+        fields.append(f"controls={op.num_control_qubits}")
+        if op.control_value is not None:
+            fields.append(f"control_value={op.control_value}")
+    metadata = " [" + ", ".join(fields) + "]" if fields else ""
+    return f"{_format_results(op.results)} = inverse {op.name}({args}){metadata}"
+
+
+def _format_global_phase(op: GlobalPhaseOperation) -> str:
+    """Format a zero-qubit global-phase operation.
+
+    Args:
+        op (GlobalPhaseOperation): Operation to format.
+
+    Returns:
+        str: ``global_phase(<phase>)`` textual representation.
+    """
+    return f"global_phase({_format_value(op.phase)})"
 
 
 def _format_measure(op: Operation, mnemonic: str) -> str:
@@ -367,6 +543,26 @@ def _format_merge(if_op: IfOperation, merge: IfMerge) -> str:
     tv = _format_value(merge.true_value)
     fv = _format_value(merge.false_value)
     return f"{_format_results([merge.result])} = merge({cond} ? {tv} : {fv})"
+
+
+def _format_region_yields(
+    op: "ForOperation | ForItemsOperation | WhileOperation",
+) -> str:
+    """Format a loop's region arguments as a yield/result footer suffix.
+
+    Args:
+        op (ForOperation | ForItemsOperation | WhileOperation): The loop
+            whose region arguments are rendered.
+
+    Returns:
+        str: `` yield(%yielded, ...) -> (%result, ...)`` (leading space
+            included), or an empty string for a carry-free loop.
+    """
+    if not op.region_args:
+        return ""
+    yields = ", ".join(_format_value(arg.yielded) for arg in op.region_args)
+    results = ", ".join(_format_value(arg.result) for arg in op.region_args)
+    return f" yield({yields}) -> ({results})"
 
 
 def _format_binary(op: Operation, table: dict[Any, str]) -> str:
@@ -424,12 +620,12 @@ def _format_results(results: list[Value]) -> str:
     return ", ".join(_format_value(v) for v in results)
 
 
-def _format_param(value: Value) -> str:
+def _format_param(value: ValueLike) -> str:
     t = value.type.label() if value.type is not None else "?"
     return f"{value.name or '_'}: {t}"
 
 
-def _format_outputs(outputs: list[Value]) -> str:
+def _format_outputs(outputs: list[ValueLike]) -> str:
     if not outputs:
         return ""
     if len(outputs) == 1:

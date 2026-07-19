@@ -168,7 +168,14 @@ class CircuitLayoutEngine:
     def _place_vinline_block(
         self, node: VInlineBlock, state: LayoutState, depth: int
     ) -> None:
-        """Place a VInlineBlock node (inlined CallBlock/ControlledU/CompositeGate)."""
+        """Place one inlined callable or controlled body.
+
+        Args:
+            node (VInlineBlock): Pre-resolved inlined body to place.
+            state (LayoutState): Mutable layout state receiving coordinates
+                and block-range metadata.
+            depth (int): Current visual nesting depth.
+        """
         affected_qubits = node.affected_qubits
 
         # The box's visual extent spans every wire from ``min(affected)``
@@ -271,6 +278,7 @@ class CircuitLayoutEngine:
                     "end_x": actual_end,
                     "qubit_indices": affected_qubits,
                     "control_qubit_indices": node.control_qubit_indices,
+                    "control_pattern": node.control_pattern,
                     "power": node.power,
                     "depth": depth,
                     "max_gate_width": max_gate_width,
@@ -646,7 +654,11 @@ class CircuitLayoutEngine:
         # Reserve the rendered half-height plus a neighboring gate half-height
         # so adjacent wires and gates do not collide with the summary box.
         for folded_extent in folded_block_extents.values():
-            qubits = sorted(folded_extent.get("affected_qubits", []))
+            qubits = sorted(
+                q
+                for q in folded_extent.get("affected_qubits", [])
+                if 0 <= q < num_qubits
+            )
             if not qubits:
                 continue
             num_lines = folded_extent.get("num_text_lines", 1)
