@@ -115,6 +115,26 @@ def _zero_probability(results: list[tuple[Any, int]]) -> float:
     return zero / total
 
 
+def _prepare_basis(
+    system: qmc.Vector[qmc.Qubit],
+    basis: int,
+    num_qubits: int,
+) -> None:
+    """Prepare a little-endian computational-basis system state in place.
+
+    Args:
+        system (qmc.Vector[qmc.Qubit]): System register to prepare.
+        basis (int): Computational-basis value to encode.
+        num_qubits (int): Number of little-endian basis bits to inspect.
+
+    Returns:
+        None: The register is updated in place.
+    """
+    for index in range(num_qubits):
+        if basis & (1 << index):
+            system[index] = qmc.x(system[index])
+
+
 def _z_encoding(*, num_signal_qubits: int = 2) -> qmc.LCUBlockEncoding:
     """Return a hand-written Z leaf with a configurable physical signal width."""
     return qmc.LCUBlockEncoding(
@@ -692,6 +712,79 @@ def test_recursive_lcu_control_samples_and_estimates_on_every_sdk(
         outer = qmc.h(qmc.qubit("outer"))
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(1, "system")
+        outer, signal, system = controlled(outer, signal, system)
+        return qmc.expval(outer, observable)
+
+    shots = 2048
+    sample = sdk_transpiler.transpiler.transpile(sample_kernel)
+    sample_result = sample.sample(_executor(sdk_transpiler), shots=shots).result()
+    expected_zero = (1.0 + float(np.real(overlap))) / 2.0
+    tolerance = 6.0 * math.sqrt(expected_zero * (1.0 - expected_zero) / shots) + 0.02
+    assert _zero_probability(sample_result.results) == pytest.approx(
+        expected_zero,
+        abs=tolerance,
+    )
+
+    expval = sdk_transpiler.transpiler.transpile(
+        expval_kernel,
+        bindings={"observable": qm_o.Y(0)},
+    )
+    observed = float(expval.run(_executor(sdk_transpiler)).result())
+    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed == pytest.approx(float(np.imag(overlap)), abs=atol)
+
+
+@pytest.mark.parametrize("num_system_qubits", [1, 2, 3])
+@pytest.mark.parametrize("seed", [0, 42])
+def test_random_recursive_lcu_samples_and_estimates_on_every_sdk(
+    sdk_transpiler: Any,
+    num_system_qubits: int,
+    seed: int,
+) -> None:
+    """Random two-level LCUs execute across system widths on every SDK."""
+    rng = np.random.default_rng(seed + 100 * num_system_qubits)
+    inner_i, inner_z, outer_inner, outer_i = (
+        complex(*rng.uniform(-1.0, 1.0, size=2)) for _ in range(4)
+    )
+    identity = qmc.identity_block_encoding(num_system_qubits)
+    z_encoding = qmc.ising_z_block_encoding({(0,): 1.0}, num_system_qubits)
+    inner = qmc.lcu_block_encoding(
+        (
+            qmc.LCUBlockEncodingTerm(inner_i, identity),
+            qmc.LCUBlockEncodingTerm(inner_z, z_encoding),
+        )
+    )
+    encoding = qmc.lcu_block_encoding(
+        (
+            qmc.LCUBlockEncodingTerm(outer_inner, inner),
+            qmc.LCUBlockEncodingTerm(outer_i, identity),
+        )
+    )
+    basis = seed % (1 << num_system_qubits)
+    z_eigenvalue = -1.0 if basis & 1 else 1.0
+    overlap = (
+        outer_inner * (inner_i + z_eigenvalue * inner_z) + outer_i
+    ) / encoding.normalization
+    controlled = qmc.control(encoding.unitary)
+
+    @qmc.qkernel
+    def sample_kernel() -> qmc.Bit:
+        """Sample the real part of one randomized recursive overlap."""
+        outer = qmc.h(qmc.qubit("outer"))
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(num_system_qubits, "system")
+        _prepare_basis(system, basis, num_system_qubits)
+        outer, signal, system = controlled(outer, signal, system)
+        outer = qmc.h(outer)
+        return qmc.measure(outer)
+
+    @qmc.qkernel
+    def expval_kernel(observable: qmc.Observable) -> qmc.Float:
+        """Estimate the imaginary part of one randomized recursive overlap."""
+        outer = qmc.h(qmc.qubit("outer"))
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(num_system_qubits, "system")
+        _prepare_basis(system, basis, num_system_qubits)
         outer, signal, system = controlled(outer, signal, system)
         return qmc.expval(outer, observable)
 
