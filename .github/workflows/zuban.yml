@@ -19,22 +19,23 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
+      skip_all: ${{ steps.changes.outputs.skip_all }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Detect docs-only changes
+      - name: Classify changed files
         id: changes
         shell: bash
         run: |
-          .github/scripts/detect-docs-only.sh \
+          .github/scripts/classify-changes.sh \
             "${{ github.event.pull_request.base.sha }}" \
             "${{ github.event.pull_request.head.sha }}"
 
   zuban-check:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,4 +70,6 @@ jobs:
           # to qamomile/ for now so future docs edits don't accidentally
           # break the type-check job. Re-enable by switching the line
           # above to ``uv run zuban check qamomile/ docs/`` once the
-          # docs-side discipline is established.
+          # docs-side discipline is established; when doing so, drop the
+          # docs_only skip on this job so docs-only pull requests still
+          # get type-checked.

@@ -19,23 +19,24 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
+      skip_all: ${{ steps.changes.outputs.skip_all }}
       changed_files: ${{ steps.changes.outputs.changed_files }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Detect docs-only changes
+      - name: Classify changed files
         id: changes
         shell: bash
         run: |
-          .github/scripts/detect-docs-only.sh \
+          .github/scripts/classify-changes.sh \
             "${{ github.event.pull_request.base.sha }}" \
             "${{ github.event.pull_request.head.sha }}"
 
   base-test:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
       matrix:
@@ -73,7 +74,7 @@ jobs:
 
   docs-test:
     needs: changes
-    if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
+    if: ${{ needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     runs-on: ubuntu-latest
     env:
       MPLBACKEND: Agg
@@ -114,7 +115,7 @@ jobs:
 
   quri-parts-test:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
       matrix:
@@ -150,7 +151,7 @@ jobs:
 
   hugr-test:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
       matrix:
@@ -186,7 +187,7 @@ jobs:
 
   cudaq-test-macos:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
       matrix:
@@ -228,7 +229,7 @@ jobs:
 
   cudaq-test-ubuntu:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
       matrix:

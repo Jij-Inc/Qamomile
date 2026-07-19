@@ -19,22 +19,23 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
+      skip_all: ${{ steps.changes.outputs.skip_all }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Detect docs-only changes
+      - name: Classify changed files
         id: changes
         shell: bash
         run: |
-          .github/scripts/detect-docs-only.sh \
+          .github/scripts/classify-changes.sh \
             "${{ github.event.pull_request.base.sha }}" \
             "${{ github.event.pull_request.head.sha }}"
 
   ruff-format:
     needs: changes
-    if: ${{ needs.changes.outputs.docs_only != 'true' }}
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

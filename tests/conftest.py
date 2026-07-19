@@ -39,7 +39,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--docs-file",
         action="append",
         default=[],
-        help="Repository-relative documentation path changed by the pull request.",
+        help="Repository-relative path changed by the pull request.",
     )
 
 
