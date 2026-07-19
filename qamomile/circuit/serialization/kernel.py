@@ -646,13 +646,17 @@ class _StaticBindingResolver:
                 if an owned block declares an unknown static slot.
         """
         if self._contexts:
+            # Validate deferred member widths before resolution removes their
+            # static-binding markers. This same call-site traversal also
+            # finalizes inverse widths already present in the payload graph.
             self._validate_block_call_widths(block, {}, {})
             self._resolve_block(block)
-        # Value substitution can leave owned-block formals symbolic even when
-        # their enclosing call operands are concrete. Walk the final graph
-        # after member resolution so inverse metadata uses those call-site
-        # widths, including kernels without static binding contexts.
-        self._validate_block_call_widths(block, {}, {})
+        else:
+            # Value substitution can leave owned-block formals symbolic even
+            # when their enclosing call operands are concrete. Without static
+            # members, this is the single traversal that propagates those
+            # call-site widths into inverse metadata.
+            self._validate_block_call_widths(block, {}, {})
 
     def _validate_block_call_widths(
         self,
@@ -1410,14 +1414,6 @@ def _replace_operations(
                 for items in new_operation.nested_op_lists()
             ]
             new_operation = new_operation.rebuild_nested(nested)
-        if isinstance(new_operation, InverseBlockOperation):
-            _materialize_inverse_target_width(
-                new_operation,
-                [
-                    _concrete_quantum_width(target)
-                    for target in new_operation.target_qubits
-                ],
-            )
         _replace_owned_blocks(new_operation, replacements, block_cache)
         rewritten.append(new_operation)
     return rewritten

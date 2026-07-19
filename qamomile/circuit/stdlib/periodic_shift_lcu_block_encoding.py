@@ -15,10 +15,11 @@ register.  Consequently the all-zero signal block is ``A / lambda`` for
 
 Only periodic boundaries, constant coefficients, and power-of-two axis sizes
 are in scope.  Non-periodic boundary corrections and position-dependent
-coefficients require different block-encoding constructions.  Constant shifts
-are emitted as repeated ancilla-free unit increments or decrements, so this
-factory targets local stencils rather than dense circulant kernels with large
-displacements.
+coefficients require different block-encoding constructions. Each constant
+shift is decomposed into ancilla-free increment or decrement ladders for the
+set bits of its displacement. A dense circulant kernel may still require
+exponentially many LCU terms, so this factory is intended for shift-sparse
+decompositions.
 """
 
 from __future__ import annotations
@@ -26,20 +27,17 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-import numpy as np
-
 import qamomile.circuit as qmc
-from qamomile.circuit.frontend.handle.utils import get_size
-from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.circuit.stdlib.arithmetic import (
     _apply_fixed_window_periodic_shift,
 )
 from qamomile.circuit.stdlib.lcu_block_encoding import (
     LCUBlockEncoding,
-    _BlockEncodingUnitary,
-)
-from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
-    _mottonen_composite,
+    _build_lcu_block_encoding_unitary,
+    _coefficient_phase,
+    _identity_vector,
+    _lcu_num_signal_qubits,
+    _register_lcu_block_encoding_static_binding,
 )
 from qamomile.linalg import PeriodicShiftLCU, PeriodicShiftLCUTerm
 
@@ -77,9 +75,11 @@ class PeriodicShiftLCUBlockEncoding(LCUBlockEncoding):
 
     The inherited fields form the qkernel-visible static LCU contract.
     ``register_sizes``, ``offsets``, and ``coefficients`` are deeply immutable
-    producer metadata for host-side inspection only. Reusable qkernels should
-    annotate descriptor arguments with :class:`LCUBlockEncoding`, allowing the
-    same serialized template to accept this and other exact LCU producers.
+    producer metadata for host-side inspection only. A producer-specific
+    qkernel may annotate an argument with this class. Reusable qkernels should
+    instead annotate descriptor arguments with :class:`LCUBlockEncoding`,
+    allowing the same serialized template to accept this and other exact LCU
+    producers.
 
     Args:
         unitary (qmc.QKernel): QKernel implementing the block-encoding unitary
@@ -208,7 +208,7 @@ def _validate_descriptor_metadata(
         raise ValueError("num_system_qubits must equal the sum of register_sizes.")
     frozen_offsets = tuple(term.offset for term in lcu.terms)
     frozen_coefficients = tuple(term.coefficient for term in terms)
-    expected_signal = max(1, (len(frozen_offsets) - 1).bit_length())
+    expected_signal = _lcu_num_signal_qubits(len(frozen_offsets))
     if num_signal_qubits != expected_signal:
         raise ValueError(
             "num_signal_qubits does not match the number of canonical terms."
@@ -245,27 +245,6 @@ def _shortest_signed_shift(residue: int, width: int) -> int:
     return residue if residue <= modulus // 2 else residue - modulus
 
 
-def _apply_constant_periodic_shift(
-    axis: qmc.Vector[qmc.Qubit] | qmc.VectorView[qmc.Qubit],
-    shift: int,
-) -> qmc.Vector[qmc.Qubit] | qmc.VectorView[qmc.Qubit]:
-    """Apply a compile-time constant periodic shift to one axis register.
-
-    Args:
-        axis (qmc.Vector[qmc.Qubit] | qmc.VectorView[qmc.Qubit]): Axis register
-            interpreted as an LSB-first unsigned integer.
-        shift (int): Signed modular displacement. Positive values increment;
-            negative values decrement.
-
-    Returns:
-        qmc.Vector[qmc.Qubit] | qmc.VectorView[qmc.Qubit]: Updated axis handle.
-    """
-    primitive = qmc.modular_increment if shift >= 0 else qmc.modular_decrement
-    for _ in range(abs(shift)):
-        axis = primitive(axis)
-    return axis
-
-
 def _apply_multidimensional_shift(
     system: qmc.Vector[qmc.Qubit],
     register_sizes: tuple[int, ...],
@@ -273,9 +252,9 @@ def _apply_multidimensional_shift(
 ) -> qmc.Vector[qmc.Qubit]:
     """Apply captured constant shifts to a flattened multidimensional register.
 
-    This helper is ordinary trace-time Python rather than a qkernel.  Its loop
-    therefore unrolls the fixed axis layout while the emitted operations remain
-    ordinary Qamomile qkernel calls.
+    This helper is ordinary trace-time Python rather than a qkernel. Its loop
+    unrolls the fixed axis layout, and every axis uses the same fixed-window
+    implementation regardless of the number of dimensions.
 
     Args:
         system (qmc.Vector[qmc.Qubit]): Flattened axis register.
@@ -285,15 +264,11 @@ def _apply_multidimensional_shift(
     Returns:
         qmc.Vector[qmc.Qubit]: Shifted flattened register.
     """
-    if len(register_sizes) == 1:
-        return _apply_constant_periodic_shift(system, signed_shifts[0])  # type: ignore[return-value]
-
     start = 0
     for width, shift in zip(register_sizes, signed_shifts, strict=True):
-        stop = start + width
         if shift:
             system = _apply_fixed_window_periodic_shift(system, start, width, shift)
-        start = stop
+        start += width
     return system
 
 
@@ -301,7 +276,7 @@ def _make_shift_case(
     offset: tuple[int, ...],
     coefficient: complex,
     register_sizes: tuple[int, ...],
-) -> qmc.QKernel:
+) -> qmc.QKernel[..., qmc.Vector[qmc.Qubit]]:
     """Build one phased multidimensional shift qkernel for SELECT.
 
     Args:
@@ -312,37 +287,36 @@ def _make_shift_case(
             register.
 
     Returns:
-        qmc.QKernel: Qkernel implementing
-        ``exp(1j * arg(coefficient)) * T_offset``.
+        qmc.QKernel[..., qmc.Vector[qmc.Qubit]]: Qkernel implementing
+            ``exp(1j * arg(coefficient)) * T_offset``.
     """
     signed_shifts = tuple(
         _shortest_signed_shift(residue, width)
         for residue, width in zip(offset, register_sizes, strict=True)
     )
 
-    @qmc.qkernel
-    def shift_case(
-        system: qmc.Vector[qmc.Qubit],
-    ) -> qmc.Vector[qmc.Qubit]:
-        """Apply the captured tensor product of periodic shifts.
-
-        Args:
-            system (qmc.Vector[qmc.Qubit]): Flattened axis register.
-
-        Returns:
-            qmc.Vector[qmc.Qubit]: Shifted system register.
-        """
-        return _apply_multidimensional_shift(
-            system,
-            register_sizes,
-            signed_shifts,
-        )
-
     phase = _coefficient_phase(coefficient)
     if not phase:
-        return shift_case
 
-    phased_shift = qmc.global_phase(shift_case, phase)
+        @qmc.qkernel
+        def shift_case(
+            system: qmc.Vector[qmc.Qubit],
+        ) -> qmc.Vector[qmc.Qubit]:
+            """Apply the captured tensor product of periodic shifts.
+
+            Args:
+                system (qmc.Vector[qmc.Qubit]): Flattened axis register.
+
+            Returns:
+                qmc.Vector[qmc.Qubit]: Shifted system register.
+            """
+            return _apply_multidimensional_shift(
+                system,
+                register_sizes,
+                signed_shifts,
+            )
+
+        return shift_case
 
     @qmc.qkernel
     def phased_shift_case(
@@ -356,235 +330,14 @@ def _make_shift_case(
         Returns:
             qmc.Vector[qmc.Qubit]: Phased and shifted system register.
         """
-        return phased_shift(system)
+        system = _apply_multidimensional_shift(
+            system,
+            register_sizes,
+            signed_shifts,
+        )
+        return qmc.global_phase(_identity_vector, phase)(system)
 
     return phased_shift_case
-
-
-def _coefficient_phase(coefficient: complex) -> float:
-    """Return one nonzero coefficient phase with signed zero canonicalized.
-
-    Args:
-        coefficient (complex): Nonzero canonical shift coefficient.
-
-    Returns:
-        float: Principal coefficient phase, using positive zero for a
-            positive-real coefficient.
-    """
-    phase = math.atan2(coefficient.imag, coefficient.real)
-    return phase if phase else 0.0
-
-
-def _validate_register_widths(
-    signal: qmc.Vector[qmc.Qubit],
-    system: qmc.Vector[qmc.Qubit],
-    expected_signal: int,
-    expected_system: int,
-) -> None:
-    """Validate concrete registers while allowing symbolic cache traces.
-
-    Args:
-        signal (qmc.Vector[qmc.Qubit]): Complete public signal register.
-        system (qmc.Vector[qmc.Qubit]): Ordered flat system register.
-        expected_signal (int): Required signal width.
-        expected_system (int): Required system width.
-
-    Raises:
-        TypeError: If either argument is not a qubit vector.
-        ValueError: If a concrete register width differs from its requirement.
-    """
-    _validate_register_width(signal, expected_signal, "signal")
-    _validate_register_width(system, expected_system, "system")
-
-
-def _validate_register_width(
-    register: qmc.Vector[qmc.Qubit],
-    expected: int,
-    name: str,
-) -> None:
-    """Validate one concrete vector width and defer symbolic-width checks.
-
-    Args:
-        register (qmc.Vector[qmc.Qubit]): Register to inspect.
-        expected (int): Required width.
-        name (str): Register name used in diagnostics.
-
-    Raises:
-        TypeError: If ``register`` is not a vector.
-        ValueError: If its concrete width differs from ``expected``.
-    """
-    try:
-        actual = get_size(register)
-    except ValueError:
-        return
-    if actual != expected:
-        unit = "qubit" if expected == 1 else "qubits"
-        raise ValueError(
-            "periodic shift LCU block encoding requires "
-            f"{expected} {name} {unit}, got {actual}."
-        )
-
-
-def _build_single_term_encoding(
-    term: tuple[tuple[int, ...], complex],
-    register_sizes: tuple[int, ...],
-    num_signal_qubits: int,
-) -> _BlockEncodingUnitary:
-    """Build an unconditional phased-shift encoding for one LCU term.
-
-    Args:
-        term (tuple[tuple[int, ...], complex]): Canonical nonzero shift term.
-        register_sizes (tuple[int, ...]): Per-axis system-register widths.
-        num_signal_qubits (int): Positive pass-through signal width.
-
-    Returns:
-        _BlockEncodingUnitary: Single-term periodic block-encoding unitary.
-    """
-    offset, coefficient = term
-    phased_shift = _make_shift_case(offset, coefficient, register_sizes)
-    num_system_qubits = sum(register_sizes)
-
-    @qmc.qkernel
-    def unitary(
-        signal: qmc.Vector[qmc.Qubit],
-        system: qmc.Vector[qmc.Qubit],
-    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-        """Apply one captured phased periodic shift.
-
-        Args:
-            signal (qmc.Vector[qmc.Qubit]): Pass-through signal register.
-            system (qmc.Vector[qmc.Qubit]): Flattened system register.
-
-        Returns:
-            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Preserved
-                signal and shifted system registers.
-        """
-        _validate_register_widths(
-            signal,
-            system,
-            num_signal_qubits,
-            num_system_qubits,
-        )
-        system = phased_shift(system)
-        return signal, system
-
-    return unitary
-
-
-def _build_zero_encoding(
-    register_sizes: tuple[int, ...],
-    num_signal_qubits: int,
-) -> _BlockEncodingUnitary:
-    """Build an exact zero block using one signal-qubit bit flip.
-
-    Args:
-        register_sizes (tuple[int, ...]): Per-axis system-register widths.
-        num_signal_qubits (int): Positive signal-register width.
-
-    Returns:
-        _BlockEncodingUnitary: Zero periodic-shift block-encoding unitary.
-    """
-    num_system_qubits = sum(register_sizes)
-
-    @qmc.qkernel
-    def unitary(
-        signal: qmc.Vector[qmc.Qubit],
-        system: qmc.Vector[qmc.Qubit],
-    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-        """Apply the zero block-encoding body.
-
-        Args:
-            signal (qmc.Vector[qmc.Qubit]): One-qubit signal register.
-            system (qmc.Vector[qmc.Qubit]): Flattened system register.
-
-        Returns:
-            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated signal
-                and preserved system registers.
-        """
-        _validate_register_widths(
-            signal,
-            system,
-            num_signal_qubits,
-            num_system_qubits,
-        )
-        signal[0] = qmc.x(signal[0])
-        return signal, system
-
-    return unitary
-
-
-def _build_multi_term_encoding(
-    terms: tuple[tuple[tuple[int, ...], complex], ...],
-    register_sizes: tuple[int, ...],
-    normalization: float,
-    num_signal_qubits: int,
-) -> _BlockEncodingUnitary:
-    """Build PREPARE-SELECT-PREPARE-dagger for multiple shift terms.
-
-    Args:
-        terms (tuple[tuple[tuple[int, ...], complex], ...]): Canonical nonzero
-            periodic-shift terms.
-        register_sizes (tuple[int, ...]): Per-axis system-register widths.
-        normalization (float): Finite positive sum of coefficient magnitudes.
-        num_signal_qubits (int): Required SELECT index width.
-
-    Returns:
-        _BlockEncodingUnitary: Multi-term periodic block-encoding unitary.
-
-    Raises:
-        RuntimeError: If state preparation disagrees with the SELECT width.
-    """
-    amplitudes = np.zeros(1 << num_signal_qubits, dtype=np.float64)
-    sqrt_normalization = math.sqrt(normalization)
-    for index, (_, coefficient) in enumerate(terms):
-        amplitudes[index] = math.sqrt(abs(coefficient)) / sqrt_normalization
-
-    preparation, required_signal_qubits = _mottonen_composite(
-        amplitudes,
-        name="periodic_shift_lcu_prepare",
-        policy=CallPolicy.PRESERVE_BOX,
-    )
-    if required_signal_qubits != num_signal_qubits:
-        raise RuntimeError(
-            "Möttönen preparation width disagrees with the shift LCU SELECT width."
-        )
-    unprepare = qmc.inverse(preparation)
-    selector = qmc.select(
-        tuple(
-            _make_shift_case(offset, coefficient, register_sizes)
-            for offset, coefficient in terms
-        ),
-        num_index_qubits=qmc.uint(num_signal_qubits),
-    )
-    num_system_qubits = sum(register_sizes)
-
-    @qmc.qkernel
-    def unitary(
-        signal: qmc.Vector[qmc.Qubit],
-        system: qmc.Vector[qmc.Qubit],
-    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-        """Apply PREPARE, phased shift SELECT, and inverse PREPARE.
-
-        Args:
-            signal (qmc.Vector[qmc.Qubit]): All-zero block signal register.
-            system (qmc.Vector[qmc.Qubit]): Flattened system register.
-
-        Returns:
-            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated signal
-                and system registers.
-        """
-        _validate_register_widths(
-            signal,
-            system,
-            num_signal_qubits,
-            num_system_qubits,
-        )
-        signal = preparation(signal)
-        signal, system = selector(signal, system)
-        signal = unprepare(signal)
-        return signal, system
-
-    return unitary
 
 
 def periodic_shift_lcu_block_encoding(
@@ -595,8 +348,11 @@ def periodic_shift_lcu_block_encoding(
     ``lcu`` defines ``A = sum_k c_k T_k``, where ``T_k`` is the modular
     translation for one canonical offset tuple. The system is the flattened
     concatenation of the decomposition's LSB-first axis registers. A shift
-    uses the shorter of repeated modular increments or decrements, so its gate
-    cost is linear in that shortest displacement.
+    uses the shorter signed displacement, then emits one ancilla-free
+    increment or decrement ladder for each set bit of its magnitude. This
+    bounds the number of Qamomile-level X and multi-controlled-X operations by
+    a quadratic function of an axis register's width; backend elementary-gate
+    cost depends on how that backend decomposes multi-controlled X operations.
 
     The returned descriptor's ``unitary`` acts on arbitrary signal states.
     Projecting its signal register onto all zero before and after the unitary
@@ -635,8 +391,8 @@ def periodic_shift_lcu_block_encoding(
         ... def apply_encoding(
         ...     encoding: qmc.LCUBlockEncoding,
         ... ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-        ...     signal = qmc.qubit_array(encoding.num_signal_qubits)
-        ...     system = qmc.qubit_array(encoding.num_system_qubits)
+        ...     signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        ...     system = qmc.qubit_array(encoding.num_system_qubits, "system")
         ...     return encoding.unitary(signal, system)
         >>> payload = serialize(apply_encoding)
         >>> received = deserialize(payload)
@@ -665,22 +421,17 @@ def periodic_shift_lcu_block_encoding(
     sizes = lcu.register_sizes
     terms = tuple((term.offset, term.coefficient) for term in lcu.terms)
     normalization = lcu.alpha if terms else 1.0
-    num_signal_qubits = max(1, (len(terms) - 1).bit_length())
-    if not terms:
-        unitary = _build_zero_encoding(sizes, num_signal_qubits)
-    elif len(terms) == 1:
-        unitary = _build_single_term_encoding(
-            terms[0],
-            sizes,
-            num_signal_qubits,
-        )
-    else:
-        unitary = _build_multi_term_encoding(
-            terms,
-            sizes,
-            normalization,
-            num_signal_qubits,
-        )
+    num_signal_qubits = _lcu_num_signal_qubits(len(terms))
+    unitary = _build_lcu_block_encoding_unitary(
+        tuple(
+            _make_shift_case(offset, coefficient, sizes)
+            for offset, coefficient in terms
+        ),
+        tuple(coefficient for _, coefficient in terms),
+        sum(sizes),
+        description="periodic shift LCU block encoding",
+        preparation_name="periodic_shift_lcu_prepare",
+    )
     # This display name is diagnostic only. Stable boxed callable identity is
     # intentionally deferred until boxed inverse lowering supports this body.
     unitary.name = "periodic_shift_lcu_block_encoding"
@@ -693,6 +444,12 @@ def periodic_shift_lcu_block_encoding(
         offsets=tuple(offset for offset, _ in terms),
         coefficients=tuple(coefficient for _, coefficient in terms),
     )
+
+
+_register_lcu_block_encoding_static_binding(
+    PeriodicShiftLCUBlockEncoding,
+    "qamomile.stdlib.periodic_shift_lcu_block_encoding",
+)
 
 
 __all__ = [

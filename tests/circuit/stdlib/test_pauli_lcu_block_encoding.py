@@ -390,26 +390,28 @@ def test_factory_builds_only_the_forward_multi_term_kernel(
 ) -> None:
     """Construction leaves inverse materialization to the lazy transform path."""
     module = importlib.import_module("qamomile.circuit.stdlib.pauli_lcu_block_encoding")
-    original_builder = module._build_multi_term_encoding
-    calls: list[PauliLCU] = []
+    original_builder = module._build_lcu_block_encoding_unitary
+    calls = 0
 
-    def counted_builder(lcu: PauliLCU) -> qmc.QKernel:
-        """Record and delegate one multi-term kernel construction.
+    def counted_builder(*args: Any, **kwargs: Any) -> qmc.QKernel:
+        """Record and delegate one shared LCU kernel construction.
 
         Args:
-            lcu (PauliLCU): Decomposition passed to the patched builder.
+            *args (Any): Positional arguments passed to the shared builder.
+            **kwargs (Any): Keyword arguments passed to the shared builder.
 
         Returns:
             qmc.QKernel: Kernel produced by the original builder.
         """
-        calls.append(lcu)
-        return original_builder(lcu)
+        nonlocal calls
+        calls += 1
+        return original_builder(*args, **kwargs)
 
-    monkeypatch.setattr(module, "_build_multi_term_encoding", counted_builder)
+    monkeypatch.setattr(module, "_build_lcu_block_encoding_unitary", counted_builder)
     lcu = PauliLCU.from_matrix(1j * I2 + 0.5 * X)
     encoding = module.pauli_lcu_block_encoding(lcu)
 
-    assert calls == [lcu]
+    assert calls == 1
     assert encoding.unitary._block is None
     assert qmc.inverse(qmc.inverse(encoding.unitary)) is encoding.unitary
 

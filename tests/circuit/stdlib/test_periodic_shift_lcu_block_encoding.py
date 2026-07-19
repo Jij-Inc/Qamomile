@@ -17,9 +17,10 @@ from qamomile.circuit.transpiler.circuit_ir import (
     SELECT_SEMANTIC_KEY,
     CallInstruction,
     CircuitProgram,
+    GateInstruction,
     lower_circuit_plan,
 )
-from qamomile.linalg import PeriodicShiftLCU
+from qamomile.linalg import PauliLCU, PeriodicShiftLCU
 
 
 def _periodic_encoding(
@@ -107,6 +108,25 @@ def _static_direct_template(
 
     Args:
         encoding (qmc.LCUBlockEncoding): Compile-time exact LCU descriptor.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured system register.
+    """
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = encoding.unitary(signal, system)
+    return qmc.measure(system)
+
+
+@qmc.qkernel
+def _periodic_static_direct_template(
+    encoding: qmc.PeriodicShiftLCUBlockEncoding,
+) -> qmc.Vector[qmc.Bit]:
+    """Apply a Periodic-specific statically bound encoding directly.
+
+    Args:
+        encoding (qmc.PeriodicShiftLCUBlockEncoding): Compile-time periodic
+            shift LCU descriptor.
 
     Returns:
         qmc.Vector[qmc.Bit]: Measured system register.
@@ -294,6 +314,31 @@ def _expected_z(coefficients: Sequence[float], bits: Sequence[int]) -> float:
             for coefficient, bit in zip(coefficients, bits, strict=True)
         )
     )
+
+
+def _shifted_basis_bits(
+    bits: Sequence[int],
+    register_sizes: Sequence[int],
+    offset: Sequence[int],
+) -> tuple[int, ...]:
+    """Return basis bits after one axis-wise periodic shift.
+
+    Args:
+        bits (Sequence[int]): Flattened LSB-first input bits.
+        register_sizes (Sequence[int]): Qubit widths of the consecutive axes.
+        offset (Sequence[int]): Signed modular displacement of every axis.
+
+    Returns:
+        tuple[int, ...]: Flattened LSB-first shifted bits.
+    """
+    shifted_bits: list[int] = []
+    start = 0
+    for width, displacement in zip(register_sizes, offset, strict=True):
+        value = sum(int(bits[start + index]) << index for index in range(width))
+        shifted = (value + displacement) % (1 << width)
+        shifted_bits.extend((shifted >> index) & 1 for index in range(width))
+        start += width
+    return tuple(shifted_bits)
 
 
 def _sample_only_outcome(
@@ -507,32 +552,9 @@ def test_periodic_stencil_top_left_block_matches_dense_matrix(
     coefficients: dict[tuple[int, ...], complex],
 ) -> None:
     """The all-zero signal block equals the requested complex stencil."""
-    from qiskit.quantum_info import Operator
-
     encoding = _periodic_encoding(coefficients, register_sizes)
-
-    @qmc.qkernel
-    def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
-        signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
-        system = qmc.qubit_array(encoding.num_system_qubits, name="system")
-        signal, system = encoding.unitary(signal, system)
-        return qmc.measure(signal), qmc.measure(system)
-
-    executable = qiskit_transpiler.transpile(circuit)
-    unitary = np.asarray(
-        Operator(
-            executable.compiled_quantum[0].circuit.remove_final_measurements(
-                inplace=False
-            )
-        ).data,
-        dtype=np.complex128,
-    )
-    expected_dimension = 1 << (encoding.num_signal_qubits + encoding.num_system_qubits)
-    assert unitary.shape == (expected_dimension, expected_dimension)
-    system_dimension = 1 << encoding.num_system_qubits
-    signal_dimension = 1 << encoding.num_signal_qubits
-    zero_signal_indices = np.arange(system_dimension) * signal_dimension
-    encoded_block = unitary[np.ix_(zero_signal_indices, zero_signal_indices)]
+    unitary = _qiskit_unitary(qiskit_transpiler, encoding)
+    encoded_block = _top_left_block(unitary, encoding)
     expected = _stencil_matrix(coefficients, register_sizes)
     assert np.allclose(
         encoding.normalization * encoded_block,
@@ -540,6 +562,41 @@ def test_periodic_stencil_top_left_block_matches_dense_matrix(
         atol=1e-8,
         rtol=1e-8,
     )
+
+
+def test_periodic_shift_uses_binary_fixed_window_ladders(
+    qiskit_transpiler: Any,
+) -> None:
+    """All dimensions share binary ladders without displacement repetition."""
+
+    def controlled_x_count(
+        register_sizes: tuple[int, ...],
+        offset: tuple[int, ...],
+    ) -> int:
+        """Count controlled-X ladder calls for one single-term shift.
+
+        Args:
+            register_sizes (tuple[int, ...]): Qubit widths of the periodic axes.
+            offset (tuple[int, ...]): Shift applied on each axis.
+
+        Returns:
+            int: Number of controlled-X calls in the lowered shift.
+        """
+        encoding = _periodic_encoding({offset: 1.0}, register_sizes)
+        program = _lower_first_circuit(
+            _build_unitary_kernel(encoding),
+            qiskit_transpiler,
+        )
+        return sum(
+            len(call.callee.body.operations) == 1
+            and isinstance(call.callee.body.operations[0], GateInstruction)
+            and call.callee.body.operations[0].kind.name == "X"
+            for call in _nested_calls(program)
+        )
+
+    assert controlled_x_count((3,), (3,)) == controlled_x_count((3, 1), (3, 0)) == 3
+    assert controlled_x_count((4,), (7,)) == 6
+    assert controlled_x_count((4,), (8,)) == 0
 
 
 def test_periodic_stencil_inverse_is_exact_adjoint_of_full_unitary(
@@ -775,11 +832,7 @@ def test_periodic_stencil_rejects_boolean_widths(width: Any) -> None:
 
 
 def test_periodic_shift_lcu_factory_is_publicly_exported() -> None:
-    """The factory is public in stdlib with its legacy algorithm export."""
-    from qamomile.circuit.algorithm import (
-        PeriodicShiftLCUBlockEncoding as AlgorithmPeriodicShiftLCUBlockEncoding,
-        periodic_shift_lcu_block_encoding as algorithm_periodic_shift_lcu,
-    )
+    """The factory is public only through the circuit and stdlib surfaces."""
     from qamomile.circuit.stdlib import (
         PeriodicShiftLCUBlockEncoding,
         periodic_shift_lcu_block_encoding,
@@ -787,8 +840,6 @@ def test_periodic_shift_lcu_factory_is_publicly_exported() -> None:
 
     assert qmc.periodic_shift_lcu_block_encoding is periodic_shift_lcu_block_encoding
     assert qmc.PeriodicShiftLCUBlockEncoding is PeriodicShiftLCUBlockEncoding
-    assert algorithm_periodic_shift_lcu is periodic_shift_lcu_block_encoding
-    assert AlgorithmPeriodicShiftLCUBlockEncoding is PeriodicShiftLCUBlockEncoding
 
 
 def test_periodic_stencil_descriptor_is_frozen_noncallable_and_identity_based() -> None:
@@ -954,7 +1005,9 @@ def test_periodic_stencil_single_term_omits_prepare_and_select(
     )
 
     assert all(identity.key != SELECT_SEMANTIC_KEY for identity in identities)
-    assert all(identity.key.name != "state_preparation" for identity in identities)
+    assert all(
+        identity.key.name != "periodic_shift_lcu_prepare" for identity in identities
+    )
 
 
 def test_periodic_stencil_preserves_tiny_nonzero_terms() -> None:
@@ -1245,6 +1298,39 @@ def test_generic_static_binding_composes_and_executes_on_every_sdk(
     assert tuple(sampled) == expected_bits
 
 
+def test_periodic_specific_static_binding_executes_on_every_sdk(
+    sdk_transpiler: Any,
+) -> None:
+    """The public Periodic subtype annotation round-trips and binds directly."""
+    restored = deserialize(serialize(_periodic_static_direct_template))
+    encoding = _periodic_encoding({1: 1.0}, (2,))
+
+    assert len(restored.block.static_bindings) == 1
+    assert restored.block.static_bindings[0].type_key == (
+        "qamomile.stdlib.periodic_shift_lcu_block_encoding"
+    )
+    sampled = _sample_only_outcome(
+        sdk_transpiler,
+        restored,
+        {"encoding": encoding},
+    )
+
+    assert tuple(sampled) == (1, 0)
+
+
+def test_periodic_specific_static_binding_rejects_other_lcu_producers(
+    qiskit_transpiler: Any,
+) -> None:
+    """A Periodic-specific static slot rejects a Pauli descriptor."""
+    restored = deserialize(serialize(_periodic_static_direct_template))
+    pauli = qmc.pauli_lcu_block_encoding(
+        PauliLCU.from_matrix(np.eye(2, dtype=np.complex128))
+    )
+
+    with pytest.raises(TypeError, match="PeriodicShiftLCUBlockEncoding"):
+        qiskit_transpiler.transpile(restored, bindings={"encoding": pauli})
+
+
 def test_serialized_generic_lcu_template_rebinds_periodic_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
@@ -1368,6 +1454,100 @@ def test_two_term_periodic_encoding_samples_and_estimates_on_every_sdk(
     )
     tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
     assert observed_y == pytest.approx(expected_y, abs=tolerance)
+
+
+@pytest.mark.parametrize(
+    ("register_sizes", "offset"),
+    [
+        ((4,), (7,)),
+        ((3, 3), (4, -3)),
+    ],
+    ids=["large-one-dimensional", "half-turn-and-negative-multiaxis"],
+)
+@pytest.mark.parametrize("seed", [0, 42])
+def test_binary_periodic_shifts_execute_on_every_sdk(
+    sdk_transpiler: Any,
+    register_sizes: tuple[int, ...],
+    offset: tuple[int, ...],
+    seed: int,
+) -> None:
+    """Binary, half-turn, and multi-axis shifts sample and estimate exactly."""
+    rng = np.random.default_rng(seed)
+    encoding = _periodic_encoding({offset: 1.0}, register_sizes)
+    initial_bits = (
+        rng.integers(
+            0,
+            2,
+            size=encoding.num_system_qubits,
+        )
+        .astype(int)
+        .tolist()
+    )
+    expected_bits = _shifted_basis_bits(initial_bits, register_sizes, offset)
+    z_coefficients = rng.uniform(
+        -1.0,
+        1.0,
+        size=encoding.num_system_qubits,
+    ).tolist()
+
+    @qmc.qkernel
+    def sample_kernel(
+        bits: qmc.Vector[qmc.UInt],
+    ) -> qmc.Vector[qmc.Bit]:
+        """Apply one captured shift and measure the resulting basis state.
+
+        Args:
+            bits (qmc.Vector[qmc.UInt]): Initial computational-basis bits.
+
+        Returns:
+            qmc.Vector[qmc.Bit]: Measured system bits after the shift.
+        """
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        system = _prepare_basis(system, bits)
+        signal, system = encoding.unitary(signal, system)
+        return qmc.measure(system)
+
+    @qmc.qkernel
+    def expval_kernel(
+        bits: qmc.Vector[qmc.UInt],
+        observable: qmc.Observable,
+    ) -> qmc.Float:
+        """Apply one captured shift and estimate a diagonal observable.
+
+        Args:
+            bits (qmc.Vector[qmc.UInt]): Initial computational-basis bits.
+            observable (qmc.Observable): Observable evaluated after the shift.
+
+        Returns:
+            qmc.Float: Expectation value of ``observable``.
+        """
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        system = _prepare_basis(system, bits)
+        signal, system = encoding.unitary(signal, system)
+        return qmc.expval(system, observable)
+
+    sampled = _sample_only_outcome(
+        sdk_transpiler,
+        sample_kernel,
+        {"bits": initial_bits},
+    )
+    observed = _run_expval(
+        sdk_transpiler,
+        expval_kernel,
+        {
+            "bits": initial_bits,
+            "observable": _z_hamiltonian(z_coefficients),
+        },
+    )
+
+    assert tuple(sampled) == expected_bits
+    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed == pytest.approx(
+        _expected_z(z_coefficients, expected_bits),
+        abs=tolerance,
+    )
 
 
 @pytest.mark.parametrize("register_sizes", [(1,), (2,), (1, 2)])

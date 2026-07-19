@@ -8,10 +8,6 @@ from .basic import (
     rz_layer,
     superposition_vector,
 )
-from .block_encoding import (
-    PeriodicShiftLCUBlockEncoding,
-    periodic_shift_lcu_block_encoding,
-)
 from .fqaoa import (
     cost_layer,
     fqaoa_layers,
@@ -34,9 +30,6 @@ from .qaoa import (
 from .trotter import trotterized_time_evolution
 
 __all__ = [
-    # Block encoding
-    "PeriodicShiftLCUBlockEncoding",
-    "periodic_shift_lcu_block_encoding",
     # QAOA
     "ising_cost",
     "x_mixer",

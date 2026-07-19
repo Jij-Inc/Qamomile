@@ -11,6 +11,12 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike
 
+from qamomile.linalg._validation import (
+    as_finite_square_complex_matrix,
+    coerce_finite_complex_scalar,
+    coerce_nonnegative_finite_real,
+)
+
 Offset = int | tuple[int, ...]
 
 
@@ -43,7 +49,10 @@ class PeriodicShiftLCUTerm:
             ValueError: If the coefficient or offset is outside its valid
                 domain.
         """
-        coefficient = _coerce_coefficient(self.coefficient, "term coefficient")
+        coefficient = coerce_finite_complex_scalar(
+            self.coefficient,
+            "term coefficient",
+        )
         if not coefficient:
             raise ValueError("PeriodicShiftLCUTerm coefficient must be nonzero.")
         try:
@@ -149,7 +158,7 @@ class PeriodicShiftLCU:
         if not math.isfinite(alpha):
             raise ValueError("PeriodicShiftLCU normalization must be finite.")
 
-        error_bound = _validate_nonnegative_real(
+        error_bound = coerce_nonnegative_finite_real(
             self.truncation_error_bound,
             "truncation_error_bound",
         )
@@ -194,11 +203,11 @@ class PeriodicShiftLCU:
         if not isinstance(coefficients, Mapping):
             raise TypeError("coefficients must be a mapping from offsets to values.")
         sizes = _validate_register_sizes(register_sizes)
-        threshold = _validate_atol(atol)
+        threshold = coerce_nonnegative_finite_real(atol, "atol")
         grouped: dict[tuple[int, ...], list[complex]] = {}
         for offset, coefficient in coefficients.items():
             canonical = _canonical_offset(offset, sizes)
-            value = _coerce_coefficient(
+            value = coerce_finite_complex_scalar(
                 coefficient,
                 f"coefficient for offset {offset!r}",
             )
@@ -265,8 +274,8 @@ class PeriodicShiftLCU:
                 structure, or produces an unrepresentable normalization.
         """
         sizes = _validate_register_sizes(register_sizes)
-        threshold = _validate_atol(atol)
-        dense = _validate_matrix(matrix)
+        threshold = coerce_nonnegative_finite_real(atol, "atol")
+        dense = as_finite_square_complex_matrix(matrix)
         expected_dimension = 1 << sum(sizes)
         if dense.shape[0] != expected_dimension:
             raise ValueError(
@@ -419,34 +428,6 @@ def _canonical_offset(
     return tuple(residues)
 
 
-def _coerce_coefficient(value: object, name: str) -> complex:
-    """Validate and canonicalize one finite complex coefficient.
-
-    Args:
-        value (object): Candidate numeric coefficient.
-        name (str): Human-readable value name used in diagnostics.
-
-    Returns:
-        complex: Finite Python complex value with positive signed-zero parts.
-
-    Raises:
-        TypeError: If the value is not a numeric scalar.
-        ValueError: If conversion overflows or produces a non-finite value.
-    """
-    if _is_boolean(value) or not isinstance(value, (numbers.Complex, np.number)):
-        raise TypeError(f"{name} must be a numeric scalar.")
-    try:
-        coefficient = complex(value)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError(f"{name} must fit in a finite complex value.") from error
-    if not math.isfinite(coefficient.real) or not math.isfinite(coefficient.imag):
-        raise ValueError(f"{name} must be finite.")
-    return complex(
-        coefficient.real if coefficient.real else 0.0,
-        coefficient.imag if coefficient.imag else 0.0,
-    )
-
-
 def _sum_complex_values(
     values: Sequence[complex],
     offset: tuple[int, ...],
@@ -475,74 +456,6 @@ def _sum_complex_values(
     if not math.isfinite(real) or not math.isfinite(imag):
         raise ValueError(f"combined coefficient for offset {offset!r} must be finite.")
     return complex(real if real else 0.0, imag if imag else 0.0)
-
-
-def _validate_atol(atol: float) -> float:
-    """Validate an absolute coefficient-pruning threshold.
-
-    Args:
-        atol (float): Candidate non-negative threshold.
-
-    Returns:
-        float: Finite non-negative Python float.
-
-    Raises:
-        TypeError: If ``atol`` is not a real numeric scalar.
-        ValueError: If ``atol`` is negative or non-finite.
-    """
-    return _validate_nonnegative_real(atol, "atol")
-
-
-def _validate_nonnegative_real(value: object, name: str) -> float:
-    """Validate and normalize one finite non-negative real scalar.
-
-    Args:
-        value (object): Candidate scalar value.
-        name (str): Parameter name used in diagnostics.
-
-    Returns:
-        float: Finite non-negative Python float.
-
-    Raises:
-        TypeError: If the value is not a real numeric scalar.
-        ValueError: If the value is negative, non-finite, or unrepresentable.
-    """
-    if _is_boolean(value) or not isinstance(
-        value,
-        (numbers.Real, np.integer, np.floating),
-    ):
-        raise TypeError(f"{name} must be a real numeric scalar.")
-    try:
-        normalized = float(value)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError(f"{name} must fit in a finite float.") from error
-    if not math.isfinite(normalized) or normalized < 0.0:
-        raise ValueError(f"{name} must be finite and non-negative.")
-    return normalized if normalized else 0.0
-
-
-def _validate_matrix(matrix: ArrayLike) -> np.ndarray:
-    """Convert and validate one finite square complex matrix.
-
-    Args:
-        matrix (ArrayLike): Candidate dense matrix.
-
-    Returns:
-        np.ndarray: Finite square complex128 matrix.
-
-    Raises:
-        ValueError: If conversion fails or the result is nonsquare or
-            non-finite.
-    """
-    try:
-        dense = np.asarray(matrix, dtype=np.complex128)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError("matrix must contain numeric values.") from error
-    if dense.ndim != 2 or dense.shape[0] != dense.shape[1]:
-        raise ValueError(f"matrix must be 2D square; got shape {dense.shape}.")
-    if not np.all(np.isfinite(dense)):
-        raise ValueError("matrix entries must all be finite.")
-    return dense
 
 
 def _is_integer(value: object) -> bool:
