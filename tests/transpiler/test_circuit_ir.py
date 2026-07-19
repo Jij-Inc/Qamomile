@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import pytest
 
 import qamomile.circuit as qmc
 import qamomile.circuit.transpiler.circuit_ir.lowering as circuit_ir_lowering
 import qamomile.observable as qm_o
+from qamomile.circuit.ir.operation.callable import (
+    CallableImplementation,
+    CallTransform,
+    InvokeOperation,
+)
 from qamomile.circuit.transpiler.circuit_ir import (
     SELECT_SEMANTIC_KEY,
     CallInstruction,
@@ -39,6 +45,58 @@ from qamomile.circuit.transpiler.circuit_ir.lowering import (
 )
 from qamomile.circuit.transpiler.gate_emitter import GateKind
 from qamomile.qiskit import QiskitTranspiler
+
+
+class _PartialDecliningEmitter:
+    """Append a partial gate before declining controlled-call emission."""
+
+    def emit(
+        self,
+        circuit: CircuitBuilder,
+        op: InvokeOperation,
+        qubit_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> bool:
+        """Append a partial Hadamard gate and decline the operation.
+
+        Args:
+            circuit (CircuitBuilder): Builder receiving the partial attempt.
+            op (InvokeOperation): Normalized controlled invocation.
+            qubit_indices (list[int]): Physical control and target slots.
+            bindings (dict[str, Any]): Active emit bindings.
+
+        Returns:
+            bool: Always ``False`` to select the generic fallback.
+        """
+        del op, bindings
+        circuit.append_gate(GateKind.H, (qubit_indices[-1],))
+        return False
+
+
+@qmc.composite_gate(
+    name="declining_controlled_composite",
+    implementations=(
+        CallableImplementation(
+            transform=CallTransform.CONTROLLED,
+            emitter=_PartialDecliningEmitter(),
+        ),
+    ),
+)
+def _declining_controlled_composite(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Apply the fallback X used after the native emitter declines."""
+    return qmc.x(qubit)
+
+
+@qmc.qkernel
+def _value_controlled_declining_composite() -> qmc.Bit:
+    """Invoke the declining composite on a zero-valued control."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(
+        _declining_controlled_composite,
+        control_value=0,
+    )(control, target)
+    return qmc.measure(target)
 
 
 @qmc.qkernel
@@ -1142,6 +1200,27 @@ def test_lowering_brackets_control_value_at_the_circuit_boundary() -> None:
     assert isinstance(closing, GateInstruction)
     assert closing.kind is GateKind.X
     assert closing.inputs == (controlled_call.outputs[0],)
+    verify_circuit(program)
+
+
+def test_declining_emitter_rolls_back_bracket_and_partial_gate() -> None:
+    """A declining emitter leaves only the complete controlled fallback."""
+    transpiler = QiskitTranspiler()
+    prepared = transpiler.prepare(_value_controlled_declining_composite)
+    lowered = lower_circuit_plan(transpiler.plan_circuit(prepared))
+    program = lowered.quantum_circuit
+
+    opening, controlled_call, closing, _measurement = program.operations
+    assert isinstance(opening, GateInstruction)
+    assert opening.kind is GateKind.X
+    assert isinstance(controlled_call, CallInstruction)
+    assert controlled_call.callee.controls == 1
+    assert isinstance(closing, GateInstruction)
+    assert closing.kind is GateKind.X
+    assert all(
+        not isinstance(operation, GateInstruction) or operation.kind is not GateKind.H
+        for operation in program.operations
+    )
     verify_circuit(program)
 
 
