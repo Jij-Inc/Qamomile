@@ -1,9 +1,5 @@
 """Algorithm building blocks for quantum circuits."""
 
-from .arithmetic import (
-    modular_decrement,
-    modular_increment,
-)
 from .basic import (
     cx_entangling_layer,
     cz_entangling_layer,
@@ -13,8 +9,8 @@ from .basic import (
     superposition_vector,
 )
 from .block_encoding import (
-    PeriodicStencilBlockEncoding,
-    periodic_stencil_block_encoding,
+    PeriodicShiftLCUBlockEncoding,
+    periodic_shift_lcu_block_encoding,
 )
 from .fqaoa import (
     cost_layer,
@@ -39,11 +35,8 @@ from .trotter import trotterized_time_evolution
 
 __all__ = [
     # Block encoding
-    "PeriodicStencilBlockEncoding",
-    "periodic_stencil_block_encoding",
-    # Arithmetic
-    "modular_increment",
-    "modular_decrement",
+    "PeriodicShiftLCUBlockEncoding",
+    "periodic_shift_lcu_block_encoding",
     # QAOA
     "ising_cost",
     "x_mixer",

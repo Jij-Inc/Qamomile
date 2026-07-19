@@ -26,19 +26,20 @@ from .arithmetic import (
     controlled_modular_add,
     modmul_const,
     modular_add,
+    modular_decrement,
+    modular_increment,
     ripple_carry_add,
 )
 from .grover import grover_iteration_count, grover_search
 from .lcu_block_encoding import LCUBlockEncoding
-from .modular_incdec import modular_decrement, modular_increment
 from .multi_controlled_x import mcx, multi_controlled_x
 from .pauli_lcu_block_encoding import (
     PauliLCUBlockEncoding,
     pauli_lcu_block_encoding,
 )
-from .periodic_stencil_block_encoding import (
-    PeriodicStencilBlockEncoding,
-    periodic_stencil_block_encoding,
+from .periodic_shift_lcu_block_encoding import (
+    PeriodicShiftLCUBlockEncoding,
+    periodic_shift_lcu_block_encoding,
 )
 from .qft import iqft, qft
 from .qpe import qpe
@@ -60,8 +61,8 @@ __all__ = [
     "LCUBlockEncoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
-    "PeriodicStencilBlockEncoding",
-    "periodic_stencil_block_encoding",
+    "PeriodicShiftLCUBlockEncoding",
+    "periodic_shift_lcu_block_encoding",
     "computational_basis_state",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",

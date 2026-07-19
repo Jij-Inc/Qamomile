@@ -5,12 +5,12 @@ define one universal base for every block-encoding data-access model, while
 static exact LCU producers share :class:`qamomile.circuit.LCUBlockEncoding`.
 """
 
-from .periodic_stencil import (
-    PeriodicStencilBlockEncoding,
-    periodic_stencil_block_encoding,
+from .periodic_shift_lcu_block_encoding import (
+    PeriodicShiftLCUBlockEncoding,
+    periodic_shift_lcu_block_encoding,
 )
 
 __all__ = [
-    "PeriodicStencilBlockEncoding",
-    "periodic_stencil_block_encoding",
+    "PeriodicShiftLCUBlockEncoding",
+    "periodic_shift_lcu_block_encoding",
 ]

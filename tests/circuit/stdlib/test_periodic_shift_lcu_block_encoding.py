@@ -1,10 +1,10 @@
-"""Tests for periodic-stencil LCU block encodings."""
+"""Tests for periodic-shift LCU block encodings."""
 
 from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -19,6 +19,27 @@ from qamomile.circuit.transpiler.circuit_ir import (
     CircuitProgram,
     lower_circuit_plan,
 )
+from qamomile.linalg import PeriodicShiftLCU
+
+
+def _periodic_encoding(
+    coefficients: Mapping[Any, complex],
+    register_sizes: Sequence[int],
+) -> qmc.PeriodicShiftLCUBlockEncoding:
+    """Build a circuit descriptor through the public linalg decomposition.
+
+    Args:
+        coefficients (Mapping[Any, complex]): Periodic-shift coefficients.
+        register_sizes (Sequence[int]): Per-axis qubit widths.
+
+    Returns:
+        qmc.PeriodicShiftLCUBlockEncoding: Generated circuit descriptor.
+    """
+    lcu = PeriodicShiftLCU.from_coefficients(
+        coefficients,
+        register_sizes=register_sizes,
+    )
+    return qmc.periodic_shift_lcu_block_encoding(lcu)
 
 
 @qmc.qkernel
@@ -349,14 +370,14 @@ def _zero_probability(results: Sequence[tuple[Any, int]]) -> float:
 
 
 def _build_unitary_kernel(
-    encoding: qmc.PeriodicStencilBlockEncoding,
+    encoding: qmc.PeriodicShiftLCUBlockEncoding,
     *,
     invert: bool = False,
 ) -> qmc.QKernel:
     """Build an allocation-only kernel for exact unitary inspection.
 
     Args:
-        encoding (qmc.PeriodicStencilBlockEncoding): Descriptor to inspect.
+        encoding (qmc.PeriodicShiftLCUBlockEncoding): Descriptor to inspect.
         invert (bool): Whether to apply the inverse unitary. Defaults to
             ``False``.
 
@@ -378,7 +399,7 @@ def _build_unitary_kernel(
 
 def _qiskit_unitary(
     qiskit_transpiler: Any,
-    encoding: qmc.PeriodicStencilBlockEncoding,
+    encoding: qmc.PeriodicShiftLCUBlockEncoding,
     *,
     invert: bool = False,
 ) -> np.ndarray:
@@ -386,7 +407,7 @@ def _qiskit_unitary(
 
     Args:
         qiskit_transpiler (Any): Qiskit backend fixture.
-        encoding (qmc.PeriodicStencilBlockEncoding): Descriptor to inspect.
+        encoding (qmc.PeriodicShiftLCUBlockEncoding): Descriptor to inspect.
         invert (bool): Whether to materialize the inverse. Defaults to
             ``False``.
 
@@ -409,13 +430,13 @@ def _qiskit_unitary(
 
 def _top_left_block(
     unitary: np.ndarray,
-    encoding: qmc.PeriodicStencilBlockEncoding,
+    encoding: qmc.PeriodicShiftLCUBlockEncoding,
 ) -> np.ndarray:
     """Extract the all-zero-signal block from one dense unitary.
 
     Args:
         unitary (np.ndarray): Full block-encoding unitary.
-        encoding (qmc.PeriodicStencilBlockEncoding): Register-width metadata.
+        encoding (qmc.PeriodicShiftLCUBlockEncoding): Register-width metadata.
 
     Returns:
         np.ndarray: Projected system block in LSB-first order.
@@ -488,7 +509,7 @@ def test_periodic_stencil_top_left_block_matches_dense_matrix(
     """The all-zero signal block equals the requested complex stencil."""
     from qiskit.quantum_info import Operator
 
-    encoding = qmc.periodic_stencil_block_encoding(coefficients, register_sizes)
+    encoding = _periodic_encoding(coefficients, register_sizes)
 
     @qmc.qkernel
     def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
@@ -531,7 +552,7 @@ def test_periodic_stencil_inverse_is_exact_adjoint_of_full_unitary(
         (-1,): 0.3 - 0.6j,
     }
     register_sizes = (2,)
-    encoding = qmc.periodic_stencil_block_encoding(coefficients, register_sizes)
+    encoding = _periodic_encoding(coefficients, register_sizes)
     forward = _qiskit_unitary(qiskit_transpiler, encoding)
     inverse = _qiskit_unitary(qiskit_transpiler, encoding, invert=True)
     identity = np.eye(forward.shape[0], dtype=np.complex128)
@@ -548,9 +569,57 @@ def test_periodic_stencil_inverse_is_exact_adjoint_of_full_unitary(
     )
 
 
+def test_zero_periodic_shift_lcu_has_exact_zero_block(
+    qiskit_transpiler: Any,
+) -> None:
+    """The empty retained decomposition uses normalization one and a zero block."""
+    lcu = PeriodicShiftLCU.from_coefficients({}, register_sizes=(2,))
+    encoding = qmc.periodic_shift_lcu_block_encoding(lcu)
+    unitary = _qiskit_unitary(qiskit_transpiler, encoding)
+
+    assert lcu.alpha == 0.0
+    assert encoding.normalization == 1.0
+    assert encoding.num_signal_qubits == 1
+    assert encoding.num_system_qubits == 2
+    assert encoding.offsets == ()
+    assert encoding.coefficients == ()
+    np.testing.assert_allclose(
+        _top_left_block(unitary, encoding),
+        np.zeros((4, 4), dtype=np.complex128),
+        atol=0.0,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        unitary.conj().T @ unitary,
+        np.eye(unitary.shape[0]),
+        atol=1e-12,
+        rtol=0.0,
+    )
+
+
+def test_factory_encodes_lcu_recovered_from_dense_matrix(
+    qiskit_transpiler: Any,
+) -> None:
+    """The Pauli-like matrix entry point composes with the circuit factory."""
+    matrix = _stencil_matrix(
+        {(0, 0): -2.0, (1, 0): 0.5j, (0, 1): 1.25},
+        (1, 1),
+    )
+    lcu = PeriodicShiftLCU.from_matrix(matrix, register_sizes=(1, 1))
+    encoding = qmc.periodic_shift_lcu_block_encoding(lcu)
+    unitary = _qiskit_unitary(qiskit_transpiler, encoding)
+
+    np.testing.assert_allclose(
+        encoding.normalization * _top_left_block(unitary, encoding),
+        matrix,
+        atol=1e-8,
+        rtol=1e-8,
+    )
+
+
 def test_periodic_stencil_combines_equivalent_offsets() -> None:
     """Offsets equal modulo an axis size combine before normalization."""
-    encoding = qmc.periodic_stencil_block_encoding(
+    encoding = _periodic_encoding(
         {1: 2.0, -3: -0.5, 0: -1.0},
         register_sizes=(2,),
     )
@@ -575,8 +644,8 @@ def test_periodic_stencil_canonical_sum_is_mapping_order_independent() -> None:
         (5, 1.0),
         (0, -2.0),
     ]
-    forward = qmc.periodic_stencil_block_encoding(dict(items), (2,))
-    reversed_order = qmc.periodic_stencil_block_encoding(
+    forward = _periodic_encoding(dict(items), (2,))
+    reversed_order = _periodic_encoding(
         dict(reversed(items)),
         (2,),
     )
@@ -604,11 +673,11 @@ def test_periodic_stencil_canonical_sum_is_mapping_order_independent() -> None:
 
 def test_periodic_stencil_canonicalizes_signed_zero_components() -> None:
     """Signed-zero coefficient components have one canonical representation."""
-    positive_zero = qmc.periodic_stencil_block_encoding(
+    positive_zero = _periodic_encoding(
         {0: complex(-1.0, 0.0)},
         (1,),
     )
-    negative_zero = qmc.periodic_stencil_block_encoding(
+    negative_zero = _periodic_encoding(
         {0: complex(-1.0, -0.0)},
         (1,),
     )
@@ -624,7 +693,7 @@ def test_periodic_stencil_canonicalizes_signed_zero_components() -> None:
 
 def test_periodic_stencil_drops_only_exactly_cancelled_residues() -> None:
     """Partial cancellation removes one residue without losing the operator."""
-    encoding = qmc.periodic_stencil_block_encoding(
+    encoding = _periodic_encoding(
         {1: 1.0, -3: -1.0, 0: 2.0},
         (2,),
     )
@@ -642,11 +711,11 @@ def test_periodic_stencil_drops_only_exactly_cancelled_residues() -> None:
 
 def test_periodic_laplacian_normalizations() -> None:
     """Canonical one- and two-dimensional Laplacians use factors four and eight."""
-    one_dimensional = qmc.periodic_stencil_block_encoding(
+    one_dimensional = _periodic_encoding(
         {-1: 1.0, 0: -2.0, 1: 1.0},
         register_sizes=(3,),
     )
-    two_dimensional = qmc.periodic_stencil_block_encoding(
+    two_dimensional = _periodic_encoding(
         {
             (0, 0): -4.0,
             (-1, 0): 1.0,
@@ -663,32 +732,26 @@ def test_periodic_laplacian_normalizations() -> None:
     assert two_dimensional.num_signal_qubits == 3
 
 
-@pytest.mark.parametrize(
-    ("coefficients", "register_sizes", "exception", "message"),
-    [
-        ({}, (1,), ValueError, "at least one stencil term"),
-        ({0: 1.0}, (), ValueError, "at least one axis"),
-        ({0: 1.0}, (0,), ValueError, "must be positive"),
-        ({(0, 1): 1.0}, (2,), ValueError, "dimensions"),
-        ({0: "1.0"}, (1,), TypeError, "must be numeric"),
-        ({0: complex(np.inf, 0.0)}, (1,), ValueError, "must be finite"),
-        ({0: 1.0, 2: -1.0}, (1,), ValueError, "zero operator"),
-    ],
-)
-def test_periodic_stencil_rejects_invalid_descriptions(
-    coefficients: dict[Any, complex],
-    register_sizes: tuple[int, ...],
-    exception: type[Exception],
-    message: str,
-) -> None:
-    """Invalid dimensions, coefficients, and zero operators fail clearly."""
-    with pytest.raises(exception, match=message):
-        qmc.periodic_stencil_block_encoding(coefficients, register_sizes)
+def test_periodic_shift_factory_rejects_non_lcu_input() -> None:
+    """The circuit factory accepts only the validated linalg value object."""
+    with pytest.raises(TypeError, match="PeriodicShiftLCU"):
+        qmc.periodic_shift_lcu_block_encoding({0: 1.0})  # type: ignore[arg-type]
+
+
+def test_periodic_shift_factory_rejects_scalar_lcu() -> None:
+    """The linalg scalar domain has no circuit-level system register."""
+    lcu = PeriodicShiftLCU.from_coefficients(
+        {(): 1.0},
+        register_sizes=(),
+    )
+
+    with pytest.raises(ValueError, match="at least one system qubit"):
+        qmc.periodic_shift_lcu_block_encoding(lcu)
 
 
 def test_periodic_stencil_normalizes_numpy_integer_widths() -> None:
     """NumPy integer axis widths become plain immutable Python integers."""
-    encoding = qmc.periodic_stencil_block_encoding(
+    encoding = _periodic_encoding(
         {(0, 0): 1.0, (1, 0): -0.5j},
         register_sizes=(np.int64(2), np.int32(1)),
     )
@@ -708,32 +771,32 @@ def test_periodic_stencil_normalizes_numpy_integer_widths() -> None:
 def test_periodic_stencil_rejects_boolean_widths(width: Any) -> None:
     """Boolean scalar types never act as periodic axis widths."""
     with pytest.raises(TypeError, match="must be an int"):
-        qmc.periodic_stencil_block_encoding({0: 1.0}, (width,))
+        _periodic_encoding({0: 1.0}, (width,))
 
 
-def test_periodic_stencil_factory_is_publicly_exported() -> None:
+def test_periodic_shift_lcu_factory_is_publicly_exported() -> None:
     """The factory is public in stdlib with its legacy algorithm export."""
     from qamomile.circuit.algorithm import (
-        PeriodicStencilBlockEncoding as AlgorithmPeriodicStencilBlockEncoding,
-        periodic_stencil_block_encoding as algorithm_periodic_stencil,
+        PeriodicShiftLCUBlockEncoding as AlgorithmPeriodicShiftLCUBlockEncoding,
+        periodic_shift_lcu_block_encoding as algorithm_periodic_shift_lcu,
     )
     from qamomile.circuit.stdlib import (
-        PeriodicStencilBlockEncoding,
-        periodic_stencil_block_encoding,
+        PeriodicShiftLCUBlockEncoding,
+        periodic_shift_lcu_block_encoding,
     )
 
-    assert qmc.periodic_stencil_block_encoding is periodic_stencil_block_encoding
-    assert qmc.PeriodicStencilBlockEncoding is PeriodicStencilBlockEncoding
-    assert algorithm_periodic_stencil is periodic_stencil_block_encoding
-    assert AlgorithmPeriodicStencilBlockEncoding is PeriodicStencilBlockEncoding
+    assert qmc.periodic_shift_lcu_block_encoding is periodic_shift_lcu_block_encoding
+    assert qmc.PeriodicShiftLCUBlockEncoding is PeriodicShiftLCUBlockEncoding
+    assert algorithm_periodic_shift_lcu is periodic_shift_lcu_block_encoding
+    assert AlgorithmPeriodicShiftLCUBlockEncoding is PeriodicShiftLCUBlockEncoding
 
 
 def test_periodic_stencil_descriptor_is_frozen_noncallable_and_identity_based() -> None:
     """The static descriptor has the agreed ABI without value equality."""
-    encoding = qmc.periodic_stencil_block_encoding({0: 1j, 1: 0.5}, (2,))
-    repeated = qmc.periodic_stencil_block_encoding({0: 1j, 1: 0.5}, (2,))
+    encoding = _periodic_encoding({0: 1j, 1: 0.5}, (2,))
+    repeated = _periodic_encoding({0: 1j, 1: 0.5}, (2,))
 
-    assert isinstance(encoding, qmc.PeriodicStencilBlockEncoding)
+    assert isinstance(encoding, qmc.PeriodicShiftLCUBlockEncoding)
     assert isinstance(encoding, qmc.LCUBlockEncoding)
     assert tuple(field.name for field in dataclasses.fields(encoding)) == (
         "unitary",
@@ -778,7 +841,7 @@ def test_periodic_descriptor_metadata_is_deeply_immutable() -> None:
     """Mutable factory inputs cannot mutate stored canonical metadata."""
     register_sizes = [2, 1]
     coefficients = {(0, 0): 1j, (1, -1): 0.5}
-    encoding = qmc.periodic_stencil_block_encoding(coefficients, register_sizes)
+    encoding = _periodic_encoding(coefficients, register_sizes)
     expected = (
         encoding.register_sizes,
         encoding.offsets,
@@ -809,9 +872,9 @@ def test_generic_lcu_template_rebinds_periodic_encodings_after_round_trip() -> N
     payload = serialize(_static_direct_template)
     restored = deserialize(payload)
     encodings = (
-        qmc.periodic_stencil_block_encoding({1: 1.0}, (1,)),
-        qmc.periodic_stencil_block_encoding({1: 1.0}, (2,)),
-        qmc.periodic_stencil_block_encoding({0: 1.0, 1: 0.5, 2: -0.25j}, (2,)),
+        _periodic_encoding({1: 1.0}, (1,)),
+        _periodic_encoding({1: 1.0}, (2,)),
+        _periodic_encoding({0: 1.0, 1: 0.5, 2: -0.25j}, (2,)),
     )
 
     assert restored.input_types == {"encoding": qmc.LCUBlockEncoding}
@@ -826,7 +889,7 @@ def test_generic_lcu_template_rebinds_periodic_encodings_after_round_trip() -> N
 
 def test_periodic_descriptor_canonicalizes_equivalent_normalization() -> None:
     """Direct construction tolerates host rounding and stores the canonical sum."""
-    encoding = qmc.periodic_stencil_block_encoding({0: 0.1, 1: 0.2}, (2,))
+    encoding = _periodic_encoding({0: 0.1, 1: 0.2}, (2,))
 
     replaced = dataclasses.replace(encoding, normalization=0.3)
 
@@ -846,7 +909,7 @@ def test_periodic_descriptor_canonicalizes_equivalent_normalization() -> None:
         ({"offsets": ((1,), (0,))}, "canonically sorted"),
         ({"offsets": ((0,), (0,))}, "unique"),
         ({"offsets": ((0,), (4,))}, "canonical modular residue"),
-        ({"coefficients": (0.1 + 0.0j,)}, "same nonzero length"),
+        ({"coefficients": (0.1 + 0.0j,)}, "same length"),
         ({"coefficients": (0.0j, 0.2 + 0.0j)}, "must be nonzero"),
     ],
 )
@@ -855,7 +918,7 @@ def test_periodic_descriptor_rejects_inconsistent_metadata(
     message: str,
 ) -> None:
     """Direct construction rejects inconsistent method-specific metadata."""
-    encoding = qmc.periodic_stencil_block_encoding({0: 0.1, 1: 0.2}, (2,))
+    encoding = _periodic_encoding({0: 0.1, 1: 0.2}, (2,))
 
     with pytest.raises(ValueError, match=message):
         dataclasses.replace(encoding, **changes)
@@ -863,9 +926,9 @@ def test_periodic_descriptor_rejects_inconsistent_metadata(
 
 def test_periodic_stencil_signal_width_tracks_canonical_term_count() -> None:
     """One and two terms use one signal qubit while three terms use two."""
-    single = qmc.periodic_stencil_block_encoding({0: 1.0}, (2,))
-    two = qmc.periodic_stencil_block_encoding({0: 1.0, 1: 0.5}, (2,))
-    three = qmc.periodic_stencil_block_encoding(
+    single = _periodic_encoding({0: 1.0}, (2,))
+    two = _periodic_encoding({0: 1.0, 1: 0.5}, (2,))
+    three = _periodic_encoding(
         {0: 1.0, 1: 0.5, 2: -0.25j},
         (2,),
     )
@@ -879,7 +942,7 @@ def test_periodic_stencil_single_term_omits_prepare_and_select(
     qiskit_transpiler: Any,
 ) -> None:
     """The pass-through signal ABI does not force dummy LCU operations."""
-    encoding = qmc.periodic_stencil_block_encoding({1: 1j}, (2,))
+    encoding = _periodic_encoding({1: 1j}, (2,))
     calls = _nested_calls(
         _lower_first_circuit(
             _build_unitary_kernel(encoding),
@@ -896,7 +959,7 @@ def test_periodic_stencil_single_term_omits_prepare_and_select(
 
 def test_periodic_stencil_preserves_tiny_nonzero_terms() -> None:
     """Every representable nonzero term remains part of the encoded operator."""
-    encoding = qmc.periodic_stencil_block_encoding(
+    encoding = _periodic_encoding(
         {0: 1e-16, 1: 2.0},
         register_sizes=(2,),
     )
@@ -924,7 +987,7 @@ def test_periodic_stencil_rejects_unrepresentable_normalization(
 ) -> None:
     """Unrepresentable coefficients and overflowing normalizations fail early."""
     with pytest.raises(ValueError, match="finite"):
-        qmc.periodic_stencil_block_encoding(coefficients, register_sizes=(2,))
+        _periodic_encoding(coefficients, register_sizes=(2,))
 
 
 @pytest.mark.parametrize(
@@ -938,7 +1001,7 @@ def test_periodic_stencil_rejects_wrong_register_widths(
     role: str,
 ) -> None:
     """Concrete caller registers must match the factory's declared ABI."""
-    encoding = qmc.periodic_stencil_block_encoding(
+    encoding = _periodic_encoding(
         {-1: 1.0, 0: -2.0, 1: 1.0},
         register_sizes=(2,),
     )
@@ -958,7 +1021,7 @@ def test_periodic_stencil_rejects_wrong_register_widths(
 
 def test_periodic_stencil_width_validation_survives_all_composition_paths() -> None:
     """Plain, inverse, control, and nested SELECT report the same width ABI."""
-    encoding = qmc.periodic_stencil_block_encoding(
+    encoding = _periodic_encoding(
         {0: 1.0, 1: 0.5j, 2: -0.25},
         (2,),
     )
@@ -1046,7 +1109,7 @@ def test_periodic_stencil_width_validation_survives_all_composition_paths() -> N
         with pytest.raises(ValueError) as error:
             kernel.build()
         assert str(error.value) == (
-            "periodic stencil block encoding requires 2 signal qubits, got 1."
+            "periodic shift LCU block encoding requires 2 signal qubits, got 1."
         )
 
     for kernel in (
@@ -1058,7 +1121,7 @@ def test_periodic_stencil_width_validation_survives_all_composition_paths() -> N
         with pytest.raises(ValueError) as error:
             kernel.build()
         assert str(error.value) == (
-            "periodic stencil block encoding requires 2 system qubits, got 3."
+            "periodic shift LCU block encoding requires 2 system qubits, got 3."
         )
 
 
@@ -1066,8 +1129,8 @@ def test_distinct_periodic_instances_compose_in_one_caller(
     qiskit_transpiler: Any,
 ) -> None:
     """Equal-signature ordinary qkernels retain distinct shift semantics."""
-    plus_one = qmc.periodic_stencil_block_encoding({1: 1.0}, (2,))
-    plus_two = qmc.periodic_stencil_block_encoding({2: 1.0}, (2,))
+    plus_one = _periodic_encoding({1: 1.0}, (2,))
+    plus_two = _periodic_encoding({2: 1.0}, (2,))
     controlled_one = qmc.control(plus_one.unitary)
     controlled_two = qmc.control(plus_two.unitary)
 
@@ -1084,6 +1147,74 @@ def test_distinct_periodic_instances_compose_in_one_caller(
     executable = qiskit_transpiler.transpile(circuit)
     result = executable.sample(qiskit_transpiler.executor(), shots=16).result()
     assert result.results == [((1, 1), 16)]
+
+
+def test_zero_periodic_encoding_samples_and_estimates_on_every_sdk(
+    sdk_transpiler: Any,
+) -> None:
+    """The exact zero path and its transforms execute on every backend."""
+    lcu = PeriodicShiftLCU.from_coefficients({}, register_sizes=(2,))
+    encoding = qmc.periodic_shift_lcu_block_encoding(lcu)
+    inverse_unitary = qmc.inverse(encoding.unitary)
+    controlled_unitary = qmc.control(encoding.unitary)
+    selected_unitary = qmc.select(
+        (_identity_registers, encoding.unitary),
+        num_index_qubits=1,
+    )
+
+    @qmc.qkernel
+    def sample_kernel() -> qmc.Bit:
+        """Apply the zero encoding and measure its flipped signal."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def expval_kernel(observable: qmc.Observable) -> qmc.Float:
+        """Apply the zero encoding and observe its flipped signal."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.expval(signal[0], observable)
+
+    @qmc.qkernel
+    def inverse_kernel() -> qmc.Bit:
+        """Apply the inverse zero encoding and measure its signal."""
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = inverse_unitary(signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def control_kernel() -> qmc.Bit:
+        """Apply the controlled zero encoding and measure its signal."""
+        outer = qmc.x(qmc.qubit("outer"))
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        _, signal, _ = controlled_unitary(outer, signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def select_kernel() -> qmc.Bit:
+        """Apply the selected zero encoding and measure its signal."""
+        index = qmc.x(qmc.qubit("index"))
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        _, signal, _ = selected_unitary(index, signal, system)
+        return qmc.measure(signal[0])
+
+    for kernel in (sample_kernel, inverse_kernel, control_kernel, select_kernel):
+        sampled = _sample_only_outcome(sdk_transpiler, kernel, {})
+        assert int(sampled) == 1
+    observed = _run_expval(
+        sdk_transpiler,
+        expval_kernel,
+        {"observable": qm_o.Z(0)},
+    )
+
+    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed == pytest.approx(-1.0, abs=tolerance)
 
 
 @pytest.mark.parametrize(
@@ -1103,7 +1234,7 @@ def test_generic_static_binding_composes_and_executes_on_every_sdk(
 ) -> None:
     """Serialized generic LCU slots materialize Periodic encodings everywhere."""
     restored = deserialize(serialize(template))
-    encoding = qmc.periodic_stencil_block_encoding({1: 1.0}, (2,))
+    encoding = _periodic_encoding({1: 1.0}, (2,))
 
     sampled = _sample_only_outcome(
         sdk_transpiler,
@@ -1123,8 +1254,8 @@ def test_serialized_generic_lcu_template_rebinds_periodic_on_every_sdk(
     sample_template = deserialize(sample_payload)
     expval_template = deserialize(expval_payload)
     encodings = (
-        qmc.periodic_stencil_block_encoding({1: np.exp(0.37j)}, (1,)),
-        qmc.periodic_stencil_block_encoding(
+        _periodic_encoding({1: np.exp(0.37j)}, (1,)),
+        _periodic_encoding(
             {0: 1j, 1: 0.5, 2: -0.25j},
             (2,),
         ),
@@ -1178,7 +1309,7 @@ def test_two_term_periodic_encoding_samples_and_estimates_on_every_sdk(
         1j * rng.uniform(-math.pi, math.pi)
     )
     shift_weight = rng.uniform(0.4, 1.2) * np.exp(1j * rng.uniform(-math.pi, math.pi))
-    encoding = qmc.periodic_stencil_block_encoding(
+    encoding = _periodic_encoding(
         {0: identity_weight, 1: shift_weight},
         (num_system_qubits,),
     )
@@ -1260,7 +1391,7 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
     coefficients = {
         offset: complex(*rng.uniform(-1.0, 1.0, size=2)) for offset in offsets
     }
-    encoding = qmc.periodic_stencil_block_encoding(coefficients, register_sizes)
+    encoding = _periodic_encoding(coefficients, register_sizes)
     width = encoding.num_system_qubits
     bits = rng.integers(0, 2, size=width).astype(int).tolist()
     z_coefficients = rng.uniform(-1.0, 1.0, size=width).tolist()
@@ -1327,7 +1458,7 @@ def test_periodic_phase_composes_cross_backend(
     coefficients = {0: identity_weight}
     if shift_weight is not None:
         coefficients[1] = shift_weight
-    encoding = qmc.periodic_stencil_block_encoding(
+    encoding = _periodic_encoding(
         coefficients,
         (1,),
     )

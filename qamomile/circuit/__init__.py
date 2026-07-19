@@ -121,7 +121,7 @@ from .frontend.qkernel import QKernel, qkernel
 from .stdlib import (
     LCUBlockEncoding,
     PauliLCUBlockEncoding,
-    PeriodicStencilBlockEncoding,
+    PeriodicShiftLCUBlockEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
     computational_basis_state,
@@ -138,7 +138,7 @@ from .stdlib import (
     mottonen_amplitude_encoding_from_angles,
     multi_controlled_x,
     pauli_lcu_block_encoding,
-    periodic_stencil_block_encoding,
+    periodic_shift_lcu_block_encoding,
     qft,
     qpe,
     ripple_carry_add,
@@ -246,8 +246,8 @@ __all__ = [
     "Tensor",
     "Observable",
     # stdlib
-    "PeriodicStencilBlockEncoding",
-    "periodic_stencil_block_encoding",
+    "PeriodicShiftLCUBlockEncoding",
+    "periodic_shift_lcu_block_encoding",
     "modular_decrement",
     "modular_increment",
     "qpe",

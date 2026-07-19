@@ -34,7 +34,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
 )
 from qamomile.circuit.transpiler.errors import EmitError, TargetCapabilityError
 from qamomile.circuit.transpiler.gate_emitter import GateKind
-from qamomile.linalg import PauliLCU
+from qamomile.linalg import PauliLCU, PeriodicShiftLCU
 from qamomile.quration import QurationTranspiler
 from qamomile.quration.materializer import (
     PyQretMaterializer,
@@ -293,13 +293,19 @@ _quration_three_term_lcu = PauliLCU.from_matrix(
     atol=1e-12,
 )
 _quration_three_term_encoding = qmc.pauli_lcu_block_encoding(_quration_three_term_lcu)
-_quration_two_term_periodic_encoding = qmc.periodic_stencil_block_encoding(
+_quration_two_term_periodic_lcu = PeriodicShiftLCU.from_coefficients(
     {0: 1j, 1: 0.5},
     register_sizes=(1,),
 )
-_quration_three_term_periodic_encoding = qmc.periodic_stencil_block_encoding(
+_quration_two_term_periodic_encoding = qmc.periodic_shift_lcu_block_encoding(
+    _quration_two_term_periodic_lcu
+)
+_quration_three_term_periodic_lcu = PeriodicShiftLCU.from_coefficients(
     {0: 1j, 1: 0.5, -1: 0.25},
     register_sizes=(2,),
+)
+_quration_three_term_periodic_encoding = qmc.periodic_shift_lcu_block_encoding(
+    _quration_three_term_periodic_lcu
 )
 
 
