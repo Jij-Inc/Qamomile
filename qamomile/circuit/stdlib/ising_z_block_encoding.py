@@ -195,7 +195,7 @@ def _canonicalize_coefficients(
         imaginary = _canonicalize_zero(imaginary)
         if not math.isfinite(real) or not math.isfinite(imaginary):
             raise ValueError(
-                f"coefficient aggregate must be finite for canonical word {word}."
+                f"coefficient aggregation overflowed for canonical word {word}."
             )
         if not real and not imaginary:
             continue
@@ -322,7 +322,9 @@ def _coefficient_one_norm(terms: tuple[_CanonicalTerm, ...]) -> float:
         normalization = math.fsum(abs(coefficient) for _, coefficient in terms)
     except OverflowError as exc:
         raise ValueError("Ising-Z normalization overflowed.") from exc
-    if not math.isfinite(normalization) or normalization <= 0.0:
+    if not math.isfinite(normalization):
+        raise ValueError("Ising-Z normalization overflowed.")
+    if normalization <= 0.0:
         raise ValueError("Ising-Z normalization must be finite and positive.")
     return normalization
 

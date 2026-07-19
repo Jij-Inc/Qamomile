@@ -290,6 +290,8 @@ def test_canonical_aggregation_handles_cancellation_overflow_and_signed_zero() -
         qmc.ising_z_block_encoding({(): 1e308, (0, 0): 1e308}, 1)
     with pytest.raises(ValueError, match="normalization overflowed"):
         qmc.ising_z_block_encoding({(): 1e308, (0,): 1e308}, 1)
+    with pytest.raises(ValueError, match="normalization overflowed"):
+        qmc.ising_z_block_encoding({(): complex(1.7e308, 1.7e308)}, 1)
 
     from qamomile.circuit.serialization import serialize
 
