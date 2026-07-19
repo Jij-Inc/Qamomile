@@ -4,32 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
-
-from qamomile.circuit.frontend.composite_gate import (
-    composite_gate,
-    configure_composite,
-)
-from qamomile.circuit.frontend.constructors import uint
+from qamomile.circuit.frontend.composite_gate import configure_composite
 from qamomile.circuit.frontend.handle import Qubit, Vector
-from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.operation.global_phase import global_phase
-from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x, y, z
-from qamomile.circuit.frontend.operation.select import select
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
 from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.circuit.stdlib.lcu_block_encoding import (
     LCUBlockEncoding,
     _BlockEncodingUnitary,
+    _build_lcu_block_encoding_unitary,
+    _coefficient_phase,
+    _identity_vector,
+    _lcu_num_signal_qubits,
     _register_lcu_block_encoding_static_binding,
-)
-from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
-    _mottonen_composite,
 )
 from qamomile.linalg import PauliLCU, PauliLCUTerm
 from qamomile.observable import Pauli, PauliOperator
@@ -59,37 +50,6 @@ class PauliLCUBlockEncoding(LCUBlockEncoding):
         ValueError: If normalization or a register width is non-positive or
             non-finite.
     """
-
-
-@qkernel
-def _identity_vector(qubits: Vector[Qubit]) -> Vector[Qubit]:
-    """Return a quantum register unchanged.
-
-    Args:
-        qubits (Vector[Qubit]): Register to preserve.
-
-    Returns:
-        Vector[Qubit]: The same logical register.
-    """
-    return qubits
-
-
-def _pauli_lcu_num_signal_qubits(lcu: PauliLCU) -> int:
-    """Return the signal-register width required by the block encoding.
-
-    At least one qubit is retained for the zero- and single-term paths so the
-    returned unitary has one stable two-register signature and remains valid as
-    a nested SELECT case.
-
-    Args:
-        lcu (PauliLCU): Pauli linear combination to encode.
-
-    Returns:
-        int: Required positive number of signal qubits.
-    """
-    if lcu.num_terms <= 1:
-        return 1
-    return (lcu.num_terms - 1).bit_length()
 
 
 def pauli_lcu_block_encoding(lcu: PauliLCU) -> PauliLCUBlockEncoding:
@@ -158,152 +118,22 @@ def pauli_lcu_block_encoding(lcu: PauliLCU) -> PauliLCUBlockEncoding:
             "a 1 x 1 scalar matrix has no Qamomile system register."
         )
 
-    if lcu.num_terms == 0:
-        unitary = _build_zero_encoding(lcu)
-    elif lcu.num_terms == 1:
-        unitary = _build_single_term_encoding(lcu)
-    else:
-        unitary = _build_multi_term_encoding(lcu)
+    coefficients = tuple(term.coefficient for term in lcu.terms)
+    cases = tuple(_build_phased_pauli_case(term) for term in lcu.terms)
+    unitary = _build_lcu_block_encoding_unitary(
+        cases,
+        coefficients,
+        lcu.num_qubits,
+        description="Pauli LCU block encoding",
+        preparation_name="mottonen_amplitude_encoding",
+    )
     unitary = _configure_block_encoding(unitary, lcu)
     return PauliLCUBlockEncoding(
         unitary=unitary,
         normalization=lcu.alpha if lcu.num_terms else 1.0,
-        num_signal_qubits=_pauli_lcu_num_signal_qubits(lcu),
+        num_signal_qubits=_lcu_num_signal_qubits(lcu.num_terms),
         num_system_qubits=lcu.num_qubits,
     )
-
-
-def _build_zero_encoding(lcu: PauliLCU) -> _BlockEncodingUnitary:
-    """Build the exact zero block using one signal-qubit bit flip.
-
-    Args:
-        lcu (PauliLCU): Zero Pauli linear combination.
-
-    Returns:
-        _BlockEncodingUnitary: Zero block-encoding unitary.
-    """
-    signal_width = _pauli_lcu_num_signal_qubits(lcu)
-
-    @composite_gate(name="pauli_lcu_block_encoding")
-    def unitary(
-        signal: Vector[Qubit],
-        system: Vector[Qubit],
-    ) -> tuple[Vector[Qubit], Vector[Qubit]]:
-        """Apply the zero block-encoding body.
-
-        Args:
-            signal (Vector[Qubit]): One-qubit signal register.
-            system (Vector[Qubit]): System register.
-
-        Returns:
-            tuple[Vector[Qubit], Vector[Qubit]]: Updated signal and system
-                registers.
-        """
-        _validate_register_widths(signal, system, signal_width, lcu.num_qubits)
-        signal[0] = x(signal[0])
-        return signal, system
-
-    return unitary
-
-
-def _build_single_term_encoding(
-    lcu: PauliLCU,
-) -> _BlockEncodingUnitary:
-    """Build an unconditional phased-Pauli encoding for one term.
-
-    Args:
-        lcu (PauliLCU): One-term Pauli linear combination.
-
-    Returns:
-        _BlockEncodingUnitary: Single-term block-encoding unitary.
-    """
-    signal_width = _pauli_lcu_num_signal_qubits(lcu)
-    term = lcu.terms[0]
-    phase = _coefficient_phase(term.coefficient)
-
-    @composite_gate(name="pauli_lcu_block_encoding")
-    def unitary(
-        signal: Vector[Qubit],
-        system: Vector[Qubit],
-    ) -> tuple[Vector[Qubit], Vector[Qubit]]:
-        """Apply the single phased-Pauli body.
-
-        Args:
-            signal (Vector[Qubit]): One-qubit signal register, preserved
-                unchanged.
-            system (Vector[Qubit]): System register receiving the Pauli word.
-
-        Returns:
-            tuple[Vector[Qubit], Vector[Qubit]]: Preserved signal register
-                and transformed system register.
-        """
-        _validate_register_widths(signal, system, signal_width, lcu.num_qubits)
-        _apply_pauli_word(system, term.operators)
-        system = global_phase(_identity_vector, phase)(system)
-        return signal, system
-
-    return unitary
-
-
-def _build_multi_term_encoding(
-    lcu: PauliLCU,
-) -> _BlockEncodingUnitary:
-    """Build a PREPARE-SELECT-PREPARE-dagger encoding.
-
-    Args:
-        lcu (PauliLCU): Pauli linear combination containing at least two
-            terms.
-
-    Returns:
-        _BlockEncodingUnitary: Multi-term block-encoding unitary.
-    """
-    signal_width = _pauli_lcu_num_signal_qubits(lcu)
-    amplitudes = np.zeros(1 << signal_width, dtype=np.float64)
-    alpha = lcu.alpha
-    sqrt_alpha = math.sqrt(alpha)
-    for index, term in enumerate(lcu.terms):
-        amplitudes[index] = math.sqrt(abs(term.coefficient)) / sqrt_alpha
-
-    preparation, required_width = _mottonen_composite(
-        amplitudes,
-        name="mottonen_amplitude_encoding",
-        policy=CallPolicy.PRESERVE_BOX,
-    )
-    if required_width != signal_width:
-        raise RuntimeError(
-            "Möttönen preparation width disagrees with the LCU signal width."
-        )
-    unprepare = inverse(preparation)
-    # A constant UInt keeps the unspecialized composite's signal Vector
-    # traceable while lowering still resolves the exact fixed LCU width.
-    selector = select(
-        tuple(_build_phased_pauli_case(term) for term in lcu.terms),
-        num_index_qubits=uint(signal_width),
-    )
-
-    @composite_gate(name="pauli_lcu_block_encoding")
-    def unitary(
-        signal: Vector[Qubit],
-        system: Vector[Qubit],
-    ) -> tuple[Vector[Qubit], Vector[Qubit]]:
-        """Apply the multi-term Pauli LCU block encoding.
-
-        Args:
-            signal (Vector[Qubit]): Signal register whose all-zero state selects
-                the encoded block.
-            system (Vector[Qubit]): Arbitrary system register.
-
-        Returns:
-            tuple[Vector[Qubit], Vector[Qubit]]: Updated signal and system
-                registers.
-        """
-        _validate_register_widths(signal, system, signal_width, lcu.num_qubits)
-        signal = preparation(signal)
-        signal, system = selector(signal, system)
-        signal = unprepare(signal)
-        return signal, system
-
-    return unitary
 
 
 def _build_phased_pauli_case(
@@ -378,69 +208,6 @@ def _apply_pauli_word(
             raise ValueError(f"Unsupported sparse Pauli value: {operator.pauli!r}.")
 
 
-def _coefficient_phase(coefficient: complex) -> float:
-    """Return the coefficient phase with signed zero canonicalized.
-
-    Args:
-        coefficient (complex): Nonzero complex Pauli coefficient.
-
-    Returns:
-        float: Coefficient phase, using positive zero for a positive-real
-            coefficient.
-    """
-    phase = math.atan2(coefficient.imag, coefficient.real)
-    return phase if phase else 0.0
-
-
-def _validate_register_widths(
-    signal: Vector[Qubit],
-    system: Vector[Qubit],
-    expected_signal: int,
-    expected_system: int,
-) -> None:
-    """Validate concrete register widths while allowing symbolic cache traces.
-
-    Args:
-        signal (Vector[Qubit]): Complete signal register.
-        system (Vector[Qubit]): System register.
-        expected_signal (int): Required signal width.
-        expected_system (int): Required system width.
-
-    Raises:
-        TypeError: If either argument is not a vector register.
-        ValueError: If a concrete register width differs from its requirement.
-    """
-    _validate_register_width(signal, expected_signal, "signal")
-    _validate_register_width(system, expected_system, "system")
-
-
-def _validate_register_width(
-    register: Vector[Qubit],
-    expected: int,
-    name: str,
-) -> None:
-    """Validate one concrete vector width and defer symbolic-width checks.
-
-    Args:
-        register (Vector[Qubit]): Register to inspect.
-        expected (int): Required width.
-        name (str): Register name used in diagnostics.
-
-    Raises:
-        TypeError: If ``register`` is not a vector.
-        ValueError: If its concrete width differs from ``expected``.
-    """
-    try:
-        actual = get_size(register)
-    except ValueError:
-        return
-    if actual != expected:
-        unit = "qubit" if expected == 1 else "qubits"
-        raise ValueError(
-            f"Pauli LCU block encoding requires {expected} {name} {unit}, got {actual}."
-        )
-
-
 def _configure_block_encoding(
     unitary: _BlockEncodingUnitary,
     lcu: PauliLCU,
@@ -482,7 +249,7 @@ def _semantic_arguments(lcu: PauliLCU) -> dict[str, Any]:
     """
     return {
         "num_qubits": lcu.num_qubits,
-        "signal_qubits": _pauli_lcu_num_signal_qubits(lcu),
+        "signal_qubits": _lcu_num_signal_qubits(lcu.num_terms),
         "terms": [
             {
                 "coefficient": [

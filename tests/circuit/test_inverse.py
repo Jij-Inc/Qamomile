@@ -7,10 +7,6 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.arithmetic import (
-    modular_decrement,
-    modular_increment,
-)
 from qamomile.circuit.algorithm.basic import (
     cx_entangling_layer,
     cz_entangling_layer,
@@ -57,6 +53,10 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+from qamomile.circuit.stdlib import (
+    modular_decrement,
+    modular_increment,
+)
 from qamomile.circuit.stdlib.state_preparation import (
     computational_basis_state,
     mottonen_amplitude_encoding,
@@ -2937,7 +2937,7 @@ def _rx_layer_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
 
 
 def _modular_increment_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
-    """Build algorithm modular_increment inverse roundtrip kernels.
+    """Build standard-library modular_increment inverse roundtrip kernels.
 
     The register stays at two qubits so the QURI Parts modular-arithmetic
     support documented in LIMITATIONS.md is not exceeded by the forward op.
@@ -3202,7 +3202,7 @@ def _x_mixer_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
 
 
 def _modular_decrement_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
-    """Build algorithm modular_decrement inverse roundtrip kernels.
+    """Build standard-library modular_decrement inverse roundtrip kernels.
 
     The register stays at two qubits so the QURI Parts modular-arithmetic
     support documented in LIMITATIONS.md is not exceeded by the forward op.
@@ -3590,13 +3590,13 @@ STDLIB_ALGO_ROUNDTRIP_CASES = [
         _modular_increment_roundtrip_kernels,
         2,
         {},
-        id="algorithm-modular-increment",
+        id="stdlib-modular-increment",
     ),
     pytest.param(
         _modular_decrement_roundtrip_kernels,
         2,
         {},
-        id="algorithm-modular-decrement",
+        id="stdlib-modular-decrement",
     ),
     pytest.param(
         _computational_basis_state_roundtrip_kernels,
@@ -3737,6 +3737,22 @@ def test_inverse_block_operation_rejects_interleaved_parameters() -> None:
             results=[q0.next_version(), q1.next_version()],
             num_control_qubits=0,
             num_target_qubits=2,
+        )
+
+
+def test_inverse_block_operation_rejects_vector_control_operand() -> None:
+    """The constructor rejects controls whose operand width exceeds one qubit."""
+    dimension = Value(type=UIntType(), name="dimension").with_const(3)
+    control = ArrayValue(type=QubitType(), name="control", shape=(dimension,))
+    target = Value(type=QubitType(), name="target")
+
+    with pytest.raises(ValueError, match="control operands must be scalar qubits"):
+        InverseBlockOperation(
+            operands=[control, target],
+            results=[control.next_version(), target.next_version()],
+            num_control_qubits=1,
+            num_target_qubits=1,
+            control_value=0,
         )
 
 

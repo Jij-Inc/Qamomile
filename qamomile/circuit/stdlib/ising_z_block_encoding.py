@@ -12,27 +12,21 @@ from typing import Any
 
 import numpy as np
 
-from qamomile.circuit.frontend.composite_gate import (
-    composite_gate,
-    configure_composite,
-)
-from qamomile.circuit.frontend.constructors import uint
+from qamomile.circuit.frontend.composite_gate import configure_composite
 from qamomile.circuit.frontend.handle import Qubit, Vector
 from qamomile.circuit.frontend.operation.global_phase import global_phase
-from qamomile.circuit.frontend.operation.inverse import inverse
-from qamomile.circuit.frontend.operation.qubit_gates import x, z
-from qamomile.circuit.frontend.operation.select import select
+from qamomile.circuit.frontend.operation.qubit_gates import z
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
 from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.circuit.stdlib.lcu_block_encoding import (
     LCUBlockEncoding,
     _BlockEncodingUnitary,
+    _build_lcu_block_encoding_unitary,
+    _coefficient_phase,
+    _identity_vector,
+    _lcu_num_signal_qubits,
     _register_lcu_block_encoding_static_binding,
     _validate_positive_integer,
-    _validate_register_widths,
-)
-from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
-    _mottonen_composite,
 )
 
 _CanonicalTerm = tuple[tuple[int, ...], complex]
@@ -74,19 +68,6 @@ class IsingZBlockEncoding(LCUBlockEncoding):
         ValueError: If normalization is non-finite or non-positive, or a
             register width is non-positive.
     """
-
-
-@qkernel
-def _identity_vector(qubits: Vector[Qubit]) -> Vector[Qubit]:
-    """Return a quantum register unchanged.
-
-    Args:
-        qubits (Vector[Qubit]): Register to preserve.
-
-    Returns:
-        Vector[Qubit]: The same logical register.
-    """
-    return qubits
 
 
 def ising_z_block_encoding(
@@ -143,24 +124,15 @@ def ising_z_block_encoding(
     """
     width = _validate_positive_integer(num_system_qubits, "num_system_qubits")
     terms = _canonicalize_coefficients(coefficients, width)
-
-    if not terms:
-        unitary = _build_zero_encoding(width)
-        normalization = 1.0
-        signal_width = 1
-    elif len(terms) == 1:
-        unitary = _build_single_term_encoding(terms[0], width)
-        normalization = _coefficient_one_norm(terms)
-        signal_width = 1
-    else:
-        normalization = _coefficient_one_norm(terms)
-        signal_width = (len(terms) - 1).bit_length()
-        unitary = _build_multi_term_encoding(
-            terms,
-            width,
-            signal_width,
-            normalization,
-        )
+    normalization = _coefficient_one_norm(terms) if terms else 1.0
+    signal_width = _lcu_num_signal_qubits(len(terms))
+    unitary = _build_lcu_block_encoding_unitary(
+        tuple(_build_phased_z_case(term) for term in terms),
+        tuple(coefficient for _, coefficient in terms),
+        width,
+        description="Ising-Z block encoding",
+        preparation_name="ising_z_prepare",
+    )
 
     _configure_block_encoding(
         unitary,
@@ -355,175 +327,6 @@ def _coefficient_one_norm(terms: tuple[_CanonicalTerm, ...]) -> float:
     return normalization
 
 
-def _build_zero_encoding(num_system_qubits: int) -> _BlockEncodingUnitary:
-    """Build the exact zero block using one signal-qubit bit flip.
-
-    Args:
-        num_system_qubits (int): Required system-register width.
-
-    Returns:
-        _BlockEncodingUnitary: Zero block-encoding unitary.
-    """
-
-    @composite_gate(name="ising_z_block_encoding")
-    def unitary(
-        signal: Vector[Qubit],
-        system: Vector[Qubit],
-    ) -> tuple[Vector[Qubit], Vector[Qubit]]:
-        """Apply the zero Ising-Z block encoding.
-
-        Args:
-            signal (Vector[Qubit]): One-qubit signal register.
-            system (Vector[Qubit]): System register preserved unchanged.
-
-        Returns:
-            tuple[Vector[Qubit], Vector[Qubit]]: Updated signal and preserved
-                system registers.
-
-        Raises:
-            TypeError: If either argument is not a vector register.
-            ValueError: If either concrete register width is incorrect.
-        """
-        _validate_register_widths(
-            signal,
-            system,
-            1,
-            num_system_qubits,
-            "Ising-Z block encoding",
-        )
-        signal[0] = x(signal[0])
-        return signal, system
-
-    return unitary
-
-
-def _build_single_term_encoding(
-    term: _CanonicalTerm,
-    num_system_qubits: int,
-) -> _BlockEncodingUnitary:
-    """Build an unconditional phased Z-word encoding for one term.
-
-    Args:
-        term (_CanonicalTerm): Single nonzero canonical term.
-        num_system_qubits (int): Required system-register width.
-
-    Returns:
-        _BlockEncodingUnitary: Single-term block-encoding unitary.
-    """
-    word, coefficient = term
-    phase = _coefficient_phase(coefficient)
-
-    @composite_gate(name="ising_z_block_encoding")
-    def unitary(
-        signal: Vector[Qubit],
-        system: Vector[Qubit],
-    ) -> tuple[Vector[Qubit], Vector[Qubit]]:
-        """Apply one phased Ising-Z word and preserve the signal register.
-
-        Args:
-            signal (Vector[Qubit]): One-qubit pass-through signal register.
-            system (Vector[Qubit]): System register receiving the Z word.
-
-        Returns:
-            tuple[Vector[Qubit], Vector[Qubit]]: Preserved signal and
-                transformed system registers.
-
-        Raises:
-            TypeError: If either argument is not a vector register.
-            ValueError: If either concrete register width is incorrect.
-        """
-        _validate_register_widths(
-            signal,
-            system,
-            1,
-            num_system_qubits,
-            "Ising-Z block encoding",
-        )
-        _apply_z_word(system, word)
-        system = global_phase(_identity_vector, phase)(system)
-        return signal, system
-
-    return unitary
-
-
-def _build_multi_term_encoding(
-    terms: tuple[_CanonicalTerm, ...],
-    num_system_qubits: int,
-    signal_width: int,
-    normalization: float,
-) -> _BlockEncodingUnitary:
-    """Build a PREPARE-SELECT-PREPARE-dagger Ising-Z encoding.
-
-    Args:
-        terms (tuple[_CanonicalTerm, ...]): At least two nonzero canonical
-            terms.
-        num_system_qubits (int): Required system-register width.
-        signal_width (int): Required selector-register width.
-        normalization (float): Positive coefficient one-norm.
-
-    Returns:
-        _BlockEncodingUnitary: Multi-term block-encoding unitary.
-
-    Raises:
-        RuntimeError: If state preparation reports an unexpected register
-            width.
-    """
-    amplitudes = np.zeros(1 << signal_width, dtype=np.float64)
-    sqrt_normalization = math.sqrt(normalization)
-    for index, (_, coefficient) in enumerate(terms):
-        amplitudes[index] = math.sqrt(abs(coefficient)) / sqrt_normalization
-
-    preparation, required_width = _mottonen_composite(
-        amplitudes,
-        name="mottonen_amplitude_encoding",
-        policy=CallPolicy.PRESERVE_BOX,
-    )
-    if required_width != signal_width:
-        raise RuntimeError(
-            "Möttönen preparation width disagrees with the Ising-Z signal width."
-        )
-    unprepare = inverse(preparation)
-    selector = select(
-        tuple(_build_phased_z_case(term) for term in terms),
-        num_index_qubits=uint(signal_width),
-    )
-
-    @composite_gate(name="ising_z_block_encoding")
-    def unitary(
-        signal: Vector[Qubit],
-        system: Vector[Qubit],
-    ) -> tuple[Vector[Qubit], Vector[Qubit]]:
-        """Apply the multi-term Ising-Z block encoding.
-
-        Args:
-            signal (Vector[Qubit]): Complete signal register whose all-zero
-                state selects the encoded block.
-            system (Vector[Qubit]): System register receiving the selected
-                phased Z word.
-
-        Returns:
-            tuple[Vector[Qubit], Vector[Qubit]]: Updated signal and system
-                registers.
-
-        Raises:
-            TypeError: If either argument is not a vector register.
-            ValueError: If either concrete register width is incorrect.
-        """
-        _validate_register_widths(
-            signal,
-            system,
-            signal_width,
-            num_system_qubits,
-            "Ising-Z block encoding",
-        )
-        signal = preparation(signal)
-        signal, system = selector(signal, system)
-        signal = unprepare(signal)
-        return signal, system
-
-    return unitary
-
-
 def _build_phased_z_case(
     term: _CanonicalTerm,
 ) -> QKernel[..., Vector[Qubit]]:
@@ -580,20 +383,6 @@ def _apply_z_word(system: Vector[Qubit], word: tuple[int, ...]) -> None:
     """
     for index in word:
         system[index] = z(system[index])
-
-
-def _coefficient_phase(coefficient: complex) -> float:
-    """Return a coefficient phase with signed zero canonicalized.
-
-    Args:
-        coefficient (complex): Nonzero finite complex coefficient.
-
-    Returns:
-        float: Phase angle in radians, using positive zero on the positive-real
-            axis.
-    """
-    phase = math.atan2(coefficient.imag, coefficient.real)
-    return phase if phase else 0.0
 
 
 def _configure_block_encoding(

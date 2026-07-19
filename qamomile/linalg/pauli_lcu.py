@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import dataclasses
 import math
-import numbers
 
 import numpy as np
 from numpy.typing import ArrayLike
 
 from qamomile.linalg._fwht import fwht_complex_pauli_coefficients
+from qamomile.linalg._validation import (
+    coerce_finite_complex_scalar,
+    coerce_nonnegative_finite_real,
+)
 from qamomile.observable import Pauli, PauliOperator
 
 
@@ -48,13 +51,10 @@ class PauliLCUTerm:
                 index is not an integer.
             ValueError: If the coefficient or Pauli word is invalid.
         """
-        coefficient = _validate_coefficient(self.coefficient)
-        coefficient = complex(
-            coefficient.real if coefficient.real else 0.0,
-            coefficient.imag if coefficient.imag else 0.0,
+        coefficient = coerce_finite_complex_scalar(
+            self.coefficient,
+            "PauliLCUTerm coefficient",
         )
-        if not math.isfinite(coefficient.real) or not math.isfinite(coefficient.imag):
-            raise ValueError("PauliLCUTerm coefficient must be finite.")
         if not coefficient:
             raise ValueError("PauliLCUTerm coefficient must be nonzero.")
 
@@ -161,7 +161,7 @@ class PauliLCU:
         if not math.isfinite(alpha):
             raise ValueError("PauliLCU normalization must be finite.")
 
-        error_bound = _validate_nonnegative_real(
+        error_bound = coerce_nonnegative_finite_real(
             self.truncation_error_bound,
             "truncation_error_bound",
         )
@@ -200,7 +200,7 @@ class PauliLCU:
                 dimension, or the resulting LCU normalization exceeds the
                 finite float range.
         """
-        threshold = _validate_atol(atol)
+        threshold = coerce_nonnegative_finite_real(atol, "atol")
         coeffs, num_qubits = fwht_complex_pauli_coefficients(matrix)
         dim = 1 << num_qubits
         pauli_for_bits = {
@@ -275,90 +275,6 @@ class PauliLCU:
             int: Number of nonzero terms.
         """
         return len(self.terms)
-
-
-def _validate_atol(atol: float) -> float:
-    """Validate and normalize a coefficient truncation threshold.
-
-    Args:
-        atol (float): Candidate absolute threshold.
-
-    Returns:
-        float: Finite non-negative Python float.
-
-    Raises:
-        TypeError: If ``atol`` is not a real scalar.
-        ValueError: If ``atol`` is negative or non-finite.
-    """
-    return _validate_nonnegative_real(atol, "atol")
-
-
-def _validate_coefficient(value: object) -> complex:
-    """Validate and convert one finite numeric coefficient scalar.
-
-    Args:
-        value (object): Candidate real or complex numeric scalar.
-
-    Returns:
-        complex: Equivalent Python complex value.
-
-    Raises:
-        TypeError: If ``value`` is not an actual numeric scalar.
-        ValueError: If conversion exceeds the finite complex range.
-    """
-    if _is_boolean_scalar(value) or not isinstance(
-        value,
-        (numbers.Complex, np.number),
-    ):
-        raise TypeError("PauliLCUTerm coefficient must be a numeric scalar.")
-    try:
-        return complex(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(
-            "PauliLCUTerm coefficient must fit in a finite complex value."
-        ) from exc
-
-
-def _validate_nonnegative_real(value: object, name: str) -> float:
-    """Validate and convert one finite non-negative real scalar.
-
-    Args:
-        value (object): Candidate scalar value.
-        name (str): Parameter name used in diagnostics.
-
-    Returns:
-        float: Finite non-negative Python float.
-
-    Raises:
-        TypeError: If ``value`` is not an actual real numeric scalar.
-        ValueError: If ``value`` is negative or outside the finite float range.
-    """
-    if _is_boolean_scalar(value) or not isinstance(
-        value,
-        (numbers.Real, np.integer, np.floating),
-    ):
-        raise TypeError(f"{name} must be a real numeric scalar.")
-    try:
-        normalized = float(value)
-    except (TypeError, ValueError) as exc:
-        raise TypeError(f"{name} must be a real numeric scalar.") from exc
-    except OverflowError as exc:
-        raise ValueError(f"{name} must be finite and non-negative.") from exc
-    if not math.isfinite(normalized) or normalized < 0.0:
-        raise ValueError(f"{name} must be finite and non-negative.")
-    return normalized
-
-
-def _is_boolean_scalar(value: object) -> bool:
-    """Return whether a value is a Python or NumPy boolean scalar.
-
-    Args:
-        value (object): Candidate scalar value.
-
-    Returns:
-        bool: Whether ``value`` is boolean rather than numeric input.
-    """
-    return isinstance(value, (bool, np.bool_))
 
 
 __all__ = ["PauliLCU", "PauliLCUTerm"]

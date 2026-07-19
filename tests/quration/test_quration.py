@@ -34,7 +34,7 @@ from qamomile.circuit.transpiler.circuit_ir import (
 )
 from qamomile.circuit.transpiler.errors import EmitError, TargetCapabilityError
 from qamomile.circuit.transpiler.gate_emitter import GateKind
-from qamomile.linalg import PauliLCU
+from qamomile.linalg import PauliLCU, PeriodicShiftLCU
 from qamomile.quration import QurationTranspiler
 from qamomile.quration.materializer import (
     PyQretMaterializer,
@@ -293,6 +293,20 @@ _quration_three_term_lcu = PauliLCU.from_matrix(
     atol=1e-12,
 )
 _quration_three_term_encoding = qmc.pauli_lcu_block_encoding(_quration_three_term_lcu)
+_quration_two_term_periodic_lcu = PeriodicShiftLCU.from_coefficients(
+    {0: 1j, 1: 0.5},
+    register_sizes=(1,),
+)
+_quration_two_term_periodic_encoding = qmc.periodic_shift_lcu_block_encoding(
+    _quration_two_term_periodic_lcu
+)
+_quration_three_term_periodic_lcu = PeriodicShiftLCU.from_coefficients(
+    {0: 1j, 1: 0.5, -1: 0.25},
+    register_sizes=(2,),
+)
+_quration_three_term_periodic_encoding = qmc.periodic_shift_lcu_block_encoding(
+    _quration_three_term_periodic_lcu
+)
 
 
 @qmc.qkernel
@@ -321,6 +335,38 @@ def _quration_three_term_pauli_lcu() -> qmc.Bit:
     signal = qmc.qubit_array(2, "signal")
     system = qmc.qubit_array(1, "system")
     signal, _ = _quration_three_term_encoding.unitary(signal, system)
+    return qmc.measure(signal[0])
+
+
+@qmc.qkernel
+def _quration_two_term_periodic_stencil() -> qmc.Bit:
+    """Apply the supported two-term periodic-stencil block encoding."""
+    encoding = _quration_two_term_periodic_encoding
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, _ = encoding.unitary(signal, system)
+    return qmc.measure(signal[0])
+
+
+@qmc.qkernel
+def _quration_two_term_periodic_stencil_expval(
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Apply the supported periodic stencil and evaluate an observable."""
+    encoding = _quration_two_term_periodic_encoding
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = encoding.unitary(signal, system)
+    return qmc.expval((signal[0], system[0]), observable)
+
+
+@qmc.qkernel
+def _quration_three_term_periodic_stencil() -> qmc.Bit:
+    """Build a periodic stencil whose SELECT exceeds Quration's bound."""
+    encoding = _quration_three_term_periodic_encoding
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, _ = encoding.unitary(signal, system)
     return qmc.measure(signal[0])
 
 
@@ -560,6 +606,31 @@ def test_quration_rejects_three_term_pauli_lcu() -> None:
     capabilities = PyQretMaterializer().capabilities
     legalized = legalize_program(
         _lower_quration_program(_quration_three_term_pauli_lcu),
+        capabilities,
+        DEFAULT_POLICY,
+    )
+
+    with pytest.raises(TargetCapabilityError, match=r"quration.*controls=2"):
+        verify_target_legal(legalized, capabilities)
+
+
+def test_quration_accepts_two_term_periodic_stencil() -> None:
+    """A one-bit periodic SELECT fits Quration's distributed-control profile."""
+    capabilities = PyQretMaterializer().capabilities
+    legalized = legalize_program(
+        _lower_quration_program(_quration_two_term_periodic_stencil),
+        capabilities,
+        DEFAULT_POLICY,
+    )
+
+    verify_target_legal(legalized, capabilities)
+
+
+def test_quration_rejects_three_term_periodic_stencil() -> None:
+    """A two-bit periodic SELECT exceeds Quration's distributed-control profile."""
+    capabilities = PyQretMaterializer().capabilities
+    legalized = legalize_program(
+        _lower_quration_program(_quration_three_term_periodic_stencil),
         capabilities,
         DEFAULT_POLICY,
     )
@@ -869,6 +940,67 @@ def test_quration_executes_two_term_complex_pauli_lcu() -> None:
         * np.imag(np.conj(identity_weight) * x_weight)
         / _quration_two_term_encoding.normalization**2
     )
+    assert float(result) == pytest.approx(expected_y, abs=1e-8)
+
+
+@pytest.mark.quration
+def test_quration_samples_two_term_complex_periodic_stencil() -> None:
+    """Quration samples the supported complex periodic block encoding.
+
+    Identity and one-step shift produce orthogonal system states from ``|0>``,
+    giving success probability ``(|a|² + |b|²) / normalization²``.
+    """
+    pytest.importorskip("pyqret")
+    encoding = _quration_two_term_periodic_encoding
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(_quration_two_term_periodic_stencil)
+    shots = 1024
+
+    result = executable.sample(transpiler.executor(seed=14), shots=shots).result()
+    counts = dict(result.results)
+    assert sum(counts.values()) == shots
+    assert set(counts) <= {0, 1}
+
+    expected_success = (abs(1j) ** 2 + abs(0.5) ** 2) / encoding.normalization**2
+    tolerance = (
+        6.0 * math.sqrt(expected_success * (1.0 - expected_success) / shots) + 0.02
+    )
+    assert counts.get(0, 0) / shots == pytest.approx(
+        expected_success,
+        abs=tolerance,
+    )
+
+
+@pytest.mark.quration
+def test_quration_executes_two_term_complex_periodic_stencil() -> None:
+    """Quration evaluates the supported complex periodic block encoding.
+
+    The success-projected system-Y expectation is
+    ``2 Im(conj(a) b) / normalization²`` for identity weight ``a`` and shift
+    weight ``b``.
+    """
+    pytest.importorskip("pyqret")
+    projected_y = qm_o.Hamiltonian(num_qubits=2)
+    projected_y.add_term(
+        (qm_o.PauliOperator(qm_o.Pauli.Y, 1),),
+        0.5,
+    )
+    projected_y.add_term(
+        (
+            qm_o.PauliOperator(qm_o.Pauli.Z, 0),
+            qm_o.PauliOperator(qm_o.Pauli.Y, 1),
+        ),
+        0.5,
+    )
+    encoding = _quration_two_term_periodic_encoding
+    transpiler = QurationTranspiler()
+    executable = transpiler.transpile(
+        _quration_two_term_periodic_stencil_expval,
+        bindings={"observable": projected_y},
+    )
+
+    result = executable.run(transpiler.executor(seed=15)).result()
+    expected_y = 2.0 * np.imag(np.conj(1j) * 0.5) / encoding.normalization**2
     assert float(result) == pytest.approx(expected_y, abs=1e-8)
 
 

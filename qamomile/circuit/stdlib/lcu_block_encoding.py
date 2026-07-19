@@ -7,14 +7,10 @@ import math
 import numbers
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import cast
 
 import numpy as np
 
-from qamomile.circuit.frontend.composite_gate import (
-    composite_gate,
-    configure_composite,
-)
 from qamomile.circuit.frontend.constructors import uint
 from qamomile.circuit.frontend.handle import Float, Qubit, UInt, Vector
 from qamomile.circuit.frontend.handle.utils import get_size
@@ -23,17 +19,12 @@ from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x
 from qamomile.circuit.frontend.operation.select import select
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
-from qamomile.circuit.frontend.qkernel_callable import (
-    qkernel_callable_attrs,
-    qkernel_callable_ref,
-)
 from qamomile.circuit.frontend.static_binding import (
     StaticBindingFieldSpec,
     StaticBindingMemberSpec,
     StaticBindingSpec,
     register_static_binding,
 )
-from qamomile.circuit.ir.canonical import content_fingerprint
 from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
@@ -43,6 +34,7 @@ _BlockEncodingUnitary = QKernel[
     ...,
     tuple[Vector[Qubit], Vector[Qubit]],
 ]
+_LCUCase = QKernel[..., Vector[Qubit]]
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -210,6 +202,245 @@ def _validate_positive_integer(value: object, name: str) -> int:
     return normalized
 
 
+@qkernel
+def _identity_vector(qubits: Vector[Qubit]) -> Vector[Qubit]:
+    """Return a quantum register unchanged.
+
+    Args:
+        qubits (Vector[Qubit]): Register to preserve.
+
+    Returns:
+        Vector[Qubit]: The same logical register.
+    """
+    return qubits
+
+
+def _coefficient_phase(coefficient: complex) -> float:
+    """Return a coefficient phase with signed zero canonicalized.
+
+    Args:
+        coefficient (complex): Nonzero finite complex coefficient.
+
+    Returns:
+        float: Principal coefficient phase, using positive zero for a
+            positive-real coefficient.
+    """
+    phase = math.atan2(coefficient.imag, coefficient.real)
+    return phase if phase else 0.0
+
+
+def _lcu_num_signal_qubits(num_terms: int) -> int:
+    """Return the positive selector width for a retained LCU term count.
+
+    Zero- and single-term encodings retain one pass-through signal qubit so
+    every exact LCU producer has the same two-register ABI under nested SELECT.
+
+    Args:
+        num_terms (int): Non-negative number of retained nonzero LCU terms.
+
+    Returns:
+        int: Positive signal-register width.
+
+    Raises:
+        TypeError: If ``num_terms`` is not a plain integer.
+        ValueError: If ``num_terms`` is negative.
+    """
+    if type(num_terms) is not int:
+        raise TypeError("num_terms must be an integer.")
+    if num_terms < 0:
+        raise ValueError("num_terms must be non-negative.")
+    return max(1, (num_terms - 1).bit_length())
+
+
+def _validate_register_widths(
+    signal: Vector[Qubit],
+    system: Vector[Qubit],
+    expected_signal: int,
+    expected_system: int,
+    description: str,
+) -> None:
+    """Validate concrete LCU registers while allowing symbolic cache traces.
+
+    Args:
+        signal (Vector[Qubit]): Complete signal register.
+        system (Vector[Qubit]): Ordered system register.
+        expected_signal (int): Required signal width.
+        expected_system (int): Required system width.
+        description (str): Producer description used in diagnostics.
+
+    Raises:
+        ValueError: If a concrete register width differs from its requirement.
+    """
+    _validate_register_width(signal, expected_signal, "signal", description)
+    _validate_register_width(system, expected_system, "system", description)
+
+
+def _validate_register_width(
+    register: Vector[Qubit],
+    expected: int,
+    name: str,
+    description: str,
+) -> None:
+    """Validate one concrete vector width and defer symbolic-width checks.
+
+    Args:
+        register (Vector[Qubit]): Register to inspect.
+        expected (int): Required width.
+        name (str): Register name used in diagnostics.
+        description (str): Producer description used in diagnostics.
+
+    Raises:
+        ValueError: If the concrete width differs from ``expected``.
+    """
+    try:
+        actual = get_size(register)
+    except ValueError:
+        return
+    if actual != expected:
+        unit = "qubit" if expected == 1 else "qubits"
+        raise ValueError(
+            f"{description} requires {expected} {name} {unit}, got {actual}."
+        )
+
+
+def _build_lcu_block_encoding_unitary(
+    cases: tuple[_LCUCase, ...],
+    coefficients: tuple[complex, ...],
+    num_system_qubits: int,
+    *,
+    description: str,
+    preparation_name: str,
+) -> _BlockEncodingUnitary:
+    """Build the shared zero-, single-, or multi-term exact LCU unitary.
+
+    Each supplied case must already include the phase and unitary action for
+    its matching coefficient. The builder owns the common signal-width rule,
+    zero-block bit flip, and PREPARE-SELECT-PREPARE-dagger construction.
+
+    Args:
+        cases (tuple[_LCUCase, ...]): Uniform one-register SELECT cases in
+            retained coefficient order.
+        coefficients (tuple[complex, ...]): Matching nonzero LCU coefficients.
+        num_system_qubits (int): Positive width of the ordered system register.
+        description (str): Producer description used in width diagnostics.
+        preparation_name (str): Compiler identity name for the Möttönen
+            PREPARE callable.
+
+    Returns:
+        _BlockEncodingUnitary: Shared-signature block-encoding unitary.
+
+    Raises:
+        ValueError: If the case and coefficient counts differ.
+        RuntimeError: If state preparation returns an unexpected signal width.
+    """
+    if len(cases) != len(coefficients):
+        raise ValueError("LCU cases and coefficients must have the same length.")
+    signal_width = _lcu_num_signal_qubits(len(cases))
+    normalization = math.fsum(abs(coefficient) for coefficient in coefficients)
+
+    if not cases:
+
+        @qkernel
+        def unitary(
+            signal: Vector[Qubit],
+            system: Vector[Qubit],
+        ) -> tuple[Vector[Qubit], Vector[Qubit]]:
+            """Apply the shared exact-zero block-encoding body.
+
+            Args:
+                signal (Vector[Qubit]): One-qubit signal register.
+                system (Vector[Qubit]): Ordered system register.
+
+            Returns:
+                tuple[Vector[Qubit], Vector[Qubit]]: Updated signal and
+                    preserved system registers.
+            """
+            _validate_register_widths(
+                signal,
+                system,
+                signal_width,
+                num_system_qubits,
+                description,
+            )
+            signal[0] = x(signal[0])
+            return signal, system
+
+    elif len(cases) == 1:
+        case = cases[0]
+
+        @qkernel
+        def unitary(
+            signal: Vector[Qubit],
+            system: Vector[Qubit],
+        ) -> tuple[Vector[Qubit], Vector[Qubit]]:
+            """Apply one unconditional phased LCU case.
+
+            Args:
+                signal (Vector[Qubit]): Pass-through signal register.
+                system (Vector[Qubit]): Ordered system register.
+
+            Returns:
+                tuple[Vector[Qubit], Vector[Qubit]]: Preserved signal and
+                    transformed system registers.
+            """
+            _validate_register_widths(
+                signal,
+                system,
+                signal_width,
+                num_system_qubits,
+                description,
+            )
+            system = case(system)
+            return signal, system
+
+    else:
+        amplitudes = np.zeros(1 << signal_width, dtype=np.float64)
+        sqrt_normalization = math.sqrt(normalization)
+        for index, coefficient in enumerate(coefficients):
+            amplitudes[index] = math.sqrt(abs(coefficient)) / sqrt_normalization
+
+        preparation, required_signal_qubits = _mottonen_composite(
+            amplitudes,
+            name=preparation_name,
+            policy=CallPolicy.PRESERVE_BOX,
+        )
+        if required_signal_qubits != signal_width:
+            raise RuntimeError(
+                "Möttönen preparation width disagrees with the LCU signal width."
+            )
+        unprepare = inverse(preparation)
+        selector = select(cases, num_index_qubits=uint(signal_width))
+
+        @qkernel
+        def unitary(
+            signal: Vector[Qubit],
+            system: Vector[Qubit],
+        ) -> tuple[Vector[Qubit], Vector[Qubit]]:
+            """Apply shared PREPARE, SELECT, and inverse PREPARE operations.
+
+            Args:
+                signal (Vector[Qubit]): All-zero block signal register.
+                system (Vector[Qubit]): Ordered system register.
+
+            Returns:
+                tuple[Vector[Qubit], Vector[Qubit]]: Updated signal and system
+                    registers.
+            """
+            _validate_register_widths(
+                signal,
+                system,
+                signal_width,
+                num_system_qubits,
+                description,
+            )
+            signal = preparation(signal)
+            signal, system = selector(signal, system)
+            signal = unprepare(signal)
+            return signal, system
+
+    return cast(_BlockEncodingUnitary, unitary)
+
+
 def _register_lcu_block_encoding_static_binding(
     annotation: type[LCUBlockEncoding],
     type_key: str,
@@ -267,19 +498,6 @@ _register_lcu_block_encoding_static_binding(
     LCUBlockEncoding,
     "qamomile.stdlib.lcu_block_encoding",
 )
-
-
-@qkernel
-def _identity_vector(qubits: Vector[Qubit]) -> Vector[Qubit]:
-    """Return a quantum register unchanged.
-
-    Args:
-        qubits (Vector[Qubit]): Register to preserve.
-
-    Returns:
-        Vector[Qubit]: The same logical register.
-    """
-    return qubits
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -367,41 +585,16 @@ def identity_block_encoding(num_system_qubits: int) -> LCUBlockEncoding:
         num_system_qubits,
         "num_system_qubits",
     )
-
-    @composite_gate(name="identity_block_encoding")
-    def unitary(
-        signal: Vector[Qubit],
-        system: Vector[Qubit],
-    ) -> tuple[Vector[Qubit], Vector[Qubit]]:
-        """Apply the exact identity block-encoding body.
-
-        Args:
-            signal (Vector[Qubit]): One-qubit pass-through signal register.
-            system (Vector[Qubit]): Pass-through system register.
-
-        Returns:
-            tuple[Vector[Qubit], Vector[Qubit]]: Unchanged signal and system
-                registers.
-
-        Raises:
-            TypeError: If either argument is not a vector register.
-            ValueError: If either concrete register width is incorrect.
-        """
-        _validate_register_widths(
-            signal,
-            system,
-            expected_signal=1,
-            expected_system=system_width,
-            owner="Identity block encoding",
-        )
-        return signal, system
-
-    _configure_generated_unitary(
-        unitary,
-        name="identity_block_encoding",
-        family="identity",
-        semantic_arguments={"num_system_qubits": system_width},
+    unitary = _build_lcu_block_encoding_unitary(
+        (_identity_vector,),
+        (1.0 + 0.0j,),
+        system_width,
+        description="identity block encoding",
+        preparation_name="identity_block_encoding_prepare",
     )
+    # The name is diagnostic only; stable generated semantic identity remains
+    # deferred until the compiler can derive it from the owned callable body.
+    unitary.name = "identity_block_encoding"
     return LCUBlockEncoding(
         unitary=unitary,
         normalization=1.0,
@@ -446,12 +639,11 @@ def lcu_block_encoding(
 
     Children must interpret the ordered system wires in the same logical basis;
     the common descriptor can validate their widths but cannot infer basis
-    conventions. Qamomile-produced configured composites, including Pauli,
-    Ising-Z, identity, and recursive LCU encodings, contribute stable semantic
-    identity to the parent and support deterministic standalone serialization.
-    A hand-written plain qkernel remains a legal exact child for execution and
-    static binding, but deterministic cross-process identity for arbitrary
-    Python closure captures is outside this version's contract.
+    conventions. Generated callable semantic identity across separately
+    constructed descriptors is not part of this API yet. Concrete children are
+    captured when the factory runs, and the completed descriptor supports
+    nesting and compile-time static binding without exposing those children as
+    public qkernel arguments.
 
     Zero-coefficient terms are removed before normalization and SELECT
     construction. A nonempty sequence containing only zero coefficients
@@ -512,17 +704,9 @@ def lcu_block_encoding(
                 system_width,
             )
 
-    _configure_generated_unitary(
-        unitary,
-        name="lcu_block_encoding",
-        family="recursive_lcu",
-        semantic_arguments=_lcu_semantic_arguments(
-            active_terms,
-            normalization,
-            signal_width,
-            system_width,
-        ),
-    )
+    # The name is diagnostic only; stable generated semantic identity remains
+    # deferred until the compiler can derive it from the owned callable body.
+    unitary.name = "lcu_block_encoding"
     return LCUBlockEncoding(
         unitary=unitary,
         normalization=normalization,
@@ -647,7 +831,7 @@ def _build_zero_encoding(system_width: int) -> _BlockEncodingUnitary:
         _BlockEncodingUnitary: Zero block-encoding unitary.
     """
 
-    @composite_gate(name="lcu_block_encoding")
+    @qkernel
     def unitary(
         signal: Vector[Qubit],
         system: Vector[Qubit],
@@ -671,7 +855,7 @@ def _build_zero_encoding(system_width: int) -> _BlockEncodingUnitary:
             system,
             expected_signal=1,
             expected_system=system_width,
-            owner="LCU block encoding",
+            description="LCU block encoding",
         )
         signal[0] = x(signal[0])
         return signal, system
@@ -695,7 +879,7 @@ def _build_single_term_encoding(
     signal_width = term.signal_width
     system_width = term.system_width
 
-    @composite_gate(name="lcu_block_encoding")
+    @qkernel
     def unitary(
         signal: Vector[Qubit],
         system: Vector[Qubit],
@@ -719,7 +903,7 @@ def _build_single_term_encoding(
             system,
             expected_signal=signal_width,
             expected_system=system_width,
-            owner="LCU block encoding",
+            description="LCU block encoding",
         )
         signal, system = child(signal, system)
         system = global_phase(_identity_vector, phase)(system)
@@ -772,7 +956,7 @@ def _build_multi_term_encoding(
         num_index_qubits=uint(selector_width),
     )
 
-    @composite_gate(name="lcu_block_encoding")
+    @qkernel
     def unitary(
         signal: Vector[Qubit],
         system: Vector[Qubit],
@@ -796,7 +980,7 @@ def _build_multi_term_encoding(
             system,
             expected_signal=signal_width,
             expected_system=system_width,
-            owner="LCU block encoding",
+            description="LCU block encoding",
         )
         signal[:selector_width] = preparation(signal[:selector_width])
         signal[:selector_width], signal[selector_width:], system = selector(
@@ -855,20 +1039,6 @@ def _build_uniform_case(
     return case
 
 
-def _coefficient_phase(coefficient: complex) -> float:
-    """Return the coefficient phase with signed zero canonicalized.
-
-    Args:
-        coefficient (complex): Nonzero finite complex coefficient.
-
-    Returns:
-        float: Phase angle in radians, using positive zero on the
-            positive-real axis.
-    """
-    phase = math.atan2(coefficient.imag, coefficient.real)
-    return phase if phase else 0.0
-
-
 def _validate_pool_width(child_pool: Vector[Qubit], expected: int) -> None:
     """Validate a concrete shared child-pool width.
 
@@ -890,57 +1060,6 @@ def _validate_pool_width(child_pool: Vector[Qubit], expected: int) -> None:
             "LCU block-encoding SELECT case requires "
             f"{expected} child-pool {unit}, got {actual}."
         )
-
-
-def _validate_register_widths(
-    signal: Vector[Qubit],
-    system: Vector[Qubit],
-    expected_signal: int,
-    expected_system: int,
-    owner: str,
-) -> None:
-    """Validate concrete block-register widths and defer symbolic widths.
-
-    Args:
-        signal (Vector[Qubit]): Complete signal register.
-        system (Vector[Qubit]): Ordered system register.
-        expected_signal (int): Required signal width.
-        expected_system (int): Required system width.
-        owner (str): Encoding name used in diagnostics.
-
-    Raises:
-        TypeError: If either argument is not a vector register.
-        ValueError: If either concrete register width is incorrect.
-    """
-    _validate_register_width(signal, expected_signal, "signal", owner)
-    _validate_register_width(system, expected_system, "system", owner)
-
-
-def _validate_register_width(
-    register: Vector[Qubit],
-    expected: int,
-    name: str,
-    owner: str,
-) -> None:
-    """Validate one concrete vector width while allowing symbolic traces.
-
-    Args:
-        register (Vector[Qubit]): Register to inspect.
-        expected (int): Required width.
-        name (str): Register role used in diagnostics.
-        owner (str): Encoding name used in diagnostics.
-
-    Raises:
-        TypeError: If ``register`` is not a vector.
-        ValueError: If its concrete width differs from ``expected``.
-    """
-    try:
-        actual = get_size(register)
-    except ValueError:
-        return
-    if actual != expected:
-        unit = "qubit" if expected == 1 else "qubits"
-        raise ValueError(f"{owner} requires {expected} {name} {unit}, got {actual}.")
 
 
 def _validate_finite_complex(value: object, name: str) -> complex:
@@ -971,92 +1090,6 @@ def _validate_finite_complex(value: object, name: str) -> complex:
     real = normalized.real if normalized.real else 0.0
     imag = normalized.imag if normalized.imag else 0.0
     return complex(real, imag)
-
-
-def _configure_generated_unitary(
-    unitary: _BlockEncodingUnitary,
-    *,
-    name: str,
-    family: str,
-    semantic_arguments: dict[str, Any],
-) -> _BlockEncodingUnitary:
-    """Attach stable compiler identity and serializer-safe metadata.
-
-    Args:
-        unitary (_BlockEncodingUnitary): Composite qkernel to configure.
-        name (str): Public diagnostic callable name.
-        family (str): Stable stdlib namespace family.
-        semantic_arguments (dict[str, Any]): Primitive semantic metadata.
-
-    Returns:
-        _BlockEncodingUnitary: The same configured qkernel.
-    """
-    digest = content_fingerprint(semantic_arguments)[:16]
-    configure_composite(
-        unitary,
-        name=name,
-        namespace=f"qamomile.stdlib.{family}.{digest}",
-        policy=CallPolicy.PRESERVE_BOX,
-        semantic_arguments=semantic_arguments,
-    )
-    return unitary
-
-
-def _lcu_semantic_arguments(
-    terms: tuple[_ValidatedTerm, ...],
-    normalization: float,
-    signal_width: int,
-    system_width: int,
-) -> dict[str, Any]:
-    """Return serializer-safe arguments determining a recursive unitary.
-
-    Args:
-        terms (tuple[_ValidatedTerm, ...]): Ordered active terms.
-        normalization (float): Parent normalization, including the zero case.
-        signal_width (int): Complete parent signal width.
-        system_width (int): Ordered parent system width.
-
-    Returns:
-        dict[str, Any]: Stable primitive semantic argument mapping.
-    """
-    return {
-        "normalization": normalization,
-        "num_signal_qubits": signal_width,
-        "num_system_qubits": system_width,
-        "terms": [
-            {
-                "coefficient": [
-                    float(term.coefficient.real),
-                    float(term.coefficient.imag),
-                ],
-                "child": _child_semantic_identity(term.encoding),
-            }
-            for term in terms
-        ],
-    }
-
-
-def _child_semantic_identity(encoding: LCUBlockEncoding) -> dict[str, Any]:
-    """Return the compiler identity consumed by a recursive parent.
-
-    Args:
-        encoding (LCUBlockEncoding): Concrete exact child descriptor.
-
-    Returns:
-        dict[str, Any]: Serializer-safe callable identity and block metadata.
-    """
-    reference = qkernel_callable_ref(encoding.unitary)
-    return {
-        "unitary": {
-            "namespace": reference.namespace,
-            "name": reference.name,
-            "version": reference.version,
-            "attributes": qkernel_callable_attrs(encoding.unitary),
-        },
-        "normalization": encoding.normalization,
-        "num_signal_qubits": encoding.num_signal_qubits,
-        "num_system_qubits": encoding.num_system_qubits,
-    }
 
 
 __all__ = [

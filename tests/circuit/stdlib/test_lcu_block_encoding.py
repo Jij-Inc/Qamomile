@@ -11,7 +11,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.frontend.composite_gate import configure_composite
+from qamomile.linalg import PeriodicShiftLCU
 
 
 @qmc.qkernel
@@ -348,52 +348,13 @@ def test_two_level_recursion_and_inverse_have_exact_projected_blocks() -> None:
     )
 
 
-def test_recursive_unitary_has_stable_identity_and_serialization() -> None:
-    """Equivalent stdlib children produce one round-trippable composite."""
+def test_recursive_unitary_serialization_round_trip_is_stable() -> None:
+    """A generated recursive unitary survives a canonical wire round trip."""
     from qamomile.circuit.serialization import deserialize, serialize
 
-    first, _ = _recursive_encoding()
-    second, _ = _recursive_encoding()
-    payload = serialize(first.unitary)
+    encoding, _ = _recursive_encoding()
+    payload = serialize(encoding.unitary)
 
-    assert first.unitary._callable_namespace == second.unitary._callable_namespace
-    assert payload == serialize(second.unitary)
-    assert payload == serialize(deserialize(payload))
-
-
-def test_recursive_identity_accepts_rich_serializable_child_metadata() -> None:
-    """Parent fingerprints accept every stable metadata form used by the IR."""
-    from qamomile.circuit.serialization import deserialize, serialize
-
-    @qmc.composite_gate(name="rich_semantic_child")
-    def rich_child(
-        signal: qmc.Vector[qmc.Qubit],
-        system: qmc.Vector[qmc.Qubit],
-    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-        """Preserve registers for a child carrying rich semantic metadata.
-
-        Args:
-            signal (qmc.Vector[qmc.Qubit]): Pass-through signal register.
-            system (qmc.Vector[qmc.Qubit]): Pass-through system register.
-
-        Returns:
-            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Unchanged
-                signal and system registers.
-        """
-        return signal, system
-
-    configure_composite(
-        rich_child,
-        namespace="tests.block_encoding.rich_semantic_child",
-        semantic_arguments={
-            "phase": 1j,
-            "weights": np.array([0.25, 0.75], dtype=np.float64),
-        },
-    )
-    child = qmc.LCUBlockEncoding(rich_child, 1.0, 1, 1)
-    parent = qmc.lcu_block_encoding((qmc.LCUBlockEncodingTerm(1.0, child),))
-
-    payload = serialize(parent.unitary)
     assert payload == serialize(deserialize(payload))
 
 
@@ -442,6 +403,36 @@ def test_shifted_ising_composes_recursively_with_child_normalizations() -> None:
         atol=1e-10,
         rtol=0.0,
     )
+
+
+def test_distinct_periodic_children_coexist_on_every_sdk(
+    sdk_transpiler: Any,
+) -> None:
+    """Equal-width recursive parents retain distinct captured shift bodies."""
+    shift_one = qmc.periodic_shift_lcu_block_encoding(
+        PeriodicShiftLCU.from_coefficients({1: 1.0}, register_sizes=(2,))
+    )
+    shift_two = qmc.periodic_shift_lcu_block_encoding(
+        PeriodicShiftLCU.from_coefficients({2: 1.0}, register_sizes=(2,))
+    )
+    parent_one = qmc.lcu_block_encoding((qmc.LCUBlockEncodingTerm(1.0, shift_one),))
+    parent_two = qmc.lcu_block_encoding((qmc.LCUBlockEncodingTerm(1.0, shift_two),))
+
+    @qmc.qkernel
+    def kernel() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+        """Apply two distinct generated parents in one caller."""
+        signal_one = qmc.qubit_array(parent_one.num_signal_qubits, "signal_one")
+        system_one = qmc.qubit_array(parent_one.num_system_qubits, "system_one")
+        signal_two = qmc.qubit_array(parent_two.num_signal_qubits, "signal_two")
+        system_two = qmc.qubit_array(parent_two.num_system_qubits, "system_two")
+        _, system_one = parent_one.unitary(signal_one, system_one)
+        _, system_two = parent_two.unitary(signal_two, system_two)
+        return qmc.measure(system_one), qmc.measure(system_two)
+
+    executable = sdk_transpiler.transpiler.transpile(kernel)
+    result = executable.sample(_executor(sdk_transpiler), shots=32).result()
+    assert sum(count for _, count in result.results) == 32
+    assert all(_flatten(outcome) == (1, 0, 0, 1) for outcome, _ in result.results)
 
 
 def test_composite_rejects_wrong_widths_through_all_composition_paths() -> None:

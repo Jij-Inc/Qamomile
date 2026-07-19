@@ -14,6 +14,8 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import ArrayLike
 
+from qamomile.linalg._validation import as_finite_square_complex_matrix
+
 _PHASE_TABLE = np.array([1.0, -1j, -1.0, 1j], dtype=np.complex128)
 _BINARY64_SUBNORMAL_EXPONENT = 1074
 
@@ -97,17 +99,10 @@ def fwht_complex_pauli_coefficients(matrix: ArrayLike) -> tuple[np.ndarray, int]
             dimension is a positive power of two, or cannot be converted to
             complex numeric data.
     """
-    try:
-        m = np.asarray(matrix, dtype=np.complex128)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("matrix must contain numeric values.") from exc
-    if m.ndim != 2 or m.shape[0] != m.shape[1]:
-        raise ValueError(f"matrix must be 2D square; got shape {m.shape}.")
+    m = as_finite_square_complex_matrix(matrix)
     dim = m.shape[0]
     if not is_power_of_two(dim):
         raise ValueError(f"matrix dimension must be a power of 2; got {dim}.")
-    if not np.all(np.isfinite(m)):
-        raise ValueError("matrix entries must all be finite.")
     num_qubits = dim.bit_length() - 1
 
     coeffs = np.empty((dim, dim), dtype=np.complex128)
