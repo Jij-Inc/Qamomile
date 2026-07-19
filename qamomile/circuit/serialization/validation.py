@@ -1917,10 +1917,16 @@ def _validate_inverse_block(
         location (str): Human-readable operation location.
 
     Raises:
-        ValueError: If neither source nor implementation body is available.
+        ValueError: If neither source nor implementation body is available or
+            a control operand is a quantum array instead of a scalar qubit.
     """
     if operation.source_block is None and operation.implementation_block is None:
         raise ValueError(f"{location} requires a source or implementation block")
+    if any(
+        isinstance(value, ArrayValue)
+        for value in operation.operands[: operation.num_control_qubits]
+    ):
+        raise ValueError(f"{location} control operands must be scalar qubits")
     _validate_control_activation(
         operation.control_value,
         operation.num_control_qubits,
