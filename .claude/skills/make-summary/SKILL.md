@@ -21,7 +21,6 @@ Summarize the diff between `origin/main` and the current worktree branch after r
 - If the file already exists, overwrite it without asking.
 - Do not commit the summary file. Leave it untracked.
 - Do not choose `/tmp` or another ephemeral directory as the output location yourself. If the current worktree root itself is under a temporary directory, prefer the worktree root.
-- Write the summary in the language explicitly requested by the user; otherwise use the language of the current conversation. Translate the required headings and limitation-frame labels consistently while preserving their meaning and order.
 - On completion, report only the absolute path and the fact that the file was not committed. If an independent discrepancy check could not run, also mention that briefly.
 
 ## Writing Rules
@@ -48,7 +47,7 @@ Summarize the diff between `origin/main` and the current worktree branch after r
 
 ## Summary Structure
 
-Write exactly the following five semantic top-level (`##`) sections, in this order. Translate the headings into the output language when needed, but do not change their meaning. Do not add or remove a top-level section — no `0. Glossary`, verification results, TODOs, or conversation history as its own `##` heading. Section 3 is the one section that MUST be broken into `###` sub-sections (see its guidance below); the other four are prose and use no sub-headings.
+Write exactly the following five top-level (`##`) sections, in this order. Do not add or remove a top-level section — no `0. Glossary`, verification results, TODOs, or conversation history as its own `##` heading. Section 3 is the one section that MUST be broken into `###` sub-sections (see its guidance below); the other four are prose and use no sub-headings.
 
 ```md
 ## 1. Problem Overview
@@ -76,7 +75,7 @@ In `3. Backend Changes (IR And Internals)`, describe compiler, IR, transpiler, a
 
 In `4. Alternatives Not Adopted And Why This Approach Was Chosen`, describe design-level alternatives, trade-offs, and adoption or rejection reasons. If none apply, write `None`. This section may include alternatives raised in external review or conversation, but only as final design rationale, not as a narrative of the work history.
 
-In `5. Known Limitations`, describe gaps that remain after merge. Cover real cases a user can hit, such as false negatives, false positives, unsupported AST forms, or backend differences, using the `When:` / `Why:` / `Future fix:` frame or faithful translations of those labels. If there are multiple limitations, use separate prose paragraphs rather than bullets. If none apply, write `None` in the output language.
+In `5. Known Limitations`, describe gaps that remain after merge. Cover real cases a user can hit, such as false negatives, false positives, unsupported AST forms, or backend differences, using the `When:` / `Why:` / `Future fix:` frame. If there are multiple limitations, use separate prose paragraphs rather than bullets. If none apply, write `None`.
 
 ## Workflow
 
