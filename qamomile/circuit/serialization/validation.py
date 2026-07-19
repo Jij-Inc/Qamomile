@@ -96,6 +96,7 @@ from qamomile.circuit.ir.value import (
     collect_value_like_uuids,
     resolve_root_qubit_address,
 )
+from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
 _SINGLE_QUBIT_GATES = frozenset(
     {
@@ -1916,10 +1917,16 @@ def _validate_inverse_block(
         location (str): Human-readable operation location.
 
     Raises:
-        ValueError: If neither source nor implementation body is available.
+        ValueError: If neither source nor implementation body is available or
+            a control operand is a quantum array instead of a scalar qubit.
     """
     if operation.source_block is None and operation.implementation_block is None:
         raise ValueError(f"{location} requires a source or implementation block")
+    if any(
+        isinstance(value, ArrayValue)
+        for value in operation.operands[: operation.num_control_qubits]
+    ):
+        raise ValueError(f"{location} control operands must be scalar qubits")
     _validate_control_activation(
         operation.control_value,
         operation.num_control_qubits,
@@ -2002,9 +2009,14 @@ def _validate_select(operation: SelectOperation, location: str) -> None:
     case_outputs = target_operands
     for case_index, case_block in enumerate(operation.case_blocks):
         case_location = f"{location} case block {case_index}"
+        if len(case_block.input_values) != len(case_inputs):
+            raise ValueError(f"{case_location} input arity disagrees with SELECT")
+        case_input_pairs = pair_block_operands(case_block, case_inputs)
+        if len(case_input_pairs) != len(case_inputs):
+            raise ValueError(f"{case_location} input categories disagree with SELECT")
         _require_types(
-            case_block.input_values,
-            [value.type for value in case_inputs],
+            [formal for formal, _ in case_input_pairs],
+            [actual.type for _, actual in case_input_pairs],
             case_location,
             "input",
         )
