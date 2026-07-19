@@ -95,8 +95,8 @@ def ising_z_block_encoding(
     Args:
         coefficients (Mapping[tuple[int, ...], complex]): Ising-Z
             coefficients keyed by products of zero-based system-qubit
-            indices. Coefficients must convert to finite built-in complex
-            values.
+            indices. Coefficients must be finite Python or NumPy real/complex
+            numeric scalars.
         num_system_qubits (int): Positive number of ordered system qubits.
 
     Returns:
@@ -104,8 +104,8 @@ def ising_z_block_encoding(
 
     Raises:
         TypeError: If ``coefficients`` is not a mapping, a word is not a
-            tuple, an index is not an integer, or a coefficient cannot be
-            converted to ``complex``.
+            tuple, an index is not an integer, or a coefficient has an
+            unsupported scalar type.
         ValueError: If a width is non-positive, an index is out of range, a
             coefficient or aggregate is non-finite, or finite coefficient
             aggregation overflows.
@@ -197,7 +197,7 @@ def _canonicalize_coefficients(
             raise ValueError(
                 f"coefficient aggregate must be finite for canonical word {word}."
             )
-        if real == 0.0 and imaginary == 0.0:
+        if not real and not imaginary:
             continue
         terms.append((word, complex(real, imaginary)))
     return tuple(terms)
@@ -244,7 +244,7 @@ def _canonicalize_word(
 
 
 def _coerce_finite_complex(value: object, word: tuple[int, ...]) -> complex:
-    """Convert one coefficient to a finite built-in complex value.
+    """Normalize one supported coefficient to a built-in complex value.
 
     Args:
         value (object): Candidate coefficient.
@@ -254,7 +254,7 @@ def _coerce_finite_complex(value: object, word: tuple[int, ...]) -> complex:
         complex: Finite built-in complex coefficient with signed zeros removed.
 
     Raises:
-        TypeError: If ``value`` cannot be converted to ``complex``.
+        TypeError: If ``value`` is not a supported Python or NumPy scalar.
         ValueError: If conversion overflows or produces a non-finite component.
     """
     if isinstance(value, (bool, np.bool_)) or not isinstance(
@@ -291,7 +291,7 @@ def _canonicalize_zero(value: float) -> float:
     Returns:
         float: ``0.0`` for either zero sign, otherwise ``value`` unchanged.
     """
-    return 0.0 if value == 0.0 else value
+    return value if value else 0.0
 
 
 def _component_sort_key(value: float) -> tuple[float, float]:

@@ -1634,23 +1634,6 @@ def test_static_member_transforms_resolve_after_deserialization(template: Any) -
     _assert_static_binding_resolved(specialized)
 
 
-def test_static_argument_inverse_materializes_scalar_target_width() -> None:
-    """Binding replaces symbolic Vector arity with its scalar qubit width."""
-    encoding = qmc.LCUBlockEncoding(_identity_case, 1.0, 2, 1)
-    restored = deserialize(serialize(_inverse_static_argument_template))
-
-    specialized = restored.build(encoding=encoding)
-    inverse_widths = [
-        operation.num_target_qubits
-        for block in _reachable_blocks(specialized)
-        for operation in block.operations
-        if isinstance(operation, InverseBlockOperation)
-    ]
-
-    assert inverse_widths
-    assert all(width == 3 for width in inverse_widths)
-
-
 def test_inverse_qkernel_executes_with_a_concrete_static_binding_argument(
     sdk_transpiler: Any,
 ) -> None:

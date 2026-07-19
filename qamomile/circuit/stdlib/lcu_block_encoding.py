@@ -643,7 +643,10 @@ def lcu_block_encoding(
     constructed descriptors is not part of this API yet. Concrete children are
     captured when the factory runs, and the completed descriptor supports
     nesting and compile-time static binding without exposing those children as
-    public qkernel arguments.
+    public qkernel arguments. Qiskit, QuriParts, and CUDA-Q inline these
+    generated bodies. The HUGR target does not currently support recursive LCU
+    composition because SELECT lowering and multiple inline callable-body
+    variants sharing one source-derived reference are not yet supported.
 
     Zero-coefficient terms are removed before normalization and SELECT
     construction. A nonempty sequence containing only zero coefficients
@@ -680,14 +683,20 @@ def lcu_block_encoding(
         2.5
     """
     validated_terms = _validate_terms(terms)
-    active_terms = tuple(term for term in validated_terms if term.coefficient != 0.0j)
+    active_terms = tuple(term for term in validated_terms if term.coefficient)
     domain_terms = active_terms if active_terms else validated_terms
     system_width = _common_system_width(domain_terms)
 
     if not active_terms:
         normalization = 1.0
         signal_width = 1
-        unitary = _build_zero_encoding(system_width)
+        unitary = _build_lcu_block_encoding_unitary(
+            (),
+            (),
+            system_width,
+            description="LCU block encoding",
+            preparation_name="recursive_lcu_prepare",
+        )
     else:
         normalization = _lcu_normalization(active_terms)
         if len(active_terms) == 1:
@@ -821,48 +830,6 @@ def _lcu_normalization(terms: tuple[_ValidatedTerm, ...]) -> float:
     return normalization
 
 
-def _build_zero_encoding(system_width: int) -> _BlockEncodingUnitary:
-    """Build an exact zero block using one signal-qubit bit flip.
-
-    Args:
-        system_width (int): Positive ordered system-register width.
-
-    Returns:
-        _BlockEncodingUnitary: Zero block-encoding unitary.
-    """
-
-    @qkernel
-    def unitary(
-        signal: Vector[Qubit],
-        system: Vector[Qubit],
-    ) -> tuple[Vector[Qubit], Vector[Qubit]]:
-        """Apply the exact zero block-encoding body.
-
-        Args:
-            signal (Vector[Qubit]): One-qubit signal register.
-            system (Vector[Qubit]): Pass-through system register.
-
-        Returns:
-            tuple[Vector[Qubit], Vector[Qubit]]: Orthogonalized signal and
-                unchanged system registers.
-
-        Raises:
-            TypeError: If either argument is not a vector register.
-            ValueError: If either concrete register width is incorrect.
-        """
-        _validate_register_widths(
-            signal,
-            system,
-            expected_signal=1,
-            expected_system=system_width,
-            description="LCU block encoding",
-        )
-        signal[0] = x(signal[0])
-        return signal, system
-
-    return unitary
-
-
 def _build_single_term_encoding(
     term: _ValidatedTerm,
 ) -> _BlockEncodingUnitary:
@@ -876,6 +843,7 @@ def _build_single_term_encoding(
     """
     child = term.encoding.unitary
     phase = _coefficient_phase(term.coefficient)
+    applied_child = global_phase(child, phase) if phase else child
     signal_width = term.signal_width
     system_width = term.system_width
 
@@ -905,9 +873,7 @@ def _build_single_term_encoding(
             expected_system=system_width,
             description="LCU block encoding",
         )
-        signal, system = child(signal, system)
-        system = global_phase(_identity_vector, phase)(system)
-        return signal, system
+        return applied_child(signal, system)
 
     return unitary
 
@@ -1011,6 +977,7 @@ def _build_uniform_case(
     child = term.encoding.unitary
     child_width = term.signal_width
     phase = _coefficient_phase(term.coefficient)
+    applied_child = global_phase(child, phase) if phase else child
 
     @qkernel
     def case(
@@ -1032,8 +999,10 @@ def _build_uniform_case(
             ValueError: If the concrete shared pool has an unexpected width.
         """
         _validate_pool_width(signal, child_pool_width)
-        signal[:child_width], system = child(signal[:child_width], system)
-        system = global_phase(_identity_vector, phase)(system)
+        signal[:child_width], system = applied_child(
+            signal[:child_width],
+            system,
+        )
         return signal, system
 
     return case

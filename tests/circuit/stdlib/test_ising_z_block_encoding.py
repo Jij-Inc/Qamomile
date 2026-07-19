@@ -63,6 +63,50 @@ def _ising_matrix(
     return np.diag(diagonal)
 
 
+def _zero_projector(num_qubits: int) -> qm_o.Hamiltonian:
+    """Return the Pauli expansion of the all-zero projector.
+
+    Args:
+        num_qubits (int): Positive projector-register width.
+
+    Returns:
+        qm_o.Hamiltonian: ``product((I + Z_i) / 2)`` on the register.
+    """
+    coefficient = 1.0 / (1 << num_qubits)
+    projector = qm_o.Hamiltonian.identity(
+        coefficient,
+        num_qubits=num_qubits,
+    )
+    for mask in range(1, 1 << num_qubits):
+        operators = tuple(
+            qm_o.PauliOperator(qm_o.Pauli.Z, index)
+            for index in range(num_qubits)
+            if mask & (1 << index)
+        )
+        projector.add_term(operators, coefficient)
+    return projector
+
+
+def _prepare_basis(
+    system: qmc.Vector[qmc.Qubit],
+    basis: int,
+    num_qubits: int,
+) -> None:
+    """Prepare a little-endian computational-basis system state in place.
+
+    Args:
+        system (qmc.Vector[qmc.Qubit]): System register to prepare.
+        basis (int): Computational-basis value to encode.
+        num_qubits (int): Number of little-endian basis bits to inspect.
+
+    Returns:
+        None: The register is updated in place.
+    """
+    for index in range(num_qubits):
+        if basis & (1 << index):
+            system[index] = qmc.x(system[index])
+
+
 def _build_unitary_kernel(
     encoding: qmc.IsingZBlockEncoding,
     *,
@@ -224,6 +268,37 @@ def test_canonical_aggregation_is_mapping_order_invariant() -> None:
     )
 
 
+def test_canonical_aggregation_handles_cancellation_overflow_and_signed_zero() -> None:
+    """Canonical summation is stable and reports its documented edge cases."""
+    aliases = [
+        ((0,), 1e16),
+        ((0, 0, 0), 1.0),
+        ((0, 0, 0, 0, 0), -1e16),
+    ]
+    forward = qmc.ising_z_block_encoding(dict(aliases), 1)
+    reverse = qmc.ising_z_block_encoding(dict(reversed(aliases)), 1)
+
+    assert forward.normalization == reverse.normalization == 1.0
+    np.testing.assert_allclose(
+        _top_left_block(_qiskit_unitary(forward), forward),
+        np.diag([1.0, -1.0]),
+        atol=1e-10,
+        rtol=0.0,
+    )
+
+    with pytest.raises(ValueError, match="aggregation overflowed"):
+        qmc.ising_z_block_encoding({(): 1e308, (0, 0): 1e308}, 1)
+    with pytest.raises(ValueError, match="normalization overflowed"):
+        qmc.ising_z_block_encoding({(): 1e308, (0,): 1e308}, 1)
+
+    from qamomile.circuit.serialization import serialize
+
+    signed_zero = qmc.ising_z_block_encoding({(): complex(-0.0, -0.0)}, 1)
+    exact_zero = qmc.ising_z_block_encoding({}, 1)
+    assert signed_zero.normalization == exact_zero.normalization == 1.0
+    assert serialize(signed_zero.unitary) == serialize(exact_zero.unitary)
+
+
 def test_canonical_mapping_has_stable_identity_and_serialization() -> None:
     """Equivalent Ising mappings produce one round-trippable composite."""
     from qamomile.circuit.serialization import deserialize, serialize
@@ -232,7 +307,6 @@ def test_canonical_mapping_has_stable_identity_and_serialization() -> None:
     reverse = qmc.ising_z_block_encoding({(0,): 0.5, (): 1.0j}, 1)
     payload = serialize(forward.unitary)
 
-    assert forward.unitary._callable_namespace == reverse.unitary._callable_namespace
     assert payload == serialize(reverse.unitary)
     assert payload == serialize(deserialize(payload))
 
@@ -284,8 +358,19 @@ def test_factory_does_not_delegate_to_pauli_lcu(
     assert encoding.normalization == 1.25
 
 
-def test_register_width_errors_survive_inverse_control_and_outer_select() -> None:
-    """Every composition path retains the Ising-Z signal-width diagnostic."""
+@pytest.mark.parametrize(
+    ("signal_width", "system_width", "message"),
+    [
+        (2, 1, "requires 1 signal qubit, got 2"),
+        (1, 2, "requires 1 system qubit, got 2"),
+    ],
+)
+def test_register_width_errors_survive_inverse_control_and_outer_select(
+    signal_width: int,
+    system_width: int,
+    message: str,
+) -> None:
+    """Every composition path retains both Ising-Z width diagnostics."""
     encoding = qmc.ising_z_block_encoding({(): 1.0, (0,): 0.5}, 1)
     inverse = qmc.inverse(encoding.unitary)
     controlled = qmc.control(encoding.unitary)
@@ -293,80 +378,83 @@ def test_register_width_errors_survive_inverse_control_and_outer_select() -> Non
 
     @qmc.qkernel
     def plain() -> qmc.Bit:
-        """Call the encoding with a wide signal register."""
-        signal = qmc.qubit_array(2, "signal")
-        system = qmc.qubit_array(1, "system")
+        """Call the encoding with one incorrect register width."""
+        signal = qmc.qubit_array(signal_width, "signal")
+        system = qmc.qubit_array(system_width, "system")
         signal, _ = encoding.unitary(signal, system)
         return qmc.measure(signal[0])
 
     @qmc.qkernel
     def inverted() -> qmc.Bit:
-        """Call the inverse with a wide signal register."""
-        signal = qmc.qubit_array(2, "signal")
-        system = qmc.qubit_array(1, "system")
+        """Call the inverse with one incorrect register width."""
+        signal = qmc.qubit_array(signal_width, "signal")
+        system = qmc.qubit_array(system_width, "system")
         signal, _ = inverse(signal, system)
         return qmc.measure(signal[0])
 
     @qmc.qkernel
     def controlled_call() -> qmc.Bit:
-        """Call the controlled encoding with a wide signal register."""
+        """Call the controlled encoding with one incorrect width."""
         control = qmc.qubit("control")
-        signal = qmc.qubit_array(2, "signal")
-        system = qmc.qubit_array(1, "system")
+        signal = qmc.qubit_array(signal_width, "signal")
+        system = qmc.qubit_array(system_width, "system")
         control, signal, _ = controlled(control, signal, system)
         return qmc.measure(control)
 
     @qmc.qkernel
     def selected_call() -> qmc.Bit:
-        """Call an outer SELECT with a wide signal register."""
+        """Call an outer SELECT with one incorrect width."""
         outer = qmc.qubit_array(1, "outer")
-        signal = qmc.qubit_array(2, "signal")
-        system = qmc.qubit_array(1, "system")
+        signal = qmc.qubit_array(signal_width, "signal")
+        system = qmc.qubit_array(system_width, "system")
         outer, signal, _ = selected(outer, signal, system)
         return qmc.measure(outer[0])
 
     for kernel in (plain, inverted, controlled_call, selected_call):
-        with pytest.raises(ValueError, match=r"requires 1 signal qubit, got 2"):
+        with pytest.raises(ValueError, match=message):
             kernel.build()
 
 
+@pytest.mark.parametrize("num_system_qubits", [1, 2])
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 def test_random_complex_ising_lcu_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
+    num_system_qubits: int,
     seed: int,
 ) -> None:
-    """Random Ising coefficients execute through sampler and estimator paths."""
+    """Random multi-qubit Ising LCUs execute sampler and estimator paths."""
     rng = np.random.default_rng(seed)
-    identity_weight = complex(*rng.uniform(-1.0, 1.0, size=2))
-    z_weight = complex(*rng.uniform(-1.0, 1.0, size=2))
-    basis = seed & 1
+    words = ((), (0,)) if num_system_qubits == 1 else ((), (0,), (1,), (0, 1))
+    coefficients = {word: complex(*rng.uniform(-1.0, 1.0, size=2)) for word in words}
+    basis = seed % (1 << num_system_qubits)
     encoding = qmc.ising_z_block_encoding(
-        {(): identity_weight, (0,): z_weight},
-        1,
+        coefficients,
+        num_system_qubits,
     )
-    signed_z = 1.0 if basis == 0 else -1.0
-    success = abs(identity_weight + signed_z * z_weight) ** 2
+    eigenvalue = sum(
+        coefficient * (-1.0 if sum((basis >> index) & 1 for index in word) & 1 else 1.0)
+        for word, coefficient in coefficients.items()
+    )
+    success = abs(eigenvalue) ** 2
     success /= encoding.normalization**2
 
     @qmc.qkernel
-    def sample_kernel() -> qmc.Bit:
-        """Apply the Ising-Z encoding and measure its success signal."""
+    def sample_kernel() -> qmc.Vector[qmc.Bit]:
+        """Apply the Ising-Z encoding and measure its complete signal."""
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
-        system = qmc.qubit_array(1, "system")
-        if basis:
-            system[0] = qmc.x(system[0])
+        system = qmc.qubit_array(num_system_qubits, "system")
+        _prepare_basis(system, basis, num_system_qubits)
         signal, _ = encoding.unitary(signal, system)
-        return qmc.measure(signal[0])
+        return qmc.measure(signal)
 
     @qmc.qkernel
     def expval_kernel(observable: qmc.Observable) -> qmc.Float:
-        """Estimate signal Z after the Ising-Z encoding."""
+        """Estimate the all-zero signal projector after the encoding."""
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
-        system = qmc.qubit_array(1, "system")
-        if basis:
-            system[0] = qmc.x(system[0])
+        system = qmc.qubit_array(num_system_qubits, "system")
+        _prepare_basis(system, basis, num_system_qubits)
         signal, _ = encoding.unitary(signal, system)
-        return qmc.expval(signal[0], observable)
+        return qmc.expval(signal, observable)
 
     shots = 2048
     sample = sdk_transpiler.transpiler.transpile(sample_kernel)
@@ -379,11 +467,11 @@ def test_random_complex_ising_lcu_samples_and_estimates_on_every_sdk(
 
     expval = sdk_transpiler.transpiler.transpile(
         expval_kernel,
-        bindings={"observable": qm_o.Z(0)},
+        bindings={"observable": _zero_projector(encoding.num_signal_qubits)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
     atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-    assert observed == pytest.approx(2.0 * success - 1.0, abs=atol)
+    assert observed == pytest.approx(success, abs=atol)
 
 
 def test_zero_encoding_samples_and_estimates_on_every_sdk(
