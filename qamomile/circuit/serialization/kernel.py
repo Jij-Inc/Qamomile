@@ -633,7 +633,7 @@ class _StaticBindingResolver:
         self._seen_blocks: set[int] = set()
 
     def resolve(self, block: Block) -> None:
-        """Resolve every reachable static-member marker in a block graph.
+        """Resolve static members and materialize final call-site widths.
 
         Args:
             block (Block): Root block to rewrite in place.
@@ -645,10 +645,18 @@ class _StaticBindingResolver:
             ValueError: If a marker is inconsistent with its static slot or
                 if an owned block declares an unknown static slot.
         """
-        if not self._contexts:
-            return
-        self._validate_block_call_widths(block, {}, {})
-        self._resolve_block(block)
+        if self._contexts:
+            # Validate deferred member widths before resolution removes their
+            # static-binding markers. This same call-site traversal also
+            # finalizes inverse widths already present in the payload graph.
+            self._validate_block_call_widths(block, {}, {})
+            self._resolve_block(block)
+        else:
+            # Value substitution can leave owned-block formals symbolic even
+            # when their enclosing call operands are concrete. Without static
+            # members, this is the single traversal that propagates those
+            # call-site widths into inverse metadata.
+            self._validate_block_call_widths(block, {}, {})
 
     def _validate_block_call_widths(
         self,
@@ -656,7 +664,7 @@ class _StaticBindingResolver:
         widths: dict[str, int],
         active_blocks: dict[int, dict[str, int]],
     ) -> None:
-        """Validate deferred member call widths in one reachable block.
+        """Validate calls and materialize reachable inverse target widths.
 
         Args:
             block (Block): Block whose operation graph should be inspected.
@@ -699,7 +707,7 @@ class _StaticBindingResolver:
         widths: dict[str, int],
         active_blocks: dict[int, dict[str, int]],
     ) -> None:
-        """Validate deferred calls reachable from one operation.
+        """Validate deferred calls and materialize inverse call-site widths.
 
         Args:
             operation (Operation): Operation and owned blocks to inspect.
@@ -752,9 +760,12 @@ class _StaticBindingResolver:
 
         if isinstance(operation, ControlledUOperation):
             if operation.block is not None:
+                actuals_without_controls = list(
+                    operation.operands[len(operation.control_operands) :]
+                )
                 self._validate_owned_block_call_widths(
                     operation.block,
-                    [*operation.target_operands, *operation.param_operands],
+                    actuals_without_controls,
                     list(operation.operands),
                     widths,
                     active_blocks,
@@ -762,6 +773,15 @@ class _StaticBindingResolver:
             return
 
         if isinstance(operation, InverseBlockOperation):
+            _materialize_inverse_target_width(
+                operation,
+                [
+                    self._concrete_array_width(target, widths)
+                    if isinstance(target, ArrayValue)
+                    else 1
+                    for target in operation.target_qubits
+                ],
+            )
             actuals = [*operation.target_qubits, *operation.parameters]
             for owned_block in (
                 operation.source_block,
@@ -852,15 +872,7 @@ class _StaticBindingResolver:
         inherited = widths.get(value.logical_id)
         if inherited is not None:
             return inherited
-        if not value.shape:
-            return None
-        width = 1
-        for dimension in value.shape:
-            concrete = dimension.get_const()
-            if type(concrete) is not int:
-                return None
-            width *= concrete
-        return width
+        return _concrete_quantum_width(value)
 
     def _validate_static_invoke_widths(
         self,
@@ -1319,6 +1331,45 @@ def _collect_formal_replacements(
         ):
             _collect_formal_replacements(formal_key, concrete_key, replacements)
             _collect_formal_replacements(formal_value, concrete_value, replacements)
+
+
+def _concrete_quantum_width(value: ValueBase) -> int | None:
+    """Return the scalar qubit width of one concrete quantum value.
+
+    Args:
+        value (ValueBase): Scalar or array quantum value to inspect.
+
+    Returns:
+        int | None: Scalar qubit width, or ``None`` when an array dimension
+            remains symbolic.
+    """
+    if not isinstance(value, ArrayValue):
+        return 1
+    if not value.shape:
+        return None
+    width = 1
+    for dimension in value.shape:
+        concrete = dimension.get_const()
+        if type(concrete) is not int:
+            return None
+        width *= concrete
+    return width
+
+
+def _materialize_inverse_target_width(
+    operation: InverseBlockOperation,
+    target_widths: list[int | None],
+) -> None:
+    """Refresh inverse scalar-width metadata when every target is concrete.
+
+    Args:
+        operation (InverseBlockOperation): Inverse operation to update in
+            place.
+        target_widths (list[int | None]): Scalar widths resolved from the
+            operation values or their enclosing call-site environment.
+    """
+    if target_widths and all(width is not None for width in target_widths):
+        operation.num_target_qubits = sum(cast(int, width) for width in target_widths)
 
 
 def _replace_operations(

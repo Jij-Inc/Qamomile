@@ -121,6 +121,7 @@ from .frontend.qkernel import QKernel, qkernel
 from .stdlib import (
     LCUBlockEncoding,
     PauliLCUBlockEncoding,
+    PeriodicShiftLCUBlockEncoding,
     amplitude_encoding,
     amplitude_encoding_from_angles,
     computational_basis_state,
@@ -131,10 +132,13 @@ from .stdlib import (
     mcx,
     modmul_const,
     modular_add,
+    modular_decrement,
+    modular_increment,
     mottonen_amplitude_encoding,
     mottonen_amplitude_encoding_from_angles,
     multi_controlled_x,
     pauli_lcu_block_encoding,
+    periodic_shift_lcu_block_encoding,
     qft,
     qpe,
     ripple_carry_add,
@@ -170,14 +174,6 @@ def __getattr__(name: str):  # type: ignore[no-untyped-def]
         )
         return globals()[name]
     raise AttributeError(f"module 'qamomile.circuit' has no attribute {name!r}")
-
-
-# Imported after frontend symbols are initialized because these kernels use
-# ``import qamomile.circuit as qmc`` in their implementation module.
-from .algorithm.arithmetic.modular_incdec import (  # noqa: E402, I001
-    modular_decrement,
-    modular_increment,
-)
 
 
 __all__ = [
@@ -250,6 +246,8 @@ __all__ = [
     "Tensor",
     "Observable",
     # stdlib
+    "PeriodicShiftLCUBlockEncoding",
+    "periodic_shift_lcu_block_encoding",
     "modular_decrement",
     "modular_increment",
     "qpe",

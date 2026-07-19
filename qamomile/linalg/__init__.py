@@ -23,6 +23,8 @@ Exposes:
   ``mottonen_amplitude_encoding_from_angles`` via ``parameters=[...]``.
 * :class:`PauliLCU`, which decomposes any finite complex power-of-two square
   matrix into immutable complex-weighted Pauli terms for LCU algorithms.
+* :class:`PeriodicShiftLCU`, which validates constant-coefficient periodic
+  shift structure and stores its immutable complex-weighted shift terms.
 """
 
 from qamomile.linalg.hermitian import HermitianMatrix
@@ -32,6 +34,10 @@ from qamomile.linalg.mottonen import (
     validate_and_normalize_amplitudes,
 )
 from qamomile.linalg.pauli_lcu import PauliLCU, PauliLCUTerm
+from qamomile.linalg.periodic_shift_lcu import (
+    PeriodicShiftLCU,
+    PeriodicShiftLCUTerm,
+)
 from qamomile.linalg.subspace import (
     generalized_subspace_matrices,
     solve_subspace,
@@ -42,6 +48,8 @@ __all__ = [
     "HermitianMatrix",
     "PauliLCU",
     "PauliLCUTerm",
+    "PeriodicShiftLCU",
+    "PeriodicShiftLCUTerm",
     "compute_mottonen_amplitude_encoding_ry_angles",
     "compute_mottonen_amplitude_encoding_rz_angles",
     "generalized_subspace_matrices",
