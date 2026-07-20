@@ -34,9 +34,9 @@
 
 # %%
 # 最新のQamomileをpipからインストールします。
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit]"
 # # or
-# # !uv add qamomile
+# # !uv add "qamomile[qiskit]"
 
 # %% [markdown]
 # ## 1. スタビライザ形式論
@@ -145,7 +145,7 @@
 # 物理量子ビット7個、生成子6個なので、守れる論理量子ビットは $7-6=1$ 個。これが Steane $[[7,1,3]]$ 符号です。
 
 # %% [markdown]
-# 実装に入る前に、Qamomile と Qiskit バックエンドを読み込み、補助関数を用意します。`_bits7` / `_passes_hamming_checks` / `_is_steane_zero_word` は、測定結果が Hamming 符号語や $\lvert0_L\rangle$ の符号語かを判定するユーティリティです。QEC の本筋ではないので、読み飛ばして構いません。
+# 実装に入る前に、QamomileとQiskit連携を読み込み、補助関数を用意します。`_bits7` / `_passes_hamming_checks` / `_is_steane_zero_word`は、測定結果がHamming符号語や$\lvert0_L\rangle$の符号語かを判定するユーティリティです。QECの本筋ではないので、読み飛ばして構いません。
 
 # %%
 import qamomile.circuit as qmc

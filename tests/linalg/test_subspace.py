@@ -271,6 +271,14 @@ def test_solve_z_basis_full_eigenvalues(num_qubits: int) -> None:
     np.testing.assert_allclose(eigvals, expected, atol=1e-10)
 
 
+def test_solve_z_basis_removes_duplicate_sample_null_space() -> None:
+    """Repeated Z-basis samples cannot create non-variational eigenvalues."""
+    eigvals, eigvecs = solve_subspace([(0,), (0,), (1,)], qm_o.Z(0))
+
+    np.testing.assert_allclose(eigvals, [-1.0, 1.0], atol=1e-12)
+    assert eigvecs.shape == (3, 2)
+
+
 def test_solve_x_basis_recovers_minus_x_ground_state() -> None:
     """Sampling ``|+⟩`` of ``-X`` recovers ``-1`` ground-state energy."""
     H = -qm_o.X(0)

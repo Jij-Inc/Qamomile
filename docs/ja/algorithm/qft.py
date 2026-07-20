@@ -19,7 +19,7 @@
 #
 # # 量子フーリエ変換（QFT）入門
 #
-# 量子フーリエ変換（Quantum Fourier Transformation; QFT）は、離散フーリエ変換の量子版です。量子位相推定や位数発見など、量子振幅に埋め込まれた位相情報を使うアルゴリズムで、重要なサブルーチンとして使われます{cite:p}`10.1109/SFCS.1994.365700`。
+# 量子フーリエ変換（Quantum Fourier Transformation; QFT）は、離散フーリエ変換の量子版です。量子位相推定やShorのアルゴリズム{cite:p}`10.1109/SFCS.1994.365700`など、量子振幅に埋め込まれた位相情報を使うアルゴリズムで、重要なサブルーチンとして使われます{cite:p}`10.48550/arXiv.quant-ph/0201067`。
 #
 # このノートブックでは、古典のフーリエ変換から始めてQFT回路を説明し、4量子ビットの周波数推定の例をQamomileで実装します。QFT回路の描画、ローカルのQiskitシミュレータでの実行、ヒストグラムからの周波数推定、計算量のスケーリングの確認までを扱います。
 
@@ -52,19 +52,21 @@ transpiler = QiskitTranspiler()
 # \qquad k = 0, 1, \ldots, N-1.
 # $$
 #
-# 出力の添字$k$は周波数を表します。位相因子$e^{2\pi i jk / N}$により、入力の各位置が異なる位相で足し合わされます。
+# 出力の添字$k$は周波数成分のインデックスです。このインデックスに対応する角周波数は$2\pi k/N$であり、位相因子$e^{2\pi i jk / N}$により、入力の各位置が異なる位相で足し合わされます。
 
 # %% [markdown]
 # ## アルゴリズム
 #
-# QFTは、同じ変換を量子状態の振幅に適用します。$N = 2^n$のとき、基底状態$\lvert x\rangle$への作用は次の通りです。
+# QFTは、DFTと同じ変換を量子状態の振幅に適用します。$N = 2^n$のとき、整数$x$に対応する計算基底状態$\lvert x\rangle$への作用は次の通りです。
 #
 # $$
 # \mathrm{QFT}_N \lvert x \rangle =
 # \frac{1}{\sqrt{N}}\sum_{k=0}^{N-1} e^{2\pi i xk/N}\lvert k \rangle.
 # $$
 #
-# 古典のDFTでは、出力ベクトル全体を得られます。一方、QFTは量子状態の振幅を変換します。QFTの直後に測定しても、得られるのはサンプルだけです。ただし、位相推定のように、後続の量子演算では変換後の位相情報を利用できます。
+# 一般の量子状態$\lvert\psi\rangle = \sum_{j=0}^{N-1} a_j\lvert j\rangle$に対しては、QFTは線形性により各計算基底状態$\lvert j\rangle$への作用を重ね合わせた状態を返します。
+#
+# 古典のDFTでは、出力ベクトル全体を得られます。一方、QFTは量子状態の振幅を変換し、変換後の量子状態を返します。QFTの直後に測定しても、得られるのはサンプルだけです。ただし、位相推定のように、後続の量子演算では変換後の位相情報を利用できます。
 #
 # 標準的なQFT回路は、アダマールゲート、制御付き位相回転、最後のスワップで構成されます。$n$量子ビットのレジスタでは、密な$2^n \times 2^n$行列を直接使うのではなく、$O(n^2)$個のゲートで実装できます。位相を表すために、次の2進小数表記を使います。
 #
@@ -81,6 +83,8 @@ transpiler = QiskitTranspiler()
 # ### ステップ1：対象量子ビットを1つ選ぶ
 #
 # レジスタを対象量子ビットごとに処理します。最後の量子ビットにアダマールゲートを適用すると、QFTの出力に現れる最初の因子が得られます。
+#
+# $x_n=0$なら$H\lvert0\rangle = (\lvert0\rangle + \lvert1\rangle)/\sqrt{2}$です。一方、$x_n=1$なら$H\lvert1\rangle = (\lvert0\rangle - \lvert1\rangle)/\sqrt{2}$であり、これは$e^{2\pi i[0.1]} = e^{\pi i} = -1$を使って同じ形にまとめられます。
 #
 # $$
 # \lvert x_n\rangle
@@ -159,24 +163,26 @@ transpiler = QiskitTranspiler()
 #
 # ### 問題例
 #
-# $N=16$個のサンプルを使うので、4量子ビットで表せます。この例では$n=4$、$N=16$、$\omega = e^{2\pi i/16}$であり、次のように書けます。
-#
-# $$
-# F_{16}\lvert x \rangle =
-# \frac{1}{\sqrt{16}}\sum_{k=0}^{15}\omega^{xk}\lvert k\rangle.
-# $$
-#
-# ここでは、基底状態$\lvert j\rangle$の振幅を$s_j$とする量子状態を準備します。
+# $N=16$個のサンプルを使うので、4量子ビットで表せます。この例では、計算基底状態$\lvert j\rangle$の振幅を$s_j$とする量子状態を準備します。ここで、$n=4$、$N=16$、$\omega = e^{2\pi i/16}$です。
 #
 # $$
 # \lvert \psi_f\rangle =
 # \sum_{j=0}^{N-1} s_j \lvert j\rangle,
 # \qquad
-# s_j = \frac{1}{\sqrt{N}} e^{-2\pi i f j/N},
+# s_j = \frac{1}{\sqrt{N}} e^{-2\pi i f j/N}
+# = \frac{1}{\sqrt{N}}\omega^{-fj},
 # \qquad f=5,\quad j=0,1,\ldots,N-1.
 # $$
 #
-# つまり、$e^{-2\pi i f j/N}$の値を、正規化係数$1/\sqrt{N}$付きで$\lvert \psi_f\rangle$の振幅に埋め込んでいます。この状態にQFTを適用すると、この周波数が出力状態の振幅に現れます。上で示したDFTの規約では、出力は周波数インデックス$k=5$に集中するはずです。
+# つまり、$e^{-2\pi i f j/N}$の値を、正規化係数$1/\sqrt{N}$付きで$\lvert \psi_f\rangle$の振幅に埋め込んでいます。この状態にQFTを適用すると、各計算基底状態$\lvert j\rangle$からの寄与が足し合わされ、周波数インデックス$f$だけが残ります。
+#
+# $$
+# \mathrm{QFT}_{16}\lvert \psi_f \rangle =
+# \frac{1}{16}\sum_{j=0}^{15}\sum_{k=0}^{15}\omega^{j(k-f)}\lvert k\rangle
+# = \lvert f\rangle.
+# $$
+#
+# したがって、$f=5$のとき、出力は周波数インデックス$k=5$に集中するはずです。
 
 # %%
 num_qubits = 4
@@ -245,11 +251,12 @@ for outcome, count in result.results:
     probabilities[frequency_index] = count / shots
 
 fig, ax = plt.subplots(figsize=(7, 3))
-ax.bar(range(dimension), probabilities)
+ax.bar(range(dimension), probabilities, color="#2696EB")
 ax.set_xlabel("frequency index")
 ax.set_ylabel("probability")
 ax.set_xticks(range(dimension))
 ax.set_ylim(0, 1.05)
+ax.grid(axis="y", alpha=0.3)
 plt.show()
 
 estimated_frequency = int(np.argmax(probabilities))
@@ -275,50 +282,90 @@ assert all(
 #
 # したがって総ゲート数は$n + \frac{n(n - 1)}{2} + \left\lfloor n / 2 \right\rfloor$であり、$O(n^2)$で増えます。
 #
-# それでは、Qamomileのリソース推定機能を使って確認してみましょう。
-# Qamomileでは、量子ビット数がバインドされていないシンボリックな量子カーネルに対して`estimate_resources()`を使うことで、量子ビット数に関する式としてスケーリングを確認することができます。
+# それでは、Qamomileのリソース推定機能を使って、QFT回路のゲート数を確認してみましょう。
 
 # %%
-@qmc.qkernel
-def qft_scaling(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-    q = qmc.qubit_array(n, name="q")
+# n量子ビットのレジスタにQFTだけを適用する量子カーネルを作ります。
+def make_qft_resource_kernel(n: int) -> qmc.QKernel:
+    @qmc.qkernel
+    def qft_resource_kernel() -> qmc.Vector[qmc.Qubit]:
+        q = qmc.qubit_array(n, name="q")
+        q = qft(q)
+        return q
 
-    for j in qmc.range(n - 1, -1, -1):
-        q[j] = qmc.h(q[j])
-
-        for k in qmc.range(j - 1, -1, -1):
-            angle = math.pi / (2 ** (j - k))
-            q[j], q[k] = qmc.cp(q[j], q[k], angle)
-
-    for j in qmc.range(n // 2):
-        q[j], q[n - j - 1] = qmc.swap(q[j], q[n - j - 1])
-
-    return q
+    return qft_resource_kernel
 
 
 # %%
-symbolic_estimate = qft_scaling.estimate_resources().simplify()
-print("量子ビット数:", symbolic_estimate.qubits)
-print("総ゲート数:", symbolic_estimate.gates.total)
-print("単一量子ビットゲート数:", symbolic_estimate.gates.single_qubit)
-print("2量子ビットゲート数:", symbolic_estimate.gates.two_qubit)
-print("回転ゲート数:", symbolic_estimate.gates.rotation_gates)
-print("クリフォードゲート数:", symbolic_estimate.gates.clifford_gates)
+estimate_4 = make_qft_resource_kernel(4).estimate_resources().simplify()
+print("量子ビット数:", estimate_4.qubits)
+print("総ゲート数:", estimate_4.gates.total)
+print("単一量子ビットゲート数:", estimate_4.gates.single_qubit)
+print("2量子ビットゲート数:", estimate_4.gates.two_qubit)
+print("回転ゲート数:", estimate_4.gates.rotation_gates)
+print("クリフォードゲート数:", estimate_4.gates.clifford_gates)
 
-assert "n" in str(symbolic_estimate.gates.total)
-assert "j" not in str(symbolic_estimate.gates.total)
-assert "k" not in str(symbolic_estimate.gates.total)
-
-estimate_8 = symbolic_estimate.substitute(n=8)
-assert estimate_8.qubits == 8
-assert estimate_8.gates.total == 40
-assert estimate_8.gates.single_qubit == 8
-assert estimate_8.gates.two_qubit == 32
-assert estimate_8.gates.rotation_gates == 28
-assert estimate_8.gates.clifford_gates == 12
+assert estimate_4.qubits == 4
+assert estimate_4.gates.total == 12
+assert estimate_4.gates.single_qubit == 4
+assert estimate_4.gates.two_qubit == 8
+assert estimate_4.gates.rotation_gates == 6
+assert estimate_4.gates.clifford_gates == 6
 
 # %% [markdown]
 # 長さ$N$のベクトルを古典DFTで直接計算すると、$O(N^2)$回の演算が必要です。高速フーリエ変換（FFT）を使うと、これを$O(N\log N)$まで減らせます。一方、$N = 2^n$と書くと、厳密QFTは$O(n^2)=O((\log N)^2)$個のゲートで実装できます。したがって、直接計算する古典DFTと比べると、$N$に対して指数的に少ないゲートで同じ変換を状態に適用できます。ただし、測定だけで$N$個すべてのフーリエ係数を読み出せるわけではありません。QFTの利点は、変換後の振幅を後続の量子演算でそのまま使える場合に現れます。
+
+# %%
+qft_qubit_counts = np.arange(3, 10)
+qft_total_gates = []
+
+for n in qft_qubit_counts:
+    estimate_n = make_qft_resource_kernel(int(n)).estimate_resources().simplify()
+    qft_total_gates.append(int(estimate_n.gates.total))
+
+quadratic_reference = qft_qubit_counts**2
+quadratic_reference = quadratic_reference / quadratic_reference[0] * qft_total_gates[0]
+
+dimension_counts = 2**qft_qubit_counts
+nlogn_reference = dimension_counts * qft_qubit_counts
+nlogn_reference = nlogn_reference / nlogn_reference[0] * qft_total_gates[0]
+
+fig, ax = plt.subplots(figsize=(7, 3))
+ax.plot(
+    qft_qubit_counts,
+    qft_total_gates,
+    marker="o",
+    color="#2696EB",
+    label="QFT gate count",
+)
+ax.plot(
+    qft_qubit_counts,
+    quadratic_reference,
+    linestyle="--",
+    color="#FF6B6B",
+    label=r"theory: QFT $O(n^2)$",
+)
+ax.plot(
+    qft_qubit_counts,
+    nlogn_reference,
+    linestyle="--",
+    color="#4ECDC4",
+    label=r"theory: DFT $O(N\log N)$",
+)
+ax.set_xlabel("number of qubits")
+ax.set_ylabel("total gates")
+ax.set_yscale("log")
+ax.set_xticks(qft_qubit_counts)
+ax.grid(alpha=0.3)
+ax.legend()
+plt.show()
+
+expected_total_gates = [
+    n + n * (n - 1) // 2 + n // 2 for n in qft_qubit_counts
+]
+assert qft_total_gates == expected_total_gates
+assert len(quadratic_reference) == len(qft_total_gates)
+assert len(nlogn_reference) == len(qft_total_gates)
 
 # %% [markdown]
 # ## まとめ

@@ -7,11 +7,12 @@ Covers fixes for:
     ValueSubstitutor.substitute_value() now substitutes shape dimension UUIDs
     through the value_map so callers' concrete sizes propagate correctly.
 
-- Bug #6 (IfOperation phi_ops cloning/substitution):
-    UUIDRemapper.clone_operation() now recurses into IfOperation.phi_ops,
-    giving each PhiOp fresh UUIDs.
+- Bug #6 (IfOperation merge-slot cloning/substitution):
+    UUIDRemapper.clone_operation() now recurses into IfOperation merge
+    slots, giving each merged output fresh UUIDs.
     ValueSubstitutor.substitute_operation() now substitutes values inside
-    IfOperation.phi_ops so inlined phi operands are correctly remapped.
+    IfOperation merge slots so inlined merge operands are correctly
+    remapped.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from qamomile.circuit.ir.operation.arithmetic_operations import PhiOp
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.types.primitives import (
@@ -32,7 +32,9 @@ from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
     CastMetadata,
+    DictValue,
     QFixedMetadata,
+    TupleValue,
     Value,
     ValueMetadata,
 )
@@ -614,12 +616,12 @@ class TestCarrierMetadataMapping:
         with pytest.raises(ValueError, match="symbolic slice bounds"):
             ValueSubstitutor({formal.uuid: view}).substitute_operation(op)
 
-    def test_uuid_remapper_clones_phi_output_carriers_from_branch_body(
+    def test_uuid_remapper_clones_merge_output_carriers_from_branch_body(
         self,
     ) -> None:
-        """If-phi output carriers track arrays first seen inside branch bodies.
+        """If-merge output carriers track arrays first seen inside branch bodies.
 
-        IfOperation results are phi outputs whose carrier metadata references
+        IfOperation results are merge outputs whose carrier metadata references
         the array cast inside the branches. The array's first appearance is
         inside the nested bodies, so cloning must fill the remap tables from
         the bodies before remapping the result metadata.
@@ -665,22 +667,17 @@ class TestCarrierMetadataMapping:
 
         cast_true = branch_cast("qf_true")
         cast_false = branch_cast("qf_false")
-        phi_out = Value(type=result_type, name="qf_phi").with_qfixed_metadata(
+        merge_out = Value(type=result_type, name="qf_merge").with_qfixed_metadata(
             qubit_uuids=[f"{source.uuid}_0", f"{source.uuid}_1"],
             num_bits=2,
             int_bits=0,
         )
-        phi = PhiOp(
-            operands=[condition, cast_true.results[0], cast_false.results[0]],
-            results=[phi_out],
-        )
         if_op = IfOperation(
             operands=[condition],
-            results=[phi_out],
             true_operations=[cast_true],
             false_operations=[cast_false],
-            phi_ops=[phi],
         )
+        if_op.add_merge(cast_true.results[0], cast_false.results[0], merge_out)
 
         remapper = UUIDRemapper()
         cloned = remapper.clone_operation(if_op)
@@ -692,8 +689,9 @@ class TestCarrierMetadataMapping:
             f"{cloned_source_uuid}_0",
             f"{cloned_source_uuid}_1",
         )
-        # The phi output and the operation result stay the same clone.
-        assert cloned.phi_ops[0].results[0] is cloned_out
+        # The merged output and the operation result stay the same clone.
+        merges = list(cloned.iter_merges())
+        assert merges[0].result is cloned_out
 
 
 class TestArrayValueShapeSubstitution:
@@ -739,122 +737,263 @@ class TestArrayValueShapeSubstitution:
         assert result.shape[1].uuid == dim1.uuid
 
 
+class TestNestedArrayIndexSubstitution:
+    """Test recursive substitution through nested array element indices."""
+
+    def test_loop_index_inside_nested_array_element_is_substituted(self) -> None:
+        """A mapped loop index reaches an array element used as another index."""
+        loop_index = _make_value("k")
+        zero = _make_const_value("zero", const=0)
+        one = _make_const_value("one", const=1)
+        matrix = _make_array_value(
+            "indices",
+            shape_vals=(
+                _make_const_value("rows", 1),
+                _make_const_value("cols", 2),
+            ),
+            type_cls=UIntType,
+        )
+        nested_index = Value(
+            type=UIntType(),
+            name="indices[k,1]",
+            parent_array=matrix,
+            element_indices=(loop_index, one),
+        )
+        qubits = _make_array_value("q")
+        operand = Value(
+            type=QubitType(),
+            name="q[indices[k,1]]",
+            parent_array=qubits,
+            element_indices=(nested_index,),
+        )
+
+        substituted = ValueSubstitutor(
+            {loop_index.uuid: zero}, transitive=True
+        ).substitute_value(operand)
+
+        assert isinstance(substituted, Value)
+        resolved_nested = substituted.element_indices[0]
+        assert resolved_nested.element_indices[0].uuid == zero.uuid
+        assert resolved_nested.element_indices[1].uuid == one.uuid
+
+
+class TestRecursiveStructuralSubstitution:
+    """Test recursive substitution through shape, slice, and containers."""
+
+    @staticmethod
+    def _nested_view(index: Value) -> ArrayValue:
+        """Build a view whose shape/start/step all contain ``index``.
+
+        Args:
+            index (Value): Nested array-element index to embed.
+
+        Returns:
+            ArrayValue: View with three independently nested references.
+        """
+        two = _make_const_value("two", 2)
+        bounds = _make_array_value("bounds", shape_vals=(two,), type_cls=UIntType)
+
+        def bound_element(name: str) -> Value:
+            """Build one symbolic element of the bounds array.
+
+            Args:
+                name (str): Display name for the element.
+
+            Returns:
+                Value: UInt element indexed by ``index``.
+            """
+            return Value(
+                type=UIntType(),
+                name=name,
+                parent_array=bounds,
+                element_indices=(index,),
+            )
+
+        return ArrayValue(
+            type=QubitType(),
+            name="view",
+            shape=(bound_element("length"),),
+            slice_of=_make_array_value("root"),
+            slice_start=bound_element("start"),
+            slice_step=bound_element("step"),
+        )
+
+    def test_direct_mapped_view_recurses_into_shape_and_slice_fields(self) -> None:
+        """A selected view rewrites nested indices below every structural field."""
+        old_index = _make_value("if_result")
+        new_index = _make_const_value("selected", 1)
+        formal = _make_array_value("formal")
+        selected_view = self._nested_view(old_index)
+
+        result = ValueSubstitutor(
+            {
+                formal.uuid: selected_view,
+                old_index.uuid: new_index,
+            },
+            transitive=True,
+        ).substitute_value(formal)
+
+        assert isinstance(result, ArrayValue)
+        assert result is not selected_view
+        assert result.shape[0].element_indices[0] is new_index
+        assert result.slice_start is not None
+        assert result.slice_start.element_indices[0] is new_index
+        assert result.slice_step is not None
+        assert result.slice_step.element_indices[0] is new_index
+
+    def test_direct_container_replacements_recurse_into_nested_views(self) -> None:
+        """Tuple and Dict replacements recursively rewrite their view members."""
+        old_index = _make_value("if_result")
+        new_index = _make_const_value("selected", 1)
+        selected_view = self._nested_view(old_index)
+        tuple_formal = TupleValue(name="tuple_formal")
+        tuple_replacement = TupleValue(
+            name="tuple_replacement", elements=(selected_view,)
+        )
+        dict_formal = DictValue(name="dict_formal")
+        dict_replacement = DictValue(
+            name="dict_replacement",
+            entries=((_make_const_value("key", 0), selected_view),),
+        )
+        substitutor = ValueSubstitutor(
+            {
+                tuple_formal.uuid: tuple_replacement,
+                dict_formal.uuid: dict_replacement,
+                old_index.uuid: new_index,
+            },
+            transitive=True,
+        )
+
+        tuple_result = substitutor.substitute_value(tuple_formal)
+        dict_result = substitutor.substitute_value(dict_formal)
+
+        assert isinstance(tuple_result, TupleValue)
+        tuple_view = tuple_result.elements[0]
+        assert isinstance(tuple_view, ArrayValue)
+        assert tuple_view.slice_start is not None
+        assert tuple_view.slice_start.element_indices[0] is new_index
+        assert isinstance(dict_result, DictValue)
+        dict_view = dict_result.entries[0][1]
+        assert isinstance(dict_view, ArrayValue)
+        assert dict_view.slice_start is not None
+        assert dict_view.slice_start.element_indices[0] is new_index
+
+    def test_unchanged_replacement_and_transitive_cycle_preserve_identity(
+        self,
+    ) -> None:
+        """No-op field walks keep replacement identity and map cycles terminate."""
+        formal = _make_value("formal")
+        replacement = _make_value("replacement")
+        direct = ValueSubstitutor({formal.uuid: replacement}).substitute_value(formal)
+        assert direct is replacement
+
+        cyclic = ValueSubstitutor(
+            {
+                formal.uuid: replacement,
+                replacement.uuid: formal,
+            },
+            transitive=True,
+        ).substitute_value(formal)
+        assert cyclic is formal
+
+
 # ===========================================================================
-# Bug #6: IfOperation phi_ops cloning and substitution
+# Bug #6: IfOperation merge-slot cloning and substitution
 # ===========================================================================
 
 
-class TestIfOperationPhiOpsCloning:
-    """Tests that UUIDRemapper clones IfOperation.phi_ops."""
+class TestIfOperationMergeCloning:
+    """Tests that UUIDRemapper clones IfOperation merge slots."""
 
-    def test_phi_ops_are_cloned(self) -> None:
-        """Cloning IfOperation should also clone phi_ops."""
+    def test_merges_are_cloned(self) -> None:
+        """Cloning IfOperation should also clone its merge slots."""
         cond = _make_value("cond", BitType)
         true_q = _make_value("q_true", QubitType)
         false_q = _make_value("q_false", QubitType)
-        phi_output = _make_value("q_phi", QubitType)
-
-        phi = PhiOp(
-            operands=[cond, true_q, false_q],
-            results=[phi_output],
-        )
+        merge_output = _make_value("q_merge", QubitType)
 
         if_op = IfOperation(
             operands=[cond],
-            results=[phi_output],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
+        )
+        if_op.add_merge(true_q, false_q, merge_output)
+
+        remapper = UUIDRemapper()
+        cloned = remapper.clone_operation(if_op)
+
+        assert isinstance(cloned, IfOperation)
+        merges = list(cloned.iter_merges())
+        assert len(merges) == 1
+        # Merged output should have a fresh UUID
+        assert merges[0].result.uuid != merge_output.uuid
+
+    def test_empty_merges_is_preserved(self) -> None:
+        """IfOperation with no merge slots is cloned without error."""
+        cond = _make_value("cond", BitType)
+
+        if_op = IfOperation(
+            operands=[cond],
+            true_operations=[],
+            false_operations=[],
         )
 
         remapper = UUIDRemapper()
         cloned = remapper.clone_operation(if_op)
 
         assert isinstance(cloned, IfOperation)
-        assert len(cloned.phi_ops) == 1
-        cloned_phi = cloned.phi_ops[0]
-        assert isinstance(cloned_phi, PhiOp)
-        # Phi output should have a fresh UUID
-        assert cloned_phi.results[0].uuid != phi_output.uuid
+        assert len(list(cloned.iter_merges())) == 0
 
-    def test_phi_ops_empty_is_preserved(self) -> None:
-        """IfOperation with no phi_ops is cloned without error."""
+    def test_multiple_merges_are_all_cloned(self) -> None:
+        """IfOperation with multiple merge slots clones each one."""
         cond = _make_value("cond", BitType)
 
         if_op = IfOperation(
             operands=[cond],
-            results=[],
             true_operations=[],
             false_operations=[],
-            phi_ops=[],
         )
-
-        remapper = UUIDRemapper()
-        cloned = remapper.clone_operation(if_op)
-
-        assert isinstance(cloned, IfOperation)
-        assert len(cloned.phi_ops) == 0
-
-    def test_multiple_phi_ops_are_all_cloned(self) -> None:
-        """IfOperation with multiple phi_ops clones each one."""
-        cond = _make_value("cond", BitType)
-
-        phi_outputs = []
-        phis = []
+        merge_outputs = []
         for i in range(3):
             t = _make_value(f"t{i}", QubitType)
             f = _make_value(f"f{i}", QubitType)
-            out = _make_value(f"phi{i}", QubitType)
-            phi_outputs.append(out)
-            phis.append(PhiOp(operands=[cond, t, f], results=[out]))
-
-        if_op = IfOperation(
-            operands=[cond],
-            results=phi_outputs,
-            true_operations=[],
-            false_operations=[],
-            phi_ops=phis,
-        )
+            out = _make_value(f"merge{i}", QubitType)
+            merge_outputs.append(out)
+            if_op.add_merge(t, f, out)
 
         remapper = UUIDRemapper()
         cloned = remapper.clone_operation(if_op)
 
         assert isinstance(cloned, IfOperation)
-        assert len(cloned.phi_ops) == 3
-        for orig_phi, cloned_phi in zip(phis, cloned.phi_ops):
-            assert isinstance(cloned_phi, PhiOp)
-            assert cloned_phi.results[0].uuid != orig_phi.results[0].uuid
+        merges = list(cloned.iter_merges())
+        assert len(merges) == 3
+        for orig_out, cloned_merge in zip(merge_outputs, merges):
+            assert cloned_merge.result.uuid != orig_out.uuid
 
 
-class TestPhiOpsSubstitution:
-    """Tests that ValueSubstitutor substitutes phi_ops inside IfOperation."""
+class TestIfOperationMergeSubstitution:
+    """Tests that ValueSubstitutor substitutes merge slots inside IfOperation."""
 
-    def test_phi_ops_operands_are_substituted(self) -> None:
-        """ValueSubstitutor should substitute values inside phi_ops."""
+    def test_merge_operands_are_substituted(self) -> None:
+        """ValueSubstitutor should substitute values inside merge slots."""
         cond = _make_value("cond", BitType)
         old_q = _make_value("q_old", QubitType)
         new_q = _make_value("q_new", QubitType)
         false_q = _make_value("q_false", QubitType)
-        phi_output = _make_value("q_phi", QubitType)
-
-        phi = PhiOp(
-            operands=[cond, old_q, false_q],
-            results=[phi_output],
-        )
+        merge_output = _make_value("q_merge", QubitType)
 
         if_op = IfOperation(
             operands=[cond],
-            results=[phi_output],
             true_operations=[],
             false_operations=[],
-            phi_ops=[phi],
         )
+        if_op.add_merge(old_q, false_q, merge_output)
 
         sub = ValueSubstitutor({old_q.uuid: new_q})
         result = sub.substitute_operation(if_op)
 
         assert isinstance(result, IfOperation)
-        assert len(result.phi_ops) == 1
-        subst_phi = result.phi_ops[0]
-        # The true_val operand (index 1) should be substituted
-        assert subst_phi.operands[1].uuid == new_q.uuid
+        merges = list(result.iter_merges())
+        assert len(merges) == 1
+        # The true-branch value should be substituted
+        assert merges[0].true_value.uuid == new_q.uuid
