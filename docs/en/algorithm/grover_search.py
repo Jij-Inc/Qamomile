@@ -434,22 +434,25 @@ ax.plot(
     RESOURCE_SEARCH_QUBITS,
     grover_query_counts,
     marker="o",
-    label="Grover phase-oracle queries",
+    color="#2696EB",
+    label="Grover's oracle queries",
 )
 ax.plot(
     RESOURCE_SEARCH_QUBITS,
     grover_scaling_reference,
     linestyle="--",
-    label=r"Grover scaling $\propto 2^{n/2}$",
+    color="#FF6B6B",
+    label=r"theory: Grover $O(\sqrt{N})$",
 )
 ax.plot(
     RESOURCE_SEARCH_QUBITS,
     exhaustive_search_reference,
     linestyle=":",
-    label=r"exhaustive-search scaling $2^n$",
+    color="#4ECDC4",
+    label=r"theory: Classical (Brute-force) $O(N)$",
 )
 ax.set_xlabel("search qubits")
-ax.set_ylabel("oracle queries (log scale)")
+ax.set_ylabel("oracle queries")
 ax.set_xticks(RESOURCE_SEARCH_QUBITS)
 ax.set_yscale("log", base=10)
 ax.grid(alpha=0.25, which="both")
