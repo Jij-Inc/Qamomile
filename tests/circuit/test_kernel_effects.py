@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Sequence
+
 import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.operation import Operation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types import QubitType
 from qamomile.circuit.ir.value import Value
@@ -124,6 +128,46 @@ def test_qkernel_block_and_invoke_expose_cached_effects() -> None:
         if isinstance(operation, InvokeOperation)
     )
     assert measured_invocation.measurement_result_indices == frozenset({0})
+
+
+def test_block_effects_are_lazy_cached_and_replacement_invalidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Effect analysis runs on demand and fresh Blocks start invalidated."""
+    import qamomile.circuit.ir.effect as effect_module
+
+    original = effect_module.summarize_block_effects
+    calls = 0
+
+    def counting_summary(
+        operations: Sequence[Operation],
+        output_values: Sequence[object],
+    ) -> tuple[qmc.KernelEffect, frozenset[int]]:
+        """Count and delegate one block-effect analysis.
+
+        Args:
+            operations (Sequence[Operation]): Semantic operations to summarize.
+            output_values (Sequence[object]): Public outputs to inspect.
+
+        Returns:
+            tuple[qmc.KernelEffect, frozenset[int]]: Delegated effect summary.
+        """
+        nonlocal calls
+        calls += 1
+        return original(operations, output_values)
+
+    monkeypatch.setattr(effect_module, "summarize_block_effects", counting_summary)
+    block = Block(name="lazy")
+    assert calls == 0
+
+    assert block.effects == qmc.KernelEffect.NONE
+    assert block.measurement_result_indices == frozenset()
+    assert calls == 1
+
+    replacement = dataclasses.replace(block, name="replacement")
+    assert calls == 1
+    assert replacement.effects == qmc.KernelEffect.NONE
+    assert calls == 2
 
 
 def test_reset_and_feed_forward_effects_are_distinct_and_composable() -> None:

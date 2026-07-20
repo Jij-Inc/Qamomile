@@ -165,13 +165,16 @@ def test_ekera_hastad_uses_two_short_exponent_registers() -> None:
     assert kernel.output_types[0] == qmc.Vector[qmc.Bit]
 
 
-def test_small_ekera_hastad_schedule_executes(qiskit_transpiler) -> None:
+def test_small_ekera_hastad_schedule_executes(sdk_transpiler) -> None:
     """The 2 mod 3 short-DLP schedule executes with phase-qubit reuse."""
+    if sdk_transpiler.backend_name == "quri_parts":
+        pytest.skip("QURI Parts cannot represent Ekerå–Håstad's mid-circuit reset")
+
     kernel = qmc.ekera_hastad_factoring(generator=2, modulus=3, window_size=2)
+    transpiler = sdk_transpiler.transpiler
+    shots = 16 if sdk_transpiler.backend_name == "cudaq" else 64
     result = (
-        qiskit_transpiler.transpile(kernel)
-        .sample(qiskit_transpiler.executor(), shots=64)
-        .result()
+        transpiler.transpile(kernel).sample(transpiler.executor(), shots=shots).result()
     )
 
     counts = {}

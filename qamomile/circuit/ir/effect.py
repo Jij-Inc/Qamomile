@@ -246,10 +246,19 @@ def refresh_block_effects(block: "Block") -> None:
     Args:
         block (Block): Mutable semantic block whose operations are finalized.
     """
-    block.effects, block.measurement_result_indices = summarize_block_effects(
-        block.operations,
-        block.output_values,
-    )
+    if block._effects_refreshing:
+        return
+    block._effects_refreshing = True
+    try:
+        effects, result_indices = summarize_block_effects(
+            block.operations,
+            block.output_values,
+        )
+        block._effects = effects
+        block._measurement_result_indices = result_indices
+        block._effects_valid = True
+    finally:
+        block._effects_refreshing = False
 
 
 def format_kernel_effects(effects: KernelEffect) -> str:
