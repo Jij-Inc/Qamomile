@@ -2,7 +2,7 @@
 
 The recursion is resolved by the transpiler's inline ↔ partial_eval
 fixed-point loop: each iteration unrolls one layer of self-referential
-``CallBlockOperation`` and then folds the base-case ``if`` under the
+``InvokeOperation`` and then folds the base-case ``if`` under the
 provided bindings.  When the recursion driver is not concretized by the
 bindings the self-call is left in the IR; when it is concrete but the
 recursion does not terminate the loop raises ``FrontendTransformError``.
@@ -11,7 +11,7 @@ recursion does not terminate the loop raises ``FrontendTransformError``.
 import pytest
 
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.transpiler.errors import FrontendTransformError
 from qamomile.qiskit import QiskitTranspiler
 
@@ -38,6 +38,13 @@ def _outer_of_rec(k: qmc.UInt) -> qmc.Bit:
 
 
 @qmc.qkernel
+def _outer_of_leaf() -> qmc.Bit:
+    q = qmc.qubit(name="q")
+    q = _leaf(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
 def _non_terminating(k: qmc.UInt, q: qmc.Qubit) -> qmc.Qubit:
     if k == 0:
         q = _leaf(q)
@@ -53,16 +60,40 @@ def _outer_of_non_terminating(k: qmc.UInt) -> qmc.Bit:
     return qmc.measure(q)
 
 
+@qmc.qkernel
+def _rec_tuple_without_matching_input(
+    k: qmc.UInt,
+) -> qmc.Tuple[qmc.UInt, qmc.UInt]:
+    if k == 0:
+        result = (k, k)
+    else:
+        result = _rec_tuple_without_matching_input(k - 1)
+    return result
+
+
+def test_helper_qkernel_call_is_inline_policy_invoke():
+    """A helper qkernel call is represented as an inline InvokeOperation."""
+    block = _outer_of_leaf.block
+    invokes = [op for op in block.operations if isinstance(op, InvokeOperation)]
+
+    assert len(invokes) == 1
+    assert invokes[0].attrs["kind"] == "qkernel"
+    assert invokes[0].target.namespace.startswith("user.qkernel.")
+
+    inlined = QiskitTranspiler().inline(block)
+    assert not any(isinstance(op, InvokeOperation) for op in inlined.operations)
+
+
 def test_build_of_self_recursive_kernel_succeeds():
     """A self-recursive kernel builds into a hierarchical block with a
-    self-referential CallBlockOperation inside its body."""
+    self-referential InvokeOperation inside its body."""
     block = _rec.block
     self_refs = 0
     pending = [block.operations]
     while pending:
         ops = pending.pop()
         for op in ops:
-            if isinstance(op, CallBlockOperation) and op.block is block:
+            if isinstance(op, InvokeOperation) and op.body is block:
                 self_refs += 1
             if hasattr(op, "nested_op_lists"):
                 for body in op.nested_op_lists():
@@ -88,6 +119,44 @@ def test_non_terminating_recursion_raises():
     tr = QiskitTranspiler()
     with pytest.raises(FrontendTransformError, match="did not terminate"):
         tr.transpile(_outer_of_non_terminating, bindings={"k": 3})
+
+
+def test_self_recursive_unmatched_tuple_output_raises_targeted_error():
+    """Forward refs reject structural outputs that cannot match inputs."""
+    with pytest.raises(FrontendTransformError, match="tuple output"):
+        _ = _rec_tuple_without_matching_input.block
+
+
+@qmc.qkernel
+def _control_of_rec() -> qmc.Bit:
+    """Control a self-recursive kernel — unsupported, must fail clearly."""
+    ctrl = qmc.qubit(name="ctrl")
+    q = qmc.qubit(name="q")
+    ctrl, q = qmc.control(_rec)(ctrl, k=2, q=q)
+    return qmc.measure(ctrl)
+
+
+def test_control_of_recursive_kernel_raises_targeted_error():
+    """Controlling a self-recursive kernel fails with a cause-specific error.
+
+    The recursion lives inside ``ControlledUOperation.block``, where
+    ``inline``'s cycle guard unrolls the self-call one layer and then
+    declines to re-enter, leaving a residual call the unroll loop cannot
+    resolve. The unroll loop must recognise that every residual call is
+    trapped there and raise a targeted message naming
+    ``qmc.control`` / ``qmc.inverse`` — not the generic "did not terminate
+    after N iterations" message, which would wrongly blame the (perfectly
+    valid, terminating) bindings.
+    """
+    tr = QiskitTranspiler()
+    with pytest.raises(FrontendTransformError) as excinfo:
+        tr.transpile(_control_of_rec, bindings={})
+    message = str(excinfo.value)
+    assert "self-recursive" in message and "qmc.control" in message
+    # The generic non-termination wording must NOT be used here: the
+    # recursion terminates and the driver is concrete; the real cause is
+    # the control/inverse-of-recursion limitation.
+    assert "did not terminate" not in message
 
 
 def test_non_recursive_kernel_still_works():

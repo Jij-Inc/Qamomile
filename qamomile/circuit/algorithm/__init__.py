@@ -1,9 +1,5 @@
 """Algorithm building blocks for quantum circuits."""
 
-from .arithmetic import (
-    modular_decrement,
-    modular_increment,
-)
 from .basic import (
     cx_entangling_layer,
     cz_entangling_layer,
@@ -31,18 +27,9 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
-from .state_preparation import (
-    MottonenAmplitudeEncoding,
-    amplitude_encoding,
-    amplitude_encoding_from_angles,
-    computational_basis_state,
-)
 from .trotter import trotterized_time_evolution
 
 __all__ = [
-    # Arithmetic
-    "modular_increment",
-    "modular_decrement",
     # QAOA
     "ising_cost",
     "x_mixer",
@@ -67,11 +54,6 @@ __all__ = [
     "cost_layer",
     "fqaoa_layers",
     "fqaoa_state",
-    # State preparation
-    "computational_basis_state",
-    "MottonenAmplitudeEncoding",
-    "amplitude_encoding",
-    "amplitude_encoding_from_angles",
     # Trotterization
     "trotterized_time_evolution",
 ]

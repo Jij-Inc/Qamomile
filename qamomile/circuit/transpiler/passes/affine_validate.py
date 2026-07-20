@@ -18,9 +18,12 @@ class AffineValidationPass(Pass[Block, Block]):
     """Validate affine type semantics at IR level.
 
     This pass serves as a safety net to catch affine type violations
-    that may have bypassed the frontend checks. It verifies:
-    1. Each quantum value is used (consumed) at most once
-    2. Quantum values are not silently discarded
+    that may have bypassed the frontend checks. It verifies that each
+    quantum value is used (consumed) at most once. It does NOT detect
+    "never consumed" / silent-discard patterns; the branch-internal and
+    loop-body discard cases are rejected separately by
+    ``reject_control_flow_quantum_discard`` in
+    ``qamomile.circuit.transpiler.passes.analyze``.
 
     Input: Block (any kind)
     Output: Same Block (unchanged, validation only)
@@ -86,18 +89,13 @@ class AffineValidationPass(Pass[Block, Block]):
                 if isinstance(operand, Value) and operand.type.is_quantum():
                     self._check_and_mark_consumed(operand, op_name, consumed)
 
-            # Handle control flow with scope management
+            # Handle control flow with scope management. IfOperation
+            # branch-merge yields are neither operands nor nested
+            # operations, so the consume walk sees exactly the branch
+            # bodies here and never counts a merge source as a consume.
             if isinstance(op, HasNestedOps):
-                nested_lists = op.nested_op_lists()
-                # For IfOperation, skip phi_ops (last list) - they are
-                # merge operations referencing values from both branches
-                # and should not be independently validated.
-                if isinstance(op, IfOperation) and len(nested_lists) > 2:
-                    validate_lists = nested_lists[:2]
-                else:
-                    validate_lists = nested_lists
                 scoped_sets: list[dict[str, str]] = []
-                for op_list in validate_lists:
+                for op_list in op.nested_op_lists():
                     scoped = consumed.copy()
                     self._validate_operations(op_list, scoped)
                     scoped_sets.append(scoped)

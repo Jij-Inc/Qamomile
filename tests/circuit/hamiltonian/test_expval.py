@@ -5,6 +5,7 @@ import pytest
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation import ExpvalOp
+from qamomile.circuit.transpiler.errors import EmitError
 
 
 class TestExpvalFrontend:
@@ -176,6 +177,56 @@ class TestExpvalTranspiler:
 
         # Check hamiltonian field
         assert isinstance(compiled_expval.hamiltonian, qm_o.Hamiltonian)
+
+    def test_multiple_expval_outputs_return_typed_tuple(self):
+        """run() preserves tuple output shape for multiple expval segments."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def kernel(
+            left_observable: qm.Observable,
+            right_observable: qm.Observable,
+        ) -> tuple[qm.Float, qm.Float]:
+            left = qm.qubit("left")
+            right = qm.qubit("right")
+            right = qm.x(right)
+            return (
+                qm.expval(left, left_observable),
+                qm.expval(right, right_observable),
+            )
+
+        transpiler = QiskitTranspiler()
+        result = (
+            transpiler.transpile(
+                kernel,
+                bindings={
+                    "left_observable": qm_o.Z(0),
+                    "right_observable": qm_o.Z(0),
+                },
+            )
+            .run(transpiler.executor())
+            .result()
+        )
+
+        assert result == pytest.approx((1.0, -1.0))
+
+    def test_measurement_and_expval_are_rejected_during_transpile(self):
+        """One execution cannot mix stochastic measurement and estimation."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qm.qkernel
+        def kernel(observable: qm.Observable) -> tuple[qm.Bit, qm.Float]:
+            measured = qm.qubit("measured")
+            estimated = qm.qubit("estimated")
+            return qm.measure(measured), qm.expval(estimated, observable)
+
+        with pytest.raises(EmitError, match="cannot also contain measurement"):
+            QiskitTranspiler().transpile(
+                kernel,
+                bindings={"observable": qm_o.Z(0)},
+            )
 
     def test_transpile_without_hamiltonian_binding_raises(self):
         """Test that transpilation without Hamiltonian binding raises error."""

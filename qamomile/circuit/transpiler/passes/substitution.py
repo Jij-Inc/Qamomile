@@ -1,15 +1,15 @@
-"""Substitution pass for replacing QKernel subroutines and composite gate strategies.
+"""Substitution pass for replacing callable bodies and strategies.
 
 This pass allows replacing:
-1. CallBlockOperation targets (QKernel subroutines) with alternative implementations
-2. CompositeGateOperation strategies with specified decomposition strategies
+1. Inline callable bodies (QKernel subroutines) with alternative implementations
+2. InvokeOperation strategies with specified decomposition strategies
 
 Example:
     # Replace a custom oracle with an optimized version
     config = SubstitutionConfig(
         rules=[
             SubstitutionRule(source_name="my_oracle", target=optimized_oracle),
-            SubstitutionRule(source_name="qft", strategy="approximate"),
+            SubstitutionRule(source_name="qft", strategy="approximate_k2"),
         ]
     )
     pass = SubstitutionPass(config)
@@ -24,9 +24,13 @@ from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
-from qamomile.circuit.ir.operation.composite_gate import CompositeGateOperation
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableRef,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 
@@ -99,8 +103,8 @@ class SubstitutionRule:
 
     Attributes:
         source_name: Name of the target to replace (block name or gate name)
-        target: Replacement Block or QKernel (for CallBlockOperation)
-        strategy: Strategy name (for CompositeGateOperation)
+        target: Replacement Block or QKernel (for inline callables)
+        strategy: Strategy name (for callable/composite operations)
         validate_signature: If True, validate signature compatibility when
             replacing blocks. Default is True.
     """
@@ -145,11 +149,11 @@ class SubstitutionConfig:
 
 
 class SubstitutionPass(Pass[Block, Block]):
-    """Pass that substitutes CallBlockOperations and CompositeGateOperations.
+    """Pass that substitutes call operations and callable strategies.
 
     This pass traverses the block and applies substitution rules:
-    - For CallBlockOperation: replaces the block reference with the target
-    - For CompositeGateOperation: sets the strategy_name field
+    - For inline InvokeOperation: replaces the callable body with the target
+    - For boxed InvokeOperation: sets the strategy field
 
     The pass preserves the block structure and only modifies matching operations.
 
@@ -234,13 +238,22 @@ class SubstitutionPass(Pass[Block, Block]):
         Returns:
             Transformed operation (may be the same object if no changes)
         """
-        if isinstance(op, CallBlockOperation):
-            return self._transform_call_block(op)
+        if isinstance(op, InvokeOperation):
+            return self._transform_invoke(op)
 
-        elif isinstance(op, CompositeGateOperation):
-            return self._transform_composite_gate(op)
+        if isinstance(op, SelectOperation):
+            return dataclasses.replace(
+                op,
+                case_blocks=[
+                    dataclasses.replace(
+                        case_block,
+                        operations=self._transform_operations(case_block.operations),
+                    )
+                    for case_block in op.case_blocks
+                ],
+            )
 
-        elif isinstance(op, HasNestedOps):
+        if isinstance(op, HasNestedOps):
             # Recursively transform all nested operation lists
             new_lists = [
                 self._transform_operations(op_list) for op_list in op.nested_op_lists()
@@ -250,77 +263,99 @@ class SubstitutionPass(Pass[Block, Block]):
         # Other operations pass through unchanged
         return op
 
-    def _transform_call_block(self, op: CallBlockOperation) -> CallBlockOperation:
-        """Transform a CallBlockOperation.
-
-        If a rule matches the block name, replaces the block reference.
+    @staticmethod
+    def _replacement_block(rule: SubstitutionRule) -> Block | None:
+        """Return the replacement block configured by a rule.
 
         Args:
-            op: Operation to transform
+            rule (SubstitutionRule): Rule to resolve.
 
         Returns:
-            Transformed operation
+            Block | None: Replacement block, or ``None`` when the rule has no
+            block target.
         """
-        # Get the block being called
-        block = op.block
-        if block is None:  # type: ignore[unreachable]
-            return op  # type: ignore[unreachable]
-
-        block_name = block.name
-
-        # Look up rule
-        rule = self._rules_by_name.get(block_name)
-        if rule is None or rule.target is None:
-            return op
-
-        # Get the replacement block
         from qamomile.circuit.frontend.qkernel import QKernel
 
         if isinstance(rule.target, QKernel):
-            new_block = rule.target.block
-        elif isinstance(rule.target, Block):
-            new_block = rule.target
-        else:  # type: ignore[unreachable]
-            # Unknown target type
-            return op  # type: ignore[unreachable]
+            return rule.target.block
+        if isinstance(rule.target, Block):
+            return rule.target
+        return None
 
-        # Validate signature compatibility
-        if rule.validate_signature:
-            is_compatible, error_msg = check_signature_compatibility(block, new_block)
-            if not is_compatible:
-                raise SignatureCompatibilityError(
-                    f"Cannot substitute '{block_name}': {error_msg}"
-                )
-
-        return dataclasses.replace(op, block=new_block)
-
-    def _transform_composite_gate(
+    def _transform_invoke(
         self,
-        op: CompositeGateOperation,
-    ) -> CompositeGateOperation:
-        """Transform a CompositeGateOperation.
-
-        If a rule matches, sets the strategy_name field.
+        op: InvokeOperation,
+    ) -> InvokeOperation:
+        """Transform an InvokeOperation.
 
         Args:
-            op: Operation to transform
+            op (InvokeOperation): Operation to transform.
 
         Returns:
-            Transformed operation
+            InvokeOperation: Transformed operation.
         """
-        # Try to match by gate name or custom_name
-        gate_name = op.name  # Uses custom_name or gate_type.value
-
-        rule = self._rules_by_name.get(gate_name)
+        gate_names = [
+            str(op.attrs.get("custom_name", "")),
+            op.target.name,
+        ]
+        rule = next(
+            (
+                self._rules_by_name[name]
+                for name in gate_names
+                if name in self._rules_by_name
+            ),
+            None,
+        )
         if rule is None:
-            # Also try matching by gate_type value
-            rule = self._rules_by_name.get(op.gate_type.value)
-
-        if rule is None or rule.strategy is None:
             return op
 
-        # Set the strategy name
-        return dataclasses.replace(op, strategy_name=rule.strategy)
+        replacement = self._replacement_block(rule)
+        if replacement is not None:
+            current_body = op.effective_body()
+            if isinstance(current_body, Block) and rule.validate_signature:
+                is_compatible, error_msg = check_signature_compatibility(
+                    current_body,
+                    replacement,
+                )
+                if not is_compatible:
+                    raise SignatureCompatibilityError(
+                        f"Cannot substitute '{op.target.name}': {error_msg}"
+                    )
+
+            new_ref = op.target
+            if replacement.name:
+                new_ref = CallableRef(
+                    namespace=op.target.namespace,
+                    name=replacement.name,
+                    version=op.target.version,
+                )
+            definition = op.definition or CallableDef(ref=new_ref)
+            new_definition = dataclasses.replace(
+                definition,
+                ref=new_ref,
+                body=replacement,
+            )
+            return dataclasses.replace(
+                op,
+                target=new_ref,
+                definition=new_definition,
+            )
+
+        if rule.strategy is None:
+            return op
+
+        attrs = dict(op.attrs)
+        attrs["strategy_name"] = rule.strategy
+        definition = op.definition or CallableDef(ref=op.target)
+        new_definition = dataclasses.replace(
+            definition,
+            attrs={**definition.attrs, **attrs},
+        )
+        return dataclasses.replace(
+            op,
+            attrs=attrs,
+            definition=new_definition,
+        )
 
 
 def create_substitution_pass(
@@ -343,7 +378,7 @@ def create_substitution_pass(
     Example:
         pass = create_substitution_pass(
             block_replacements={"my_oracle": optimized_oracle},
-            strategy_overrides={"qft": "approximate", "iqft": "approximate"},
+            strategy_overrides={"qft": "approximate_k2", "iqft": "approximate_k2"},
         )
     """
     rules: list[SubstitutionRule] = []

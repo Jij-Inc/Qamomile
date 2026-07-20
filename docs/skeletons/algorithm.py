@@ -72,7 +72,7 @@
 # Execute the implementation and assert the important result properties.
 
 # %% [markdown]
-# ## Qamomile Built-in
+# ## Qamomile Built-ins
 #
 # Optional. If this page implemented the algorithm from scratch and Qamomile
 # provides a built-in qkernel, converter, or helper, show the built-in version

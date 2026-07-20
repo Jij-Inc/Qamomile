@@ -30,7 +30,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import qamomile.circuit as qmc
@@ -95,18 +95,20 @@ est = scalable_circuit.estimate_resources()
 print("qubits:", est.qubits)
 assert str(est.qubits) == "n"
 print("total gates:", est.gates.total)
-assert str(est.gates.total) == "3*n - 1"
+assert str(est.gates.total) == "2*n + Max(0, n - 1)"
 print("single-qubit gates:", est.gates.single_qubit)
 assert str(est.gates.single_qubit) == "2*n"
 print("two-qubit gates:", est.gates.two_qubit)
-assert str(est.gates.two_qubit) == "n - 1"
+assert str(est.gates.two_qubit) == "Max(0, n - 1)"
 print("rotation gates:", est.gates.rotation_gates)
 assert str(est.gates.rotation_gates) == "n"
 print("parameters:", est.parameters)
 assert set(est.parameters.keys()) == {"n"}
 
 # %% [markdown]
-# 出力には、量子ビット数を表す`n`や総ゲート数を表す`3*n - 1`のようなSymPy式が含まれます。これらは近似ではなく厳密な値です。
+# 出力には、量子ビット数を表す`n`や総ゲート数を表す`2*n + Max(0, n - 1)`のようなSymPy式が含まれます。これらは近似ではなく厳密な値です。
+#
+# `Max(0, ...)`は`qmc.range(n - 1)`のループ回数に由来します。`n`が未束縛のため`n >= 1`を仮定できず、`n = 0`のときに回数が`-1`になってしまわないよう0で下限を取っています。具体的な`n >= 1`を代入すればこのガードは外れるので、後述の合計値はそのまま整数になります。
 
 # %% [markdown]
 # ## `ResourceEstimate`フィールドリファレンス

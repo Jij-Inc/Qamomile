@@ -190,3 +190,6 @@ _build
 docs/en/api/
 docs/ja/api/
 docs/api/
+
+# Local Codex/agent skill mirrors. Project-owned skills live under .claude/.
+.agents/

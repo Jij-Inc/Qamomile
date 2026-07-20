@@ -13,10 +13,11 @@ than build-local Python state.
 
 Supported scope:
     Only ``BlockKind.AFFINE`` and ``BlockKind.ANALYZED`` are accepted.
-    ``HIERARCHICAL`` Blocks still contain ``CallBlockOperation``s that
-    reference sibling Blocks by Python identity; their canonical
-    treatment is deferred (see backlog ``[IR design] Add named/versioned
-    module references for cross-process kernel composition``).
+    ``HIERARCHICAL`` Blocks may still contain inline-policy
+    ``InvokeOperation``s that reference nested Blocks before inlining;
+    canonical treatment for those pre-inline references is deferred (see
+    backlog ``[IR design] Add named/versioned module references for
+    cross-process kernel composition``).
 
 Output guarantees:
     1. ``canonicalize`` does not change ``Block.kind``; it is a
@@ -28,16 +29,36 @@ Output guarantees:
     3. ``canonicalize`` is idempotent: running it twice on the same
        Block yields the same canonical bytes as running it once.
 
+Canonical-bytes scope:
+    Display-only fields (``Block.name``, ``Block.output_names``,
+    ``Value.name``) are excluded from ``to_canonical_bytes``;
+    functional fields are included. ``Block.label_args`` (input port
+    names by position) and ``Block.param_slots`` (the kernel's
+    classical parameter contract) are both functional: two Blocks
+    whose operations match but whose parameter manifests differ (e.g.,
+    a slot rebound from ``RUNTIME_PARAMETER`` to
+    ``COMPILE_TIME_BOUND``) hash differently. ``param_slots`` holds no
+    Value/UUID references, so ``canonicalize`` carries the tuple over
+    verbatim with nothing to remap.
+
 Limitations:
     - ``Value.parent_array`` cycles (a Value whose ``parent_array`` is
       itself reachable from the Value's siblings) are not constructed
       by the frontend today; the canonicalizer assumes the
       Value-reference graph through ``parent_array`` and
       ``element_indices`` is acyclic.
-    - ``ValueMetadata.dict_runtime.bound_data`` and
-      ``ArrayRuntimeMetadata.const_array`` may carry arbitrary frozen
-      Python data; hash stability for these requires that contained
-      objects have a stable ``repr``.
+    - ``ValueMetadata.dict_runtime.bound_data``,
+      ``ArrayRuntimeMetadata.const_array``, and
+      ``ParamSlot.default`` / ``ParamSlot.bound_value`` may carry
+      arbitrary frozen Python data. Every payload type the wire format
+      supports is hashed structurally: ``numpy.ndarray`` (except
+      object-dtype arrays) from its raw buffer (dtype + shape + bytes),
+      ``numpy`` scalars via their Python value, ``bytes`` via a digest,
+      ``complex`` via its components, and ``Hamiltonian`` via its
+      term structure (order-independent, matching ``Hamiltonian.__eq__``
+      plus the declared register width). Only object types outside that
+      set fall back to ``repr`` and therefore require a stable ``repr``
+      for the hash to be reliable.
 """
 
 from __future__ import annotations
@@ -48,16 +69,27 @@ import hashlib
 import uuid as _uuid
 from typing import Any, cast
 
+import numpy as np
+
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.call_block_ops import CallBlockOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.composite_gate import (
-    CompositeGateOperation,
+from qamomile.circuit.ir.operation.control_flow import (
+    BranchRebind,
+    ForItemsOperation,
+    ForOperation,
+    HasNestedOps,
+    LoopCarriedRebind,
+    RegionArg,
+    WhileOperation,
+    validate_region_args,
 )
-from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.serialize.hamiltonian_io import hamiltonian_to_dict
+from qamomile.circuit.ir.static_binding import StaticBindingField, StaticBindingSlot
 from qamomile.circuit.ir.types.primitives import ValueType
 from qamomile.circuit.ir.value import (
     ArrayValue,
@@ -65,9 +97,12 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
+    remap_indexed_identifier,
     remap_value_metadata_references,
 )
+from qamomile.observable.hamiltonian import Hamiltonian
 
 _SUPPORTED_KINDS = frozenset({BlockKind.AFFINE, BlockKind.ANALYZED})
 
@@ -87,12 +122,14 @@ def canonicalize(block: Block) -> Block:
     Returns:
         Block: A new Block with canonical UUIDs. ``Block.kind`` matches
             the input. Existing input/output ordering, operation
-            ordering, and metadata structure are preserved.
+            ordering, metadata structure, and the ``param_slots``
+            manifest (carried over verbatim) are preserved.
 
     Raises:
-        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
-        NotImplementedError: If a ``CallBlockOperation`` is encountered
-            (typically because ``inline`` has not been run yet).
+        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``,
+            or if a loop operation's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
+        NotImplementedError: If an unsupported operation is encountered.
 
     Example:
         >>> from qamomile.qiskit import QiskitTranspiler
@@ -127,8 +164,10 @@ def canonicalize_and_remap(
             tracked in separate maps.
 
     Raises:
-        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``.
-        NotImplementedError: If a ``CallBlockOperation`` is encountered.
+        ValueError: If ``block.kind`` is not in ``{AFFINE, ANALYZED}``,
+            or if a loop operation's region arguments violate the SSA
+            identity invariants (see :func:`validate_region_args`).
+        NotImplementedError: If an unsupported operation is encountered.
     """
     if block.kind not in _SUPPORTED_KINDS:
         raise ValueError(
@@ -201,6 +240,47 @@ def content_hash(block: Block) -> str:
     return hashlib.sha256(to_canonical_bytes(block)).hexdigest()
 
 
+def content_fingerprint(obj: Any) -> str:
+    """Compute a deterministic fingerprint for supported lowered IR content.
+
+    Unlike the legacy canonical ``content_hash`` encoder, this function rejects
+    values that would require a ``repr`` fallback. Its accepted values are the
+    stable scalar, collection, enum, array, Hamiltonian, type, and dataclass
+    forms used by lowered circuit programs.
+
+    Args:
+        obj (Any): Lowered IR content composed exclusively of supported stable
+            values.
+
+    Returns:
+        str: SHA-256 hexadecimal digest of the structural content token.
+
+    Raises:
+        TypeError: If ``obj`` contains a value without a stable structural
+            encoding.
+    """
+    return hashlib.sha256(_token(obj, strict=True).encode("utf-8")).hexdigest()
+
+
+def collect_reachable_values(block: Block) -> tuple[ValueBase, ...]:
+    """Collect values reachable from an IR block in canonical walk order.
+
+    The traversal includes values referenced by operation-owned nested blocks
+    and returns each value UUID at most once. Its ordering is the same stable
+    ordering used by canonical byte emission.
+
+    Args:
+        block (Block): Root block whose reachable values to collect.
+
+    Returns:
+        tuple[ValueBase, ...]: Reachable values in deterministic canonical
+            declaration order.
+    """
+    values: list[ValueBase] = []
+    _collect_values(block, values, set())
+    return tuple(values)
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
@@ -211,8 +291,8 @@ class _Canonicalizer:
 
     A single ``_Canonicalizer`` covers one ``canonicalize`` invocation
     and may recurse into nested Blocks (for example via
-    ``CompositeGateOperation.implementation_block`` and
-    ``InverseBlockOperation`` source/fallback blocks). A shared counter
+    ``InvokeOperation.body`` and ``InverseBlockOperation`` source/fallback
+    blocks). A shared counter
     across nested Blocks guarantees no UUID string collisions within
     the returned canonical tree.
     """
@@ -320,18 +400,32 @@ class _Canonicalizer:
         if cached is not None:
             return cached
 
-        new_input_values: list[Value] = [
-            cast(Value, self.canonical_value(v)) for v in block.input_values
+        new_input_values: list[ValueLike] = [
+            cast(ValueLike, self.canonical_value(v)) for v in block.input_values
         ]
         new_parameters: dict[str, Value] = {
             key: cast(Value, self.canonical_value(block.parameters[key]))
             for key in sorted(block.parameters)
         }
+        new_static_bindings = tuple(
+            StaticBindingSlot(
+                name=slot.name,
+                type_key=slot.type_key,
+                fields=tuple(
+                    StaticBindingField(
+                        name=field.name,
+                        value=cast(Value, self.canonical_value(field.value)),
+                    )
+                    for field in slot.fields
+                ),
+            )
+            for slot in block.static_bindings
+        )
         new_operations: list[Operation] = [
             self.canonical_operation(op) for op in block.operations
         ]
-        new_output_values: list[Value] = [
-            cast(Value, self.canonical_value(v)) for v in block.output_values
+        new_output_values: list[ValueLike] = [
+            cast(ValueLike, self.canonical_value(v)) for v in block.output_values
         ]
 
         new_block = Block(
@@ -343,6 +437,10 @@ class _Canonicalizer:
             operations=new_operations,
             kind=block.kind,
             parameters=new_parameters,
+            # ParamSlot is frozen and holds no Value/UUID references, so
+            # the manifest is shared verbatim — there is nothing to remap.
+            param_slots=block.param_slots,
+            static_bindings=new_static_bindings,
         )
         self._block_cache[id(block)] = new_block
         return new_block
@@ -353,8 +451,11 @@ class _Canonicalizer:
         Uses ``Operation.all_input_values`` / ``Operation.replace_values``
         so subclass-extra Value fields (e.g., ``ControlledU.power``,
         ``ForOperation.loop_var_value``) are rewritten consistently.
-        Recurses into nested control-flow ops via ``HasNestedOps`` and
-        into nested operation Blocks.
+        Recurses into nested control-flow ops via ``HasNestedOps`` and into
+        operation-owned Blocks, including every ``SelectOperation`` case.
+        Each owned Block retains its fresh formal namespace: it is
+        canonicalized independently rather than receiving parent-value
+        substitutions.
 
         Args:
             op (Operation): The Operation to canonicalize.
@@ -365,14 +466,10 @@ class _Canonicalizer:
                 and canonicalized nested op lists / implementation Blocks.
 
         Raises:
-            NotImplementedError: If ``op`` is a ``CallBlockOperation``.
-                Canonicalize requires the input Block to be inlined first.
+            NotImplementedError: If ``op`` contains unsupported nested data.
         """
-        if isinstance(op, CallBlockOperation):
-            raise NotImplementedError(
-                "canonicalize() does not support HIERARCHICAL blocks "
-                "(CallBlockOperation present). Run inline() first."
-            )
+        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
+            validate_region_args(op)
 
         sub_map: dict[str, ValueBase] = {}
         for v in op.all_input_values():
@@ -393,15 +490,38 @@ class _Canonicalizer:
         if isinstance(new_op, CastOperation) and new_op.qubit_mapping:
             new_op = dataclasses.replace(
                 new_op,
-                qubit_mapping=[self._remap_uuid(u) for u in new_op.qubit_mapping],
+                qubit_mapping=[
+                    remap_indexed_identifier(u, self._remap_uuid)
+                    for u in new_op.qubit_mapping
+                ],
             )
 
-        if (
-            isinstance(new_op, CompositeGateOperation)
-            and new_op.implementation_block is not None
-        ):
-            sub = self.canonical_block(new_op.implementation_block)
-            new_op = dataclasses.replace(new_op, implementation_block=sub)
+        if isinstance(new_op, InvokeOperation) and new_op.definition is not None:
+            definition = new_op.definition
+            body = (
+                self.canonical_block(definition.body)
+                if definition.body is not None
+                else None
+            )
+            implementations = [
+                dataclasses.replace(
+                    implementation,
+                    body=(
+                        self.canonical_block(implementation.body)
+                        if implementation.body is not None
+                        else None
+                    ),
+                )
+                for implementation in definition.implementations
+            ]
+            new_op = dataclasses.replace(
+                new_op,
+                definition=dataclasses.replace(
+                    definition,
+                    body=body,
+                    implementations=implementations,
+                ),
+            )
         if isinstance(new_op, InverseBlockOperation):
             if new_op.source_block is not None:
                 sub = self.canonical_block(new_op.source_block)
@@ -417,6 +537,19 @@ class _Canonicalizer:
         if isinstance(new_op, ControlledUOperation) and new_op.block is not None:
             sub_block = self.canonical_block(new_op.block)
             new_op = dataclasses.replace(new_op, block=sub_block)
+
+        # SELECT cases are operation-owned callable regions, not
+        # ``HasNestedOps`` lists in the parent's SSA scope. Canonicalize each
+        # Block through the shared deterministic counter while never applying
+        # the parent's substitution map to the case formals.
+        if isinstance(new_op, SelectOperation):
+            new_op = dataclasses.replace(
+                new_op,
+                case_blocks=[
+                    self.canonical_block(case_block)
+                    for case_block in new_op.case_blocks
+                ],
+            )
 
         return new_op
 
@@ -454,7 +587,7 @@ class _Canonicalizer:
         cloned: ValueBase
         if isinstance(value, TupleValue):
             new_elements = tuple(
-                cast(Value, self.canonical_value(e)) for e in value.elements
+                cast(ValueLike, self.canonical_value(e)) for e in value.elements
             )
             cloned = dataclasses.replace(
                 value,
@@ -545,7 +678,20 @@ class _Canonicalizer:
         return cloned
 
     def _canonical_metadata(self, metadata: ValueMetadata) -> ValueMetadata:
-        """Rewrite UUID and logical_id references inside ValueMetadata."""
+        """Rewrite UUID and logical_id references inside ValueMetadata.
+
+        ``ScalarMetadata`` and ``DictRuntimeMetadata`` carry no UUID
+        references; ``CastMetadata``, ``QFixedMetadata``, and
+        ``ArrayRuntimeMetadata`` do and are rewritten through the
+        active remap tables.
+
+        Args:
+            metadata (ValueMetadata): Original metadata bundle.
+
+        Returns:
+            ValueMetadata: A new bundle with rewritten UUID / logical_id
+                references and untouched scalar / dict-runtime sections.
+        """
         return remap_value_metadata_references(
             metadata,
             self._remap_uuid,
@@ -554,58 +700,177 @@ class _Canonicalizer:
 
 
 # ---------------------------------------------------------------------------
-# Deterministic byte serialization (for content_hash only)
+# Deterministic serialization for content hashes and fingerprints
 # ---------------------------------------------------------------------------
 
 
-def _token(obj: Any) -> str:
+def _token(obj: Any, *, strict: bool = False) -> str:
     """Render an arbitrary Python value into a stable string token.
 
-    Handles the small set of types appearing in IR metadata: scalars,
-    enums, tuples/lists, dicts (sorted by key), ``ValueBase`` instances
+    Handles the small set of types appearing in IR metadata: scalars
+    (including ``complex`` and ``numpy`` scalar types), enums,
+    ``bytes``, ``numpy.ndarray`` (rendered as dtype + shape + a digest
+    of the raw buffer), ``Hamiltonian`` (rendered structurally,
+    order-independently over its terms — see ``_hamiltonian_token``),
+    tuples/lists, dicts (sorted by key), nested ``Block`` instances,
+    ``ValueBase`` instances
     (rendered as a compact ``<ClassName:UUID>`` reference since the
     full state is emitted in the value-declaration section), and
     ``ValueType`` instances (rendered via ``.label()`` to avoid
     embedding memory addresses from the default ``object.__repr__``).
-    Falls back to ``repr`` for anything else; callers that store
-    opaque Python objects in metadata must ensure those objects have a
-    stable ``repr`` for the hash to be reliable.
+    Falls back to ``repr`` only for object types outside that set unless
+    ``strict`` is true. Legacy canonical hashes retain this fallback, while
+    lowered-IR fingerprints reject it.
 
     Args:
         obj (Any): A Python value reachable from canonical IR data
-            (Value metadata field, operation dataclass field, etc.).
+            (Value metadata field, operation dataclass field,
+            ``ParamSlot`` payload, etc.).
+        strict (bool): Whether to reject values that require the legacy
+            ``repr`` fallback. Defaults to ``False``.
 
     Returns:
         str: A deterministic string token suitable for inclusion in
             ``to_canonical_bytes``.
+
+    Raises:
+        TypeError: If ``strict`` is true and ``obj`` has no stable structural
+            encoding.
     """
     if obj is None:
         return "None"
     if isinstance(obj, bool):
         return "true" if obj else "false"
+    if isinstance(obj, np.generic):
+        # numpy scalars behave like plain numbers; hash their Python
+        # value so np.float64(0.5) and 0.5 produce the same token.
+        # Checked before the int/float branch because numpy float64 /
+        # int scalar types subclass the Python primitives, whose repr
+        # differs (e.g. ``np.float64(0.5)`` vs ``0.5`` under numpy 2).
+        return _token(obj.item(), strict=strict)
     if isinstance(obj, (int, float, str)):
         return repr(obj)
+    if isinstance(obj, complex):
+        # Structural components rather than repr so the token does not
+        # depend on complex.__repr__ formatting details.
+        return f"complex({obj.real!r},{obj.imag!r})"
+    if isinstance(obj, (bytes, bytearray)):
+        return f"bytes<sha256={hashlib.sha256(bytes(obj)).hexdigest()}>"
     if isinstance(obj, enum.Enum):
         return f"{type(obj).__name__}.{obj.name}"
+    if isinstance(obj, range):
+        if strict:
+            return f"range({obj.start},{obj.stop},{obj.step})"
+        return repr(obj)
+    if isinstance(obj, np.ndarray) and not obj.dtype.hasobject:
+        # ``repr`` is unusable as array identity: it truncates large
+        # arrays (different arrays collide) and obeys process-global
+        # ``np.printoptions`` (equal arrays diverge). Hash the raw
+        # buffer instead. Object-dtype arrays have no content-defined
+        # buffer and fall through to the ``repr`` fallback below.
+        data = np.ascontiguousarray(obj)
+        # Feed the contiguous buffer to the hasher as a flat ``uint8``
+        # memoryview (buffer protocol) so no extra ``bytes`` copy of a
+        # potentially large array is allocated; ``ascontiguousarray``
+        # already guarantees a C-contiguous buffer.
+        digest = hashlib.sha256(memoryview(data.reshape(-1)).cast("B")).hexdigest()
+        return f"ndarray<dtype={data.dtype.str},shape={obj.shape},sha256={digest}>"
+    if isinstance(obj, Hamiltonian):
+        return _hamiltonian_token(obj, strict=strict)
+    if isinstance(obj, Block):
+        if strict:
+            raise TypeError(
+                "content_fingerprint() does not accept Block values; "
+                "use content_hash() instead."
+            )
+        # Blocks can appear inside CallableDef dataclass fields. Their normal
+        # dataclass repr includes display-only names and would reintroduce
+        # build-local identity after canonicalization, so render them through
+        # the same semantic emitter used by the top-level block.
+        block_lines: list[str] = []
+        _emit_block(obj, block_lines, indent=0)
+        return "Block<" + "\n".join(block_lines) + ">"
     if isinstance(obj, ValueBase):
+        if strict:
+            raise TypeError(
+                "content_fingerprint() does not accept ValueBase values with "
+                "build-local identities."
+            )
         return _value_token(obj)
     if isinstance(obj, ValueType):
         return f"Type<{obj.label()}>"
+    if isinstance(obj, (RegionArg, LoopCarriedRebind, BranchRebind)):
+        # ``var_name`` is a display-only diagnostic label and must not
+        # perturb content identity; every other field participates.
+        # Iterate the dataclass fields dynamically so a functional field
+        # added later is hashed automatically instead of being silently
+        # ignored by a hand-frozen list.
+        parts = ",".join(
+            f"{field.name}={_token(getattr(obj, field.name), strict=strict)}"
+            for field in dataclasses.fields(obj)
+            if field.name != "var_name"
+        )
+        return f"{type(obj).__name__}({parts})"
     if isinstance(obj, (list, tuple)):
-        return "[" + ",".join(_token(x) for x in obj) + "]"
+        return "[" + ",".join(_token(x, strict=strict) for x in obj) + "]"
     if isinstance(obj, dict):
-        items = sorted(obj.items(), key=lambda kv: _token(kv[0]))
-        return "{" + ",".join(f"{_token(k)}:{_token(v)}" for k, v in items) + "}"
+        items = sorted(obj.items(), key=lambda kv: _token(kv[0], strict=strict))
+        return (
+            "{"
+            + ",".join(
+                f"{_token(k, strict=strict)}:{_token(v, strict=strict)}"
+                for k, v in items
+            )
+            + "}"
+        )
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        # Dataclass instances (e.g. ``ResourceMetadata`` on
-        # ``CompositeGateOperation``) get serialized field-by-field in
-        # name-sorted order so canonical bytes are independent of the
-        # declared-field order and of any nested ``dict``'s insertion
-        # order (handled transitively via the dict branch above).
+        # Dataclass instances get serialized field-by-field in name-sorted
+        # order so canonical bytes are independent of the declared-field order
+        # and of any nested ``dict``'s insertion order (handled transitively
+        # via the dict branch above).
         fields = sorted(dataclasses.fields(obj), key=lambda f: f.name)
-        body = ",".join(f"{f.name}={_token(getattr(obj, f.name))}" for f in fields)
+        body = ",".join(
+            f"{f.name}={_token(getattr(obj, f.name), strict=strict)}" for f in fields
+        )
         return f"{type(obj).__name__}({body})"
+    if strict:
+        raise TypeError(
+            "content_fingerprint() does not support values of type "
+            f"{type(obj).__name__}."
+        )
     return repr(obj)
+
+
+def _hamiltonian_token(h: Hamiltonian, *, strict: bool = False) -> str:
+    """Render a ``Hamiltonian`` payload into a structural, stable token.
+
+    Reuses the wire encoding (``hamiltonian_to_dict``) so the token is
+    derived from term structure — Pauli names, qubit indices, and
+    coefficients — rather than from ``Hamiltonian.__repr__``. Term
+    entries are sorted by their token so two Hamiltonians that compare
+    equal (``Hamiltonian.__eq__`` compares the term *dict*, which is
+    insertion-order-insensitive) hash identically regardless of the
+    order terms were added in. The declared register width is included
+    even though ``__eq__`` ignores it, because it changes circuit
+    behavior (``num_qubits`` / ``remap_qubits``).
+
+    Args:
+        h (Hamiltonian): The Hamiltonian payload (e.g. a bound
+            ``Observable`` parameter stored in ``ParamSlot.bound_value``
+            or ``ArrayRuntimeMetadata.const_array``).
+        strict (bool): Whether nested wire-format values must use stable
+            structural encodings. Defaults to ``False``.
+
+    Returns:
+        str: A deterministic ``Hamiltonian(...)`` token.
+    """
+    wire = hamiltonian_to_dict(h)
+    term_tokens = sorted(_token(entry, strict=strict) for entry in wire["terms"])
+    return (
+        "Hamiltonian(terms=[" + ",".join(term_tokens) + "],"
+        f"constant={_token(wire['constant'], strict=strict)},"
+        f"num_qubits={_token(wire['num_qubits'], strict=strict)})"
+    )
 
 
 def _value_token(v: ValueBase) -> str:
@@ -729,6 +994,9 @@ def _collect_values(block: Block, out: list[ValueBase], seen: set[str]) -> None:
 
     for v in block.input_values:
         visit(v)
+    for slot in block.static_bindings:
+        for field in slot.fields:
+            visit(field.value)
     for key in sorted(block.parameters):
         visit(block.parameters[key])
     for op in block.operations:
@@ -756,11 +1024,14 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
         for child_list in op.nested_op_lists():
             for child in child_list:
                 _collect_from_operation(child, visit)
-    if isinstance(op, CompositeGateOperation):
-        if op.implementation_block is not None:
+    if isinstance(op, InvokeOperation) and op.definition is not None:
+        if op.definition.body is not None:
             # Nested block's values participate in the same canonical
             # universe; recurse to ensure they are declared too.
-            _collect_from_subblock(op.implementation_block, visit)
+            _collect_from_subblock(op.definition.body, visit)
+        for implementation in op.definition.implementations:
+            if implementation.body is not None:
+                _collect_from_subblock(implementation.body, visit)
     if isinstance(op, InverseBlockOperation):
         if op.source_block is not None:
             _collect_from_subblock(op.source_block, visit)
@@ -768,13 +1039,16 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
             _collect_from_subblock(op.implementation_block, visit)
     if isinstance(op, ControlledUOperation) and op.block is not None:
         _collect_from_subblock(op.block, visit)
+    if isinstance(op, SelectOperation):
+        for case_block in op.case_blocks:
+            _collect_from_subblock(case_block, visit)
 
 
 def _collect_from_subblock(sub: Block, visit: Any) -> None:
     """Walk the Values declared inside a nested Block.
 
     Used for nested operation Blocks such as
-    ``CompositeGateOperation.implementation_block``,
+    ``InvokeOperation.body``,
     ``InverseBlockOperation.source_block``, and
     ``ControlledUOperation.block``. Mirrors the top-level
     ``_collect_values`` walk order so declarations remain
@@ -788,6 +1062,9 @@ def _collect_from_subblock(sub: Block, visit: Any) -> None:
     """
     for v in sub.input_values:
         visit(v)
+    for slot in sub.static_bindings:
+        for field in slot.fields:
+            visit(field.value)
     for key in sorted(sub.parameters):
         visit(sub.parameters[key])
     for nested_op in sub.operations:
@@ -804,15 +1081,19 @@ _OP_FIELD_EXCLUDES: frozenset[str] = frozenset(
     {
         "operands",
         "results",
-        # CompositeGateOperation extras: opaque Python references that
-        # do not reflect IR-level structure.
-        "composite_gate_instance",
         # Nested-Block fields. These are emitted separately by
         # ``_emit_operation`` so they are not rendered through ``repr``
         # here.
+        "body",
         "implementation_block",
         "source_block",
         "block",
+        "case_blocks",
+        # Control-flow source labels. Their UUID-bearing formal Values and
+        # operation structure carry the semantics.
+        "loop_var",
+        "key_vars",
+        "value_var",
     }
 )
 
@@ -823,8 +1104,9 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     ``Block.name`` and ``Block.output_names`` are display-only labels
     and are intentionally omitted from canonical bytes; two
     structurally-identical kernels with different function names hash
-    equally. ``Block.label_args`` is functional (it names input
-    parameters by position) and is included.
+    equally. ``Block.label_args`` (input parameter names by position)
+    and ``Block.param_slots`` (the kernel's classical parameter
+    contract) are functional and are included.
 
     Args:
         block (Block): The canonical Block to render.
@@ -835,12 +1117,10 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     pad = _INLINE_INDENT * indent
     out.append(f"{pad}BLOCK kind={block.kind.name}")
     out.append(f"{pad}{_INLINE_INDENT}label_args={_token(block.label_args)}")
+    out.append(f"{pad}{_INLINE_INDENT}param_slots={_token(block.param_slots)}")
 
-    declared: list[ValueBase] = []
-    seen: set[str] = set()
-    _collect_values(block, declared, seen)
     out.append(f"{pad}{_INLINE_INDENT}values:")
-    for v in declared:
+    for v in collect_reachable_values(block):
         out.append(f"{pad}{_INLINE_INDENT * 2}{_value_declaration(v)}")
 
     out.append(
@@ -852,6 +1132,19 @@ def _emit_block(block: Block, out: list[str], indent: int) -> None:
     out.append(
         f"{pad}{_INLINE_INDENT}parameters="
         + _token({k: block.parameters[k].uuid for k in sorted(block.parameters)})
+    )
+    out.append(
+        f"{pad}{_INLINE_INDENT}static_bindings="
+        + _token(
+            [
+                {
+                    "name": slot.name,
+                    "type_key": slot.type_key,
+                    "fields": [(field.name, field.value.uuid) for field in slot.fields],
+                }
+                for slot in block.static_bindings
+            ]
+        )
     )
 
     out.append(f"{pad}{_INLINE_INDENT}operations:")
@@ -936,9 +1229,9 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
             for child in child_list:
                 _emit_operation(child, out, indent + 2)
 
-    if isinstance(op, CompositeGateOperation) and op.implementation_block is not None:
-        out.append(f"{pad}{_INLINE_INDENT}implementation:")
-        _emit_block(op.implementation_block, out, indent + 2)
+    if isinstance(op, InvokeOperation) and op.body is not None:
+        out.append(f"{pad}{_INLINE_INDENT}body:")
+        _emit_block(op.body, out, indent + 2)
     if isinstance(op, InverseBlockOperation):
         if op.source_block is not None:
             out.append(f"{pad}{_INLINE_INDENT}source:")
@@ -950,6 +1243,11 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
     if isinstance(op, ControlledUOperation) and op.block is not None:
         out.append(f"{pad}{_INLINE_INDENT}unitary_block:")
         _emit_block(op.block, out, indent + 2)
+
+    if isinstance(op, SelectOperation):
+        for index, case_block in enumerate(op.case_blocks):
+            out.append(f"{pad}{_INLINE_INDENT}case[{index}]:")
+            _emit_block(case_block, out, indent + 2)
 
 
 def _extra_field_tokens(op: Operation) -> list[str]:
