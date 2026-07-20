@@ -2012,6 +2012,20 @@ class ResourceInterpreter:
                 merged = true_value
             elif taken is False:
                 merged = false_value
+            elif operation.condition.uuid in self._measurement_derived:
+                # A runtime measurement chooses the merge value shot by shot.
+                # Keeping every such merge as a nested Piecewise expression
+                # makes feed-forward-heavy FTQC circuits grow exponentially
+                # during final SymPy simplification, even though resource
+                # counting already conservatively combines the branches with
+                # ``choice`` above. A fresh typed symbol preserves the unknown
+                # runtime value without coupling unrelated later estimates to
+                # the complete measurement history.
+                merged = _typed_value_symbol(
+                    merge.result,
+                    merge.result.name,
+                    fresh=True,
+                )
             elif bool(getattr(condition, "is_Boolean", False)):
                 merged = sp.Piecewise(
                     (true_value, cast(Any, condition)),
@@ -3082,9 +3096,27 @@ class ResourceInterpreter:
         ):
             own_controls = int(operation.attrs.get("num_control_qubits", 0) or 0)
         total_controls = _expr(controls) + own_controls
-        body_estimate = self.eval_operations(
-            body.operations, child, controls=total_controls
-        )
+        # Measurement provenance crosses ordinary callable boundaries. Without
+        # remapping a measured actual operand onto the callee's formal value,
+        # a feed-forward ``if`` inside a helper looks like a compile-time
+        # symbolic branch and accumulates nested Piecewise gate expressions.
+        # The runtime branch is already costed conservatively by ``choice``;
+        # preserving the taint here keeps that behavior compositional.
+        tainted_formals = {
+            formal.uuid
+            for formal, actual in zip(body.input_values, operation.operands)
+            if actual.uuid in self._measurement_derived
+        }
+        previous_taint = self._measurement_derived
+        self._measurement_derived = previous_taint | tainted_formals
+        try:
+            body_estimate = self.eval_operations(
+                body.operations,
+                child,
+                controls=total_controls,
+            )
+        finally:
+            self._measurement_derived = previous_taint
         if (
             operation.transform is CallTransform.INVERSE
             and not body_implements_transform
