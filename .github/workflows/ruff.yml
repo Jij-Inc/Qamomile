@@ -15,7 +15,27 @@ on:
       - synchronize
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.changes.outputs.docs_only }}
+      skip_all: ${{ steps.changes.outputs.skip_all }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: changes
+        shell: bash
+        run: |
+          .github/scripts/classify-changes.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}"
+
   ruff-format:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

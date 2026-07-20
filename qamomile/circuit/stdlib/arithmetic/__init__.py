@@ -14,6 +14,11 @@ from .carry_venting import (
     _dirty_const_add_extended as _dirty_const_add_extended,
 )
 from .constant import add_const, controlled_add_const
+from .increment import (
+    _apply_fixed_window_periodic_shift as _apply_fixed_window_periodic_shift,
+    modular_decrement,
+    modular_increment,
+)
 from .modular import (
     controlled_modular_add,
     controlled_modular_add_const,
@@ -38,6 +43,8 @@ __all__ = [
     "lookup_xor",
     "modular_add",
     "modular_add_const",
+    "modular_decrement",
+    "modular_increment",
     "modmul_const",
     "ripple_carry_add",
 ]

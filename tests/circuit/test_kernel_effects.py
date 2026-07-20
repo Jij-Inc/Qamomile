@@ -215,11 +215,11 @@ def test_select_operation_propagates_case_effects() -> None:
     assert block.effects == (qmc.KernelEffect.MEASUREMENT | qmc.KernelEffect.RESET)
 
 
-def test_select_frontend_rejects_effectful_cases_from_cached_metadata() -> None:
-    """The SELECT frontend names the offending case effects immediately."""
+def test_select_frontend_rejects_effectful_cases_structurally() -> None:
+    """The SELECT frontend rejects non-unitary case operations directly."""
     with pytest.raises(
         ValueError,
-        match=r"case 0.*kernel effects \[MEASUREMENT\]",
+        match=r"case 0.*non-unitary ProjectOperation",
     ):
         _ = _effectful_select_entrypoint.block
 

@@ -21,6 +21,10 @@ from qamomile.circuit.frontend.handle import (
     UInt,
     Vector,
 )
+from qamomile.circuit.frontend.static_binding import (
+    get_static_binding_by_type_key,
+    validate_static_binding_slot,
+)
 from qamomile.circuit.ir.serialize.decode import (
     _decode_block,
     _decode_callable_def,
@@ -107,17 +111,22 @@ def from_dict(envelope: dict[str, Any]) -> SerializedQKernel:
     raw_results = artifact.get("results")
     if not isinstance(raw_parameters, list) or not isinstance(raw_results, list):
         raise ValueError("QKernel interface fields must be lists")
-    if len(raw_parameters) != len(body.input_values):
-        raise ValueError("QKernel parameter count does not match its body input count")
+    if len(raw_parameters) != len(body.input_values) + len(body.static_bindings):
+        raise ValueError(
+            "QKernel parameter count does not match its ordinary inputs and "
+            "static bindings"
+        )
     if len(raw_results) != len(body.output_values):
         raise ValueError("QKernel result count does not match its body output count")
 
     parameters: list[inspect.Parameter] = []
     input_types: dict[str, Any] = {}
     differentiable: dict[str, bool] = {}
-    for index, (item, formal) in enumerate(
-        zip(raw_parameters, body.input_values, strict=True)
-    ):
+    formals = dict(zip(body.label_args, body.input_values, strict=True))
+    static_slots = {slot.name: slot for slot in body.static_bindings}
+    ordinary_names: list[str] = []
+    static_names: list[str] = []
+    for index, item in enumerate(raw_parameters):
         if not isinstance(item, dict):
             raise ValueError("QKernel parameter entries must be dictionaries")
         name = item.get("name")
@@ -127,12 +136,54 @@ def from_dict(envelope: dict[str, Any]) -> SerializedQKernel:
         kind = _PARAMETER_KINDS.get(kind_name)
         if kind is None:
             raise ValueError(f"unknown qkernel parameter kind {kind_name!r}")
-        annotation = _decode_kernel_type_for_value(
-            item.get("type"),
-            formal,
-            ctx,
-            f"parameter {name!r} at index {index}",
+        raw_type = item.get("type")
+        static_binding_type = item.get("static_binding_type")
+        has_value_type = isinstance(raw_type, dict)
+        has_static_type = isinstance(static_binding_type, str) and bool(
+            static_binding_type
         )
+        if has_value_type == has_static_type:
+            raise ValueError(
+                f"QKernel parameter {name!r} requires exactly one ordinary "
+                "or static binding type"
+            )
+        if has_static_type:
+            assert isinstance(static_binding_type, str)
+            if item.get("has_default") is True:
+                raise ValueError(
+                    f"static binding parameter {name!r} cannot have a default"
+                )
+            if item.get("differentiable") is True:
+                raise ValueError(
+                    f"static binding parameter {name!r} cannot be differentiable"
+                )
+            try:
+                spec = get_static_binding_by_type_key(static_binding_type)
+            except KeyError as exc:
+                raise ValueError(
+                    f"unknown static binding type {static_binding_type!r}"
+                ) from exc
+            slot = static_slots.get(name)
+            if slot is None:
+                raise ValueError(
+                    f"static binding parameter {name!r} does not match its Block slot"
+                )
+            validate_static_binding_slot(spec, slot)
+            annotation = spec.annotation
+            static_names.append(name)
+        else:
+            formal = formals.get(name)
+            if formal is None:
+                raise ValueError(
+                    f"ordinary qkernel parameter {name!r} has no Block input"
+                )
+            annotation = _decode_kernel_type_for_value(
+                raw_type,
+                formal,
+                ctx,
+                f"parameter {name!r} at index {index}",
+            )
+            ordinary_names.append(name)
         default = (
             _decode_payload(item.get("default"))
             if item.get("has_default") is True
@@ -150,6 +201,11 @@ def from_dict(envelope: dict[str, Any]) -> SerializedQKernel:
             raise ValueError(f"duplicate qkernel parameter {name!r}")
         input_types[name] = annotation
         differentiable[name] = item.get("differentiable") is True
+
+    if ordinary_names != body.label_args:
+        raise ValueError("QKernel ordinary parameter order disagrees with Block inputs")
+    if static_names != list(static_slots):
+        raise ValueError("QKernel static parameter order disagrees with Block slots")
 
     output_types = [
         _decode_kernel_type_for_value(

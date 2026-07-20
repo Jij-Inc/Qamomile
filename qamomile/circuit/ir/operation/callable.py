@@ -16,11 +16,13 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     ValueLike,
+    collect_value_like_uuids,
     remap_value_metadata_references,
 )
 
 from .control_value import normalize_control_value
 from .operation import Operation, OperationKind, ParamHint, Signature
+from .return_operation import ReturnOperation
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.effect import KernelEffect
@@ -320,7 +322,10 @@ class _CallResultMaterializer:
     The materializer first reserves UUID and logical-ID mappings for the
     complete callee value graph, then rebuilds output values. Reserving first
     lets metadata on one output safely reference values owned by another
-    output or by an operation visited later in the block.
+    output or by an operation visited later in the block. Classical values
+    captured from an enclosing lexical scope are not callee-owned, so their
+    identity is preserved; this lets a later compile-time binding replace the
+    same value in both caller and callee graphs.
 
     Args:
         block (Block): Callee block whose outputs are being materialized.
@@ -351,6 +356,7 @@ class _CallResultMaterializer:
         self._reserved_uuids: set[str] = set()
         self._materialized: dict[str, ValueLike] = {}
         self._pass_through: dict[str, ValueLike] = {}
+        self._owned_uuids = self._collect_owned_uuids(block)
 
         for formal, actual in zip(block.input_values, actuals, strict=True):
             self._bind_input(formal, actual)
@@ -381,6 +387,8 @@ class _CallResultMaterializer:
             self._uuid_remap[value.uuid] = result.uuid
             self._logical_id_remap[value.logical_id] = result.logical_id
             return result
+        if value.uuid not in self._owned_uuids and value.type.is_classical():
+            return value
 
         self._reserve_value(value)
         new_uuid = self._uuid_remap[value.uuid]
@@ -419,30 +427,36 @@ class _CallResultMaterializer:
             result = dataclasses.replace(
                 value,
                 parent_array=(
-                    cast(ArrayValue, self.materialize(value.parent_array))
+                    cast(
+                        ArrayValue,
+                        self._materialize_dependency(value.parent_array),
+                    )
                     if value.parent_array is not None
                     else None
                 ),
                 element_indices=tuple(
-                    cast(Value, self.materialize(index))
+                    cast(Value, self._materialize_dependency(index))
                     for index in value.element_indices
                 ),
                 shape=tuple(
-                    cast(Value, self.materialize(dimension))
+                    cast(Value, self._materialize_dependency(dimension))
                     for dimension in value.shape
                 ),
                 slice_of=(
-                    cast(ArrayValue, self.materialize(value.slice_of))
+                    cast(
+                        ArrayValue,
+                        self._materialize_dependency(value.slice_of),
+                    )
                     if value.slice_of is not None
                     else None
                 ),
                 slice_start=(
-                    cast(Value, self.materialize(value.slice_start))
+                    cast(Value, self._materialize_dependency(value.slice_start))
                     if value.slice_start is not None
                     else None
                 ),
                 slice_step=(
-                    cast(Value, self.materialize(value.slice_step))
+                    cast(Value, self._materialize_dependency(value.slice_step))
                     if value.slice_step is not None
                     else None
                 ),
@@ -454,12 +468,15 @@ class _CallResultMaterializer:
             result = dataclasses.replace(
                 value,
                 parent_array=(
-                    cast(ArrayValue, self.materialize(value.parent_array))
+                    cast(
+                        ArrayValue,
+                        self._materialize_dependency(value.parent_array),
+                    )
                     if value.parent_array is not None
                     else None
                 ),
                 element_indices=tuple(
-                    cast(Value, self.materialize(index))
+                    cast(Value, self._materialize_dependency(index))
                     for index in value.element_indices
                 ),
                 metadata=metadata,
@@ -469,6 +486,25 @@ class _CallResultMaterializer:
 
         self._materialized[value.uuid] = result
         return result
+
+    def _materialize_dependency(self, value: ValueLike) -> ValueLike:
+        """Materialize a structural dependency without advancing an input.
+
+        Array shapes, slice bounds, parent arrays, and element indices describe
+        a result but are not themselves callable results. A dependency bound
+        to a caller value therefore keeps that exact SSA version.
+
+        Args:
+            value (ValueLike): Structural dependency to materialize.
+
+        Returns:
+            ValueLike: Bound caller value unchanged, or a caller-local clone
+            for a callee-owned dependency.
+        """
+        actual = self._bound_actual(value)
+        if actual is not None:
+            return actual
+        return self.materialize(value)
 
     def _bind_input(
         self,
@@ -546,6 +582,107 @@ class _CallResultMaterializer:
                 self._reserve_value(cast(ValueLike, value))
         self._reserve_operations(block.operations)
 
+    @classmethod
+    def _collect_owned_uuids(cls, block: Block) -> set[str]:
+        """Collect values defined by a callable rather than lexically captured.
+
+        Args:
+            block (Block): Callable body whose local producer identities should
+                be collected.
+
+        Returns:
+            set[str]: UUIDs owned by formals, parameters, static fields, and
+            operation results in this callable scope.
+        """
+        owned: set[str] = set()
+        for value in (*block.input_values, *block.parameters.values()):
+            owned.update(collect_value_like_uuids(value))
+        for slot in block.static_bindings:
+            owned.update(field.value.uuid for field in slot.fields)
+
+        def collect_results(operations: list[Operation]) -> None:
+            """Collect operation results without claiming their dependencies.
+
+            Args:
+                operations (list[Operation]): Operations in one lexical region.
+            """
+            for operation in operations:
+                for result in operation.results:
+                    cls._collect_result_uuids(result, owned)
+                nested_op_lists = getattr(operation, "nested_op_lists", None)
+                if callable(nested_op_lists):
+                    for nested in nested_op_lists():
+                        collect_results(nested)
+
+        collect_results(block.operations)
+        has_explicit_return = any(
+            isinstance(operation, ReturnOperation) for operation in block.operations
+        )
+        for output in block.output_values:
+            if has_explicit_return and cls._has_free_symbolic_classical_output(
+                output,
+                owned,
+            ):
+                raise ValueError(
+                    "A nested qkernel cannot return a symbolic classical "
+                    "value captured from its enclosing scope directly. Use "
+                    "the captured value inside the nested qkernel instead."
+                )
+            cls._collect_result_uuids(output, owned)
+        return owned
+
+    @classmethod
+    def _has_free_symbolic_classical_output(
+        cls,
+        value: ValueLike,
+        owned: set[str],
+    ) -> bool:
+        """Return whether an output directly exposes a free classical value.
+
+        Args:
+            value (ValueLike): Output value to inspect.
+            owned (set[str]): Identities already defined in the callee scope.
+
+        Returns:
+            bool: Whether a non-constant classical output lacks a local
+            producer.
+        """
+        if value.uuid in owned:
+            return False
+        if isinstance(value, TupleValue):
+            return any(
+                cls._has_free_symbolic_classical_output(element, owned)
+                for element in value.elements
+            )
+        if isinstance(value, DictValue):
+            return any(
+                cls._has_free_symbolic_classical_output(item, owned)
+                for key, entry_value in value.entries
+                for item in (key, entry_value)
+            )
+        return value.type.is_classical() and not value.is_constant()
+
+    @classmethod
+    def _collect_result_uuids(
+        cls,
+        value: ValueLike,
+        owned: set[str],
+    ) -> None:
+        """Collect identities produced as part of one operation result.
+
+        Args:
+            value (ValueLike): Operation result to inspect.
+            owned (set[str]): UUID set updated in place.
+        """
+        owned.add(value.uuid)
+        if isinstance(value, TupleValue):
+            for element in value.elements:
+                cls._collect_result_uuids(element, owned)
+        elif isinstance(value, DictValue):
+            for key, entry_value in value.entries:
+                cls._collect_result_uuids(key, owned)
+                cls._collect_result_uuids(entry_value, owned)
+
     def _reserve_operations(self, operations: list[Operation]) -> None:
         """Reserve values owned or referenced by an operation tree.
 
@@ -579,6 +716,10 @@ class _CallResultMaterializer:
             self._uuid_remap[value.uuid] = actual.uuid
             self._logical_id_remap[value.logical_id] = actual.logical_id
             return
+        if value.uuid not in self._owned_uuids and value.type.is_classical():
+            self._uuid_remap[value.uuid] = value.uuid
+            self._logical_id_remap[value.logical_id] = value.logical_id
+            return
 
         self._uuid_remap.setdefault(value.uuid, str(uuid_module.uuid4()))
         self._logical_id_remap.setdefault(
@@ -601,8 +742,13 @@ class _CallResultMaterializer:
             self._uuid_remap[value.uuid] = result.uuid
             self._logical_id_remap[value.logical_id] = result.logical_id
             return
-        for child in self._value_children(value):
-            self._reserve_output_pass_throughs(child)
+        if isinstance(value, TupleValue):
+            for element in value.elements:
+                self._reserve_output_pass_throughs(element)
+        elif isinstance(value, DictValue):
+            for key, entry_value in value.entries:
+                self._reserve_output_pass_throughs(key)
+                self._reserve_output_pass_throughs(entry_value)
 
     @staticmethod
     def _value_children(value: ValueLike) -> tuple[ValueLike, ...]:

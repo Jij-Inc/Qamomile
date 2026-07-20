@@ -11,9 +11,10 @@ passes, and a backend package emits an executable program. This module
 re-exports everything a user program needs to be written: the decorator,
 the handle types (``Qubit``, ``Vector``, ``Float``, ...), gate /
 measurement / control-flow builders, meta-operations (``control`` /
-``inverse``), the stdlib and algorithm kernels (QFT, QPE, Grover, Shor,
-modular arithmetic), symbolic resource estimation (``estimator/``), and
-the job / result types returned by ``ExecutableProgram.sample`` / ``run``.
+``inverse``), stdlib and algorithm kernels (QFT, QPE, Grover, Shor, modular
+arithmetic), scheme-specific descriptors returned by circuit factories,
+symbolic resource estimation (``estimator/``), and the job / result types
+returned by ``ExecutableProgram.sample`` / ``run``.
 
 Dependency direction (hard constraint)
 --------------------------------------
@@ -117,6 +118,9 @@ from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 from .ir.effect import KernelEffect
 from .stdlib import (
+    LCUBlockEncoding,
+    PauliLCUBlockEncoding,
+    PeriodicShiftLCUBlockEncoding,
     add_const,
     amplitude_encoding,
     amplitude_encoding_from_angles,
@@ -133,9 +137,13 @@ from .stdlib import (
     modmul_const,
     modular_add,
     modular_add_const,
+    modular_decrement,
+    modular_increment,
     mottonen_amplitude_encoding,
     mottonen_amplitude_encoding_from_angles,
     multi_controlled_x,
+    pauli_lcu_block_encoding,
+    periodic_shift_lcu_block_encoding,
     qft,
     qpe,
     ripple_carry_add,
@@ -174,15 +182,10 @@ def __getattr__(name: str):  # type: ignore[no-untyped-def]
 
 # Imported after frontend symbols are initialized because these kernels use
 # ``import qamomile.circuit as qmc`` in their implementation module.
-from .algorithm.arithmetic.modular_incdec import (  # noqa: E402, I001
-    modular_decrement,
-    modular_increment,
-)
 from .algorithm.shor import (  # noqa: E402, I001
     ekera_hastad_factoring,
     shor_order_finding,
 )
-
 
 __all__ = [
     "qkernel",
@@ -256,11 +259,16 @@ __all__ = [
     "Tensor",
     "Observable",
     # stdlib
+    "PeriodicShiftLCUBlockEncoding",
+    "periodic_shift_lcu_block_encoding",
     "modular_decrement",
     "modular_increment",
     "qpe",
     "mcx",
     "multi_controlled_x",
+    "LCUBlockEncoding",
+    "PauliLCUBlockEncoding",
+    "pauli_lcu_block_encoding",
     "computational_basis_state",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",

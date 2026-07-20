@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
+import struct
 import subprocess
 import sys
 from importlib.metadata import version
@@ -25,6 +27,7 @@ from qamomile.circuit.ir.operation.callable import (
     CallPolicy,
     CallTransform,
     CompositeGateType,
+    InvokeOperation,
 )
 from qamomile.circuit.ir.operation.classical_ops import (
     ReturnQuantumArrayElementOperation,
@@ -32,9 +35,15 @@ from qamomile.circuit.ir.operation.classical_ops import (
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
-from qamomile.circuit.ir.serialize.encode import _OP_ENCODERS
-from qamomile.circuit.ir.types.primitives import FloatType, QubitType
+from qamomile.circuit.ir.serialize.encode import (
+    _OP_ENCODERS,
+    _encode_block,
+    _EncodeContext,
+)
+from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
+from qamomile.circuit.ir.uuid_remapper import UUIDRemapper
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import (
     QAMOMILE_VERSION,
@@ -93,6 +102,245 @@ def _phase_identity(q: qmc.Qubit) -> qmc.Qubit:
 def _global_phase_kernel(q: qmc.Qubit) -> qmc.Qubit:
     """Append a zero-result global-phase operation."""
     return qmc.global_phase(_phase_identity, 0.375)(q)
+
+
+@qmc.qkernel
+def _symbolic_vector_x(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply X through a loop over a symbolic vector width."""
+    for index in qmc.range(qubits.shape[0]):
+        qubits[index] = qmc.x(qubits[index])
+    return qubits
+
+
+@qmc.qkernel
+def _atomic_symbolic_vector_inverse() -> qmc.Vector[qmc.Bit]:
+    """Inverse-call a symbolic-vector kernel at a concrete width."""
+    qubits = qmc.qubit_array(2, "qubits")
+    qubits = qmc.inverse(_symbolic_vector_x)(qubits)
+    return qmc.measure(qubits)
+
+
+@qmc.composite_gate(name="symbolic_width_box")
+def _symbolic_width_box(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply X to the first qubit of a symbolic-width register.
+
+    Args:
+        qubits (qmc.Vector[qmc.Qubit]): Nonempty symbolic-width register.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Register with its first qubit flipped.
+    """
+    qubits[0] = qmc.x(qubits[0])
+    return qubits
+
+
+@qmc.qkernel
+def _symbolic_width_inverse_helper(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Route a symbolic-width register through a preserved composite.
+
+    Args:
+        qubits (qmc.Vector[qmc.Qubit]): Symbolic-width register to update.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated register from the preserved composite.
+    """
+    return _symbolic_width_box(qubits)
+
+
+@qmc.qkernel
+def _bound_symbolic_vector_inverse(width: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Inverse-call a symbolic-vector kernel at a bound width.
+
+    Args:
+        width (qmc.UInt): Compile-time vector width.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured inverted all-zero register.
+    """
+    qubits = qmc.qubit_array(width, "qubits")
+    qubits = qmc.inverse(_symbolic_width_inverse_helper)(qubits)
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _asymmetric_block_encoding_unitary(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Flip one system qubit while preserving an independent signal.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Pass-through signal register.
+        system (qmc.Vector[qmc.Qubit]): One-qubit system register.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Preserved signal
+            and flipped system registers.
+    """
+    system[0] = qmc.x(system[0])
+    return signal, system
+
+
+@qmc.qkernel
+def _apply_static_block_encoding(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+    encoding: qmc.LCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Apply a unitary reached through a static block-encoding slot.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Descriptor-sized signal register.
+        system (qmc.Vector[qmc.Qubit]): Descriptor-sized system register.
+        encoding (qmc.LCUBlockEncoding): Compile-time block encoding.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Registers after
+            the bound unitary.
+    """
+    return encoding.unitary(signal, system)
+
+
+@qmc.qkernel
+def _controlled_static_inverse(
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Vector[qmc.Bit]:
+    """Control an inverse helper after static descriptor specialization.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Compile-time block encoding.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured system register.
+    """
+
+    @qmc.qkernel
+    def inverse_member(
+        signal: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Expose the static-argument inverse through outer control.
+
+        Args:
+            signal (qmc.Vector[qmc.Qubit]): Descriptor-sized signal register.
+            system (qmc.Vector[qmc.Qubit]): Descriptor-sized system register.
+
+        Returns:
+            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Inverted
+                signal and system registers.
+        """
+        return qmc.inverse(_apply_static_block_encoding)(
+            signal,
+            system,
+            encoding,
+        )
+
+    outer = qmc.x(qmc.qubit("outer"))
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    outer, signal, system = qmc.control(inverse_member)(outer, signal, system)
+    return qmc.measure(system)
+
+
+@qmc.qkernel
+def _symbolic_pair_inverse_helper(
+    signal: qmc.Vector[qmc.Qubit],
+    system: qmc.Vector[qmc.Qubit],
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    """Route two symbolic registers through one preserved system operation.
+
+    Args:
+        signal (qmc.Vector[qmc.Qubit]): Pass-through symbolic register.
+        system (qmc.Vector[qmc.Qubit]): Symbolic register whose first qubit is
+            flipped.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Preserved signal
+            and updated system registers.
+    """
+    system = _symbolic_width_box(system)
+    return signal, system
+
+
+@qmc.qkernel
+def _controlled_bound_symbolic_pair_inverse(
+    signal_width: qmc.UInt,
+    system_width: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Control a nested inverse after two register widths are bound.
+
+    Args:
+        signal_width (qmc.UInt): Compile-time signal width.
+        system_width (qmc.UInt): Compile-time system width.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured system register.
+    """
+
+    @qmc.qkernel
+    def inverse_member(
+        signal: qmc.Vector[qmc.Qubit],
+        system: qmc.Vector[qmc.Qubit],
+    ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+        """Expose a symbolic two-register inverse through outer control.
+
+        Args:
+            signal (qmc.Vector[qmc.Qubit]): Symbolic signal register.
+            system (qmc.Vector[qmc.Qubit]): Symbolic system register.
+
+        Returns:
+            tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Inverted
+                signal and system registers.
+        """
+        return qmc.inverse(_symbolic_pair_inverse_helper)(signal, system)
+
+    outer = qmc.x(qmc.qubit("outer"))
+    signal = qmc.qubit_array(signal_width, "signal")
+    system = qmc.qubit_array(system_width, "system")
+    outer, signal, system = qmc.control(inverse_member)(outer, signal, system)
+    return qmc.measure(system)
+
+
+@qmc.qkernel
+def _vector_rotation_layer(
+    qubits: qmc.Vector[qmc.Qubit],
+    angles: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Qubit]:
+    """Rotate each qubit by the corresponding vector element."""
+    for index in qmc.range(qubits.shape[0]):
+        qubits[index] = qmc.rx(qubits[index], angles[index])
+    return qubits
+
+
+@qmc.qkernel
+def _vector_parameter_inverse_round_trip(
+    angles: qmc.Vector[qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Apply a vector-parameter layer and its atomic inverse."""
+    qubits = qmc.qubit_array(2, "qubits")
+    qubits = _vector_rotation_layer(qubits, angles)
+    qubits = qmc.inverse(_vector_rotation_layer)(qubits, angles)
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _inverse_with_free_classical_capture(theta: qmc.Float) -> qmc.Bit:
+    """Inverse-call a nested kernel that captures a parent parameter."""
+
+    @qmc.qkernel
+    def rotation(qubit: qmc.Qubit) -> qmc.Qubit:
+        """Rotate by the enclosing runtime parameter."""
+        return qmc.rx(qubit, theta)
+
+    qubit = qmc.qubit("qubit")
+    qubit = qmc.inverse(rotation)(qubit)
+    return qmc.measure(qubit)
 
 
 @qmc.qkernel
@@ -266,6 +514,55 @@ def _select_program(
 
 
 @qmc.qkernel
+def _select_rx_parameter_first(
+    angle: qmc.Float,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Apply an X rotation with a parameter-first case signature.
+
+    Args:
+        angle (qmc.Float): Rotation angle in radians.
+        target (qmc.Qubit): Qubit to rotate.
+
+    Returns:
+        qmc.Qubit: Rotated target qubit.
+    """
+    return qmc.rx(target, angle)
+
+
+@qmc.qkernel
+def _select_rz_parameter_first(
+    angle: qmc.Float,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Apply a Z rotation with a parameter-first case signature.
+
+    Args:
+        angle (qmc.Float): Rotation angle in radians.
+        target (qmc.Qubit): Qubit to rotate.
+
+    Returns:
+        qmc.Qubit: Rotated target qubit.
+    """
+    return qmc.rz(target, angle)
+
+
+@qmc.qkernel
+def _parameter_before_target_select_program() -> qmc.Bit:
+    """Select between parameter-first rotation cases.
+
+    Returns:
+        qmc.Bit: Measurement of the selected rotation target.
+    """
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_select_rx_parameter_first, _select_rz_parameter_first]
+    )(index, 0.5, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
 def _wide_select_program() -> qmc.Bit:
     """Preserve a concrete SELECT index width greater than 64."""
     index = qmc.qubit_array(70, "index")
@@ -330,6 +627,18 @@ def _carried_scalar(n: qmc.UInt) -> qmc.UInt:
     for i in qmc.range(n):
         total = total + i
     return total
+
+
+@qmc.qkernel
+def _constant_one() -> qmc.UInt:
+    """Return one caller-local compile-time UInt value."""
+    return qmc.uint(1)
+
+
+@qmc.qkernel
+def _calls_constant_one_twice() -> qmc.UInt:
+    """Consume two independently materialized constant qkernel results."""
+    return _constant_one() + _constant_one()
 
 
 @qmc.qkernel
@@ -533,6 +842,22 @@ def test_qkernel_round_trip_preserves_static_ir_and_interface() -> None:
     assert len(message.callable_table) > 0
 
 
+def test_repeated_constant_qkernel_calls_get_distinct_results() -> None:
+    """Each call materializes a fresh SSA result for a constant output."""
+    payload = serialize(_calls_constant_one_twice)
+    restored = deserialize(payload)
+    invokes = [
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, InvokeOperation)
+    ]
+
+    assert len(invokes) == 2
+    assert invokes[0].results[0].uuid != invokes[1].results[0].uuid
+    assert invokes[0].results[0].logical_id != invokes[1].results[0].logical_id
+    assert serialize(restored) == payload
+
+
 def test_bit_comparison_operations_round_trip() -> None:
     """Bit and mixed Bit-UInt CompOps survive protobuf serialization."""
     payload = serialize(_comparison_operations)
@@ -722,6 +1047,52 @@ def test_select_without_a_quantum_target_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="requires at least one quantum target"):
         validate_qkernel_ir(block)
+
+
+def test_inverse_block_vector_control_is_rejected_during_validation() -> None:
+    """Serialization validation independently rejects a vector control operand."""
+    scalar_control = Value(type=QubitType(), name="scalar_control")
+    target = Value(type=QubitType(), name="target")
+    scalar_control_result = scalar_control.next_version()
+    target_result = target.next_version()
+    operation = InverseBlockOperation(
+        operands=[scalar_control, target],
+        results=[scalar_control_result, target_result],
+        num_control_qubits=1,
+        num_target_qubits=1,
+        source_block=Block(),
+        implementation_block=Block(),
+        control_value=0,
+    )
+
+    # Corrupt an otherwise valid operation after construction to exercise the
+    # serialization boundary's independent defense against forged IR.
+    dimension = Value(type=UIntType(), name="dimension").with_const(3)
+    vector_control = ArrayValue(
+        type=QubitType(),
+        name="vector_control",
+        shape=(dimension,),
+    )
+    vector_control_result = vector_control.next_version()
+    operation.operands[0] = vector_control
+    operation.results[0] = vector_control_result
+    block = Block(
+        input_values=[vector_control, target],
+        output_values=[vector_control_result, target_result],
+        operations=[operation],
+    )
+
+    with pytest.raises(ValueError, match="control operands must be scalar qubits"):
+        validate_qkernel_ir(block)
+
+
+def test_select_parameter_before_target_round_trips_through_dict() -> None:
+    """SELECT case declaration order survives dict encoding and decoding."""
+    payload = kernel_to_dict(_parameter_before_target_select_program)
+
+    restored = kernel_from_dict(payload)
+
+    assert kernel_to_dict(restored) == payload
 
 
 def test_concrete_select_width_greater_than_64_round_trips() -> None:
@@ -1035,13 +1406,20 @@ def test_python_tuple_return_annotation_round_trips_exactly() -> None:
 
 
 def test_wire_payload_contains_no_invocation_values() -> None:
-    """The qkernel message contains interface defaults but no bindings fields."""
+    """The qkernel message contains defaults but no concrete binding values."""
     message = _message(_parameterized)
-    schema_text = message.DESCRIPTOR.file.serialized_pb
+    pending = list(pb.DESCRIPTOR.message_types_by_name.values())
+    message_descriptors = []
+    while pending:
+        descriptor = pending.pop()
+        message_descriptors.append(descriptor)
+        pending.extend(descriptor.nested_types)
+    forbidden_fields = {"bindings", "bound_value", "runtime_parameters"}
 
-    assert b"bindings" not in schema_text
-    assert b"bound_value" not in schema_text
-    assert b"runtime_parameters" not in schema_text
+    for descriptor in message_descriptors:
+        assert forbidden_fields.isdisjoint(field.name for field in descriptor.fields), (
+            descriptor.full_name
+        )
     assert message.parameters[1].has_default
     assert message.parameters[1].default.float_value.bits
 
@@ -1409,3 +1787,225 @@ def test_signature_parameter_kind_is_preserved() -> None:
         parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
         for parameter in restored.signature.parameters.values()
     )
+
+
+def test_value_encoder_rejects_active_duplicate_uuid_structure() -> None:
+    """A recursive value edge cannot hide a conflicting duplicate UUID."""
+    one = Value(type=UIntType(), name="one").with_const(1)
+    two = Value(type=UIntType(), name="two").with_const(2)
+    root = ArrayValue(type=QubitType(), name="root", shape=(one,))
+    conflicting = dataclasses.replace(root, shape=(two,))
+    sliced = dataclasses.replace(
+        root,
+        slice_of=conflicting,
+        slice_start=Value(type=UIntType(), name="start").with_const(0),
+        slice_step=one,
+    )
+
+    with pytest.raises(ValueError, match="conflicting structures"):
+        _EncodeContext().register_value(sliced)
+
+
+def test_value_encoder_rejects_conflict_across_owned_blocks() -> None:
+    """Independent owned blocks cannot reuse one UUID for different arrays."""
+    one = Value(type=UIntType(), name="one").with_const(1)
+    two = Value(type=UIntType(), name="two").with_const(2)
+    source_value = ArrayValue(type=QubitType(), name="q", shape=(one,))
+    fallback_value = dataclasses.replace(source_value, shape=(two,))
+    source = Block(
+        name="source",
+        label_args=["q"],
+        input_values=[source_value],
+        output_values=[source_value],
+    )
+    fallback = Block(
+        name="fallback",
+        label_args=["q"],
+        input_values=[fallback_value],
+        output_values=[fallback_value],
+    )
+    root = Block(
+        operations=[
+            InverseBlockOperation(
+                source_block=source,
+                implementation_block=fallback,
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="conflicting structures"):
+        _encode_block(root, _EncodeContext())
+
+
+def test_uuid_remapper_rejects_conflicting_source_structures() -> None:
+    """Alpha-renaming cannot launder one UUID with incompatible shapes."""
+    one = Value(type=UIntType(), name="one").with_const(1)
+    two = Value(type=UIntType(), name="two").with_const(2)
+    source_value = ArrayValue(type=QubitType(), name="q", shape=(one,))
+    conflicting = dataclasses.replace(source_value, shape=(two,))
+    block = Block(
+        label_args=["first", "second"],
+        input_values=[source_value, conflicting],
+    )
+
+    with pytest.raises(ValueError, match="conflicting structures"):
+        UUIDRemapper().clone_block(block)
+
+
+def test_uuid_remapper_rejects_recursive_inverse_source() -> None:
+    """Alpha-renaming rejects an inverse source edge back to its own block."""
+    block = Block(name="recursive")
+    block.operations.append(
+        InverseBlockOperation(
+            source_block=block,
+            implementation_block=Block(name="fallback"),
+        )
+    )
+
+    with pytest.raises(ValueError, match="recursive inverse source"):
+        UUIDRemapper().clone_block(block)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (0.0, -0.0),
+        (
+            struct.unpack(">d", struct.pack(">Q", 0x7FF8000000000001))[0],
+            struct.unpack(">d", struct.pack(">Q", 0x7FF8000000000002))[0],
+        ),
+    ],
+    ids=["signed_zero", "nan_payload"],
+)
+def test_value_encoder_compares_float_metadata_by_bits(
+    first: float,
+    second: float,
+) -> None:
+    """Same-UUID metadata with different binary64 bits is rejected."""
+    value = Value(type=FloatType(), name="value").with_const(first)
+    conflicting = dataclasses.replace(
+        value,
+        metadata=Value(type=FloatType(), name="other").with_const(second).metadata,
+    )
+    context = _EncodeContext()
+    context.register_value(value)
+
+    with pytest.raises(ValueError, match="conflicting structures"):
+        context.register_value(conflicting)
+
+
+def test_value_encoder_accepts_repeated_nan_with_identical_bits() -> None:
+    """Same-UUID NaN metadata is stable when its payload bits match."""
+    nan = struct.unpack(">d", struct.pack(">Q", 0x7FF8000000000001))[0]
+    value = Value(type=FloatType(), name="value").with_const(nan)
+    repeated = dataclasses.replace(
+        value,
+        metadata=Value(type=FloatType(), name="other").with_const(nan).metadata,
+    )
+    context = _EncodeContext()
+
+    assert context.register_value(value) == value.uuid
+    assert context.register_value(repeated) == value.uuid
+
+
+def test_symbolic_vector_inverse_round_trips_with_disjoint_fallback_values() -> None:
+    """Atomic inverse serialization alpha-renames its specialized fallback."""
+    inverse_operation = next(
+        operation
+        for operation in _atomic_symbolic_vector_inverse.block.operations
+        if isinstance(operation, InverseBlockOperation)
+    )
+    assert inverse_operation.source_block is not None
+    assert inverse_operation.implementation_block is not None
+    assert {
+        value.uuid for value in inverse_operation.source_block.input_values
+    }.isdisjoint(
+        value.uuid for value in inverse_operation.implementation_block.input_values
+    )
+
+    restored = deserialize(serialize(_atomic_symbolic_vector_inverse))
+    executable = QiskitTranspiler().transpile(restored)
+    result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
+
+    assert result.results == [((1, 1), 16)]
+
+
+def test_serialized_symbolic_inverse_refreshes_bound_scalar_width() -> None:
+    """Value replacement refreshes inverse scalar-width metadata before emit."""
+    restored = deserialize(serialize(_bound_symbolic_vector_inverse))
+    specialized = restored.build(width=3)
+    inverse_operation = next(
+        operation
+        for operation in specialized.operations
+        if isinstance(operation, InverseBlockOperation)
+    )
+
+    assert inverse_operation.num_target_qubits == 3
+    executable = QiskitTranspiler().transpile(restored, bindings={"width": 3})
+    result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
+    assert result.results == [((1, 0, 0), 16)]
+
+
+def test_serialized_controlled_static_inverse_refreshes_call_site_width() -> None:
+    """Call-site widths refresh nested inverse metadata before outer control."""
+    encoding = qmc.LCUBlockEncoding(
+        unitary=_asymmetric_block_encoding_unitary,
+        normalization=1.0,
+        num_signal_qubits=2,
+        num_system_qubits=1,
+    )
+    restored = deserialize(serialize(_controlled_static_inverse))
+
+    executable = QiskitTranspiler().transpile(
+        restored,
+        bindings={"encoding": encoding},
+    )
+    result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
+    assert result.results == [((1,), 16)]
+
+
+@pytest.mark.parametrize(("signal_width", "system_width"), [(2, 1), (2, 3)])
+def test_serialized_controlled_inverse_materializes_owned_block_widths(
+    signal_width: int,
+    system_width: int,
+) -> None:
+    """Bound call edges materialize inverse widths without static bindings."""
+    restored = deserialize(serialize(_controlled_bound_symbolic_pair_inverse))
+
+    executable = QiskitTranspiler().transpile(
+        restored,
+        bindings={
+            "signal_width": signal_width,
+            "system_width": system_width,
+        },
+    )
+    result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
+    expected = (1, *(0 for _ in range(system_width - 1)))
+    assert result.results == [(expected, 16)]
+
+
+def test_inverse_round_trip_preserves_free_classical_capture() -> None:
+    """Fallback alpha-renaming leaves enclosing runtime parameters shared."""
+    restored = deserialize(serialize(_inverse_with_free_classical_capture))
+    block = restored.build(parameters=["theta"])
+
+    assert list(block.parameters) == ["theta"]
+    executable = QiskitTranspiler().transpile(restored, parameters=["theta"])
+    result = executable.sample(
+        QiskitTranspiler().executor(),
+        shots=16,
+        bindings={"theta": np.pi},
+    ).result()
+    assert result.results == [(1, 16)]
+
+
+def test_inverse_round_trip_remaps_vector_parameter_elements() -> None:
+    """Fallback vector elements point to its fresh classical input array."""
+    restored = deserialize(serialize(_vector_parameter_inverse_round_trip))
+    executable = QiskitTranspiler().transpile(
+        restored,
+        bindings={"angles": [0.37, -0.81]},
+    )
+    result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
+
+    assert result.results == [((0, 0), 16)]

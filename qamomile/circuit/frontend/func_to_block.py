@@ -11,6 +11,11 @@ from qamomile.circuit.frontend.handle.primitives import (
     Qubit,
     UInt,
 )
+from qamomile.circuit.frontend.static_binding import (
+    StaticBindingProxy,
+    create_static_binding_proxy,
+    is_static_binding_annotation,
+)
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.operation import QInitOperation
@@ -128,6 +133,10 @@ def build_param_slots(
     Returns:
         tuple[ParamSlot, ...]: One slot per classical argument, in the
             order they appear in ``signature.parameters``.
+
+    Raises:
+        TypeError: If a non-static classical annotation cannot be represented
+            by an IR parameter type.
     """
     parameters_set = set(parameters or ())
     kwargs_map = kwargs or {}
@@ -136,6 +145,12 @@ def build_param_slots(
     slots: list[ParamSlot] = []
     for name, param in signature.parameters.items():
         param_type = input_types.get(name, param.annotation)
+
+        # Static object slots are resolved before ordinary parameter binding.
+        # Their projected fields live in ``Block.static_bindings`` rather than
+        # the runtime/compile-time scalar parameter manifest.
+        if is_static_binding_annotation(param_type):
+            continue
 
         # Skip pure-quantum arguments. These do not participate in the
         # classical parameter contract.
@@ -586,7 +601,20 @@ def _validate_return_shape(
 
 
 def func_to_block(func: typing.Callable) -> Block:
-    """Convert a function to a hierarchical Block.
+    """Convert a typed frontend function to a hierarchical block.
+
+    Args:
+        func (Callable): Typed frontend function to trace. Registered static
+            binding annotations are represented by typed proxy slots.
+
+    Returns:
+        Block: Hierarchical trace containing ordinary inputs and any deferred
+            static binding slots.
+
+    Raises:
+        TypeError: If an input or return annotation is missing or unsupported,
+            a static binding parameter declares a default, or the traced return
+            value does not match its annotation.
 
     Example:
         ```python
@@ -622,7 +650,16 @@ def func_to_block(func: typing.Callable) -> Block:
 
         # Use resolved type hint instead of raw annotation
         param_type = type_hints.get(param.name, param.annotation)
-        input_types[param.name] = handle_type_map(param_type)
+        if is_static_binding_annotation(param_type):
+            if param.default is not inspect.Parameter.empty:
+                raise TypeError(
+                    f"Static binding parameter {param.name!r} cannot have a "
+                    "default value; provide it through bindings when building "
+                    "or transpiling the qkernel."
+                )
+            input_types[param.name] = param_type
+        else:
+            input_types[param.name] = handle_type_map(param_type)
 
     if signature.return_annotation is inspect.Signature.empty:
         raise TypeError("Return type must have a type annotation")
@@ -641,12 +678,20 @@ def func_to_block(func: typing.Callable) -> Block:
 
     # Create dummy inputs from resolved type hints (preserving Array types)
     # Use emit_init=False to avoid emitting QInitOperation for nested Block inputs
-    dummy_inputs = {
-        name: create_dummy_input(
-            type_hints.get(name, param.annotation), name, emit_init=False
-        )
-        for name, param in signature.parameters.items()
-    }
+    dummy_inputs: dict[str, typing.Any] = {}
+    static_proxies: list[StaticBindingProxy] = []
+    for name, param in signature.parameters.items():
+        param_type = type_hints.get(name, param.annotation)
+        if is_static_binding_annotation(param_type):
+            proxy = create_static_binding_proxy(param_type, name)
+            dummy_inputs[name] = proxy
+            static_proxies.append(proxy)
+        else:
+            dummy_inputs[name] = create_dummy_input(
+                param_type,
+                name,
+                emit_init=False,
+            )
 
     # Trace the function execution to collect operations ========
     tracer = Tracer()
@@ -667,8 +712,15 @@ def func_to_block(func: typing.Callable) -> Block:
     operations = tracer.operations
 
     # Extract the input Values from the dummy Handles
-    label_args = list(dummy_inputs.keys())
-    input_values: list[ValueLike] = [h.value for h in dummy_inputs.values()]
+    ordinary_input_names = [
+        name
+        for name, param in signature.parameters.items()
+        if not is_static_binding_annotation(type_hints.get(name, param.annotation))
+    ]
+    label_args = ordinary_input_names
+    input_values: list[ValueLike] = [
+        dummy_inputs[name].value for name in ordinary_input_names
+    ]
 
     # Extract return Values from result
     return_values: list[ValueLike] = []
@@ -711,4 +763,5 @@ def func_to_block(func: typing.Callable) -> Block:
         operations=operations,
         kind=BlockKind.HIERARCHICAL,
         param_slots=param_slots,
+        static_bindings=tuple(proxy.slot for proxy in static_proxies),
     )

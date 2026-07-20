@@ -31,13 +31,13 @@ from qamomile.circuit.frontend.handle.primitives import UInt
 from qamomile.circuit.frontend.qkernel_specialization import select_specialized_block
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.effect import format_kernel_effects
 from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
-from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.gate import ControlledUOperation, ResetOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import (
     Operation,
+    OperationKind,
     QInitOperation,
 )
 from qamomile.circuit.ir.operation.select import SelectOperation
@@ -262,6 +262,7 @@ def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
             the quantum input wires it received, or if its reachable body
             contains non-unitary behavior or internal ancilla allocation.
     """
+    seen_blocks: set[int] = set()
     for position, block in enumerate(case_blocks):
         quantum_inputs = [
             value for value in block.input_values if value.type.is_quantum()
@@ -288,20 +289,30 @@ def _validate_case_target_footprint(case_blocks: Sequence[Any]) -> None:
                 f"not valid selectable unitaries; use explicit gates such "
                 f"as qmc.swap for physical permutations."
             )
-        _validate_case_effects_and_allocations(block, position)
+        _validate_case_operations_are_unitary(block, position, seen_blocks)
 
 
-def _validate_case_effects_and_allocations(block: Block, position: int) -> None:
-    """Reject non-unitary effects and internal ancillas in a SELECT case.
+def _validate_case_operations_are_unitary(
+    block: Block,
+    position: int,
+    seen_blocks: set[int],
+) -> None:
+    """Reject non-unitary behavior and internal ancillas in a SELECT case.
 
-    Effect validation is a cached metadata lookup. Internal allocation still
-    needs a structural walk because allocation is unitary but a SELECT case has
-    no operation-owned ancilla ABI. Owned callable/control/inverse/select
-    bodies are checked recursively so boxing cannot hide an allocation.
+    Classical arithmetic and control-flow nodes are allowed because a
+    compile-time-resolvable branch may parameterize an otherwise unitary case;
+    the normal partial-evaluation pipeline lowers it before emission. Hybrid
+    operations and reset are intrinsically non-unitary and cannot appear in a
+    quantum multiplexer case. Internal allocation is also rejected because a
+    SELECT case has no operation-owned ancilla ABI. Operation-owned
+    callable/control/inverse/select bodies are checked recursively so boxing
+    cannot hide a violation.
 
     Args:
         block (Block): Case block to inspect recursively.
         position (int): Case index used in diagnostics.
+        seen_blocks (set[int]): Block identities already inspected during the
+            current SELECT validation.
 
     Returns:
         None: The function returns nothing when the case is unitary.
@@ -310,15 +321,6 @@ def _validate_case_effects_and_allocations(block: Block, position: int) -> None:
         ValueError: If a reachable operation is non-unitary or allocates an
             internal ancilla.
     """
-    if not block.effects.is_unitary:
-        raise ValueError(
-            f"qmc.select case {position} has non-unitary kernel effects "
-            f"[{format_kernel_effects(block.effects)}]; SELECT cases require "
-            "unitary kernels. Use explicit measurement/reset control flow "
-            "outside qmc.select instead."
-        )
-
-    seen_blocks: set[int] = set()
 
     def visit_block(candidate: Block) -> None:
         """Inspect one block once and recurse through owned bodies.
@@ -355,6 +357,14 @@ def _validate_case_effects_and_allocations(block: Block, position: int) -> None:
                 raise ValueError(
                     f"qmc.select case {position} contains internal "
                     f"QInitOperation; SELECT cases cannot allocate ancillas."
+                )
+            if operation.operation_kind is OperationKind.HYBRID or isinstance(
+                operation, ResetOperation
+            ):
+                raise ValueError(
+                    f"qmc.select case {position} contains non-unitary "
+                    f"{type(operation).__name__}; SELECT cases may contain "
+                    f"only unitary quantum behavior."
                 )
             if isinstance(operation, HasNestedOps):
                 for nested in operation.nested_op_lists():

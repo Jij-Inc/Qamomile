@@ -111,7 +111,11 @@ def test_shor_rejects_invalid_problem_instances(
 
 
 def test_small_shor_order_finding_recovers_period_two(sdk_transpiler) -> None:
-    """The simulatable two-bit instance recovers the period-two peaks."""
+    """The simulatable two-bit instance recovers the period-two peaks.
+
+    Order finding is sample-only by design: its mid-circuit measurements are
+    the algorithm output, so an expectation-value execution path is invalid.
+    """
     if sdk_transpiler.backend_name == "quri_parts":
         pytest.skip("QURI Parts cannot represent Shor's mid-circuit reset")
 
@@ -166,7 +170,11 @@ def test_ekera_hastad_uses_two_short_exponent_registers() -> None:
 
 
 def test_small_ekera_hastad_schedule_executes(sdk_transpiler) -> None:
-    """The 2 mod 3 short-DLP schedule executes with phase-qubit reuse."""
+    """The 2 mod 3 short-DLP schedule executes with phase-qubit reuse.
+
+    The schedule is sample-only because its measurement record is the
+    factoring output; expectation-value execution is intentionally rejected.
+    """
     if sdk_transpiler.backend_name == "quri_parts":
         pytest.skip("QURI Parts cannot represent Ekerå–Håstad's mid-circuit reset")
 

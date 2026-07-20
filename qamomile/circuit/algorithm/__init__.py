@@ -1,9 +1,5 @@
 """Algorithm building blocks for quantum circuits."""
 
-from .arithmetic import (
-    modular_decrement,
-    modular_increment,
-)
 from .basic import (
     cx_entangling_layer,
     cz_entangling_layer,
@@ -35,9 +31,7 @@ from .shor import ekera_hastad_factoring, shor_order_finding
 from .trotter import trotterized_time_evolution
 
 __all__ = [
-    # Arithmetic
-    "modular_increment",
-    "modular_decrement",
+    # Factoring
     "shor_order_finding",
     "ekera_hastad_factoring",
     # QAOA
