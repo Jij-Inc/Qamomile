@@ -19,7 +19,7 @@
 #
 # # Introduction to the Quantum Fourier Transform (QFT)
 #
-# The Quantum Fourier Transform (QFT) is the quantum version of the discrete Fourier transform. It is an important subroutine in quantum phase estimation, order finding, and related algorithms that use phases encoded in quantum amplitudes {cite:p}`10.48550/arXiv.quant-ph/0201067`.
+# The Quantum Fourier Transform (QFT) is the quantum version of the discrete Fourier transform. It is an important subroutine in quantum phase estimation, Shor's algorithm {cite:p}`10.1109/SFCS.1994.365700`, and related algorithms that use phases encoded in quantum amplitudes {cite:p}`10.48550/arXiv.quant-ph/0201067`.
 #
 # This notebook starts with the classical Fourier transform, explains the QFT circuit, and implements a four-qubit frequency-estimation example. You will draw the circuit, run it on a local Qiskit simulator, estimate the dominant frequency from a histogram, and check the computational complexity scaling.
 
@@ -52,19 +52,21 @@ transpiler = QiskitTranspiler()
 # \qquad k = 0, 1, \ldots, N-1.
 # $$
 #
-# The output index $k$ labels a frequency. The phase factor $e^{2\pi i jk / N}$ makes each input position contribute with a different phase.
+# The output index $k$ labels a frequency component. The angular frequency corresponding to this index is $2\pi k/N$, and the phase factor $e^{2\pi i jk / N}$ makes each input position contribute with a different phase.
 
 # %% [markdown]
 # ## Algorithm
 #
-# QFT applies the same transform to the amplitudes of a quantum state. If $N = 2^n$, its action on a basis state $\lvert x\rangle$ is
+# QFT applies the same transform as DFT to the amplitudes of a quantum state. If $N = 2^n$, its action on the computational basis state $\lvert x\rangle$ corresponding to an integer $x$ is
 #
 # $$
 # \mathrm{QFT}_N \lvert x \rangle =
 # \frac{1}{\sqrt{N}}\sum_{k=0}^{N-1} e^{2\pi i xk/N}\lvert k \rangle.
 # $$
 #
-# The key difference from a classical DFT is what we can read out. A classical DFT returns the full output vector. QFT changes the amplitudes of a quantum state, and a measurement returns only samples. Later quantum operations can still use the phase information, as in phase estimation.
+# For a general quantum state $\lvert\psi\rangle = \sum_{j=0}^{N-1} a_j\lvert j\rangle$, QFT returns the state obtained by linearly combining the action on each computational basis state $\lvert j\rangle$.
+#
+# The key difference from a classical DFT is what we can read out. A classical DFT returns the full output vector. QFT transforms the amplitudes of a quantum state and returns the transformed quantum state. A measurement immediately after QFT returns only samples. Later quantum operations can still use the phase information, as in phase estimation.
 #
 # The standard QFT circuit uses Hadamard gates, controlled phase rotations, and final swaps. For an $n$-qubit register, the exact circuit uses $O(n^2)$ gates, much fewer than applying a dense $2^n \times 2^n$ matrix directly. It is useful to write the phases as binary fractions:
 #
@@ -81,6 +83,8 @@ transpiler = QiskitTranspiler()
 # ### Step 1: Select one target qubit
 #
 # Work across the register one target qubit at a time. On the last qubit, a Hadamard gate creates the first factor in the QFT output:
+#
+# If $x_n=0$, then $H\lvert0\rangle = (\lvert0\rangle + \lvert1\rangle)/\sqrt{2}$. If $x_n=1$, then $H\lvert1\rangle = (\lvert0\rangle - \lvert1\rangle)/\sqrt{2}$, which can be written in the same form using $e^{2\pi i[0.1]} = e^{\pi i} = -1$.
 #
 # $$
 # \lvert x_n\rangle
@@ -159,24 +163,26 @@ transpiler = QiskitTranspiler()
 #
 # ### Problem Example
 #
-# We use $N=16$ samples, so four qubits are enough. In this example, $n=4$, $N=16$, $\omega = e^{2\pi i/16}$, and
-#
-# $$
-# F_{16}\lvert x \rangle =
-# \frac{1}{\sqrt{16}}\sum_{k=0}^{15}\omega^{xk}\lvert k\rangle.
-# $$
-#
-# We prepare a quantum state whose amplitude at basis index $j$ is $s_j$:
+# We use $N=16$ samples, so four qubits are enough. In this example, we prepare a quantum state whose amplitude for the computational basis state $\lvert j\rangle$ is $s_j$. Here, $n=4$, $N=16$, and $\omega = e^{2\pi i/16}$.
 #
 # $$
 # \lvert \psi_f\rangle =
 # \sum_{j=0}^{N-1} s_j \lvert j\rangle,
 # \qquad
-# s_j = \frac{1}{\sqrt{N}} e^{-2\pi i f j/N},
+# s_j = \frac{1}{\sqrt{N}} e^{-2\pi i f j/N}
+# = \frac{1}{\sqrt{N}}\omega^{-fj},
 # \qquad f=5,\quad j=0,1,\ldots,N-1.
 # $$
 #
-# In other words, the values of $e^{-2\pi i f j/N}$ are placed in the amplitudes of $\lvert \psi_f\rangle$, with the normalization factor $1/\sqrt{N}$. Applying QFT moves this frequency into the output amplitudes. With the DFT convention above, the output should be concentrated at frequency index $k=5$.
+# In other words, the values of $e^{-2\pi i f j/N}$ are placed in the amplitudes of $\lvert \psi_f\rangle$, with the normalization factor $1/\sqrt{N}$. Applying QFT sums the contributions from each computational basis state $\lvert j\rangle$, leaving only the frequency index $f$.
+#
+# $$
+# \mathrm{QFT}_{n=4}\lvert \psi_f \rangle =
+# \frac{1}{16}\sum_{j=0}^{15}\sum_{k=0}^{15}\omega^{j(k-f)}\lvert k\rangle
+# = \lvert f\rangle.
+# $$
+#
+# Therefore, when $f=5$, the output should be concentrated at frequency index $k=5$.
 
 # %%
 num_qubits = 4
@@ -245,11 +251,12 @@ for outcome, count in result.results:
     probabilities[frequency_index] = count / shots
 
 fig, ax = plt.subplots(figsize=(7, 3))
-ax.bar(range(dimension), probabilities)
+ax.bar(range(dimension), probabilities, color="#2696EB")
 ax.set_xlabel("frequency index")
 ax.set_ylabel("probability")
 ax.set_xticks(range(dimension))
 ax.set_ylim(0, 1.05)
+ax.grid(axis="y", alpha=0.3)
 plt.show()
 
 estimated_frequency = int(np.argmax(probabilities))
@@ -275,50 +282,90 @@ assert all(
 #
 # Therefore the total gate count is $n + \frac{n(n - 1)}{2} + \left\lfloor n / 2 \right\rfloor$, so it scales as $O(n^2)$.
 #
-# Now let's check this with Qamomile's resource estimation feature.
-# In Qamomile, you can call `estimate_resources()` on a symbolic qkernel whose qubit count is not bound. This lets you check the scaling as an expression in the number of qubits.
+# Now let's use Qamomile's resource estimation feature to check the gate count of the QFT circuit.
 
 # %%
-@qmc.qkernel
-def qft_scaling(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-    q = qmc.qubit_array(n, name="q")
+# Build a qkernel that applies only QFT to an n-qubit register.
+def make_qft_resource_kernel(n: int) -> qmc.QKernel:
+    @qmc.qkernel
+    def qft_resource_kernel() -> qmc.Vector[qmc.Qubit]:
+        q = qmc.qubit_array(n, name="q")
+        q = qft(q)
+        return q
 
-    for j in qmc.range(n - 1, -1, -1):
-        q[j] = qmc.h(q[j])
-
-        for k in qmc.range(j - 1, -1, -1):
-            angle = math.pi / (2 ** (j - k))
-            q[j], q[k] = qmc.cp(q[j], q[k], angle)
-
-    for j in qmc.range(n // 2):
-        q[j], q[n - j - 1] = qmc.swap(q[j], q[n - j - 1])
-
-    return q
+    return qft_resource_kernel
 
 
 # %%
-symbolic_estimate = qft_scaling.estimate_resources().simplify()
-print("qubits:", symbolic_estimate.qubits)
-print("total gates:", symbolic_estimate.gates.total)
-print("single-qubit gates:", symbolic_estimate.gates.single_qubit)
-print("two-qubit gates:", symbolic_estimate.gates.two_qubit)
-print("rotation gates:", symbolic_estimate.gates.rotation_gates)
-print("Clifford gates:", symbolic_estimate.gates.clifford_gates)
+estimate_4 = make_qft_resource_kernel(4).estimate_resources().simplify()
+print("qubits:", estimate_4.qubits)
+print("total gates:", estimate_4.gates.total)
+print("single-qubit gates:", estimate_4.gates.single_qubit)
+print("two-qubit gates:", estimate_4.gates.two_qubit)
+print("rotation gates:", estimate_4.gates.rotation_gates)
+print("Clifford gates:", estimate_4.gates.clifford_gates)
 
-assert "n" in str(symbolic_estimate.gates.total)
-assert "j" not in str(symbolic_estimate.gates.total)
-assert "k" not in str(symbolic_estimate.gates.total)
-
-estimate_8 = symbolic_estimate.substitute(n=8)
-assert estimate_8.qubits == 8
-assert estimate_8.gates.total == 40
-assert estimate_8.gates.single_qubit == 8
-assert estimate_8.gates.two_qubit == 32
-assert estimate_8.gates.rotation_gates == 28
-assert estimate_8.gates.clifford_gates == 12
+assert estimate_4.qubits == 4
+assert estimate_4.gates.total == 12
+assert estimate_4.gates.single_qubit == 4
+assert estimate_4.gates.two_qubit == 8
+assert estimate_4.gates.rotation_gates == 6
+assert estimate_4.gates.clifford_gates == 6
 
 # %% [markdown]
 # A direct classical DFT on a length-$N$ vector uses $O(N^2)$ arithmetic operations, and the fast Fourier transform (FFT) uses $O(N\log N)$. If $N = 2^n$, the exact QFT circuit uses $O(n^2)=O((\log N)^2)$ gates. Compared with the direct classical DFT, this is exponentially smaller in $N$. The caveat is important: measuring the state does not give all $N$ Fourier coefficients. QFT is useful when later quantum steps can use the transformed amplitudes without reading out the whole vector.
+
+# %%
+qft_qubit_counts = np.arange(3, 10)
+qft_total_gates = []
+
+for n in qft_qubit_counts:
+    estimate_n = make_qft_resource_kernel(int(n)).estimate_resources().simplify()
+    qft_total_gates.append(int(estimate_n.gates.total))
+
+quadratic_reference = qft_qubit_counts**2
+quadratic_reference = quadratic_reference / quadratic_reference[0] * qft_total_gates[0]
+
+dimension_counts = 2**qft_qubit_counts
+nlogn_reference = dimension_counts * qft_qubit_counts
+nlogn_reference = nlogn_reference / nlogn_reference[0] * qft_total_gates[0]
+
+fig, ax = plt.subplots(figsize=(7, 3))
+ax.plot(
+    qft_qubit_counts,
+    qft_total_gates,
+    marker="o",
+    color="#2696EB",
+    label="QFT gate count",
+)
+ax.plot(
+    qft_qubit_counts,
+    quadratic_reference,
+    linestyle="--",
+    color="#FF6B6B",
+    label=r"theory: QFT $O(n^2)$",
+)
+ax.plot(
+    qft_qubit_counts,
+    nlogn_reference,
+    linestyle="--",
+    color="#4ECDC4",
+    label=r"theory: DFT $O(N\log N)$",
+)
+ax.set_xlabel("number of qubits")
+ax.set_ylabel("total gates")
+ax.set_yscale("log")
+ax.set_xticks(qft_qubit_counts)
+ax.grid(alpha=0.3)
+ax.legend()
+plt.show()
+
+expected_total_gates = [
+    n + n * (n - 1) // 2 + n // 2 for n in qft_qubit_counts
+]
+assert qft_total_gates == expected_total_gates
+assert len(quadratic_reference) == len(qft_total_gates)
+assert len(nlogn_reference) == len(qft_total_gates)
 
 # %% [markdown]
 # ## Summary
