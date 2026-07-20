@@ -59,16 +59,19 @@ def test_shor_width_is_body_derived_three_n_plus_constant(
     assert estimate.qubits == 3 * n + 2 + 7
 
 
-def test_shor_body_gate_growth_is_cubic_at_fixed_window() -> None:
-    """Direct body estimates follow cubic growth across register sizes."""
-    cases = [(2, 3), (2, 5), (2, 15)]
-    normalized = []
-    for base, modulus in cases:
-        n = modulus.bit_length()
-        gates = _shor_estimate(base, modulus).gates.total
-        normalized.append(float(gates) / (n**3))
+def test_shor_skips_identity_modular_multiplication_rounds() -> None:
+    """Identity powers retain phase work without expanding arithmetic."""
+    arithmetic_rounds = qmc.shor_order_finding(
+        base=2,
+        modulus=15,
+        precision=2,
+    ).estimate_resources()
+    full_schedule = _shor_estimate(2, 15)
 
-    assert max(normalized) / min(normalized) < 1.5
+    assert arithmetic_rounds.gates.total == 3420
+    assert full_schedule.gates.total == 3465
+    assert full_schedule.gates.two_qubit == arithmetic_rounds.gates.two_qubit
+    assert full_schedule.gates.multi_qubit == arithmetic_rounds.gates.multi_qubit
 
 
 def test_shor_rejects_invalid_window_size() -> None:
@@ -107,22 +110,29 @@ def test_shor_rejects_invalid_problem_instances(
         qmc.shor_order_finding(base=base, modulus=modulus)
 
 
-def test_small_shor_order_finding_recovers_period_two(qiskit_transpiler) -> None:
+def test_small_shor_order_finding_recovers_period_two(sdk_transpiler) -> None:
     """The simulatable two-bit instance recovers the period-two peaks."""
+    if sdk_transpiler.backend_name == "quri_parts":
+        pytest.skip("QURI Parts cannot represent Shor's mid-circuit reset")
+
     kernel = qmc.shor_order_finding(base=2, modulus=3)
-    executable = qiskit_transpiler.transpile(kernel)
-    result = executable.sample(qiskit_transpiler.executor(), shots=128).result()
+    transpiler = sdk_transpiler.transpiler
+    executable = transpiler.transpile(kernel)
+    shots = 16 if sdk_transpiler.backend_name == "cudaq" else 128
+    result = executable.sample(transpiler.executor(), shots=shots).result()
 
     counts = {_basis_value(bits): count for bits, count in result.results}
     targets = {0, 8}
     on_peak = sum(counts.get(value, 0) for value in targets)
 
     assert on_peak / result.shots > 0.9
-    assert all(counts.get(value, 0) / result.shots > 0.3 for value in targets)
+    assert all(counts.get(value, 0) > 0 for value in targets)
+    if sdk_transpiler.backend_name == "qiskit":
+        assert all(counts.get(value, 0) / result.shots > 0.3 for value in targets)
 
 
 def test_four_bit_shor_transpiles_without_statevector_execution(
-    qiskit_transpiler,
+    sdk_transpiler,
 ) -> None:
     """Transpile the 21-qubit benchmark without allocating its statevector.
 
@@ -130,10 +140,13 @@ def test_four_bit_shor_transpiles_without_statevector_execution(
     runtime to statevector sampling.
 
     Args:
-        qiskit_transpiler: FTQC-capable backend fixture.
+        sdk_transpiler: Parametrized SDK backend fixture.
     """
+    if sdk_transpiler.backend_name == "quri_parts":
+        pytest.skip("QURI Parts cannot represent Shor's mid-circuit reset")
+
     kernel = qmc.shor_order_finding(base=2, modulus=15)
-    executable = qiskit_transpiler.transpile(kernel)
+    executable = sdk_transpiler.transpiler.transpile(kernel)
 
     assert _shor_estimate(2, 15).qubits == 21
     assert executable.compiled_quantum

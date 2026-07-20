@@ -863,6 +863,28 @@ def test_unresolved_uint_and_bit_fallbacks_are_nonnegative() -> None:
     assert bit_symbol.is_nonnegative is True
 
 
+def test_expr_resolver_indexes_every_operation_result() -> None:
+    """Producer lookup uses UUIDs and includes non-leading results."""
+    from qamomile.circuit.estimator._resolver import ExprResolver
+    from qamomile.circuit.ir.block import Block
+    from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+    from qamomile.circuit.ir.types.primitives import UIntType
+    from qamomile.circuit.ir.value import Value
+
+    left = Value(type=UIntType(), name="left").with_const(2)
+    right = Value(type=UIntType(), name="right").with_const(3)
+    first = Value(type=UIntType(), name="first")
+    second = Value(type=UIntType(), name="second")
+    operation = BinOp(
+        operands=[left, right],
+        results=[first, second],
+        kind=BinOpKind.ADD,
+    )
+    resolver = ExprResolver(Block(name="multiple_results", operations=[operation]))
+
+    assert resolver.resolve(second) == 5
+
+
 def test_controlled_composite_body_counts_own_control() -> None:
     """A controlled body-backed composite reclassifies its primitives as controlled.
 

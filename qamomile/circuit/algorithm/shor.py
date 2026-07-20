@@ -90,38 +90,39 @@ def _iterative_modular_phase_bits(
     """
     measured_bits: list[qmc.Bit] = []
     for round_index, multiplier in enumerate(multipliers):
-        inverse_multiplier = pow(multiplier, -1, modulus)
         phase = qmc.h(phase)
-        (
-            phase,
-            work,
-            accumulator,
-            lookup,
-            address,
-            carry,
-            vent,
-            overflow,
-            flag,
-            domain,
-            enable,
-        ) = _modmul_const_body(
-            phase,
-            work,
-            accumulator,
-            lookup,
-            address,
-            carry,
-            vent,
-            overflow,
-            flag,
-            domain,
-            enable,
-            qmc.uint(multiplier),
-            qmc.uint(inverse_multiplier),
-            qmc.uint(modulus),
-            register_size,
-            window_size,
-        )
+        if multiplier != 1:
+            inverse_multiplier = pow(multiplier, -1, modulus)
+            (
+                phase,
+                work,
+                accumulator,
+                lookup,
+                address,
+                carry,
+                vent,
+                overflow,
+                flag,
+                domain,
+                enable,
+            ) = _modmul_const_body(
+                phase,
+                work,
+                accumulator,
+                lookup,
+                address,
+                carry,
+                vent,
+                overflow,
+                flag,
+                domain,
+                enable,
+                qmc.uint(multiplier),
+                qmc.uint(inverse_multiplier),
+                qmc.uint(modulus),
+                register_size,
+                window_size,
+            )
         phase = _apply_semiclassical_iqft_feedback(
             phase,
             measured_bits,

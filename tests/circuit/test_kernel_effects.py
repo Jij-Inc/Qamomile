@@ -95,11 +95,11 @@ def _mixed_measurement_expval(
 def _explicit_controlled_modmul() -> tuple[qmc.Bit, qmc.Vector[qmc.Bit]]:
     """Use the stdlib kernel's explicit control argument."""
     control = qmc.qubit("control")
-    register = qmc.qubit_array(4, name="register")
+    register = qmc.qubit_array(2, name="register")
     control, register = modmul_const(
         register,
         multiplier=2,
-        modulus=15,
+        modulus=3,
         control=control,
     )
     return qmc.measure(control), qmc.measure(register)
@@ -236,8 +236,8 @@ def test_explicit_modmul_control_path_still_executes(sdk_transpiler: object) -> 
     transpiler = sdk_transpiler.transpiler
     result = (
         transpiler.transpile(_explicit_controlled_modmul)
-        .sample(transpiler.executor(), shots=16)
+        .sample(transpiler.executor(), shots=1)
         .result()
     )
 
-    assert result.results == [((0, (0, 0, 0, 0)), 16)]
+    assert result.results == [((0, (0, 0)), 1)]

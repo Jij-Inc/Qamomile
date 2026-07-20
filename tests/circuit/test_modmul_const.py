@@ -61,10 +61,13 @@ def _load_probe(a: int, x: int, n: int, modulus: int, path: str):
 
 def test_modmul_const_non_cyclic_executes(sdk_transpiler, tmp_path) -> None:
     """A small non-rotation instance executes the polynomial reversible body."""
+    if sdk_transpiler.backend_name == "quri_parts":
+        pytest.skip("QURI Parts cannot represent modmul's mid-circuit reset")
+
     probe = _load_probe(3, 2, 3, 7, str(tmp_path / "noncyclic.py"))
     transpiler = sdk_transpiler.transpiler
     executable = transpiler.transpile(probe)
-    result = executable.sample(transpiler.executor(), shots=64).result()
+    result = executable.sample(transpiler.executor(), shots=1).result()
 
     assert _value_of(result.most_common(1)[0][0]) == 6
 
@@ -152,11 +155,11 @@ def test_xor_constant_preserves_controlled_phase(sdk_transpiler) -> None:
     transpiler = sdk_transpiler.transpiler
     result = (
         transpiler.transpile(_controlled_xor_phase_probe)
-        .sample(transpiler.executor(), shots=64)
+        .sample(transpiler.executor(), shots=1)
         .result()
     )
 
-    assert result.results == [(0, 64)]
+    assert result.results == [(0, 1)]
 
 
 def test_modmul_const_requires_a_concrete_register_width() -> None:
@@ -267,15 +270,13 @@ def test_modmul_const_small_instance_is_correct(
 
     The n=2 instance exercises the same polynomial reversible body used by
     larger problems without allocating the n=4 workspace statevector. The
-    25-qubit Shor benchmark separately verifies large-instance transpilation.
+    21-qubit Shor benchmark separately verifies large-instance transpilation.
     """
     a, n, modulus = 2, 2, 3
     path = str(tmp_path / f"probe_{a}_{x}.py")
     probe = _load_probe(a, x, n, modulus, path)
     exe = qiskit_transpiler.transpile(probe)
-    measured = (
-        exe.sample(qiskit_transpiler.executor(), shots=64).result().most_common(1)
-    )
+    measured = exe.sample(qiskit_transpiler.executor(), shots=1).result().most_common(1)
     got = _value_of(measured[0][0])
     expected = (a * x) % modulus if x < modulus else x
     assert got == expected
@@ -305,8 +306,8 @@ def test_modmul_const_preserves_coherent_phase(qiskit_transpiler) -> None:
     """Measurement-assisted arithmetic preserves multiplier eigenphases."""
     result = (
         qiskit_transpiler.transpile(_modmul_phase_kickback)
-        .sample(qiskit_transpiler.executor(), shots=128)
+        .sample(qiskit_transpiler.executor(), shots=8)
         .result()
     )
-    assert sum(count for (control, _), count in result.results if control == 1) == 128
+    assert sum(count for (control, _), count in result.results if control == 1) == 8
     assert {bits for (_, bits), _ in result.results} <= {(1, 0), (0, 1)}

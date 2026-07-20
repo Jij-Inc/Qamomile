@@ -615,6 +615,10 @@ def _reject_stale_while_condition_reads(
             while — directly, through a lazy expression, or through a
             pruned-merge alias — is read after the condition update.
     """
+    flat_operations = flatten_ops(pruned.operations)
+    if not any(isinstance(operation, WhileOperation) for operation in flat_operations):
+        return
+
     dependency_graph = build_dependency_graph(pruned.operations)
     value_table: dict[str, ValueBase] = {}
 
@@ -641,7 +645,6 @@ def _reject_stale_while_condition_reads(
             if isinstance(item, ValueBase):
                 register_value(item)
 
-    flat_operations = flatten_ops(pruned.operations)
     for operation in flat_operations:
         for value in (*operation.all_input_values(), *operation.results):
             register_value(value)
@@ -2070,8 +2073,9 @@ def _collect_loop_external_liveness(
 
     Returns:
         tuple[dict[int, set[str]], dict[int, set[str]]]: Same-path live-after
-            UUIDs keyed first by loop identity and then by every operation
-            identity.
+            UUIDs keyed first by loop identity and then by operation identity.
+            Per-operation entries are recorded only inside while bodies, where
+            stale-condition validation consumes them.
     """
     live_after_loop: dict[int, set[str]] = {}
     live_after_operation: dict[int, set[str]] = {}
@@ -2085,19 +2089,29 @@ def _collect_loop_external_liveness(
         """
         _add_uuid_with_ancestry(value, live)
 
-    def walk_scope(scope: list[Operation], inherited: set[str]) -> set[str]:
+    def walk_scope(
+        scope: list[Operation],
+        inherited: set[str],
+        *,
+        record_operation_liveness: bool = False,
+    ) -> set[str]:
         """Walk one sequential scope backwards.
 
         Args:
             scope (list[Operation]): Operations in execution order.
             inherited (set[str]): Values live after the scope returns.
+            record_operation_liveness (bool): Whether to retain a live-after
+                snapshot for each operation in this scope. This is enabled
+                only for while bodies, whose stale-condition validation needs
+                those snapshots. Defaults to ``False``.
 
         Returns:
             set[str]: Values live before entering the scope.
         """
         live = set(inherited)
         for operation in reversed(scope):
-            live_after_operation[id(operation)] = set(live)
+            if record_operation_liveness:
+                live_after_operation[id(operation)] = set(live)
             if isinstance(operation, IfOperation):
                 result_uuids = {result.uuid for result in operation.results}
                 true_live = live - result_uuids
@@ -2107,8 +2121,16 @@ def _collect_loop_external_liveness(
                         continue
                     add_value(true_live, merge.true_value)
                     add_value(false_live, merge.false_value)
-                true_before = walk_scope(operation.true_operations, true_live)
-                false_before = walk_scope(operation.false_operations, false_live)
+                true_before = walk_scope(
+                    operation.true_operations,
+                    true_live,
+                    record_operation_liveness=record_operation_liveness,
+                )
+                false_before = walk_scope(
+                    operation.false_operations,
+                    false_live,
+                    record_operation_liveness=record_operation_liveness,
+                )
                 live.difference_update(result_uuids)
                 live.update(true_before)
                 live.update(false_before)
@@ -2133,7 +2155,16 @@ def _collect_loop_external_liveness(
 
                 body_before: set[str] = set()
                 for body in operation.nested_op_lists():
-                    body_before.update(walk_scope(body, body_live))
+                    body_before.update(
+                        walk_scope(
+                            body,
+                            body_live,
+                            record_operation_liveness=(
+                                record_operation_liveness
+                                or isinstance(operation, WhileOperation)
+                            ),
+                        )
+                    )
 
                 internal_uuids = set(result_uuids)
                 for region_arg in operation.region_args:
@@ -2165,7 +2196,13 @@ def _collect_loop_external_liveness(
             if isinstance(operation, HasNestedOps):
                 nested_before: set[str] = set()
                 for body in operation.nested_op_lists():
-                    nested_before.update(walk_scope(body, live))
+                    nested_before.update(
+                        walk_scope(
+                            body,
+                            live,
+                            record_operation_liveness=record_operation_liveness,
+                        )
+                    )
                 live.update(nested_before)
 
             result_uuids = {result.uuid for result in operation.results}
