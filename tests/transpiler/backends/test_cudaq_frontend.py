@@ -35,7 +35,11 @@ from qamomile.circuit.algorithm.qaoa import (  # noqa: E402
     qaoa_state,
     x_mixer,
 )
-from qamomile.circuit.transpiler.errors import DependencyError, EmitError  # noqa: E402
+from qamomile.circuit.transpiler.errors import (  # noqa: E402
+    DependencyError,
+    EmitError,
+    QamomileCompileError,
+)
 from tests.transpiler.gate_test_specs import (  # noqa: E402
     GATE_SPECS,
     all_zeros_state,
@@ -1262,6 +1266,24 @@ class TestExpvalCudaqPipeline:
         result = exe.run(transpiler.executor()).result()
         assert np.isclose(result, 1.0, atol=0.15)
 
+    def test_expval_accepts_complex_typed_real_coefficients(self):
+        """Hermitian complex-typed coefficients normalize to CUDA-Q floats."""
+
+        @qmc.qkernel
+        def circuit(H: qmc.Observable) -> qmc.Float:
+            q = qmc.qubit("q")
+            return qmc.expval((q,), H)
+
+        hamiltonian = complex(1.0, 0.0) * qm_o.Z(0)
+        transpiler = CudaqTranspiler()
+        result = (
+            transpiler.transpile(circuit, bindings={"H": hamiltonian})
+            .run(transpiler.executor())
+            .result()
+        )
+
+        assert np.isclose(result, 1.0, atol=1e-8)
+
     def test_expval_missing_observable_raises(self):
         """Transpilation without Observable binding raises RuntimeError."""
 
@@ -1311,6 +1333,63 @@ class TestExpvalStaticOnlyCudaq:
         executor = transpiler.executor()
         value = executor.estimate(artifact, H_label, params=[angle])
         assert np.isclose(value, np.cos(angle), atol=1e-6)
+
+    def test_estimate_positional_parameters_follow_declared_order(self):
+        """CUDA-Q positional estimation uses the qkernel declaration ABI."""
+
+        @qmc.qkernel
+        def circuit(
+            alpha: qmc.Float,
+            beta: qmc.Float,
+            H: qmc.Observable,
+        ) -> qmc.Float:
+            q = qmc.qubit("q")
+            q = qmc.rx(q, beta)
+            q = qmc.ry(q, alpha)
+            return qmc.expval((q,), H)
+
+        hamiltonian = qm_o.X(0)
+        transpiler = CudaqTranspiler()
+        executable = transpiler.transpile(
+            circuit,
+            bindings={"H": hamiltonian},
+            parameters=["alpha", "beta"],
+        )
+        artifact = executable.get_first_circuit()
+
+        value = transpiler.executor().estimate(
+            artifact,
+            hamiltonian,
+            params=[np.pi / 2, 0.0],
+        )
+
+        assert np.isclose(value, 1.0, atol=1e-6)
+
+    def test_bound_estimate_rejects_second_parameter_sequence(self):
+        """An already-bound CUDA-Q artifact cannot silently ignore params."""
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float, H: qmc.Observable) -> qmc.Float:
+            q = qmc.rx(qmc.qubit("q"), theta)
+            return qmc.expval((q,), H)
+
+        hamiltonian = qm_o.Z(0)
+        transpiler = CudaqTranspiler()
+        executable = transpiler.transpile(
+            circuit,
+            bindings={"H": hamiltonian},
+            parameters=["theta"],
+        )
+        executor = transpiler.executor()
+        artifact = executable.get_first_circuit()
+        bound = executor.bind_parameters(
+            artifact,
+            {"theta": 0.2},
+            executable.compiled_quantum[0].parameter_metadata,
+        )
+
+        with pytest.raises(ValueError, match="already fixed"):
+            executor.estimate(bound, hamiltonian, params=[0.7])
 
     @pytest.mark.parametrize("seed", [0, 1, 7])
     def test_static_kernel_estimate_random_observable(self, seed):
@@ -2144,9 +2223,9 @@ class TestCIfControlFlow:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         exe, circuit = _transpile_and_get_circuit(circuit_with_while)
@@ -2210,9 +2289,9 @@ class TestCIfControlFlow:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = CudaqTranspiler()
@@ -2288,10 +2367,10 @@ class TestLogicalClbitReturnContract:
         assert "return [__b" in circuit.source
 
     def test_runnable_source_initializes_clbits(self) -> None:
-        """RUNNABLE source must initialize __b{i} = False for all clbits."""
+        """RUNNABLE source must initialize mutable clbit cells."""
         _, circuit = _transpile_and_get_circuit(_c_if_basic)
         for i in range(circuit.num_clbits):
-            assert f"__b{i} = False" in circuit.source
+            assert f"__b{i} = [False]" in circuit.source
 
     def test_runnable_measurement_qubit_map_empty(self) -> None:
         """RUNNABLE segments must not populate measurement_qubit_map."""
@@ -2299,6 +2378,24 @@ class TestLogicalClbitReturnContract:
         assert circuit.execution_mode == ExecutionMode.RUNNABLE
         meas_map = exe.compiled_quantum[0].measurement_qubit_map
         assert meas_map == {}
+
+    def test_project_result_is_captured_before_later_gate(self) -> None:
+        """A project bit records its mid-circuit value, not final state."""
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            q = qmc.x(qmc.qubit("q"))
+            q, projected = qmc.project_z(q)
+            q = qmc.x(q)
+            return projected
+
+        transpiler = CudaqTranspiler()
+        executable = transpiler.transpile(circuit)
+        artifact = executable.compiled_quantum[0].circuit
+
+        assert artifact.execution_mode == ExecutionMode.RUNNABLE
+        result = executable.sample(transpiler.executor(), shots=32).result()
+        assert result.results == [(1, 32)]
 
     def test_if_else_different_qubit_sources(self) -> None:
         """Same logical bit from different qubits in if/else branches."""
@@ -2601,12 +2698,12 @@ class TestControlledHelperCudaq:
 
 
 # ============================================================================
-# Compile-time constant if with array quantum phi output
+# Compile-time constant if with array quantum merge output
 # ============================================================================
 
 
-class TestCompileTimeIfArrayQuantumPhi:
-    """Compile-time constant if with array quantum phi must not raise EmitError."""
+class TestCompileTimeIfArrayQuantumMerge:
+    """Compile-time constant if with array quantum merge must not raise EmitError."""
 
     def test_dead_branch_different_array(self):
         """Dead branch rebinds qubit array to a different array."""
@@ -2720,12 +2817,10 @@ class TestCudaqHelperKernelSemanticsContract:
         sv = _run_statevector(qc)
         expected = computational_basis_state(4, 0b1111)
         assert statevectors_equal(sv, expected)
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit, t1: cudaq.qubit):",
-            "x(t0)",
-            "x(t1)",
-            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2], q[3])",
+        assert "x(q0)" in qc.source
+        assert "x(q1)" in qc.source
+        assert (
+            "cudaq.control(_qamomile_U_0, [q[0], q[1]], q[2], q[3])" in qc.entry_source
         )
 
     def test_existing_ccx_happy_path_regression(self):
@@ -3420,7 +3515,7 @@ class TestAlgorithmQAOAModules:
         assert sum(count for _, count in result.results) == 200
 
 
-class TestCompileTimeIfPhiPropagation:
+class TestCompileTimeIfMergePropagation:
     """Compile-time if lowering should preserve selected classical values."""
 
     def test_direct_classical_if_after_qinit_flag_true(self):
@@ -3550,7 +3645,7 @@ class TestCompileTimeIfPhiPropagation:
         assert {value for value, _ in sample.results} == {1}
         assert statevectors_equal(sv, expected)
 
-    def test_bit_vector_phi_merge_flag_true(self):
+    def test_bit_vector_merge_flag_true(self):
         """Branch-local Vector[Bit] values merge correctly for the true branch."""
         flag = True
 
@@ -3578,7 +3673,7 @@ class TestCompileTimeIfPhiPropagation:
         result = exe.sample(transpiler.executor(), shots=32).result()
         assert {value for value, _ in result.results} == {(1, 0)}
 
-    def test_bit_vector_phi_merge_flag_false(self):
+    def test_bit_vector_merge_flag_false(self):
         """Branch-local Vector[Bit] values merge correctly for the false branch."""
         flag = False
 
@@ -3663,64 +3758,52 @@ class TestDirectCastMeasure:
 # ============================================================================
 
 
+@qmc.composite_gate(name="bell_pair")
+def _custom_bell_pair(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Prepare a Bell pair through the public composite API.
+
+    Args:
+        q0 (qmc.Qubit): Control qubit.
+        q1 (qmc.Qubit): Target qubit.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Updated Bell-pair qubits.
+    """
+    q0 = qmc.h(q0)
+    return qmc.cx(q0, q1)
+
+
 class TestCustomCompositeGate:
-    """Custom CompositeGate decomposition should work on CUDA-Q."""
+    """Custom composite decomposition should work on CUDA-Q."""
 
     def test_custom_composite_transpiles(self):
-        """A BellPair composite gate can be inlined into CUDA-Q source."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return q0, q1
-
-        bell = BellPair()
+        """A Bell composite can be lowered into CUDA-Q source."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
         assert qc.execution_mode == ExecutionMode.STATIC
         assert qc.num_qubits == 2
-        _assert_source_contains(
-            qc, "def _qamomile_kernel():", "h(q[0])", "x.ctrl(q[0], q[1])"
-        )
+        assert "h(q0)" in qc.source
+        assert "x.ctrl(q0, q1)" in qc.source
+        assert "def _qamomile_kernel():" in qc.source
+        assert "_qamomile_bell_pair_" not in qc.source
+        assert "_qamomile_U_" in qc.entry_source
 
     def test_composite_statevector(self):
-        """A BellPair composite gate prepares |Phi+>."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
-
-        class BellPair(CompositeGate):
-            custom_name = "bell_pair"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits: tuple) -> tuple:
-                q0, q1 = qubits
-                q0 = qmc.h(q0)
-                q0, q1 = qmc.cx(q0, q1)
-                return q0, q1
-
-        bell = BellPair()
+        """A Bell composite prepares |Phi+>."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
             q = qmc.qubit_array(2, "q")
-            q[0], q[1] = bell(q[0], q[1])
+            q[0], q[1] = _custom_bell_pair(q[0], q[1])
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
@@ -3729,6 +3812,27 @@ class TestCustomCompositeGate:
         expected[0] = 1.0 / np.sqrt(2)
         expected[3] = 1.0 / np.sqrt(2)
         assert statevectors_equal(sv, expected)
+
+    def test_inverse_composite_uses_cudaq_adjoint(self):
+        """An inverse callable remains a named CUDA-Q adjoint invocation."""
+
+        @qmc.qkernel
+        def phase(qubit: qmc.Qubit) -> qmc.Qubit:
+            return qmc.s(qubit)
+
+        inverse_phase = qmc.inverse(phase)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            qubit = qmc.qubit("qubit")
+            qubit = qmc.h(qubit)
+            qubit = inverse_phase(qubit)
+            return qmc.measure(qubit)
+
+        _, compiled = _transpile_and_get_circuit(circuit, smoke_test=True)
+
+        assert "cudaq.adjoint(_qamomile_U_0, q0)" in compiled.source
+        assert "_qamomile__qamomile_U_0_adjoint_" in compiled.entry_source
 
 
 class TestDeepNestedQKernelComposition:
@@ -3900,6 +4004,35 @@ class TestControlledSubRoutines:
         expected = GATE_SPECS["CRZ"].matrix_fn(theta) @ state
         assert statevectors_equal(sv, expected)
 
+    def test_controlled_cp_body_preserves_relative_phase(self):
+        """An outer control exposes no lost global phase in an inner CP."""
+
+        @qmc.qkernel
+        def phase_pair(
+            left: qmc.Qubit,
+            right: qmc.Qubit,
+            theta: qmc.Float,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            return qmc.cp(left, right, theta)
+
+        @qmc.qkernel
+        def circuit(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+            q = qmc.h(qmc.qubit_array(3, "q"))
+            q[0], q[1], q[2] = qmc.control(phase_pair)(q[0], q[1], q[2], theta)
+            return qmc.measure(q)
+
+        theta = 0.73
+        _, artifact = _transpile_and_get_circuit(
+            circuit,
+            bindings={"theta": theta},
+            smoke_test=True,
+        )
+        actual = _run_statevector(artifact)
+        expected = np.ones(8, dtype=np.complex128) / np.sqrt(8)
+        expected[7] *= np.exp(1j * theta)
+
+        assert statevectors_equal(actual, expected)
+
     def test_controlled_multi_gate_kernel(self):
         """A controlled multi-gate helper kernel transpiles."""
 
@@ -3921,15 +4054,11 @@ class TestControlledSubRoutines:
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
         assert qc.num_qubits == 2
         assert qc.execution_mode == ExecutionMode.STATIC
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit):",
-            "h(t0)",
-            "x(t0)",
-            "def _qamomile_kernel():",
-            "q = cudaq.qvector(2)",
-            "cudaq.control(_qamomile_controlled_0, q[0], q[1])",
-        )
+        assert "def _qamomile_kernel():" in qc.source
+        assert "q = cudaq.qvector(2)" in qc.entry_source
+        assert "h(q0)" in qc.source
+        assert "x(q0)" in qc.source
+        assert "cudaq.control(_qamomile_U_0, q[0], q[1])" in qc.entry_source
 
     def test_controlled_parametric_kernel_uses_cudaq_control(self):
         """A controlled parametric helper is emitted via cudaq.control."""
@@ -3948,13 +4077,9 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
-            "ry(thetas[0], t0)",
-            "def _qamomile_kernel(thetas: list[float]):",
-            "cudaq.control(_qamomile_controlled_0, q[0], q[1], thetas)",
-        )
+        assert "def _qamomile_kernel(thetas: list[float]):" in qc.source
+        assert "ry(thetas[0], q0)" in qc.source
+        assert "cudaq.control(_qamomile_U_0, q[0], q[1], thetas)" in qc.source
 
     def test_nested_controlled_parametric_helper_forwards_thetas(self):
         """A nested controlled helper forwards runtime parameters."""
@@ -3982,14 +4107,10 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, parameters=["theta"])
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit, thetas: list[float]):",
-            "ry(thetas[0], t0)",
-            "def _qamomile_controlled_1(t0: cudaq.qubit, t1: cudaq.qubit, thetas: list[float]):",
-            "cudaq.control(_qamomile_controlled_0, t0, t1, thetas)",
-            "cudaq.control(_qamomile_controlled_1, q[0], q[1], q[2], thetas)",
-        )
+        assert "def _qamomile_kernel(thetas: list[float]):" in qc.source
+        assert "ry(thetas[0], q0)" in qc.source
+        assert qc.source.count("cudaq.control(") == 2
+        assert ", thetas)" in qc.entry_source
 
     def test_controlled_multi_control_helper_uses_cudaq_control(self):
         """A multi-control helper uses CUDA-Q's controlled-kernel API."""
@@ -4011,13 +4132,9 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
-        _assert_source_contains(
-            qc,
-            "def _qamomile_controlled_0(t0: cudaq.qubit):",
-            "h(t0)",
-            "x(t0)",
-            "cudaq.control(_qamomile_controlled_0, [q[0], q[1]], q[2])",
-        )
+        assert "h(q0)" in qc.source
+        assert "x(q0)" in qc.source
+        assert "cudaq.control(_qamomile_U_0, [q[0], q[1]], q[2])" in qc.entry_source
 
     def test_identical_controlled_helpers_are_reused(self):
         """Identical generated helper kernels share one CUDA-Q helper."""
@@ -4039,8 +4156,8 @@ class TestControlledSubRoutines:
             return qmc.measure(q)
 
         _, qc = _transpile_and_get_circuit(circuit, smoke_test=True)
-        assert qc.source.count("def _qamomile_controlled_") == 1
-        assert qc.source.count("cudaq.control(_qamomile_controlled_0") == 2
+        assert qc.source.count("def _qamomile_U_0(") == 1
+        assert qc.source.count("cudaq.control(_qamomile_U_0") == 2
 
     def test_controlled_power_2(self):
         """A powered controlled phase helper transpiles."""
@@ -4193,7 +4310,7 @@ class TestEntanglementAndParityPatterns:
         assert statevectors_equal(sv, all_zeros_state(3))
 
 
-class TestWhileIfSharedLocalPhi:
+class TestWhileIfSharedLocalMerge:
     """While-if shared locals should preserve dead/live distinction."""
 
     def test_while_loop_with_if_else_same_name_dead_local_transpile(self):
@@ -4566,7 +4683,7 @@ class TestUnresolvedStructuralSize:
     """Unresolved structural UInt must raise, not produce zero-size artifact."""
 
     def test_qubit_array_with_unresolved_size_raises(self):
-        """qubit_array(n) with parameters=["n"] must raise EmitError."""
+        """qubit_array(n) with parameters=["n"] must raise compile error."""
 
         @qmc.qkernel
         def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
@@ -4576,5 +4693,6 @@ class TestUnresolvedStructuralSize:
             return qmc.measure(q)
 
         transpiler = CudaqTranspiler()
-        with pytest.raises((EmitError, ValueError)):
+        with pytest.raises(QamomileCompileError) as exc_info:
             transpiler.transpile(circuit, parameters=["n"])
+        assert "depends on runtime parameter 'n'" in str(exc_info.value)

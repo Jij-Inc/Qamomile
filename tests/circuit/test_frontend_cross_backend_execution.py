@@ -190,7 +190,6 @@ def _pauli_x_evolve(
 
 
 @qmc.composite_gate(name="bell_pair")
-@qmc.qkernel
 def _bell_pair(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
     """Create a Bell pair as a custom composite gate."""
     q0 = qmc.h(q0)
@@ -199,7 +198,6 @@ def _bell_pair(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
 
 
 @qmc.composite_gate(name="ry_composite")
-@qmc.qkernel
 def _ry_composite(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
     """Apply ``RY`` as a parameterized custom composite gate."""
     return qmc.ry(q, theta)
@@ -346,6 +344,209 @@ def controlled_qkernel_run(obs: qmc.Observable) -> qmc.Float:
     q[0] = qmc.x(q[0])
     controlled_flip = qmc.control(_flip)
     q[0], q[1] = controlled_flip(q[0], q[1])
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def _x_if_sel_zero(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
+    """Flip ``q`` only when the compile-time ``sel`` equals zero."""
+    if sel == 0:
+        q = qmc.x(q)
+    return q
+
+
+@qmc.composite_gate(name="boxed_x_if_sel_zero")
+def _boxed_x_if_sel_zero(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
+    """Flip ``q`` in a boxed callable when compile-time ``sel`` is zero."""
+    if sel == 0:
+        q = qmc.x(q)
+    return q
+
+
+@qmc.qkernel
+def _boxed_if_wrapper(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
+    """Forward through a direct boxed callable inside another qkernel."""
+    return _boxed_x_if_sel_zero(q, sel)
+
+
+@qmc.qkernel
+def _x_in_for_if_sel_zero(q: qmc.Qubit, sel: qmc.UInt) -> qmc.Qubit:
+    """Flip ``q`` in a one-iteration loop when ``sel`` equals zero."""
+    for _ in qmc.range(1):
+        if sel == 0:
+            q = qmc.x(q)
+    return q
+
+
+@qmc.qkernel
+def controlled_if_comparison_sample(sel: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled body whose compile-time ``if sel == 0`` picks a branch.
+
+    The wrapped unitary contains a comparison-conditioned compile-time ``if``;
+    it must be lowered inside the controlled block so every backend sees a
+    plain controlled-X (true branch) or controlled-identity (false branch),
+    rather than an unresolved ``CompOp`` that QURI Parts / CUDA-Q reject.
+    """
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_if_comparison_run(sel: qmc.UInt, obs: qmc.Observable) -> qmc.Float:
+    """Run expval for a controlled body whose compile-time ``if sel == 0`` picks a branch."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_composite_if_sample(sel: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled boxed body with a compile-time branch."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_boxed_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_composite_if_run(
+    sel: qmc.UInt,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval for a controlled boxed body with a compile-time branch."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_boxed_x_if_sel_zero)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_nested_composite_if_sample(
+    sel: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Sample control over a qkernel that directly invokes a boxed body."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_boxed_if_wrapper)(q[0], q[1], sel)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_nested_composite_if_run(
+    sel: qmc.UInt,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval for control over a direct boxed invocation."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_boxed_if_wrapper)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_loop_selector_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled branch selected by the current loop iteration."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    for i in qmc.range(2):
+        q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], i)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_loop_selector_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval after a loop-iteration-selected controlled branch."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    for i in qmc.range(2):
+        q[0], q[1] = qmc.control(_x_if_sel_zero)(q[0], q[1], i)
+    return qmc.expval(q, obs)
+
+
+@qmc.composite_gate(name="interleaved_loop_if")
+def _interleaved_loop_if(
+    first: qmc.Qubit,
+    selector: qmc.UInt,
+    second: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Apply gates through an interleaved signature and arithmetic branch."""
+    first = qmc.x(first)
+    if selector + 1 == 1:
+        second = qmc.x(second)
+    return first, second
+
+
+@qmc.qkernel
+def controlled_interleaved_loop_if_sample() -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled boxed branch selected by a loop iteration."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled = qmc.control(_interleaved_loop_if)
+    for selector in qmc.range(2):
+        q[0], q[1], q[2] = controlled(q[0], q[1], selector, q[2])
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_interleaved_loop_if_run(obs: qmc.Observable) -> qmc.Float:
+    """Run expval for an interleaved boxed loop-selected branch."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled = qmc.control(_interleaved_loop_if)
+    for selector in qmc.range(2):
+        q[0], q[1], q[2] = controlled(q[0], q[1], selector, q[2])
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_if_in_for_sample(sel: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Sample a controlled compile-time if nested inside a For body."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_x_in_for_if_sel_zero)(q[0], q[1], sel)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_if_in_for_run(sel: qmc.UInt, obs: qmc.Observable) -> qmc.Float:
+    """Run expval for a controlled compile-time if nested inside a For body."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q[0], q[1] = qmc.control(_x_in_for_if_sel_zero)(q[0], q[1], sel)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def controlled_if_symbolic_multi_control_sample(
+    n: qmc.UInt,
+    sel: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    """Sample a compile-time if under a bound symbolic control count."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    controlled = qmc.control(_x_if_sel_zero, num_controls=n)
+    controls, q[2] = controlled(q[0:2], q[2], sel)
+    q[0:2] = controls
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_if_symbolic_multi_control_run(
+    n: qmc.UInt,
+    sel: qmc.UInt,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Run expval for a compile-time if under a symbolic control count."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.x(q[1])
+    controlled = qmc.control(_x_if_sel_zero, num_controls=n)
+    controls, q[2] = controlled(q[0:2], q[2], sel)
+    q[0:2] = controls
     return qmc.expval(q, obs)
 
 
@@ -754,6 +955,77 @@ def pauli_evolve_run(
 
 
 @qmc.qkernel
+def padded_pauli_evolve_sample(
+    ham: qmc.Observable, gamma: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Sample evolution under a Hamiltonian narrower than the register.
+
+    The register has 2 qubits but ``ham`` (e.g. ``Z(0)``) acts on only
+    1 qubit, so it must be identity-padded onto the untouched qubit
+    rather than rejected.
+    """
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q = qmc.pauli_evolve(q, ham, gamma)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def padded_pauli_evolve_run(
+    ham: qmc.Observable, gamma: qmc.Float, obs: qmc.Observable
+) -> qmc.Float:
+    """Run expval after evolution under a register-narrower Hamiltonian."""
+    q = qmc.qubit_array(2, "q")
+    q[0] = qmc.x(q[0])
+    q = qmc.pauli_evolve(q, ham, gamma)
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
+def _evolve_narrow_then_flip_tail(
+    q: qmc.Vector[qmc.Qubit],
+    ham: qmc.Observable,
+    gamma: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    """Evolve under a register-narrower Hamiltonian, then use the tail slot."""
+    q = qmc.pauli_evolve(q, ham, gamma)
+    q[1] = qmc.x(q[1])
+    return q
+
+
+@qmc.qkernel
+def controlled_padded_pauli_evolve_sample(
+    ham: qmc.Observable, gamma: qmc.Float
+) -> qmc.Vector[qmc.Bit]:
+    """Control a helper whose Hamiltonian is narrower than its target vector.
+
+    Controlled variant of the #467 regression: the controlled emission
+    paths must identity-pad the narrow Hamiltonian exactly like the
+    uncontrolled paths, and the untouched tail slot must stay
+    addressable (the helper flips it under control).
+    """
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_evolve = qmc.control(_evolve_narrow_then_flip_tail)
+    q[0], targets = controlled_evolve(q[0], q[1:3], ham=ham, gamma=gamma)
+    q[1:3] = targets
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def controlled_padded_pauli_evolve_run(
+    ham: qmc.Observable, gamma: qmc.Float, obs: qmc.Observable
+) -> qmc.Float:
+    """Run expval after a controlled register-narrower evolution."""
+    q = qmc.qubit_array(3, "q")
+    q[0] = qmc.x(q[0])
+    controlled_evolve = qmc.control(_evolve_narrow_then_flip_tail)
+    q[0], targets = controlled_evolve(q[0], q[1:3], ham=ham, gamma=gamma)
+    q[1:3] = targets
+    return qmc.expval(q, obs)
+
+
+@qmc.qkernel
 def sliced_pauli_evolve_sample(
     ham: qmc.Observable,
     gamma: qmc.Float,
@@ -986,6 +1258,7 @@ def nested_classical_output_run(
     """Return a nested classical value that also feeds a gate angle."""
     q = qmc.qubit_array(1, "q")
     base = phase * 2.0
+    out = qmc.float_(0.0)
     for i in qmc.range(1):
         q[0] = qmc.rx(q[0], base)
         out = base + 1.0
@@ -1041,14 +1314,6 @@ class FrontendExecutionCase:
     sample_bindings: dict[str, Any] = dataclasses.field(default_factory=dict)
     run_bindings: dict[str, Any] = dataclasses.field(default_factory=dict)
     unsupported_backends: frozenset[str] = dataclasses.field(default_factory=frozenset)
-
-
-# QURI Parts has no native multi-controlled gate object and does not yet
-# lower a controlled PauliEvolveOp through its recursive fallback, so the
-# controlled-pauli-evolve case still raises EmitError there. Multi-target
-# and irreducible multi-control single-qubit shapes are now supported via
-# the dense UnitaryMatrix path, so they no longer belong to this set.
-QURI_PARTS_CONTROLLED_PAULI_EVOLVE_UNSUPPORTED = frozenset({"quri_parts"})
 
 
 FRONTEND_EXECUTION_CASES = [
@@ -1107,6 +1372,123 @@ FRONTEND_EXECUTION_CASES = [
         expected_support={(1, 1)},
         expected_expval=-2.0,
         run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    # Compile-time ``if sel == 0`` inside a controlled body must be lowered
+    # before emit. ``sel=0`` selects the true branch (controlled-X -> |11>);
+    # ``sel=1`` selects the empty false branch (controlled-identity -> |10>).
+    # Both must succeed on every backend, including QURI Parts / CUDA-Q whose
+    # controlled-emission walks reject an unresolved ``CompOp``.
+    FrontendExecutionCase(
+        name="controlled-if-comparison-true",
+        sample_kernel=controlled_if_comparison_sample,
+        run_kernel=controlled_if_comparison_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"sel": 0},
+        run_bindings={"sel": 0, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-if-comparison-false",
+        sample_kernel=controlled_if_comparison_sample,
+        run_kernel=controlled_if_comparison_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=0.0,
+        sample_bindings={"sel": 1},
+        run_bindings={"sel": 1, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-composite-if-true",
+        sample_kernel=controlled_composite_if_sample,
+        run_kernel=controlled_composite_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"sel": 0},
+        run_bindings={"sel": 0, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-composite-if-false",
+        sample_kernel=controlled_composite_if_sample,
+        run_kernel=controlled_composite_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=0.0,
+        sample_bindings={"sel": 1},
+        run_bindings={"sel": 1, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-nested-composite-if-true",
+        sample_kernel=controlled_nested_composite_if_sample,
+        run_kernel=controlled_nested_composite_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"sel": 0},
+        run_bindings={"sel": 0, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-nested-composite-if-false",
+        sample_kernel=controlled_nested_composite_if_sample,
+        run_kernel=controlled_nested_composite_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=0.0,
+        sample_bindings={"sel": 1},
+        run_bindings={"sel": 1, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-loop-selector",
+        sample_kernel=controlled_loop_selector_sample,
+        run_kernel=controlled_loop_selector_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-interleaved-loop-if",
+        sample_kernel=controlled_interleaved_loop_if_sample,
+        run_kernel=controlled_interleaved_loop_if_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1),
+        expected_support={(1, 0, 1)},
+        expected_expval=-1.0,
+        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-if-in-for",
+        sample_kernel=controlled_if_in_for_sample,
+        run_kernel=controlled_if_in_for_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1),
+        expected_support={(1, 1)},
+        expected_expval=-2.0,
+        sample_bindings={"sel": 0},
+        run_bindings={"sel": 0, "obs": qm_o.Z(0) + qm_o.Z(1)},
+    ),
+    FrontendExecutionCase(
+        name="controlled-if-symbolic-multi-control",
+        sample_kernel=controlled_if_symbolic_multi_control_sample,
+        run_kernel=controlled_if_symbolic_multi_control_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 1, 1),
+        expected_support={(1, 1, 1)},
+        expected_expval=-3.0,
+        sample_bindings={"n": 2, "sel": 0},
+        run_bindings={
+            "n": 2,
+            "sel": 0,
+            "obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2),
+        },
     ),
     FrontendExecutionCase(
         name="controlled-native-gates",
@@ -1232,7 +1614,6 @@ FRONTEND_EXECUTION_CASES = [
             "gamma": math.pi / 2,
             "obs": qm_o.Z(1),
         },
-        unsupported_backends=QURI_PARTS_CONTROLLED_PAULI_EVOLVE_UNSUPPORTED,
     ),
     FrontendExecutionCase(
         name="sliced-pauli-evolve",
@@ -1294,6 +1675,46 @@ FRONTEND_EXECUTION_CASES = [
             "ham": qm_o.Z(0) * qm_o.Z(1),
             "gamma": 0.0,
             "obs": qm_o.Z(0) + qm_o.Z(1),
+        },
+    ),
+    # Regression for #467: a Hamiltonian (Z(0), 1 qubit) narrower than the
+    # 2-qubit register must be identity-padded onto the untouched qubit
+    # rather than rejected. The non-zero gamma only adds a phase on q[0],
+    # so the Z-basis sample and ⟨Z(0)⟩ stay deterministic.
+    FrontendExecutionCase(
+        name="padded-pauli-evolve",
+        sample_kernel=padded_pauli_evolve_sample,
+        run_kernel=padded_pauli_evolve_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0),
+        expected_support={(1, 0)},
+        expected_expval=-1.0,
+        sample_bindings={"ham": qm_o.Z(0), "gamma": 0.5},
+        run_bindings={
+            "ham": qm_o.Z(0),
+            "gamma": 0.5,
+            "obs": qm_o.Z(0),
+        },
+    ),
+    # Controlled variant of the #467 regression: the identity-padding rule
+    # must hold inside ``qmc.control`` too (the shared controlled emission
+    # used by QuriParts and the Qiskit fallback, and the CUDA-Q helper
+    # kernels). With the control on, the helper evolves q[1] under Z(0)
+    # (a pure phase on the |0> state) and flips the tail slot q[2], so the
+    # Z-basis sample and <Z(2)> stay deterministic.
+    FrontendExecutionCase(
+        name="controlled-padded-pauli-evolve",
+        sample_kernel=controlled_padded_pauli_evolve_sample,
+        run_kernel=controlled_padded_pauli_evolve_run,
+        sample_mode="deterministic",
+        expected_bits=(1, 0, 1),
+        expected_support={(1, 0, 1)},
+        expected_expval=-1.0,
+        sample_bindings={"ham": qm_o.Z(0), "gamma": 0.5},
+        run_bindings={
+            "ham": qm_o.Z(0),
+            "gamma": 0.5,
+            "obs": qm_o.Z(2),
         },
     ),
 ]

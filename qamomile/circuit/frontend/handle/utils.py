@@ -31,8 +31,8 @@ def get_size(arr: Vector[_H]) -> int:
     ``init_value=0``.  Falling back to ``init_value`` for that case
     would silently turn a runtime-symbolic ``Vector[Float]`` parameter
     into a "size 0" array, hiding programming errors.  Callers that
-    need to handle symbolic shapes (e.g., to gracefully no-op when the
-    size is unknown) must catch the ``ValueError`` themselves.
+    need to handle symbolic shapes (e.g., to emit a deferred callable
+    when the size is unknown) must catch the ``ValueError`` themselves.
 
     Args:
         arr (Vector[Handle]): Vector handle whose first axis size is

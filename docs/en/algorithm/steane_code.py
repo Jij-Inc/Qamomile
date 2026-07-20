@@ -34,9 +34,9 @@
 
 # %%
 # Install the latest Qamomile from pip.
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit]"
 # # or
-# # !uv add qamomile
+# # !uv add "qamomile[qiskit]"
 
 # %% [markdown]
 # ## 1. Stabilizer Formalism
@@ -145,7 +145,7 @@
 # With 7 physical qubits and 6 generators, the number of logical qubits protected is $7-6=1$. This is the Steane $[[7,1,3]]$ code.
 
 # %% [markdown]
-# Before getting into the implementation, we load Qamomile and the Qiskit backend and define helper functions. `_bits7`, `_passes_hamming_checks`, and `_is_steane_zero_word` are utilities that decide whether a measurement outcome is a Hamming codeword or a $\lvert0_L\rangle$ codeword. They are not central to QEC, so feel free to skip them.
+# Before getting into the implementation, we load Qamomile and the Qiskit integration and define helper functions. `_bits7`, `_passes_hamming_checks`, and `_is_steane_zero_word` are utilities that decide whether a measurement outcome is a Hamming codeword or a $\lvert0_L\rangle$ codeword. They are not central to QEC, so feel free to skip them.
 
 # %%
 import qamomile.circuit as qmc

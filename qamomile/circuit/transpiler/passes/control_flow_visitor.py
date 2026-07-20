@@ -103,7 +103,9 @@ class ValueCollector(ControlFlowVisitor):
     """Collects Value UUIDs from operation operands and results.
 
     Attributes:
-        operand_uuids: Set of UUIDs from operands
+        operand_uuids: Set of UUIDs from input values (operands plus
+            subclass-specific Value fields such as IfOperation yields,
+            via ``all_input_values``)
         result_uuids: Set of UUIDs from results
     """
 
@@ -112,11 +114,15 @@ class ValueCollector(ControlFlowVisitor):
         self.result_uuids: set[str] = set()
 
     def visit_operation(self, op: Operation) -> None:
-        from qamomile.circuit.ir.value import ValueBase
+        """Record one operation's input and result Value UUIDs.
 
-        for operand in op.operands:
-            if isinstance(operand, ValueBase):
-                self.operand_uuids.add(operand.uuid)
+        Args:
+            op (Operation): The visited operation. Inputs are read via
+                ``all_input_values`` so subclass-specific Value fields
+                (e.g. IfOperation yields) are covered.
+        """
+        for operand in op.all_input_values():
+            self.operand_uuids.add(operand.uuid)
 
         for result in op.results:
             self.result_uuids.add(result.uuid)

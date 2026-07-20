@@ -15,8 +15,28 @@ on:
       - synchronize
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.changes.outputs.docs_only }}
+      skip_all: ${{ steps.changes.outputs.skip_all }}
+      changed_files: ${{ steps.changes.outputs.changed_files }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: changes
+        shell: bash
+        run: |
+          .github/scripts/classify-changes.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}"
+
   base-test:
-    if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
       matrix:
@@ -52,14 +72,50 @@ jobs:
           set -eux
           uv run pytest tests -v
 
+  docs-test:
+    needs: changes
+    if: ${{ needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
+    runs-on: ubuntu-latest
+    env:
+      MPLBACKEND: Agg
+      CHANGED_FILES: ${{ needs.changes.outputs.changed_files }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -eux
+          uv sync --frozen --group dev
+
       - name: Run docs tests
         shell: bash
         run: |
           set -eux
-          uv run pytest -m docs tests/docs -v
+          args=()
+          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
+            args+=(--changed-docs)
+            while IFS= read -r changed_file; do
+              if [[ -n "${changed_file}" ]]; then
+                args+=(--docs-file "${changed_file}")
+              fi
+            done <<< "${CHANGED_FILES}"
+          fi
+          uv run pytest -m docs tests/docs -v "${args[@]}"
 
   quri-parts-test:
-    if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
       matrix:
@@ -93,8 +149,45 @@ jobs:
           set -eux
           uv run pytest -m quri_parts tests -v
 
+  hugr-test:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: *python_versions
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies with HUGR
+        shell: bash
+        run: |
+          set -eux
+          uv sync --frozen --group dev --extra hugr
+
+      - name: Run HUGR related tests
+        shell: bash
+        run: |
+          set -eux
+          uv run pytest -m hugr tests -v
+
   cudaq-test-macos:
-    if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
       matrix:
@@ -135,7 +228,8 @@ jobs:
           uv run pytest -m cudaq tests -v
 
   cudaq-test-ubuntu:
-    if: ${{ !contains(github.head_ref, 'dependabot/github_actions') }}
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' && !contains(github.head_ref, 'dependabot/github_actions') }}
     strategy:
       fail-fast: false
       matrix:

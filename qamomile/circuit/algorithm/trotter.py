@@ -142,7 +142,7 @@ def _resolve_hamiltonian_len(
 
     A bound ``Vector[qmc.Observable]`` (the qkernel-side handle for a
     vector of ``qamomile.observable.Hamiltonian`` objects) stores
-    ``_shape`` as an int tuple (see ``qkernel._create_bound_input``);
+    ``_shape`` as an int tuple (see ``qkernel_inputs.create_bound_input``);
     cache-trace Vectors carry a symbolic ``UInt`` in shape[0] and
     return ``None``.
     """
@@ -188,18 +188,25 @@ def trotterized_time_evolution(
     Raises:
         ValueError: If ``hamiltonian`` has fewer than two terms, if
             ``order`` is a ``bool``, or if ``order`` is not ``1`` or a
-            positive even integer.  When these arguments are still
-            symbolic (e.g. the enclosing kernel has not been re-traced
-            with bindings yet) validation silently defers.
+            positive even integer, or if ``step`` is not a positive integer.
+            When these arguments are still symbolic (e.g. the enclosing
+            kernel has not been re-traced with bindings yet) validation
+            silently defers.
     """
     # ``bool`` is a subclass of ``int``; reject it before numeric checks
     # so ``order=True`` does not silently satisfy ``order == 1``.
     if isinstance(order, bool):
         raise ValueError(f"order must be int or qmc.UInt, got bool ({order})")
+    if isinstance(step, bool):
+        raise ValueError(f"step must be int or qmc.UInt, got bool ({step})")
 
     o = _resolve_order(order)
     if o is not None and not (o == 1 or (o >= 2 and o % 2 == 0)):
         raise ValueError(f"order must be 1 or a positive even integer, got {o}")
+
+    resolved_step = _resolve_order(step)
+    if resolved_step is not None and resolved_step <= 0:
+        raise ValueError(f"step must be a positive integer, got {resolved_step}")
 
     n = _resolve_hamiltonian_len(hamiltonian)
     if n is not None and n < 2:

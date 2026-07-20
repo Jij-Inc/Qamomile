@@ -21,6 +21,8 @@ import pytest
 
 from tests._cudaq_isolation import (
     CUDAQ_MODULE_LEVEL_IMPORTERS,
+    NATIVE_THREAD_LIMIT_ENV,
+    configure_cudaq_thread_limits,
     markexpr_can_select_cudaq,
 )
 
@@ -141,3 +143,31 @@ def test_conftests_do_not_import_cudaq_at_module_level():
 def test_markexpr_can_select_cudaq(markexpr: str, expected: bool):
     """Pins the selection decisions the collection-ignore relies on."""
     assert markexpr_can_select_cudaq(markexpr) is expected
+
+
+def test_cudaq_sessions_default_native_thread_pools_to_one() -> None:
+    """CUDA-Q sessions avoid unconstrained implicit native parallelism."""
+    environ: dict[str, str] = {}
+
+    configure_cudaq_thread_limits("cudaq", environ)
+
+    assert environ == {variable: "1" for variable in NATIVE_THREAD_LIMIT_ENV}
+
+
+def test_cudaq_thread_limits_preserve_explicit_settings() -> None:
+    """An explicit developer thread limit remains authoritative."""
+    environ = {"OMP_NUM_THREADS": "3"}
+
+    configure_cudaq_thread_limits("cudaq", environ)
+
+    assert environ["OMP_NUM_THREADS"] == "3"
+    assert environ["VECLIB_MAXIMUM_THREADS"] == "1"
+
+
+def test_non_cudaq_sessions_do_not_change_native_thread_pools() -> None:
+    """Default sessions leave unrelated native-library settings alone."""
+    environ: dict[str, str] = {}
+
+    configure_cudaq_thread_limits("not cudaq", environ)
+
+    assert environ == {}

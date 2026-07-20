@@ -11,6 +11,7 @@ The @qkernel AST transformer relies on resolved type annotations.
 import pytest
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.errors import DependencyError, SeparationError
 from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 from qamomile.qiskit.transpiler import QiskitTranspiler
@@ -73,6 +74,38 @@ class TestDependencyErrorContract:
         err = DependencyError("msg")
         assert isinstance(err, QamomileCompileError)
 
+    def test_region_args_propagate_measurement_taint(self) -> None:
+        """A loop result inherits taint from its initial and yielded values."""
+        from qamomile.circuit.ir.operation.control_flow import ForOperation, RegionArg
+        from qamomile.circuit.ir.operation.gate import MeasureOperation
+        from qamomile.circuit.ir.types.primitives import BitType, QubitType
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.passes.analyze import (
+            build_dependency_graph,
+            find_measurement_derived_values,
+            find_measurement_results,
+        )
+
+        qubit = Value(type=QubitType(), name="q")
+        init = Value(type=BitType(), name="init").with_const(False)
+        block_arg = Value(type=BitType(), name="carry")
+        yielded = Value(type=BitType(), name="yielded")
+        result = Value(type=BitType(), name="result")
+        measure = MeasureOperation(operands=[qubit], results=[yielded])
+        loop = ForOperation(
+            operations=[measure],
+            region_args=(RegionArg("carry", init, block_arg, yielded, result),),
+            results=[result],
+        )
+
+        graph = build_dependency_graph([loop])
+        derived = find_measurement_derived_values(
+            graph, find_measurement_results([loop])
+        )
+
+        assert block_arg.uuid in derived
+        assert result.uuid in derived
+
 
 class TestMultipleQuantumSegmentsErrorContract:
     """MultipleQuantumSegmentsError is raised when the program has more than
@@ -86,8 +119,37 @@ class TestMultipleQuantumSegmentsErrorContract:
         assert "3 quantum segments" in str(err)
 
     def test_error_is_exception(self) -> None:
-        """MultipleQuantumSegmentsError inherits from Exception."""
-        assert issubclass(MultipleQuantumSegmentsError, Exception)
+        """MultipleQuantumSegmentsError follows the compile-error contract."""
+        from qamomile.circuit.transpiler.errors import QamomileCompileError
+
+        assert issubclass(MultipleQuantumSegmentsError, QamomileCompileError)
+
+    def test_true_multi_segment_program_keeps_segment_count_message(
+        self, qiskit_transpiler
+    ) -> None:
+        """A genuinely multi-quantum-segment program keeps the original message.
+
+        Quantum operations resuming after ``qmc.expval`` produce a second
+        quantum segment. This must keep raising ``MultipleQuantumSegmentsError``
+        with the segment-count / measurement-dependence wording — the
+        runtime-loop-bound case is diagnosed earlier by
+        ``SymbolicShapeValidationPass`` and must not have changed this path.
+        """
+
+        @qmc.qkernel
+        def kernel(obs: qmc.Observable) -> tuple[qmc.Float, qmc.Vector[qmc.Bit]]:
+            q = qmc.qubit_array(1, "q")
+            q[0] = qmc.h(q[0])
+            e = qmc.expval(q, obs)
+            q2 = qmc.qubit_array(1, "q2")
+            q2[0] = qmc.x(q2[0])
+            return e, qmc.measure(q2)
+
+        with pytest.raises(
+            MultipleQuantumSegmentsError, match="Found 2 quantum segments"
+        ) as exc_info:
+            qiskit_transpiler.transpile(kernel, bindings={"obs": qm_o.Z(0)})
+        assert "measurement results" in str(exc_info.value)
 
 
 class TestMeasurementFeedbackWithNativeControlFlow:
