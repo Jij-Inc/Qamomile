@@ -20,9 +20,9 @@
 #
 # # 量子位相推定（QPE）入門
 #
-# 量子位相推定（QPE）は、$U|\psi\rangle = e^{2\pi i \phi}|\psi\rangle$を満たすユニタリ$U$と固有状態$|\psi\rangle$から、固有位相$\phi$を推定するアルゴリズムです。位数発見など、ユニタリの固有値に埋め込まれた位相を使うアルゴリズムで中心的なプリミティブとして使われます{cite:p}`10.48550/arXiv.quant-ph/9511026,10.1098/rspa.1998.0164`。
+# 量子位相推定（Quantum Phase Estimation; QPE）は、$U|\psi\rangle = e^{2\pi i \phi}|\psi\rangle$を満たすユニタリ$U$と固有状態$|\psi\rangle$から、固有位相$\phi$を推定するアルゴリズムです。Shorのアルゴリズムなど、ユニタリの固有値に埋め込まれた位相を使うアルゴリズムで中心的なプリミティブとして使われます{cite:p}`10.48550/arXiv.quant-ph/9511026,10.1098/rspa.1998.0164`。
 #
-# このノートブックでは、組み込みの`qpe`ヘルパーを4x4ユニタリに適用します。既知の固有状態を準備し、ローカルのQiskitシミュレータで回路を実行して、復号された位相を目標位相$0.6$と比較します。さらに、カウント用量子ビットを増やすと精度が上がることを確認し、シンボリックなリソース推定を使って、必要な精度に対する計算量の増え方を見ます。
+# このノートブックでは、組み込みの`qpe`ヘルパーを4x4ユニタリに適用します。既知の固有状態を準備し、ローカルのQiskitシミュレータで回路を実行して、復号された位相を既知の固有位相と比較します。さらに、カウント用量子ビットを増やすと精度が上がることを確認し、リソース推定を使って、必要な精度に対する計算量の増え方を見ます。
 
 # %%
 # 最新のQamomileをpipからインストールします！
@@ -111,6 +111,10 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # QPEは、1つの制御量子ビットで見た位相キックバックを、レジスタ全体の手順へ拡張します。カウント用レジスタはまず、すべての2進重みを重ね合わせとして保持します。そこへ$U$の制御ユニタリーゲートを適用すると、対応する重み付きの固有位相がカウント用レジスタへキックバックされます。最後に逆QFTを使い、このフーリエ符号化された位相パターンを通常の2進整数として読み出すことで、$\phi$の推定値を得ます。
 #
 # 対象レジスタへの入力は、$U|\psi\rangle = e^{2\pi i\phi}|\psi\rangle$を満たす$U$のある固有状態$|\psi\rangle$であるとします。$m$ビットの精度で推定したいとし、カウント用レジスタは$|0\rangle^{\otimes m}$から始めます。ここで$M=2^m$とおきます。
+#
+# :::{note} 固有状態の重ね合わせ
+# より一般には、対象レジスタへの入力は1つの固有状態に限られません。固有状態の重ね合わせを入力した場合、QPEは入力状態に含まれる各固有状態の重みに応じた確率で、対応する固有位相を測定します。このチュートリアルでは、位相キックバックの式とサンプリング結果を読みやすくするため、既知の固有状態を使います。
+# :::
 #
 # ### ステップ1：カウント用レジスタを重ね合わせにする
 #
@@ -414,47 +418,14 @@ for counting_bits, phase_error in zip(bits, phase_errors):
 # %% [markdown]
 # ## リソース推定
 #
-# 前のサブセクションでは、カウント用量子ビットを増やすと精度が上がることを確認しました。下のシンボリックなリソース推定用の量子カーネルでは、カウント用量子ビット数を`m`として残し、制御対象には1量子ビットの位相ユニタリを使います。まず、カウント用レジスタそのものに由来するQPEのスケーリングをセルの結果として見ます。
+# 前のサブセクションでは、カウント用量子ビットを増やすと精度が上がることを確認しました。ここでは、上の`run_qpe_experiment()`で使ったものと同じQPE量子カーネルに、`estimate_resources()`を直接適用します。この推定には、アダマールゲート、`qmc.qpe`による制御ユニタリー、逆QFT、最後の固定小数点測定が含まれます。
 
 # %%
-# QPEのスケーリングを見るため、最小限の1量子ビット位相ユニタリを使います。
-@qmc.qkernel
-def phase_unitary_for_resources(q: qmc.Qubit) -> qmc.Qubit:
-    q = qmc.p(q, 1.0)
-    return q
-
-
-# m個のカウント用量子ビットを持つシンボリックなQPE風リソース量子カーネルを作ります。
-@qmc.qkernel
-def symbolic_qpe_resource_kernel(m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-    # シンボリックなカウント用レジスタと対象固有状態を確保します。
-    counting = qmc.qubit_array(m, name="counting")
-    target = qmc.qubit(name="target")
-    target = qmc.x(target)
-
-    # 各カウント用量子ビットを重ね合わせにします。
-    for i in qmc.range(m):
-        counting[i] = qmc.h(counting[i])
-
-    # 制御U, U^2, ..., U^{2^{m-1}}を繰り返しで適用します。
-    controlled_unitary = qmc.control(phase_unitary_for_resources)
-    for i in qmc.range(m):
-        repetitions = 2**i
-        for _ in qmc.range(repetitions):
-            counting[i], target = controlled_unitary(counting[i], target)
-
-    return counting
-
-
-# mを具体化する前にシンボリックなリソースを推定します。
-symbolic_resource_estimate = symbolic_qpe_resource_kernel.estimate_resources().simplify()
-
 # 具体的なカウント用量子ビット数を代入し、総ゲート数を集めます。
 resource_gate_counts: list[int] = []
 for counting_bits in bits:
-    concrete_estimate = symbolic_resource_estimate.substitute(
-        m=counting_bits
-    ).simplify()
+    qpe_kernel = make_qpe_kernel(counting_bits)
+    concrete_estimate = qpe_kernel.estimate_resources(inputs=bindings).simplify()
     resource_gate_counts.append(int(concrete_estimate.gates.total))
 
 # 最初の推定点に合わせて2^mの参照曲線を作ります。
@@ -469,26 +440,26 @@ ax.plot(
     bits,
     resource_gate_counts,
     marker="o",
-    color="#6A5ACD",
-    label="resource estimate",
+    color="#2696EB",
+    label="QPE gate count",
 )
 ax.plot(
     bits,
     scaling_reference,
     linestyle="--",
     color="#DB4D3F",
-    label=r"$\propto 2^m$",
+    label=r"theory: QPE O$(2^m)$",
 )
 ax.set_xlabel("counting qubits")
-ax.set_ylabel("Qamomile gate count")
+ax.set_ylabel("total gates")
+ax.set_yscale("log")
 ax.set_xticks(bits)
 ax.grid(alpha=0.25)
 ax.legend()
 plt.tight_layout()
 plt.show()
 
-# シンボリックな推定がmに依存し、この範囲で増加することを確認します。
-assert "m" in str(symbolic_resource_estimate.gates.total)
+# 直接推定したゲート数が、この範囲で増加することを確認します。
 assert all(
     later > earlier
     for earlier, later in zip(resource_gate_counts, resource_gate_counts[1:])
@@ -509,7 +480,7 @@ assert all(
 #
 # です。
 #
-# このリソース推定用の量子カーネルのように、$U^{2^k}$を$U$の繰り返しで実装する場合、QPEは重み$1,2,\ldots,2^{m-1}$に対応する制御ユニタリーゲートを適用します。したがって、制御ユニタリーゲートの適用回数は
+# 制御ユニタリーを繰り返しモデルで考える場合、QPEは重み$1,2,\ldots,2^{m-1}$に対応する制御ユニタリーゲートを適用します。したがって、制御ユニタリーゲートの適用回数は
 #
 # $$
 # \sum_{k=0}^{m-1} 2^k = 2^m - 1
@@ -519,23 +490,44 @@ assert all(
 #
 # です。つまり、カウント用量子ビット数は$1/\epsilon$に対して対数的ですが、繰り返しによる制御ユニタリーゲートの回数は$O(1/\epsilon)$で増えます{cite:p}`10.1017/CBO9780511976667`。
 #
-# 最後に、この見積もりは実装に依存します。一般には
+# 最後に、このスケーリングは実装方法に依存します。QPEでは
+# $\mathrm{controlled}\text{-}U^{2^0}, \ldots,
+# \mathrm{controlled}\text{-}U^{2^{m-1}}$という制御ユニタリーが必要です。
+# これらを$U$の繰り返しで実装する場合、コストは$O(2^m)=O(1/\epsilon)$となり、
+# 高精度では通常効率的ではありません。より一般には、コストは
 #
 # $$
-# C_{\mathrm{QPE}}(m)
+# G_{\mathrm{QPE}}(m)
 # =
-# \sum_{k=0}^{m-1} C\!\left(\mathrm{controlled}\text{-}U^{2^k}\right)
+# \sum_{k=0}^{m-1} G\!\left(\mathrm{controlled}\text{-}U^{2^k}\right)
 # + O(m^2)
 # $$
 #
-# と考えられます。
+# と書けます。ここで$G(V)$は、操作$V$を実装するための論理ゲートコストを表します。
+# このページでは、コストの単位がゲート数であることを明示するために$G$を使います。
 #
 # :::{note}
 # $m$個の量子ビットに対する逆QFTは、$O(m^2)$個のゲートに分解できます。詳しくはQFTのチュートリアルを参照してください。
 # :::
 #
-# 上の$O(1/\epsilon)$という見積もりは、$U^{2^k}$を$U$の繰り返しで実装する場合のものです。問題の構造を使って$\mathrm{controlled}\text{-}U^{2^k}$をより直接的に実装できる場合は、その実装コストを使ってリソースを見積もる必要があります。
-
+# しかし、実際には以下の要因によってこの見積もりは大きく変わる可能性があります。
+#
+# 1. **制御ユニタリーの実装コスト**
+#
+#    多くの場合、主なコストは各制御ユニタリーをどう実装するかで決まります。
+#    Shorのアルゴリズムでは、モジュラー乗算に対応する制御ユニタリーを問題構造から構成できるため、
+#    $U$を指数回反復する必要はありません。量子系のハミルトニアンシミュレーションでも、
+#    ハミルトニアンの形やシミュレーション手法によっては、制御された時間発展を多項式程度のリソースで実装できる場合があります。
+#    そのため、QPEのリソースを見積もるときは、制御ユニタリーを$U$の反復として数えるのか、
+#    直接合成した回路として数えるのか、あるいは問題固有の算術回路やシミュレーション回路として与えるのかを明示する必要があります。
+#
+# 2. **初期状態の準備コスト**
+#
+#    上の見積もりには、対象レジスタの初期状態を準備するコストも含まれていません。
+#    QPEを有効に使うには、入力状態が$U$の固有状態であるか、少なくとも固有状態に十分近い状態である必要があります。
+#    そのような固有状態または近似固有状態を準備する量子回路は非自明なコストを持つ場合があり、
+#    実際の応用で全体のリソースを評価するときは、この準備コストを別途数える必要があります。
+#
 # %% [markdown]
 # ## まとめ
 #
@@ -544,5 +536,5 @@ assert all(
 # - `qmc.qpe`は、渡したユニタリ量子カーネルに対して、アダマールゲート、制御ユニタリーゲート、逆QFT、固定小数点の位相復号を適用します。
 # - この例では固有状態$|01\rangle$を準備し、目標位相$0.6$を浮動小数点の`QFixed`測定結果として直接推定します。
 # - カウント用量子ビットを増やすと2進位相の格子が細かくなるため、サンプリングされた推定値が目標位相に近づきます。
-# - シンボリックな`estimate_resources()`により、単純な繰り返し実装では$m=O(\log(1/\epsilon))$個のカウント用量子ビットに対して、$O(1/\epsilon)$回の制御ユニタリーゲートが必要になることを確認できます。
-# - 実際の応用では、$\mathrm{controlled}\text{-}U^{2^k}$をどう実装するかが主なコストを決めるため、リソース推定ではその実装方法を明示することが重要です。
+# - `estimate_resources()`を直接呼び出すことで、単純な繰り返し実装では$m=O(\log(1/\epsilon))$個のカウント用量子ビットに対して、$O(1/\epsilon)$回の制御ユニタリーゲートが必要になることを確認できます。
+# - 実際の応用では、制御ユニタリーの実装方法と初期状態の準備コストを含めるかどうかを明示することが重要です。

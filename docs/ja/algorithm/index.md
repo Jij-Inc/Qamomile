@@ -69,7 +69,7 @@ QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_stat
 :::
 
 :::{card}
-:header: **量子位相推定（QPE）入門**
+:header: **量子位相推定（Quantum Phase Estimation; QPE）入門**
 :link: qpe
 4x4ユニタリに組み込みの`qpe`ヘルパーを適用し、復号された位相をサンプリングして、カウント用レジスタを大きくしたときの精度を比較します。
 :::

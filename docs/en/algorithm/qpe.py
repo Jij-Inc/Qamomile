@@ -23,14 +23,14 @@
 # Quantum Phase Estimation (QPE) estimates the eigenphase $\phi$ of a unitary
 # $U$ from an eigenstate $|\psi\rangle$ satisfying
 # $U|\psi\rangle = e^{2\pi i \phi}|\psi\rangle$. It is a central primitive in
-# order finding and related algorithms that use phases encoded by unitary
+# Shor's algorithm and other algorithms that use phases encoded by unitary
 # eigenvalues {cite:p}`10.48550/arXiv.quant-ph/9511026,10.1098/rspa.1998.0164`.
 #
 # This notebook applies the built-in `qpe` helper to a 4x4 unitary. You will
 # prepare a known eigenstate, run the circuit on a local Qiskit simulator,
-# compare the decoded phase with the target phase $0.6$, see how additional
-# counting qubits improve precision, and use a symbolic resource estimate to
-# see how the cost grows with the requested precision.
+# compare the decoded phase with the known eigenphase, see how additional
+# counting qubits improve precision, and use resource estimation to see how the
+# cost grows with the requested precision.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -142,6 +142,14 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # so that $U|\psi\rangle = e^{2\pi i\phi}|\psi\rangle$, and we want $m$ bits
 # of precision. The counting register starts in $|0\rangle^{\otimes m}$.
 # Let $M=2^m$.
+#
+# :::{note} Superpositions of Eigenstates
+# More generally, the target-register input does not have to be a single
+# eigenstate. If it is a superposition of eigenstates, QPE measures one of the
+# corresponding eigenphases with probability determined by that eigenstate's
+# weight in the input state. This tutorial uses one known eigenstate so the
+# phase-kickback algebra and sampled output are easy to read.
+# :::
 #
 # ### Step 1: Put the counting register in superposition
 #
@@ -489,49 +497,16 @@ for counting_bits, phase_error in zip(bits, phase_errors):
 # ## Resource Estimation
 #
 # The previous subsection showed that more counting qubits improve precision.
-# The following symbolic resource-estimation kernel keeps the number of counting
-# qubits as `m` and uses a one-qubit phase unitary, so the cell first exposes the
-# QPE scaling that comes from the counting register itself.
+# We can apply `estimate_resources()` directly to the same QPE kernels used by
+# `run_qpe_experiment()` above. This estimate includes the Hadamards, controlled
+# powers from `qmc.qpe`, inverse QFT, and final fixed-point measurement.
 
 # %%
-# Use a minimal one-qubit phase unitary to isolate QPE scaling.
-@qmc.qkernel
-def phase_unitary_for_resources(q: qmc.Qubit) -> qmc.Qubit:
-    q = qmc.p(q, 1.0)
-    return q
-
-
-# Build a symbolic QPE-like resource kernel with m counting qubits.
-@qmc.qkernel
-def symbolic_qpe_resource_kernel(m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-    # Allocate the symbolic counting register and a target eigenstate.
-    counting = qmc.qubit_array(m, name="counting")
-    target = qmc.qubit(name="target")
-    target = qmc.x(target)
-
-    # Put every counting qubit into superposition.
-    for i in qmc.range(m):
-        counting[i] = qmc.h(counting[i])
-
-    # Apply controlled U, U^2, ..., U^{2^{m-1}} by repetition.
-    controlled_unitary = qmc.control(phase_unitary_for_resources)
-    for i in qmc.range(m):
-        repetitions = 2**i
-        for _ in qmc.range(repetitions):
-            counting[i], target = controlled_unitary(counting[i], target)
-
-    return counting
-
-
-# Estimate resources symbolically before substituting a concrete m.
-symbolic_resource_estimate = symbolic_qpe_resource_kernel.estimate_resources().simplify()
-
 # Substitute concrete counting-qubit counts and collect total gate counts.
 resource_gate_counts: list[int] = []
 for counting_bits in bits:
-    concrete_estimate = symbolic_resource_estimate.substitute(
-        m=counting_bits
-    ).simplify()
+    qpe_kernel = make_qpe_kernel(counting_bits)
+    concrete_estimate = qpe_kernel.estimate_resources(inputs=bindings).simplify()
     resource_gate_counts.append(int(concrete_estimate.gates.total))
 
 # Anchor a 2^m reference curve at the first resource-estimate point.
@@ -546,26 +521,26 @@ ax.plot(
     bits,
     resource_gate_counts,
     marker="o",
-    color="#6A5ACD",
-    label="resource estimate",
+    color="#2696EB",
+    label="QPE gate count",
 )
 ax.plot(
     bits,
     scaling_reference,
     linestyle="--",
     color="#DB4D3F",
-    label=r"$\propto 2^m$",
+    label=r"theory: QPE O$(2^m)$",
 )
 ax.set_xlabel("counting qubits")
-ax.set_ylabel("Qamomile gate count")
+ax.set_ylabel("total gates")
+ax.set_yscale("log")
 ax.set_xticks(bits)
 ax.grid(alpha=0.25)
 ax.legend()
 plt.tight_layout()
 plt.show()
 
-# Check that the symbolic estimate depends on m and increases over this range.
-assert "m" in str(symbolic_resource_estimate.gates.total)
+# Check that the direct estimates increase over this range.
 assert all(
     later > earlier
     for earlier, later in zip(resource_gate_counts, resource_gate_counts[1:])
@@ -586,9 +561,9 @@ assert all(
 # m = O\!\left(\log\frac{1}{\epsilon}\right).
 # $$
 #
-# In the repetition model used by this resource-estimation kernel, QPE applies
-# controlled unitaries with weights $1,2,\ldots,2^{m-1}$. Therefore the number
-# of controlled-unitary applications is
+# In a repetition model for the controlled powers, QPE applies controlled
+# unitaries with weights $1,2,\ldots,2^{m-1}$. Therefore the number of
+# controlled-unitary applications is
 #
 # $$
 # \sum_{k=0}^{m-1} 2^k = 2^m - 1
@@ -600,25 +575,50 @@ assert all(
 # in $1/\epsilon$ are enough, but the repeated controlled-unitary work scales as
 # $O(1/\epsilon)$ {cite:p}`10.1017/CBO9780511976667`.
 #
-# The last point is implementation-dependent. In general,
+# Finally, this scaling depends on the implementation. QPE uses
+# $\mathrm{controlled}\text{-}U^{2^0}, \ldots,
+# \mathrm{controlled}\text{-}U^{2^{m-1}}$. If these are built by repeating $U$,
+# the cost is $O(2^m)=O(1/\epsilon)$, which is usually not efficient for high
+# precision. More generally, write the cost as
 #
 # $$
-# C_{\mathrm{QPE}}(m)
+# G_{\mathrm{QPE}}(m)
 # =
-# \sum_{k=0}^{m-1} C\!\left(\mathrm{controlled}\text{-}U^{2^k}\right)
+# \sum_{k=0}^{m-1} G\!\left(\mathrm{controlled}\text{-}U^{2^k}\right)
 # + O(m^2),
 # $$
+#
+# where $G(V)$ denotes the logical gate cost of implementing the operation $V$.
+# The letter $G$ is used here to make the unit of cost explicit.
 #
 # :::{note} Inverse QFT Gate Count
 # The inverse QFT on $m$ qubits can be decomposed using $O(m^2)$ gates. Refer
 # to the QFT tutorial for details.
 # :::
 #
-# The $O(1/\epsilon)$ estimate above applies when $U^{2^k}$ is realized by
-# repeated uses of $U$. If the problem structure lets you implement
-# $\mathrm{controlled}\text{-}U^{2^k}$ more directly, the resource estimate
-# should use that implementation cost instead.
-
+# In practice, however, this estimate can change significantly because of the
+# following factors.
+#
+# 1. **Controlled-unitary implementation cost.**
+#
+#    The dominant cost is often the implementation of each controlled unitary.
+#    In Shor's algorithm, the modular-multiplication powers can be constructed
+#    from the problem structure, so they do not require exponentially many
+#    repetitions of $U$. In quantum Hamiltonian simulation, controlled
+#    time-evolution powers may also be implementable with polynomial resources,
+#    depending on the Hamiltonian model and simulation method. A useful QPE
+#    resource estimate should therefore state whether the controlled unitaries
+#    are repeated applications of $U$, directly synthesized circuits, or
+#    problem-specific arithmetic/simulation circuits.
+#
+# 2. **Initial-state preparation cost.**
+#
+#    The estimate above also does not include the cost of preparing the target
+#    register. QPE is most useful when the input has large overlap with an
+#    eigenstate of $U$, or is already close to one. Preparing such an eigenstate
+#    or approximate eigenstate can require a nontrivial quantum circuit, and
+#    that cost must be counted separately in an end-to-end application.
+#
 # %% [markdown]
 # ## Summary
 #
@@ -632,9 +632,8 @@ assert all(
 #   phase $0.6$ directly as a floating-point `QFixed` measurement result.
 # - Adding counting qubits makes the binary phase grid finer, so the sampled
 #   estimate moves closer to the target phase.
-# - A symbolic `estimate_resources()` call shows that $m=O(\log(1/\epsilon))$
+# - Direct `estimate_resources()` calls show that $m=O(\log(1/\epsilon))$
 #   counting qubits lead to $O(1/\epsilon)$ repeated controlled-unitary
 #   applications in the simple repetition model.
-# - In real applications, the main cost driver is the implementation of
-#   $\mathrm{controlled}\text{-}U^{2^k}$, so resource estimates should state how
-#   those powers are realized.
+# - In real applications, resource estimates should state how the controlled
+#   unitaries are implemented and whether initial-state preparation is included.
