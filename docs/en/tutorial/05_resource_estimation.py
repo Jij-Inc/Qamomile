@@ -159,6 +159,7 @@ print("estimate quality:", shor_est.quality)
 
 assert shor_est.parameters == {}
 assert shor_est.qubits == 21
+assert shor_est.gates.total == 3465
 assert str(shor_est.quality) == "upper_bound"
 
 # %% [markdown]
@@ -233,6 +234,7 @@ window_est = modular_multiplier.estimate_resources()
 print("windowed arithmetic qubits:", window_est.qubits)
 print("windowed arithmetic gates:", window_est.gates.total)
 assert window_est.qubits == 3 * 4 + 2 + 7
+assert window_est.gates.total == 1708
 
 # %% [markdown]
 # In the standalone primitive, an internal control for the unconditional case takes the phase-qubit role, so it has the same `3*n + w + 7` width as the full order-finding circuit. For `x < modulus`, `modmul_const()` implements `|x> -> |a*x mod modulus>`; it leaves basis states outside that domain unchanged to preserve unitarity.
@@ -243,6 +245,8 @@ assert window_est.qubits == 3 * 4 + 2 + 7
 # `qmc.ekera_hastad_factoring()` constructs the short-discrete-logarithm quantum stage of the [Ekerå–Håstad method](https://arxiv.org/abs/1702.00249) for factoring a product of two similarly sized primes. Qamomile sets `m = ceil(n / 2) + 1` and measures schedules of lengths `2*m` and `m` sequentially.
 #
 # Rather than retain two exponent registers coherently, it reuses the same phase qubit and arithmetic workspace. Its width is consequently the same `3*n + w + 7` as Shor's order finding; the number of controlled modular multiplications differs. The returned `Vector[Bit]` contains the first `2*m` little-endian bits from the long schedule and the remaining `m` bits from the short schedule.
+#
+# The modulus-5 instance below is a compact resource-estimation fixture, not a complete factoring example. A factoring application supplies the composite modulus whose two prime factors are to be recovered.
 
 # %%
 short_dlp = qmc.ekera_hastad_factoring(
@@ -255,14 +259,17 @@ short_dlp_est = short_dlp.estimate_resources()
 print("Ekerå–Håstad logical qubits:", short_dlp_est.qubits)
 print("Ekerå–Håstad total logical gates:", short_dlp_est.gates.total)
 assert short_dlp_est.qubits == 3 * 3 + 2 + 7
+assert short_dlp_est.gates.total == 3685
 assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 
 # %% [markdown]
 # ## Summary
 #
 # - `estimate_resources()` reports qubit and gate costs without executing.
-# - For parameterized qkernels, results are SymPy expressions showing exact scaling.
+# - For parameterized qkernels, results are SymPy scaling expressions. Check `quality` to distinguish exact estimates from upper bounds.
 # - Use `.substitute(n=...)` to evaluate at specific sizes and check feasibility.
-# - Concrete FTQC factories can still expose body-derived width and gate estimates after specialization.
+# - The FTQC Shor and Ekerå–Håstad factories share the same `O(n^2)` windowed modular-multiplication body and one reused phase qubit.
+# - At fixed window width, the circuit body uses `3*n + w + 7` qubits, and Shor's default-precision gate count is `O(n^3)`.
+# - Problem-specialized FTQC factories expose concrete width and gate estimates derived from their executable bodies.
 #
 # **Next**: [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.

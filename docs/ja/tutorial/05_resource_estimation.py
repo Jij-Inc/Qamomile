@@ -160,6 +160,7 @@ print("estimate quality:", shor_est.quality)
 
 assert shor_est.parameters == {}
 assert shor_est.qubits == 21
+assert shor_est.gates.total == 3465
 assert str(shor_est.quality) == "upper_bound"
 
 # %% [markdown]
@@ -235,6 +236,7 @@ window_est = modular_multiplier.estimate_resources()
 print("windowed arithmetic qubits:", window_est.qubits)
 print("windowed arithmetic gates:", window_est.gates.total)
 assert window_est.qubits == 3 * 4 + 2 + 7
+assert window_est.gates.total == 1708
 
 # %% [markdown]
 # standalone版では、無条件実行を表す内部controlがphase qubitの代わりになるため、位数探索全体と同じ`3*n + w + 7`幅になります。`modmul_const()`は`x < modulus`の領域では`|x> -> |a*x mod modulus>`を実行し、領域外の基底状態はunitaryを保つため変更しません。
@@ -245,6 +247,8 @@ assert window_est.qubits == 3 * 4 + 2 + 7
 # `qmc.ekera_hastad_factoring()`は、同程度のビット長を持つ2素数の積を対象とする[Ekerå–Håstad法](https://arxiv.org/abs/1702.00249)のshort discrete logarithm量子段を構築します。Qamomileでは`m = ceil(n / 2) + 1`とし、長さ`2*m`と`m`の位相スケジュールを順番に測定します。
 #
 # 2つの指数レジスタをcoherentに保持するのではなく、同じphase qubitと算術workspaceを再利用します。そのため幅はShorと同じ`3*n + w + 7`で、違いはcontrolled modular multiplicationの回数です。返される`Vector[Bit]`は、先頭`2*m`ビットが長いスケジュール、残り`m`ビットが短いスケジュールで、それぞれlittle-endianです。
+#
+# 以下の法5のインスタンスは、リソース推定を小規模に確認するためのfixtureであり、完全な因数分解例ではありません。実際の因数分解では、2つの素因数を求める対象の合成数を法として与えます。
 
 # %%
 short_dlp = qmc.ekera_hastad_factoring(
@@ -257,6 +261,7 @@ short_dlp_est = short_dlp.estimate_resources()
 print("Ekerå–Håstad logical qubits:", short_dlp_est.qubits)
 print("Ekerå–Håstad total logical gates:", short_dlp_est.gates.total)
 assert short_dlp_est.qubits == 3 * 3 + 2 + 7
+assert short_dlp_est.gates.total == 3685
 assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 
 
@@ -268,6 +273,6 @@ assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 # - `.substitute(n=...)`で特定のサイズに代入し、実行可能性を確認できます。
 # - FTQC版のShorとEkerå–Håstadは、同じ`O(n^2)`のwindowed modular multiplication bodyと、1つの再利用phase qubitを共有します。
 # - 固定window幅では、回路本体から得られる幅は`3*n + w + 7`、Shorの既定精度でgate数は`O(n^3)`です。
-# - 問題インスタンスにspecializeされたFTQC kernelは具体的な推定値を返します。サイズ依存性は、異なる法から作った実body同士を比較して確認します。
+# - 問題インスタンスにspecializeされたFTQC factoryは、実行可能なbodyから具体的な幅とgate推定値を返します。
 #
 # **次へ**：[実行モデル](06_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序について。
