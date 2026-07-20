@@ -105,12 +105,6 @@ def test_float_arrays_are_rejected(array_fn):
         array_fn(np.array([0.0, 1.0]))
 
 
-def test_bytearray_is_rejected():
-    """bytearray is not a valid bit container, matching bytes/str."""
-    with pytest.raises(TypeError):
-        binary_to_spin(bytearray([0, 1]))
-
-
 @pytest.mark.parametrize("bits", [0, 1, [0, 1, 0], [1, 1, 0]])
 def test_round_trip_binary_spin_binary(bits):
     """spin_to_binary(binary_to_spin(x)) is the identity on valid bits."""
@@ -156,8 +150,9 @@ def test_numpy_array_rejects_out_of_domain_entries():
         spin_to_binary(np.array([1, -1, 0]))
 
 
-@pytest.mark.parametrize("bad", ["01", b"01", 1.0, None])
-def test_unsupported_types_raise_type_error(bad):
-    """Strings, floats, and None are not valid bit containers."""
+@pytest.mark.parametrize("convert", [binary_to_spin, spin_to_binary])
+@pytest.mark.parametrize("bad", ["01", b"01", bytearray(b"01"), 1.0, None])
+def test_unsupported_types_raise_type_error(convert, bad):
+    """Strings, bytes, floats, and None are rejected by both directions."""
     with pytest.raises(TypeError):
-        binary_to_spin(bad)
+        convert(bad)

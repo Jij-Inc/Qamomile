@@ -88,7 +88,7 @@ def _require_integral_dtype(values: np.ndarray) -> None:
         np.issubdtype(values.dtype, np.integer) or np.issubdtype(values.dtype, np.bool_)
     ):
         raise TypeError(
-            "bit arrays must have an integer or boolean dtype, "
+            "input arrays must have an integer or boolean dtype, "
             f"got dtype {values.dtype}"
         )
 
@@ -256,6 +256,6 @@ def _convert(
     if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
         return [_convert(item, scalar_fn, array_fn) for item in values]
     raise TypeError(
-        "expected an int, NumPy array, sequence, or mapping of bits, "
+        "expected an int, NumPy array, sequence, or mapping, "
         f"got {type(values).__name__}"
     )
