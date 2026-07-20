@@ -117,6 +117,7 @@ site:
   template: book-theme
   title: Qamomile ドキュメント
   options:
+    favicon: ../assets/qamomile_logo.png
     logo: ../assets/qamomile_logo.png
     style: ../assets/custom-theme.css
     folders: true
