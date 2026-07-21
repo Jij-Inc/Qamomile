@@ -47,10 +47,10 @@ from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # (problem-settings)=
-# ## 問題設定
+# ## 問題設定: MaxCut
 
 # %% [markdown]
-# ### MaxCut問題とは？
+# ### 問題の定義
 #
 # 無向グラフ$G = (V, E)$が与えられたとき、MaxCut問題は頂点を2つの集合$S$と$\bar{S}$に分割し、2つの集合間の辺の数を最大化する問題です。各頂点にスピン変数$s_i \in \{+1, -1\}$を割り当てます。$s_i = +1$なら頂点$i$は$S$に入り、$s_i = -1$なら$\bar{S}$に入ります。カット値は次のように書けます。
 #
@@ -138,7 +138,7 @@ plt.show()
 #
 # データ項は接続された各ペアで$\sigma_i$と$\sigma_j$を逆符号へ引き寄せます。つまり$J_{ij} \sigma_i \sigma_j$が負になる方向へ働きます。正則化項は大きな緩和値にペナルティーを与えてこの圧力と釣り合いを取ります。これにより、オプティマイザを領域の滑らかな内部に保ち、劣ったビット列への早期収束を抑えます。
 #
-# この損失には3つのハイパーパラメータ$\alpha$（tanhの鋭さ）、$\beta$（正則化項の強さ）、$\nu$（全体スケール）が含まれます。これらの値はオプティマイザの収束と最終的なビット列の品質に影響します。本チュートリアルで用いる具体的な値は元論文に従い、[](#pce-step5)で設定します。
+# この損失には3つのハイパーパラメータ$\alpha$（tanhの鋭さ）、$\beta$（正則化項の強さ）、$\nu$（全体スケール）が含まれます。これらの値はオプティマイザの収束と最終的なビット列の品質に影響します。本チュートリアルで用いる具体的な値は元論文に従い、[](#pce-optimize-variational-parameters)で設定します。
 #
 # MaxCutに限れば、スピンモデルは$h_i = 0$、各辺で$J_{ij} = +\tfrac{1}{2}$なので、データ項は隣接する$\sigma_i, \sigma_j$が逆符号となるとき最小になります。
 
@@ -202,10 +202,10 @@ for P_i in observables:
 # %% [markdown]
 # ### アンザッツの定義
 #
-# PCEでは回路を自由に選べます。原論文では**Hardware-efficient ansatz**を使います。これは単一量子ビット回転と2量子ビットのエンタングリングゲートを交互に積み重ねる構成です。本チュートリアルでは`qamomile.circuit.algorithm.basic`が提供する事前定義のレイヤ（`ry_layer`、`rz_layer`、`cx_entangling_layer`）を`depth`回スタックして使い、合計で$2 \cdot n \cdot \text{depth}$個の変分角度を持たせます。量子カーネルは$\langle P \rangle$を返します。`P`はトランスパイル時のbindingsで固定されるオブザーバブルなので、同じ量子カーネルを$P_i$ごとに1回ずつトランスパイルします。
+# PCEでは回路を自由に選べます。原論文では**Hardware-efficient ansatz**を使います。これは単一量子ビット回転と2量子ビットのエンタングルゲートを交互に積み重ねる構成です。本チュートリアルでは`qamomile.circuit.algorithm.basic`が提供する事前定義のレイヤ（`ry_layer`、`rz_layer`、`cx_entangling_layer`）を`depth`回スタックして使い、合計で$2 \cdot n \cdot \text{depth}$個の変分角度を持たせます。量子カーネルは$\langle P \rangle$を返します。`P`はトランスパイル時のbindingsで固定されるオブザーバブルなので、同じ量子カーネルを$P_i$ごとに1回ずつトランスパイルします。
 #
 # :::{note}
-# **ゲート規約：** Qamomileの回転ゲートは標準的な$1/2$係数を持ちます: $\text{RY}(\theta) = e^{-i \theta Y / 2}$、$\text{RZ}(\theta) = e^{-i \theta Z / 2}$。`thetas`ベクトルの各要素は変分パラメータです。オプティマイザがスケールできるため、この定数倍は最適な`thetas`値に吸収されます。したがって明示的に$2$を掛けず、`thetas[i]`をそのまま渡しています。
+# Qamomileの回転ゲートは標準的な$1/2$係数を持ちます: $\text{RY}(\theta) = e^{-i \theta Y / 2}$、$\text{RZ}(\theta) = e^{-i \theta Z / 2}$。`thetas`ベクトルの各要素は変分パラメータです。オプティマイザがスケールできるため、この定数倍は最適な`thetas`値に吸収されます。したがって明示的に$2$を掛けず、`thetas[i]`をそのまま渡しています。
 # :::
 
 
@@ -262,7 +262,7 @@ assert len(executables) == len(observables)
 assert num_thetas == 2 * n * depth
 
 # %% [markdown]
-# (pce-step5)=
+# (pce-optimize-variational-parameters)=
 # ### 変分パラメータの最適化
 #
 # 古典ループは現在の`thetas`で全オブザーバブルに対し$\langle P_i \rangle$を推定し、得られた値を[](#pce-algorithm)のtanh緩和損失（データ項＋正則化項）に代入し、`scipy.optimize.minimize`に角度を更新させます。
@@ -335,7 +335,7 @@ plt.title("PCE Optimization Progress")
 plt.show()
 
 # %% [markdown]
-# (pce-step6)=
+# (pce-decode-optimized-expectations)=
 # ### 最適化済みの期待値をデコードする
 #
 # `PCEConverter.decode(expectations)`は変数ごとの期待値を受け取り、それぞれを符号丸めしてスピンに変換し、入力モデルと同じvartypeで1サンプルの`BinarySampleSet`を返します。ここでは`ising_model`を`BinaryModel.from_ising`で構築したため、vartypeはSPINです。出力されるエネルギーは[](#problem-settings)で設定した規約（エネルギー＝$-\,\text{cut}$）に従うので、デコード後のエネルギーはカット値の負の値です。
@@ -388,7 +388,7 @@ assert best_cut == 26
 # %% [markdown]
 # #### ベストカット
 #
-# デコードされたスピン割り当てをグラフ分割に変換し、[](#pce-classical-baseline)の全探索による厳密解と比較します。整合性チェックとして、カット値は[](#pce-step6)で出力したスピンエネルギーの$-1$倍と一致するはずです。
+# デコードされたスピン割り当てをグラフ分割に変換し、[](#pce-classical-baseline)の全探索による厳密解と比較します。整合性チェックとして、カット値は[](#pce-decode-optimized-expectations)で出力したスピンエネルギーの$-1$倍と一致するはずです。
 
 # %%
 sample = sampleset.samples[0]

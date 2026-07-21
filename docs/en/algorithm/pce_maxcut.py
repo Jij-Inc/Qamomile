@@ -56,10 +56,10 @@ from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # (problem-settings)=
-# ## Problem Settings
+# ## Problem Settings: MaxCut
 
 # %% [markdown]
-# ### What is MaxCut?
+# ### Problem Definition
 #
 # Given an undirected graph $G = (V, E)$, the MaxCut problem asks for
 # a partition of the vertices into two sets $S$ and $\bar{S}$ so that the
@@ -195,7 +195,7 @@ plt.show()
 # $\beta$ (regularizer strength), and $\nu$ (overall scale). Their
 # values affect optimizer convergence and final solution quality. The
 # concrete values used in this tutorial follow the original paper and
-# are configured in [](#pce-step5).
+# are configured in [](#pce-optimize-variational-parameters).
 #
 # For MaxCut specifically, the spin model has $h_i = 0$ and
 # $J_{ij} = +\tfrac{1}{2}$ on every edge, so the data term is minimized
@@ -284,7 +284,7 @@ for P_i in observables:
 # per $P_i$.
 #
 # :::{note}
-# **Gate convention.** Qamomile's rotation gates carry the standard
+# Qamomile's rotation gates carry the standard
 # $1/2$ factor: $\text{RY}(\theta) = e^{-i \theta Y / 2}$ and
 # $\text{RZ}(\theta) = e^{-i \theta Z / 2}$. Every entry of the `thetas`
 # vector is a variational parameter. The optimizer can scale it, so the
@@ -356,7 +356,7 @@ assert len(executables) == len(observables)
 assert num_thetas == 2 * n * depth
 
 # %% [markdown]
-# (pce-step5)=
+# (pce-optimize-variational-parameters)=
 # ### Optimize the Variational Parameters
 #
 # The classical loop estimates $\langle P_i \rangle$ for every
@@ -437,7 +437,7 @@ plt.title("PCE Optimization Progress")
 plt.show()
 
 # %% [markdown]
-# (pce-step6)=
+# (pce-decode-optimized-expectations)=
 # ### Decode the Optimized Expectations
 #
 # `PCEConverter.decode(expectations)` takes the per-variable expectation
@@ -508,7 +508,7 @@ assert best_cut == 26
 # its cut value with the brute-force optimum from
 # [](#pce-classical-baseline). As a consistency check, the cut
 # value should equal $-1$ times the spin energy reported in
-# [](#pce-step6).
+# [](#pce-decode-optimized-expectations).
 
 # %%
 sample = sampleset.samples[0]
