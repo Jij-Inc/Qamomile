@@ -1281,13 +1281,15 @@ def _hugr_disjoint_array_alias_for(
 
 @qmc.qkernel
 def _hugr_while_scalar_carry() -> qmc.UInt:
-    """Expose the unsupported non-condition scalar carry in a while loop."""
+    """Expose multiple non-condition scalar carries in a while loop."""
     trigger = qmc.measure(qmc.qubit("trigger"))
     total = qmc.uint(0)
+    doubled = qmc.uint(0)
     while trigger:
         total = total + 1
+        doubled = doubled + 2
         trigger = qmc.measure(qmc.qubit("next_trigger"))
-    return total
+    return total + doubled
 
 
 @qmc.qkernel
@@ -2891,10 +2893,11 @@ def test_hugr_static_zero_trip_publishes_region_arg_initializer() -> None:
 
 
 @pytest.mark.hugr
-def test_hugr_rejects_while_scalar_carry_before_lowering() -> None:
-    """Residual while scalar carries fail with a targeted diagnostic."""
-    with pytest.raises(EmitError, match="loop-carried classical values.*while"):
-        HugrTranspiler().to_hugr(_hugr_while_scalar_carry)
+def test_hugr_threads_while_scalar_carry_through_tail_loop() -> None:
+    """A TailLoop threads multiple explicit non-condition state slots."""
+    package = HugrTranspiler().to_hugr(_hugr_while_scalar_carry)
+
+    HugrTranspiler().target.validate(package)
 
 
 @pytest.mark.hugr

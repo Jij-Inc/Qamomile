@@ -481,11 +481,16 @@ class _Canonicalizer:
         new_op: Operation = op.replace_values(sub_map) if sub_map else op
 
         if isinstance(new_op, HasNestedOps):
-            new_lists = [
-                [self.canonical_operation(child) for child in op_list]
-                for op_list in new_op.nested_op_lists()
-            ]
-            new_op = new_op.rebuild_nested(new_lists)
+            new_regions = tuple(
+                dataclasses.replace(
+                    region,
+                    operations=tuple(
+                        self.canonical_operation(child) for child in region.operations
+                    ),
+                )
+                for region in new_op.nested_regions()
+            )
+            new_op = new_op.rebuild_regions(new_regions)
 
         if isinstance(new_op, CastOperation) and new_op.qubit_mapping:
             new_op = dataclasses.replace(
@@ -1021,8 +1026,8 @@ def _collect_from_operation(op: Operation, visit: Any) -> None:
         if isinstance(v, ValueBase):
             visit(v)
     if isinstance(op, HasNestedOps):
-        for child_list in op.nested_op_lists():
-            for child in child_list:
+        for region in op.nested_regions():
+            for child in region.operations:
                 _collect_from_operation(child, visit)
     if isinstance(op, InvokeOperation) and op.definition is not None:
         if op.definition.body is not None:
@@ -1224,9 +1229,9 @@ def _emit_operation(op: Operation, out: list[str], indent: int) -> None:
         out.append(f"{pad}{_INLINE_INDENT}fields={{{','.join(extras)}}}")
 
     if isinstance(op, HasNestedOps):
-        for i, child_list in enumerate(op.nested_op_lists()):
+        for i, region in enumerate(op.nested_regions()):
             out.append(f"{pad}{_INLINE_INDENT}nested[{i}]:")
-            for child in child_list:
+            for child in region.operations:
                 _emit_operation(child, out, indent + 2)
 
     if isinstance(op, InvokeOperation) and op.body is not None:

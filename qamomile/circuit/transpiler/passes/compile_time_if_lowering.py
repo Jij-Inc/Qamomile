@@ -519,15 +519,17 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
             elif isinstance(op, HasNestedOps):
                 # Generic recursion for For/ForItems/While bodies.
-                new_lists: list[list[Operation]] = []
-                for body in op.nested_op_lists():
+                new_regions = []
+                for region in op.nested_regions():
                     lowered_body, nested_subst, nested_dead = self._lower_operations(
-                        body, dict(concrete_values)
+                        list(region.operations), dict(concrete_values)
                     )
-                    new_lists.append(lowered_body)
+                    new_regions.append(
+                        dataclasses.replace(region, operations=tuple(lowered_body))
+                    )
                     merge_subst.update(nested_subst)
                     dead_uuids.update(nested_dead)
-                op = op.rebuild_nested(new_lists)
+                op = op.rebuild_regions(new_regions)
                 # The substitution applied at the top of the loop predates
                 # the nested lowering, so merge outputs erased INSIDE this
                 # op's body are still referenced by its rebind records
@@ -1984,11 +1986,16 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
 
         if isinstance(op, HasNestedOps):
             # Generic recursion for For/ForItems/While bodies.
-            new_lists = [
-                [self._apply_substitution(o, subst) for o in body]
-                for body in op.nested_op_lists()
+            new_regions = [
+                dataclasses.replace(
+                    region,
+                    operations=tuple(
+                        self._apply_substitution(o, subst) for o in region.operations
+                    ),
+                )
+                for region in op.nested_regions()
             ]
-            rebuilt = op.rebuild_nested(new_lists)
+            rebuilt = op.rebuild_regions(new_regions)
             rebuilt = dataclasses.replace(
                 cast(Any, rebuilt),
                 operands=new_operands,
@@ -2182,21 +2189,20 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 recursively_pruned.append(op)
                 continue
 
-            nested_outputs: list[list[ValueLike]]
-            if isinstance(op, IfOperation):
-                nested_outputs = [list(op.true_yields), list(op.false_yields)]
-            elif isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-                nested_outputs = [[arg.yielded for arg in op.region_args]]
-            else:
-                nested_outputs = [[] for _ in op.nested_op_lists()]
-
-            new_lists = [
-                self._eliminate_dead_ops(body, dead_uuids, protected)
-                for body, protected in zip(
-                    op.nested_op_lists(), nested_outputs, strict=True
+            new_regions = [
+                dataclasses.replace(
+                    region,
+                    operations=tuple(
+                        self._eliminate_dead_ops(
+                            list(region.operations),
+                            dead_uuids,
+                            [cast(ValueLike, value) for value in region.yields],
+                        )
+                    ),
                 )
+                for region in op.nested_regions()
             ]
-            recursively_pruned.append(op.rebuild_nested(new_lists))
+            recursively_pruned.append(op.rebuild_regions(new_regions))
 
         operations = recursively_pruned
 
@@ -2242,14 +2248,16 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         removed = False
         for op in operations:
             if isinstance(op, HasNestedOps):
-                new_lists: list[list[Operation]] = []
-                for body in op.nested_op_lists():
+                new_regions = []
+                for region in op.nested_regions():
                     new_body, body_removed = self._remove_dead_ops_recursive(
-                        body, dead_uuids, used_uuids
+                        list(region.operations), dead_uuids, used_uuids
                     )
-                    new_lists.append(new_body)
+                    new_regions.append(
+                        dataclasses.replace(region, operations=tuple(new_body))
+                    )
                     removed = removed or body_removed
-                op = op.rebuild_nested(new_lists)
+                op = op.rebuild_regions(new_regions)
 
             # Only known-pure scalar expressions are removable. Quantum,
             # hybrid, control-flow, and unknown classical operations may have
@@ -2295,14 +2303,11 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         """
         for operand in genuine_input_values(op):
             used.update(collect_value_like_uuids(cast(ValueLike, operand)))
-        if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-            for region_arg in op.region_args:
-                used.update(collect_value_like_uuids(region_arg.yielded))
 
         # Recurse into control flow (For/ForItems/While/If).
         if isinstance(op, HasNestedOps):
-            for body in op.nested_op_lists():
-                for inner in body:
+            for region in op.nested_regions():
+                for inner in region.operations:
                     CompileTimeIfLoweringPass._collect_used_uuids(inner, used)
 
     def _try_seed_value(

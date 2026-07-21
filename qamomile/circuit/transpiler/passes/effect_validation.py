@@ -49,8 +49,8 @@ def _operations_contain_expval(
         if isinstance(operation, ExpvalOp):
             return True
         if isinstance(operation, HasNestedOps) and any(
-            _operations_contain_expval(nested, seen)
-            for nested in operation.nested_op_lists()
+            _operations_contain_expval(list(region.operations), seen)
+            for region in operation.nested_regions()
         ):
             return True
         if isinstance(operation, InvokeOperation) and operation.definition is not None:
