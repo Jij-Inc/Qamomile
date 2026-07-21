@@ -220,7 +220,7 @@ plt.show()
 # ## Implementation
 
 # %% [markdown]
-# ### Step 1: Build the `BinaryModel` and `PCEConverter`
+# ### Build the `BinaryModel` and `PCEConverter`
 #
 # We build the Ising form derived in [](#problem-settings) with
 # `BinaryModel.from_ising`: $h_i = 0$, $J_{ij} = 1/2$ on every edge, and
@@ -249,7 +249,7 @@ assert converter.num_qubits == 3
 assert converter.correlator_order == 2
 
 # %% [markdown]
-# ### Step 2: Inspect the Per-Variable Pauli Observables
+# ### Inspect the Per-Variable Pauli Observables
 #
 # `get_encoded_pauli_list()` returns one Hamiltonian per variable, each
 # containing exactly one $k$-body Pauli string with coefficient $1$.
@@ -271,7 +271,7 @@ for P_i in observables:
     assert len(coeffs) == 1 and abs(coeffs[0] - 1.0) < 1e-12
 
 # %% [markdown]
-# ### Step 3: Define the Ansatz
+# ### Define the Ansatz
 #
 # PCE leaves the circuit choice open. The original paper uses a
 # **hardware-efficient ansatz**: alternating layers of
@@ -322,7 +322,7 @@ def pce_ansatz(
 pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
 
 # %% [markdown]
-# ### Step 4: Transpile One `ExecutableProgram` per Observable
+# ### Transpile One `ExecutableProgram` per Observable
 #
 # Each $P_i$ must be fixed at transpile time, so we transpile the kernel
 # once per observable and cache the resulting executables. Each
@@ -357,7 +357,7 @@ assert num_thetas == 2 * n * depth
 
 # %% [markdown]
 # (pce-step5)=
-# ### Step 5: Optimize the Variational Parameters
+# ### Optimize the Variational Parameters
 #
 # The classical loop estimates $\langle P_i \rangle$ for every
 # observable at the current `thetas`, plugs those values into the
@@ -438,7 +438,7 @@ plt.show()
 
 # %% [markdown]
 # (pce-step6)=
-# ### Step 6: Decode the Optimized Expectations
+# ### Decode the Optimized Expectations
 #
 # `PCEConverter.decode(expectations)` takes the per-variable expectation
 # values, sign-rounds each one to a spin, and returns a single-sample

@@ -158,7 +158,7 @@ plt.show()
 # ## Qamomileでの実装
 
 # %% [markdown]
-# ### Step 1: `BinaryModel`と`PCEConverter`の構築
+# ### `BinaryModel`と`PCEConverter`の構築
 #
 # [](#problem-settings)で導出したIsing形式を`BinaryModel.from_ising`で構築します。係数は$h_i = 0$、各辺で$J_{ij} = 1/2$、定数項$-|E|/2$です。得られたスピンモデルと相関演算子の次数$k = 2$を`PCEConverter`に渡すと、コンバータが必要な量子ビット数を決めます。このスケーリングではスピンモデルのエネルギーがカット値の符号反転に等しくなります。カットが大きいほどエネルギーが低くなります。
 
@@ -182,7 +182,7 @@ assert converter.num_qubits == 3
 assert converter.correlator_order == 2
 
 # %% [markdown]
-# ### Step 2: 変数ごとのPauliオブザーバブルを確認する
+# ### 変数ごとのPauliオブザーバブルを確認する
 #
 # `get_encoded_pauli_list()`は変数ごとに1つのHamiltonianを返します。各Hamiltonianは係数1の$k$体Pauli文字列をちょうど1つ含みます。これらが[](#pce-algorithm)で言及した$P_i$オブザーバブルです。最適化ループはアンザッツの量子カーネル内の`qmc.expval`で、それらの期待値を推定します。
 
@@ -200,7 +200,7 @@ for P_i in observables:
     assert len(coeffs) == 1 and abs(coeffs[0] - 1.0) < 1e-12
 
 # %% [markdown]
-# ### Step 3: アンザッツの定義
+# ### アンザッツの定義
 #
 # PCEでは回路を自由に選べます。原論文では**Hardware-efficient ansatz**を使います。これは単一量子ビット回転と2量子ビットのエンタングリングゲートを交互に積み重ねる構成です。本チュートリアルでは`qamomile.circuit.algorithm.basic`が提供する事前定義のレイヤ（`ry_layer`、`rz_layer`、`cx_entangling_layer`）を`depth`回スタックして使い、合計で$2 \cdot n \cdot \text{depth}$個の変分角度を持たせます。量子カーネルは$\langle P \rangle$を返します。`P`はトランスパイル時のbindingsで固定されるオブザーバブルなので、同じ量子カーネルを$P_i$ごとに1回ずつトランスパイルします。
 #
@@ -235,7 +235,7 @@ def pce_ansatz(
 pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
 
 # %% [markdown]
-# ### Step 4: オブザーバブルごとに1つの`ExecutableProgram`へとトランスパイルする
+# ### オブザーバブルごとに1つの`ExecutableProgram`へとトランスパイルする
 #
 # 各$P_i$はトランスパイル時に固定する必要があるため、オブザーバブルごとに1回トランスパイルし、得られた`ExecutableProgram`をリストに保存します。各`transpiler.transpile(...)`は、トランスパイル済みのバックエンド回路とランタイムパラメータの再バインドに必要なメタデータをまとめた`ExecutableProgram`を返します。トランスパイル時の`bindings`は構造的な入力（`n`、`depth`、`P`）を固定し、`parameters=["thetas"]`は変分角度をオプティマイザが呼び出しのたびに変更できるランタイムパラメータとして残します。
 
@@ -263,7 +263,7 @@ assert num_thetas == 2 * n * depth
 
 # %% [markdown]
 # (pce-step5)=
-# ### Step 5: 変分パラメータの最適化
+# ### 変分パラメータの最適化
 #
 # 古典ループは現在の`thetas`で全オブザーバブルに対し$\langle P_i \rangle$を推定し、得られた値を[](#pce-algorithm)のtanh緩和損失（データ項＋正則化項）に代入し、`scipy.optimize.minimize`に角度を更新させます。
 #
@@ -336,7 +336,7 @@ plt.show()
 
 # %% [markdown]
 # (pce-step6)=
-# ### Step 6: 最適化済みの期待値をデコードする
+# ### 最適化済みの期待値をデコードする
 #
 # `PCEConverter.decode(expectations)`は変数ごとの期待値を受け取り、それぞれを符号丸めしてスピンに変換し、入力モデルと同じvartypeで1サンプルの`BinarySampleSet`を返します。ここでは`ising_model`を`BinaryModel.from_ising`で構築したため、vartypeはSPINです。出力されるエネルギーは[](#problem-settings)で設定した規約（エネルギー＝$-\,\text{cut}$）に従うので、デコード後のエネルギーはカット値の負の値です。
 
