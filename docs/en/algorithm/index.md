@@ -9,9 +9,9 @@ Concrete quantum algorithm examples built with Qamomile.
 ::::{grid} 1 1 1 1
 
 :::{card}
-:header: **Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)**
+:header: **Hamiltonian Simulation with Suzuki–Trotter**
 :link: hamiltonian_simulation
-Trotter–Suzuki product formulas on the Rabi model with empirical convergence orders.
+This tutorial shows how to use Qamomile to simulate quantum Hamiltonian time evolution based on Suzuki-Trotter decompositions. Using the Rabi oscillation Hamiltonian as an example, it examines the relationship between decomposition order and accuracy.
 :::
 
 :::{card}
