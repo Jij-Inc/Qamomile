@@ -22,33 +22,32 @@
 # Simulating the time evolution $e^{-iHt}$ of a quantum system is one of the
 # canonical applications of a quantum computer. When the Hamiltonian splits
 # into non-commuting pieces $H = A + B$ with $[A, B] \neq 0$, the naive
-# factorisation $e^{-i(A+B)t} = e^{-iAt}\,e^{-iBt}$ is wrong; the standard fix
-# is **Trotter–Suzuki product formulas**, which interleave short evolutions of
-# each piece. The error decreases as we take smaller steps (Lie–Trotter,
-# first order), symmetrise the step (Strang, second order), or nest the
-# symmetric step recursively via Suzuki's construction (any even order).
+# factorisation $e^{-i(A+B)t} = e^{-iAt}\,e^{-iBt}$ is wrong. Instead, we use
+# approximations commonly called **Suzuki-Trotter product formulas**, which
+# interleave short evolutions of each term. The approximation error
+# (Trotter error) decreases as the approximation order increases. The
+# first-order case is the Lie-Trotter product formula
+# {cite:p}`10.1090/S0002-9939-1959-0108732-6`, and higher-order recursive
+# formulas are given by the Suzuki-Trotter product-formula construction
+# {cite:p}`10.1007/BF01609348`.
 #
-# This article builds these approximations end-to-end in Qamomile on a
-# one-qubit Rabi Hamiltonian so the Trotter error is measurable. We start
-# with $S_1$ and $S_2$, then write the full Suzuki fractal recursion as a
-# **self-recursive** `@qkernel` that takes the target order as a `UInt`
-# parameter — the transpiler resolves the recursion by iterating
-# inline + partial-evaluation under a concrete `order` binding, so the emitted
-# circuit is flat regardless of how deep the recursion went. Finally, we
-# verify the textbook convergence rates ($S_k$'s fidelity error scales as
-# $\Delta t^{2k}$) against the exact 2x2 propagator.
+# This article uses a one-qubit Rabi-oscillation Hamiltonian, where the
+# Trotter error is easy to measure, and shows how to implement Hamiltonian
+# simulation with Trotter decomposition in Qamomile. We cover two
+# implementations: a scratch implementation and a simpler version using the
+# built-in `trotterized_time_evolution` function. We then run the implemented
+# quantum circuits and check their convergence rates ($S_k$'s fidelity error
+# scales as $\Delta t^{2k}$) against an exact reference.
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit]"
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
-from qiskit import QuantumCircuit, transpile as qk_transpile
-from qiskit_aer import AerSimulator
 from scipy.linalg import expm
 
 import qamomile.circuit as qmc
@@ -57,13 +56,13 @@ from qamomile.circuit.algorithm import trotterized_time_evolution
 from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
-# ## Problem Settings
+# ## Problem Settings: Rabi Oscillation
 #
 # We use the smallest non-trivial Hamiltonian simulation problem: one qubit
 # with two non-commuting Hamiltonian terms. This keeps the circuits compact
 # while still making the Trotter error visible.
 #
-# ### The Rabi Hamiltonian
+# ### Hamiltonian
 #
 # A single two-level system driven on resonance is governed by
 #
@@ -117,55 +116,39 @@ assert comm_zx == expected
 # %% [markdown]
 # ### Exact reference state
 #
-# A 2x2 matrix exponential gives the exact state $|\psi(T)\rangle = e^{-iHT}|0\rangle$,
-# which each Trotter approximation is judged against via the **fidelity error**
-# $1 - |\langle\psi_\text{exact}|\psi_\text{trotter}\rangle|$.
+# A dense 2x2 matrix exponential gives the exact state
+# $|\psi(T)\rangle = e^{-iHT}|0\rangle$ directly. This is simpler than
+# asking a quantum SDK to simulate the one-qubit reference state, and it is
+# also the object against which each Trotter approximation is judged via the
+# **fidelity error** $1 - |\langle\psi_\text{exact}|\psi_\text{trotter}\rangle|$.
 
 # %%
+ket0 = np.array([1.0, 0.0], dtype=complex)
 X_mat = np.array([[0, 1], [1, 0]], dtype=complex)
 Z_mat = np.array([[1, 0], [0, -1]], dtype=complex)
-H_mat = 0.5 * omega * Z_mat + 0.5 * Omega * X_mat
-sv_exact = expm(-1j * T * H_mat) @ np.array([1.0, 0.0], dtype=complex)
+Hz_mat = 0.5 * omega * Z_mat
+Hx_mat = 0.5 * Omega * X_mat
+H_mat = Hz_mat + Hx_mat
 
 
-# %%
-def statevector(circuit) -> np.ndarray:
-    """Strip measurements, lower PauliEvolutionGate, and read out the state.
+def evolve(hamiltonian: np.ndarray, time: float) -> np.ndarray:
+    return expm(-1j * time * hamiltonian)
 
-    The default ``pauli_evolve`` emitter produces a ``PauliEvolutionGate``, which
-    is not in AerSimulator's native basis.  We run a shallow Qiskit transpile
-    pass to expand it into elementary rotations before simulating.
-    """
-    stripped = QuantumCircuit(*circuit.qregs)
-    for instr in circuit.data:
-        if instr.operation.name not in ("measure", "save_statevector"):
-            stripped.append(instr)
-    stripped = qk_transpile(
-        stripped,
-        basis_gates=["u", "cx", "rx", "ry", "rz", "h", "p", "sx", "x", "y", "z"],
-    )
-    # ``save_statevector`` is a qiskit-aer monkey-patch on ``QuantumCircuit``
-    # that base qiskit's typeshed does not know about.
-    stripped.save_statevector()  # type: ignore[attr-defined]
-    sim = AerSimulator(method="statevector")
-    return np.asarray(sim.run(stripped).result().get_statevector())
+
+sv_exact = evolve(H_mat, T) @ ket0
 
 
 # %% [markdown]
-# ## Algorithm
+# ## Algorithm: Trotter Simulation
 #
 # The algorithm approximates the full evolution by composing evolutions under
 # the separate Hamiltonian terms. We start with the first-order Lie-Trotter
-# formula, improve it with the symmetric second-order formula, and then use
-# Suzuki's recursive construction to obtain higher even orders.
+# decomposition {cite:p}`10.1090/S0002-9939-1959-0108732-6`, introduce the
+# symmetric second-order formula, and then show how recursion gives
+# Suzuki-Trotter formulas for arbitrary even orders
+# {cite:p}`10.1007/BF01609348`.
 #
-# ## Implementation
-#
-# The implementation mirrors the formulas directly with Qamomile qkernels.
-# Each step kernel threads a qubit register through `pauli_evolve`, and the
-# outer kernels repeat the chosen step for `n_steps` slices of duration `dt`.
-#
-# ### $S_1$: First-order Suzuki–Trotter decomposition (Lie–Trotter)
+# ### $S_1$: First-order Suzuki–Trotter decomposition (Lie–Trotter decomposition)
 #
 # The simplest split is
 #
@@ -175,72 +158,22 @@ def statevector(circuit) -> np.ndarray:
 # local error is $O(\Delta t^2)$; integrated over $N = T/\Delta t$ steps the
 # global state-norm error is $O(\Delta t)$.
 #
-# We write one step as a small helper `@qkernel`: the qubit register is threaded
-# through, evolved under $H_z$ and then $H_x$. The outer kernel `rabi_s1`
-# repeats that step $N$ times, where `n_steps` is a `UInt` parameter so the
-# same kernel transpiles for any $N$ at bind-time.
-
-
-# %%
-@qmc.qkernel
-def s1_step(
-    q: qmc.Vector[qmc.Qubit], Hs: qmc.Vector[qmc.Observable], dt: qmc.Float
-) -> qmc.Vector[qmc.Qubit]:
-    q = qmc.pauli_evolve(q, Hs[0], dt)
-    q = qmc.pauli_evolve(q, Hs[1], dt)
-    return q
-
-
-# %%
-@qmc.qkernel
-def rabi_s1(
-    Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
-) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(1, "q")
-    for _ in qmc.range(n_steps):
-        q = s1_step(q, Hs, dt)
-    return qmc.measure(q)
-
-
-# %% [markdown]
-# ### $S_2$: Second-order Suzuki–Trotter decomposition (Strang splitting)
+#
+# ### $S_2$: Second-order Suzuki–Trotter decomposition
 #
 # Symmetrising the step around the middle term cancels the leading error:
 #
 # $$ S_2(\Delta t) = e^{-i H_z \Delta t/2}\, e^{-i H_x \Delta t}\, e^{-i H_z \Delta t/2}. $$
 #
 # The local error drops to $O(\Delta t^3)$ and the global state-norm error to
-# $O(\Delta t^2)$. The step kernel is just three `pauli_evolve` calls.
-
-
-# %%
-@qmc.qkernel
-def s2_step(
-    q: qmc.Vector[qmc.Qubit], Hs: qmc.Vector[qmc.Observable], dt: qmc.Float
-) -> qmc.Vector[qmc.Qubit]:
-    q = qmc.pauli_evolve(q, Hs[0], 0.5 * dt)
-    q = qmc.pauli_evolve(q, Hs[1], dt)
-    q = qmc.pauli_evolve(q, Hs[0], 0.5 * dt)
-    return q
-
-
-# %%
-@qmc.qkernel
-def rabi_s2(
-    Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
-) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(1, "q")
-    for _ in qmc.range(n_steps):
-        q = s2_step(q, Hs, dt)
-    return qmc.measure(q)
-
-
-# %% [markdown]
+# $O(\Delta t^2)$. The step consists of half a $H_z$ evolution, one full
+# $H_x$ evolution, and another half $H_z$ evolution.
+#
 # ### Higher-order Suzuki–Trotter decomposition: the fractal recursion
 #
-# Masuo Suzuki showed that an arbitrary even-order Trotter approximation can
-# be built **recursively** from $S_2$ by nesting five rescaled copies at each
-# level:
+# The Suzuki-Trotter product-formula paper {cite:p}`10.1007/BF01609348`
+# gives a recursive construction of arbitrary even-order Trotter
+# approximations from $S_2$. Each level nests five rescaled copies:
 #
 # $$ S_{2k}(\Delta t) = S_{2k-2}(p_k \Delta t)^2 \, S_{2k-2}\bigl((1 - 4 p_k)\Delta t\bigr) \, S_{2k-2}(p_k \Delta t)^2, $$
 #
@@ -261,12 +194,56 @@ def rabi_s2(
 # implementing Suzuki-Trotter by hand.
 
 # %% [markdown]
-# #### Writing the recursion as a self-recursive `@qkernel`
+# ## Implementation with Qamomile
 #
-# The mathematical recursion translates directly into a `@qkernel` that takes
-# the target order as a `UInt` parameter and calls itself with `order - 2` in
-# the recursive branch. The base case at `order == 2` hands off to `s2_step`;
-# otherwise five nested calls produce the Suzuki fractal.
+# Qamomile provides `trotterized_time_evolution`, a function that implements
+# Trotter simulation based on Suzuki-Trotter decomposition. Here we first
+# implement the Trotter formulas directly as Qamomile qkernels and see how
+# they map to Qamomile. We then look at the simpler implementation using
+# `trotterized_time_evolution`.
+#
+# ### Scratch implementation
+#
+# The scratch implementation mirrors the formulas above directly. The
+# `rabi_s1` and `rabi_s2` kernels thread a qubit register through
+# `pauli_evolve` while repeating `n_steps` slices of duration `dt`.
+#
+# For $S_1$, each loop iteration sends the register through $H_z$ and then
+# $H_x$. For $S_2$, the same loop directly applies the symmetric
+# half-full-half schedule.
+
+
+# %%
+@qmc.qkernel
+def rabi_s1(
+    Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
+) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(1, "q")
+    for _ in qmc.range(n_steps):
+        q = qmc.pauli_evolve(q, Hs[0], dt)
+        q = qmc.pauli_evolve(q, Hs[1], dt)
+    return qmc.measure(q)
+
+
+# %%
+@qmc.qkernel
+def rabi_s2(
+    Hs: qmc.Vector[qmc.Observable], dt: qmc.Float, n_steps: qmc.UInt
+) -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(1, "q")
+    for _ in qmc.range(n_steps):
+        q = qmc.pauli_evolve(q, Hs[0], 0.5 * dt)
+        q = qmc.pauli_evolve(q, Hs[1], dt)
+        q = qmc.pauli_evolve(q, Hs[0], 0.5 * dt)
+    return qmc.measure(q)
+
+
+# %% [markdown]
+# The mathematical recursion also translates directly into a `@qkernel` that
+# takes the target order as a `UInt` parameter and calls itself with
+# `order - 2` in the recursive branch. The base case at `order == 2` applies
+# the second-order half-full-half schedule directly; otherwise five nested
+# calls produce the Suzuki fractal recursion.
 #
 # Qamomile's transpiler resolves a self-recursive kernel by running an
 # **inline + partial-evaluation fixed-point loop** under the concrete
@@ -276,7 +253,7 @@ def rabi_s2(
 # bind `order=8` at transpile time and get a concrete 8th-order Suzuki
 # circuit without generating the formula by hand.
 #
-# Two caveats to know up front:
+# There are two caveats:
 #
 # - **`order` must be concrete at transpile time.** Without a binding the
 #   base-case `if` never folds and the unroll loop has nothing to terminate
@@ -297,7 +274,9 @@ def suzuki_trotter(
     dt: qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
     if order == 2:
-        q = s2_step(q, Hs, dt)
+        q = qmc.pauli_evolve(q, Hs[0], 0.5 * dt)
+        q = qmc.pauli_evolve(q, Hs[1], dt)
+        q = qmc.pauli_evolve(q, Hs[0], 0.5 * dt)
     else:
         p = 1.0 / (4.0 - 4.0 ** (1.0 / (order - 1)))
         w = 1.0 - 4.0 * p
@@ -329,12 +308,17 @@ def rabi_suzuki(
 # separate kernel per order.
 
 # %% [markdown]
-# #### Shortcut: `trotterized_time_evolution` in `qamomile.circuit.algorithm`
+# ### `trotterized_time_evolution` function
 #
-# Writing out `s1_step` / `s2_step` / `suzuki_trotter` and the outer step loop
-# by hand was useful for seeing the recursion in action, but for day-to-day
-# use Qamomile ships the same construction as a ready-made helper in
-# [`qamomile.circuit.algorithm.trotter`](../../../qamomile/circuit/algorithm/trotter.py):
+# Qamomile provides the Suzuki–Trotter construction as
+# `trotterized_time_evolution` in `qamomile.circuit.algorithm`. The helper
+# takes a qubit register, a list of Hamiltonian terms, the approximation
+# `order`, the total evolution time `gamma`, and the number of Trotter slices
+# `step`. It applies `step` slices of width `gamma / step`.
+#
+# The qkernel below wraps that helper and measures the final qubit. Choose
+# `order = 1` for Lie-Trotter decomposition, or any positive even integer
+# (`2`, `4`, `6`, …) for the corresponding higher-order formula.
 
 
 # %%
@@ -351,50 +335,82 @@ def rabi_from_algorithm(
 
 
 # %% [markdown]
-# The helper accepts `order = 1` or any positive even integer and applies
-# `step` Trotter slices of size `gamma / step`, so the rest of this article's
-# plots could be reproduced by binding `order` and `step` on this single
-# kernel. Use it when you do not need to customise the splitting and fall
-# back to the explicit form above when you want to see (or tweak) the
-# per-term gate schedule.
+# Binding `Hs` supplies the concrete Hamiltonian terms, while binding `order`
+# and `step` selects the formula and resolution. The following result section
+# uses this helper-based kernel for $S_1$, $S_2$, $S_4$, and $S_6$.
 
 # %% [markdown]
 # ## Result
 #
 # We compare each approximation against the exact statevector and confirm the
-# expected convergence rates.
+# expected convergence rates. For this one-qubit benchmark, the comparison can
+# use the same Suzuki-Trotter product formulas as 2x2 matrices. The Qamomile
+# kernels above still define the circuits; the numerical error check does not
+# need a backend statevector simulator.
+#
+
+# %%
+FLOAT64_FLOOR = 1e-15
+
+
+def suzuki_trotter_matrix(order: int, dt: float) -> np.ndarray:
+    if order == 1:
+        return evolve(Hx_mat, dt) @ evolve(Hz_mat, dt)
+    if order == 2:
+        return (
+            evolve(Hz_mat, 0.5 * dt)
+            @ evolve(Hx_mat, dt)
+            @ evolve(Hz_mat, 0.5 * dt)
+        )
+
+    p = 1.0 / (4.0 - 4.0 ** (1.0 / (order - 1)))
+    w = 1.0 - 4.0 * p
+    return (
+        suzuki_trotter_matrix(order - 2, p * dt)
+        @ suzuki_trotter_matrix(order - 2, p * dt)
+        @ suzuki_trotter_matrix(order - 2, w * dt)
+        @ suzuki_trotter_matrix(order - 2, p * dt)
+        @ suzuki_trotter_matrix(order - 2, p * dt)
+    )
+
+
+def trotter_state(order: int, n_steps: int) -> np.ndarray:
+    step = suzuki_trotter_matrix(order, T / n_steps)
+    return np.linalg.matrix_power(step, n_steps) @ ket0
+
+
+def fidelity_error(reference: np.ndarray, state: np.ndarray) -> float:
+    return max(1.0 - abs(np.vdot(reference, state)), FLOAT64_FLOOR)
+
+
+# %% [markdown]
 #
 # ### Quick sanity check at $N = 8$
 #
-# Before the convergence sweep, transpile each kernel once and confirm the
-# statevectors land in the right ball park. $S_1$ and $S_2$ use their own
-# dedicated kernels; $S_4$ and $S_6$ come from `rabi_suzuki` with the
-# corresponding `order` bindings.
+# Before the convergence sweep, transpile the helper-based Qamomile kernel once
+# for each formula and compute the corresponding 2x2 product at $N = 8$. All
+# formulas use `rabi_from_algorithm`; only the `order` binding changes.
 
 # %%
 tr = QiskitTranspiler()
 N_demo = 8
-s1_s2_kernels = {"S1": rabi_s1, "S2": rabi_s2}
-suzuki_orders = {"S4": 4, "S6": 6}
+trotter_orders = {"S1": 1, "S2": 2, "S4": 4, "S6": 6}
 
-for name, ker in s1_s2_kernels.items():
-    exe = tr.transpile(ker, bindings={"Hs": Hs, "dt": T / N_demo, "n_steps": N_demo})
-    sv = statevector(exe.compiled_quantum[0].circuit)
-    err = 1.0 - abs(np.vdot(sv_exact, sv))
-    print(f"{name} at N={N_demo}: fidelity error = {err:.3e}")
-
-for name, order in suzuki_orders.items():
+for name, order in trotter_orders.items():
     exe = tr.transpile(
-        rabi_suzuki,
-        bindings={"order": order, "Hs": Hs, "dt": T / N_demo, "n_steps": N_demo},
+        rabi_from_algorithm,
+        bindings={"Hs": Hs, "gamma": T, "order": order, "step": N_demo},
     )
-    sv = statevector(exe.compiled_quantum[0].circuit)
-    err = 1.0 - abs(np.vdot(sv_exact, sv))
+    assert len(exe.compiled_quantum) == 1
+    sv = trotter_state(order, N_demo)
+    err = fidelity_error(sv_exact, sv)
     print(f"{name} at N={N_demo}: fidelity error = {err:.3e}")
 
 # %% [markdown]
-# ### Convergence sweep
+# ### Approximation order and convergence
 #
+# In Trotter simulation, the error decreases as the step size becomes smaller
+# and as the approximation order becomes higher.
 # We now sweep the number of Trotter steps $N$ and plot the fidelity error
 # against the step size $\Delta t = T / N$ on a log-log axis. The expected
 # slopes are:
@@ -413,23 +429,13 @@ for name, order in suzuki_orders.items():
 
 # %%
 Ns = np.array([2, 4, 8, 16, 32, 64])
-all_names = ["S1", "S2", "S4", "S6"]
+all_names = list(trotter_orders)
 errors: dict[str, Any] = {name: [] for name in all_names}
 
 for N in Ns:
-    for name, ker in s1_s2_kernels.items():
-        exe = tr.transpile(
-            ker, bindings={"Hs": Hs, "dt": T / int(N), "n_steps": int(N)}
-        )
-        sv = statevector(exe.compiled_quantum[0].circuit)
-        errors[name].append(1.0 - abs(np.vdot(sv_exact, sv)))
-    for name, order in suzuki_orders.items():
-        exe = tr.transpile(
-            rabi_suzuki,
-            bindings={"order": order, "Hs": Hs, "dt": T / int(N), "n_steps": int(N)},
-        )
-        sv = statevector(exe.compiled_quantum[0].circuit)
-        errors[name].append(1.0 - abs(np.vdot(sv_exact, sv)))
+    for name, order in trotter_orders.items():
+        sv = trotter_state(order, int(N))
+        errors[name].append(fidelity_error(sv_exact, sv))
 
 errors = {k: np.asarray(v) for k, v in errors.items()}
 dts = T / Ns
@@ -447,7 +453,7 @@ slope_s4 = fit_slope(dts, errors["S4"], 3)
 print(f"Fitted slopes:  S1 = {slope_s1:.2f}  S2 = {slope_s2:.2f}  S4 = {slope_s4:.2f}")
 print(f"S6 fidelity error at largest dt: {errors['S6'][0]:.3e}")
 
-# Guard the expected orders so doc-tests catch regressions in pauli_evolve.
+# Guard the expected orders so doc-tests catch accidental changes to the benchmark.
 assert 1.7 < slope_s1 < 2.3, slope_s1
 assert 3.7 < slope_s2 < 4.3, slope_s2
 assert 7.0 < slope_s4 < 9.0, slope_s4
@@ -460,7 +466,8 @@ fig, ax = plt.subplots(figsize=(6, 4))
 markers = {"S1": "o", "S2": "s", "S4": "^", "S6": "D"}
 for name in all_names:
     ax.loglog(dts, errors[name], marker=markers[name], label=name)
-ax.axhline(1e-15, color="grey", linestyle=":", linewidth=0.8, label="float64 floor")
+ax.axhline(1e-15, color="black", linestyle=":", linewidth=1.8, label="float64 floor")
+ax.set_xlim(1e-2, 1e0)
 ax.set_xlabel(r"step size $\Delta t = T / N$")
 ax.set_ylabel(
     r"fidelity error $1 - |\langle \psi_{\rm exact} | \psi_{\rm trotter} \rangle|$"
@@ -477,24 +484,24 @@ plt.show()
 # already at $N = 16$; $S_6$ is at the floor across the entire sweep, so its
 # line appears flat (the expected $\Delta t^{12}$ slope is not resolvable on
 # this 1-qubit problem in double precision).
+#
+# In practice, the approximation order is chosen by balancing the required
+# accuracy against the computational cost. Higher orders improve accuracy, but
+# they also increase the number of quantum gates per step. This is especially
+# important on NISQ devices, where deeper circuits are more strongly affected
+# by hardware noise.
 
 # %% [markdown]
 # ## Summary
 #
-# - **Model**: a single-qubit Rabi Hamiltonian $H = H_z + H_x$ whose non-zero
-#   commutator makes Trotter error measurable.
-# - **`Vector[Observable]` + `pauli_evolve`**: the natural primitive for
-#   time-stepping; binding the Hamiltonian list at transpile time expands any
-#   iteration over `Hs.shape[0]` into per-term evolutions.
-# - **Suzuki–Trotter fractal**: $S_{2k}$ is built by nesting five rescaled copies
-#   of $S_{2k-2}$ using the level-specific coefficient $p_k = 1/(4 - 4^{1/(2k-1)})$.
-#   Reusing one constant across levels is a common trap and does **not**
-#   produce the fractal.
-# - **Recursion**: write the math directly as a self-recursive `@qkernel` with
-#   `order: UInt`. The transpiler iterates inline + partial-eval under a
-#   concrete `order` binding and emits a flat circuit. Without a binding the
-#   self-call survives in the IR; non-terminating recursion raises
-#   `FrontendTransformError`.
-# - **Convergence**: fidelity-error slopes of $2, 4, 8$ on log-log match
-#   textbook Trotter orders, and the symbolic `dt` / `n_steps` parameters let
-#   you sweep step sizes without rebuilding the circuit structure.
+# In this notebook, we:
+#
+# - Learned that the Suzuki–Trotter decomposition approximates time evolution
+#   under noncommuting Hamiltonian terms, from the first-order Lie–Trotter
+#   formula to recursively constructed higher even orders.
+# - Introduced Qamomile's `trotterized_time_evolution`, which applies the
+#   selected product formula from a list of Hamiltonian terms, an order, a total
+#   evolution time, and a number of Trotter steps.
+# - Numerically compared the approximations with the exact Rabi evolution and
+#   confirmed the expected convergence behavior for the tested orders, up to
+#   the float64 precision floor.
