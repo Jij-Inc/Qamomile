@@ -57,7 +57,13 @@ from qamomile.circuit.algorithm import trotterized_time_evolution
 from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
-# ## The Rabi Hamiltonian
+# ## Problem Settings
+#
+# We use the smallest non-trivial Hamiltonian simulation problem: one qubit
+# with two non-commuting Hamiltonian terms. This keeps the circuits compact
+# while still making the Trotter error visible.
+#
+# ### The Rabi Hamiltonian
 #
 # A single two-level system driven on resonance is governed by
 #
@@ -109,7 +115,7 @@ expected = 1j * 0.5 * omega * Omega * qm_o.Y(0)
 assert comm_zx == expected
 
 # %% [markdown]
-# ## Exact reference state
+# ### Exact reference state
 #
 # A 2x2 matrix exponential gives the exact state $|\psi(T)\rangle = e^{-iHT}|0\rangle$,
 # which each Trotter approximation is judged against via the **fidelity error**
@@ -146,7 +152,20 @@ def statevector(circuit) -> np.ndarray:
 
 
 # %% [markdown]
-# ## $S_1$: First-order Suzuki–Trotter decomposition (Lie–Trotter)
+# ## Algorithm
+#
+# The algorithm approximates the full evolution by composing evolutions under
+# the separate Hamiltonian terms. We start with the first-order Lie-Trotter
+# formula, improve it with the symmetric second-order formula, and then use
+# Suzuki's recursive construction to obtain higher even orders.
+#
+# ## Implementation
+#
+# The implementation mirrors the formulas directly with Qamomile qkernels.
+# Each step kernel threads a qubit register through `pauli_evolve`, and the
+# outer kernels repeat the chosen step for `n_steps` slices of duration `dt`.
+#
+# ### $S_1$: First-order Suzuki–Trotter decomposition (Lie–Trotter)
 #
 # The simplest split is
 #
@@ -184,7 +203,7 @@ def rabi_s1(
 
 
 # %% [markdown]
-# ## $S_2$: Second-order Suzuki–Trotter decomposition (Strang splitting)
+# ### $S_2$: Second-order Suzuki–Trotter decomposition (Strang splitting)
 #
 # Symmetrising the step around the middle term cancels the leading error:
 #
@@ -217,7 +236,7 @@ def rabi_s2(
 
 
 # %% [markdown]
-# ## Higher-order Suzuki–Trotter decomposition: the fractal recursion
+# ### Higher-order Suzuki–Trotter decomposition: the fractal recursion
 #
 # Masuo Suzuki showed that an arbitrary even-order Trotter approximation can
 # be built **recursively** from $S_2$ by nesting five rescaled copies at each
@@ -242,7 +261,7 @@ def rabi_s2(
 # implementing Suzuki-Trotter by hand.
 
 # %% [markdown]
-# ### Writing the recursion as a self-recursive `@qkernel`
+# #### Writing the recursion as a self-recursive `@qkernel`
 #
 # The mathematical recursion translates directly into a `@qkernel` that takes
 # the target order as a `UInt` parameter and calls itself with `order - 2` in
@@ -310,7 +329,7 @@ def rabi_suzuki(
 # separate kernel per order.
 
 # %% [markdown]
-# ### Shortcut: `trotterized_time_evolution` in `qamomile.circuit.algorithm`
+# #### Shortcut: `trotterized_time_evolution` in `qamomile.circuit.algorithm`
 #
 # Writing out `s1_step` / `s2_step` / `suzuki_trotter` and the outer step loop
 # by hand was useful for seeing the recursion in action, but for day-to-day
@@ -340,7 +359,12 @@ def rabi_from_algorithm(
 # per-term gate schedule.
 
 # %% [markdown]
-# ## Quick sanity check at $N = 8$
+# ## Result
+#
+# We compare each approximation against the exact statevector and confirm the
+# expected convergence rates.
+#
+# ### Quick sanity check at $N = 8$
 #
 # Before the convergence sweep, transpile each kernel once and confirm the
 # statevectors land in the right ball park. $S_1$ and $S_2$ use their own
@@ -369,7 +393,7 @@ for name, order in suzuki_orders.items():
     print(f"{name} at N={N_demo}: fidelity error = {err:.3e}")
 
 # %% [markdown]
-# ## Convergence sweep
+# ### Convergence sweep
 #
 # We now sweep the number of Trotter steps $N$ and plot the fidelity error
 # against the step size $\Delta t = T / N$ on a log-log axis. The expected

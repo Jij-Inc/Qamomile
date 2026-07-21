@@ -42,7 +42,11 @@ from qamomile.circuit.algorithm import trotterized_time_evolution
 from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
-# ## Rabiハミルトニアン
+# ## 問題設定
+#
+# 最小の非自明なハミルトニアンシミュレーション問題として、非可換な2つのハミルトニアン項を持つ1量子ビット系を扱います。これにより、回路を小さく保ちながらTrotter誤差を観測できます。
+#
+# ### Rabiハミルトニアン
 #
 # 共鳴駆動される2準位系は次のハミルトニアンで記述されます:
 #
@@ -80,7 +84,7 @@ expected = 1j * 0.5 * omega * Omega * qm_o.Y(0)
 assert comm_zx == expected
 
 # %% [markdown]
-# ## 厳密な参照状態
+# ### 厳密な参照状態
 #
 # 2x2行列の指数関数で厳密な状態$|\psi(T)\rangle = e^{-iHT}|0\rangle$が得られます。各Trotter近似は**フィデリティ誤差**$1 - |\langle\psi_\text{exact}|\psi_\text{trotter}\rangle|$によってこの状態と比較します。
 
@@ -115,7 +119,15 @@ def statevector(circuit) -> np.ndarray:
 
 
 # %% [markdown]
-# ## $S_1$: 1次Suzuki–Trotter分解 (Lie–Trotter)
+# ## アルゴリズム
+#
+# このアルゴリズムでは、全体の時間発展を各ハミルトニアン項による時間発展の積で近似します。まず1次のLie-Trotter公式から始め、対称化された2次公式で精度を上げ、さらにSuzukiの再帰構成によって高い偶数次の公式を得ます。
+#
+# ## 実装
+#
+# 実装では、数式をQamomileのqkernelとして直接写します。各ステップカーネルは量子ビットレジスタを`pauli_evolve`へ渡しながら発展させ、外側のカーネルは時間幅`dt`のスライスを`n_steps`回繰り返します。
+#
+# ### $S_1$: 1次Suzuki–Trotter分解 (Lie–Trotter)
 #
 # もっとも単純な分解は
 #
@@ -148,7 +160,7 @@ def rabi_s1(
 
 
 # %% [markdown]
-# ## $S_2$: 2次Suzuki–Trotter分解 (Strang分解)
+# ### $S_2$: 2次Suzuki–Trotter分解 (Strang分解)
 #
 # 中央の項を中心にステップを対称化すると先頭の誤差項が消えます:
 #
@@ -180,7 +192,7 @@ def rabi_s2(
 
 
 # %% [markdown]
-# ## 高次のSuzuki–Trotter分解:フラクタル再帰
+# ### 高次のSuzuki–Trotter分解:フラクタル再帰
 #
 # 鈴木増雄氏は、任意の偶数次Trotter近似を$S_2$から**再帰的に**構築できることを示しました。各段で5つのリスケーリングされたコピーを入れ子にします:
 #
@@ -199,7 +211,7 @@ def rabi_s2(
 # すべての段で$p_2$を使い回すと$(2k-1)$次の誤差項が残ったままになり、結果として得られる公式は$S_4$とほぼ同等の精度しか持ちません。これはSuzuki-Trotterを手書きで実装するときにハマりがちな罠です。
 
 # %% [markdown]
-# ### 自己再帰`@qkernel`として再帰を書く
+# #### 自己再帰`@qkernel`として再帰を書く
 #
 # この数学的な再帰は`@qkernel`にそのまま翻訳できます。目標次数を`UInt`パラメータで受け取り、再帰ブランチで`order - 2`を引数にして自分自身を呼び出します。基底ケースである`order == 2`では`s2_step`に処理を渡し、そうでなければ5回の入れ子呼び出しでSuzukiフラクタルを生成します。
 #
@@ -250,7 +262,7 @@ def rabi_suzuki(
 # `rabi_suzuki`はトランスパイル時の`order`バインドを変えるだけで$S_2$、$S_4$、$S_6$、$S_8$、……のいずれも生成できる、単一のカーネルです。次数ごとに別のカーネルを書く必要はありません。
 
 # %% [markdown]
-# ### ショートカット: `qamomile.circuit.algorithm`の`trotterized_time_evolution`
+# #### ショートカット: `qamomile.circuit.algorithm`の`trotterized_time_evolution`
 #
 # ここまで`s1_step` / `s2_step` / `suzuki_trotter`と外側のステップループを手で書き下してきたのは、再帰の流れを追うのに役立つからです。一方で日常的な用途には、同じ構成をそのまま使える既製のヘルパーが[`qamomile.circuit.algorithm.trotter`](../../../qamomile/circuit/algorithm/trotter.py)にあります。
 
@@ -272,7 +284,11 @@ def rabi_from_algorithm(
 # このヘルパーは`order = 1`または任意の正の偶数を受け付け、`gamma / step`の幅のTrotterスライスを`step`回適用します。したがって本記事以降のプロットは、この1つのカーネルに`order`と`step`をバインドするだけで再現できます。分割をカスタマイズする必要がなければこちらを使い、項ごとのゲートスケジュールを確認したり手で調整したりしたい場合には上の明示的な形に戻してください。
 
 # %% [markdown]
-# ## $N = 8$での簡易チェック
+# ## 結果
+#
+# 各近似を厳密な状態ベクトルと比較し、期待される収束次数を確認します。
+#
+# ### $N = 8$での簡易チェック
 #
 # 収束性のスイープを行う前に、各カーネルを一度トランスパイルし、状態ベクトルが妥当な範囲に収まることを確認します。$S_1$と$S_2$は専用カーネルを使い、$S_4$と$S_6$はそれぞれ対応する`order`バインドで`rabi_suzuki`から生成します。
 
@@ -298,7 +314,7 @@ for name, order in suzuki_orders.items():
     print(f"{name} at N={N_demo}: fidelity error = {err:.3e}")
 
 # %% [markdown]
-# ## 収束性のスイープ
+# ### 収束性のスイープ
 #
 # Trotterステップ数$N$を掃引し、ステップ幅$\Delta t = T / N$に対してフィデリティ誤差を両対数軸でプロットします。期待される傾きは以下のとおりです:
 #
