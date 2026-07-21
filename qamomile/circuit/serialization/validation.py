@@ -39,6 +39,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
 )
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -1070,6 +1072,8 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
             raise ValueError(f"{location} result type must match its quantum input")
     elif isinstance(operation, BinOp):
         _validate_binop(operation, location)
+    elif isinstance(operation, UnaryMathOp):
+        _validate_unary_math(operation, location)
     elif isinstance(operation, CompOp):
         _validate_comparison(operation, location)
     elif isinstance(operation, CondOp):
@@ -1221,6 +1225,26 @@ def _validate_binop(operation: BinOp, location: str) -> None:
         if not isinstance(result_type, (UIntType, FloatType)):
             raise ValueError(f"{location} result must be UIntType or FloatType")
         expected_result = result_type
+    _require_types(operation.results, [expected_result], location, "result")
+
+
+def _validate_unary_math(operation: UnaryMathOp, location: str) -> None:
+    """Validate one exact unary mathematical operation.
+
+    Args:
+        operation (UnaryMathOp): Mathematical operation to validate.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If arity or scalar types do not match the operation kind.
+    """
+    _require_arity(operation, 1, 1, location)
+    operand_type = operation.operands[0].type
+    if not isinstance(operand_type, (UIntType, FloatType)):
+        raise ValueError(f"{location} operand must be UIntType or FloatType")
+    expected_result = (
+        FloatType() if operation.kind is UnaryMathOpKind.LOG2 else UIntType()
+    )
     _require_types(operation.results, [expected_result], location, "result")
 
 

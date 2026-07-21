@@ -92,6 +92,7 @@ class OperationType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     GLOBAL_PHASE_OPERATION: _ClassVar[OperationType]
     SELECT_OPERATION: _ClassVar[OperationType]
     RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: _ClassVar[OperationType]
+    UNARY_MATH_OPERATION: _ClassVar[OperationType]
 PARAMETER_KIND_UNSPECIFIED: ParameterKind
 POSITIONAL_ONLY: ParameterKind
 POSITIONAL_OR_KEYWORD: ParameterKind
@@ -164,6 +165,7 @@ INVERSE_BLOCK_OPERATION: OperationType
 GLOBAL_PHASE_OPERATION: OperationType
 SELECT_OPERATION: OperationType
 RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: OperationType
+UNARY_MATH_OPERATION: OperationType
 
 class QKernel(_message.Message):
     __slots__ = ("qamomile_version", "name", "parameters", "results", "body", "value_table", "callable_table", "callable_definition", "return_annotation")

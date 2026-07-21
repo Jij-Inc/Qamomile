@@ -49,6 +49,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
     RuntimeClassicalExpr,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
@@ -1255,6 +1256,26 @@ def _encode_binop(op: BinOp, ctx: _EncodeContext) -> dict[str, Any]:
     return d
 
 
+def _encode_unary_math(
+    op: UnaryMathOp,
+    ctx: _EncodeContext,
+) -> dict[str, Any]:
+    """Encode a unary mathematical operation.
+
+    Args:
+        op (UnaryMathOp): Operation to encode.
+        ctx (_EncodeContext): Active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary plus its kind name.
+    """
+    del ctx
+    d = _base_op_dict("UnaryMathOp", op)
+    assert op.kind is not None
+    d["kind"] = op.kind.name
+    return d
+
+
 def _encode_compop(op: CompOp, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`CompOp`.
 
@@ -1838,6 +1859,7 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     ExpvalOp: _encode_expval,
     PauliEvolveOp: _encode_pauli_evolve,
     BinOp: _encode_binop,
+    UnaryMathOp: _encode_unary_math,
     CompOp: _encode_compop,
     CondOp: _encode_condop,
     NotOp: _encode_notop,
