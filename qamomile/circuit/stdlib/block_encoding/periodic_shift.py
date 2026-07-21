@@ -31,7 +31,9 @@ import qamomile.circuit as qmc
 from qamomile.circuit.stdlib.arithmetic import (
     _apply_fixed_window_periodic_shift,
 )
-from qamomile.circuit.stdlib.lcu_block_encoding import (
+from qamomile.linalg import PeriodicShiftLCU, PeriodicShiftLCUTerm
+
+from .lcu import (
     LCUBlockEncoding,
     _build_lcu_block_encoding_unitary,
     _coefficient_phase,
@@ -39,7 +41,6 @@ from qamomile.circuit.stdlib.lcu_block_encoding import (
     _lcu_num_signal_qubits,
     _register_lcu_block_encoding_static_binding,
 )
-from qamomile.linalg import PeriodicShiftLCU, PeriodicShiftLCUTerm
 
 _NORMALIZATION_REL_TOLERANCE = 1e-12
 

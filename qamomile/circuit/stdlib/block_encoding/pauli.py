@@ -13,7 +13,10 @@ from qamomile.circuit.frontend.operation.global_phase import global_phase
 from qamomile.circuit.frontend.operation.qubit_gates import x, y, z
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
 from qamomile.circuit.ir.operation.callable import CallPolicy
-from qamomile.circuit.stdlib.lcu_block_encoding import (
+from qamomile.linalg import PauliLCU, PauliLCUTerm
+from qamomile.observable import Pauli, PauliOperator
+
+from .lcu import (
     LCUBlockEncoding,
     _BlockEncodingUnitary,
     _build_lcu_block_encoding_unitary,
@@ -22,8 +25,6 @@ from qamomile.circuit.stdlib.lcu_block_encoding import (
     _lcu_num_signal_qubits,
     _register_lcu_block_encoding_static_binding,
 )
-from qamomile.linalg import PauliLCU, PauliLCUTerm
-from qamomile.observable import Pauli, PauliOperator
 
 
 @dataclass(frozen=True, slots=True, eq=False)

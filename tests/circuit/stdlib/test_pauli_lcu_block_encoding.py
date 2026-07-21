@@ -389,7 +389,7 @@ def test_factory_builds_only_the_forward_multi_term_kernel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Construction leaves inverse materialization to the lazy transform path."""
-    module = importlib.import_module("qamomile.circuit.stdlib.pauli_lcu_block_encoding")
+    module = importlib.import_module("qamomile.circuit.stdlib.block_encoding.pauli")
     original_builder = module._build_lcu_block_encoding_unitary
     calls = 0
 

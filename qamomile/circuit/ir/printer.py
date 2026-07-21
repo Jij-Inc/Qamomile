@@ -45,6 +45,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -347,6 +348,12 @@ def _format_flat_op(op: Operation) -> str:
         return _format_simple(op, "expval")
     if isinstance(op, BinOp):
         return _format_binary(op, _BINOP_SYMBOLS)
+    if isinstance(op, UnaryMathOp):
+        assert op.kind is not None
+        return (
+            f"{_format_results(op.results)} = "
+            f"{op.kind.name.lower()}({_format_value(op.input)})"
+        )
     if isinstance(op, CompOp):
         return _format_binary(op, _COMPOP_SYMBOLS)
     if isinstance(op, CondOp):

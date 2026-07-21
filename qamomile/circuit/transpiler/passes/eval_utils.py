@@ -10,6 +10,9 @@ same family of ops (``CompOp``, ``CondOp``, ``NotOp``, ``BinOp``):
 - ``cast_binop_emission`` (emit pass) — folds ops at emit time for
   inlining loop variables and parameter bindings into ``if`` conditions.
 
+Compile-time constant folding additionally uses the same interface for
+``UnaryMathOp``.
+
 The low-level ``evaluate_*_values`` functions take fully resolved Python
 operands and return the computed value (or ``None`` if the op cannot be
 evaluated, e.g. division by zero, unknown kind, type mismatch). They
@@ -27,6 +30,7 @@ inside this function rather than re-implemented per call site.
 from __future__ import annotations
 
 import enum
+import math
 from typing import Any, Callable
 
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -38,6 +42,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOpKind,
     NotOp,
     RuntimeOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
 )
 
 
@@ -91,7 +97,7 @@ def _is_runtime_parameter_operand(operand: Any, parameters: set[str]) -> bool:
 
 
 def fold_classical_op(
-    op: "BinOp | CompOp | CondOp | NotOp",
+    op: "BinOp | CompOp | CondOp | NotOp | UnaryMathOp",
     operand_resolver: Callable[[Any], Any],
     parameters: set[str],
     policy: FoldPolicy,
@@ -111,7 +117,7 @@ def fold_classical_op(
 
     Args:
         op: The classical op to fold. Must be one of ``BinOp``,
-            ``CompOp``, ``CondOp``, ``NotOp``.
+            ``CompOp``, ``CondOp``, ``NotOp``, or ``UnaryMathOp``.
         operand_resolver: Callable mapping each operand Value to a
             resolved Python scalar (or ``None`` when unresolvable).
         parameters: Set of runtime parameter names. Used only when
@@ -119,9 +125,9 @@ def fold_classical_op(
         policy: Folding policy. See ``FoldPolicy`` docstring.
 
     Returns:
-        The folded value (numeric for ``BinOp``, bool for predicates),
-        or ``None`` when any operand is symbolic, missing, or a runtime
-        parameter under the policy.
+        The folded value (numeric for arithmetic and unary math operations,
+        bool for predicates), or ``None`` when any operand is symbolic,
+        missing, or a runtime parameter under the policy.
     """
     operands = op.operands
 
@@ -153,8 +159,12 @@ def fold_classical_op(
         if len(resolved) != 1:
             return None
         return evaluate_notop_value(resolved[0])
+    if isinstance(op, UnaryMathOp):
+        if len(resolved) != 1:
+            return None
+        return evaluate_unary_math_value(op.kind, resolved[0])
 
-    # All four op kinds in the signature are exhausted above; this guard
+    # All op kinds in the signature are exhausted above; this guard
     # only matters if a caller bypasses the type system at runtime.
     return None  # type: ignore[unreachable]
 
@@ -197,6 +207,34 @@ def evaluate_binop_values(
                 return left if left <= right else right
             case _:
                 return None  # type: ignore[unreachable]
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def evaluate_unary_math_value(
+    kind: UnaryMathOpKind | None,
+    operand: float | int,
+) -> float | int | None:
+    """Evaluate one unary mathematical operation on a concrete value.
+
+    Args:
+        kind (UnaryMathOpKind | None): Mathematical operation to apply.
+        operand (float | int): Concrete numeric operand.
+
+    Returns:
+        float | int | None: Computed value, or ``None`` for an invalid domain
+            or missing operation kind.
+    """
+    if kind is None:
+        return None
+    try:
+        if isinstance(operand, float) and not math.isfinite(operand):
+            return None
+        if kind is UnaryMathOpKind.LOG2:
+            return math.log2(operand) if operand > 0 else None
+        assert kind is UnaryMathOpKind.CEIL
+        result = math.ceil(operand)
+        return result if result >= 0 else None
     except (TypeError, ValueError, OverflowError):
         return None
 

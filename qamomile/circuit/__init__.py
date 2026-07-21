@@ -84,6 +84,7 @@ from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.expval import expval
 from .frontend.operation.global_phase import global_phase
 from .frontend.operation.inverse import inverse
+from .frontend.operation.math import ceil, log2
 from .frontend.operation.measurement import (
     measure,
     measure_reset,
@@ -118,7 +119,9 @@ from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 from .ir.effect import KernelEffect
 from .stdlib import (
+    IsingZBlockEncoding,
     LCUBlockEncoding,
+    LCUBlockEncodingTerm,
     PauliLCUBlockEncoding,
     PeriodicShiftLCUBlockEncoding,
     add_const,
@@ -131,7 +134,10 @@ from .stdlib import (
     controlled_modular_add_const_modulus,
     grover_iteration_count,
     grover_search,
+    identity_block_encoding,
     iqft,
+    ising_z_block_encoding,
+    lcu_block_encoding,
     lookup_xor,
     mcx,
     modmul_const,
@@ -210,6 +216,8 @@ __all__ = [
     "inverse",
     "global_phase",
     "cast",
+    "ceil",
+    "log2",
     "bit",
     "bit_array",
     "float_",
@@ -267,6 +275,11 @@ __all__ = [
     "mcx",
     "multi_controlled_x",
     "LCUBlockEncoding",
+    "LCUBlockEncodingTerm",
+    "identity_block_encoding",
+    "lcu_block_encoding",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "computational_basis_state",
