@@ -32,6 +32,45 @@ from qamomile.circuit.transpiler.block_parameter_binding import pair_block_opera
 from ._utils import BINOP_TO_SYMPY, UNARY_MATH_TO_SYMPY
 
 
+def input_shape_dimension_aliases(block: Block) -> dict[str, str]:
+    """Return collision-free public aliases for root array dimensions.
+
+    Frontend-generated dimension labels can collide with an ordinary
+    classical argument (for example, a vector ``signal`` and a UInt argument
+    named ``signal_dim0``). Reusing that spelling for both SymPy symbols would
+    make one resource input specialize two semantically different values.
+
+    Args:
+        block (Block): Root block whose input dimensions should be named.
+
+    Returns:
+        dict[str, str]: Dimension UUID to deterministic, unique input alias.
+    """
+    occupied = {
+        *block.label_args,
+        *(slot.name for slot in block.param_slots),
+        *block.parameters,
+    }
+    aliases: dict[str, str] = {}
+    for input_value in block.input_values:
+        if not isinstance(input_value, ArrayValue):
+            continue
+        for dimension in input_value.shape:
+            alias = dimension.name
+            if not alias:
+                alias = f"array_dim_{len(aliases)}"
+            if alias in occupied:
+                base = f"{alias}__shape"
+                alias = base
+                suffix = 2
+                while alias in occupied:
+                    alias = f"{base}_{suffix}"
+                    suffix += 1
+            aliases[dimension.uuid] = alias
+            occupied.add(alias)
+    return aliases
+
+
 class UnresolvedValueError(Exception):
     """A value cannot be concretized during resource estimation."""
 
@@ -351,8 +390,9 @@ class ExprResolver:
         # and canonical UUIDs commonly share long prefixes.
         if concrete:
             raise UnresolvedValueError(v.uuid, f"Unresolvable: '{v.name}'")
-        if self._is_input_shape_dimension(v):
-            return sp.Symbol(v.name, integer=True, nonnegative=True)
+        shape_alias = self._input_shape_dimension_alias(v)
+        if shape_alias is not None:
+            return sp.Symbol(shape_alias, integer=True, nonnegative=True)
         fallback_name = f"{v.name}_{v.uuid}"
         if isinstance(v.type, FloatType):
             return sp.Symbol(fallback_name, real=True)
@@ -360,25 +400,23 @@ class ExprResolver:
             return sp.Symbol(fallback_name, integer=True, nonnegative=True)
         return sp.Symbol(fallback_name)
 
-    def _is_input_shape_dimension(self, value: Value) -> bool:
-        """Return whether a value is a public input-array dimension.
+    def _input_shape_dimension_alias(self, value: Value) -> str | None:
+        """Return the collision-free alias for an input-array dimension.
 
         Args:
             value (Value): Unresolved value considered for symbolic fallback.
 
         Returns:
-            bool: Whether ``value`` appears in an input array's shape in the
-                current or an enclosing block.
+            str | None: Stable input alias when ``value`` is an input-array
+                dimension in the current or an enclosing block.
         """
         for block in (self._block, *reversed(self._parent_blocks)):
             if not isinstance(block, Block):
                 continue
-            for input_value in block.input_values:
-                if isinstance(input_value, ArrayValue) and any(
-                    dimension.uuid == value.uuid for dimension in input_value.shape
-                ):
-                    return True
-        return False
+            alias = input_shape_dimension_aliases(block).get(value.uuid)
+            if alias is not None:
+                return alias
+        return None
 
     def _trace(
         self, v: Value, block: Any, visited: set[int], concrete: bool

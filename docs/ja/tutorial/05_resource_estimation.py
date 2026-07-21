@@ -216,7 +216,7 @@ assert vector_est.gates.total == 8
 assert vector_est.parameters == {}
 
 # %% [markdown]
-# 幅、index、arityは単なる目安ではなく、リソース推定の要件です。確保数が非負整数であること、配列のaccessとview、control index、SELECTのindex幅、Pauli support、block encodingのsignal/systemレジスタについて、推定中も要件を維持します。例えばblock encodingの量子portは`inputs={"signal": encoding.num_signal_qubits, "system": encoding.num_system_qubits}`で推定できます。`inputs`を渡した時点と`.substitute()`後の両方で、制御形やinverse形も含めて検証します。不正な値はもっともらしい推定値へ補正せず`ValueError`にします。serializationした出力では、これらを`requirements`リストで確認できます。
+# 幅、index、arityは単なる目安ではなく、リソース推定の要件です。確保数が非負整数であること、配列のaccessとview、control index、SELECTのindex幅、Pauli support、block encodingのsignal/systemレジスタについて、推定中も要件を維持します。descriptorから作成したblock encodingは1次元の量子port幅を正確に保持するため、`encoding.unitary.estimate_resources()`だけで自動的に具体化します。wrapper量子カーネルを推定する場合は`inputs={"signal": encoding.num_signal_qubits, "system": encoding.num_system_qubits}`を指定でき、同じ契約を明示的に検証できます。`inputs`を渡した時点と`.substitute()`後の両方で、制御形やinverse形も含めて検証します。不正な値はもっともらしい推定値へ補正せず`ValueError`にします。serializationした出力では、これらを`requirements`リストで確認できます。
 #
 # 構造を決める具体値は、可能な限り最初の`estimate_resources()`呼び出しで`inputs`として渡します。こうするとdepth式を構築する前に、dependency schedulerが配列の物理index、view、loopで引き継がれるwireの同一性を解決できます。後から`.substitute()`してもsymbolic推定の安全な評価と維持された要件の検証はできますが、すでに保守的に構築されたalias scheduleは再構築できません。そのため、すべてのsymbolがconcreteになってもdepthは`upper_bound`のままになる場合があります。
 

@@ -118,6 +118,11 @@ def test_typed_branch_inputs_retain_uint_and_bit_domains() -> None:
         _branch_probe.estimate_resources(inputs={"flag": -1})
     with pytest.raises(ValueError, match="upper bound"):
         bit_branch.estimate_resources(inputs={"flag": 2})
+    assert bit_branch.estimate_resources(inputs={"flag": True}).gates.total == 1
+    assert bit_branch.estimate_resources(inputs={"flag": False}).gates.total == 1
+    for boolean in (False, True):
+        with pytest.raises(TypeError, match="expects UIntType, got bool"):
+            _branch_probe.estimate_resources(inputs={"flag": boolean})
 
 
 @pytest.mark.parametrize(

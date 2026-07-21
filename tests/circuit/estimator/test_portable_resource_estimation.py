@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,12 +11,15 @@ import sympy as sp
 
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.gate import ProjectOperation
 from qamomile.circuit.ir.operation.operation import (
     Operation,
     OperationKind,
     Signature,
 )
+from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.linalg import PauliLCU, PeriodicShiftLCU
 
@@ -89,6 +93,43 @@ def _generic_block_unitary(
 ) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
     """Return two arbitrary-width registers unchanged."""
     return signal, system
+
+
+@qm.qkernel
+def _shape_name_collision(
+    signal: qm.Vector[qm.Qubit],
+    signal_dim0: qm.UInt,
+) -> qm.Vector[qm.Qubit]:
+    """Exercise a classical argument colliding with a generated shape name."""
+    for _ in qm.range(signal_dim0):
+        signal[0] = qm.h(signal[0])
+    return signal
+
+
+@qm.qkernel
+def _port_shape_name_collision(
+    signal: qm.Vector[qm.Qubit],
+    signal_dim0: qm.Vector[qm.Qubit],
+) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+    """Exercise a generated shape name colliding with another quantum port."""
+    return signal, signal_dim0
+
+
+def _recursive_lcu_resource_encoding() -> qm.LCUBlockEncoding:
+    """Build a public heterogeneous recursive LCU estimation fixture.
+
+    Returns:
+        qm.LCUBlockEncoding: Two-level encoding with complex phases and child
+            descriptors from different public producers.
+    """
+    identity = qm.identity_block_encoding(1)
+    ising = qm.ising_z_block_encoding({(): 1.0j, (0,): 0.5}, 1)
+    return qm.lcu_block_encoding(
+        (
+            qm.LCUBlockEncodingTerm(1.0, ising),
+            qm.LCUBlockEncodingTerm(-0.25j, identity),
+        )
+    )
 
 
 class _ContextAwareOpaqueCost:
@@ -772,6 +813,55 @@ def test_controlled_pauli_evolve_resolves_binding_and_constant() -> None:
     assert triple.width.clean_ancilla_qubits == 2
 
 
+def test_pauli_evolve_zero_time_specialization_removes_all_resources() -> None:
+    """Late zero-time inputs remove Pauli gates, depth, and control ancillas."""
+    base_inputs = {"register": 1, "observable": qm_o.Z(0)}
+    symbolic = _renamed_pauli_evolution.estimate_resources(inputs=base_inputs)
+
+    assert symbolic.substitute(time=0.0).gates.total == 0
+    assert symbolic.substitute(time=0.0).depth.depth == 0
+    assert symbolic.substitute(time=0.25).gates.total == 1
+    direct_zero = _renamed_pauli_evolution.estimate_resources(
+        inputs={**base_inputs, "time": 0.0}
+    )
+    assert direct_zero.gates.total == 0
+    assert direct_zero.depth.depth == 0
+    assert not any(
+        "time" in assumption.message for assumption in direct_zero.assumptions
+    )
+
+    @qm.qkernel
+    def controlled(
+        time: qm.Float,
+        observable: qm.Observable,
+    ) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+        """Apply one symbolic-time evolution under three controls."""
+        controls = qm.qubit_array(3, "controls")
+        target = qm.qubit_array(1, "target")
+        *_, target = qm.control(
+            _renamed_pauli_evolution,
+            num_controls=3,
+        )(
+            controls,
+            target,
+            observable,
+            time,
+        )
+        return controls, target
+
+    controlled_symbolic = controlled.estimate_resources(
+        inputs={"observable": qm_o.Z(0)}
+    )
+    controlled_zero = controlled_symbolic.substitute(time=0.0)
+    controlled_active = controlled_symbolic.substitute(time=0.25)
+    assert controlled_zero.gates.total == 0
+    assert controlled_zero.depth.depth == 0
+    assert controlled_zero.width.clean_ancilla_qubits == 0
+    assert controlled_zero.width.peak_qubits == 4
+    assert controlled_active.gates.total > 0
+    assert controlled_active.width.clean_ancilla_qubits == 2
+
+
 def test_raw_ir_inputs_bind_hamiltonian_during_interpretation() -> None:
     """Block and operation-list inputs retain concrete object payloads."""
     inputs = {"observable": qm_o.Z(1)}
@@ -1077,7 +1167,7 @@ def test_pauli_lcu_block_encoding_composes_forward_inverse_and_control() -> None
     direct_estimate = direct.estimate_resources()
     inverse_estimate = inverse.estimate_resources()
     controlled_estimate = controlled.estimate_resources()
-    formal_estimate = encoding.unitary.estimate_resources()
+    root_estimate = encoding.unitary.estimate_resources()
 
     assert direct_estimate.gates == inverse_estimate.gates
     assert direct_estimate.gates.total == 6
@@ -1093,14 +1183,12 @@ def test_pauli_lcu_block_encoding_composes_forward_inverse_and_control() -> None
     assert controlled_estimate.width.peak_qubits == 8
     assert controlled_estimate.width.circuit_qubits == 8
 
-    concrete_formal = formal_estimate.substitute(
-        signal_dim0=encoding.num_signal_qubits,
-        system_dim0=encoding.num_system_qubits,
-    )
-    assert formal_estimate.width.allocated_qubits == 0
-    assert concrete_formal.width.input_qubits == 2
-    assert concrete_formal.width.peak_qubits == 2
-    assert concrete_formal.width.circuit_qubits == 2
+    assert root_estimate.width.allocated_qubits == 0
+    assert root_estimate.width.input_qubits == 2
+    assert root_estimate.width.peak_qubits == 2
+    assert root_estimate.width.circuit_qubits == 2
+    assert "signal_dim0" not in root_estimate.parameters
+    assert "system_dim0" not in root_estimate.parameters
 
 
 def _block_encoding_callers(
@@ -1145,6 +1233,88 @@ def _block_encoding_callers(
     return direct, inverse, controlled
 
 
+def test_recursive_lcu_expands_through_inverse_control_and_serialization() -> None:
+    """New public LCU encodings retain recursive resource semantics."""
+    encoding = _recursive_lcu_resource_encoding()
+    direct, inverse, controlled = _block_encoding_callers(encoding)
+    inputs = {
+        "signal": encoding.num_signal_qubits,
+        "system": encoding.num_system_qubits,
+    }
+
+    direct_estimate = direct.estimate_resources(inputs=inputs)
+    inverse_estimate = inverse.estimate_resources(inputs=inputs)
+    controlled_estimate = controlled.estimate_resources(inputs=inputs)
+    root_estimate = encoding.unitary.estimate_resources()
+    restored_estimate = qm.estimate_resources(
+        deserialize(serialize(encoding.unitary)),
+    )
+    restored_inverse = qm.estimate_resources(
+        deserialize(serialize(inverse)),
+        inputs=inputs,
+    )
+    restored_controlled = qm.estimate_resources(
+        deserialize(serialize(controlled)),
+        inputs=inputs,
+    )
+
+    assert (encoding.num_signal_qubits, encoding.num_system_qubits) == (2, 1)
+    # Two outer RY preparation gates surround a coherent SELECT. Its Ising
+    # branch contributes two X brackets plus eight child gates; its identity
+    # branch contributes one relative-phase gate, for 2 + 10 + 1 = 13.
+    assert direct_estimate.gates == qm.GateResources(
+        total=13,
+        single_qubit=7,
+        two_qubit=5,
+        multi_qubit=1,
+        clifford=6,
+        rotation=6,
+        t=0,
+        toffoli=1,
+        non_clifford=7,
+    )
+    assert inverse_estimate.gates == direct_estimate.gates
+    assert inverse_estimate.width == direct_estimate.width
+    assert inverse_estimate.depth == direct_estimate.depth
+    assert inverse_estimate.calls == direct_estimate.calls
+    assert inverse_estimate.quality is direct_estimate.quality
+    assert direct_estimate.width.input_qubits == 3
+    assert direct_estimate.width.peak_qubits == 3
+
+    assert controlled_estimate.gates == qm.GateResources(
+        total=21,
+        single_qubit=0,
+        two_qubit=9,
+        multi_qubit=12,
+        clifford=3,
+        rotation=6,
+        t=0,
+        toffoli=12,
+        non_clifford=18,
+    )
+    assert controlled_estimate.width.input_qubits == 4
+    assert controlled_estimate.width.clean_ancilla_qubits == 2
+    assert controlled_estimate.width.peak_qubits == 6
+
+    assert root_estimate.gates == direct_estimate.gates
+    assert root_estimate.width == direct_estimate.width
+    assert root_estimate.depth == direct_estimate.depth
+    assert restored_estimate.gates == root_estimate.gates
+    assert restored_estimate.width == root_estimate.width
+    assert restored_estimate.depth == root_estimate.depth
+    assert direct_estimate.calls == qm.CallResources()
+    assert controlled_estimate.calls == qm.CallResources()
+    for restored, expected in (
+        (restored_inverse, inverse_estimate),
+        (restored_controlled, controlled_estimate),
+    ):
+        assert restored.width == expected.width
+        assert restored.gates == expected.gates
+        assert restored.depth == expected.depth
+        assert restored.calls == expected.calls
+        assert restored.quality is expected.quality
+
+
 @pytest.mark.parametrize(
     "encoding",
     [
@@ -1154,8 +1324,14 @@ def _block_encoding_callers(
         qm.periodic_shift_lcu_block_encoding(
             PeriodicShiftLCU.from_coefficients({1: 1.0}, register_sizes=(2,))
         ),
+        qm.identity_block_encoding(2),
+        qm.ising_z_block_encoding(
+            {(): 1.0, (0,): -0.5, (1,): 0.25j},
+            2,
+        ),
+        _recursive_lcu_resource_encoding(),
     ],
-    ids=("pauli", "periodic-shift"),
+    ids=("pauli", "periodic-shift", "identity", "ising-z", "recursive"),
 )
 def test_block_encoding_width_contract_survives_all_call_transforms(
     encoding: qm.LCUBlockEncoding,
@@ -1221,11 +1397,141 @@ def test_block_encoding_width_contract_survives_serialization() -> None:
     )
     restored = deserialize(serialize(encoding.unitary))
 
+    automatic = qm.estimate_resources(restored)
+    assert automatic.width.input_qubits == 3
+    assert "signal_dim0" not in automatic.parameters
+    assert "system_dim0" not in automatic.parameters
     qm.estimate_resources(restored, inputs={"signal": 1, "system": 2})
     with pytest.raises(ValueError, match="signal register width must equal 1"):
         qm.estimate_resources(restored, inputs={"signal": 2, "system": 2})
     with pytest.raises(ValueError, match="system register width must equal 2"):
         qm.estimate_resources(restored, inputs={"signal": 1, "system": 3})
+
+
+def test_root_width_aliases_must_agree_when_both_are_supplied() -> None:
+    """Port widths cannot silently overwrite explicit dimension aliases."""
+    encoding = _recursive_lcu_resource_encoding()
+
+    estimate = encoding.unitary.estimate_resources(
+        inputs={"signal": 2, "signal_dim0": 2}
+    )
+    assert estimate.width.input_qubits == 3
+    with pytest.raises(ValueError, match="signal_dim0=2.*also specify"):
+        encoding.unitary.estimate_resources(inputs={"signal": 2, "signal_dim0": 1})
+    with pytest.raises(ValueError, match="signal_dim0=None"):
+        encoding.unitary.estimate_resources(inputs={"signal": 2, "signal_dim0": None})
+    with pytest.raises(ValueError, match="bool is not a dimension"):
+        encoding.unitary.estimate_resources(inputs={"signal_dim0": True})
+
+
+def test_shape_alias_collision_keeps_classical_and_width_inputs_independent() -> None:
+    """Generated shape aliases never capture a same-named classical input."""
+    attrs = {
+        "resource_contract": {
+            "quantum_operand_widths": [{"index": 0, "name": "signal", "width": 1}]
+        }
+    }
+    contracted = _shape_name_collision._clone_with_callable_attrs(attrs)
+
+    symbolic = _shape_name_collision.estimate_resources()
+    assert set(symbolic.parameters) == {"signal_dim0", "signal_dim0__shape"}
+    assert symbolic.gates.total == symbolic.parameters["signal_dim0"]
+    assert symbolic.width.input_qubits == symbolic.parameters["signal_dim0__shape"]
+
+    automatic = contracted.estimate_resources(inputs={"signal_dim0": 3})
+    explicit = contracted.estimate_resources(inputs={"signal": 1, "signal_dim0": 3})
+    plain = _shape_name_collision.estimate_resources(
+        inputs={"signal": 1, "signal_dim0": 3}
+    )
+    for estimate in (automatic, explicit, plain):
+        assert estimate.width.input_qubits == 1
+        assert estimate.gates.total == 3
+        assert estimate.parameters == {}
+
+
+def test_shape_alias_collision_keeps_quantum_ports_independent() -> None:
+    """Generated shape aliases never capture another quantum port name."""
+    attrs = {
+        "resource_contract": {
+            "quantum_operand_widths": [
+                {"index": 0, "name": "signal", "width": 2},
+                {"index": 1, "name": "signal_dim0", "width": 3},
+            ]
+        }
+    }
+    contracted = _port_shape_name_collision._clone_with_callable_attrs(attrs)
+
+    symbolic = _port_shape_name_collision.estimate_resources()
+    assert set(symbolic.parameters) == {
+        "signal_dim0__shape",
+        "signal_dim0_dim0",
+    }
+    automatic = contracted.estimate_resources()
+    explicit = _port_shape_name_collision.estimate_resources(
+        inputs={"signal": 2, "signal_dim0": 3}
+    )
+    assert automatic.width.input_qubits == 5
+    assert explicit.width.input_qubits == 5
+    with pytest.raises(ValueError, match="signal register width must equal 2"):
+        contracted.estimate_resources(inputs={"signal": 1, "signal_dim0": 3})
+
+
+def test_root_width_inference_skips_a_constant_array_dimension() -> None:
+    """Fixed IR dimensions satisfy exact contracts without synthetic inputs."""
+    dimension = Value(type=UIntType(), name="register_dim0").with_const(3)
+    register = ArrayValue(
+        type=QubitType(),
+        name="register",
+        shape=(dimension,),
+    )
+    kernel = SimpleNamespace(
+        name="fixed_width",
+        block=Block(
+            name="fixed_width",
+            label_args=["register"],
+            input_values=[register],
+        ),
+        _callable_attrs_override={
+            "resource_contract": {
+                "quantum_operand_widths": [{"index": 0, "name": "register", "width": 3}]
+            }
+        },
+    )
+
+    estimate = qm.estimate_resources(kernel)
+
+    assert estimate.width.input_qubits == 3
+    assert estimate.parameters == {}
+    assert qm.estimate_resources(kernel, inputs={"register": 3}).width == estimate.width
+    assert (
+        qm.estimate_resources(
+            kernel,
+            inputs={"register_dim0": 3},
+        ).width
+        == estimate.width
+    )
+    assert (
+        qm.estimate_resources(
+            kernel.block,
+            inputs={"register": 3},
+        ).width
+        == estimate.width
+    )
+    with pytest.raises(ValueError, match="fixed at 3"):
+        qm.estimate_resources(kernel, inputs={"register": 2})
+    with pytest.raises(ValueError, match="fixed at 3"):
+        qm.estimate_resources(kernel, inputs={"register_dim0": 2})
+    with pytest.raises(ValueError, match="fixed at 3"):
+        qm.estimate_resources(kernel.block, inputs={"register": 2})
+
+
+@pytest.mark.parametrize("value", [1.5, "1", None])
+def test_quantum_port_width_rejects_non_integer_scalars(value: object) -> None:
+    """One-dimensional quantum ports diagnose invalid scalar widths directly."""
+    encoding = _recursive_lcu_resource_encoding()
+
+    with pytest.raises(ValueError, match="requires an integer width"):
+        encoding.unitary.estimate_resources(inputs={"signal": value})
 
 
 def test_block_encoding_width_contract_survives_select_and_serialization() -> None:
@@ -1236,19 +1542,56 @@ def test_block_encoding_width_contract_survives_select_and_serialization() -> No
 
     @qm.qkernel
     def circuit(
+        index: qm.Qubit,
         signal: qm.Vector[qm.Qubit],
         system: qm.Vector[qm.Qubit],
     ) -> tuple[qm.Qubit, qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
         """Select between two copies of one periodic block encoding."""
-        index = qm.qubit("index")
         return qm.select([encoding.unitary, encoding.unitary])(
             index,
             signal,
             system,
         )
 
-    restored = deserialize(serialize(circuit))
-    for candidate in (circuit, restored):
+    @qm.qkernel
+    def inverse_circuit(
+        index: qm.Qubit,
+        signal: qm.Vector[qm.Qubit],
+        system: qm.Vector[qm.Qubit],
+    ) -> tuple[qm.Qubit, qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+        """Invert the SELECT while preserving each case width contract."""
+        return qm.inverse(circuit)(index, signal, system)
+
+    @qm.qkernel
+    def controlled_inverse_circuit(
+        control: qm.Qubit,
+        index: qm.Qubit,
+        signal: qm.Vector[qm.Qubit],
+        system: qm.Vector[qm.Qubit],
+    ) -> tuple[
+        qm.Qubit,
+        qm.Qubit,
+        qm.Vector[qm.Qubit],
+        qm.Vector[qm.Qubit],
+    ]:
+        """Control the inverse SELECT and preserve its case width contracts."""
+        return qm.control(inverse_circuit)(control, index, signal, system)
+
+    candidates = (circuit, inverse_circuit, controlled_inverse_circuit)
+    restored = tuple(deserialize(serialize(candidate)) for candidate in candidates)
+    direct_estimate = qm.estimate_resources(
+        circuit,
+        inputs={"signal": 1, "system": 2},
+    )
+    inverse_estimate = qm.estimate_resources(
+        inverse_circuit,
+        inputs={"signal": 1, "system": 2},
+    )
+    assert inverse_estimate.gates == direct_estimate.gates
+    assert inverse_estimate.width == direct_estimate.width
+    assert inverse_estimate.depth == direct_estimate.depth
+
+    for candidate in (*candidates, *restored):
         qm.estimate_resources(candidate, inputs={"signal": 1, "system": 2})
         with pytest.raises(ValueError, match="signal register width must equal 1"):
             qm.estimate_resources(candidate, inputs={"signal": 2, "system": 2})

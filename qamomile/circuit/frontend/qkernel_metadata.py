@@ -79,7 +79,9 @@ def estimate_qkernel_resources(
     Args:
         kernel (QKernel[Any, Any]): Kernel to estimate.
         inputs (dict[str, Any] | None): QKernel input values used to specialize
-            the symbolic estimate. Defaults to ``None``.
+            the symbolic estimate. Exact one-dimensional root quantum-port
+            widths declared by callable resource metadata are inferred when
+            omitted. Defaults to ``None``.
         strategies (dict[str, str] | None): Callable strategy overrides.
             Defaults to ``None``.
         trace (bool): Whether to retain the explanation tree. Defaults to
@@ -92,6 +94,13 @@ def estimate_qkernel_resources(
 
     Returns:
         ResourceEstimate: Estimated qubit, gate, and parameter resources.
+
+    Raises:
+        ValueError: If an input, estimation configuration, callable resource
+            contract, or structural requirement is invalid.
+        TypeError: If the qkernel cannot be built as an estimator input.
+        NotImplementedError: If the qkernel contains a construct not supported
+            by resource estimation.
     """
     from qamomile.circuit.estimator.resource_estimator import (
         GateBasis,

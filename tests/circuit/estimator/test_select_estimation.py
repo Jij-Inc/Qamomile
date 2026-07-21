@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
+from qamomile.circuit.serialization import deserialize, serialize
 
 
 @qm.qkernel
@@ -43,6 +46,48 @@ def _select_x(index: qm.Qubit, target: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
     return index, target
 
 
+@qm.qkernel
+def _phased_identity_case(target: qm.Qubit) -> qm.Qubit:
+    """Apply a relative quarter-turn phase to an identity case."""
+    return qm.global_phase(_identity_case, math.pi / 2)(target)
+
+
+@qm.qkernel
+def _phase_select(
+    index: qm.Qubit,
+    target: qm.Qubit,
+) -> tuple[qm.Qubit, qm.Qubit]:
+    """Select between an identity and a globally phased identity."""
+    return qm.select([_identity_case, _phased_identity_case])(index, target)
+
+
+@qm.qkernel
+def _inverse_phase_select(
+    index: qm.Qubit,
+    target: qm.Qubit,
+) -> tuple[qm.Qubit, qm.Qubit]:
+    """Apply the inverse of the relative-phase SELECT fixture."""
+    return qm.inverse(_phase_select)(index, target)
+
+
+@qm.qkernel
+def _outer_controlled_phase_select() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+    """Apply the relative-phase SELECT under one coherent control."""
+    outer = qm.qubit("outer")
+    index = qm.qubit("index")
+    target = qm.qubit("target")
+    return qm.control(_phase_select)(outer, index, target)
+
+
+@qm.qkernel
+def _controlled_inverse_phase_select() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+    """Control the inverse relative-phase SELECT fixture."""
+    outer = qm.qubit("outer")
+    index = qm.qubit("index")
+    target = qm.qubit("target")
+    return qm.control(_inverse_phase_select)(outer, index, target)
+
+
 def test_select_estimates_every_controlled_case_body() -> None:
     """SELECT sums nonempty cases under every index qubit control."""
 
@@ -64,6 +109,53 @@ def test_select_estimates_every_controlled_case_body() -> None:
     assert estimate.gates.toffoli == 2
     assert estimate.width.allocated_qubits == 3
     assert estimate.width.peak_qubits == 3
+
+
+def test_select_phase_survives_inverse_and_outer_control() -> None:
+    """A case-global phase remains observable under SELECT transformations."""
+    direct = _phase_select.estimate_resources()
+    inverse = _inverse_phase_select.estimate_resources()
+    outer = _outer_controlled_phase_select.estimate_resources()
+    outer_inverse = _controlled_inverse_phase_select.estimate_resources()
+
+    for estimate in (direct, inverse):
+        assert estimate.gates.total == 1
+        assert estimate.gates.single_qubit == 1
+        assert estimate.gates.rotation == 1
+        assert estimate.width.input_qubits == 2
+        assert estimate.width.peak_qubits == 2
+        assert estimate.depth.depth == 1
+        assert estimate.calls == qm.CallResources()
+        assert estimate.quality is qm.EstimateQuality.EXACT
+    for estimate in (outer, outer_inverse):
+        assert estimate.gates.total == 1
+        assert estimate.gates.two_qubit == 1
+        assert estimate.gates.rotation == 1
+        assert estimate.width.allocated_qubits == 3
+        assert estimate.width.peak_qubits == 3
+        assert estimate.depth.depth == 1
+        assert estimate.calls == qm.CallResources()
+        assert estimate.quality is qm.EstimateQuality.EXACT
+
+    assert inverse.width == direct.width
+    assert inverse.depth == direct.depth
+    assert inverse.calls == direct.calls
+    assert outer_inverse.width == outer.width
+    assert outer_inverse.depth == outer.depth
+    assert outer_inverse.calls == outer.calls
+
+    for kernel, expected in (
+        (_phase_select, direct),
+        (_inverse_phase_select, inverse),
+        (_outer_controlled_phase_select, outer),
+        (_controlled_inverse_phase_select, outer_inverse),
+    ):
+        restored = qm.estimate_resources(deserialize(serialize(kernel)))
+        assert restored.width == expected.width
+        assert restored.gates == expected.gates
+        assert restored.depth == expected.depth
+        assert restored.calls == expected.calls
+        assert restored.quality is expected.quality
 
 
 def test_select_clifford_t_bounds_controlled_hadamard_case() -> None:

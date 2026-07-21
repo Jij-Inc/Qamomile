@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
@@ -16,6 +17,30 @@ from qamomile.circuit.estimator.resource_estimator import (
     _ConstraintRange,
     _ResourceConstraint,
 )
+
+
+def test_large_quantified_finite_requirement_does_not_ignore_a_pole() -> None:
+    """Analytic range validation never proves finiteness across a singularity."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    requirement = _ResourceConstraint(
+        expression=1 / (index - 5000) ** 2,
+        minimum=0,
+        label="log2 input",
+        integer=False,
+        minimum_inclusive=False,
+        finite=True,
+        ranges=(
+            _ConstraintRange(
+                symbol=index,
+                start=sp.Integer(0),
+                step=sp.Integer(1),
+                iterations=sp.Integer(10000),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="validate log2 input exhaustively"):
+        requirement.validate()
 
 
 def test_dummy_normalization_preserves_assumptions_and_expression_structure() -> None:

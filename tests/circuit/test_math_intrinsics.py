@@ -14,6 +14,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     UnaryMathOp,
     UnaryMathOpKind,
 )
+from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import EmitError
 
 
@@ -28,6 +30,18 @@ def _log_width_register(register_size: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 def _derived_log_width(register_size: qmc.UInt) -> qmc.UInt:
     """Return a logarithmic structural width from a nested qkernel."""
     return qmc.ceil(qmc.log2(register_size))
+
+
+@qmc.qkernel
+def _float_log2(value: qmc.Float) -> qmc.Float:
+    """Return a symbolic base-two logarithm of one floating-point input."""
+    return qmc.log2(value)
+
+
+@qmc.qkernel
+def _float_ceil(value: qmc.Float) -> qmc.UInt:
+    """Return a symbolic unsigned ceiling of one floating-point input."""
+    return qmc.ceil(value)
 
 
 @qmc.qkernel
@@ -61,6 +75,97 @@ def test_log2_and_ceil_remain_exact_in_resource_expressions() -> None:
     for register_size in (2, 3, 8, 9, 1024):
         concrete = estimate.substitute(register_size=register_size)
         assert concrete.qubits == math.ceil(math.log2(register_size))
+
+
+def test_log2_resource_requirement_preserves_the_source_domain() -> None:
+    """Resource substitution reports UInt log2 domain errors directly."""
+    estimate = _log_width_register.estimate_resources()
+
+    assert estimate.substitute(register_size=1).qubits == 0
+    with pytest.raises(ValueError, match="log2 input must be at least 1"):
+        estimate.substitute(register_size=0)
+    with pytest.raises(ValueError, match="log2 input must be at least 1"):
+        _log_width_register.estimate_resources(inputs={"register_size": 0})
+    for boolean in (False, True):
+        with pytest.raises(TypeError, match="expects UIntType, got bool"):
+            _log_width_register.estimate_resources(inputs={"register_size": boolean})
+
+
+@pytest.mark.parametrize(
+    "value", [0.0, -0.5, float("nan"), float("inf"), -float("inf"), 1j]
+)
+def test_float_log2_resource_requirement_rejects_invalid_domain(
+    value: complex | float,
+) -> None:
+    """Float log2 estimation retains positivity, finiteness, and reality."""
+    with pytest.raises(ValueError, match="log2 input must be"):
+        _float_log2.estimate_resources(inputs={"value": value})
+
+
+def test_float_log2_resource_requirement_accepts_fractional_input() -> None:
+    """A finite positive Float remains valid even when smaller than one."""
+    estimate = _float_log2.estimate_resources(inputs={"value": 0.5})
+
+    assert estimate.gates.total == 0
+    assert estimate.parameters == {}
+
+
+@pytest.mark.parametrize("value", [-1.0, -1.25, float("nan"), float("inf"), 1j])
+def test_float_ceil_resource_requirement_rejects_invalid_domain(
+    value: complex | float,
+) -> None:
+    """Float ceil estimation rejects values outside its UInt result domain."""
+    with pytest.raises(ValueError, match="ceil input must be"):
+        _float_ceil.estimate_resources(inputs={"value": value})
+
+
+@pytest.mark.parametrize("value", [-0.5, 0.0, 2.25])
+def test_float_ceil_resource_requirement_accepts_nonnegative_result(
+    value: float,
+) -> None:
+    """Float ceil accepts exactly the finite inputs whose result is UInt."""
+    estimate = _float_ceil.estimate_resources(inputs={"value": value})
+
+    assert estimate.gates.total == 0
+    assert estimate.parameters == {}
+
+
+def test_float_log2_requirement_serializes_exclusive_finite_domain() -> None:
+    """Serialized requirements expose the exact Float log2 domain."""
+    estimate = _float_log2.estimate_resources()
+    requirement = next(
+        item
+        for item in estimate.to_dict()["requirements"]
+        if item["label"] == "log2 input"
+    )
+
+    assert requirement["minimum"] == 0
+    assert requirement["minimum_inclusive"] is False
+    assert requirement["finite"] is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "input_type", "output_type"),
+    [
+        (UnaryMathOpKind.LOG2, QubitType(), FloatType()),
+        (UnaryMathOpKind.LOG2, UIntType(), UIntType()),
+        (UnaryMathOpKind.CEIL, FloatType(), FloatType()),
+    ],
+)
+def test_resource_estimation_rejects_malformed_unary_math_types(
+    kind: UnaryMathOpKind,
+    input_type: object,
+    output_type: object,
+) -> None:
+    """Raw malformed unary math IR fails closed instead of costing zero."""
+    operation = UnaryMathOp(
+        operands=[Value(type=input_type, name="input")],
+        results=[Value(type=output_type, name="output")],
+        kind=kind,
+    )
+
+    with pytest.raises(ValueError, match=f"malformed {kind.name} operation"):
+        qmc.estimate_resources([operation])
 
 
 def test_log2_and_ceil_are_independent_ir_operations() -> None:

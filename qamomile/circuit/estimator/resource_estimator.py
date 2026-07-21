@@ -16,7 +16,11 @@ from sympy.core.relational import Relational
 from sympy.logic.boolalg import Boolean
 
 from qamomile.circuit.estimator._loop_executor import symbolic_iterations
-from qamomile.circuit.estimator._resolver import ExprResolver, UnresolvedValueError
+from qamomile.circuit.estimator._resolver import (
+    ExprResolver,
+    UnresolvedValueError,
+    input_shape_dimension_aliases,
+)
 from qamomile.circuit.estimator._serialization import SymbolRegistry
 from qamomile.circuit.ir._resource_contract import quantum_operand_widths
 from qamomile.circuit.ir.block import Block
@@ -25,6 +29,10 @@ from qamomile.circuit.ir.dataflow import (
     find_measurement_derived_values,
     find_measurement_results,
     walk_operations,
+)
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    UnaryMathOp,
+    UnaryMathOpKind,
 )
 from qamomile.circuit.ir.operation.callable import (
     CallTransform,
@@ -774,13 +782,17 @@ class _ResourceConstraint:
     Args:
         expression (ResourceExpr): Symbolic value constrained by the IR
             operation.
-        minimum (int | None): Smallest accepted value, or ``None`` when only
-            an equality is required.
+        minimum (int | None): Lower bound, or ``None`` when only an equality
+            is required.
         label (str): User-facing name of the constrained value.
         unit (str): Optional singular unit appended to diagnostics. Defaults
             to an empty string.
         integer (bool): Whether concrete values must be integers. Defaults to
             ``True``.
+        minimum_inclusive (bool): Whether ``minimum`` itself is accepted.
+            Defaults to ``True``.
+        finite (bool): Whether concrete values must be finite. Defaults to
+            ``False``.
         expected (ResourceExpr | None): Required exact value. Defaults to
             ``None``.
         ranges (tuple[_ConstraintRange, ...]): Outer-to-inner loop ranges that
@@ -793,6 +805,8 @@ class _ResourceConstraint:
     label: str
     unit: str = ""
     integer: bool = True
+    minimum_inclusive: bool = True
+    finite: bool = False
     expected: ResourceExpr | None = None
     ranges: tuple[_ConstraintRange, ...] = ()
 
@@ -829,7 +843,7 @@ class _ResourceConstraint:
             _ResourceConstraint: Conditionally active requirement.
         """
         predicate = _boolean_condition(condition)
-        fallback = sp.Integer(self.minimum or 0)
+        fallback = self._valid_fallback()
         expected = self.expected
         if expected is not None:
             expected = _piecewise(expected, _ZERO, predicate)
@@ -848,6 +862,20 @@ class _ResourceConstraint:
                 integer or lower-bound requirement.
         """
         self._validate_ranges(0, {}, [4096])
+
+    def _valid_fallback(self) -> sp.Integer:
+        """Return one concrete value satisfying this lower-bound requirement.
+
+        Conditional constraints use this value outside their active branch.
+        Equality requirements replace it separately with zero.
+
+        Returns:
+            sp.Integer: Finite integer that satisfies the lower bound.
+        """
+        if self.minimum is None:
+            return _ZERO
+        offset = 0 if self.minimum_inclusive else 1
+        return sp.Integer(self.minimum + offset)
 
     def _validate_ranges(
         self,
@@ -976,10 +1004,12 @@ class _ResourceConstraint:
                 coefficient.is_integer is True
                 for coefficient in polynomial.all_coeffs()
             )
+        finite_proven = not self.finite or indexed.is_finite is True
+        real_proven = self.minimum is None or indexed.is_real is True
 
         if indexed_expected is not None:
             difference = _safe_simplify(cast(ResourceExpr, indexed - indexed_expected))
-            if difference == _ZERO and integer_proven:
+            if difference == _ZERO and integer_proven and finite_proven and real_proven:
                 return True
             for offset in {0, count - 1}:
                 resolved = _safe_constraint_substitute(
@@ -1002,10 +1032,12 @@ class _ResourceConstraint:
             lower_bound = None
         if (
             integer_proven
+            and finite_proven
+            and real_proven
             and self.minimum is not None
             and isinstance(lower_bound, sp.Expr)
             and lower_bound.is_number
-            and sp.Ge(lower_bound, self.minimum) is sp.true
+            and self._minimum_relation(lower_bound) is sp.true
         ):
             return True
 
@@ -1045,7 +1077,7 @@ class _ResourceConstraint:
                     loop_range.symbol: start + step * offset,
                 },
             )
-        return integer_proven
+        return integer_proven and finite_proven and real_proven
 
     def _validate_value(
         self,
@@ -1060,7 +1092,8 @@ class _ResourceConstraint:
                 used to resolve it.
 
         Raises:
-            ValueError: If the value is non-integral or below the minimum.
+            ValueError: If the value is non-finite, non-integral, or outside
+                the lower bound.
         """
         location = ""
         if substitutions:
@@ -1069,6 +1102,10 @@ class _ResourceConstraint:
                 for symbol, value in substitutions.items()
             )
             location = f" at {assignments}"
+        if self.finite and resolved.is_finite is not True:
+            raise ValueError(f"{self.label} must be finite; got {resolved}{location}.")
+        if self.minimum is not None and resolved.is_real is not True:
+            raise ValueError(f"{self.label} must be real; got {resolved}{location}.")
         if self.integer and not _is_concrete_integer(resolved):
             raise ValueError(
                 f"{self.label} must be an integer; got {resolved}{location}."
@@ -1082,15 +1119,45 @@ class _ResourceConstraint:
                 raise ValueError(
                     f"{self.label} must equal {expected}; got {resolved}{location}."
                 )
-        if self.minimum is not None and sp.Lt(resolved, self.minimum) is sp.true:
+        if self.minimum is not None and self._minimum_violation(resolved) is sp.true:
             unit = ""
             if self.unit:
                 plural = "" if self.minimum == 1 else "s"
                 unit = f" {self.unit}{plural}"
-            raise ValueError(
-                f"{self.label} must be at least {self.minimum}{unit}; "
-                f"got {resolved}{location}."
+            comparison = (
+                f"greater than {self.minimum}"
+                if not self.minimum_inclusive
+                else f"at least {self.minimum}"
             )
+            raise ValueError(
+                f"{self.label} must be {comparison}{unit}; got {resolved}{location}."
+            )
+
+    def _minimum_relation(self, value: sp.Expr) -> Boolean:
+        """Return the predicate that proves ``value`` satisfies the bound.
+
+        Args:
+            value (sp.Expr): Value or analytic lower bound to compare.
+
+        Returns:
+            Boolean: Inclusive or exclusive lower-bound predicate.
+        """
+        assert self.minimum is not None
+        relation = sp.Ge if self.minimum_inclusive else sp.Gt
+        return cast(Boolean, relation(value, self.minimum))
+
+    def _minimum_violation(self, value: sp.Expr) -> Boolean:
+        """Return the predicate that proves ``value`` violates the bound.
+
+        Args:
+            value (sp.Expr): Concrete constrained value.
+
+        Returns:
+            Boolean: Inclusive or exclusive lower-bound violation predicate.
+        """
+        assert self.minimum is not None
+        relation = sp.Lt if self.minimum_inclusive else sp.Le
+        return cast(Boolean, relation(value, self.minimum))
 
     def bound_over(
         self,
@@ -1188,7 +1255,7 @@ class _ResourceConstraint:
         expression = _resource_expr(
             sp.Piecewise(
                 (range_minimum, sp.Gt(iterations, _ZERO)),
-                (sp.Integer(cast(int, self.minimum)), True),
+                (self._valid_fallback(), True),
             )
         )
         bound = dataclasses.replace(
@@ -2062,6 +2129,8 @@ class ResourceEstimate:
                 {
                     "expression": serialize(constraint.expression),
                     "minimum": constraint.minimum,
+                    "minimum_inclusive": constraint.minimum_inclusive,
+                    "finite": constraint.finite,
                     "expected": (
                         serialize(constraint.expected)
                         if constraint.expected is not None
@@ -2524,7 +2593,9 @@ class ResourceEstimator:
                 estimate. QKernel-like objects are built before traversal.
             inputs (dict[str, Any] | None): QKernel input values used to
                 specialize the symbolic estimate without constructing a
-                problem-sized circuit. Defaults to ``None``.
+                problem-sized circuit. Exact one-dimensional root quantum-port
+                widths declared by callable resource metadata are inferred
+                when omitted. Defaults to ``None``.
             strategies (dict[str, str] | None): Per-call override merged over
                 estimator-level strategies. Defaults to ``None``.
 
@@ -2532,11 +2603,19 @@ class ResourceEstimator:
             ResourceEstimate: Logical resource estimate.
 
         Raises:
-            ValueError: If an input name is neither a free symbol nor a declared
-                kernel argument.
+            ValueError: If an input name is unknown, a callable resource
+                contract is malformed or violated, or a structural resource
+                requirement fails.
+            TypeError: If ``kernel`` is not a supported estimator input.
+            NotImplementedError: If the input IR contains a construct not
+                supported by resource estimation.
         """
+        explicit_inputs = dict(inputs or {})
         root_callable_attrs = _root_callable_resource_attrs(kernel)
-        build_inputs, estimation_inputs = _partition_estimation_inputs(kernel, inputs)
+        build_inputs, estimation_inputs = _partition_estimation_inputs(
+            kernel,
+            explicit_inputs,
+        )
         block_or_ops = self._coerce_input(
             kernel,
             build_inputs,
@@ -2552,6 +2631,9 @@ class ResourceEstimator:
             condition_values=_scalar_values({**build_inputs, **estimation_inputs}),
         )
         estimate = interpreter.estimate(block_or_ops)
+        root_source = getattr(kernel, "name", None) or (
+            block_or_ops.name if isinstance(block_or_ops, Block) else "qkernel"
+        )
         if isinstance(block_or_ops, Block):
             estimate = _with_constraints(
                 estimate,
@@ -2565,20 +2647,31 @@ class ResourceEstimator:
                             build_inputs,
                         ),
                     ),
-                    source=getattr(kernel, "name", block_or_ops.name or "qkernel"),
+                    source=root_source,
                 ),
             )
         if build_inputs:
             estimate = _substitute_bindings(estimate, build_inputs)
+        inferred_shape_inputs = _root_callable_shape_inputs(
+            root_callable_attrs,
+            block_or_ops,
+            explicit_inputs,
+            source=root_source,
+        )
+        effective_estimation_inputs = {
+            **inferred_shape_inputs,
+            **estimation_inputs,
+        }
         expanded_estimation_inputs, shape_input_names = _expand_array_shape_inputs(
             block_or_ops,
-            estimation_inputs,
+            effective_estimation_inputs,
         )
-        if estimation_inputs:
+        if effective_estimation_inputs:
             estimate = _apply_inputs(
                 estimate,
                 expanded_estimation_inputs,
                 contract_names=_contract_names(block_or_ops),
+                input_types=_scalar_input_types(block_or_ops),
                 branch_condition_names=interpreter.branch_condition_names,
                 consumed_input_names=shape_input_names,
             )
@@ -2980,6 +3073,8 @@ class ResourceInterpreter:
                     resolver,
                     controls=controls,
                 )
+            case UnaryMathOp():
+                return self.eval_unary_math(operation, resolver)
             case CastOperation() | ReturnQuantumArrayElementOperation():
                 return ResourceEstimate.zero()
             case HasNestedOps():
@@ -2995,6 +3090,82 @@ class ResourceInterpreter:
                     f"operation {type(operation).__name__} "
                     f"({operation.operation_kind.value}); refusing to report "
                     "it as an exact zero-cost operation."
+                )
+
+    def eval_unary_math(
+        self,
+        operation: UnaryMathOp,
+        resolver: ExprResolver,
+    ) -> ResourceEstimate:
+        """Evaluate structural requirements of one unary math expression.
+
+        Classical arithmetic has no quantum gate cost, but unary math domains
+        must remain valid after resource-input substitution. Retaining those
+        domains here produces source-level diagnostics before downstream width
+        expressions turn into infinities or invalid unsigned sizes.
+
+        Args:
+            operation (UnaryMathOp): Unary mathematical IR operation.
+            resolver (ExprResolver): Resolver for the mathematical operand.
+
+        Returns:
+            ResourceEstimate: Zero quantum cost with any retained structural
+                input-domain requirements.
+
+        Raises:
+            ValueError: If the operation types are malformed or a concrete
+                input violates the unary operation's numeric domain.
+            NotImplementedError: If the unary operation kind is unknown.
+        """
+        kind = operation.kind
+        if kind is None:
+            raise ValueError("Cannot estimate unary math operation without a kind.")
+        expected_output_type = FloatType if kind is UnaryMathOpKind.LOG2 else UIntType
+        if not isinstance(
+            operation.input.type, (UIntType, FloatType)
+        ) or not isinstance(
+            operation.output.type,
+            expected_output_type,
+        ):
+            raise ValueError(
+                f"Cannot estimate malformed {kind.name} operation: "
+                "expected UInt or Float input and "
+                f"{expected_output_type.__name__} output."
+            )
+        match kind:
+            case UnaryMathOpKind.LOG2:
+                is_uint = isinstance(operation.input.type, UIntType)
+                constraint = _ResourceConstraint(
+                    expression=resolver.resolve(operation.input),
+                    minimum=1 if is_uint else 0,
+                    label="log2 input",
+                    integer=is_uint,
+                    minimum_inclusive=is_uint,
+                    finite=not is_uint,
+                )
+                return _with_constraints(
+                    ResourceEstimate.zero("log2"),
+                    constraint,
+                )
+            case UnaryMathOpKind.CEIL:
+                if isinstance(operation.input.type, UIntType):
+                    return ResourceEstimate.zero("ceil")
+                constraint = _ResourceConstraint(
+                    expression=resolver.resolve(operation.input),
+                    minimum=-1,
+                    label="ceil input",
+                    integer=False,
+                    minimum_inclusive=False,
+                    finite=True,
+                )
+                return _with_constraints(
+                    ResourceEstimate.zero("ceil"),
+                    constraint,
+                )
+            case _:
+                raise NotImplementedError(
+                    "Resource estimation does not support unary math kind "
+                    f"{operation.kind!r}."
                 )
 
     def _eval_call_body(
@@ -5188,7 +5359,7 @@ class ResourceInterpreter:
         structural_constraints = [
             *_quantum_operand_width_constraints(
                 operation.callable_attrs,
-                operation.target_operands,
+                _controlled_u_body_operands(operation),
                 resolver,
                 source=callable_name,
             ),
@@ -5254,10 +5425,7 @@ class ResourceInterpreter:
             )
         if isinstance(operation.block, Block):
             child = _controlled_u_child_resolver(operation, resolver)
-            actual_operands = [
-                *operation.target_operands,
-                *operation.param_operands,
-            ]
+            actual_operands = _controlled_u_body_operands(operation)
             body = self._eval_call_body(
                 operation.block,
                 child,
@@ -5741,7 +5909,7 @@ class ResourceInterpreter:
         )
         register_constraint.validate()
 
-        gamma = resolver.resolve(operation.gamma)
+        gamma = self._apply_condition_values(resolver.resolve(operation.gamma))
         if gamma.is_zero is True:
             return _with_constraints(
                 ResourceEstimate.zero("pauli_evolve"),
@@ -5816,17 +5984,20 @@ class ResourceInterpreter:
                     controls=controls,
                 )
             )
-        return _with_constraints(
-            dataclasses.replace(
-                estimate,
-                trace=_wrap_trace(
-                    "pauli_evolve",
-                    estimate.trace,
-                    source_kind="body",
-                ),
+        active_estimate = dataclasses.replace(
+            estimate,
+            trace=_wrap_trace(
+                "pauli_evolve",
+                estimate.trace,
+                source_kind="body",
             ),
-            register_constraint,
         )
+        if gamma.is_zero is not False:
+            active_estimate = ResourceEstimate.zero("pauli_evolve").conditional(
+                active_estimate,
+                sp.Eq(gamma, _ZERO),
+            )
+        return _with_constraints(active_estimate, register_constraint)
 
     def _resolve_hamiltonian_binding(
         self,
@@ -6180,7 +6351,9 @@ def estimate_resources(
             block, or operation sequence to estimate.
         inputs (dict[str, Any] | None): QKernel input values used to specialize
             the symbolic estimate without building a problem-sized circuit.
-            Defaults to ``None``.
+            Exact one-dimensional root quantum-port widths declared by
+            callable resource metadata are inferred when omitted. Defaults to
+            ``None``.
         strategies (dict[str, str] | None): Strategy overrides by callable
             name. Defaults to ``None``.
         trace (bool): Whether to retain the explanation tree. Defaults to
@@ -6193,6 +6366,13 @@ def estimate_resources(
 
     Returns:
         ResourceEstimate: Logical resource estimate.
+
+    Raises:
+        ValueError: If the basis, precision, input specialization, callable
+            resource contract, or structural requirements are invalid.
+        TypeError: If ``kernel`` is not a supported estimator input.
+        NotImplementedError: If the input IR contains a construct not
+            supported by resource estimation.
 
     Example:
         >>> import qamomile.circuit as qmc
@@ -6588,12 +6768,14 @@ def _array_constraint_is_proven(constraint: _ResourceConstraint) -> bool:
     )
     if not integer_proven:
         return False
+    if constraint.finite and expression.is_finite is not True:
+        return False
     if constraint.expected is not None:
         expected = _safe_simplify(constraint.expected)
         if _safe_simplify(expression - expected) != _ZERO:
             return False
     if constraint.minimum is not None:
-        return sp.Ge(expression, constraint.minimum) is sp.true
+        return constraint._minimum_relation(expression) is sp.true
     return True
 
 
@@ -9788,6 +9970,66 @@ def _root_callable_resource_attrs(
     return attrs if isinstance(attrs, Mapping) else {}
 
 
+def _root_callable_shape_inputs(
+    attrs: Mapping[str, Any],
+    block_or_ops: Block | Sequence[Operation],
+    explicit_inputs: Mapping[str, Any],
+    *,
+    source: str,
+) -> dict[str, int]:
+    """Infer one-dimensional root quantum-port widths from exact metadata.
+
+    A callable resource contract describes total scalar widths. That value
+    uniquely determines the shape of a one-dimensional quantum vector, but it
+    cannot safely choose dimensions for a higher-rank array. Explicit port or
+    dimension inputs always take precedence so a conflicting value reaches
+    the normal contract validator and produces a useful error.
+
+    Args:
+        attrs (Mapping[str, Any]): Root callable definition attributes.
+        block_or_ops (Block | Sequence[Operation]): Coerced estimator input.
+        explicit_inputs (Mapping[str, Any]): User-supplied specialization
+            inputs before build/estimation partitioning.
+        source (str): Callable name used in malformed-contract diagnostics.
+
+    Returns:
+        dict[str, int]: Inferred one-dimensional quantum-port widths keyed by
+            their public argument names.
+
+    Raises:
+        ValueError: If present resource metadata is malformed.
+    """
+    if not isinstance(block_or_ops, Block):
+        return {}
+    quantum_ports = [
+        (name, value)
+        for name, value in zip(
+            block_or_ops.label_args,
+            block_or_ops.input_values,
+        )
+        if isinstance(value, Value) and value.type.is_quantum()
+    ]
+    shape_aliases = input_shape_dimension_aliases(block_or_ops)
+    inferred: dict[str, int] = {}
+    for entry in quantum_operand_widths(attrs, source=source):
+        if entry.index >= len(quantum_ports):
+            # The constraint builder reports the complete call-shape
+            # diagnostic before inference runs.
+            continue
+        name, value = quantum_ports[entry.index]
+        if not isinstance(value, ArrayValue) or len(value.shape) != 1:
+            continue
+        if value.shape[0].is_constant():
+            continue
+        dimension_name = shape_aliases.get(value.shape[0].uuid)
+        if name in explicit_inputs or (
+            dimension_name is not None and dimension_name in explicit_inputs
+        ):
+            continue
+        inferred[name] = entry.width
+    return inferred
+
+
 def _quantum_operand_width_constraints(
     attrs: Mapping[str, Any],
     operands: Sequence[ValueBase],
@@ -9905,7 +10147,11 @@ def _block_input_constraints(
         if value is None:
             continue
         expression = (
-            cast(sp.Expr, sp.sympify(slot.bound_value))
+            (
+                sp.Integer(int(slot.bound_value))
+                if isinstance(slot.bound_value, bool)
+                else cast(sp.Expr, sp.sympify(slot.bound_value))
+            )
             if slot.bound_value is not None
             else resolver.resolve(value)
         )
@@ -12208,6 +12454,15 @@ def _root_input_binding_context(
                     f"qkernel declares rank {len(value.shape)}."
                 )
             for dimension, size in zip(value.shape, shape):
+                if dimension.is_constant():
+                    expected = dimension.get_const()
+                    if not _input_values_equal(size, expected):
+                        raise ValueError(
+                            f"array input '{name}' dimension '{dimension.name}' "
+                            f"is fixed at {expected}, but the supplied shape "
+                            f"has size {size}."
+                        )
+                    continue
                 context[dimension.uuid] = sp.Integer(size)
             return
         if name in scalar_bindings:
@@ -12281,6 +12536,31 @@ def _contract_names(
     return frozenset(slot.name for slot in block_or_ops.param_slots)
 
 
+def _scalar_input_types(
+    block_or_ops: "Block | Sequence[Operation]",
+) -> dict[str, Any]:
+    """Return recoverable scalar qkernel input types by public name.
+
+    Args:
+        block_or_ops (Block | Sequence[Operation]): Coerced estimator input.
+
+    Returns:
+        dict[str, Any]: Scalar classical input types, or an empty mapping when
+            the input has no root interface manifest.
+    """
+    if not isinstance(block_or_ops, Block):
+        return {}
+    input_types = {
+        slot.name: slot.type for slot in block_or_ops.param_slots if slot.ndim == 0
+    }
+    for name, value in zip(block_or_ops.label_args, block_or_ops.input_values):
+        if not isinstance(value, ArrayValue) and not value.type.is_quantum():
+            input_types.setdefault(name, value.type)
+    for name, value in block_or_ops.parameters.items():
+        input_types.setdefault(name, value.type)
+    return input_types
+
+
 def _expand_array_shape_inputs(
     block_or_ops: "Block | Sequence[Operation]",
     inputs: Mapping[str, Any],
@@ -12310,20 +12590,54 @@ def _expand_array_shape_inputs(
     consumed: set[str] = set()
     if not isinstance(block_or_ops, Block):
         return expanded, frozenset()
+    shape_aliases = input_shape_dimension_aliases(block_or_ops)
+    dimensions_by_uuid = {
+        dimension.uuid: dimension
+        for value in block_or_ops.input_values
+        if isinstance(value, ArrayValue)
+        for dimension in value.shape
+    }
+    for dimension_uuid, dimension_name in shape_aliases.items():
+        if dimension_name in inputs and isinstance(inputs[dimension_name], bool):
+            raise ValueError(
+                f"array dimension input '{dimension_name}' requires a numeric "
+                "integer or symbolic expression; bool is not a dimension."
+            )
+        dimension = dimensions_by_uuid[dimension_uuid]
+        if dimension_name in inputs and dimension.is_constant():
+            expected = dimension.get_const()
+            supplied = inputs[dimension_name]
+            if not _input_values_equal(supplied, expected):
+                raise ValueError(
+                    f"array dimension '{dimension_name}' is fixed at {expected}, "
+                    f"but inputs specify {supplied!r}."
+                )
+            expanded.pop(dimension_name, None)
+            consumed.add(dimension_name)
     for name, ir_value in zip(block_or_ops.label_args, block_or_ops.input_values):
         if name not in inputs or not isinstance(ir_value, ArrayValue):
             continue
         supplied = inputs[name]
-        if isinstance(supplied, bool):
-            shape = _concrete_input_shape(supplied)
-        elif (
-            ir_value.type.is_quantum()
+        is_quantum_array = ir_value.type.is_quantum()
+        if is_quantum_array and len(ir_value.shape) == 1 and isinstance(supplied, bool):
+            raise ValueError(
+                f"quantum array input '{name}' requires an integer width or "
+                "an array-like value; bool is not a width."
+            )
+        if (
+            is_quantum_array
             and len(ir_value.shape) == 1
             and isinstance(supplied, numbers.Integral)
         ):
             shape = (int(supplied),)
         else:
             shape = _concrete_input_shape(supplied)
+            if is_quantum_array and not shape and not _is_array_like_input(supplied):
+                raise ValueError(
+                    f"quantum array input '{name}' requires an integer width "
+                    "or an array-like value; got "
+                    f"{type(supplied).__name__} ({supplied!r})."
+                )
         if shape and len(shape) != len(ir_value.shape):
             raise ValueError(
                 f"array input '{name}' has rank {len(shape)}, but the qkernel "
@@ -12334,9 +12648,63 @@ def _expand_array_shape_inputs(
         if ir_value.type.is_quantum() and shape:
             expanded.pop(name, None)
         for dimension, size in zip(ir_value.shape, shape):
-            if dimension.name:
-                expanded[dimension.name] = size
+            dimension_name = shape_aliases.get(dimension.uuid)
+            if dimension_name:
+                if dimension.is_constant():
+                    expected = dimension.get_const()
+                    if not _input_values_equal(size, expected):
+                        raise ValueError(
+                            f"array input '{name}' dimension '{dimension_name}' "
+                            f"is fixed at {expected}, but the supplied shape "
+                            f"has size {size}."
+                        )
+                    continue
+                has_existing = dimension_name in inputs
+                existing = inputs.get(dimension_name)
+                if has_existing and not _input_values_equal(existing, size):
+                    raise ValueError(
+                        f"array input '{name}' implies {dimension_name}={size}, "
+                        f"but inputs also specify {dimension_name}={existing!r}."
+                    )
+                expanded[dimension_name] = size
     return expanded, frozenset(consumed)
+
+
+def _input_values_equal(left: Any, right: Any) -> bool:
+    """Return whether two scalar estimation inputs are provably equal.
+
+    Args:
+        left (Any): Explicit input value.
+        right (Any): Shape-derived input value.
+
+    Returns:
+        bool: Whether SymPy proves the scalar values equal.
+    """
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left is right
+    try:
+        difference = sp.sympify(left) - sp.sympify(right)
+    except (TypeError, ValueError, sp.SympifyError):
+        return False
+    return _safe_simplify(cast(ResourceExpr, difference)) == _ZERO
+
+
+def _is_array_like_input(value: Any) -> bool:
+    """Return whether an estimation input exposes at least one array axis.
+
+    Args:
+        value (Any): Candidate array payload.
+
+    Returns:
+        bool: Whether ``value`` is a non-scalar array or sequence.
+    """
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        try:
+            return len(shape) > 0
+        except TypeError:
+            return False
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
 
 
 def _concrete_input_shape(value: Any) -> tuple[int, ...]:
@@ -12397,6 +12765,7 @@ def _apply_inputs(
     inputs: Mapping[str, Any],
     *,
     contract_names: frozenset[str] | None = None,
+    input_types: Mapping[str, Any] | None = None,
     branch_condition_names: set[str] | None = None,
     consumed_input_names: frozenset[str] | None = None,
 ) -> ResourceEstimate:
@@ -12421,6 +12790,9 @@ def _apply_inputs(
             may be numbers or SymPy expressions.
         contract_names (frozenset[str] | None): Declared kernel argument names.
             ``None`` (raw op sequence, no contract) keeps every name strict.
+        input_types (Mapping[str, Any] | None): Recoverable scalar input types
+            used to distinguish Bit booleans from invalid UInt/Float booleans.
+            Defaults to ``None``.
         branch_condition_names (set[str] | None): Names that participated in a
             compile-time branch or dependency-scheduling decision during
             interpretation. Defaults to ``None``.
@@ -12435,6 +12807,7 @@ def _apply_inputs(
         ValueError: If an input name is neither a free symbol of the
             estimate nor a declared kernel argument, or a negative input is
             supplied for a nonnegative resource symbol.
+        TypeError: If a boolean is supplied for a non-Bit scalar input.
     """
     # SymPy treats same-named symbols with different assumptions as distinct, so
     # a name can map to more than one symbol object; substitute every match.
@@ -12449,6 +12822,7 @@ def _apply_inputs(
         symbols_by_name.setdefault(_symbol_display_name(symbol), []).append(symbol)
     known = contract_names or frozenset()
     referenced = set(branch_condition_names or ()) | set(consumed_input_names or ())
+    declared_types = input_types or {}
     unknown = [
         name for name in inputs if name not in symbols_by_name and name not in known
     ]
@@ -12462,6 +12836,13 @@ def _apply_inputs(
     subs: dict[sp.Symbol, sp.Expr] = {}
     ignored: list[str] = []
     for name, value in inputs.items():
+        if isinstance(value, bool) and (
+            name in declared_types and not isinstance(declared_types[name], BitType)
+        ):
+            raise TypeError(
+                f"resource input '{name}' expects "
+                f"{type(declared_types[name]).__name__}, got bool ({value!r})."
+            )
         if name not in symbols_by_name:
             # Not a free symbol: either initial branch/dependency
             # interpretation already consumed it (silent), or it genuinely
@@ -12469,7 +12850,21 @@ def _apply_inputs(
             if name not in referenced:
                 ignored.append(name)
             continue
-        sympified = sp.sympify(value)
+        if isinstance(value, bool):
+            sympified: sp.Basic = sp.Integer(int(value))
+        else:
+            try:
+                sympified = sp.sympify(value)
+            except (TypeError, ValueError, sp.SympifyError) as error:
+                raise ValueError(
+                    f"Cannot apply non-scalar value {value!r} to resource "
+                    f"parameter '{name}'."
+                ) from error
+        if not isinstance(sympified, sp.Expr):
+            raise ValueError(
+                f"Cannot apply non-numeric value {value!r} to resource "
+                f"parameter '{name}'."
+            )
         if (
             sympified.is_number
             and any(symbol.is_integer is True for symbol in symbols_by_name[name])
@@ -12620,6 +13015,27 @@ def _operand_shapes(
     return shapes
 
 
+def _controlled_u_body_operands(
+    operation: ControlledUOperation,
+) -> list[Value]:
+    """Return wrapped-body actuals after the external control prefix.
+
+    The operation stores controls followed by the wrapped qkernel's complete
+    argument list. Slicing that layout directly is the canonical arity
+    contract; reconstructing it from ``target_operands`` and
+    ``param_operands`` can duplicate classical values because historical
+    target accessors include every post-control operand.
+
+    Args:
+        operation (ControlledUOperation): Controlled call to inspect.
+
+    Returns:
+        list[Value]: Quantum and classical/object body operands in call-site
+            storage order.
+    """
+    return list(operation.operands[len(operation.control_operands) :])
+
+
 def _controlled_u_child_resolver(
     operation: ControlledUOperation,
     resolver: ExprResolver,
@@ -12638,7 +13054,7 @@ def _controlled_u_child_resolver(
         return resolver.child_scope(block)
 
     extra: dict[str, ResourceExpr] = {}
-    actual_operands = [*operation.target_operands, *operation.param_operands]
+    actual_operands = _controlled_u_body_operands(operation)
     for formal, actual in pair_block_operands(block, actual_operands):
         extra[formal.uuid] = resolver.resolve(actual)
         if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
@@ -12734,7 +13150,9 @@ def _controlled_u_broadcast_factor(
         one vector actual target, otherwise one.
     """
     target_operands = [
-        operand for operand in operation.target_operands if operand.type.is_quantum()
+        operand
+        for operand in _controlled_u_body_operands(operation)
+        if operand.type.is_quantum()
     ]
     if len(target_operands) != 1 or not isinstance(target_operands[0], ArrayValue):
         return _ONE

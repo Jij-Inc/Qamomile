@@ -64,8 +64,6 @@ project:
             - file: api/circuit/frontend
             - file: api/circuit/ir
             - file: api/circuit/multi_controlled_x
-            - file: api/circuit/pauli_lcu_block_encoding
-            - file: api/circuit/periodic_shift_lcu_block_encoding
             - file: api/circuit/qft
             - file: api/circuit/qpe
             - file: api/circuit/serialization

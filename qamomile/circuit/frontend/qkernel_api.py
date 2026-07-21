@@ -41,7 +41,9 @@ class QKernelBuildMixin:
         Args:
             inputs (dict[str, Any] | None): QKernel input values used to
                 specialize the symbolic estimate without constructing a
-                problem-sized circuit. Defaults to ``None``.
+                problem-sized circuit. Exact one-dimensional root quantum-port
+                widths declared by callable resource metadata are inferred
+                when omitted. Defaults to ``None``.
             strategies (dict[str, str] | None): Callable strategy overrides.
                 Defaults to ``None``.
             trace (bool): Whether to retain the explanation tree. Defaults to
@@ -55,6 +57,13 @@ class QKernelBuildMixin:
 
         Returns:
             ResourceEstimate: Logical symbolic resource estimate.
+
+        Raises:
+            ValueError: If an input, estimation configuration, callable
+                resource contract, or structural requirement is invalid.
+            TypeError: If the qkernel cannot be built as an estimator input.
+            NotImplementedError: If the qkernel contains a construct not
+                supported by resource estimation.
 
         Example:
             >>> @qm.qkernel
