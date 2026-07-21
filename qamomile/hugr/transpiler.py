@@ -8,6 +8,7 @@ from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.transpiler.artifact import CompiledProgram
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.config import CompilerConfig
+from qamomile.circuit.transpiler.oracle_bindings import OracleBindings
 from qamomile.hugr.lowerer import HugrTarget
 
 
@@ -34,6 +35,8 @@ class HugrTranspiler:
         kernel: QKernelLike,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
+        *,
+        oracle_bindings: OracleBindings | None = None,
     ) -> CompiledProgram[Any]:
         """Transpile a qkernel directly to a validated HUGR package.
 
@@ -43,12 +46,21 @@ class HugrTranspiler:
                 to ``None``.
             parameters (list[str] | None): Runtime parameter names retained as
                 HUGR function inputs. Defaults to ``None``.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the direct
+                body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
 
         Returns:
             CompiledProgram[Any]: Validated ``hugr.package.Package`` artifact.
 
         Raises:
             ImportError: If HUGR dependencies are unavailable.
+            TypeError: If an oracle binding key or implementation is invalid.
+            ValueError: If an oracle name is unused or targets an unsupported
+                callable, or oracle implementations form a cycle.
             QamomileCompileError: If semantic preparation or HUGR lowering
                 rejects the program.
             HugrCliError: If target-native validation rejects the package.
@@ -58,6 +70,7 @@ class HugrTranspiler:
             self.target,
             bindings=bindings,
             parameters=parameters,
+            oracle_bindings=oracle_bindings,
         )
 
     def to_hugr(
@@ -65,6 +78,8 @@ class HugrTranspiler:
         kernel: QKernelLike,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
+        *,
+        oracle_bindings: OracleBindings | None = None,
     ) -> Any:
         """Return only the validated HUGR package artifact.
 
@@ -74,8 +89,27 @@ class HugrTranspiler:
                 to ``None``.
             parameters (list[str] | None): Runtime parameter names. Defaults
                 to ``None``.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the direct
+                body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
 
         Returns:
             Any: ``hugr.package.Package`` artifact.
+
+        Raises:
+            ImportError: If HUGR dependencies are unavailable.
+            TypeError: If an oracle binding key or implementation is invalid.
+            ValueError: If an oracle name is unused or targets an unsupported
+                callable, or oracle implementations form a cycle.
+            QamomileCompileError: If semantic preparation or HUGR lowering
+                rejects the program.
         """
-        return self.transpile(kernel, bindings, parameters).artifact
+        return self.transpile(
+            kernel,
+            bindings,
+            parameters,
+            oracle_bindings=oracle_bindings,
+        ).artifact

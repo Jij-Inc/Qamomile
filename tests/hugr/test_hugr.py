@@ -67,6 +67,48 @@ def _hugr_helper(qubit: qmc.Qubit) -> qmc.Qubit:
     return qmc.h(qubit)
 
 
+_HUGR_OPAQUE_ORACLE = qmc.opaque("hugr_opaque_oracle", num_qubits=1)
+
+
+@qmc.qkernel
+def _hugr_oracle_implementation(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Implement the HUGR oracle test with an X gate."""
+    return qmc.x(qubit)
+
+
+@qmc.qkernel
+def _hugr_oracle_program() -> qmc.Bit:
+    """Invoke and measure one late-bound HUGR oracle."""
+    (qubit,) = _HUGR_OPAQUE_ORACLE(qmc.qubit("qubit"))
+    return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _hugr_oracle_helper(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Invoke the late-bound HUGR oracle from a helper definition."""
+    (qubit,) = _HUGR_OPAQUE_ORACLE(qubit)
+    return qubit
+
+
+@qmc.qkernel
+def _hugr_nested_oracle_program() -> qmc.Bit:
+    """Invoke and measure a late-bound oracle through a helper."""
+    qubit = _hugr_oracle_helper(qmc.qubit("qubit"))
+    return qmc.measure(qubit)
+
+
+@qmc.qkernel
+def _hugr_controlled_oracle_program() -> qmc.Vector[qmc.Bit]:
+    """Invoke one late-bound HUGR oracle under an explicit control."""
+    qubits = qmc.qubit_array(2, "qubits")
+    qubits[0] = qmc.x(qubits[0])
+    qubits[0], qubits[1] = qmc.control(_HUGR_OPAQUE_ORACLE)(
+        qubits[0],
+        qubits[1],
+    )
+    return qmc.measure(qubits)
+
+
 @qmc.qkernel
 def _hugr_identity(qubit: qmc.Qubit) -> qmc.Qubit:
     """Return one qubit unchanged for global-phase tests."""
@@ -1654,6 +1696,42 @@ def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
     assert isinstance(compiled.artifact, Package)
     assert compiled.metadata.target == "hugr"
     assert compiled.metadata.pipeline == "program_graph"
+
+
+@pytest.mark.hugr
+def test_hugr_compiles_per_call_oracle_binding() -> None:
+    """HUGR receives the same late-bound oracle body as circuit backends."""
+    compiled = HugrTranspiler().transpile(
+        _hugr_oracle_program,
+        oracle_bindings={"hugr_opaque_oracle": _hugr_oracle_implementation},
+    )
+
+    assert isinstance(compiled.artifact, Package)
+    assert compiled.metadata.target == "hugr"
+
+
+@pytest.mark.hugr
+def test_hugr_compiles_nested_oracle_binding() -> None:
+    """HUGR receives bindings inside reachable helper definitions."""
+    compiled = HugrTranspiler().transpile(
+        _hugr_nested_oracle_program,
+        oracle_bindings={"hugr_opaque_oracle": _hugr_oracle_implementation},
+    )
+
+    assert isinstance(compiled.artifact, Package)
+    assert compiled.metadata.target == "hugr"
+
+
+@pytest.mark.hugr
+def test_hugr_compiles_controlled_oracle_binding() -> None:
+    """HUGR applies its controlled transform to a bound direct body."""
+    compiled = HugrTranspiler().transpile(
+        _hugr_controlled_oracle_program,
+        oracle_bindings={"hugr_opaque_oracle": _hugr_oracle_implementation},
+    )
+
+    assert isinstance(compiled.artifact, Package)
+    assert compiled.metadata.target == "hugr"
 
 
 @pytest.mark.parametrize(

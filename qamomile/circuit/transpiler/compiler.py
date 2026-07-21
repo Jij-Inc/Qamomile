@@ -12,13 +12,16 @@ from qamomile.circuit.frontend.static_binding import without_static_bindings
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.artifact import CompiledProgram
 from qamomile.circuit.transpiler.config import CompilerConfig
+from qamomile.circuit.transpiler.oracle_bindings import (
+    OracleBindings,
+    _apply_compiler_substitutions,
+)
 from qamomile.circuit.transpiler.passes.entrypoint_validation import (
     EntrypointValidationPass,
 )
 from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
     ParameterShapeResolutionPass,
 )
-from qamomile.circuit.transpiler.passes.substitution import SubstitutionPass
 from qamomile.circuit.transpiler.prepared import PreparedModule, prepare_module
 from qamomile.circuit.transpiler.target import CompilationTarget
 
@@ -101,6 +104,8 @@ class QamomileCompiler:
         kernel: QKernelLike,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
+        *,
+        oracle_bindings: OracleBindings | None = None,
     ) -> PreparedModule:
         """Prepare a hierarchical semantic module without destroying calls.
 
@@ -110,12 +115,25 @@ class QamomileCompiler:
                 tracing and shape resolution. Defaults to ``None``.
             parameters (list[str] | None): Runtime parameter names. Defaults
                 to ``None``.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the direct
+                body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
 
         Returns:
             PreparedModule: Program-level semantic input for target planning.
 
         Raises:
-            ValueError: If bindings overlap runtime parameters.
+            TypeError: If an oracle binding key or implementation is invalid.
+            ValueError: If bindings overlap runtime parameters, an oracle
+                name is unused or targets an unsupported callable, or oracle
+                implementations form a cycle.
+            ValidationError: If an oracle implementation signature is
+                incompatible.
+            SignatureCompatibilityError: If a configured replacement
+                signature is incompatible.
             EntrypointValidationError: If the top-level kernel has quantum
                 inputs or outputs.
         """
@@ -123,8 +141,11 @@ class QamomileCompiler:
         input_types = getattr(kernel, "input_types", {})
         ordinary_bindings = without_static_bindings(input_types, bindings)
         EntrypointValidationPass().run(block)
-        if self.config.substitutions.rules:
-            block = SubstitutionPass(self.config.substitutions).run(block)
+        block = _apply_compiler_substitutions(
+            block,
+            self.config.substitutions,
+            oracle_bindings,
+        )
         block = ParameterShapeResolutionPass(ordinary_bindings).run(block)
         return prepare_module(block, ordinary_bindings)
 
@@ -134,6 +155,8 @@ class QamomileCompiler:
         target: CompilationTarget[PlanT, ArtifactT],
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
+        *,
+        oracle_bindings: OracleBindings | None = None,
     ) -> CompiledProgram[ArtifactT]:
         """Compile a qkernel with an explicit target implementation.
 
@@ -145,15 +168,32 @@ class QamomileCompiler:
                 to ``None``.
             parameters (list[str] | None): Runtime parameter names. Defaults
                 to ``None``.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the direct
+                body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
 
         Returns:
             CompiledProgram[ArtifactT]: Validated target-native artifact.
 
         Raises:
-            Exception: If semantic preparation, target compilation, or
+            ValueError: If an oracle name is unused or targets an unsupported
+                callable, or oracle implementations form a cycle.
+            ValidationError: If an oracle implementation signature is
+                incompatible.
+            SignatureCompatibilityError: If a configured replacement
+                signature is incompatible.
+            Exception: If other semantic preparation, target compilation, or
                 target-native validation fails.
         """
-        program = self.prepare(kernel, bindings, parameters)
+        program = self.prepare(
+            kernel,
+            bindings,
+            parameters,
+            oracle_bindings=oracle_bindings,
+        )
         owned_program = program.owned_snapshot()
         plan = target.plan(owned_program)
         compiled = target.compile(owned_program, plan)

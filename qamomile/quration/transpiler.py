@@ -9,6 +9,7 @@ from typing import Any
 from qamomile.circuit.transpiler.circuit_ir import (
     CircuitBackendEmitPass,
 )
+from qamomile.circuit.transpiler.oracle_bindings import OracleBindings
 from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
@@ -216,6 +217,8 @@ class QurationTranspiler(Transpiler[Any]):
         kernel: Any,
         option: Any,
         bindings: dict[str, Any] | None = None,
+        *,
+        oracle_bindings: OracleBindings | None = None,
     ) -> QurationResourceResult:
         """Compile a qkernel to a configured Quration FTQC target.
 
@@ -225,6 +228,12 @@ class QurationTranspiler(Transpiler[Any]):
                 desired FTQC target configuration.
             bindings (dict[str, Any] | None): Compile-time bindings. Defaults
                 to ``None``.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the direct
+                body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
 
         Returns:
             QurationResourceResult: Materialized circuit, compile pass result,
@@ -232,12 +241,19 @@ class QurationTranspiler(Transpiler[Any]):
 
         Raises:
             ImportError: If PyQret is unavailable.
+            TypeError: If an oracle binding key or implementation is invalid.
+            ValueError: If an oracle name is unused or targets an unsupported
+                callable, or oracle implementations form a cycle.
             QamomileCompileError: If Qamomile or Quration compilation fails.
         """
         _require_pyqret()
         from pyqret.backend import Compiler  # type: ignore[import-not-found]
 
-        executable = self.transpile(kernel, bindings=bindings)
+        executable = self.transpile(
+            kernel,
+            bindings=bindings,
+            oracle_bindings=oracle_bindings,
+        )
         circuit = executable.quantum_circuit
         compiler = Compiler(option)
         compile_result = compiler.compile(circuit)

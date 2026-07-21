@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.frontend.qkernel_build import build_qkernel
+from qamomile.circuit.frontend.qkernel_like import OracleBindings
 from qamomile.circuit.frontend.qkernel_metadata import (
     estimate_qkernel_resources,
 )
@@ -29,6 +30,7 @@ class QKernelBuildMixin:
         *,
         inputs: dict[str, Any] | None = None,
         strategies: dict[str, str] | None = None,
+        oracle_bindings: OracleBindings | None = None,
         trace: bool = False,
         unknown_policy: Any = None,
         basis: Any = None,
@@ -44,6 +46,12 @@ class QKernelBuildMixin:
                 problem-sized circuit. Defaults to ``None``.
             strategies (dict[str, str] | None): Callable strategy overrides.
                 Defaults to ``None``.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the direct
+                body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
             trace (bool): Whether to retain the explanation tree. Defaults to
                 ``False``.
             unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
@@ -55,6 +63,13 @@ class QKernelBuildMixin:
 
         Returns:
             ResourceEstimate: Logical symbolic resource estimate.
+
+        Raises:
+            TypeError: If an oracle binding key or implementation is invalid.
+            ValueError: If estimator configuration, inputs, or binding names
+                are invalid or target an unsupported callable.
+            QamomileCompileError: If an implementation signature is
+                incompatible with its oracle.
 
         Example:
             >>> @qm.qkernel
@@ -71,6 +86,7 @@ class QKernelBuildMixin:
             kernel,
             inputs=inputs,
             strategies=strategies,
+            oracle_bindings=oracle_bindings,
             trace=trace,
             unknown_policy=unknown_policy,
             basis=basis,

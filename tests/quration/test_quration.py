@@ -73,6 +73,22 @@ def _quration_resource_bell() -> tuple[qmc.Bit, qmc.Bit]:
     return qmc.measure(left), qmc.measure(right)
 
 
+_QURATION_ORACLE = qmc.opaque("quration_bound_oracle", num_qubits=1)
+
+
+@qmc.qkernel
+def _quration_oracle_implementation(qubit: qmc.Qubit) -> qmc.Qubit:
+    """Implement the Quration binding test with one X gate."""
+    return qmc.x(qubit)
+
+
+@qmc.qkernel
+def _quration_oracle_program() -> qmc.Bit:
+    """Invoke one opaque oracle before measurement."""
+    (qubit,) = _QURATION_ORACLE(qmc.qubit("qubit"))
+    return qmc.measure(qubit)
+
+
 @qmc.qkernel
 def _quration_gate_helper(
     left: qmc.Qubit,
@@ -1161,3 +1177,26 @@ def test_quration_compiles_ftqc_resources_and_preserves_native_owners() -> None:
     assert result.compile_result.get_run_order()
     assert result.compile_info.gate_count > 0
     assert result.circuit.has_mf()
+
+
+@pytest.mark.quration
+def test_quration_compile_resources_forwards_oracle_bindings() -> None:
+    """Quration resource compilation materializes a per-call oracle body."""
+    pytest.importorskip("pyqret")
+    from pyqret.backend import CompileOption, OptLevel, ScLsFixedV0Option
+
+    topology = Path(__file__).parent / "data" / "plane.yaml"
+    option = CompileOption(
+        opt_level=OptLevel.O0,
+        sc_ls_fixed_v0_option=ScLsFixedV0Option(topology=str(topology)),
+    )
+
+    result = QurationTranspiler().compile_resources(
+        _quration_oracle_program,
+        option,
+        oracle_bindings={
+            "quration_bound_oracle": _quration_oracle_implementation,
+        },
+    )
+
+    assert result.compile_info.gate_count > 0

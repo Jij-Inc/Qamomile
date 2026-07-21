@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Protocol
+from collections.abc import Mapping
+from typing import Any, Protocol, TypeAlias
 
 from qamomile.circuit.ir.block import Block
 
@@ -86,3 +87,7 @@ class QKernelLike(Protocol):
             Block: Traced hierarchical body block.
         """
         ...
+
+
+OracleBindingTarget: TypeAlias = Block | QKernelLike
+OracleBindings: TypeAlias = Mapping[str, OracleBindingTarget]

@@ -19,6 +19,10 @@ from qamomile.circuit.transpiler.errors import (
     QamomileCompileError,
 )
 from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
+from qamomile.circuit.transpiler.oracle_bindings import (
+    OracleBindings,
+    _apply_compiler_substitutions,
+)
 from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
@@ -39,7 +43,6 @@ from qamomile.circuit.transpiler.passes.separate import SegmentationPass
 from qamomile.circuit.transpiler.passes.slice_borrow_check import (
     SliceBorrowCheckPass,
 )
-from qamomile.circuit.transpiler.passes.substitution import SubstitutionPass
 from qamomile.circuit.transpiler.passes.symbolic_shape_validation import (
     SymbolicShapeValidationPass,
 )
@@ -159,21 +162,43 @@ class Transpiler(ABC, Generic[T]):
 
     # === Pipeline Passes ===
 
-    def substitute(self, block: Block) -> Block:
+    def substitute(
+        self,
+        block: Block,
+        *,
+        oracle_bindings: OracleBindings | None = None,
+    ) -> Block:
         """Pass 0.5: Apply substitutions (optional).
 
         This pass rewrites inline callable targets and sets strategy names on
         boxed InvokeOperations based on config.
 
         Args:
-            block: Block to transform
+            block (Block): Hierarchical block to transform.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the direct
+                body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
 
         Returns:
-            Block with substitutions applied
+            Block: Block with substitutions applied.
+
+        Raises:
+            TypeError: If an oracle binding key or implementation is invalid.
+            ValueError: If an oracle name is unused or targets an unsupported
+                callable, or oracle implementations form a cycle.
+            ValidationError: If an oracle implementation signature is
+                incompatible.
+            SignatureCompatibilityError: If a configured replacement
+                signature is incompatible.
         """
-        if not self.config.substitutions.rules:
-            return block
-        return SubstitutionPass(self.config.substitutions).run(block)
+        return _apply_compiler_substitutions(
+            block,
+            self.config.substitutions,
+            oracle_bindings,
+        )
 
     def resolve_parameter_shapes(
         self,
@@ -464,6 +489,8 @@ class Transpiler(ABC, Generic[T]):
         kernel: QKernelLike,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
+        *,
+        oracle_bindings: OracleBindings | None = None,
     ) -> PreparedModule:
         """Prepare a qkernel for target-specific planning and lowering.
 
@@ -479,18 +506,35 @@ class Transpiler(ABC, Generic[T]):
                 tracing and resolving parameter shapes. Defaults to ``None``.
             parameters (list[str] | None): Argument names preserved as runtime
                 parameters. Defaults to ``None``.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the direct
+                body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
 
         Returns:
             PreparedModule: Hierarchical entrypoint, reachable callables,
                 call graph, and public ABI.
 
         Raises:
+            TypeError: If an oracle binding key or implementation is invalid.
             ValueError: If a name appears in both ``bindings`` and
-                ``parameters``.
+                ``parameters``, or an oracle name is unused or targets an
+                unsupported callable.
+            ValidationError: If an oracle implementation signature is
+                incompatible.
+            SignatureCompatibilityError: If a configured replacement
+                signature is incompatible.
             EntrypointValidationError: If the top-level kernel uses quantum
                 inputs or outputs.
         """
-        return QamomileCompiler(self.config).prepare(kernel, bindings, parameters)
+        return QamomileCompiler(self.config).prepare(
+            kernel,
+            bindings,
+            parameters,
+            oracle_bindings=oracle_bindings,
+        )
 
     def emit(
         self,
@@ -563,6 +607,8 @@ class Transpiler(ABC, Generic[T]):
         kernel: QKernelLike,
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
+        *,
+        oracle_bindings: OracleBindings | None = None,
     ) -> ExecutableProgram[T]:
         """Full compilation pipeline from a qkernel-like object to executable.
 
@@ -585,6 +631,14 @@ class Transpiler(ABC, Generic[T]):
                 arguments stay out of the slot manifest); its emitted
                 per-key parameters are visible via
                 ``ExecutableProgram.parameter_names``.
+            oracle_bindings (OracleBindings | None): Per-call implementations
+                for opaque oracles. Keys match callable definition names
+                exactly, not display ``custom_name`` values, and are
+                independent of ordinary kernel argument ``bindings``.
+                Each value is the direct body for a resource-only opaque
+                definition. Direct and controlled calls are supported;
+                generated inverse callables are not bound automatically.
+                Defaults to ``None``.
 
         Returns:
             ExecutableProgram[T]: Executable wrapping the backend circuit
@@ -592,18 +646,29 @@ class Transpiler(ABC, Generic[T]):
                 parameters, ready for execution.
 
         Raises:
+            TypeError: If an oracle binding key or implementation is invalid.
             ValueError: If a name appears in both ``bindings`` and
-                ``parameters``. A name being in both is ambiguous (placeholder
-                value vs runtime symbol) and used to silently miscompile
-                control-flow predicates that depended on parameter-array
-                elements; rejecting the overlap up front keeps the contract
-                unambiguous.
+                ``parameters``, or an oracle name is unused or targets an
+                unsupported callable. A name being in both is ambiguous
+                (placeholder value vs runtime symbol) and used to silently
+                miscompile control-flow predicates that depended on
+                parameter-array elements; rejecting the overlap up front keeps
+                the contract unambiguous.
             QamomileCompileError: If compilation fails (validation, dependency errors)
 
         Note:
             ``kernel`` is treated as a top-level executable entrypoint here.
             Entry points must have classical inputs/outputs only. Quantum-I/O
             QKernels remain valid as subroutines and for ``build()``.
+
+        Example:
+            Bind a bodyless oracle by its declared definition name only for
+            this compilation::
+
+                executable = transpiler.transpile(
+                    algorithm,
+                    oracle_bindings={"cost_oracle": cost_oracle_impl},
+                )
 
         Pipeline:
             1. prepare: Trace and validate the entrypoint, apply configured
@@ -624,7 +689,12 @@ class Transpiler(ABC, Generic[T]):
         """
         validate_bindings_parameters_disjoint(bindings, parameters)
 
-        prepared = self.prepare(kernel, bindings, parameters)
+        prepared = self.prepare(
+            kernel,
+            bindings,
+            parameters,
+            oracle_bindings=oracle_bindings,
+        )
         input_types = getattr(kernel, "input_types", {})
         ordinary_bindings = without_static_bindings(input_types, bindings)
         separated = self.plan_circuit(prepared, ordinary_bindings)
@@ -634,6 +704,8 @@ class Transpiler(ABC, Generic[T]):
         self,
         kernel: QKernelLike,
         bindings: dict[str, Any] | None = None,
+        *,
+        oracle_bindings: OracleBindings | None = None,
     ) -> T:
         """Compile and extract just the quantum circuit.
 
@@ -644,9 +716,22 @@ class Transpiler(ABC, Generic[T]):
             kernel (QKernelLike): QKernel or qkernel-like frontend object to
                 compile.
             bindings (dict[str, Any] | None): Parameter values to bind.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the direct
+                body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
 
         Returns:
             T: Backend-specific quantum circuit.
+
+        Raises:
+            TypeError: If an oracle binding key or implementation is invalid.
+            ValueError: If an oracle name is unused or targets an unsupported
+                callable, or oracle implementations form a cycle.
+            QamomileCompileError: If compilation fails or produces no quantum
+                circuit.
 
         Note:
             ``kernel`` is treated as a top-level executable entrypoint and
@@ -659,7 +744,11 @@ class Transpiler(ABC, Generic[T]):
             For programs with multiple quantum segments, use
             compile() and access circuits from ExecutableProgram.
         """
-        executable = self.transpile(kernel, bindings)
+        executable = self.transpile(
+            kernel,
+            bindings,
+            oracle_bindings=oracle_bindings,
+        )
 
         circuit = executable.get_first_circuit()
         if circuit is None:
