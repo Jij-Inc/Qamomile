@@ -9,6 +9,110 @@ from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.stdlib.arithmetic import _modmul_const_body, _phase_shift_if
 
 
+@qmc.struct
+class _ShorWorkspace:
+    """Group the reusable quantum state for iterative phase estimation.
+
+    Args:
+        phase (qmc.Qubit): Recycled phase-estimation qubit.
+        work (qmc.Vector[qmc.Qubit]): Modular value register.
+        accumulator (qmc.Vector[qmc.Qubit]): Multiplication accumulator.
+        lookup (qmc.Vector[qmc.Qubit]): Lookup output register.
+        address (qmc.Vector[qmc.Qubit]): Fixed-window lookup address.
+        carry (qmc.Qubit): First carry-venting workspace qubit.
+        vent (qmc.Qubit): Second carry-venting workspace qubit.
+        overflow (qmc.Qubit): Extended-adder high bit.
+        flag (qmc.Qubit): Modular-reduction flag.
+        domain (qmc.Qubit): Valid-domain flag.
+        enable (qmc.Qubit): Controlled-window conjunction workspace.
+    """
+
+    phase: qmc.Qubit
+    work: qmc.Vector[qmc.Qubit]
+    accumulator: qmc.Vector[qmc.Qubit]
+    lookup: qmc.Vector[qmc.Qubit]
+    address: qmc.Vector[qmc.Qubit]
+    carry: qmc.Qubit
+    vent: qmc.Qubit
+    overflow: qmc.Qubit
+    flag: qmc.Qubit
+    domain: qmc.Qubit
+    enable: qmc.Qubit
+
+    @classmethod
+    def allocate(cls, register_size: int, window_size: int) -> _ShorWorkspace:
+        """Allocate a clean workspace for one factoring kernel.
+
+        Args:
+            register_size (int): Concrete modular-register width.
+            window_size (int): Lookup address width.
+
+        Returns:
+            _ShorWorkspace: Newly allocated frontend handles.
+        """
+        return cls(
+            phase=qmc.qubit("phase"),
+            work=qmc.qubit_array(register_size, name="work"),
+            accumulator=qmc.qubit_array(register_size, name="accumulator"),
+            lookup=qmc.qubit_array(register_size, name="lookup"),
+            address=qmc.qubit_array(window_size, name="address"),
+            carry=qmc.qubit("carry"),
+            vent=qmc.qubit("vent"),
+            overflow=qmc.qubit("overflow"),
+            flag=qmc.qubit("flag"),
+            domain=qmc.qubit("domain"),
+            enable=qmc.qubit("enable"),
+        )
+
+    def apply_modular_multiplication(
+        self,
+        multiplier: int,
+        inverse_multiplier: int,
+        modulus: int,
+        register_size: int,
+        window_size: int,
+    ) -> None:
+        """Apply one controlled modular multiplication in place.
+
+        Args:
+            multiplier (int): Compile-time modular multiplier.
+            inverse_multiplier (int): Multiplicative inverse modulo ``modulus``.
+            modulus (int): Compile-time modular-arithmetic modulus.
+            register_size (int): Concrete modular-register width.
+            window_size (int): Lookup address width.
+        """
+        (
+            self.phase,
+            self.work,
+            self.accumulator,
+            self.lookup,
+            self.address,
+            self.carry,
+            self.vent,
+            self.overflow,
+            self.flag,
+            self.domain,
+            self.enable,
+        ) = _modmul_const_body(
+            self.phase,
+            self.work,
+            self.accumulator,
+            self.lookup,
+            self.address,
+            self.carry,
+            self.vent,
+            self.overflow,
+            self.flag,
+            self.domain,
+            self.enable,
+            qmc.uint(multiplier),
+            qmc.uint(inverse_multiplier),
+            qmc.uint(modulus),
+            register_size,
+            window_size,
+        )
+
+
 def _apply_semiclassical_iqft_feedback(
     phase: qmc.Qubit,
     previous_bits: list[qmc.Bit],
@@ -32,50 +136,17 @@ def _apply_semiclassical_iqft_feedback(
 
 
 def _iterative_modular_phase_bits(
-    phase: qmc.Qubit,
-    work: qmc.Vector[qmc.Qubit],
-    accumulator: qmc.Vector[qmc.Qubit],
-    lookup: qmc.Vector[qmc.Qubit],
-    address: qmc.Vector[qmc.Qubit],
-    carry: qmc.Qubit,
-    vent: qmc.Qubit,
-    overflow: qmc.Qubit,
-    flag: qmc.Qubit,
-    domain: qmc.Qubit,
-    enable: qmc.Qubit,
+    workspace: _ShorWorkspace,
     *,
     multipliers: tuple[int, ...],
     modulus: int,
     register_size: int,
     window_size: int,
-) -> tuple[
-    qmc.Qubit,
-    qmc.Vector[qmc.Qubit],
-    qmc.Vector[qmc.Qubit],
-    qmc.Vector[qmc.Qubit],
-    qmc.Vector[qmc.Qubit],
-    qmc.Qubit,
-    qmc.Qubit,
-    qmc.Qubit,
-    qmc.Qubit,
-    qmc.Qubit,
-    qmc.Qubit,
-    tuple[qmc.Bit, ...],
-]:
+) -> tuple[qmc.Bit, ...]:
     """Measure one iterative modular-eigenphase schedule.
 
     Args:
-        phase (qmc.Qubit): Clean phase qubit reused by every round.
-        work (qmc.Vector[qmc.Qubit]): Modular value register.
-        accumulator (qmc.Vector[qmc.Qubit]): Clean multiplication accumulator.
-        lookup (qmc.Vector[qmc.Qubit]): Clean lookup output register.
-        address (qmc.Vector[qmc.Qubit]): Clean fixed-window lookup address.
-        carry (qmc.Qubit): First clean carry-venting workspace.
-        vent (qmc.Qubit): Second clean carry-venting workspace.
-        overflow (qmc.Qubit): Extended-adder high bit.
-        flag (qmc.Qubit): Modular-reduction flag.
-        domain (qmc.Qubit): Valid-domain flag.
-        enable (qmc.Qubit): Controlled-window conjunction workspace.
+        workspace (_ShorWorkspace): Reusable phase and arithmetic state.
         multipliers (tuple[int, ...]): Controlled modular multipliers ordered
             from the largest binary power to the smallest.
         modulus (int): Modular-arithmetic modulus.
@@ -83,82 +154,34 @@ def _iterative_modular_phase_bits(
         window_size (int): Lookup address width.
 
     Returns:
-        tuple[qmc.Qubit, qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit],
-        qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit], qmc.Qubit, qmc.Qubit,
-        qmc.Qubit, qmc.Qubit, qmc.Qubit, qmc.Qubit, tuple[qmc.Bit, ...]]:
-            Restored phase/workspace handles and little-endian phase bits.
+        tuple[qmc.Bit, ...]: Little-endian phase bits. The workspace is
+            updated in place and remains reusable by the caller.
     """
     measured_bits: list[qmc.Bit] = []
     for round_index, multiplier in enumerate(multipliers):
-        phase = qmc.h(phase)
+        workspace.phase = qmc.h(workspace.phase)
         if multiplier != 1:
             inverse_multiplier = pow(multiplier, -1, modulus)
-            (
-                phase,
-                work,
-                accumulator,
-                lookup,
-                address,
-                carry,
-                vent,
-                overflow,
-                flag,
-                domain,
-                enable,
-            ) = _modmul_const_body(
-                phase,
-                work,
-                accumulator,
-                lookup,
-                address,
-                carry,
-                vent,
-                overflow,
-                flag,
-                domain,
-                enable,
-                qmc.uint(multiplier),
-                qmc.uint(inverse_multiplier),
-                qmc.uint(modulus),
+            workspace.apply_modular_multiplication(
+                multiplier,
+                inverse_multiplier,
+                modulus,
                 register_size,
                 window_size,
             )
-        phase = _apply_semiclassical_iqft_feedback(
-            phase,
+        workspace.phase = _apply_semiclassical_iqft_feedback(
+            workspace.phase,
             measured_bits,
             round_index,
         )
-        phase = qmc.h(phase)
-        phase, measured = qmc.measure_reset(phase)
+        workspace.phase = qmc.h(workspace.phase)
+        workspace.phase, measured = qmc.measure_reset(workspace.phase)
         measured_bits.append(measured)
-    return (
-        phase,
-        work,
-        accumulator,
-        lookup,
-        address,
-        carry,
-        vent,
-        overflow,
-        flag,
-        domain,
-        enable,
-        tuple(measured_bits),
-    )
+    return tuple(measured_bits)
 
 
 def _iterative_order_finding_body(
-    phase: qmc.Qubit,
-    work: qmc.Vector[qmc.Qubit],
-    accumulator: qmc.Vector[qmc.Qubit],
-    lookup: qmc.Vector[qmc.Qubit],
-    address: qmc.Vector[qmc.Qubit],
-    carry: qmc.Qubit,
-    vent: qmc.Qubit,
-    overflow: qmc.Qubit,
-    flag: qmc.Qubit,
-    domain: qmc.Qubit,
-    enable: qmc.Qubit,
+    workspace: _ShorWorkspace,
     *,
     base: int,
     modulus: int,
@@ -173,17 +196,7 @@ def _iterative_order_finding_body(
     Qamomile's usual little-endian measurement order.
 
     Args:
-        phase (qmc.Qubit): Clean phase qubit reused by every round.
-        work (qmc.Vector[qmc.Qubit]): Modular value register.
-        accumulator (qmc.Vector[qmc.Qubit]): Clean multiplication accumulator.
-        lookup (qmc.Vector[qmc.Qubit]): Clean lookup output register.
-        address (qmc.Vector[qmc.Qubit]): Clean fixed-window lookup address.
-        carry (qmc.Qubit): First clean carry-venting workspace.
-        vent (qmc.Qubit): Second clean carry-venting workspace.
-        overflow (qmc.Qubit): Extended-adder high bit.
-        flag (qmc.Qubit): Modular-reduction flag.
-        domain (qmc.Qubit): Valid-domain flag.
-        enable (qmc.Qubit): Controlled-window conjunction workspace.
+        workspace (_ShorWorkspace): Reusable phase and arithmetic state.
         base (int): Modular multiplication base.
         modulus (int): Composite modulus.
         precision (int): Number of phase bits to measure.
@@ -193,22 +206,12 @@ def _iterative_order_finding_body(
     Returns:
         qmc.Vector[qmc.Bit]: Measured phase bits, least significant first.
     """
-    work[0] = qmc.x(work[0])
+    workspace.work[0] = qmc.x(workspace.work[0])
     multipliers = tuple(
         pow(base, 2**exponent, modulus) for exponent in range(precision - 1, -1, -1)
     )
-    *_, measured_bits = _iterative_modular_phase_bits(
-        phase,
-        work,
-        accumulator,
-        lookup,
-        address,
-        carry,
-        vent,
-        overflow,
-        flag,
-        domain,
-        enable,
+    measured_bits = _iterative_modular_phase_bits(
+        workspace,
         multipliers=multipliers,
         modulus=modulus,
         register_size=register_size,
@@ -306,29 +309,8 @@ def shor_order_finding(
         Returns:
             qmc.Vector[qmc.Bit]: Little-endian phase-estimation bits.
         """
-        phase = qmc.qubit("phase")
-        work = qmc.qubit_array(register_size, name="work")
-        accumulator = qmc.qubit_array(register_size, name="accumulator")
-        lookup = qmc.qubit_array(register_size, name="lookup")
-        address = qmc.qubit_array(window_size, name="address")
-        carry = qmc.qubit("carry")
-        vent = qmc.qubit("vent")
-        overflow = qmc.qubit("overflow")
-        flag = qmc.qubit("flag")
-        domain = qmc.qubit("domain")
-        enable = qmc.qubit("enable")
         return _iterative_order_finding_body(
-            phase,
-            work,
-            accumulator,
-            lookup,
-            address,
-            carry,
-            vent,
-            overflow,
-            flag,
-            domain,
-            enable,
+            _ShorWorkspace.allocate(register_size, window_size),
             base=base,
             modulus=modulus,
             precision=precision,
@@ -393,47 +375,14 @@ def ekera_hastad_factoring(
         Returns:
             qmc.Vector[qmc.Bit]: Concatenated long and short phase samples.
         """
-        phase = qmc.qubit("phase")
-        work = qmc.qubit_array(register_size, name="work")
-        accumulator = qmc.qubit_array(register_size, name="accumulator")
-        lookup = qmc.qubit_array(register_size, name="lookup")
-        address = qmc.qubit_array(window_size, name="address")
-        carry = qmc.qubit("carry")
-        vent = qmc.qubit("vent")
-        overflow = qmc.qubit("overflow")
-        flag = qmc.qubit("flag")
-        domain = qmc.qubit("domain")
-        enable = qmc.qubit("enable")
-        work[0] = qmc.x(work[0])
+        workspace = _ShorWorkspace.allocate(register_size, window_size)
+        workspace.work[0] = qmc.x(workspace.work[0])
         long_multipliers = tuple(
             pow(generator, 2**exponent, modulus)
             for exponent in range(long_precision - 1, -1, -1)
         )
-        (
-            phase,
-            work,
-            accumulator,
-            lookup,
-            address,
-            carry,
-            vent,
-            overflow,
-            flag,
-            domain,
-            enable,
-            long_bits,
-        ) = _iterative_modular_phase_bits(
-            phase,
-            work,
-            accumulator,
-            lookup,
-            address,
-            carry,
-            vent,
-            overflow,
-            flag,
-            domain,
-            enable,
+        long_bits = _iterative_modular_phase_bits(
+            workspace,
             multipliers=long_multipliers,
             modulus=modulus,
             register_size=register_size,
@@ -443,31 +392,8 @@ def ekera_hastad_factoring(
             pow(inverse_y, 2**exponent, modulus)
             for exponent in range(short_precision - 1, -1, -1)
         )
-        (
-            _phase,
-            _work,
-            _accumulator,
-            _lookup,
-            _address,
-            _carry,
-            _vent,
-            _overflow,
-            _flag,
-            _domain,
-            _enable,
-            short_bits,
-        ) = _iterative_modular_phase_bits(
-            phase,
-            work,
-            accumulator,
-            lookup,
-            address,
-            carry,
-            vent,
-            overflow,
-            flag,
-            domain,
-            enable,
+        short_bits = _iterative_modular_phase_bits(
+            workspace,
             multipliers=short_multipliers,
             modulus=modulus,
             register_size=register_size,
