@@ -84,6 +84,7 @@ from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.expval import expval
 from .frontend.operation.global_phase import global_phase
 from .frontend.operation.inverse import inverse
+from .frontend.operation.math import ceil, log2
 from .frontend.operation.measurement import (
     measure,
     measure_reset,
@@ -210,6 +211,8 @@ __all__ = [
     "inverse",
     "global_phase",
     "cast",
+    "ceil",
+    "log2",
     "bit",
     "bit_array",
     "float_",
