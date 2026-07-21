@@ -392,6 +392,13 @@ def test_factory_rejects_invalid_terms_and_mixed_system_widths() -> None:
                 qmc.LCUBlockEncodingTerm(2.0, huge),
             )
         )
+    with pytest.raises(ValueError, match="normalization overflowed"):
+        qmc.lcu_block_encoding(
+            (
+                qmc.LCUBlockEncodingTerm(1.0, huge),
+                qmc.LCUBlockEncodingTerm(1.0, huge),
+            )
+        )
 
 
 def test_identity_zero_and_single_term_paths_have_exact_blocks() -> None:

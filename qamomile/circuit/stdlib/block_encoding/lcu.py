@@ -837,7 +837,9 @@ def _lcu_normalization(terms: tuple[_ValidatedTerm, ...]) -> float:
         normalization = math.fsum(contributions)
     except OverflowError as exc:
         raise ValueError("LCU block-encoding normalization overflowed.") from exc
-    if not math.isfinite(normalization) or normalization <= 0.0:
+    if not math.isfinite(normalization):
+        raise ValueError("LCU block-encoding normalization overflowed.")
+    if normalization <= 0.0:
         raise ValueError(
             "LCU block-encoding normalization must be finite and positive."
         )
