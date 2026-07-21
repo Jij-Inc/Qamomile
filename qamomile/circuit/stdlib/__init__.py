@@ -23,9 +23,15 @@ Example:
 """
 
 from .arithmetic import (
+    add_const,
+    controlled_add_const,
     controlled_modular_add,
+    controlled_modular_add_const,
+    controlled_modular_add_const_modulus,
+    lookup_xor,
     modmul_const,
     modular_add,
+    modular_add_const,
     modular_decrement,
     modular_increment,
     ripple_carry_add,
@@ -49,7 +55,6 @@ from .periodic_shift_lcu_block_encoding import (
 )
 from .qft import iqft, qft
 from .qpe import qpe
-from .shor import shor_order_finding
 from .state_preparation import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
@@ -81,12 +86,17 @@ __all__ = [
     "mottonen_amplitude_encoding_from_angles",
     # Arithmetic
     "ripple_carry_add",
+    "add_const",
+    "controlled_add_const",
     "modular_increment",
     "modular_decrement",
     "modular_add",
     "controlled_modular_add",
+    "modular_add_const",
+    "controlled_modular_add_const",
+    "controlled_modular_add_const_modulus",
+    "lookup_xor",
     "modmul_const",
-    "shor_order_finding",
     "grover_search",
     "grover_iteration_count",
 ]

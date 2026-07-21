@@ -125,16 +125,22 @@ def builtin_qpe(n: int, phase: float) -> qmc.Float:
 
 
 @qmc.qkernel
-def _mul_two_mod_three(work: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Apply multiplication by two modulo three using private workspace.
+def _swap_with_private_workspace(
+    work: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply an order-two unitary while restoring private workspace.
 
     Args:
-        work (qmc.Vector[qmc.Qubit]): Two-qubit modular value register.
+        work (qmc.Vector[qmc.Qubit]): Two-qubit value register.
 
     Returns:
-        qmc.Vector[qmc.Qubit]: Updated modular value register.
+        qmc.Vector[qmc.Qubit]: Register with its two basis bits swapped.
     """
-    return qmc.modmul_const(work, multiplier=2, modulus=3)
+    workspace = qmc.qubit("workspace")
+    workspace = qmc.x(workspace)
+    workspace = qmc.x(workspace)
+    work[0], work[1] = qmc.swap(work[0], work[1])
+    return work
 
 
 @qmc.qkernel
@@ -147,7 +153,7 @@ def qpe_with_private_workspace_unitary() -> qmc.Float:
     counting = qmc.qubit_array(2, name="counting")
     work = qmc.qubit_array(2, name="work")
     work[0] = qmc.x(work[0])
-    phase = qmc.qpe(work, counting, _mul_two_mod_three)
+    phase = qmc.qpe(work, counting, _swap_with_private_workspace)
     return qmc.measure(phase)
 
 

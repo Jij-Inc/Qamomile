@@ -5,7 +5,7 @@ import pytest
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.operation import ExpvalOp
-from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.errors import ValidationError
 
 
 class TestExpvalFrontend:
@@ -222,7 +222,10 @@ class TestExpvalTranspiler:
             estimated = qm.qubit("estimated")
             return qm.measure(measured), qm.expval(estimated, observable)
 
-        with pytest.raises(EmitError, match="cannot also contain measurement"):
+        with pytest.raises(
+            ValidationError,
+            match="MEASUREMENT.*sample-only.*cannot also contain qmc.expval",
+        ):
             QiskitTranspiler().transpile(
                 kernel,
                 bindings={"observable": qm_o.Z(0)},
