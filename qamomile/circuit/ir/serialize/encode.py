@@ -1559,6 +1559,8 @@ def _encode_select(op: SelectOperation, ctx: _EncodeContext) -> dict[str, Any]:
     else:
         payload["num_index_qubits"] = op.num_index_qubits
     payload["case_blocks"] = [_encode_block(block, ctx) for block in op.case_blocks]
+    if op.case_callable_attrs:
+        payload["callable_attrs"] = _encode_payload({"cases": op.case_callable_attrs})
     return payload
 
 

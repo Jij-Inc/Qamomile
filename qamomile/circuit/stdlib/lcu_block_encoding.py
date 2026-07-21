@@ -17,6 +17,7 @@ from qamomile.circuit.frontend.operation.inverse import inverse
 from qamomile.circuit.frontend.operation.qubit_gates import x
 from qamomile.circuit.frontend.operation.select import select
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
+from qamomile.circuit.frontend.qkernel_callable import qkernel_callable_attrs
 from qamomile.circuit.frontend.static_binding import (
     StaticBindingFieldSpec,
     StaticBindingMemberSpec,
@@ -144,6 +145,82 @@ class LCUBlockEncoding:
                 "num_system_qubits",
             ),
         )
+        object.__setattr__(
+            self,
+            "unitary",
+            _with_block_encoding_resource_contract(
+                self.unitary,
+                signal_width=self.num_signal_qubits,
+                system_width=self.num_system_qubits,
+            ),
+        )
+
+
+def _with_block_encoding_resource_contract(
+    unitary: _BlockEncodingUnitary,
+    *,
+    signal_width: int,
+    system_width: int,
+) -> _BlockEncodingUnitary:
+    """Return a callable copy carrying exact quantum-operand widths.
+
+    Copying keeps descriptor-local width metadata from mutating a shared
+    user-defined qkernel. Direct, controlled, and inverse operations emitted
+    from the returned callable still preserve the same source-level contract.
+    The metadata is decomposition-independent and serializer-friendly.
+
+    Args:
+        unitary (_BlockEncodingUnitary): Block-encoding callable to annotate.
+        signal_width (int): Required signal-register width.
+        system_width (int): Required system-register width.
+
+    Returns:
+        _BlockEncodingUnitary: Shallow callable copy with descriptor-local
+            resource metadata.
+
+    Raises:
+        ValueError: If the callable already carries incompatible resource
+            metadata or a malformed resource-contract mapping.
+    """
+    attrs = qkernel_callable_attrs(unitary)
+    existing_contract = attrs.get("resource_contract")
+    if existing_contract is None:
+        contract: dict[str, object] = {}
+    elif isinstance(existing_contract, dict):
+        contract = dict(existing_contract)
+    else:
+        raise ValueError("unitary resource_contract must be a mapping.")
+
+    operand_widths = [
+        {"index": 0, "name": "signal", "width": signal_width},
+        {"index": 1, "name": "system", "width": system_width},
+    ]
+    existing_widths = contract.get("quantum_operand_widths")
+    if existing_widths is not None and existing_widths != operand_widths:
+        if isinstance(existing_widths, list):
+            existing_by_name = {
+                entry.get("name"): entry.get("width")
+                for entry in existing_widths
+                if isinstance(entry, dict)
+            }
+            for field_name, register_name, width in (
+                ("num_signal_qubits", "signal", signal_width),
+                ("num_system_qubits", "system", system_width),
+            ):
+                if (
+                    register_name in existing_by_name
+                    and existing_by_name[register_name] != width
+                ):
+                    raise ValueError(
+                        f"{field_name} conflicts with the unitary's existing "
+                        "resource contract."
+                    )
+        raise ValueError(
+            "unitary already carries incompatible block-encoding operand widths."
+        )
+    contract["quantum_operand_widths"] = operand_widths
+    attrs["resource_contract"] = contract
+    return unitary._clone_with_callable_attrs(attrs)
 
 
 def _validate_positive_real(value: object, name: str) -> float:

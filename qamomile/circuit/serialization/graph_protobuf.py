@@ -1282,6 +1282,7 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
             "case_blocks",
             "num_index_qubits_ref",
             "num_index_args",
+            "callable_attrs",
         }
     ),
     pb.GLOBAL_PHASE_OPERATION: frozenset(),

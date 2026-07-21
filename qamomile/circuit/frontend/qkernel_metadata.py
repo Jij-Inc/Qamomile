@@ -86,7 +86,8 @@ def estimate_qkernel_resources(
             ``False``.
         unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
             Defaults to ``None``.
-        basis (Any): Optional ``GateBasis`` override. Defaults to ``None``.
+        basis (Any): Optional ``GateBasis`` override. Defaults to the portable
+            algorithmic fallback basis when ``None``.
         precision (float): Rotation-synthesis precision. Defaults to ``1e-10``.
 
     Returns:
@@ -104,6 +105,6 @@ def estimate_qkernel_resources(
         strategies=strategies,
         trace=trace,
         unknown_policy=unknown_policy or UnknownResourcePolicy.ERROR,
-        basis=basis or GateBasis.LOGICAL,
+        basis=basis or GateBasis.PORTABLE,
         precision=precision,
     )

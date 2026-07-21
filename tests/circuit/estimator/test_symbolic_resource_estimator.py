@@ -90,12 +90,37 @@ def test_pauli_evolve_depth_tracks_gadget_structure() -> None:
     assert estimate.depth.rotation_depth == 2
 
 
+def test_pauli_evolve_parallelizes_basis_changes_within_a_term() -> None:
+    """Pauli evolution schedules same-stage basis changes in parallel."""
+    import qamomile.observable as qm_o
+
+    @qm.qkernel
+    def circuit(hamiltonian: qm.Observable) -> qm.Vector[qm.Qubit]:
+        """Apply one bound three-qubit Pauli evolution."""
+        qubits = qm.qubit_array(3, "qubits")
+        return qm.pauli_evolve(qubits, hamiltonian, qm.float_(0.5))
+
+    estimate = circuit.estimate_resources(
+        inputs={"hamiltonian": qm_o.X(0) * qm_o.X(1) * qm_o.X(2)}
+    )
+
+    assert estimate.gates.total == 11
+    assert estimate.gates.single_qubit == 7
+    assert estimate.gates.two_qubit == 4
+    assert estimate.depth.depth == 7
+    assert estimate.depth.clifford_depth == 6
+    assert estimate.depth.rotation_depth == 1
+
+
 def test_gate_basis_accepts_strings_and_rejects_unknown_values() -> None:
     """The public basis option accepts notebook-friendly strings safely."""
     estimate = _basis_probe.estimate_resources(basis="logical")
     assert estimate.gates.total == 2
 
-    with pytest.raises(ValueError, match="expected one of: logical, clifford_t"):
+    with pytest.raises(
+        ValueError,
+        match="expected one of: portable, logical, clifford_t",
+    ):
         _basis_probe.estimate_resources(basis="surface_code")
 
 
@@ -129,8 +154,8 @@ def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None
     assert estimate.qubits == 5
 
 
-def test_clifford_t_basis_rejects_missing_controlled_gate_lowering() -> None:
-    """Unsupported controlled gates fail instead of reporting logical counts."""
+def test_clifford_t_basis_bounds_generic_controlled_gate_lowering() -> None:
+    """A controlled fixed gate uses the generic Euler upper-bound fallback."""
 
     @qm.composite_gate
     def hadamard(target: qm.Qubit) -> qm.Qubit:
@@ -145,12 +170,15 @@ def test_clifford_t_basis_rejects_missing_controlled_gate_lowering() -> None:
         controlled_hadamard = qm.control(hadamard)
         return controlled_hadamard(control, target)
 
-    with pytest.raises(ValueError, match="controlled gate 'h'"):
-        circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+
+    assert estimate.gates.total > 1
+    assert estimate.gates.t > 0
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
 
 
-def test_clifford_t_basis_rejects_controlled_rotation_lowering() -> None:
-    """Controlled rotations fail when no decomposition contract is defined."""
+def test_clifford_t_basis_bounds_controlled_rotation_lowering() -> None:
+    """A controlled rotation is synthesized through a two-CNOT fallback."""
 
     @qm.composite_gate
     def rotate(target: qm.Qubit, theta: qm.Float) -> qm.Qubit:
@@ -165,8 +193,11 @@ def test_clifford_t_basis_rejects_controlled_rotation_lowering() -> None:
         controlled_rotate = qm.control(rotate)
         return controlled_rotate(control, target, theta)
 
-    with pytest.raises(ValueError, match="controlled gate 'ry'"):
-        circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+
+    assert estimate.gates.two_qubit == 2
+    assert estimate.gates.t > 0
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
 
 
 @qm.qkernel
@@ -204,6 +235,324 @@ def test_width_reuses_affinely_released_qubits() -> None:
 
     assert estimate.width.allocated_qubits == 2
     assert estimate.qubits == 1
+    assert estimate.circuit_qubits == 2
+
+
+def test_loop_body_release_precedes_nested_and_later_allocations() -> None:
+    """A nonempty loop can release a capture before reusing its capacity."""
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Measure one capture before loop-local and later allocations."""
+        target = qm.qubit("target")
+        for _index in qm.range(1):
+            qm.measure(target)
+            qm.qubit("fresh")
+        return qm.qubit("later")
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.width.allocated_qubits == 3
+    assert estimate.width.peak_qubits == 1
+    assert estimate.width.circuit_qubits == 3
+
+
+def test_invoke_fresh_outputs_extend_caller_liveness() -> None:
+    """Fresh outputs from nested qkernels remain live in the caller."""
+
+    @qm.qkernel
+    def allocate() -> qm.Qubit:
+        """Return one newly allocated qubit."""
+        return qm.qubit("fresh")
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Keep fresh results from two distinct call sites live together."""
+        left = allocate()
+        right = allocate()
+        return left, right
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.width.allocated_qubits == 2
+    assert estimate.width.peak_qubits == 2
+    assert estimate.width.circuit_qubits == 2
+
+
+def test_invoke_fresh_array_elements_retain_their_combined_width() -> None:
+    """Separate returned elements keep their shared fresh array live."""
+
+    @qm.qkernel
+    def allocate_pair() -> tuple[qm.Qubit, qm.Qubit]:
+        """Return both elements of one fresh two-qubit array."""
+        pair = qm.qubit_array(2, "pair")
+        return pair[0], pair[1]
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Keep a returned pair live while allocating one more qubit."""
+        left, right = allocate_pair()
+        extra = qm.qubit("extra")
+        return left, right, extra
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.width.allocated_qubits == 3
+    assert estimate.width.peak_qubits == 3
+    assert estimate.width.circuit_qubits == 3
+
+
+def test_invoke_replacement_output_releases_consumed_input() -> None:
+    """A nested qkernel can replace a consumed input without inflating peak."""
+
+    @qm.qkernel
+    def replace(target: qm.Qubit) -> qm.Qubit:
+        """Measure the input before returning one new qubit."""
+        qm.measure(target)
+        return qm.qubit("fresh")
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Replace one caller allocation through a nested invocation."""
+        initial = qm.qubit("initial")
+        return replace(initial)
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.width.allocated_qubits == 2
+    assert estimate.width.peak_qubits == 1
+    assert estimate.width.circuit_qubits == 2
+
+
+def test_invoke_partial_array_replacement_keeps_sibling_live() -> None:
+    """Consuming one array element does not release its live sibling."""
+
+    @qm.qkernel
+    def replace(target: qm.Qubit) -> qm.Qubit:
+        """Measure one input element and return a fresh scalar."""
+        qm.measure(target)
+        return qm.qubit("fresh")
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Keep a sibling and replacement live with a later allocation."""
+        pair = qm.qubit_array(2, "pair")
+        sibling = pair[1]
+        fresh = replace(pair[0])
+        extra = qm.qubit("extra")
+        return sibling, fresh, extra
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.width.allocated_qubits == 4
+    assert estimate.width.peak_qubits == 3
+    assert estimate.width.circuit_qubits == 4
+
+
+def test_runtime_branches_union_static_allocations_but_reuse_peak() -> None:
+    """Runtime branch-local results reserve sites without overlapping live."""
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Choose one fresh result after measuring the branch predicate."""
+        predicate = qm.measure(qm.qubit("predicate"))
+        if predicate:
+            result = qm.qubit("true_result")
+        else:
+            result = qm.qubit("false_result")
+        return result
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.width.allocated_qubits == 3
+    assert estimate.width.peak_qubits == 1
+    assert estimate.width.circuit_qubits == 3
+
+
+def test_compile_time_branch_substitution_prunes_dead_allocations() -> None:
+    """Post-hoc UInt substitution matches direct branch specialization."""
+
+    @qm.qkernel
+    def circuit(flag: qm.UInt) -> qm.Qubit:
+        """Allocate differently sized results in two compile-time branches."""
+        if flag:
+            result = qm.qubit("true_result")
+        else:
+            result = qm.qubit_array(2, "false_result")[0]
+        return result
+
+    symbolic = circuit.estimate_resources()
+    for flag in (0, 1):
+        substituted = symbolic.substitute(flag=flag)
+        direct = circuit.estimate_resources(inputs={"flag": flag})
+        assert substituted.width == direct.width
+
+
+def test_branch_merge_retains_the_selected_quantum_array_width() -> None:
+    """Merged arrays use the selected branch width in outer liveness."""
+
+    @qm.qkernel
+    def circuit(flag: qm.UInt) -> qm.Bit:
+        """Allocate, merge, and consume differently sized branch arrays."""
+        result = qm.qubit("result")
+        if flag:
+            work = qm.qubit_array(10, "large")
+        else:
+            work = qm.qubit_array(2, "small")
+        qm.measure(work)
+        return qm.measure(result)
+
+    symbolic = circuit.estimate_resources()
+    expected_widths = {0: 3, 1: 11}
+    for flag, width in expected_widths.items():
+        substituted = symbolic.substitute(flag=flag)
+        direct = circuit.estimate_resources(inputs={"flag": flag})
+        assert substituted.width == direct.width
+        assert direct.width.allocated_qubits == width
+        assert direct.width.peak_qubits == width
+        assert direct.width.circuit_qubits == width
+
+
+def test_invoke_retains_branch_merged_quantum_array_width() -> None:
+    """A body-backed call publishes its selected merged result width."""
+
+    @qm.qkernel
+    def allocate(flag: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Return a differently sized array from each symbolic branch."""
+        if flag:
+            result = qm.qubit_array(10, "large")
+        else:
+            result = qm.qubit_array(2, "small")
+        return result
+
+    @qm.qkernel
+    def circuit(flag: qm.UInt) -> qm.Bit:
+        """Consume the returned array while one independent qubit stays live."""
+        result = qm.qubit("result")
+        work = allocate(flag)
+        qm.measure(work)
+        return qm.measure(result)
+
+    symbolic = circuit.estimate_resources()
+    for flag, width in {0: 3, 1: 11}.items():
+        substituted = symbolic.substitute(flag=flag)
+        direct = circuit.estimate_resources(inputs={"flag": flag})
+        assert substituted.width == direct.width
+        assert direct.width.allocated_qubits == width
+        assert direct.width.peak_qubits == width
+        assert direct.width.circuit_qubits == width
+
+
+def test_if_without_quantum_outputs_releases_captured_inputs() -> None:
+    """An empty branch output summary still releases consumed outer wires."""
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Consume a captured wire in either branch before later allocation."""
+        target = qm.qubit("target")
+        predicate = qm.measure(qm.qubit("predicate"))
+        if predicate:
+            qm.measure(target)
+            qm.measure(qm.qubit("true_fresh"))
+        else:
+            qm.measure(target)
+            qm.measure(qm.qubit("false_fresh"))
+        return qm.qubit("later")
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.width.allocated_qubits == 5
+    assert estimate.width.peak_qubits == 2
+
+
+def test_symbolic_loop_maximizes_control_ancillas_without_leaking_index() -> None:
+    """Loop-dependent control width stays reusable and externally symbolic."""
+
+    @qm.qkernel
+    def controlled_leaf(target: qm.Qubit) -> qm.Qubit:
+        """Apply one X gate to the controlled target."""
+        return qm.x(target)
+
+    @qm.qkernel
+    def circuit(n: qm.UInt) -> qm.Vector[qm.Bit]:
+        """Increase control arity across a symbolic range."""
+        qubits = qm.qubit_array(n, "qubits")
+        for target_index in qm.range(1, n):
+            controls, target = qm.control(
+                controlled_leaf,
+                num_controls=target_index,
+            )(
+                qubits[0:target_index],
+                qubits[target_index],
+            )
+            qubits[0:target_index] = controls
+            qubits[target_index] = target
+        return qm.measure(qubits)
+
+    symbolic = circuit.estimate_resources()
+    metric_expressions = [
+        value
+        for resources in (symbolic.width, symbolic.gates, symbolic.depth)
+        for value in vars(resources).values()
+    ]
+    metric_expressions.extend(symbolic.calls.calls_by_name.values())
+    metric_expressions.extend(symbolic.calls.queries_by_name.values())
+
+    assert set(symbolic.parameters) == {"n"}
+    assert all(
+        symbol.name == "n"
+        for expression in metric_expressions
+        for symbol in expression.free_symbols
+    )
+    for requirement in symbolic.to_dict()["requirements"]:
+        if "target_index" in requirement["expression"]:
+            assert any(
+                loop_range["symbol"] == "target_index"
+                for loop_range in requirement["ranges"]
+            )
+
+    expected = {
+        0: (0, 0),
+        1: (0, 1),
+        2: (0, 2),
+        3: (0, 3),
+        4: (2, 6),
+        5: (3, 8),
+    }
+    for n, (clean_ancillas, peak_qubits) in expected.items():
+        concrete = symbolic.substitute(n=n)
+        assert concrete.width.clean_ancilla_qubits == clean_ancillas
+        assert concrete.width.peak_qubits == peak_qubits
+        assert all(
+            not expression.free_symbols
+            for resources in (concrete.width, concrete.gates, concrete.depth)
+            for expression in vars(resources).values()
+        )
+    assert symbolic.substitute(n=4).depth.depth == 8
+
+
+def test_symbolic_loop_width_finds_piecewise_condition_boundaries() -> None:
+    """A downward Piecewise jump is maximized at its reachable boundary."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    per_iteration = sp.Piecewise(
+        (index + 10, index < 3),
+        (index, True),
+    )
+    body = qm.ResourceEstimate(
+        width=qm.WidthResources(
+            clean_ancilla_qubits=per_iteration,
+            peak_qubits=per_iteration,
+        )
+    )
+
+    symbolic = body.sum_over(index, sp.Integer(0), iterations)
+    concrete = symbolic.substitute(iterations=5)
+
+    assert index not in symbolic.width.peak_qubits.free_symbols
+    assert concrete.width.clean_ancilla_qubits == 12
+    assert concrete.width.peak_qubits == 12
+    assert concrete.quality is qm.EstimateQuality.EXACT
 
 
 def test_trace_is_opt_in_and_honors_the_flag() -> None:
@@ -239,6 +588,47 @@ def test_composite_resources_follow_the_executable_body() -> None:
 
     estimate = qm.ResourceEstimator().estimate(circuit)
     assert estimate.gates.total == 2
+
+
+def test_independent_body_backed_calls_share_a_depth_layer() -> None:
+    """Known unitary qkernel calls schedule by their caller wire footprint."""
+
+    @qm.qkernel
+    def leaf(target: qm.Qubit) -> qm.Qubit:
+        """Apply one Hadamard gate."""
+        return qm.h(target)
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Invoke the same body on two independent qubits."""
+        left = leaf(qm.qubit("left"))
+        right = leaf(qm.qubit("right"))
+        return left, right
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 2
+    assert estimate.depth.depth == 1
+    assert estimate.depth.clifford_depth == 1
+
+
+def test_zero_depth_body_call_does_not_serialize_independent_gates() -> None:
+    """An identity call on one wire does not delay work on another wire."""
+
+    @qm.qkernel
+    def identity(target: qm.Qubit) -> qm.Qubit:
+        """Return a target unchanged."""
+        return target
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Place an identity call between independent Hadamard gates."""
+        left = qm.h(qm.qubit("left"))
+        left = identity(left)
+        right = qm.h(qm.qubit("right"))
+        return left, right
+
+    assert circuit.estimate_resources().depth.depth == 1
 
 
 def test_opaque_fixed_cost_counts_calls_and_gates() -> None:
@@ -652,6 +1042,30 @@ def test_for_items_uses_concrete_entries_and_rejects_symbolic_dependency() -> No
         circuit.estimate_resources()
 
 
+def test_for_items_rejects_item_dependent_structural_constraints() -> None:
+    """An unbound item key cannot leak through an array-index requirement."""
+
+    @qm.qkernel
+    def circuit(
+        data: qm.Dict[qm.UInt, qm.Float],
+    ) -> qm.Vector[qm.Qubit]:
+        """Use each dictionary key as a quantum-register index."""
+        register = qm.qubit_array(2, "register")
+        for index, _value in qm.items(data):
+            register[index] = qm.h(register[index])
+        return register
+
+    with pytest.raises(NotImplementedError, match="current item key or value"):
+        circuit.estimate_resources()
+
+    concrete = circuit.estimate_resources(inputs={"data": {0: 0.1, 1: 0.2}})
+    assert concrete.gates.total == 2
+    assert concrete.parameters == {}
+
+    with pytest.raises(ValueError, match="upper bound"):
+        circuit.estimate_resources(inputs={"data": {2: 0.1}})
+
+
 def test_for_items_default_entries_are_evaluated_exactly() -> None:
     """A concrete dictionary default does not leak cardinality or item symbols."""
 
@@ -795,6 +1209,52 @@ def test_while_trip_count_is_nonnegative_and_zero_disables_width() -> None:
     assert zero.qubits == 1
 
 
+def test_independent_while_loops_expose_distinct_trip_counts() -> None:
+    """Each while call site can be specialized without changing another loop."""
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply one- and two-gate bodies in independent measured loops."""
+        first = qm.qubit("first")
+        first_bit = qm.measure(qm.qubit("first_trigger"))
+        while first_bit:
+            first = qm.h(first)
+            first_bit = qm.measure(qm.qubit("first_next"))
+
+        second = qm.qubit("second")
+        second_bit = qm.measure(qm.qubit("second_trigger"))
+        while second_bit:
+            second = qm.x(second)
+            second = qm.z(second)
+            second_bit = qm.measure(qm.qubit("second_next"))
+        return first, second
+
+    estimate = circuit.estimate_resources()
+
+    assert set(estimate.parameters) == {"|while|", "|while[2]|"}
+    specialized = estimate.substitute(**{"|while|": 3, "|while[2]|": 4})
+    assert specialized.gates.total == 11
+
+
+def test_positive_symbolic_while_releases_consumed_capture() -> None:
+    """Substitution updates peak liveness when a loop consumes an outer qubit."""
+
+    @qm.qkernel
+    def circuit() -> qm.Vector[qm.Qubit]:
+        """Measure one captured qubit before allocating later workspace."""
+        retained = qm.qubit("retained")
+        trigger = qm.measure(qm.qubit("trigger"))
+        while trigger:
+            qm.measure(retained)
+            trigger = qm.measure(qm.qubit("next"))
+        return qm.qubit_array(3, "later")
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.substitute(**{"|while|": 0}).width.peak_qubits == 4
+    assert estimate.substitute(**{"|while|": 1}).width.peak_qubits == 3
+
+
 def test_while_classical_recurrence_fails_closed() -> None:
     """A carried classical while value is not modeled from one traced body."""
 
@@ -831,6 +1291,15 @@ def test_resource_substitute_matches_symbols_by_printed_name() -> None:
 
     assert concrete.qubits == 4
     assert concrete.gates.total == 2
+
+
+def test_resource_substitute_rejects_unknown_parameter_names() -> None:
+    """A typo cannot silently leave a symbolic estimate unchanged."""
+    n = sp.Symbol("n", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=n))
+
+    with pytest.raises(ValueError, match="Unknown resource parameter 'nn'"):
+        estimate.substitute(nn=3)
 
 
 def test_input_vector_shape_symbol_is_nonnegative() -> None:
@@ -928,8 +1397,8 @@ def test_controlled_composite_body_counts_own_control() -> None:
     assert ctrl.gates.two_qubit == 1
 
 
-def test_controlled_three_qubit_primitive_is_not_implicitly_toffoli() -> None:
-    """Three-qubit arity alone cannot classify a controlled gate as Toffoli."""
+def test_controlled_swap_uses_portable_fredkin_decomposition() -> None:
+    """A controlled SWAP expands to two CNOTs and one Toffoli."""
 
     @qm.composite_gate(name="one_swap")
     def one_swap(
@@ -949,9 +1418,10 @@ def test_controlled_three_qubit_primitive_is_not_implicitly_toffoli() -> None:
 
     estimate = circuit.estimate_resources()
 
-    assert estimate.gates.total == 1
+    assert estimate.gates.total == 3
+    assert estimate.gates.two_qubit == 2
     assert estimate.gates.multi_qubit == 1
-    assert estimate.gates.toffoli == 0
+    assert estimate.gates.toffoli == 1
 
 
 def test_for_items_width_reuses_wires_across_entries() -> None:
@@ -1248,8 +1718,8 @@ def test_allocation_site_identity_is_internal_to_resource_estimates() -> None:
     assert "_allocation_sites" not in left.to_dict()
 
 
-def test_unknown_branch_allocations_keep_conditional_width_semantics() -> None:
-    """Unknown branch sites remain anonymous and substitute exactly."""
+def test_branch_allocations_specialize_or_union_by_condition_kind() -> None:
+    """Compile-time sites specialize while runtime choices reserve both."""
     flag = sp.Symbol("flag", integer=True, nonnegative=True)
     left = qm.ResourceEstimate(
         width=qm.WidthResources(allocated_qubits=1, peak_qubits=1),
@@ -1263,11 +1733,56 @@ def test_unknown_branch_allocations_keep_conditional_width_semantics() -> None:
     conditional = left.conditional(right, sp.Eq(flag, 1))
     choice = left.choice(right)
 
-    assert conditional._allocation_sites == {}
+    assert set(conditional._allocation_sites) == {"left", "right"}
     assert conditional.substitute(flag=1).width.allocated_qubits == 1
     assert conditional.substitute(flag=0).width.allocated_qubits == 2
-    assert choice._allocation_sites == {}
-    assert choice.width.allocated_qubits == 2
+    assert conditional.substitute(flag=1).width.peak_qubits == 1
+    assert conditional.substitute(flag=0).width.peak_qubits == 2
+    assert choice._allocation_sites == {"left": 1, "right": 2}
+    assert choice.width.allocated_qubits == 3
+    assert choice.width.peak_qubits == 2
+
+
+def test_constant_conditional_ignores_unreachable_provenance() -> None:
+    """A decided condition never merges the unreachable branch metadata."""
+    portable = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1),
+        basis=qm.GateBasis.PORTABLE,
+    )
+    clifford_t = qm.ResourceEstimate(
+        gates=qm.GateResources(total=100),
+        assumptions=(qm.ResourceAssumption("unreachable"),),
+        quality=qm.EstimateQuality.MODELED,
+        basis=qm.GateBasis.CLIFFORD_T,
+        precision=1e-3,
+    )
+
+    assert portable.conditional(clifford_t, sp.true) is portable
+    assert portable.conditional(clifford_t, sp.false) is clifford_t
+
+
+def test_quantum_block_input_width_requires_an_integer() -> None:
+    """Public Block estimates retain formal quantum-array shape domains."""
+    from qamomile.circuit.ir.block import Block
+    from qamomile.circuit.ir.types import QubitType, UIntType
+    from qamomile.circuit.ir.value import ArrayValue, Value
+
+    dimension = Value(type=UIntType(), name="n")
+    register = ArrayValue(type=QubitType(), name="register", shape=(dimension,))
+    block = Block(
+        name="input_only",
+        label_args=["register"],
+        input_values=[register],
+        output_values=[register],
+        output_names=["register"],
+        operations=[],
+    )
+
+    symbolic = qm.estimate_resources(block)
+    with pytest.raises(ValueError, match="non-integer value"):
+        symbolic.substitute(n=1.5)
+    with pytest.raises(ValueError, match="non-integer value"):
+        qm.estimate_resources(block, inputs={"n": 1.5})
 
 
 def test_zero_trip_repeat_disables_internal_allocation_sites() -> None:

@@ -88,7 +88,7 @@ def test_modmul_const_non_cyclic_estimates_its_executable_body() -> None:
 
 
 def test_modmul_const_body_growth_is_quadratic_at_fixed_window() -> None:
-    """Specialized body estimates follow quadratic modular-multiply growth."""
+    """Portable estimates retain body width and add fallback clean ancillas."""
     cases = [(2, 2, 3), (3, 2, 5), (4, 2, 15)]
     normalized = []
     for width, multiplier, modulus in cases:
@@ -105,7 +105,13 @@ def test_modmul_const_body_growth_is_quadratic_at_fixed_window() -> None:
             )
 
         estimate = mul.estimate_resources()
-        assert estimate.qubits == 3 * width + 2 + 7
+        allocated = 3 * width + 2 + 7
+        assert estimate.basis is qmc.GateBasis.PORTABLE
+        assert estimate.width.allocated_qubits == allocated
+        assert estimate.width.clean_ancilla_qubits == 2
+        assert estimate.width.peak_qubits == allocated + 2
+        assert estimate.width.circuit_qubits == allocated + 2
+        assert estimate.qubits == allocated + 2
         normalized.append(float(estimate.gates.total) / (width**2))
 
     assert max(normalized) / min(normalized) < 1.5
@@ -229,8 +235,11 @@ def test_modmul_const_control_is_derived_from_the_controlled_body() -> None:
     plain = uncontrolled.estimate_resources()
     ctrl = controlled.estimate_resources()
 
-    assert plain.assumptions == ()
-    assert ctrl.assumptions == ()
+    assert plain.assumptions == ctrl.assumptions
+    assert plain.assumptions
+    assert plain.quality is qmc.EstimateQuality.UPPER_BOUND
+    assert ctrl.quality is qmc.EstimateQuality.UPPER_BOUND
+    assert all("depth" in assumption.message for assumption in plain.assumptions)
     assert plain.gates.two_qubit > 0
     assert ctrl.gates.multi_qubit > 0
 

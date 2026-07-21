@@ -345,6 +345,19 @@ def allocate_controlled_workspaces(
     """
     for op in operations:
         if isinstance(op, ControlledUOperation) and op.block is not None:
+            try:
+                power = resolve_power(emit_pass, op, bindings)
+            except EmitError:
+                # A loop-local power can remain unresolved until the controlled
+                # walker replays that iteration. Preserve the existing static
+                # reservation in that case; the emit path will validate it with
+                # the complete iteration bindings.
+                power = None
+            if power == 0:
+                # A zero-powered call is the identity. Its body never executes,
+                # so neither direct nor recursively nested private workspaces
+                # belong in the parent circuit.
+                continue
             block = _prepare_nested_block_for_emit(op.block, bindings)
             local_bindings = emit_pass._resolver.bind_block_params(
                 block,

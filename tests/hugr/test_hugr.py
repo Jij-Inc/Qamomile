@@ -274,6 +274,25 @@ def _hugr_dynamic_power_control_call_global_phase(
 
 
 @qmc.qkernel
+def _hugr_zero_power_control_value(
+    power: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Apply a zero-activated controlled phase at a symbolic power."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(
+        _hugr_identity,
+        control_value=0,
+    )(
+        control,
+        target,
+        power=power,
+        global_phase=0.5,
+    )
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
 def _hugr_inverse_global_phase(theta: qmc.Float) -> qmc.Bit:
     """Invert a reusable helper containing global phase."""
     qubit = qmc.qubit("qubit")
@@ -2276,7 +2295,7 @@ def test_hugr_rejects_runtime_controlled_power_explicitly() -> None:
     """A dynamic body power never degrades to one silent application."""
     with pytest.raises(
         EmitError,
-        match="compile-time positive integer",
+        match="compile-time nonnegative integer",
     ) as error:
         HugrTranspiler().to_hugr(
             _hugr_dynamic_power_control_call_global_phase,
@@ -2284,6 +2303,21 @@ def test_hugr_rejects_runtime_controlled_power_explicitly() -> None:
         )
 
     assert error.value.operation == "ControlledUOperation"
+
+
+@pytest.mark.hugr
+def test_hugr_zero_power_skips_body_and_control_value_brackets() -> None:
+    """A bound zero power emits neither its body nor zero-control brackets."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_zero_power_control_value,
+        bindings={"power": 0},
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert "tket.quantum.X" not in names
+    assert "tket.global_phase.global_phase" not in names
 
 
 @pytest.mark.hugr

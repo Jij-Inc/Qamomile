@@ -3738,12 +3738,12 @@ class AnalyzePass(Pass[Block, Block]):
 
         ``power`` lives outside ``op.operands``, so the generic
         dependency validation does not cover it.  This method rejects
-        statically-decidable invalid concrete values (``<= 0``,
+        statically-decidable invalid concrete values (negative integers,
         ``bool``, non-integer) while allowing unresolved symbolic
         ``Value`` instances that will be resolved at emit time.
 
         Args:
-            operations: The affine operation list to validate.
+            operations (list[Operation]): The affine operation list to validate.
 
         Raises:
             ValidationError: If a concrete ``power`` value is invalid.
@@ -3751,13 +3751,23 @@ class AnalyzePass(Pass[Block, Block]):
         from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
         def _validate_concrete_power(value: object, op: ControlledUOperation) -> None:
+            """Validate one statically resolved controlled-call power.
+
+            Args:
+                value (object): Resolved power candidate.
+                op (ControlledUOperation): Operation owning the candidate.
+
+            Raises:
+                ValidationError: If the candidate is not a nonnegative integer.
+            """
             if isinstance(value, bool):
                 raise ValidationError(
-                    f"ControlledU power must be a positive integer, got bool ({value})."
+                    f"ControlledU power must be a nonnegative integer, "
+                    f"got bool ({value})."
                 )
             if not isinstance(value, (int, float)):
                 raise ValidationError(
-                    f"ControlledU power must be a positive integer, "
+                    f"ControlledU power must be a nonnegative integer, "
                     f"got {type(value).__name__}."
                 )
             if isinstance(value, float) and value != int(value):
@@ -3766,13 +3776,23 @@ class AnalyzePass(Pass[Block, Block]):
                     f"got non-integer float {value}."
                 )
             int_val = int(value)
-            if int_val <= 0:
+            if int_val < 0:
                 raise ValidationError(
-                    f"ControlledU power must be strictly positive, got {int_val}."
+                    f"ControlledU power must be nonnegative, got {int_val}."
                 )
 
         class ControlledUValidator(ControlFlowVisitor):
+            """Validate controlled-call powers across nested operation lists."""
+
             def visit_operation(self, op: Operation) -> None:
+                """Validate a controlled operation when its power is concrete.
+
+                Args:
+                    op (Operation): Operation currently visited.
+
+                Raises:
+                    ValidationError: If a controlled-call power is invalid.
+                """
                 if not isinstance(op, ControlledUOperation):
                     return
                 power = op.power

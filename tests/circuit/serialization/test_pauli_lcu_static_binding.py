@@ -1541,7 +1541,7 @@ def test_build_rejects_mutated_replacement_member_abi() -> None:
         _encoding(1j * I2 + 0.5 * X),
         unitary=replacement,
     )
-    replacement.input_types = {
+    encoding.unitary.input_types = {
         "signal": qmc.Vector[qmc.Qubit],
         "system": qmc.Qubit,
     }

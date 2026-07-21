@@ -38,6 +38,7 @@ from qamomile.circuit.frontend.static_binding import (
     validate_static_binding_argument,
 )
 from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir._resource_contract import quantum_operand_widths
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.effect import require_unitary_effects
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
@@ -273,6 +274,30 @@ def _static_quantum_width(value: ValueBase) -> int | None:
             width *= int(const)
         return width
     return 1
+
+
+def _complete_resource_contract_widths(
+    attrs: dict[str, Any],
+    *,
+    operand_count: int,
+    source: str,
+) -> tuple[int, ...] | None:
+    """Return exact widths when a contract covers every quantum operand.
+
+    Args:
+        attrs (dict[str, Any]): Source callable attrs.
+        operand_count (int): Number of source-callable quantum operands.
+        source (str): Callable name used in malformed-contract diagnostics.
+
+    Returns:
+        tuple[int, ...] | None: Widths in quantum-operand order, or ``None``
+            when the callable has no complete exact-width contract.
+    """
+    entries = quantum_operand_widths(attrs, source=source)
+    by_index = {entry.index: entry.width for entry in entries}
+    if set(by_index) != set(range(operand_count)):
+        return None
+    return tuple(by_index[index] for index in range(operand_count))
 
 
 def _inverse_invoke_target_width(
@@ -1545,6 +1570,7 @@ class _BlockInverter:
             results=new_results,
             num_index_qubits=mapped_width,
             case_blocks=inverse_blocks,
+            case_callable_attrs=[dict(attrs) for attrs in op.case_callable_attrs],
             num_index_args=op.num_index_args,
         )
         self._update_quantum_value_map(
@@ -2311,11 +2337,20 @@ class InverseGate:
             input_value.logical_id == output.logical_id
             for input_value, output in zip(quantum_inputs, quantum_outputs)
         )
-        return preserves_output_order and all(
+        quantum_bindings = [binding for binding in bindings if binding.is_quantum]
+        has_static_widths = all(
             _static_quantum_width(binding.active_handle.value) is not None
-            for binding in bindings
-            if binding.is_quantum
+            for binding in quantum_bindings
         )
+        has_contract_widths = (
+            _complete_resource_contract_widths(
+                self._callable_attrs(),
+                operand_count=len(quantum_bindings),
+                source=self._qkernel.name,
+            )
+            is not None
+        )
+        return preserves_output_order and (has_static_widths or has_contract_widths)
 
     def _build_atomic_inverse(
         self,
@@ -2359,11 +2394,21 @@ class InverseGate:
         # `InverseBlockOperation` stores the scalar backend width separately
         # from operand/results lists: a Vector[Qubit] contributes many scalar
         # qubits here but remains a single operand/result value.
-        target_width = sum(
-            width
-            for value in quantum_values
-            if (width := _static_quantum_width(value)) is not None
-        )
+        static_widths = [_static_quantum_width(value) for value in quantum_values]
+        if all(width is not None for width in static_widths):
+            target_width = sum(cast(int, width) for width in static_widths)
+        else:
+            contract_widths = _complete_resource_contract_widths(
+                self._callable_attrs(),
+                operand_count=len(quantum_values),
+                source=self._qkernel.name,
+            )
+            if contract_widths is None:
+                raise RuntimeError(
+                    "atomic inverse requires static target widths or a complete "
+                    "quantum-operand resource contract."
+                )
+            target_width = sum(contract_widths)
         parameter_values = [
             binding.active_handle.value
             for binding in bindings

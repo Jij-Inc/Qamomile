@@ -1953,11 +1953,20 @@ def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
     raw_case_blocks = d.get("case_blocks")
     if not isinstance(raw_case_blocks, list):
         raise ValueError("SelectOperation.case_blocks must be a list.")
+    encoded_case_attrs = _decode_callable_attrs(d.get("callable_attrs"))
+    raw_case_attrs = encoded_case_attrs.get("cases", [])
+    if not isinstance(raw_case_attrs, list) or not all(
+        isinstance(attrs, dict) for attrs in raw_case_attrs
+    ):
+        raise ValueError(
+            "SelectOperation callable_attrs.cases must be a list of mappings."
+        )
     return SelectOperation(
         operands=operands,
         results=results,
         num_index_qubits=cast("int | Value", num_index_qubits),
         case_blocks=[_decode_block(block, ctx) for block in raw_case_blocks],
+        case_callable_attrs=[dict(attrs) for attrs in raw_case_attrs],
         num_index_args=cast(int, num_index_args),
     )
 
@@ -2067,7 +2076,7 @@ def _decode_callable_attrs(d: Any) -> dict[str, Any]:
     if attrs is None:
         return {}
     if not isinstance(attrs, dict):
-        raise ValueError("ControlledU callable_attrs must decode to a dict")
+        raise ValueError("callable_attrs must decode to a dict")
     return attrs
 
 

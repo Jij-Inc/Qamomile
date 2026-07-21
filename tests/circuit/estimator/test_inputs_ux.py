@@ -99,6 +99,27 @@ def test_branch_specialized_on_concrete_flag() -> None:
     assert false_est.gates.total == 2  # qmc.h + qmc.z
 
 
+def test_typed_branch_inputs_retain_uint_and_bit_domains() -> None:
+    """Branch pruning does not erase scalar parameter validation."""
+
+    @qmc.qkernel
+    def bit_branch(flag: qmc.Bit) -> qmc.Qubit:
+        """Select one of two gates from a classical bit parameter."""
+        target = qmc.qubit("target")
+        if flag:
+            target = qmc.x(target)
+        else:
+            target = qmc.h(target)
+        return target
+
+    with pytest.raises(ValueError, match="non-integer value"):
+        _branch_probe.estimate_resources(inputs={"flag": 1.5})
+    with pytest.raises(ValueError, match="negative value"):
+        _branch_probe.estimate_resources(inputs={"flag": -1})
+    with pytest.raises(ValueError, match="upper bound"):
+        bit_branch.estimate_resources(inputs={"flag": 2})
+
+
 @pytest.mark.parametrize(
     "value", [np.int64(1), np.int32(1), np.float64(1.0)], ids=["i64", "i32", "f64"]
 )
@@ -116,7 +137,7 @@ def test_branch_specialized_on_numpy_scalar(value: object) -> None:
 def test_symbolic_compile_time_branch_stays_piecewise() -> None:
     """A Python default remains a symbolic exact branch during estimation."""
     est = _branch_probe.estimate_resources()
-    assert str(est.gates.total) == "Piecewise((1, flag), (2, True))"
+    assert str(est.gates.total) == "Piecewise((1, flag > 0), (2, True))"
 
 
 def test_comparison_branch_specialized() -> None:
@@ -266,7 +287,7 @@ def test_region_arg_drives_later_concrete_loop() -> None:
 
 
 def test_large_input_keeps_region_loop_symbolic(monkeypatch) -> None:
-    """A large estimation input is substituted after loop summarization."""
+    """QKernel and raw IR inputs are substituted after loop summarization."""
     from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
 
     def fail_concrete_iteration(*args, **kwargs):
@@ -278,8 +299,14 @@ def test_large_input_keeps_region_loop_symbolic(monkeypatch) -> None:
         fail_concrete_iteration,
     )
 
-    estimate = _carried_loop_bound.estimate_resources(inputs={"n": 2048})
-    assert estimate.gates.total == 2048
+    targets = (
+        _carried_loop_bound,
+        _carried_loop_bound.block,
+        _carried_loop_bound.block.operations,
+    )
+    for target in targets:
+        estimate = qmc.estimate_resources(target, inputs={"n": 2048})
+        assert estimate.gates.total == 2048
 
 
 def test_region_arg_drives_later_branch() -> None:
@@ -317,6 +344,16 @@ def test_inputs_force_symbolic_over_python_default() -> None:
 
     est = _toy_qpe.estimate_resources(inputs={"bits": 5})
     assert int(est.qubits) == 6
+
+
+def test_qubit_allocation_width_requires_an_integer() -> None:
+    """UInt-sized allocations reject fractional direct and later inputs."""
+    symbolic = _sized_kernel.estimate_resources()
+
+    with pytest.raises(ValueError, match="non-integer value"):
+        symbolic.substitute(n=1.5)
+    with pytest.raises(ValueError, match="non-integer value"):
+        _sized_kernel.estimate_resources(inputs={"n": 1.5})
 
 
 def test_inputs_accept_shift_expression() -> None:
@@ -390,6 +427,10 @@ def test_inputs_trace_structural_values_and_specialize_scalars() -> None:
     assert estimate.qubits == 3
     assert estimate.gates.total == 3
     assert estimate.parameters == {}
+    assert estimate.calls.calls_by_name == {"expval": 1}
+    assert estimate.calls.queries_by_name == {"expval": 1}
+    assert estimate.quality is qmc.EstimateQuality.MODELED
+    assert len(estimate.assumptions) == 1
 
 
 @pytest.mark.parametrize(
@@ -413,3 +454,4 @@ def test_numeric_vector_input_specializes_shape(angles: object) -> None:
     assert estimate.qubits == 3
     assert estimate.gates.total == 3
     assert estimate.parameters == {}
+    assert estimate.assumptions == ()

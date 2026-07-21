@@ -3111,7 +3111,7 @@ def _lower_transformed_call(
         resolved = _resolve_wire(value, environment)
         control_wires.extend(resolved if isinstance(resolved, list) else [resolved])
     control_value = _transformed_control_value(operation)
-    if control_value is not None:
+    if power > 0 and control_value is not None:
         control_wires = _toggle_zero_controls(
             builder,
             control_wires,
@@ -3125,7 +3125,7 @@ def _lower_transformed_call(
             control_wires,
             inverse,
         )
-    if control_value is not None:
+    if power > 0 and control_value is not None:
         control_wires = _toggle_zero_controls(
             builder,
             control_wires,
@@ -3536,7 +3536,7 @@ def _resolve_transformed_power(
     operation: InvokeOperation | ControlledUOperation | InverseBlockOperation,
     environment: dict[str, Any],
 ) -> int:
-    """Resolve a transformed call's statically known positive power.
+    """Resolve a transformed call's statically known nonnegative power.
 
     Args:
         operation (InvokeOperation | ControlledUOperation |
@@ -3545,7 +3545,7 @@ def _resolve_transformed_power(
             mapping.
 
     Returns:
-        int: Positive number of complete body applications.
+        int: Nonnegative number of complete body applications.
 
     Raises:
         EmitError: If a controlled-call power is dynamic or invalid.
@@ -3561,9 +3561,9 @@ def _resolve_transformed_power(
         resolved = power.get_const()
     else:
         resolved = environment.get(f"__index__:{power.uuid}")
-    if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved <= 0:
+    if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved < 0:
         raise EmitError(
-            "HUGR transformed call power must be a compile-time positive integer",
+            "HUGR transformed call power must be a compile-time nonnegative integer",
             operation="ControlledUOperation",
         )
     return resolved

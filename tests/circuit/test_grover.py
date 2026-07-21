@@ -142,11 +142,21 @@ def test_grover_optimal_query_complexity_via_inputs() -> None:
         assert int(queries.subs({n: nn, m: mm})) == grover_iteration_count(nn, mm)
 
 
-def test_grover_qubit_count_is_linear() -> None:
-    """Grover uses O(n) qubits (the search register width)."""
+def test_grover_qubit_count_includes_portable_control_ancillas() -> None:
+    """Grover reports source width and portable control ancillas separately."""
     est = _grover_estimate_kernel.estimate_resources()
     n = est.parameters["n"]
-    assert sp.simplify(est.qubits - n) == 0
+    assert est.width.allocated_qubits == n
+
+    inactive = _grover_estimate_kernel.estimate_resources(
+        inputs={"n": 4, "iterations": 0}
+    )
+    active = _grover_estimate_kernel.estimate_resources(
+        inputs={"n": 4, "iterations": 1}
+    )
+    assert inactive.qubits == 4
+    assert active.width.clean_ancilla_qubits == 2
+    assert active.qubits == 6
 
 
 @pytest.mark.parametrize("n", [2, 3])

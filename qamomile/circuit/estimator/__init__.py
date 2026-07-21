@@ -1,10 +1,12 @@
-"""Logical symbolic resource estimation for Qamomile circuits.
+"""Algorithmic symbolic resource estimation for Qamomile circuits.
 
-This package's public surface is the *logical* resource estimator. The physical
-(surface-code) conversion in :mod:`qamomile.circuit.estimator.physical` is
-experimental and intentionally not re-exported here — import it explicitly from
-that module if you need it, keeping logical estimation and physical assumptions
-clearly separated.
+The default ``portable`` basis recursively expands coherent controls through
+Qamomile's backend-neutral per-primitive fallback, including reusable clean
+ancillas. ``logical`` retains the former abstract one-source-operation view,
+and ``clifford_t`` reports the supported synthesis model. The physical
+(surface-code) conversion in :mod:`qamomile.circuit.estimator.physical` remains
+experimental and intentionally is not re-exported here, keeping algorithmic
+estimation and physical assumptions clearly separated.
 """
 
 from qamomile.circuit.estimator.resource_estimator import (

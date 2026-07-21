@@ -48,8 +48,8 @@ class QKernelBuildMixin:
                 ``False``.
             unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
                 Defaults to ``None``.
-            basis (Any): Optional ``GateBasis`` override. Defaults to logical
-                gates when ``None``.
+            basis (Any): Optional ``GateBasis`` override. Defaults to the
+                portable algorithmic fallback basis when ``None``.
             precision (float): Rotation-synthesis precision for a lowered
                 basis. Defaults to ``1e-10``.
 

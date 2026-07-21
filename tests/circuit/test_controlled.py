@@ -5056,6 +5056,16 @@ def _symbolic_power_x(target: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _symbolic_power_workspace_phase(target: qmc.Qubit) -> qmc.Qubit:
+    """Apply a phase through one private qubit returned to the zero state."""
+    workspace = qmc.qubit("workspace")
+    target, workspace = qmc.cx(target, workspace)
+    workspace = qmc.z(workspace)
+    target, workspace = qmc.cx(target, workspace)
+    return target
+
+
+@qmc.qkernel
 def _symbolic_zero_power_probe() -> qmc.Vector[qmc.Bit]:
     """Apply controlled-X with loop powers zero and one."""
     q = qmc.qubit_array(2, name="q")
@@ -5063,6 +5073,21 @@ def _symbolic_zero_power_probe() -> qmc.Vector[qmc.Bit]:
     q[0] = qmc.x(q[0])
     for power in qmc.range(2):
         q[0], q[1] = controlled_x(q[0], q[1], power=power)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _bound_zero_power_workspace_probe(power: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Apply a bound power to a controlled body with private workspace."""
+    q = qmc.qubit_array(2, name="q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.h(q[1])
+    q[0], q[1] = qmc.control(_symbolic_power_workspace_phase)(
+        q[0],
+        q[1],
+        power=power,
+    )
+    q[1] = qmc.h(q[1])
     return qmc.measure(q)
 
 
@@ -5102,6 +5127,18 @@ def test_symbolic_controlled_power_zero_is_identity(sdk_transpiler) -> None:
     )
 
     assert result.results == [((1, 1), 32)]
+
+
+def test_bound_zero_power_skips_controlled_workspace(qiskit_transpiler) -> None:
+    """A bound zero power emits identity without reserving body workspace."""
+    executable = qiskit_transpiler.transpile(
+        _bound_zero_power_workspace_probe,
+        bindings={"power": 0},
+    )
+
+    assert executable.get_first_circuit().num_qubits == 2
+    result = executable.sample(qiskit_transpiler.executor(), shots=32).result()
+    assert result.results == [((1, 0), 32)]
 
 
 def test_nested_symbolic_controlled_power_zero_is_identity(

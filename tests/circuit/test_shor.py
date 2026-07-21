@@ -35,8 +35,13 @@ def test_shor_factory_returns_one_executable_qkernel() -> None:
     assert isinstance(kernel, QKernel)
     estimate = _shor_estimate(2, 15)
     assert estimate.parameters == {}
-    assert estimate.qubits == 21
+    assert estimate.basis is qmc.GateBasis.PORTABLE
+    assert estimate.width.allocated_qubits == 21
+    assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.width.dirty_ancilla_qubits == 0
+    assert estimate.width.peak_qubits == 23
+    assert estimate.width.circuit_qubits == 23
+    assert estimate.qubits == 23
     assert estimate.gates.total > 0
     assert "modmul_const" not in estimate.calls.calls_by_name
     assert estimate.trace is None
@@ -52,11 +57,16 @@ def test_shor_width_is_body_derived_three_n_plus_constant(
     base: int,
     modulus: int,
 ) -> None:
-    """Specialized bodies expose the expected ``3n + w + 7`` peak width."""
+    """Portable estimates add reusable fallback ancillas to body allocations."""
     n = modulus.bit_length()
     estimate = _shor_estimate(base, modulus)
 
-    assert estimate.qubits == 3 * n + 2 + 7
+    allocated = 3 * n + 2 + 7
+    assert estimate.width.allocated_qubits == allocated
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.width.peak_qubits == allocated + 2
+    assert estimate.width.circuit_qubits == allocated + 2
+    assert estimate.qubits == allocated + 2
 
 
 def test_shor_skips_identity_modular_multiplication_rounds() -> None:
@@ -65,11 +75,14 @@ def test_shor_skips_identity_modular_multiplication_rounds() -> None:
         base=2,
         modulus=15,
         precision=2,
-    ).estimate_resources()
-    full_schedule = _shor_estimate(2, 15)
+    ).estimate_resources(basis=qmc.GateBasis.LOGICAL)
+    full_schedule = qmc.shor_order_finding(
+        base=2,
+        modulus=15,
+    ).estimate_resources(basis=qmc.GateBasis.LOGICAL)
 
-    assert arithmetic_rounds.gates.total == 3420
-    assert full_schedule.gates.total == 3465
+    assert arithmetic_rounds.gates.total == 3260
+    assert full_schedule.gates.total == 3305
     assert full_schedule.gates.two_qubit == arithmetic_rounds.gates.two_qubit
     assert full_schedule.gates.multi_qubit == arithmetic_rounds.gates.multi_qubit
 
@@ -138,10 +151,11 @@ def test_small_shor_order_finding_recovers_period_two(sdk_transpiler) -> None:
 def test_four_bit_shor_transpiles_without_statevector_execution(
     sdk_transpiler,
 ) -> None:
-    """Transpile the 21-qubit benchmark without allocating its statevector.
+    """Transpile the 21-allocated-qubit benchmark without statevector execution.
 
     This test covers the realistic four-bit circuit without coupling its
-    runtime to statevector sampling.
+    runtime to statevector sampling. The portable estimate additionally
+    reserves two clean ancillas for controlled-gate fallback decompositions.
 
     Args:
         sdk_transpiler: Parametrized SDK backend fixture.
@@ -152,7 +166,11 @@ def test_four_bit_shor_transpiles_without_statevector_execution(
     kernel = qmc.shor_order_finding(base=2, modulus=15)
     executable = sdk_transpiler.transpiler.transpile(kernel)
 
-    assert _shor_estimate(2, 15).qubits == 21
+    estimate = _shor_estimate(2, 15)
+    assert estimate.width.allocated_qubits == 21
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.width.peak_qubits == 23
+    assert estimate.width.circuit_qubits == 23
     assert executable.compiled_quantum
     assert executable.plan.steps
 
@@ -163,7 +181,12 @@ def test_ekera_hastad_uses_two_short_exponent_registers() -> None:
     estimate = kernel.estimate_resources()
 
     assert isinstance(kernel, QKernel)
-    assert estimate.qubits == 18
+    assert estimate.basis is qmc.GateBasis.PORTABLE
+    assert estimate.width.allocated_qubits == 18
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.width.peak_qubits == 20
+    assert estimate.width.circuit_qubits == 20
+    assert estimate.qubits == 20
     assert "modmul_const" not in estimate.calls.calls_by_name
     assert len(kernel.output_types) == 1
     assert kernel.output_types[0] == qmc.Vector[qmc.Bit]

@@ -1086,22 +1086,22 @@ class ConstantFoldingPass(Pass[Block, Block]):
         """Cast *value* to ``int`` with strict validation for power fields.
 
         Only true integer values (or whole ``float`` like ``4.0``) are
-        accepted.  ``bool``, non-integer ``float``, and non-positive
+        accepted.  ``bool``, non-integer ``float``, and negative
         integers are rejected.
 
         Args:
-            value: The resolved constant to cast.
+            value (object): The resolved constant to cast.
 
         Returns:
-            A validated positive ``int``.
+            int: A validated nonnegative integer.
 
         Raises:
             ValueError: If *value* is ``bool``, a non-integer ``float``,
-                a non-``int`` type, or ``<= 0``.
+                a non-``int`` type, or a negative integer.
         """
         if isinstance(value, bool):
             raise ValueError(
-                f"ControlledU power must be a positive integer, got bool ({value})."
+                f"ControlledU power must be a nonnegative integer, got bool ({value})."
             )
         if isinstance(value, float):
             if value != int(value):
@@ -1114,10 +1114,8 @@ class ConstantFoldingPass(Pass[Block, Block]):
             raise ValueError(
                 f"ControlledU power must be an integer, got {type(value).__name__}."
             )
-        if value <= 0:
-            raise ValueError(
-                f"ControlledU power must be strictly positive, got {value}."
-            )
+        if value < 0:
+            raise ValueError(f"ControlledU power must be nonnegative, got {value}.")
         return value
 
     def _expand_symbolic_controlled_operands(
