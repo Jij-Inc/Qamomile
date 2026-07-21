@@ -521,7 +521,8 @@ class LCUBlockEncodingTerm:
     Raises:
         TypeError: If the coefficient is not a non-boolean complex numeric
             scalar or ``encoding`` is not an ``LCUBlockEncoding``.
-        ValueError: If either coefficient component is non-finite.
+        ValueError: If a numeric coefficient cannot be converted to a finite
+            built-in complex value or either component is non-finite.
     """
 
     coefficient: complex
@@ -533,7 +534,9 @@ class LCUBlockEncodingTerm:
         Raises:
             TypeError: If the coefficient or child descriptor type is
                 invalid.
-            ValueError: If either coefficient component is non-finite.
+            ValueError: If a numeric coefficient cannot be converted to a
+                finite built-in complex value or either component is
+                non-finite.
         """
         object.__setattr__(
             self,
@@ -554,6 +557,8 @@ class _ValidatedTerm:
         normalization (float): Child block normalization.
         signal_width (int): Child signal-register width.
         system_width (int): Child system-register width.
+        source_index (int): Original position in the user-supplied term
+            sequence, retained for diagnostics after zero-term filtering.
     """
 
     coefficient: complex
@@ -561,6 +566,7 @@ class _ValidatedTerm:
     normalization: float
     signal_width: int
     system_width: int
+    source_index: int
 
 
 def identity_block_encoding(num_system_qubits: int) -> LCUBlockEncoding:
@@ -669,6 +675,8 @@ def lcu_block_encoding(
             non-term value.
         ValueError: If ``terms`` is empty, relevant child system widths
             differ, or the composed normalization overflows or is non-finite.
+        RuntimeError: If internal state-preparation width derivation disagrees
+            with the recursive selector width.
 
     Example:
         >>> import qamomile.circuit as qmc
@@ -709,7 +717,8 @@ def lcu_block_encoding(
             unitary = _build_multi_term_encoding(
                 active_terms,
                 normalization,
-                signal_width,
+                selector_width,
+                child_pool_width,
                 system_width,
             )
 
@@ -764,6 +773,7 @@ def _validate_terms(terms: object) -> tuple[_ValidatedTerm, ...]:
                 normalization=term.encoding.normalization,
                 signal_width=term.encoding.num_signal_qubits,
                 system_width=term.encoding.num_system_qubits,
+                source_index=index,
             )
         )
     return tuple(normalized)
@@ -782,13 +792,15 @@ def _common_system_width(terms: tuple[_ValidatedTerm, ...]) -> int:
     Raises:
         ValueError: If two terms use different system widths.
     """
-    system_width = terms[0].system_width
-    for index, term in enumerate(terms[1:], start=1):
+    first = terms[0]
+    system_width = first.system_width
+    for term in terms[1:]:
         if term.system_width != system_width:
             raise ValueError(
                 "LCU block encoding requires every relevant child to use the "
-                f"same system width; term 0 uses {system_width} qubits but "
-                f"term {index} uses {term.system_width}."
+                f"same system width; term {first.source_index} has system "
+                f"width {system_width}, but term {term.source_index} has "
+                f"system width {term.system_width}."
             )
     return system_width
 
@@ -807,16 +819,18 @@ def _lcu_normalization(terms: tuple[_ValidatedTerm, ...]) -> float:
             non-finite.
     """
     contributions: list[float] = []
-    for index, term in enumerate(terms):
+    for term in terms:
         try:
             contribution = abs(term.coefficient) * term.normalization
         except OverflowError as exc:
             raise ValueError(
-                f"LCU block-encoding normalization overflowed at term {index}."
+                "LCU block-encoding normalization overflowed at term "
+                f"{term.source_index}."
             ) from exc
         if not math.isfinite(contribution):
             raise ValueError(
-                f"LCU block-encoding normalization is non-finite at term {index}."
+                "LCU block-encoding normalization is non-finite at term "
+                f"{term.source_index}."
             )
         contributions.append(contribution)
     try:
@@ -881,7 +895,8 @@ def _build_single_term_encoding(
 def _build_multi_term_encoding(
     terms: tuple[_ValidatedTerm, ...],
     normalization: float,
-    signal_width: int,
+    selector_width: int,
+    child_pool_width: int,
     system_width: int,
 ) -> _BlockEncodingUnitary:
     """Build a recursive PREPARE-SELECT-PREPARE-dagger encoding.
@@ -889,17 +904,17 @@ def _build_multi_term_encoding(
     Args:
         terms (tuple[_ValidatedTerm, ...]): Ordered active child terms.
         normalization (float): Weighted parent normalization.
-        signal_width (int): Complete parent signal width.
+        selector_width (int): Outer SELECT index-register width.
+        child_pool_width (int): Uniform shared child-signal pool width.
         system_width (int): Shared child system width.
 
     Returns:
         _BlockEncodingUnitary: Recursive multi-term LCU unitary.
 
     Raises:
-        RuntimeError: If Mottönen preparation reports an unexpected width.
+        RuntimeError: If Möttönen preparation reports an unexpected width.
     """
-    selector_width = (len(terms) - 1).bit_length()
-    child_pool_width = max(term.signal_width for term in terms)
+    signal_width = selector_width + child_pool_width
     amplitudes = np.zeros(1 << selector_width, dtype=np.float64)
     sqrt_normalization = math.sqrt(normalization)
     for index, term in enumerate(terms):
@@ -909,12 +924,12 @@ def _build_multi_term_encoding(
 
     preparation, required_width = _mottonen_composite(
         amplitudes,
-        name="mottonen_amplitude_encoding",
+        name="recursive_lcu_prepare",
         policy=CallPolicy.PRESERVE_BOX,
     )
     if required_width != selector_width:
         raise RuntimeError(
-            "Mottönen preparation width disagrees with the LCU selector width."
+            "Möttönen preparation width disagrees with the LCU selector width."
         )
     unprepare = inverse(preparation)
     selector = select(
@@ -998,7 +1013,12 @@ def _build_uniform_case(
             TypeError: If ``signal`` is not a vector register.
             ValueError: If the concrete shared pool has an unexpected width.
         """
-        _validate_pool_width(signal, child_pool_width)
+        _validate_register_width(
+            signal,
+            child_pool_width,
+            "child-pool",
+            "LCU block-encoding SELECT case",
+        )
         signal[:child_width], system = applied_child(
             signal[:child_width],
             system,
@@ -1006,29 +1026,6 @@ def _build_uniform_case(
         return signal, system
 
     return case
-
-
-def _validate_pool_width(child_pool: Vector[Qubit], expected: int) -> None:
-    """Validate a concrete shared child-pool width.
-
-    Args:
-        child_pool (Vector[Qubit]): Pool passed to one SELECT case.
-        expected (int): Required uniform pool width.
-
-    Raises:
-        TypeError: If ``child_pool`` is not a vector register.
-        ValueError: If the concrete pool width differs from ``expected``.
-    """
-    try:
-        actual = get_size(child_pool)
-    except ValueError:
-        return
-    if actual != expected:
-        unit = "qubit" if expected == 1 else "qubits"
-        raise ValueError(
-            "LCU block-encoding SELECT case requires "
-            f"{expected} child-pool {unit}, got {actual}."
-        )
 
 
 def _validate_finite_complex(value: object, name: str) -> complex:
@@ -1043,7 +1040,8 @@ def _validate_finite_complex(value: object, name: str) -> complex:
 
     Raises:
         TypeError: If ``value`` is not a complex numeric scalar.
-        ValueError: If conversion overflows or either component is non-finite.
+        ValueError: If a numeric value cannot be converted to a finite
+            built-in complex value or either component is non-finite.
     """
     if isinstance(value, (bool, np.bool_)) or not isinstance(
         value,
@@ -1052,8 +1050,8 @@ def _validate_finite_complex(value: object, name: str) -> complex:
         raise TypeError(f"{name} must be a complex numeric scalar.")
     try:
         normalized = complex(value)
-    except OverflowError as exc:
-        raise ValueError(f"{name} must be finite.") from exc
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must fit in a finite complex value.") from exc
     if not math.isfinite(normalized.real) or not math.isfinite(normalized.imag):
         raise ValueError(f"{name} must be finite.")
     real = normalized.real if normalized.real else 0.0

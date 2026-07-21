@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import numbers
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,36 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.linalg import PeriodicShiftLCU
+
+
+class _UnconvertibleComplex:
+    """Model a registered complex scalar whose conversion fails.
+
+    Args:
+        exception_type (type[Exception]): Exception class raised by
+            ``__complex__``.
+    """
+
+    def __init__(self, exception_type: type[Exception]) -> None:
+        """Store the exception type raised during complex conversion.
+
+        Args:
+            exception_type (type[Exception]): Exception class raised by
+                ``__complex__``.
+        """
+        self.exception_type = exception_type
+
+    def __complex__(self) -> complex:
+        """Reject conversion after the numeric runtime type check.
+
+        Raises:
+            Exception: Always raises an instance of the configured exception
+                type.
+        """
+        raise self.exception_type("custom complex conversion failed")
+
+
+numbers.Complex.register(_UnconvertibleComplex)
 
 
 @qmc.qkernel
@@ -173,16 +204,33 @@ def _qiskit_unitary(
     encoding: qmc.LCUBlockEncoding,
     *,
     invert: bool = False,
+    serialize_round_trip: bool = False,
 ) -> np.ndarray:
-    """Return the exact dense unitary emitted through Qiskit."""
+    """Return the exact dense unitary emitted through Qiskit.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Encoding whose complete unitary is
+            emitted.
+        invert (bool): Whether to emit the inverse unitary. Defaults to
+            ``False``.
+        serialize_round_trip (bool): Whether to serialize and deserialize the
+            closed consumer kernel before transpilation. Defaults to
+            ``False``.
+
+    Returns:
+        np.ndarray: Dense unitary in Qiskit's little-endian basis order.
+    """
     pytest.importorskip("qiskit")
     from qiskit.quantum_info import Operator
 
     from qamomile.qiskit import QiskitTranspiler
 
-    executable = QiskitTranspiler().transpile(
-        _build_unitary_kernel(encoding, invert=invert)
-    )
+    kernel: Any = _build_unitary_kernel(encoding, invert=invert)
+    if serialize_round_trip:
+        from qamomile.circuit.serialization import deserialize, serialize
+
+        kernel = deserialize(serialize(kernel))
+    executable = QiskitTranspiler().transpile(kernel)
     circuit = executable.quantum_circuit.remove_final_measurements(inplace=False)
     return np.asarray(Operator(circuit).data)
 
@@ -292,6 +340,22 @@ def test_descriptor_and_term_reject_invalid_values() -> None:
         qmc.LCUBlockEncodingTerm(1.0, object())
 
 
+@pytest.mark.parametrize("exception_type", [TypeError, ValueError])
+def test_term_wraps_numeric_complex_conversion_failures(
+    exception_type: type[Exception],
+) -> None:
+    """Numeric conversion failures retain coefficient context and cause."""
+    identity = qmc.identity_block_encoding(1)
+
+    with pytest.raises(ValueError, match="coefficient") as exc_info:
+        qmc.LCUBlockEncodingTerm(
+            _UnconvertibleComplex(exception_type),  # type: ignore[arg-type]
+            identity,
+        )
+
+    assert isinstance(exc_info.value.__cause__, exception_type)
+
+
 def test_factory_rejects_invalid_terms_and_mixed_system_widths() -> None:
     """An ordered composition requires terms over one common system register."""
     one_qubit = qmc.identity_block_encoding(1)
@@ -306,6 +370,26 @@ def test_factory_rejects_invalid_terms_and_mixed_system_widths() -> None:
             (
                 qmc.LCUBlockEncodingTerm(1.0, one_qubit),
                 qmc.LCUBlockEncodingTerm(1.0, two_qubit),
+            )
+        )
+    with pytest.raises(
+        ValueError,
+        match=r"term 1 has system width 1, but term 2 has system width 2",
+    ):
+        qmc.lcu_block_encoding(
+            (
+                qmc.LCUBlockEncodingTerm(0.0, one_qubit),
+                qmc.LCUBlockEncodingTerm(1.0, one_qubit),
+                qmc.LCUBlockEncodingTerm(1.0, two_qubit),
+            )
+        )
+
+    huge = qmc.LCUBlockEncoding(_identity_case, 1e308, 1, 1)
+    with pytest.raises(ValueError, match=r"non-finite at term 1"):
+        qmc.lcu_block_encoding(
+            (
+                qmc.LCUBlockEncodingTerm(0.0, one_qubit),
+                qmc.LCUBlockEncodingTerm(2.0, huge),
             )
         )
 
@@ -338,6 +422,94 @@ def test_identity_zero_and_single_term_paths_have_exact_blocks() -> None:
     )
 
 
+def test_zero_terms_are_removed_before_multi_and_single_term_lowering() -> None:
+    """Zero terms do not occupy SELECT slots or inflate widths and Lambda."""
+    identity = qmc.identity_block_encoding(1)
+    z_encoding = _z_encoding()
+    x_encoding = _x_encoding()
+    multi = qmc.lcu_block_encoding(
+        (
+            qmc.LCUBlockEncodingTerm(0.7, identity),
+            qmc.LCUBlockEncodingTerm(0.0, z_encoding),
+            qmc.LCUBlockEncodingTerm(0.5, x_encoding),
+        )
+    )
+    single = qmc.lcu_block_encoding(
+        (
+            qmc.LCUBlockEncodingTerm(0.0, identity),
+            qmc.LCUBlockEncodingTerm(0.0, z_encoding),
+            qmc.LCUBlockEncodingTerm(-2.0j, x_encoding),
+        )
+    )
+    x_matrix = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+
+    assert multi.normalization == pytest.approx(1.2)
+    assert multi.num_signal_qubits == 2
+    np.testing.assert_allclose(
+        _top_left_block(_qiskit_unitary(multi), multi),
+        (0.7 * np.eye(2) + 0.5 * x_matrix) / 1.2,
+        atol=1e-10,
+        rtol=0.0,
+    )
+    assert single.normalization == 2.0
+    assert single.num_signal_qubits == 1
+    np.testing.assert_allclose(
+        _top_left_block(_qiskit_unitary(single), single),
+        -1j * x_matrix,
+        atol=1e-10,
+        rtol=0.0,
+    )
+
+
+def test_zero_encoding_samples_and_estimates_on_every_sdk(
+    sdk_transpiler: Any,
+) -> None:
+    """The generic all-zero composition executes on every circuit backend."""
+    encoding = qmc.lcu_block_encoding(
+        (qmc.LCUBlockEncodingTerm(0.0, qmc.identity_block_encoding(1)),)
+    )
+
+    @qmc.qkernel
+    def sample_kernel() -> qmc.Bit:
+        """Apply the zero encoding and measure its marked signal.
+
+        Returns:
+            qmc.Bit: Measurement of the signal qubit that must be one.
+        """
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.measure(signal[0])
+
+    @qmc.qkernel
+    def expval_kernel(observable: qmc.Observable) -> qmc.Float:
+        """Estimate an observable on the zero encoding's marked signal.
+
+        Args:
+            observable (qmc.Observable): Single-qubit observable to evaluate.
+
+        Returns:
+            qmc.Float: Expectation value on the marked signal qubit.
+        """
+        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(encoding.num_system_qubits, "system")
+        signal, _ = encoding.unitary(signal, system)
+        return qmc.expval(signal[0], observable)
+
+    sample = sdk_transpiler.transpiler.transpile(sample_kernel)
+    sample_result = sample.sample(_executor(sdk_transpiler), shots=64).result()
+    assert all(_flatten(outcome) == (1,) for outcome, _ in sample_result.results)
+    assert sum(count for _, count in sample_result.results) == 64
+
+    expval = sdk_transpiler.transpiler.transpile(
+        expval_kernel,
+        bindings={"observable": qm_o.Z(0)},
+    )
+    observed = float(expval.run(_executor(sdk_transpiler)).result())
+    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed == pytest.approx(-1.0, abs=atol)
+
+
 def test_uniform_case_preserves_unused_child_pool_padding_exactly() -> None:
     """A heterogeneous SELECT wrapper acts as identity on every unused wire."""
     from qamomile.circuit.stdlib.lcu_block_encoding import (
@@ -346,7 +518,7 @@ def test_uniform_case_preserves_unused_child_pool_padding_exactly() -> None:
     )
 
     child = qmc.LCUBlockEncoding(_flip_child_signal_case, 1.0, 1, 1)
-    term = _ValidatedTerm(1.0 + 0.0j, child, 1.0, 1, 1)
+    term = _ValidatedTerm(1.0 + 0.0j, child, 1.0, 1, 1, 0)
     case = _build_uniform_case(term, child_pool_width=2)
     assert tuple(case.signature.parameters) == ("signal", "system")
 
@@ -416,13 +588,22 @@ def test_two_level_recursion_and_inverse_have_exact_projected_blocks() -> None:
 
 
 def test_recursive_unitary_serialization_round_trip_is_stable() -> None:
-    """A generated recursive unitary survives a canonical wire round trip."""
+    """A recursive body round-trips stably and retains its complete block."""
     from qamomile.circuit.serialization import deserialize, serialize
 
-    encoding, _ = _recursive_encoding()
+    encoding, matrix = _recursive_encoding()
     payload = serialize(encoding.unitary)
 
     assert payload == serialize(deserialize(payload))
+    np.testing.assert_allclose(
+        _top_left_block(
+            _qiskit_unitary(encoding, serialize_round_trip=True),
+            encoding,
+        ),
+        matrix / encoding.normalization,
+        atol=1e-10,
+        rtol=0.0,
+    )
 
 
 def test_shifted_ising_composes_recursively_with_child_normalizations() -> None:
@@ -691,7 +872,9 @@ def test_recursive_inverse_round_trip_samples_and_estimates_on_every_sdk(
 def test_recursive_lcu_control_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
-    """Two-level LCU recursion executes through control, sample, and estimator."""
+    """Serialized two-level LCU control executes through every backend path."""
+    from qamomile.circuit.serialization import deserialize, serialize
+
     encoding, matrix = _recursive_encoding()
     overlap = matrix[0, 0] / encoding.normalization
     controlled = qmc.control(encoding.unitary)
@@ -716,7 +899,7 @@ def test_recursive_lcu_control_samples_and_estimates_on_every_sdk(
         return qmc.expval(outer, observable)
 
     shots = 2048
-    sample = sdk_transpiler.transpiler.transpile(sample_kernel)
+    sample = sdk_transpiler.transpiler.transpile(deserialize(serialize(sample_kernel)))
     sample_result = sample.sample(_executor(sdk_transpiler), shots=shots).result()
     expected_zero = (1.0 + float(np.real(overlap))) / 2.0
     tolerance = 6.0 * math.sqrt(expected_zero * (1.0 - expected_zero) / shots) + 0.02
@@ -726,7 +909,7 @@ def test_recursive_lcu_control_samples_and_estimates_on_every_sdk(
     )
 
     expval = sdk_transpiler.transpiler.transpile(
-        expval_kernel,
+        deserialize(serialize(expval_kernel)),
         bindings={"observable": qm_o.Y(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())

@@ -288,6 +288,15 @@ def test_canonical_aggregation_handles_cancellation_overflow_and_signed_zero() -
 
     with pytest.raises(ValueError, match="aggregation overflowed"):
         qmc.ising_z_block_encoding({(): 1e308, (0, 0): 1e308}, 1)
+    cancellation_overflow = [
+        ((0,), 1e308),
+        ((1, 1, 0), -1e308),
+        ((0, 0, 0), 1e308),
+        ((0, 1, 1), -1e308),
+    ]
+    for entries in (cancellation_overflow, reversed(cancellation_overflow)):
+        with pytest.raises(ValueError, match="aggregation overflowed"):
+            qmc.ising_z_block_encoding(dict(entries), 2)
     with pytest.raises(ValueError, match="normalization overflowed"):
         qmc.ising_z_block_encoding({(): 1e308, (0,): 1e308}, 1)
     with pytest.raises(ValueError, match="normalization overflowed"):

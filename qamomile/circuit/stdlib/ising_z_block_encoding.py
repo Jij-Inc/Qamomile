@@ -86,6 +86,11 @@ def ising_z_block_encoding(
         A = \sum_j c_j Z_{S_j}, \qquad
         \alpha = \sum_j |c_j|.
 
+    Aggregation is deterministic for the same converted coefficient multiset
+    on one host/runtime. Inputs that make the host ``math.fsum`` overflow an
+    intermediate partial may be rejected even when their exact final sum is
+    representable.
+
     A multi-term encoding uses PREPARE amplitudes
     ``sqrt(abs(c_j) / alpha)`` and SELECT cases
     ``exp(1j * arg(c_j)) * Z_{S_j}``. The returned encoding can be used as a
@@ -109,6 +114,8 @@ def ising_z_block_encoding(
         ValueError: If a width is non-positive, an index is out of range, a
             coefficient or aggregate is non-finite, or finite coefficient
             aggregation overflows.
+        RuntimeError: If internal state-preparation width derivation disagrees
+            with the Ising-Z selector width.
 
     Example:
         >>> import qamomile.circuit as qmc
