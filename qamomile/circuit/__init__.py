@@ -141,6 +141,7 @@ from .stdlib import (
     periodic_shift_lcu_block_encoding,
     qft,
     qpe,
+    qsvt,
     ripple_carry_add,
     shor_order_finding,
 )
@@ -251,6 +252,7 @@ __all__ = [
     "modular_decrement",
     "modular_increment",
     "qpe",
+    "qsvt",
     "mcx",
     "multi_controlled_x",
     "LCUBlockEncoding",

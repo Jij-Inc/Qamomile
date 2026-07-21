@@ -1,12 +1,12 @@
 """Expose standard-library quantum callables.
 
 The reader-facing circuit API is function-oriented: use :func:`qft`,
-:func:`iqft`, :func:`qpe`, state-preparation helpers, arithmetic helpers, and
-:func:`mcx` inside qkernels. Factories that must also expose algorithm metadata
-may return frozen non-callable descriptors; invoke the descriptor's documented
-qkernel field rather than the descriptor itself. Internally these functions
-emit named callables with Qamomile bodies and optional backend-native
-implementations.
+:func:`iqft`, :func:`qpe`, :func:`qsvt`, state-preparation helpers, arithmetic
+helpers, and :func:`mcx` inside qkernels. Factories that must also expose
+algorithm metadata may return frozen non-callable descriptors; invoke the
+descriptor's documented qkernel field rather than the descriptor itself.
+Internally these functions emit named callables with Qamomile bodies and
+optional backend-native implementations.
 
 Standard composites use the same ``composite_gate`` mechanism as user
 callables; there is no separate class-based gate hierarchy.
@@ -43,6 +43,7 @@ from .periodic_shift_lcu_block_encoding import (
 )
 from .qft import iqft, qft
 from .qpe import qpe
+from .qsvt import qsvt
 from .shor import shor_order_finding
 from .state_preparation import (
     amplitude_encoding,
@@ -56,6 +57,7 @@ __all__ = [
     "qft",
     "iqft",
     "qpe",
+    "qsvt",
     "mcx",
     "multi_controlled_x",
     "LCUBlockEncoding",
