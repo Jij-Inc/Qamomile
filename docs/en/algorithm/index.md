@@ -27,6 +27,12 @@ Prepare an arbitrary real or complex amplitude vector via Gray-code Ry/Rz multip
 :::
 
 :::{card}
+:header: **Periodic Poisson Equation with QSVT**
+:link: qsvt_poisson
+Solve 1D and 2D periodic Poisson problems with shift-based block encodings, Möttönen amplitude encoding, and QSVT inverse-polynomial phases.
+:::
+
+:::{card}
 :header: **Multidimensional Quantum Fourier Transform**
 :link: multidimensional_qft
 Implement multidimensional QFT and classical preprocessing for inputs whose grid sizes are not powers of two.
