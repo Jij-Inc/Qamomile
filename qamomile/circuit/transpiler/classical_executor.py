@@ -31,6 +31,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
     validate_region_args,
 )
+from qamomile.circuit.ir.operation.operation import CInitOperation
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
@@ -161,6 +162,8 @@ class ClassicalExecutor:
             self._execute_decode_qfixed(op, context, results, scoped_locals)
         elif isinstance(op, DictGetItemOperation):
             self._execute_dict_getitem(op, context, results, scoped_locals)
+        elif isinstance(op, CInitOperation):
+            self._execute_cinit(op, results)
         elif isinstance(op, StoreArrayElementOperation):
             self._execute_store_array_element(op, context, results, scoped_locals)
         elif isinstance(op, ForOperation):
@@ -179,6 +182,37 @@ class ClassicalExecutor:
             raise ExecutionError(
                 f"Unsupported classical operation: {type(op).__name__}"
             )
+
+    def _execute_cinit(
+        self,
+        op: CInitOperation,
+        results: dict[str, Any],
+    ) -> None:
+        """Materialize compile-time classical initialization metadata.
+
+        Args:
+            op (CInitOperation): Initialization operation whose results carry
+                constant scalar or array metadata.
+            results (dict[str, Any]): Current segment results, updated in
+                place with each initialized value.
+
+        Raises:
+            ExecutionError: If an initialization result has no concrete
+                payload.
+        """
+        for result in op.results:
+            initialized: Any = None
+            if isinstance(result, ArrayValue):
+                initialized = result.get_const_array()
+                if initialized is None and array_static_length(result) == 0:
+                    initialized = ()
+            elif result.is_constant():
+                initialized = result.get_const()
+            if initialized is None:
+                raise ExecutionError(
+                    f"Classical initializer '{result.name}' has no concrete value."
+                )
+            results[result.uuid] = initialized
 
     def _execute_binop(
         self,

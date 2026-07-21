@@ -23,28 +23,36 @@ Example:
 """
 
 from .arithmetic import (
+    add_const,
+    controlled_add_const,
     controlled_modular_add,
+    controlled_modular_add_const,
+    controlled_modular_add_const_modulus,
+    lookup_xor,
     modmul_const,
     modular_add,
+    modular_add_const,
     modular_decrement,
     modular_increment,
     ripple_carry_add,
 )
-from .grover import grover_iteration_count, grover_search
-from .lcu_block_encoding import LCUBlockEncoding
-from .multi_controlled_x import mcx, multi_controlled_x
-from .pauli_lcu_block_encoding import (
+from .block_encoding import (
+    IsingZBlockEncoding,
+    LCUBlockEncoding,
+    LCUBlockEncodingTerm,
     PauliLCUBlockEncoding,
-    pauli_lcu_block_encoding,
-)
-from .periodic_shift_lcu_block_encoding import (
     PeriodicShiftLCUBlockEncoding,
+    identity_block_encoding,
+    ising_z_block_encoding,
+    lcu_block_encoding,
+    pauli_lcu_block_encoding,
     periodic_shift_lcu_block_encoding,
 )
+from .grover import grover_iteration_count, grover_search
+from .multi_controlled_x import mcx, multi_controlled_x
 from .qft import iqft, qft
 from .qpe import qpe
 from .qsvt import qsvt
-from .shor import shor_order_finding
 from .state_preparation import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
@@ -61,6 +69,11 @@ __all__ = [
     "mcx",
     "multi_controlled_x",
     "LCUBlockEncoding",
+    "LCUBlockEncodingTerm",
+    "identity_block_encoding",
+    "lcu_block_encoding",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "PeriodicShiftLCUBlockEncoding",
@@ -72,12 +85,17 @@ __all__ = [
     "mottonen_amplitude_encoding_from_angles",
     # Arithmetic
     "ripple_carry_add",
+    "add_const",
+    "controlled_add_const",
     "modular_increment",
     "modular_decrement",
     "modular_add",
     "controlled_modular_add",
+    "modular_add_const",
+    "controlled_modular_add_const",
+    "controlled_modular_add_const_modulus",
+    "lookup_xor",
     "modmul_const",
-    "shor_order_finding",
     "grover_search",
     "grover_iteration_count",
 ]

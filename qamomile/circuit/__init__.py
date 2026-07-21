@@ -62,7 +62,7 @@ from .estimator import (
 # Frontend API
 from .frontend.callable_signature import CallableSignature
 from .frontend.composite_gate import composite_gate as composite_gate
-from .frontend.constructors import bit, float_, qubit, qubit_array, uint
+from .frontend.constructors import bit, bit_array, float_, qubit, qubit_array, uint
 from .frontend.handle import (
     Bit,
     Dict,
@@ -84,6 +84,7 @@ from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.expval import expval
 from .frontend.operation.global_phase import global_phase
 from .frontend.operation.inverse import inverse
+from .frontend.operation.math import ceil, log2
 from .frontend.operation.measurement import (
     measure,
     measure_reset,
@@ -116,22 +117,32 @@ from .frontend.operation.qubit_gates import (
 from .frontend.operation.select import select
 from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
-
-# Standard library circuits
+from .ir.effect import KernelEffect
 from .stdlib import (
+    IsingZBlockEncoding,
     LCUBlockEncoding,
+    LCUBlockEncodingTerm,
     PauliLCUBlockEncoding,
     PeriodicShiftLCUBlockEncoding,
+    add_const,
     amplitude_encoding,
     amplitude_encoding_from_angles,
     computational_basis_state,
+    controlled_add_const,
     controlled_modular_add,
+    controlled_modular_add_const,
+    controlled_modular_add_const_modulus,
     grover_iteration_count,
     grover_search,
+    identity_block_encoding,
     iqft,
+    ising_z_block_encoding,
+    lcu_block_encoding,
+    lookup_xor,
     mcx,
     modmul_const,
     modular_add,
+    modular_add_const,
     modular_decrement,
     modular_increment,
     mottonen_amplitude_encoding,
@@ -143,7 +154,6 @@ from .stdlib import (
     qpe,
     qsvt,
     ripple_carry_add,
-    shor_order_finding,
 )
 
 # Execution result / job types (return values of ExecutableProgram.sample / run)
@@ -177,8 +187,16 @@ def __getattr__(name: str):  # type: ignore[no-untyped-def]
     raise AttributeError(f"module 'qamomile.circuit' has no attribute {name!r}")
 
 
+# Imported after frontend symbols are initialized because these kernels use
+# ``import qamomile.circuit as qmc`` in their implementation module.
+from .algorithm.shor import (  # noqa: E402, I001
+    ekera_hastad_factoring,
+    shor_order_finding,
+)
+
 __all__ = [
     "qkernel",
+    "KernelEffect",
     "composite_gate",
     "Oracle",
     "opaque",
@@ -199,7 +217,10 @@ __all__ = [
     "inverse",
     "global_phase",
     "cast",
+    "ceil",
+    "log2",
     "bit",
+    "bit_array",
     "float_",
     "qubit",
     "uint",
@@ -256,6 +277,11 @@ __all__ = [
     "mcx",
     "multi_controlled_x",
     "LCUBlockEncoding",
+    "LCUBlockEncodingTerm",
+    "identity_block_encoding",
+    "lcu_block_encoding",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "computational_basis_state",
@@ -264,12 +290,19 @@ __all__ = [
     "mottonen_amplitude_encoding",
     "mottonen_amplitude_encoding_from_angles",
     "ripple_carry_add",
+    "add_const",
+    "controlled_add_const",
     "modular_add",
     "controlled_modular_add",
+    "modular_add_const",
+    "controlled_modular_add_const",
+    "controlled_modular_add_const_modulus",
+    "lookup_xor",
     "iqft",
     "qft",
     "modmul_const",
     "shor_order_finding",
+    "ekera_hastad_factoring",
     "grover_search",
     "grover_iteration_count",
     "QKernel",

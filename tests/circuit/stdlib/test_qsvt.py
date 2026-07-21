@@ -116,7 +116,7 @@ def _runtime_expval_template(
         block_encoding,
         phase_count=phase_count,
     )
-    return qmc.expval(signal[0], observable)
+    return qmc.expval(signal, observable)
 
 
 @qmc.qkernel
@@ -375,6 +375,22 @@ def _zero_probability(results: list[tuple[Any, int]]) -> float:
     """
     shots = sum(count for _, count in results)
     return sum(count for value, count in results if _all_zero(value)) / shots
+
+
+def _zero_projector_observable(num_qubits: int) -> qm_o.Hamiltonian:
+    """Return the projector onto an all-zero register as a Hamiltonian.
+
+    Args:
+        num_qubits (int): Positive register width.
+
+    Returns:
+        qm_o.Hamiltonian: Product of ``(I + Z_i) / 2`` over every qubit.
+    """
+    projector = qm_o.Hamiltonian.identity(num_qubits=num_qubits)
+    identity = qm_o.Hamiltonian.identity(num_qubits=num_qubits)
+    for index in range(num_qubits):
+        projector = projector * (0.5 * (identity + qm_o.Z(index)))
+    return projector
 
 
 @pytest.mark.parametrize(
@@ -643,6 +659,108 @@ def test_multisignal_repeated_qsvt_executes_on_every_sdk(
     assert observed_z == pytest.approx(expected_z, abs=expval_tolerance)
 
 
+def test_serialized_qsvt_with_recursive_lcu_executes_on_every_sdk(
+    sdk_transpiler: Any,
+) -> None:
+    """A nested descriptor matches its analytic projector probability.
+
+    On the initial system state ``|0>``, every child is diagonal and the
+    recursive leading block has the scalar eigenvalue assembled below. For
+    phases ``(0, phi, 0)``, the all-zero signal probability is
+    ``1 - 4 sin(phi)^2 t (1 - t)``, where ``t`` is the squared magnitude of
+    that normalized eigenvalue.
+    """
+    diagonal_identity_coefficient = 0.3
+    diagonal_z_coefficient = -0.8
+    inner_identity_coefficient = 0.6 + 0.2j
+    inner_diagonal_coefficient = -0.4
+    outer_inner_coefficient = -0.7j
+    outer_identity_coefficient = 0.25
+
+    identity = qmc.identity_block_encoding(1)
+    diagonal = qmc.ising_z_block_encoding(
+        {(): diagonal_identity_coefficient, (0,): diagonal_z_coefficient},
+        1,
+    )
+    inner = qmc.lcu_block_encoding(
+        (
+            qmc.LCUBlockEncodingTerm(inner_identity_coefficient, identity),
+            qmc.LCUBlockEncodingTerm(inner_diagonal_coefficient, diagonal),
+        )
+    )
+    encoding = qmc.lcu_block_encoding(
+        (
+            qmc.LCUBlockEncodingTerm(outer_inner_coefficient, inner),
+            qmc.LCUBlockEncodingTerm(outer_identity_coefficient, identity),
+        )
+    )
+    middle_phase = 0.63
+    phases = [0.0, middle_phase, 0.0]
+    diagonal_eigenvalue = diagonal_identity_coefficient + diagonal_z_coefficient
+    inner_eigenvalue = (
+        inner_identity_coefficient + inner_diagonal_coefficient * diagonal_eigenvalue
+    )
+    outer_eigenvalue = (
+        outer_inner_coefficient * inner_eigenvalue + outer_identity_coefficient
+    )
+    normalized_squared = abs(outer_eigenvalue / encoding.normalization) ** 2
+    expected_zero = 1.0 - (
+        4.0
+        * math.sin(middle_phase) ** 2
+        * normalized_squared
+        * (1.0 - normalized_squared)
+    )
+    compile_bindings = {
+        "block_encoding": encoding,
+        "phase_count": len(phases),
+        "initial_bits": [0],
+    }
+
+    sample_payload = serialize(_runtime_sample_template)
+    expval_payload = serialize(_runtime_expval_template)
+    sample_template = deserialize(sample_payload)
+    expval_template = deserialize(expval_payload)
+    sample_executable = sdk_transpiler.transpiler.transpile(
+        sample_template,
+        bindings=compile_bindings,
+        parameters=["phases"],
+    )
+    expval_executable = sdk_transpiler.transpiler.transpile(
+        expval_template,
+        bindings={
+            **compile_bindings,
+            "observable": _zero_projector_observable(
+                encoding.num_signal_qubits,
+            ),
+        },
+        parameters=["phases"],
+    )
+
+    shots = 2048
+    executor = sdk_transpiler.transpiler.executor()
+    sample_result = sample_executable.sample(
+        executor,
+        bindings={"phases": phases},
+        shots=shots,
+    ).result()
+    observed_zero = float(
+        expval_executable.run(executor, bindings={"phases": phases}).result()
+    )
+
+    sampling_tolerance = (
+        6.0 * math.sqrt(expected_zero * (1.0 - expected_zero) / shots) + 0.02
+    )
+    assert encoding.num_signal_qubits == 3
+    assert _zero_probability(sample_result.results) == pytest.approx(
+        expected_zero,
+        abs=sampling_tolerance,
+    )
+    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed_zero == pytest.approx(expected_zero, abs=expval_tolerance)
+    assert serialize(sample_template) == sample_payload
+    assert serialize(expval_template) == expval_payload
+
+
 @pytest.mark.parametrize(
     ("phase_count", "error", "message"),
     [
@@ -736,6 +854,28 @@ def test_serialized_compile_time_phases_select_explicit_prefix(
         rtol=0.0,
         atol=1e-8,
     )
+
+
+def test_serialized_compile_time_phases_reject_short_vector(
+    qiskit_transpiler: Any,
+) -> None:
+    """A compile-time phase prefix must cover its explicit phase count."""
+    encoding = _periodic_encoding({1: 1.0}, system_width=1)
+    restored = deserialize(serialize(_runtime_sample_template))
+
+    with pytest.raises(
+        EmitError,
+        match="Index 1 is out of range.*array 'phases' of length 1",
+    ):
+        qiskit_transpiler.transpile(
+            restored,
+            bindings={
+                "block_encoding": encoding,
+                "phases": [0.1],
+                "phase_count": 2,
+                "initial_bits": [0],
+            },
+        )
 
 
 @pytest.mark.parametrize(

@@ -52,6 +52,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
@@ -165,6 +167,7 @@ class _DecodeContext:
             self._by_uuid[uuid] = entry
         self._built: dict[str, ValueBase] = {}
         self._building: set[str] = set()
+        self._blocks: list[Block] = []
         self._definition_entries: dict[str, dict[str, Any]] = {}
         self._definitions: dict[str, CallableDef] = {}
         for entry in callable_table:
@@ -184,6 +187,43 @@ class _DecodeContext:
             ref = _decode_callable_ref(definition_payload.get("ref"))
             self._definition_entries[definition_id] = definition_payload
             self._definitions[definition_id] = CallableDef(ref=ref)
+
+    def register_block(self, block: Block) -> Block:
+        """Register a decoded block for post-link metadata refresh.
+
+        Args:
+            block (Block): Newly decoded semantic block.
+
+        Returns:
+            Block: The same block for convenient decoder composition.
+        """
+        self._blocks.append(block)
+        return block
+
+    def refresh_block_effects(self) -> None:
+        """Refresh derived effects after callable placeholders are linked.
+
+        Callable bodies are decoded through shared placeholders so recursive
+        and forward references can be reconstructed. Blocks created before a
+        referenced placeholder is populated initially have an incomplete
+        effect summary. Repeated refresh reaches the finite fixed point across
+        the decoded block graph without rescanning at later API access sites.
+        """
+        from qamomile.circuit.ir.effect import refresh_block_effects
+
+        while True:
+            previous = tuple(
+                (block.effects, block.measurement_result_indices)
+                for block in self._blocks
+            )
+            for block in self._blocks:
+                refresh_block_effects(block)
+            current = tuple(
+                (block.effects, block.measurement_result_indices)
+                for block in self._blocks
+            )
+            if current == previous:
+                return
 
     def materialize(self, uuid: str) -> ValueBase:
         """Return the ``ValueBase`` for ``uuid``, instantiating on demand.
@@ -360,17 +400,19 @@ def _decode_block(d: dict[str, Any], ctx: _DecodeContext) -> Block:
         )
         inferred_names.add(name)
 
-    return Block(
-        name=d.get("name", ""),
-        kind=kind,
-        label_args=list(d.get("label_args", ())),
-        input_values=input_values,
-        output_values=output_values,
-        output_names=list(d.get("output_names", ())),
-        operations=operations,
-        parameters=parameters,
-        param_slots=tuple(inferred_slots),
-        static_bindings=tuple(static_bindings),
+    return ctx.register_block(
+        Block(
+            name=d.get("name", ""),
+            kind=kind,
+            label_args=list(d.get("label_args", ())),
+            input_values=input_values,
+            output_values=output_values,
+            output_names=list(d.get("output_names", ())),
+            operations=operations,
+            parameters=parameters,
+            param_slots=tuple(inferred_slots),
+            static_bindings=tuple(static_bindings),
+        )
     )
 
 
@@ -1450,6 +1492,27 @@ def _decode_binop(d: dict[str, Any], ctx: _DecodeContext) -> BinOp:
     return BinOp(operands=operands, results=results, kind=kind)
 
 
+def _decode_unary_math(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+) -> UnaryMathOp:
+    """Decode a unary mathematical operation.
+
+    Args:
+        d (dict[str, Any]): Encoded operation dictionary.
+        ctx (_DecodeContext): Active decoding context.
+
+    Returns:
+        UnaryMathOp: Reconstructed unary mathematical operation.
+
+    Raises:
+        ValueError: If ``kind`` is not a known ``UnaryMathOpKind`` name.
+    """
+    operands, results = _operands_results(d, ctx)
+    kind = _enum_by_name(UnaryMathOpKind, d.get("kind"), "UnaryMathOpKind")
+    return UnaryMathOp(operands=operands, results=results, kind=kind)
+
+
 def _decode_compop(d: dict[str, Any], ctx: _DecodeContext) -> CompOp:
     """Decode :class:`CompOp`.
 
@@ -2289,6 +2352,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "ExpvalOp": _decode_expval,
     "PauliEvolveOp": _decode_pauli_evolve,
     "BinOp": _decode_binop,
+    "UnaryMathOp": _decode_unary_math,
     "CompOp": _decode_compop,
     "CondOp": _decode_condop,
     "NotOp": _decode_notop,

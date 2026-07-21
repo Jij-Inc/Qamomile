@@ -14,7 +14,7 @@ from __future__ import annotations
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.operation.control_flow import for_loop
 
-from .lcu_block_encoding import LCUBlockEncoding
+from .block_encoding import LCUBlockEncoding
 
 
 def _flip_projector_auxiliary(
@@ -135,10 +135,11 @@ def qsvt(
     array, pass a separate ``phase_count`` argument and bind that count at
     transpile time; the phase values can then be supplied when the executable
     runs. For a phase vector resolved through transpile-time ``bindings``, an
-    explicit count selects a prefix and a longer vector is sliced. For a phase
-    vector preserved as a runtime parameter, the executable ABI requires
-    exactly ``phase_count`` values; shorter and longer runtime vectors are
-    rejected. Omitting the count applies the complete compile-time vector.
+    explicit count selects a prefix; the vector must contain at least that many
+    values, and any remaining values are ignored. For a phase vector preserved
+    as a runtime parameter, the executable ABI requires exactly ``phase_count``
+    values; shorter and longer runtime vectors are rejected. Omitting the count
+    applies the complete compile-time vector.
 
     The helper emits serializable IR directly into the enclosing qkernel. That
     qkernel may therefore be traced and serialized before either ``encoding``
@@ -160,10 +161,10 @@ def qsvt(
             normalized leading block is transformed.
         phase_count (int | qmc.UInt | None): Number of phase elements to use.
             Defaults to the phase vector length. For compile-time phase
-            bindings, an explicit count selects a prefix capped by the
-            available length. When ``phases`` is preserved as a runtime
-            parameter array, the count must be supplied at compile time and
-            the runtime vector must have exactly that length.
+            bindings, an explicit count selects a prefix and the vector must
+            contain at least that many values. When ``phases`` is preserved as
+            a runtime parameter array, the count must be supplied at compile
+            time and the runtime vector must have exactly that length.
 
     Returns:
         tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Transformed signal
@@ -211,7 +212,7 @@ def qsvt(
     _validate_phase_count(resolved_count)
 
     selected_phases = phases[0:resolved_count]
-    selected_count = selected_phases.shape[0]
+    selected_count = resolved_count
 
     projector_auxiliary = qmc.qubit("qsvt_projector_auxiliary")
     signal, projector_auxiliary = _projector_phase_rotation(

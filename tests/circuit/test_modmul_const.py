@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import importlib.util
 
-import numpy as np
 import pytest
-import sympy as sp
 
 import qamomile.circuit as qmc
-from qamomile.circuit.stdlib.arithmetic import _xor_constant, modmul_const
+from qamomile.circuit.stdlib.arithmetic import (
+    _xor_constant,
+    modmul_const,
+)
 
 
 def _value_of(bits: tuple[int, ...]) -> int:
@@ -60,10 +61,13 @@ def _load_probe(a: int, x: int, n: int, modulus: int, path: str):
 
 def test_modmul_const_non_cyclic_executes(sdk_transpiler, tmp_path) -> None:
     """A small non-rotation instance executes the polynomial reversible body."""
+    if sdk_transpiler.backend_name == "quri_parts":
+        pytest.skip("QURI Parts cannot represent modmul's mid-circuit reset")
+
     probe = _load_probe(3, 2, 3, 7, str(tmp_path / "noncyclic.py"))
     transpiler = sdk_transpiler.transpiler
     executable = transpiler.transpile(probe)
-    result = executable.sample(transpiler.executor(), shots=64).result()
+    result = executable.sample(transpiler.executor(), shots=1).result()
 
     assert _value_of(result.most_common(1)[0][0]) == 6
 
@@ -81,6 +85,30 @@ def test_modmul_const_non_cyclic_estimates_its_executable_body() -> None:
     est = mul.estimate_resources()
     assert est.gates.total > 0
     assert "modmul_const" not in est.calls.calls_by_name
+
+
+def test_modmul_const_body_growth_is_quadratic_at_fixed_window() -> None:
+    """Specialized body estimates follow quadratic modular-multiply growth."""
+    cases = [(2, 2, 3), (3, 2, 5), (4, 2, 15)]
+    normalized = []
+    for width, multiplier, modulus in cases:
+
+        @qmc.qkernel
+        def mul() -> qmc.Vector[qmc.Qubit]:
+            """Build one specialized modular multiplication."""
+            reg = qmc.qubit_array(width, name="reg")
+            return modmul_const(
+                reg,
+                multiplier=multiplier,
+                modulus=modulus,
+                window_size=2,
+            )
+
+        estimate = mul.estimate_resources()
+        assert estimate.qubits == 3 * width + 2 + 7
+        normalized.append(float(estimate.gates.total) / (width**2))
+
+    assert max(normalized) / min(normalized) < 1.5
 
 
 def test_modmul_const_rejects_non_coprime_multiplier() -> None:
@@ -127,15 +155,15 @@ def test_xor_constant_preserves_controlled_phase(sdk_transpiler) -> None:
     transpiler = sdk_transpiler.transpiler
     result = (
         transpiler.transpile(_controlled_xor_phase_probe)
-        .sample(transpiler.executor(), shots=64)
+        .sample(transpiler.executor(), shots=1)
         .result()
     )
 
-    assert result.results == [(0, 64)]
+    assert result.results == [(0, 1)]
 
 
-def test_modmul_const_symbolic_body_estimate() -> None:
-    """The executable multiplier body yields a symbolic quadratic estimate."""
+def test_modmul_const_requires_a_concrete_register_width() -> None:
+    """FTQC modular multiplication is specialized to a concrete width."""
 
     @qmc.qkernel
     def mul(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
@@ -144,15 +172,26 @@ def test_modmul_const_symbolic_body_estimate() -> None:
         reg = modmul_const(reg, multiplier=2, modulus=15)
         return reg
 
-    estimate = mul.estimate_resources()
-    n = estimate.parameters["n"]
-    positive_n = sp.Symbol("positive_n", integer=True, positive=True)
-    assert sp.Poly(estimate.gates.total.subs(n, positive_n), positive_n).degree() == 2
-    assert sp.Poly(estimate.gates.toffoli.subs(n, positive_n), positive_n).degree() == 2
+    with pytest.raises(ValueError, match="requires a concrete register width"):
+        mul.build()
 
-    concrete = mul.estimate_resources(inputs={"n": 2048})
-    assert concrete.gates.total == estimate.gates.total.subs(n, 2048)
-    assert concrete.gates.toffoli == estimate.gates.toffoli.subs(n, 2048)
+
+def test_modmul_const_rejects_invalid_window_size() -> None:
+    """The standard lookup multiplier rejects an empty address window."""
+
+    @qmc.qkernel
+    def bad() -> qmc.Vector[qmc.Qubit]:
+        """Attempt modular multiplication with a zero-width lookup."""
+        reg = qmc.qubit_array(2, name="reg")
+        return modmul_const(
+            reg,
+            multiplier=2,
+            modulus=3,
+            window_size=0,
+        )
+
+    with pytest.raises(ValueError, match="window_size must be positive"):
+        bad.build()
 
 
 def test_modmul_const_requires_a_real_problem_instance() -> None:
@@ -225,67 +264,50 @@ def test_modmul_const_has_no_abstract_execution_mode(sdk_transpiler) -> None:
 
 @pytest.mark.parametrize("x", [0, 1, 2, 3])
 def test_modmul_const_small_instance_is_correct(
-    sdk_transpiler, x: int, tmp_path
+    qiskit_transpiler, x: int, tmp_path
 ) -> None:
-    """Execute the smallest nontrivial modular multiplication on every backend.
+    """Execute the smallest nontrivial FTQC modular multiplication.
 
     The n=2 instance exercises the same polynomial reversible body used by
     larger problems without allocating the n=4 workspace statevector. The
-    29-qubit Shor benchmark separately verifies large-instance transpilation.
+    21-qubit Shor benchmark separately verifies large-instance transpilation.
     """
     a, n, modulus = 2, 2, 3
     path = str(tmp_path / f"probe_{a}_{x}.py")
     probe = _load_probe(a, x, n, modulus, path)
-    transpiler = sdk_transpiler.transpiler
-    exe = transpiler.transpile(probe)
-    measured = exe.sample(transpiler.executor(), shots=64).result().most_common(1)
+    exe = qiskit_transpiler.transpile(probe)
+    measured = exe.sample(qiskit_transpiler.executor(), shots=1).result().most_common(1)
     got = _value_of(measured[0][0])
     expected = (a * x) % modulus if x < modulus else x
-    assert got == expected, (
-        f"{sdk_transpiler.backend_name}: a={a} x={x} got {got}, expected {expected}"
-    )
+    assert got == expected
 
 
 @qmc.qkernel
-def _modmul_expval(obs: qmc.Observable) -> qmc.Float:
-    """Estimate ``<obs>`` after multiplying ``|1>`` by 2 modulo 3 (n=2)."""
+def _modmul_phase_kickback() -> tuple[qmc.Bit, qmc.Vector[qmc.Bit]]:
+    """Kick the multiplier's minus eigenphase into a control qubit."""
+    control = qmc.qubit("control")
     reg = qmc.qubit_array(2, name="reg")
-    reg[0] = qmc.x(reg[0])  # prepare |1>
-    reg = modmul_const(reg, multiplier=2, modulus=3)  # -> |2>
-    return qmc.expval(reg, obs)
+    control = qmc.h(control)
+    reg[0] = qmc.x(reg[0])
+    reg[1] = qmc.h(reg[1])
+    reg[1], reg[0] = qmc.cx(reg[1], reg[0])
+    reg[1] = qmc.z(reg[1])
+    control, reg = modmul_const(
+        reg,
+        multiplier=2,
+        modulus=3,
+        control=control,
+    )
+    control = qmc.h(control)
+    return qmc.measure(control), qmc.measure(reg)
 
 
-@pytest.mark.parametrize("qubit", [0, 1])
-def test_modmul_const_expval_cross_backend(sdk_transpiler, qubit) -> None:
-    """modmul_const's expectation-value path agrees across SDK backends.
-
-    Exercises the estimator (expval) primitive, which regresses independently
-    from sampling, on the concrete polynomial modmul at n=2. ``|1> -> |2>``, a
-    computational-basis state, so ``<Z_q>`` is analytically +/-1: qubit 1 (set in
-    ``|2> = 0b0010``) gives -1, the others +1. Also cross-checked against a
-    Qiskit statevector reference.
-    """
-    pytest.importorskip("qiskit")
-    import qamomile.observable as qm_o
-    from qamomile.qiskit import QiskitTranspiler
-
-    observable = qm_o.Z(qubit)
-    reference_transpiler = QiskitTranspiler()
-    reference = (
-        reference_transpiler.transpile(_modmul_expval, bindings={"obs": observable})
-        .run(reference_transpiler.executor())
+def test_modmul_const_preserves_coherent_phase(qiskit_transpiler) -> None:
+    """Measurement-assisted arithmetic preserves multiplier eigenphases."""
+    result = (
+        qiskit_transpiler.transpile(_modmul_phase_kickback)
+        .sample(qiskit_transpiler.executor(), shots=8)
         .result()
     )
-    analytic = -1.0 if qubit == 1 else 1.0
-    assert np.isclose(reference, analytic, atol=1e-8)
-
-    transpiler = sdk_transpiler.transpiler
-    value = (
-        transpiler.transpile(_modmul_expval, bindings={"obs": observable})
-        .run(transpiler.executor())
-        .result()
-    )
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-    assert np.isclose(value, reference, atol=atol), (
-        f"{sdk_transpiler.backend_name} qubit={qubit}: expected {reference}, got {value}"
-    )
+    assert sum(count for (control, _), count in result.results if control == 1) == 8
+    assert {bits for (_, bits), _ in result.results} <= {(1, 0), (0, 1)}

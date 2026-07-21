@@ -2,6 +2,24 @@
 
 This file collects known limitations of the Qamomile compiler. Each entry describes the unsupported shape, when it matters, why it remains, a workaround where one is available, and the intended direction for support.
 
+## Recursive LCU coefficients are construction-time constants
+
+`LCUBlockEncodingTerm.coefficient` accepts a finite Python or NumPy complex numeric scalar, but it does not accept a symbolic qkernel value such as `qmc.Float`. The term normalizes its coefficient to a built-in `complex` when the descriptor is constructed. The recursive composer then uses that concrete value to remove zero terms, determine the active SELECT cases and shared child-pool width, compute the parent normalization
+
+$$
+\Lambda=\sum_j |c_j|\alpha_j,
+$$
+
+construct PREPARE amplitudes $\sqrt{|c_j|\alpha_j/\Lambda}$, and attach the relative phase $c_j/|c_j|$ to SELECT case $j$. The completed block-encoding unitary consequently keeps the parameter-free `unitary(signal, system)` ABI, and its positive finite `normalization` is construction-time metadata rather than a runtime expression.
+
+**When it bites**: a caller wants to write `LCUBlockEncodingTerm(mu, child)` with `mu: qmc.Float`, or wants one already-transpiled recursive LCU circuit to change a shift or other LCU coefficient between executions. A symbolic `qmc.Float` exists only while tracing or executing a qkernel and cannot be converted to the finite built-in `complex` required while the host-side descriptor and its circuit structure are being built.
+
+**Why this trade-off was chosen**: changing a coefficient is not merely changing one gate angle. It can add or remove an active term, change selector width and child-pool routing, change every PREPARE amplitude and SELECT phase, change the descriptor's normalization, and therefore change the scale seen by a downstream QSVT polynomial. Allowing a symbolic value in the current exact descriptor would make its circuit shape and normalization unknown while weakening the static-binding, inverse, control, serialization, and nested-SELECT contract.
+
+**Workaround**: choose the coefficient as an ordinary host-side numeric value, construct a complete `LCUBlockEncoding`, and pass that completed descriptor through qkernel static `bindings`. For a parameter sweep, construct and transpile or bind one completed encoding per coefficient value. The same qkernel may still have unrelated `qmc.Float` runtime parameters for parameterized gates, provided those argument names are placed in `parameters` and the encoding argument is placed only in `bindings`; one argument must not appear in both.
+
+**Future fix**: introduce a separate parameterized-LCU contract rather than broadening `LCUBlockEncodingTerm`. Such a contract must fix or explicitly parameterize the active term set and signal layout, lower runtime state preparation and relative phases on every supported target, define how a runtime normalization is exposed, and specify how QSVT phases and scale-dependent error guarantees interact with that normalization.
+
 ## Resource estimates do not include target-specific scalar-phase synthesis
 
 The resource estimator operates on Qamomile's target-neutral semantic IR. It therefore counts an uncontrolled `GlobalPhaseOperation` as zero logical gates and zero logical qubits. This is exact for representations that retain a circuit or region phase directly, but it does not include physical operations introduced later by a target materializer. CUDA-Q emits `R1(2φ) RZ(-2φ)` on an existing qubit; for a zero-qubit program it adds one clean internal carrier and emits only `RZ(-2φ)`. QURI Parts emits `U1(2φ) RZ(-2φ)` for a concrete phase when a logical qubit is available; a symbolic or zero-qubit phase instead uses one clean internal carrier and `RZ(-2φ)`. QURI Parts also uses that carrier to restore the scalar factors missing from its parametric `P` and `CP` decompositions, adding one phase-correction `RZ` as well as the carrier qubit when one has not already been allocated. Controlled global phase is counted as an abstract controlled phase operation, not necessarily the final target decomposition, and a controlled phase whose angle is exactly zero may still be conservatively counted as one gate. The current estimator also classifies `PauliEvolveOp` without its surrounding coherent controls, so it omits both the control overhead and the controlled relative phase contributed by the Hamiltonian's identity constant.
