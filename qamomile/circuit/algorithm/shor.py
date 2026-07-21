@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import qamomile.circuit as qmc
@@ -39,78 +40,99 @@ class _ShorWorkspace:
     domain: qmc.Qubit
     enable: qmc.Qubit
 
-    @classmethod
-    def allocate(cls, register_size: int, window_size: int) -> _ShorWorkspace:
-        """Allocate a clean workspace for one factoring kernel.
 
-        Args:
-            register_size (int): Concrete modular-register width.
-            window_size (int): Lookup address width.
+def _allocate_shor_workspace(
+    register_size: int,
+    window_size: int,
+) -> _ShorWorkspace:
+    """Allocate a clean workspace for one factoring kernel.
 
-        Returns:
-            _ShorWorkspace: Newly allocated frontend handles.
-        """
-        return cls(
-            phase=qmc.qubit("phase"),
-            work=qmc.qubit_array(register_size, name="work"),
-            accumulator=qmc.qubit_array(register_size, name="accumulator"),
-            lookup=qmc.qubit_array(register_size, name="lookup"),
-            address=qmc.qubit_array(window_size, name="address"),
-            carry=qmc.qubit("carry"),
-            vent=qmc.qubit("vent"),
-            overflow=qmc.qubit("overflow"),
-            flag=qmc.qubit("flag"),
-            domain=qmc.qubit("domain"),
-            enable=qmc.qubit("enable"),
-        )
+    Args:
+        register_size (int): Concrete modular-register width.
+        window_size (int): Lookup address width.
 
-    def apply_modular_multiplication(
-        self,
-        multiplier: int,
-        inverse_multiplier: int,
-        modulus: int,
-        register_size: int,
-        window_size: int,
-    ) -> None:
-        """Apply one controlled modular multiplication in place.
+    Returns:
+        _ShorWorkspace: Newly allocated frontend handles.
+    """
+    return _ShorWorkspace(
+        phase=qmc.qubit("phase"),
+        work=qmc.qubit_array(register_size, name="work"),
+        accumulator=qmc.qubit_array(register_size, name="accumulator"),
+        lookup=qmc.qubit_array(register_size, name="lookup"),
+        address=qmc.qubit_array(window_size, name="address"),
+        carry=qmc.qubit("carry"),
+        vent=qmc.qubit("vent"),
+        overflow=qmc.qubit("overflow"),
+        flag=qmc.qubit("flag"),
+        domain=qmc.qubit("domain"),
+        enable=qmc.qubit("enable"),
+    )
 
-        Args:
-            multiplier (int): Compile-time modular multiplier.
-            inverse_multiplier (int): Multiplicative inverse modulo ``modulus``.
-            modulus (int): Compile-time modular-arithmetic modulus.
-            register_size (int): Concrete modular-register width.
-            window_size (int): Lookup address width.
-        """
-        (
-            self.phase,
-            self.work,
-            self.accumulator,
-            self.lookup,
-            self.address,
-            self.carry,
-            self.vent,
-            self.overflow,
-            self.flag,
-            self.domain,
-            self.enable,
-        ) = _modmul_const_body(
-            self.phase,
-            self.work,
-            self.accumulator,
-            self.lookup,
-            self.address,
-            self.carry,
-            self.vent,
-            self.overflow,
-            self.flag,
-            self.domain,
-            self.enable,
-            qmc.uint(multiplier),
-            qmc.uint(inverse_multiplier),
-            qmc.uint(modulus),
-            register_size,
-            window_size,
-        )
+
+def _apply_modular_multiplication(
+    workspace: _ShorWorkspace,
+    multiplier: int,
+    inverse_multiplier: int,
+    modulus: int,
+    register_size: int,
+    window_size: int,
+) -> _ShorWorkspace:
+    """Apply one controlled modular multiplication to a workspace.
+
+    Args:
+        workspace (_ShorWorkspace): Input phase and arithmetic state.
+        multiplier (int): Compile-time modular multiplier.
+        inverse_multiplier (int): Multiplicative inverse modulo ``modulus``.
+        modulus (int): Compile-time modular-arithmetic modulus.
+        register_size (int): Concrete modular-register width.
+        window_size (int): Lookup address width.
+
+    Returns:
+        _ShorWorkspace: Successor workspace containing the returned handles.
+    """
+    (
+        phase,
+        work,
+        accumulator,
+        lookup,
+        address,
+        carry,
+        vent,
+        overflow,
+        flag,
+        domain,
+        enable,
+    ) = _modmul_const_body(
+        workspace.phase,
+        workspace.work,
+        workspace.accumulator,
+        workspace.lookup,
+        workspace.address,
+        workspace.carry,
+        workspace.vent,
+        workspace.overflow,
+        workspace.flag,
+        workspace.domain,
+        workspace.enable,
+        qmc.uint(multiplier),
+        qmc.uint(inverse_multiplier),
+        qmc.uint(modulus),
+        register_size,
+        window_size,
+    )
+    return _ShorWorkspace(
+        phase=phase,
+        work=work,
+        accumulator=accumulator,
+        lookup=lookup,
+        address=address,
+        carry=carry,
+        vent=vent,
+        overflow=overflow,
+        flag=flag,
+        domain=domain,
+        enable=enable,
+    )
 
 
 def _apply_semiclassical_iqft_feedback(
@@ -142,7 +164,7 @@ def _iterative_modular_phase_bits(
     modulus: int,
     register_size: int,
     window_size: int,
-) -> tuple[qmc.Bit, ...]:
+) -> tuple[_ShorWorkspace, tuple[qmc.Bit, ...]]:
     """Measure one iterative modular-eigenphase schedule.
 
     Args:
@@ -154,30 +176,34 @@ def _iterative_modular_phase_bits(
         window_size (int): Lookup address width.
 
     Returns:
-        tuple[qmc.Bit, ...]: Little-endian phase bits. The workspace is
-            updated in place and remains reusable by the caller.
+        tuple[_ShorWorkspace, tuple[qmc.Bit, ...]]: Successor workspace and
+            little-endian phase bits.
     """
     measured_bits: list[qmc.Bit] = []
     for round_index, multiplier in enumerate(multipliers):
-        workspace.phase = qmc.h(workspace.phase)
+        phase = qmc.h(workspace.phase)
         if multiplier != 1:
             inverse_multiplier = pow(multiplier, -1, modulus)
-            workspace.apply_modular_multiplication(
+            workspace = dataclasses.replace(workspace, phase=phase)
+            workspace = _apply_modular_multiplication(
+                workspace,
                 multiplier,
                 inverse_multiplier,
                 modulus,
                 register_size,
                 window_size,
             )
-        workspace.phase = _apply_semiclassical_iqft_feedback(
-            workspace.phase,
+            phase = workspace.phase
+        phase = _apply_semiclassical_iqft_feedback(
+            phase,
             measured_bits,
             round_index,
         )
-        workspace.phase = qmc.h(workspace.phase)
-        workspace.phase, measured = qmc.measure_reset(workspace.phase)
+        phase = qmc.h(phase)
+        phase, measured = qmc.measure_reset(phase)
+        workspace = dataclasses.replace(workspace, phase=phase)
         measured_bits.append(measured)
-    return tuple(measured_bits)
+    return workspace, tuple(measured_bits)
 
 
 def _iterative_order_finding_body(
@@ -210,7 +236,7 @@ def _iterative_order_finding_body(
     multipliers = tuple(
         pow(base, 2**exponent, modulus) for exponent in range(precision - 1, -1, -1)
     )
-    measured_bits = _iterative_modular_phase_bits(
+    _, measured_bits = _iterative_modular_phase_bits(
         workspace,
         multipliers=multipliers,
         modulus=modulus,
@@ -310,7 +336,7 @@ def shor_order_finding(
             qmc.Vector[qmc.Bit]: Little-endian phase-estimation bits.
         """
         return _iterative_order_finding_body(
-            _ShorWorkspace.allocate(register_size, window_size),
+            _allocate_shor_workspace(register_size, window_size),
             base=base,
             modulus=modulus,
             precision=precision,
@@ -375,13 +401,13 @@ def ekera_hastad_factoring(
         Returns:
             qmc.Vector[qmc.Bit]: Concatenated long and short phase samples.
         """
-        workspace = _ShorWorkspace.allocate(register_size, window_size)
+        workspace = _allocate_shor_workspace(register_size, window_size)
         workspace.work[0] = qmc.x(workspace.work[0])
         long_multipliers = tuple(
             pow(generator, 2**exponent, modulus)
             for exponent in range(long_precision - 1, -1, -1)
         )
-        long_bits = _iterative_modular_phase_bits(
+        workspace, long_bits = _iterative_modular_phase_bits(
             workspace,
             multipliers=long_multipliers,
             modulus=modulus,
@@ -392,7 +418,7 @@ def ekera_hastad_factoring(
             pow(inverse_y, 2**exponent, modulus)
             for exponent in range(short_precision - 1, -1, -1)
         )
-        short_bits = _iterative_modular_phase_bits(
+        _, short_bits = _iterative_modular_phase_bits(
             workspace,
             multipliers=short_multipliers,
             modulus=modulus,
