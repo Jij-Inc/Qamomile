@@ -23,6 +23,15 @@ def _one_gate_implementation(q: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _static_implementation(
+    q: qmc.Qubit,
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Qubit:
+    """Use an LCU descriptor through a compile-time static binding."""
+    return qmc.rx(q, encoding.normalization)
+
+
+@qmc.qkernel
 def _helper(q: qmc.Qubit) -> qmc.Qubit:
     """Invoke the costed oracle from a nested body."""
     (q,) = _COSTED_ORACLE(q)
@@ -104,6 +113,15 @@ def test_estimator_validates_empty_non_mapping_bindings() -> None:
         qmc.ResourceEstimator().estimate(
             _algorithm,
             oracle_bindings=[],  # type: ignore[arg-type]
+        )
+
+
+def test_estimator_rejects_unresolved_static_oracle_implementation() -> None:
+    """Estimator rejects an implementation requiring static specialization."""
+    with pytest.raises(ValueError, match="unresolved static bindings.*encoding"):
+        qmc.ResourceEstimator().estimate(
+            _algorithm,
+            oracle_bindings={"costed_oracle": _static_implementation},
         )
 
 

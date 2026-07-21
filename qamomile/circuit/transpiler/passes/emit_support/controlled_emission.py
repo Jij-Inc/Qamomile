@@ -28,6 +28,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.callable import (
     CallTransform,
@@ -57,6 +58,7 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
     _set_emit_value,
     evaluate_binop,
     evaluate_classical_predicate,
+    evaluate_unary_math,
 )
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     remap_static_merge_outputs,
@@ -473,7 +475,10 @@ def _batch_op_weight(
         int: 0 for ops that emit nothing, 1 for a single controlled gate,
             2 for constructs that on their own justify batching.
     """
-    if isinstance(op, (BinOp, CompOp, CondOp, NotOp, ReturnOperation)):
+    if isinstance(
+        op,
+        (BinOp, CompOp, CondOp, NotOp, UnaryMathOp, ReturnOperation),
+    ):
         return 0
     if isinstance(op, GateOperation):
         return 1
@@ -561,6 +566,10 @@ def _controlled_body_batch_weight(
 ) -> int:
     """Sum the batch weights of a controlled block body, capped at the threshold.
 
+    Classical operations are evaluated sequentially into a scratch binding
+    map so later structural operations can resolve derived conditions and
+    loop bounds without mutating the bindings used by real emission.
+
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
         operations (list[Operation]): Controlled block body operations.
@@ -571,8 +580,16 @@ def _controlled_body_batch_weight(
             (callers only compare against that threshold).
     """
     total = 0
+    analysis_bindings = bindings.copy()
     for op in operations:
-        total += _batch_op_weight(emit_pass, op, bindings)
+        if isinstance(op, BinOp):
+            evaluate_binop(emit_pass, op, analysis_bindings)
+        elif isinstance(op, UnaryMathOp):
+            evaluate_unary_math(emit_pass, op, analysis_bindings)
+        elif isinstance(op, (CompOp, CondOp, NotOp)):
+            evaluate_classical_predicate(emit_pass, op, analysis_bindings)
+
+        total += _batch_op_weight(emit_pass, op, analysis_bindings)
         if total >= _BATCH_MIN_WEIGHT:
             return _BATCH_MIN_WEIGHT
     return total
@@ -774,6 +791,8 @@ def emit_controlled_operations(
             _propagate_controlled_gate_results(op, gate_targets, qubit_map)
         elif isinstance(op, BinOp):
             evaluate_binop(emit_pass, op, bindings)
+        elif isinstance(op, UnaryMathOp):
+            evaluate_unary_math(emit_pass, op, bindings)
         elif isinstance(op, (CompOp, CondOp, NotOp)):
             evaluate_classical_predicate(emit_pass, op, bindings)
         elif isinstance(op, IfOperation):

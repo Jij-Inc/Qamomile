@@ -10,8 +10,8 @@ same family of ops (``CompOp``, ``CondOp``, ``NotOp``, ``BinOp``):
 - ``cast_binop_emission`` (emit pass) — folds ops at emit time for
   inlining loop variables and parameter bindings into ``if`` conditions.
 
-Compile-time constant folding additionally uses the same interface for
-``UnaryMathOp``.
+Compile-time constant folding and emit-time nested-call lowering additionally
+use the same interface for ``UnaryMathOp``.
 
 The low-level ``evaluate_*_values`` functions take fully resolved Python
 operands and return the computed value (or ``None`` if the op cannot be

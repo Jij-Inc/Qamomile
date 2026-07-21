@@ -15,9 +15,13 @@ from qamomile.circuit.ir.types import UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler import TranspilerConfig
+from qamomile.circuit.transpiler.circuit_ir.lowering import CircuitLoweringPass
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.oracle_bindings import (
     _apply_oracle_bindings as apply_oracle_bindings,
+)
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    _controlled_body_batch_weight,
 )
 from qamomile.circuit.transpiler.passes.substitution import (
     SubstitutionConfig,
@@ -31,6 +35,10 @@ _ORACLE = qmc.opaque(
     cost=qmc.ResourceEstimate(gates=qmc.GateResources(total=7)),
 )
 _VECTOR_ORACLE = qmc.opaque("late_bound_vector_oracle", num_qubits=2)
+_LOG_WIDTH_VECTOR_ORACLE = qmc.opaque(
+    "late_bound_log_width_vector_oracle",
+    num_qubits=8,
+)
 _SECOND_ORACLE = qmc.opaque("second_late_bound_oracle", num_qubits=1)
 
 
@@ -67,6 +75,15 @@ def _reset_implementation(q: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _static_implementation(
+    q: qmc.Qubit,
+    encoding: qmc.LCUBlockEncoding,
+) -> qmc.Qubit:
+    """Use an LCU descriptor through a compile-time static binding."""
+    return qmc.rx(q, encoding.normalization)
+
+
+@qmc.qkernel
 def _incompatible_implementation(
     q0: qmc.Qubit,
     q1: qmc.Qubit,
@@ -83,6 +100,25 @@ def _vector_implementation(
     for index in qmc.range(qubits.shape[0]):
         qubits[index] = qmc.x(qubits[index])
     return qubits
+
+
+@qmc.qkernel
+def _log_width_vector_implementation(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Flip ``ceil(log2(length))`` qubits in a vector implementation."""
+    width = qmc.ceil(qmc.log2(qubits.shape[0]))
+    for index in qmc.range(width):
+        qubits[index] = qmc.x(qubits[index])
+    return qubits
+
+
+@qmc.qkernel
+def _log_width_vector_helper(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Call the log-width vector oracle from a controllable helper."""
+    return _LOG_WIDTH_VECTOR_ORACLE(qubits)
 
 
 @qmc.qkernel
@@ -177,6 +213,24 @@ def _select_sample() -> qmc.Vector[qmc.Bit]:
 def _vector_sample() -> qmc.Vector[qmc.Bit]:
     """Measure a shape-dependent vector oracle implementation."""
     qubits = _VECTOR_ORACLE(qmc.qubit_array(2, "qubits"))
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _log_width_vector_sample() -> qmc.Vector[qmc.Bit]:
+    """Measure a fixed-width oracle whose loop uses unary math."""
+    qubits = _LOG_WIDTH_VECTOR_ORACLE(qmc.qubit_array(8, "qubits"))
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _controlled_log_width_vector_sample() -> qmc.Vector[qmc.Bit]:
+    """Measure unary math inside an oracle under an enclosing control."""
+    qubits = qmc.qubit_array(9, "qubits")
+    qubits[0] = qmc.x(qubits[0])
+    controlled = qmc.control(_log_width_vector_helper)
+    qubits[0], targets = controlled(qubits[0], qubits[1:9])
+    qubits[1:9] = targets
     return qmc.measure(qubits)
 
 
@@ -572,6 +626,58 @@ def test_binding_validates_mapping_entries(
         apply_oracle_bindings(_direct_sample.block, bindings)
 
 
+@pytest.mark.parametrize(
+    "implementation",
+    [
+        pytest.param(_static_implementation, id="qkernel"),
+        pytest.param(_static_implementation.block, id="block"),
+    ],
+)
+def test_binding_rejects_unresolved_static_implementation(
+    implementation: Any,
+) -> None:
+    """Unresolved static templates fail with concrete recovery guidance."""
+    with pytest.raises(
+        ValueError,
+        match=r"unresolved static bindings \['encoding'\].*implementation\.build",
+    ):
+        apply_oracle_bindings(
+            _direct_sample.block,
+            {"late_bound_oracle": implementation},
+        )
+
+
+def test_binding_accepts_specialized_static_block(qiskit_transpiler: Any) -> None:
+    """A statically specialized implementation block compiles normally."""
+    implementation = _static_implementation.build(
+        encoding=qmc.identity_block_encoding(1)
+    )
+
+    assert implementation.static_bindings == ()
+    executable = qiskit_transpiler.transpile(
+        _direct_sample,
+        oracle_bindings={"late_bound_oracle": implementation},
+    )
+    result = executable.sample(qiskit_transpiler.executor(), shots=16).result()
+
+    assert sum(count for _, count in result.results) == 16
+
+
+def test_unary_math_preserves_multi_control_batch_weight() -> None:
+    """Unary loop bounds retain the shared-control batching threshold."""
+    block = _log_width_vector_implementation.block
+    vector_input = block.input_values[0]
+    assert isinstance(vector_input, ArrayValue)
+
+    weight = _controlled_body_batch_weight(
+        CircuitLoweringPass(),
+        block.operations,
+        {vector_input.shape[0].uuid: 8},
+    )
+
+    assert weight == 2
+
+
 def test_binding_rejects_unused_name() -> None:
     """A misspelled binding key is not silently ignored."""
     with pytest.raises(ValueError, match="missing_oracle"):
@@ -751,6 +857,18 @@ def test_substitution_pass_resets_state_between_runs() -> None:
             {"late_bound_vector_oracle": _vector_implementation},
             (1, 1),
             id="vector",
+        ),
+        pytest.param(
+            _log_width_vector_sample,
+            {"late_bound_log_width_vector_oracle": _log_width_vector_implementation},
+            (1, 1, 1, 0, 0, 0, 0, 0),
+            id="log-width-vector",
+        ),
+        pytest.param(
+            _controlled_log_width_vector_sample,
+            {"late_bound_log_width_vector_oracle": _log_width_vector_implementation},
+            (1, 1, 1, 1, 0, 0, 0, 0, 0),
+            id="controlled-log-width-vector",
         ),
     ],
 )

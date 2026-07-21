@@ -1,4 +1,4 @@
-"""Cast and binary-operation emission helpers for StandardEmitPass.
+"""Cast and classical-operation emission helpers for StandardEmitPass.
 
 Extracted from ``standard_emit.py`` to keep the main class focused on
 gate-level dispatch.  Each function mirrors the original method but takes
@@ -17,6 +17,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.transpiler.gate_emitter import default_combine_symbolic
@@ -174,6 +175,40 @@ def evaluate_binop(
         result = default_combine_symbolic(op.kind, lhs, rhs)
 
     if result is not None and op.results:
+        _set_emit_value(bindings, op.results[0].uuid, result)
+
+
+def evaluate_unary_math(
+    emit_pass: "StandardEmitPass",
+    op: UnaryMathOp,
+    bindings: dict[str, Any],
+) -> None:
+    """Evaluate a concrete unary mathematical operation at emit time.
+
+    Nested preserved callables can reach emission after the ordinary
+    partial-evaluation pipeline. Fold their unary mathematical expressions
+    against the call-local bindings so structural results such as
+    ``ceil(log2(vector.shape[0]))`` are available to later loop-bound
+    resolution. Runtime parameters remain unresolved; unlike binary
+    arithmetic, unary math has no backend-symbolic fallback.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass providing the value
+            resolver and runtime-parameter set.
+        op (UnaryMathOp): Unary mathematical operation to evaluate.
+        bindings (dict[str, Any]): Current emit bindings, mutated with the
+            result UUID when the operand resolves to a concrete scalar.
+    """
+    if not op.results:
+        return
+
+    result = fold_classical_op(
+        op,
+        lambda value: emit_pass._resolver.resolve_classical_value(value, bindings),
+        emit_pass._resolver.parameters,
+        FoldPolicy.EMIT_RESPECT_PARAMS,
+    )
+    if result is not None:
         _set_emit_value(bindings, op.results[0].uuid, result)
 
 

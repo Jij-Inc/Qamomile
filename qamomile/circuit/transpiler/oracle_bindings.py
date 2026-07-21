@@ -26,7 +26,8 @@ def _normalize_oracle_bindings(
 
     Raises:
         TypeError: If the mapping, a key, or an implementation is invalid.
-        ValueError: If a key is empty.
+        ValueError: If a key is empty or an implementation has unresolved
+            static bindings.
     """
     if oracle_bindings is None:
         return {}
@@ -46,6 +47,13 @@ def _normalize_oracle_bindings(
             raise TypeError(
                 "oracle_bindings values must be QKernel or Block instances; "
                 f"got {type(target).__name__} for {name!r}"
+            )
+        if replacement.static_bindings:
+            static_names = [slot.name for slot in replacement.static_bindings]
+            raise ValueError(
+                f"oracle_bindings[{name!r}] implementation has unresolved "
+                f"static bindings {static_names!r}; specialize it first and "
+                "pass the Block returned by implementation.build(...)"
             )
         normalized[name] = replacement
     return normalized
@@ -74,7 +82,8 @@ def _apply_oracle_bindings(
 
     Raises:
         TypeError: If a key or implementation is invalid.
-        ValueError: If a key is empty or unused, targets an unsupported
+        ValueError: If a key is empty or unused, an implementation has
+            unresolved static bindings, a binding targets an unsupported
             callable, or the implementations form a cycle.
         ValidationError: If an implementation is incompatible or non-unitary.
     """
@@ -110,8 +119,9 @@ def _apply_compiler_substitutions(
 
     Raises:
         TypeError: If a binding key or implementation is invalid.
-        ValueError: If a binding is unused, targets an unsupported callable,
-            or the implementations form a cycle.
+        ValueError: If a binding is unused, an implementation has unresolved
+            static bindings, a binding targets an unsupported callable, or the
+            implementations form a cycle.
         ValidationError: If an opaque replacement signature differs or its
             implementation has non-unitary effects.
         SignatureCompatibilityError: If a configured replacement signature
