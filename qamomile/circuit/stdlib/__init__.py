@@ -36,17 +36,20 @@ from .arithmetic import (
     modular_increment,
     ripple_carry_add,
 )
-from .grover import grover_iteration_count, grover_search
-from .lcu_block_encoding import LCUBlockEncoding
-from .multi_controlled_x import mcx, multi_controlled_x
-from .pauli_lcu_block_encoding import (
+from .block_encoding import (
+    IsingZBlockEncoding,
+    LCUBlockEncoding,
+    LCUBlockEncodingTerm,
     PauliLCUBlockEncoding,
-    pauli_lcu_block_encoding,
-)
-from .periodic_shift_lcu_block_encoding import (
     PeriodicShiftLCUBlockEncoding,
+    identity_block_encoding,
+    ising_z_block_encoding,
+    lcu_block_encoding,
+    pauli_lcu_block_encoding,
     periodic_shift_lcu_block_encoding,
 )
+from .grover import grover_iteration_count, grover_search
+from .multi_controlled_x import mcx, multi_controlled_x
 from .qft import iqft, qft
 from .qpe import qpe
 from .state_preparation import (
@@ -64,6 +67,11 @@ __all__ = [
     "mcx",
     "multi_controlled_x",
     "LCUBlockEncoding",
+    "LCUBlockEncodingTerm",
+    "identity_block_encoding",
+    "lcu_block_encoding",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "PeriodicShiftLCUBlockEncoding",

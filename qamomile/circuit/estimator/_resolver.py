@@ -20,6 +20,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOpKind,
     CompOp,
     CompOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
 )
 from qamomile.circuit.ir.operation.callable import CallTransform
 from qamomile.circuit.ir.operation.operation import Operation
@@ -27,7 +29,7 @@ from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
-from ._utils import BINOP_TO_SYMPY
+from ._utils import BINOP_TO_SYMPY, UNARY_MATH_TO_SYMPY
 
 
 class UnresolvedValueError(Exception):
@@ -44,10 +46,10 @@ class ExprResolver:
     Resolution strategy (deterministic, single path):
       1. Already sp.Basic                        → return as-is
       2. Not a Value (int, float, bool)           → direct conversion
-      3. UUID in context (call_context / BinOp)   → return mapped expression
+      3. UUID in context (call context / expression) → return mapped expression
       4. Constant value                           → sp.Integer / sp.Float
       5. Unbound parameter                        → sp.Symbol (symbolic) or raise (concrete)
-      6. BinOp/CompOp result                      → trace in block operations
+      6. Arithmetic/comparison result              → trace in block operations
       7. Search parent blocks                     → trace in ancestors
       8. Fallback                                 → identity-qualified symbol or raise
     """
@@ -72,7 +74,7 @@ class ExprResolver:
 
         Args:
             block (Any): The current block (Block or _LocalBlock)
-                whose operations are searched for BinOp/CompOp traces.
+                whose operations are searched for classical expression traces.
             context (dict[str, sp.Expr] | None): UUID → resolved expression
                 mapping for values passed across scope boundaries (e.g.
                 call arguments, composite-gate operands).
@@ -391,8 +393,8 @@ class ExprResolver:
             concrete (bool): Passed through to :meth:`_resolve`.
 
         Returns:
-            sp.Expr | None: Resolved expression if a defining BinOp or
-                CompOp was found; ``None`` otherwise.
+            sp.Expr | None: Resolved expression if a supported defining
+                classical operation was found; ``None`` otherwise.
         """
         vid = id(v)
         if vid in visited:
@@ -411,6 +413,11 @@ class ExprResolver:
             right = self._resolve(op.operands[1], concrete)
             assert op.kind is not None
             return _apply_compop(op.kind, left, right)
+
+        if isinstance(op, UnaryMathOp):
+            operand = self._resolve(op.input, concrete)
+            assert op.kind is not None
+            return _apply_unary_math(op.kind, operand)
 
         return None
 
@@ -491,6 +498,28 @@ def _apply_binop(kind: BinOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
     if fn is None:
         raise ValueError(f"Unknown BinOpKind: {kind}")
     return fn(left, right)
+
+
+def _apply_unary_math(
+    kind: UnaryMathOpKind,
+    operand: sp.Expr,
+) -> sp.Expr:
+    """Apply one exact symbolic unary mathematical operation.
+
+    Args:
+        kind (UnaryMathOpKind): Mathematical operation kind.
+        operand (sp.Expr): Symbolic numeric operand.
+
+    Returns:
+        sp.Expr: Exact SymPy expression.
+
+    Raises:
+        ValueError: If ``kind`` has no symbolic implementation.
+    """
+    fn = UNARY_MATH_TO_SYMPY.get(kind)
+    if fn is None:
+        raise ValueError(f"Unknown UnaryMathOpKind: {kind}")
+    return fn(operand)
 
 
 def _apply_compop(kind: CompOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:

@@ -148,7 +148,8 @@ def lookup_xor(
 
     The table maps ``j`` to ``(scale * j) % modulus``. Its body is expressed
     entirely in Qamomile operations, so resource estimation counts the actual
-    unary-iteration lookup network rather than an opaque table-cost formula.
+    candidate-enumeration lookup network rather than an opaque table-cost
+    formula.
 
     Args:
         address (Vector[Qubit]): Little-endian lookup address, preserved.
