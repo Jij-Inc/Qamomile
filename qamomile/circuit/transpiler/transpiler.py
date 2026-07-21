@@ -177,8 +177,8 @@ class Transpiler(ABC, Generic[T]):
             block (Block): Hierarchical block to transform.
             oracle_bindings (OracleBindings | None): Per-call opaque oracle
                 implementations. Keys match callable definition names exactly,
-                not display ``custom_name`` values. Each value is the direct
-                body for a resource-only opaque definition. Direct and
+                not display ``custom_name`` values. Each value is the unitary
+                direct body for a resource-only opaque definition. Direct and
                 controlled calls are supported; generated inverse callables
                 are not bound automatically. Defaults to ``None``.
 
@@ -190,7 +190,7 @@ class Transpiler(ABC, Generic[T]):
             ValueError: If an oracle name is unused or targets an unsupported
                 callable, or oracle implementations form a cycle.
             ValidationError: If an oracle implementation signature is
-                incompatible.
+                incompatible or its body has non-unitary effects.
             SignatureCompatibilityError: If a configured replacement
                 signature is incompatible.
         """
@@ -508,8 +508,8 @@ class Transpiler(ABC, Generic[T]):
                 parameters. Defaults to ``None``.
             oracle_bindings (OracleBindings | None): Per-call opaque oracle
                 implementations. Keys match callable definition names exactly,
-                not display ``custom_name`` values. Each value is the direct
-                body for a resource-only opaque definition. Direct and
+                not display ``custom_name`` values. Each value is the unitary
+                direct body for a resource-only opaque definition. Direct and
                 controlled calls are supported; generated inverse callables
                 are not bound automatically. Defaults to ``None``.
 
@@ -523,7 +523,7 @@ class Transpiler(ABC, Generic[T]):
                 ``parameters``, or an oracle name is unused or targets an
                 unsupported callable.
             ValidationError: If an oracle implementation signature is
-                incompatible.
+                incompatible or its body has non-unitary effects.
             SignatureCompatibilityError: If a configured replacement
                 signature is incompatible.
             EntrypointValidationError: If the top-level kernel uses quantum
@@ -635,8 +635,8 @@ class Transpiler(ABC, Generic[T]):
                 for opaque oracles. Keys match callable definition names
                 exactly, not display ``custom_name`` values, and are
                 independent of ordinary kernel argument ``bindings``.
-                Each value is the direct body for a resource-only opaque
-                definition. Direct and controlled calls are supported;
+                Each value is the unitary direct body for a resource-only
+                opaque definition. Direct and controlled calls are supported;
                 generated inverse callables are not bound automatically.
                 Defaults to ``None``.
 
@@ -718,8 +718,8 @@ class Transpiler(ABC, Generic[T]):
             bindings (dict[str, Any] | None): Parameter values to bind.
             oracle_bindings (OracleBindings | None): Per-call opaque oracle
                 implementations. Keys match callable definition names exactly,
-                not display ``custom_name`` values. Each value is the direct
-                body for a resource-only opaque definition. Direct and
+                not display ``custom_name`` values. Each value is the unitary
+                direct body for a resource-only opaque definition. Direct and
                 controlled calls are supported; generated inverse callables
                 are not bound automatically. Defaults to ``None``.
 

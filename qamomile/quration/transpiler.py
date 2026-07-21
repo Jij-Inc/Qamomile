@@ -230,8 +230,8 @@ class QurationTranspiler(Transpiler[Any]):
                 to ``None``.
             oracle_bindings (OracleBindings | None): Per-call opaque oracle
                 implementations. Keys match callable definition names exactly,
-                not display ``custom_name`` values. Each value is the direct
-                body for a resource-only opaque definition. Direct and
+                not display ``custom_name`` values. Each value is the unitary
+                direct body for a resource-only opaque definition. Direct and
                 controlled calls are supported; generated inverse callables
                 are not bound automatically. Defaults to ``None``.
 

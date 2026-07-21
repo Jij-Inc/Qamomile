@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.effect import format_kernel_effects
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -572,7 +573,8 @@ class SubstitutionPass(Pass[Block, Block]):
         Raises:
             ValueError: If the invocation is not a direct or controlled
                 resource-only opaque callable.
-            ValidationError: If the body signature is incompatible.
+            ValidationError: If the body signature is incompatible or the
+                implementation has non-unitary effects.
         """
         definition = op.definition
         definition_kind = definition.attrs.get("kind") if definition else None
@@ -596,6 +598,13 @@ class SubstitutionPass(Pass[Block, Block]):
         assert definition is not None
         self._validate_oracle_signature(op, replacement)
         replacement = self._transform_binding_body(op.target.name, replacement)
+        if not replacement.effects.is_unitary:
+            raise ValidationError(
+                f"Cannot bind opaque oracle {op.target.name!r}: implementation "
+                "has non-unitary kernel effects "
+                f"[{format_kernel_effects(replacement.effects)}]; opaque oracle "
+                "implementations must be unitary"
+            )
         self._matched_bindings.add(op.target.name)
         attrs = dict(op.attrs)
         if rule is not None and rule.strategy is not None:

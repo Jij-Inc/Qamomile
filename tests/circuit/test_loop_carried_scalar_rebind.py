@@ -45,6 +45,7 @@ from qamomile.circuit.transpiler.errors import (
     ValidationError,
 )
 from qamomile.circuit.transpiler.passes.analyze import (
+    _collect_loop_external_liveness,
     reject_loop_carried_classical_rebinds,
 )
 
@@ -53,6 +54,43 @@ pytest.importorskip("qiskit")
 from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 
 LOOP_CARRIED = "Loop-carried"
+
+
+def test_operation_liveness_is_retained_only_inside_while_bodies() -> None:
+    """Per-operation snapshots are omitted outside stale-while analysis."""
+
+    @qmc.qkernel
+    def for_only() -> qmc.Bit:
+        """Build a loop tree that contains no runtime while."""
+        qubit = qmc.qubit("qubit")
+        for _index in qmc.range(4):
+            qubit = qmc.h(qubit)
+        return qmc.measure(qubit)
+
+    _, operation_liveness = _collect_loop_external_liveness(
+        for_only.build().operations,
+        set(),
+    )
+    assert operation_liveness == {}
+
+    @qmc.qkernel
+    def with_while() -> qmc.Bit:
+        """Build one while whose body updates its measured condition."""
+        condition = qmc.measure(qmc.qubit("initial"))
+        while condition:
+            condition = qmc.measure(qmc.qubit("next"))
+        return condition
+
+    block = with_while.build()
+    [while_operation] = _find_loops(block.operations)
+    _, operation_liveness = _collect_loop_external_liveness(
+        block.operations,
+        set(),
+    )
+    assert operation_liveness
+    assert {id(operation) for operation in while_operation.operations} <= set(
+        operation_liveness
+    )
 
 
 def _transpile(kernel, bindings=None, parameters=None):

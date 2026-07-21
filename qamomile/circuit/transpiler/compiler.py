@@ -16,6 +16,9 @@ from qamomile.circuit.transpiler.oracle_bindings import (
     OracleBindings,
     _apply_compiler_substitutions,
 )
+from qamomile.circuit.transpiler.passes.effect_validation import (
+    EffectValidationPass,
+)
 from qamomile.circuit.transpiler.passes.entrypoint_validation import (
     EntrypointValidationPass,
 )
@@ -117,8 +120,8 @@ class QamomileCompiler:
                 to ``None``.
             oracle_bindings (OracleBindings | None): Per-call opaque oracle
                 implementations. Keys match callable definition names exactly,
-                not display ``custom_name`` values. Each value is the direct
-                body for a resource-only opaque definition. Direct and
+                not display ``custom_name`` values. Each value is the unitary
+                direct body for a resource-only opaque definition. Direct and
                 controlled calls are supported; generated inverse callables
                 are not bound automatically. Defaults to ``None``.
 
@@ -131,7 +134,7 @@ class QamomileCompiler:
                 name is unused or targets an unsupported callable, or oracle
                 implementations form a cycle.
             ValidationError: If an oracle implementation signature is
-                incompatible.
+                incompatible or its body has non-unitary effects.
             SignatureCompatibilityError: If a configured replacement
                 signature is incompatible.
             EntrypointValidationError: If the top-level kernel has quantum
@@ -147,6 +150,7 @@ class QamomileCompiler:
             oracle_bindings,
         )
         block = ParameterShapeResolutionPass(ordinary_bindings).run(block)
+        EffectValidationPass().run(block)
         return prepare_module(block, ordinary_bindings)
 
     def compile(
@@ -170,8 +174,8 @@ class QamomileCompiler:
                 to ``None``.
             oracle_bindings (OracleBindings | None): Per-call opaque oracle
                 implementations. Keys match callable definition names exactly,
-                not display ``custom_name`` values. Each value is the direct
-                body for a resource-only opaque definition. Direct and
+                not display ``custom_name`` values. Each value is the unitary
+                direct body for a resource-only opaque definition. Direct and
                 controlled calls are supported; generated inverse callables
                 are not bound automatically. Defaults to ``None``.
 
@@ -182,7 +186,7 @@ class QamomileCompiler:
             ValueError: If an oracle name is unused or targets an unsupported
                 callable, or oracle implementations form a cycle.
             ValidationError: If an oracle implementation signature is
-                incompatible.
+                incompatible or its body has non-unitary effects.
             SignatureCompatibilityError: If a configured replacement
                 signature is incompatible.
             Exception: If other semantic preparation, target compilation, or

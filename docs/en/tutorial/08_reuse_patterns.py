@@ -214,7 +214,7 @@ assert est.gates.total == 3
 # %% [markdown]
 # ### Attach an Implementation at Transpile Time
 #
-# Keep the same opaque algorithm skeleton while its implementation is under development. When an implementation becomes available, pass it through `oracle_bindings`. Each key is the exact definition name declared by `qmc.Oracle(name=...)`, and the binding applies only to that transpilation or resource estimate.
+# Keep the same opaque algorithm skeleton while its implementation is under development. When a unitary implementation becomes available, pass it through `oracle_bindings`. Each key is the exact definition name declared by `qmc.Oracle(name=...)`, and the binding applies only to that transpilation or resource estimate.
 
 
 # %%
@@ -261,7 +261,7 @@ implemented_result = implemented_executable.sample(
 assert all(outcome == (1, 1, 1) for outcome, _ in implemented_result.results)
 
 # %% [markdown]
-# The original opaque oracle and transpiler configuration remain unchanged. A direct binding also supplies ordinary controlled calls. Generated inverse callables are not bound automatically.
+# The original opaque oracle and transpiler configuration remain unchanged. Bindings must be unitary, and one direct binding also supplies ordinary controlled calls. Generated inverse callables are not bound automatically.
 
 # %% [markdown]
 # Next, we build a qkernel that mixes ordinary gates with multiple opaque oracles.

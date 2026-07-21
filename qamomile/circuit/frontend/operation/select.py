@@ -318,8 +318,8 @@ def _validate_case_operations_are_unitary(
         None: The function returns nothing when the case is unitary.
 
     Raises:
-        ValueError: If a reachable operation is hybrid, resets a qubit, or
-            allocates an internal ancilla.
+        ValueError: If a reachable operation is non-unitary or allocates an
+            internal ancilla.
     """
 
     def visit_block(candidate: Block) -> None:

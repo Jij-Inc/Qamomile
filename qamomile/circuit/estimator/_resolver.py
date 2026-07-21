@@ -22,6 +22,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOpKind,
 )
 from qamomile.circuit.ir.operation.callable import CallTransform
+from qamomile.circuit.ir.operation.operation import Operation
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
@@ -51,7 +52,13 @@ class ExprResolver:
       8. Fallback                                 → identity-qualified symbol or raise
     """
 
-    __slots__ = ("_block", "_context", "_loop_var_names", "_parent_blocks")
+    __slots__ = (
+        "_block",
+        "_context",
+        "_loop_var_names",
+        "_parent_blocks",
+        "_producer_maps",
+    )
 
     def __init__(
         self,
@@ -59,6 +66,7 @@ class ExprResolver:
         context: dict[str, sp.Expr] | None = None,
         loop_var_names: dict[str, sp.Expr] | None = None,
         parent_blocks: list[Any] | None = None,
+        producer_maps: dict[int, tuple[Any, dict[str, Operation]]] | None = None,
     ):
         """Initialise an ExprResolver.
 
@@ -72,11 +80,17 @@ class ExprResolver:
                 expression mapping for loop variables in scope.
             parent_blocks (list[Any] | None): Ancestor blocks to search
                 when tracing fails in the current block.
+            producer_maps (dict[int, tuple[Any, dict[str, Operation]]] | None):
+                Shared block-identity index containing a strong block reference
+                and its result UUID to producer-operation map. Child resolvers
+                reuse it so every block is indexed at most once. Defaults to
+                ``None``.
         """
         self._block = block
         self._context: dict[str, sp.Expr] = dict(context or {})
         self._loop_var_names: dict[str, sp.Expr] = dict(loop_var_names or {})
         self._parent_blocks: list[Any] = list(parent_blocks or [])
+        self._producer_maps = producer_maps if producer_maps is not None else {}
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
@@ -155,6 +169,7 @@ class ExprResolver:
             context=ctx,
             loop_var_names=lvn,
             parent_blocks=new_parents,
+            producer_maps=self._producer_maps,
         )
 
     def call_child_scope(
@@ -225,6 +240,7 @@ class ExprResolver:
             context=ctx,
             loop_var_names=self._loop_var_names.copy(),
             parent_blocks=[],
+            producer_maps=self._producer_maps,
         )
 
     def bind(self, value: Value, expression: sp.Expr) -> None:
@@ -383,25 +399,42 @@ class ExprResolver:
             return None
         visited.add(vid)
 
-        for op in block.operations:
-            if not hasattr(op, "results") or not op.results:
-                continue
-            if op.results[0] != v:
-                continue
+        op = self._producer_map(block).get(v.uuid)
+        if isinstance(op, BinOp):
+            left = self._resolve(op.operands[0], concrete)
+            right = self._resolve(op.operands[1], concrete)
+            assert op.kind is not None
+            return _apply_binop(op.kind, left, right)
 
-            if isinstance(op, BinOp):
-                left = self._resolve(op.operands[0], concrete)
-                right = self._resolve(op.operands[1], concrete)
-                assert op.kind is not None
-                return _apply_binop(op.kind, left, right)
-
-            if isinstance(op, CompOp):
-                left = self._resolve(op.operands[0], concrete)
-                right = self._resolve(op.operands[1], concrete)
-                assert op.kind is not None
-                return _apply_compop(op.kind, left, right)
+        if isinstance(op, CompOp):
+            left = self._resolve(op.operands[0], concrete)
+            right = self._resolve(op.operands[1], concrete)
+            assert op.kind is not None
+            return _apply_compop(op.kind, left, right)
 
         return None
+
+    def _producer_map(self, block: Any) -> dict[str, Operation]:
+        """Return the cached producer index for one block.
+
+        Args:
+            block (Any): Block-like object exposing an ``operations`` list.
+
+        Returns:
+            dict[str, Operation]: Result UUID to defining operation. All
+                operation results are indexed, not only the first result.
+        """
+        block_id = id(block)
+        cached = self._producer_maps.get(block_id)
+        if cached is None or cached[0] is not block:
+            producers = {
+                result.uuid: operation
+                for operation in block.operations
+                for result in operation.results
+            }
+            self._producer_maps[block_id] = (block, producers)
+            return producers
+        return cached[1]
 
 
 # ------------------------------------------------------------------ #

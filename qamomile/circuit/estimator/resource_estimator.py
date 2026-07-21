@@ -1099,8 +1099,8 @@ class ResourceEstimator:
                 estimator-level strategies. Defaults to ``None``.
             oracle_bindings (OracleBindings | None): Per-call opaque oracle
                 implementations. Keys match callable definition names exactly,
-                not display ``custom_name`` values. Each value is the direct
-                body for a resource-only opaque definition. Direct and
+                not display ``custom_name`` values. Each value is the unitary
+                direct body for a resource-only opaque definition. Direct and
                 controlled calls are supported; generated inverse callables
                 are not bound automatically. Defaults to ``None``.
 
@@ -1115,7 +1115,8 @@ class ResourceEstimator:
                 or ``oracle_bindings`` is supplied with a raw operation
                 sequence instead of a hierarchical QKernel or Block.
             QamomileCompileError: If an implementation signature is
-                incompatible with its oracle.
+                incompatible with its oracle or its body has non-unitary
+                effects.
         """
         build_inputs, estimation_inputs = _partition_estimation_inputs(kernel, inputs)
         block_or_ops = self._coerce_input(
@@ -2041,6 +2042,20 @@ class ResourceInterpreter:
                 merged = true_value
             elif taken is False:
                 merged = false_value
+            elif operation.condition.uuid in self._measurement_derived:
+                # A runtime measurement chooses the merge value shot by shot.
+                # Keeping every such merge as a nested Piecewise expression
+                # makes feed-forward-heavy FTQC circuits grow exponentially
+                # during final SymPy simplification, even though resource
+                # counting already conservatively combines the branches with
+                # ``choice`` above. A fresh typed symbol preserves the unknown
+                # runtime value without coupling unrelated later estimates to
+                # the complete measurement history.
+                merged = _typed_value_symbol(
+                    merge.result,
+                    merge.result.name,
+                    fresh=True,
+                )
             elif bool(getattr(condition, "is_Boolean", False)):
                 merged = sp.Piecewise(
                     (true_value, cast(Any, condition)),
@@ -3111,9 +3126,27 @@ class ResourceInterpreter:
         ):
             own_controls = int(operation.attrs.get("num_control_qubits", 0) or 0)
         total_controls = _expr(controls) + own_controls
-        body_estimate = self.eval_operations(
-            body.operations, child, controls=total_controls
-        )
+        # Measurement provenance crosses ordinary callable boundaries. Without
+        # remapping a measured actual operand onto the callee's formal value,
+        # a feed-forward ``if`` inside a helper looks like a compile-time
+        # symbolic branch and accumulates nested Piecewise gate expressions.
+        # The runtime branch is already costed conservatively by ``choice``;
+        # preserving the taint here keeps that behavior compositional.
+        tainted_formals = {
+            formal.uuid
+            for formal, actual in zip(body.input_values, operation.operands)
+            if actual.uuid in self._measurement_derived
+        }
+        previous_taint = self._measurement_derived
+        self._measurement_derived = previous_taint | tainted_formals
+        try:
+            body_estimate = self.eval_operations(
+                body.operations,
+                child,
+                controls=total_controls,
+            )
+        finally:
+            self._measurement_derived = previous_taint
         if (
             operation.transform is CallTransform.INVERSE
             and not body_implements_transform
@@ -3197,8 +3230,8 @@ def estimate_resources(
             name. Defaults to ``None``.
         oracle_bindings (OracleBindings | None): Per-call opaque oracle
             implementations. Keys match callable definition names exactly,
-            not display ``custom_name`` values. Each value is the direct
-            body for a resource-only opaque definition. Direct and controlled
+            not display ``custom_name`` values. Each value is the unitary
+            direct body for a resource-only opaque definition. Direct and controlled
             calls are supported; generated inverse callables are not bound
             automatically. Defaults to ``None``.
         trace (bool): Whether to retain the explanation tree. Defaults to
@@ -3218,7 +3251,7 @@ def estimate_resources(
         ValueError: If estimator configuration, inputs, or binding names are
             invalid or target an unsupported callable.
         QamomileCompileError: If an implementation signature is incompatible
-            with its oracle.
+            with its oracle or its body has non-unitary effects.
 
     Example:
         >>> import qamomile.circuit as qmc

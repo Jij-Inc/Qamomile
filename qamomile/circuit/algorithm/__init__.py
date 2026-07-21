@@ -27,9 +27,13 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
+from .shor import ekera_hastad_factoring, shor_order_finding
 from .trotter import trotterized_time_evolution
 
 __all__ = [
+    # Factoring
+    "shor_order_finding",
+    "ekera_hastad_factoring",
     # QAOA
     "ising_cost",
     "x_mixer",

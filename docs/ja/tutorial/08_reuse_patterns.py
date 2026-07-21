@@ -204,7 +204,7 @@ assert est.gates.total == 3
 # %% [markdown]
 # ### トランスパイル時に実装を指定する
 #
-# 実装の開発中は、同じ不透明なアルゴリズム骨格を維持できます。実装が利用可能になったら`oracle_bindings`で指定します。各keyには`qmc.Oracle(name=...)`で宣言した定義名を完全一致で指定し、その実装はそのトランスパイルまたはリソース推定にだけ適用されます。
+# 実装の開発中は、同じ不透明なアルゴリズム骨格を維持できます。ユニタリな実装が利用可能になったら`oracle_bindings`で指定します。各keyには`qmc.Oracle(name=...)`で宣言した定義名を完全一致で指定し、その実装はそのトランスパイルまたはリソース推定にだけ適用されます。
 
 
 # %%
@@ -251,7 +251,7 @@ implemented_result = implemented_executable.sample(
 assert all(outcome == (1, 1, 1) for outcome, _ in implemented_result.results)
 
 # %% [markdown]
-# 元の不透明オラクルとtranspiler設定は変更されません。直接実装は通常の制御呼び出しにも使われます。生成された逆演算は自動ではbindingされません。
+# 元の不透明オラクルとtranspiler設定は変更されません。bindingする実装はユニタリである必要があり、同じ直接実装が通常の制御呼び出しにも使われます。生成された逆演算は自動ではbindingされません。
 
 # %% [markdown]
 # 次に、通常ゲートと複数の不透明オラクルを混在させたqkernelで確認します。

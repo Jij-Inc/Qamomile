@@ -1,5 +1,7 @@
 """Tests for Value and ArrayValue IR classes."""
 
+from types import SimpleNamespace
+
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     DictType,
@@ -8,7 +10,41 @@ from qamomile.circuit.ir.types.primitives import (
     TupleType,
     UIntType,
 )
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    ValueMetadata,
+)
+
+
+def test_value_base_is_nominal_for_all_ir_value_shapes() -> None:
+    """IR values share a constant-time nominal runtime classification."""
+    scalar = Value(type=UIntType(), name="scalar")
+    values = (
+        scalar,
+        ArrayValue(type=UIntType(), name="array"),
+        TupleValue(name="tuple", elements=(scalar,)),
+        DictValue(name="dict"),
+    )
+
+    duck_value = SimpleNamespace(
+        uuid="uuid",
+        logical_id="logical_id",
+        name="duck",
+        metadata=ValueMetadata(),
+        type=UIntType(),
+        next_version=lambda: None,
+        is_parameter=lambda: False,
+        parameter_name=lambda: None,
+        is_constant=lambda: False,
+        get_const=lambda: None,
+    )
+
+    assert all(isinstance(value, ValueBase) for value in values)
+    assert not isinstance(duck_value, ValueBase)
 
 
 class TestContainerTypeClassification:

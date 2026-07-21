@@ -6,7 +6,7 @@ import dataclasses
 import enum
 import uuid as uuid_module
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.value import (
@@ -23,6 +23,9 @@ from qamomile.circuit.ir.value import (
 from .control_value import normalize_control_value
 from .operation import Operation, OperationKind, ParamHint, Signature
 from .return_operation import ReturnOperation
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.effect import KernelEffect
 
 
 class CallTransform(enum.Enum):
@@ -207,6 +210,42 @@ class CallableDef:
             return int(impl.backend == backend) + int(impl.strategy == strategy)
 
         return max(candidates, key=score)
+
+    def effects_for(
+        self,
+        transform: CallTransform = CallTransform.DIRECT,
+    ) -> "KernelEffect":
+        """Return cached semantic effects for one call transform.
+
+        Args:
+            transform (CallTransform): Requested call transform. Defaults to
+                ``CallTransform.DIRECT``.
+
+        Returns:
+            KernelEffect: Union of relevant implementation-body effects.
+        """
+        from qamomile.circuit.ir.effect import callable_effects
+
+        return callable_effects(self, transform)
+
+    def measurement_result_indices_for(
+        self,
+        transform: CallTransform = CallTransform.DIRECT,
+    ) -> frozenset[int]:
+        """Return measured result positions for one call transform.
+
+        Args:
+            transform (CallTransform): Requested call transform. Defaults to
+                ``CallTransform.DIRECT``.
+
+        Returns:
+            frozenset[int]: Result indices carrying measurement provenance.
+        """
+        from qamomile.circuit.ir.effect import (
+            callable_measurement_result_indices,
+        )
+
+        return callable_measurement_result_indices(self, transform)
 
 
 def signature_from_values(
@@ -918,6 +957,31 @@ class InvokeOperation(Operation):
         if self.definition is None:
             return None
         return self.definition.body
+
+    @property
+    def effects(self) -> "KernelEffect":
+        """Return cached effects of the selected callable implementation.
+
+        Returns:
+            KernelEffect: Effects reachable through this invocation.
+        """
+        from qamomile.circuit.ir.effect import callable_effects
+
+        return callable_effects(self.definition, self.transform)
+
+    @property
+    def measurement_result_indices(self) -> frozenset[int]:
+        """Return invocation result positions derived from measurement.
+
+        Returns:
+            frozenset[int]: Caller-local result indices with measurement
+                provenance.
+        """
+        from qamomile.circuit.ir.effect import (
+            callable_measurement_result_indices,
+        )
+
+        return callable_measurement_result_indices(self.definition, self.transform)
 
     @body.setter
     def body(self, value: Block | None) -> None:

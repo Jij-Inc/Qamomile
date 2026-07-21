@@ -501,6 +501,36 @@ def test_runtime_if_uint_merge_symbol_keeps_ir_domain() -> None:
     assert estimate.substitute(uint_const_merge_0=2).gates.total == 2
 
 
+def test_measurement_provenance_crosses_qkernel_call_boundary() -> None:
+    """A helper's runtime merge stays fresh instead of nesting Piecewise."""
+
+    @qm.qkernel
+    def select_count(measured: qm.Bit) -> qm.UInt:
+        """Select a loop count from a measurement-backed condition."""
+        count = qm.uint(0)
+        if measured:
+            count = qm.uint(2)
+        return count
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Use a helper-selected runtime value as a resource loop bound."""
+        predicate = qm.measure(qm.qubit("predicate"))
+        count = select_count(predicate)
+        target = qm.qubit("target")
+        for _ in qm.range(count):
+            target = qm.h(target)
+        return target
+
+    estimate = circuit.estimate_resources()
+    (count_symbol,) = estimate.parameters.values()
+
+    assert not estimate.gates.total.has(sp.Piecewise)
+    assert estimate.gates.total == count_symbol
+    assert count_symbol.is_integer is True
+    assert count_symbol.is_nonnegative is True
+
+
 def test_runtime_if_bit_merge_symbol_keeps_ir_domain() -> None:
     """An undecidable Bit merge remains a nonnegative integer."""
     from qamomile.circuit.estimator._resolver import ExprResolver
@@ -831,6 +861,28 @@ def test_unresolved_uint_and_bit_fallbacks_are_nonnegative() -> None:
     assert uint_symbol.is_nonnegative is True
     assert bit_symbol.is_integer is True
     assert bit_symbol.is_nonnegative is True
+
+
+def test_expr_resolver_indexes_every_operation_result() -> None:
+    """Producer lookup uses UUIDs and includes non-leading results."""
+    from qamomile.circuit.estimator._resolver import ExprResolver
+    from qamomile.circuit.ir.block import Block
+    from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+    from qamomile.circuit.ir.types.primitives import UIntType
+    from qamomile.circuit.ir.value import Value
+
+    left = Value(type=UIntType(), name="left").with_const(2)
+    right = Value(type=UIntType(), name="right").with_const(3)
+    first = Value(type=UIntType(), name="first")
+    second = Value(type=UIntType(), name="second")
+    operation = BinOp(
+        operands=[left, right],
+        results=[first, second],
+        kind=BinOpKind.ADD,
+    )
+    resolver = ExprResolver(Block(name="multiple_results", operations=[operation]))
+
+    assert resolver.resolve(second) == 5
 
 
 def test_controlled_composite_body_counts_own_control() -> None:

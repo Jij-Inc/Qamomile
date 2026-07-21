@@ -55,13 +55,14 @@ def _apply_oracle_bindings(
     block: Block,
     oracle_bindings: OracleBindings | None,
 ) -> Block:
-    """Attach direct implementations to exact opaque definition names.
+    """Attach unitary implementations to exact opaque definition names.
 
     The transformation is per-call and does not mutate the source or supplied
-    implementation blocks. The same direct body supplies ordinary controlled
-    calls through the existing call transform. Generated inverse callables are
-    outside this binding contract. Bindings are recursively applied inside
-    supplied implementation bodies, and cyclic dependencies are rejected.
+    implementation blocks. The same unitary direct body supplies ordinary
+    controlled calls through the existing call transform. Generated inverse
+    callables are outside this binding contract. Bindings are recursively
+    applied inside supplied implementation bodies, and cyclic dependencies
+    are rejected.
 
     Args:
         block (Block): Traced or hierarchical semantic block.
@@ -75,7 +76,7 @@ def _apply_oracle_bindings(
         TypeError: If a key or implementation is invalid.
         ValueError: If a key is empty or unused, targets an unsupported
             callable, or the implementations form a cycle.
-        ValidationError: If an implementation is incompatible.
+        ValidationError: If an implementation is incompatible or non-unitary.
     """
     bindings = _normalize_oracle_bindings(oracle_bindings)
     if not bindings:
@@ -111,7 +112,8 @@ def _apply_compiler_substitutions(
         TypeError: If a binding key or implementation is invalid.
         ValueError: If a binding is unused, targets an unsupported callable,
             or the implementations form a cycle.
-        ValidationError: If an opaque replacement signature differs.
+        ValidationError: If an opaque replacement signature differs or its
+            implementation has non-unitary effects.
         SignatureCompatibilityError: If a configured replacement signature
             differs.
     """

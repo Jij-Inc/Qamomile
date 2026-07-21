@@ -64,6 +64,8 @@ project:
             - file: api/circuit/frontend
             - file: api/circuit/ir
             - file: api/circuit/multi_controlled_x
+            - file: api/circuit/pauli_lcu_block_encoding
+            - file: api/circuit/periodic_shift_lcu_block_encoding
             - file: api/circuit/qft
             - file: api/circuit/qpe
             - file: api/circuit/serialization
@@ -77,7 +79,13 @@ project:
             - file: api/cudaq/observable
             - file: api/cudaq/transpiler
         - file: api/hugr
-        - file: api/linalg
+        - file: api/linalg/index
+          children:
+            - file: api/linalg/hermitian
+            - file: api/linalg/mottonen
+            - file: api/linalg/pauli_lcu
+            - file: api/linalg/periodic_shift_lcu
+            - file: api/linalg/subspace
         - file: api/observable
         - file: api/optimization/index
           children:
@@ -109,6 +117,7 @@ site:
   template: book-theme
   title: Qamomile Documentation
   options:
+    favicon: ../assets/qamomile_logo.png
     logo: ../assets/qamomile_logo.png
     style: ../assets/custom-theme.css
     folders: true

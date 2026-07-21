@@ -32,6 +32,7 @@ from qamomile.circuit.frontend.static_binding import (
     validate_static_binding_slot,
 )
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.effect import KernelEffect
 from qamomile.circuit.ir.operation import ExpvalOp, Operation
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -235,6 +236,15 @@ class SerializedQKernel:
             Block: Static qkernel body.
         """
         return self._block
+
+    @property
+    def effects(self) -> KernelEffect:
+        """Return cached semantic effects of the preserved body.
+
+        Returns:
+            KernelEffect: Aggregated non-unitary effects.
+        """
+        return self._block.effects
 
     def build(
         self,

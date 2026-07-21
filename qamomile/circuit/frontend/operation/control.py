@@ -43,6 +43,7 @@ from qamomile.circuit.frontend.qkernel_specialization import (
 from qamomile.circuit.frontend.qkernel_utils import reject_aliased_quantum_args
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.effect import require_unitary_effects
 from qamomile.circuit.ir.operation.callable import (
     CallableRef,
     CallTransform,
@@ -784,6 +785,33 @@ class ControlledGate:
         """
         return select_specialized_block(self._qkernel, sub_args_resolved)
 
+    def _validate_target_effects(self, block: Block) -> None:
+        """Reject effects unsupported by generic structural control.
+
+        An explicit controlled implementation is checked first and may realize
+        a callable whose direct body is non-unitary. Without one, generic
+        control requires the cached direct-body effect set to be empty.
+
+        Args:
+            block (Block): Call-site-specialized direct target body.
+
+        Raises:
+            ValueError: If generic control would reach non-unitary effects, or
+                an explicit controlled body is itself non-unitary.
+        """
+        definition = qkernel_callable_def(self._qkernel, block)
+        require_unitary_effects(
+            definition.effects_for(CallTransform.CONTROLLED),
+            operation="qmc.control()",
+            target=self._qkernel.name,
+            alternative=(
+                "Provide an explicit controlled implementation or use a "
+                "kernel's explicit control argument (for example, "
+                "modmul_const(..., control=...)); keep measurement and reset "
+                "outside generic qmc.control()."
+            ),
+        )
+
     # ------------------------------------------------------------------
     # Helpers for ``__call__``'s concrete and symbolic paths.
     #
@@ -1510,6 +1538,7 @@ class ControlledGate:
         num_controls = cast(int, self._num_controls)
         prep = self._prepare_concrete(args, sub_kwargs, num_controls)
         block = self._block_for_sub_call(prep.sub_args_resolved)
+        self._validate_target_effects(block)
         block = self._with_global_phase(block, global_phase)
         if global_phase is not None:
             prep.operands.append(global_phase)
@@ -2151,6 +2180,7 @@ class ControlledGate:
 
         prep = self._prepare_symbolic(args, sub_kwargs, control_indices)
         block = self._block_for_sub_call(prep.sub_args_resolved)
+        self._validate_target_effects(block)
         block = self._with_global_phase(block, global_phase)
         if global_phase is not None:
             prep.operands.append(global_phase)

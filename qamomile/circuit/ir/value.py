@@ -230,36 +230,72 @@ def remap_value_metadata_references(
     )
 
 
-@typing.runtime_checkable
-class ValueBase(typing.Protocol):
-    """Protocol for IR values with typed metadata.
+class ValueBase:
+    """Nominal base for every typed IR value.
 
-    Attributes are declared as read-only properties to match frozen
-    dataclass fields in concrete implementations (Value, ArrayValue, etc.).
+    Runtime compiler passes inspect values in their innermost loops. A nominal
+    base keeps those checks constant-time; a runtime-checkable protocol would
+    repeatedly scan the protocol members on Python versions that do not cache
+    structural checks.
     """
 
-    @property
-    def uuid(self) -> str: ...
-    @property
-    def logical_id(self) -> str: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def metadata(self) -> ValueMetadata: ...
-    @property
-    def type(self) -> ValueType:
-        """Return the value's IR type.
+    uuid: str
+    logical_id: str
+    name: str
+    metadata: ValueMetadata
+
+    if typing.TYPE_CHECKING:
+
+        @property
+        def type(self) -> ValueType:
+            """Return the static IR type carried by this value.
+
+            Returns:
+                ValueType: Concrete scalar or container type.
+            """
+            raise NotImplementedError
+
+    def next_version(self) -> ValueBase:
+        """Create the next SSA version of this value.
 
         Returns:
-            ValueType: Static type carried by the IR value.
+            ValueBase: A value with a fresh version UUID and preserved logical
+                identity.
         """
-        ...
+        raise NotImplementedError
 
-    def next_version(self) -> ValueBase: ...
-    def is_parameter(self) -> bool: ...
-    def parameter_name(self) -> str | None: ...
-    def is_constant(self) -> bool: ...
-    def get_const(self) -> int | float | bool | None: ...
+    def is_parameter(self) -> bool:
+        """Return whether this value represents a runtime parameter.
+
+        Returns:
+            bool: Whether parameter metadata is present.
+        """
+        raise NotImplementedError
+
+    def parameter_name(self) -> str | None:
+        """Return the public parameter name carried by this value.
+
+        Returns:
+            str | None: Parameter name, or ``None`` for a non-parameter value.
+        """
+        raise NotImplementedError
+
+    def is_constant(self) -> bool:
+        """Return whether this value carries a scalar constant.
+
+        Returns:
+            bool: Whether scalar constant metadata is present.
+        """
+        raise NotImplementedError
+
+    def get_const(self) -> int | float | bool | None:
+        """Return the scalar constant carried by this value.
+
+        Returns:
+            int | float | bool | None: Constant value, or ``None`` when the
+                value is not constant.
+        """
+        raise NotImplementedError
 
 
 ValueLike: typing.TypeAlias = "Value | ArrayValue | TupleValue | DictValue"
@@ -534,7 +570,7 @@ class _MetadataValueMixin:
 
 
 @dataclasses.dataclass(frozen=True)
-class Value(_MetadataValueMixin, typing.Generic[T]):
+class Value(_MetadataValueMixin, ValueBase, typing.Generic[T]):
     """A typed SSA value in the IR.
 
     The ``name`` field is **display-only**: it labels the value for
@@ -874,7 +910,7 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
 
 
 @dataclasses.dataclass(frozen=True)
-class TupleValue(_MetadataValueMixin):
+class TupleValue(_MetadataValueMixin, ValueBase):
     """A tuple of IR values for structured data."""
 
     name: str
@@ -903,7 +939,7 @@ class TupleValue(_MetadataValueMixin):
 
 
 @dataclasses.dataclass(frozen=True)
-class DictValue(_MetadataValueMixin):
+class DictValue(_MetadataValueMixin, ValueBase):
     """A dictionary value stored as stable ordered entries."""
 
     name: str

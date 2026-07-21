@@ -10,6 +10,7 @@ import pytest
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types import UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import deserialize, serialize
@@ -57,6 +58,12 @@ def _recursive_implementation(q: qmc.Qubit) -> qmc.Qubit:
     """Invoke the same oracle that this body would implement."""
     (q,) = _ORACLE(q)
     return q
+
+
+@qmc.qkernel
+def _reset_implementation(q: qmc.Qubit) -> qmc.Qubit:
+    """Provide an intentionally non-unitary oracle implementation."""
+    return qmc.reset(q)
 
 
 @qmc.qkernel
@@ -149,6 +156,17 @@ def _controlled_helper_sample() -> qmc.Vector[qmc.Bit]:
     qubits = qmc.qubit_array(2, "qubits")
     qubits[0] = qmc.x(qubits[0])
     qubits[0], qubits[1] = qmc.control(_oracle_helper)(
+        qubits[0],
+        qubits[1],
+    )
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _select_sample() -> qmc.Vector[qmc.Bit]:
+    """Measure an oracle reached through SELECT case bodies."""
+    qubits = qmc.qubit_array(2, "qubits")
+    qubits[0], qubits[1] = qmc.select([_oracle_helper, _oracle_helper])(
         qubits[0],
         qubits[1],
     )
@@ -292,6 +310,28 @@ def test_binding_rejects_inverse_transform() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(_direct_sample.block, id="direct"),
+        pytest.param(_controlled_sample.block, id="controlled"),
+        pytest.param(_controlled_helper_sample.block, id="controlled-block"),
+        pytest.param(_select_sample.block, id="select"),
+        pytest.param(_nested_sample.block, id="nested"),
+    ],
+)
+def test_binding_rejects_nonunitary_implementation(source: qmc.Block) -> None:
+    """Opaque implementations remain unitary in every reachable context."""
+    with pytest.raises(
+        ValidationError,
+        match=r"non-unitary kernel effects \[RESET\].*must be unitary",
+    ):
+        apply_oracle_bindings(
+            source,
+            {"late_bound_oracle": _reset_implementation},
+        )
+
+
 def test_binding_reaches_nested_callable_definition() -> None:
     """Binding descends into an invoked qkernel definition."""
     transformed = apply_oracle_bindings(
@@ -414,6 +454,24 @@ def test_binding_reaches_structured_control_flow() -> None:
 
     assert nested_oracle.body is not None
     assert nested_oracle.body.name == "_x_implementation"
+
+
+def test_binding_reaches_select_case_blocks() -> None:
+    """Binding descends through every SELECT implementation body."""
+    transformed = apply_oracle_bindings(
+        _select_sample.block,
+        {"late_bound_oracle": _x_implementation},
+    )
+    selection = next(
+        operation
+        for operation in transformed.operations
+        if isinstance(operation, SelectOperation)
+    )
+
+    for case_block in selection.case_blocks:
+        nested_oracle = _invoke_named(case_block, "late_bound_oracle")
+        assert nested_oracle.body is not None
+        assert nested_oracle.body.name == "_x_implementation"
 
 
 def test_binding_handles_self_recursive_source_graph(qiskit_transpiler: Any) -> None:

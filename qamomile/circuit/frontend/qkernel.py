@@ -23,6 +23,7 @@ from qamomile.circuit.frontend.qkernel_definition import (
     validate_quantum_rebinds,
 )
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.effect import KernelEffect
 from qamomile.circuit.ir.operation.callable import CallPolicy, CompositeGateType
 
 if TYPE_CHECKING:
@@ -105,6 +106,15 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
     def block(self) -> Block:
         """Compile the function to a hierarchical Block if not already compiled."""
         return get_or_build_block(self)
+
+    @property
+    def effects(self) -> KernelEffect:
+        """Return cached semantic effects of this qkernel.
+
+        Returns:
+            KernelEffect: Effects aggregated while building ``self.block``.
+        """
+        return self.block.effects
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R:
         """Invoke this qkernel in the active tracing context.

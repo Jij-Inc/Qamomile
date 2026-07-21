@@ -48,8 +48,8 @@ class QKernelBuildMixin:
                 Defaults to ``None``.
             oracle_bindings (OracleBindings | None): Per-call opaque oracle
                 implementations. Keys match callable definition names exactly,
-                not display ``custom_name`` values. Each value is the direct
-                body for a resource-only opaque definition. Direct and
+                not display ``custom_name`` values. Each value is the unitary
+                direct body for a resource-only opaque definition. Direct and
                 controlled calls are supported; generated inverse callables
                 are not bound automatically. Defaults to ``None``.
             trace (bool): Whether to retain the explanation tree. Defaults to
@@ -69,7 +69,8 @@ class QKernelBuildMixin:
             ValueError: If estimator configuration, inputs, or binding names
                 are invalid or target an unsupported callable.
             QamomileCompileError: If an implementation signature is
-                incompatible with its oracle.
+                incompatible with its oracle or its body has non-unitary
+                effects.
 
         Example:
             >>> @qm.qkernel
