@@ -18,7 +18,8 @@ from qamomile.circuit.frontend.operation.global_phase import global_phase
 from qamomile.circuit.frontend.operation.qubit_gates import z
 from qamomile.circuit.frontend.qkernel import QKernel, qkernel
 from qamomile.circuit.ir.operation.callable import CallPolicy
-from qamomile.circuit.stdlib.lcu_block_encoding import (
+
+from .lcu import (
     LCUBlockEncoding,
     _BlockEncodingUnitary,
     _build_lcu_block_encoding_unitary,

@@ -512,7 +512,7 @@ def test_zero_encoding_samples_and_estimates_on_every_sdk(
 
 def test_uniform_case_preserves_unused_child_pool_padding_exactly() -> None:
     """A heterogeneous SELECT wrapper acts as identity on every unused wire."""
-    from qamomile.circuit.stdlib.lcu_block_encoding import (
+    from qamomile.circuit.stdlib.block_encoding.lcu import (
         _build_uniform_case,
         _ValidatedTerm,
     )

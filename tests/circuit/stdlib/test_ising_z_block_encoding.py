@@ -354,7 +354,7 @@ def test_factory_does_not_delegate_to_pauli_lcu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The specialized Ising-Z path is independent of PauliLCUEncoding."""
-    module = importlib.import_module("qamomile.circuit.stdlib.ising_z_block_encoding")
+    module = importlib.import_module("qamomile.circuit.stdlib.block_encoding.ising_z")
 
     assert "PauliLCU" not in module.__dict__
     assert "pauli_lcu_block_encoding" not in module.__dict__
