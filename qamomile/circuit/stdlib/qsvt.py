@@ -213,6 +213,7 @@ def qsvt(
 
     selected_phases = phases[0:resolved_count]
     selected_count = resolved_count
+    inverse_unitary = qmc.inverse(encoding.unitary)
 
     projector_auxiliary = qmc.qubit("qsvt_projector_auxiliary")
     signal, projector_auxiliary = _projector_phase_rotation(
@@ -233,7 +234,7 @@ def qsvt(
             projector_auxiliary,
             selected_phases[odd_index],
         )
-        signal, system = qmc.inverse(encoding.unitary)(signal, system)
+        signal, system = inverse_unitary(signal, system)
         signal, projector_auxiliary = _projector_phase_rotation(
             signal,
             projector_auxiliary,
