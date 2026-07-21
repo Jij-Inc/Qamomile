@@ -604,6 +604,11 @@ for epoch in range(EPOCHS):
         f"  エポック {epoch + 1}/{EPOCHS}  損失={avg_loss:.4f}  テスト精度={test_acc:.2%}"
     )
 
+# データセットとモデルの乱数シードを固定しているため、通常実行の結果は再現できる。
+if not docs_test_mode:
+    assert train_losses[-1] < train_losses[0]
+    assert math.isclose(test_accs[-1], 0.975, rel_tol=0.0, abs_tol=1e-6)
+
 # %%
 # 学習曲線
 _, axes = plt.subplots(1, 2, figsize=(10, 4))
@@ -680,6 +685,16 @@ for c in range(N_CLASSES):
 conf = np.zeros((N_CLASSES, N_CLASSES), dtype=int)
 for t, p in zip(y_test.numpy(), preds.numpy()):
     conf[t, p] += 1
+if not docs_test_mode:
+    expected_conf = np.array(
+        [
+            [29, 1, 0, 0],
+            [0, 30, 0, 0],
+            [0, 0, 30, 0],
+            [1, 0, 1, 28],
+        ]
+    )
+    np.testing.assert_array_equal(conf, expected_conf)
 _, ax = plt.subplots(figsize=(5, 4))
 ax.imshow(conf, cmap="Blues")
 ax.set_xlabel("Predicted")
@@ -710,6 +725,9 @@ plt.show()
 # 予測例
 n_show = min(8, len(X_test))
 sample_imgs = X_test[:n_show, 0].numpy()
+if not docs_test_mode:
+    assert torch.equal(y_test[:n_show], torch.zeros(n_show, dtype=y_test.dtype))
+    assert torch.equal(preds[:n_show], y_test[:n_show])
 combined = np.concatenate(sample_imgs, axis=1)
 _, ax = plt.subplots(figsize=(12, 3))
 ax.imshow(combined, cmap="gray", aspect="auto")

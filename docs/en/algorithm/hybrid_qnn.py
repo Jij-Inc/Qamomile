@@ -604,6 +604,11 @@ for epoch in range(EPOCHS):
 
     print(f"  Epoch {epoch + 1}/{EPOCHS}  loss={avg_loss:.4f}  test_acc={test_acc:.2%}")
 
+# Fixed dataset and model seeds make the full tutorial result deterministic.
+if not docs_test_mode:
+    assert train_losses[-1] < train_losses[0]
+    assert math.isclose(test_accs[-1], 0.975, rel_tol=0.0, abs_tol=1e-6)
+
 # %%
 # Learning curves
 _, axes = plt.subplots(1, 2, figsize=(10, 4))
@@ -682,6 +687,16 @@ for c in range(N_CLASSES):
 conf = np.zeros((N_CLASSES, N_CLASSES), dtype=int)
 for t, p in zip(y_test.numpy(), preds.numpy()):
     conf[t, p] += 1
+if not docs_test_mode:
+    expected_conf = np.array(
+        [
+            [29, 1, 0, 0],
+            [0, 30, 0, 0],
+            [0, 0, 30, 0],
+            [1, 0, 1, 28],
+        ]
+    )
+    np.testing.assert_array_equal(conf, expected_conf)
 _, ax = plt.subplots(figsize=(5, 4))
 ax.imshow(conf, cmap="Blues")
 ax.set_xlabel("Predicted")
@@ -712,6 +727,9 @@ plt.show()
 # Sample images with predictions
 n_show = min(8, len(X_test))
 sample_imgs = X_test[:n_show, 0].numpy()
+if not docs_test_mode:
+    assert torch.equal(y_test[:n_show], torch.zeros(n_show, dtype=y_test.dtype))
+    assert torch.equal(preds[:n_show], y_test[:n_show])
 combined = np.concatenate(sample_imgs, axis=1)
 _, ax = plt.subplots(figsize=(12, 3))
 ax.imshow(combined, cmap="gray", aspect="auto")
