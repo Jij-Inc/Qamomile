@@ -9,9 +9,9 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 ::::{grid} 1 1 1 1
 
 :::{card}
-:header: **Suzuki–Trotter分解によるハミルトニアンシミュレーション (Rabi振動)**
+:header: **Suzuki–Trotter分解によるハミルトニアンシミュレーション**
 :link: hamiltonian_simulation
-RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
+Suzuki-Trotter分解に基づく量子ハミルトニアンの時間発展シミュレーションをQamomileで使う方法です。Rabi振動のハミルトニアンを例に、分解の次数と精度の関係を確認します。
 :::
 
 :::{card}
