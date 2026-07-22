@@ -22,14 +22,14 @@ CNN＋量子変分回路をFashion-MNISTでend-to-end学習し、パラメータ
 
 :::{card}
 :header: **Möttönen振幅エンコーディング**
-:link: mottonen_amplitude_encoding
-Gray符号Ry/Rz多重制御回転で任意の実数・複素振幅ベクトルを準備します。3つの入力モード(具体値、バインドされた`Vector[Float]`、ランタイムパラメトリックな角度)を扱います。
+:link: mottonen_amplitude_encoding.ipynb
+任意の量子状態を準備するMöttönenの振幅エンコーディングをQamomileで使う方法です。`amplitude_encoding`および`mottonen_amplitude_encoding`に基づく状態準備の方法を紹介します。
 :::
 
 :::{card}
-:header: **多次元量子フーリエ変換**
+:header: **多次元量子フーリエ変換によるナノシート物質特性推定**
 :link: multidimensional_qft
-任意のグリッドサイズの入力に対する多次元QFTと、2のべき乗でないグリッドに対応する古典前処理を実装します。
+多次元量子フーリエ変換をQamomileで実装する例です。ナノシート材料の特性評価について、データの前処理を行った多次元QFTを利用してナノシートに関するシミュレーションを実行します。
 :::
 
 :::{card}

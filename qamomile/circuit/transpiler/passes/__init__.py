@@ -40,6 +40,8 @@ from .control_flow_visitor import (  # noqa: E402
     OperationTransformer,
     ValueCollector,
 )
+from .region_capture import RegionCapturePass  # noqa: E402
+from .region_validation import RegionValidationPass  # noqa: E402
 from .slice_borrow_check import SliceBorrowCheckPass  # noqa: E402
 from .validate_while import ValidateWhileContractPass  # noqa: E402
 from .value_mapping import UUIDRemapper, ValueSubstitutor  # noqa: E402
@@ -60,6 +62,8 @@ __all__ = [
     "OperationTransformer",
     "OperationCollector",
     "ValueCollector",
+    "RegionCapturePass",
+    "RegionValidationPass",
     "ValidateWhileContractPass",
     "UUIDRemapper",
     "ValueSubstitutor",
