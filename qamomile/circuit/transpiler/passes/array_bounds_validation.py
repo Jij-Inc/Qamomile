@@ -2,45 +2,55 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable, Sequence
+from typing import Any, cast
 
 import numpy as np
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
+    UnaryMathOp,
+)
 from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
     ForOperation,
     HasNestedOps,
     IfOperation,
+    genuine_input_values,
 )
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.operation.slice_array import SliceArrayOperation
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+)
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.passes.control_flow_reachability import (
+    MAX_STATIC_REPLAY_TRIPS,
+    constant_integer,
+    reachable_nested_regions,
+    same_exact_typed_constant,
+    static_for_items_entries,
+    static_for_range,
+)
+from qamomile.circuit.transpiler.passes.eval_utils import (
+    FoldPolicy,
+    fold_classical_op,
+)
 from qamomile.circuit.transpiler.passes.value_mapping import ValueSubstitutor
-
-
-def _constant_integer(value: ValueBase | None) -> int | None:
-    """Return a non-boolean integer constant carried by an IR value.
-
-    Args:
-        value (ValueBase | None): Candidate scalar value.
-
-    Returns:
-        int | None: Normalized Python integer, or ``None`` when ``value`` is
-            absent, symbolic, boolean, or non-integral.
-    """
-    if not isinstance(value, Value) or not value.is_constant():
-        return None
-    constant = value.get_const()
-    if isinstance(constant, (bool, np.bool_)) or not isinstance(
-        constant, (int, np.integer)
-    ):
-        return None
-    return int(constant)
+from qamomile.circuit.transpiler.value_resolver import ValueResolver
 
 
 def _root_array(array: ArrayValue) -> ArrayValue:
@@ -60,36 +70,19 @@ def _root_array(array: ArrayValue) -> ArrayValue:
     return current
 
 
-def _is_zero_trip_loop(operation: ForOperation) -> bool:
-    """Return whether a for-loop has a statically empty iteration range.
-
-    Args:
-        operation (ForOperation): Loop whose ``start``, ``stop``, and ``step``
-            operands should be inspected.
-
-    Returns:
-        bool: ``True`` only when all bounds are constant and their range is
-            provably empty. Symbolic or zero-step ranges return ``False`` so
-            their existing validators retain ownership of the diagnosis.
-    """
-    if len(operation.operands) < 3:
-        return False
-    start, stop, step = (
-        _constant_integer(operation.operands[index]) for index in range(3)
-    )
-    if start is None or stop is None or step in (None, 0):
-        return False
-    return start >= stop if step > 0 else start <= stop
-
-
 class ArrayBoundsValidationPass(Pass[Block, Block]):
     """Reject reachable element accesses and views outside array bounds.
 
     This pass runs after partial evaluation has resolved binding-dependent
     slice extents and before declarative slice operations are stripped. It
     deliberately skips statically zero-trip loop bodies so an unreachable
-    access does not become a false-positive compilation error.
+    access does not become a false-positive compilation error. Exact loop
+    replay is capped by ``MAX_STATIC_REPLAY_TRIPS``; the conservative fallback
+    validates one reachable body instance, including first-iteration constants
+    when available, and never publishes speculative final results.
     """
+
+    _MAX_REPLAY_TRIPS = MAX_STATIC_REPLAY_TRIPS
 
     @property
     def name(self) -> str:
@@ -121,6 +114,7 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
                 "ArrayBoundsValidationPass expects AFFINE or HIERARCHICAL "
                 f"block, got {input.kind}",
             )
+        self._remaining_replay_trips = self._MAX_REPLAY_TRIPS
         self._walk_block(
             input,
             owned_blocks_on_path=frozenset({id(input)}),
@@ -148,23 +142,26 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
             ValidationError: If a reachable operation input or block output
                 has a concrete out-of-bounds array index.
         """
+        substitutors = () if substitutor is None else (substitutor,)
+        known_values: dict[str, ValueBase] = {}
         self._walk_operations(
             block.operations,
-            substitutor=substitutor,
+            substitutors=substitutors,
+            known_values=known_values,
             owned_blocks_on_path=owned_blocks_on_path,
         )
-        outputs = (
-            block.output_values
-            if substitutor is None
-            else (substitutor.substitute_value(value) for value in block.output_values)
+        self._validate_substituted_values(
+            block.output_values,
+            substitutors,
+            known_values,
         )
-        self._validate_values(outputs)
 
     def _walk_operations(
         self,
         operations: list[Operation],
         *,
-        substitutor: ValueSubstitutor | None = None,
+        substitutors: tuple[ValueSubstitutor, ...],
+        known_values: dict[str, ValueBase],
         owned_blocks_on_path: frozenset[int],
     ) -> None:
         """Walk reachable operations and validate their direct operands.
@@ -172,9 +169,11 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
         Args:
             operations (list[Operation]): Operations in the current reachable
                 control-flow region.
-            substitutor (ValueSubstitutor | None): Formal-to-actual mapping for
-                an operation-owned block. Defaults to ``None`` in the entry
-                block.
+            substitutors (tuple[ValueSubstitutor, ...]): Outer-scope
+                formal-to-actual and iteration substitutions, in application
+                order.
+            known_values (dict[str, ValueBase]): Constants learned while
+                replaying the current reachable operation sequence.
             owned_blocks_on_path (frozenset[int]): Block object identities on
                 the active recursion path.
 
@@ -183,45 +182,73 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
                 out-of-bounds array index.
         """
         for operation in operations:
-            current = (
-                operation
-                if substitutor is None
-                else substitutor.substitute_operation(operation)
+            current = self._substitute_operation(
+                operation,
+                substitutors,
+                known_values,
             )
             if isinstance(current, IfOperation):
                 self._walk_if_operation(
                     current,
-                    substitutor=substitutor,
+                    substitutors=substitutors,
+                    known_values=known_values,
                     owned_blocks_on_path=owned_blocks_on_path,
                 )
                 continue
             if isinstance(current, ForOperation):
                 self._walk_for_operation(
                     current,
-                    substitutor=substitutor,
+                    substitutors=substitutors,
+                    known_values=known_values,
+                    owned_blocks_on_path=owned_blocks_on_path,
+                )
+                continue
+            if isinstance(current, ForItemsOperation):
+                self._walk_for_items_operation(
+                    current,
+                    substitutors=substitutors,
+                    known_values=known_values,
                     owned_blocks_on_path=owned_blocks_on_path,
                 )
                 continue
 
-            self._validate_values(current.all_input_values())
+            self._validate_values(genuine_input_values(current))
             if isinstance(current, SliceArrayOperation):
                 for result in current.results:
                     if isinstance(result, ArrayValue):
                         self._validate_array_view(result)
             if isinstance(current, HasNestedOps):
-                for nested_operations in current.nested_op_lists():
+                for region in reachable_nested_regions(current):
+                    child_values = dict(known_values)
+                    self._validate_substituted_values(
+                        region.captures,
+                        substitutors,
+                        child_values,
+                    )
                     self._walk_operations(
-                        nested_operations,
-                        substitutor=substitutor,
+                        list(region.operations),
+                        substitutors=substitutors,
+                        known_values=child_values,
                         owned_blocks_on_path=owned_blocks_on_path,
                     )
+                    self._validate_substituted_values(
+                        region.yields,
+                        substitutors,
+                        child_values,
+                    )
             self._walk_owned_blocks(current, owned_blocks_on_path)
+            self._record_folded_result(
+                operation,
+                current,
+                known_values,
+            )
 
     def _walk_if_operation(
         self,
         operation: IfOperation,
         *,
-        substitutor: ValueSubstitutor | None,
+        substitutors: tuple[ValueSubstitutor, ...],
+        known_values: dict[str, ValueBase],
         owned_blocks_on_path: frozenset[int],
     ) -> None:
         """Validate only branches and yields reachable from one conditional.
@@ -229,8 +256,10 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
         Args:
             operation (IfOperation): Conditional whose condition, branch
                 yields, and nested operations should be checked.
-            substitutor (ValueSubstitutor | None): Formal-to-actual mapping
-                active for this conditional.
+            substitutors (tuple[ValueSubstitutor, ...]): Outer-scope
+                substitutions active for this conditional.
+            known_values (dict[str, ValueBase]): Constants learned in the
+                enclosing operation sequence.
             owned_blocks_on_path (frozenset[int]): Block object identities on
                 the active recursion path.
 
@@ -240,31 +269,89 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
         self._validate_values(operation.operands)
         self._validate_values(rebind.before for rebind in operation.branch_rebinds)
 
-        branches = operation.nested_op_lists()
-        yields = (operation.true_yields, operation.false_yields)
-        if operation.condition.is_constant():
-            branch_index = 0 if bool(operation.condition.get_const()) else 1
-            self._validate_values(yields[branch_index])
+        regions = operation.nested_regions()
+        condition = self._resolve_replay_value(operation.condition, (), {})
+        if isinstance(condition, Value) and condition.is_constant():
+            branch_index = 0 if bool(condition.get_const()) else 1
+            region = regions[branch_index]
+            branch_values = dict(known_values)
+            self._validate_substituted_values(
+                region.captures,
+                substitutors,
+                branch_values,
+            )
             self._walk_operations(
-                branches[branch_index],
-                substitutor=substitutor,
+                list(region.operations),
+                substitutors=substitutors,
+                known_values=branch_values,
                 owned_blocks_on_path=owned_blocks_on_path,
             )
+            self._validate_substituted_values(
+                region.yields,
+                substitutors,
+                branch_values,
+            )
+            for merge in operation.iter_merges():
+                known_values[merge.result.uuid] = self._resolve_replay_value(
+                    merge.select(branch_index == 0),
+                    substitutors,
+                    branch_values,
+                )
             return
 
-        for branch_yields, branch_operations in zip(yields, branches, strict=True):
-            self._validate_values(branch_yields)
+        branch_values_list: list[dict[str, ValueBase]] = []
+        for region in regions:
+            branch_values = dict(known_values)
+            self._validate_substituted_values(
+                region.captures,
+                substitutors,
+                branch_values,
+            )
             self._walk_operations(
-                branch_operations,
-                substitutor=substitutor,
+                list(region.operations),
+                substitutors=substitutors,
+                known_values=branch_values,
                 owned_blocks_on_path=owned_blocks_on_path,
             )
+            self._validate_substituted_values(
+                region.yields,
+                substitutors,
+                branch_values,
+            )
+            branch_values_list.append(branch_values)
+
+        for merge in operation.iter_merges():
+            true_value = self._resolve_replay_value(
+                merge.true_value,
+                substitutors,
+                branch_values_list[0],
+            )
+            false_value = self._resolve_replay_value(
+                merge.false_value,
+                substitutors,
+                branch_values_list[1],
+            )
+            if true_value.uuid == false_value.uuid:
+                known_values[merge.result.uuid] = true_value
+                continue
+            if (
+                isinstance(true_value, Value)
+                and isinstance(false_value, Value)
+                and same_exact_typed_constant(true_value, false_value)
+            ):
+                replacement = self._constant_replacement(
+                    merge.result,
+                    true_value.get_const(),
+                )
+                if replacement is not None:
+                    known_values[merge.result.uuid] = replacement
 
     def _walk_for_operation(
         self,
         operation: ForOperation,
         *,
-        substitutor: ValueSubstitutor | None,
+        substitutors: tuple[ValueSubstitutor, ...],
+        known_values: dict[str, ValueBase],
         owned_blocks_on_path: frozenset[int],
     ) -> None:
         """Validate a counted loop without inspecting a zero-trip body.
@@ -275,8 +362,10 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
 
         Args:
             operation (ForOperation): Counted loop to inspect.
-            substitutor (ValueSubstitutor | None): Formal-to-actual mapping
-                active for this loop.
+            substitutors (tuple[ValueSubstitutor, ...]): Outer-scope
+                substitutions active for this loop.
+            known_values (dict[str, ValueBase]): Constants learned in the
+                enclosing operation sequence.
             owned_blocks_on_path (frozenset[int]): Block object identities on
                 the active recursion path.
 
@@ -288,18 +377,455 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
         self._validate_values(
             rebind.before for rebind in operation.loop_carried_rebinds
         )
-        if _is_zero_trip_loop(operation):
-            return
-
-        self._validate_values(
-            region_arg.yielded for region_arg in operation.region_args
+        resolved_bounds = [
+            cast(Value, self._resolve_replay_value(bound, (), {}))
+            for bound in operation.operands[:3]
+        ]
+        resolved_operation = dataclasses.replace(
+            operation,
+            operands=[*resolved_bounds, *operation.operands[3:]],
         )
-        self._validate_values(rebind.after for rebind in operation.loop_carried_rebinds)
-        self._walk_operations(
-            operation.operations,
-            substitutor=substitutor,
+        iteration_range = static_for_range(resolved_operation)
+        iteration_bindings: Iterable[dict[str, ValueBase]] | None = None
+        trip_count: int | None = None
+        if iteration_range is not None:
+            try:
+                trip_count = len(iteration_range)
+            except OverflowError:
+                trip_count = None
+            if trip_count is not None:
+                if operation.loop_var_value is not None:
+                    iteration_bindings = (
+                        {
+                            operation.loop_var_value.uuid: (
+                                operation.loop_var_value.with_const(loop_value)
+                            )
+                        }
+                        for loop_value in iteration_range
+                    )
+                else:
+                    iteration_bindings = ({} for _ in iteration_range)
+        self._walk_loop_region(
+            operation,
+            iteration_bindings=iteration_bindings,
+            trip_count=trip_count,
+            substitutors=substitutors,
+            known_values=known_values,
             owned_blocks_on_path=owned_blocks_on_path,
         )
+
+    def _walk_for_items_operation(
+        self,
+        operation: ForItemsOperation,
+        *,
+        substitutors: tuple[ValueSubstitutor, ...],
+        known_values: dict[str, ValueBase],
+        owned_blocks_on_path: frozenset[int],
+    ) -> None:
+        """Validate an items loop with exact replay when entries are bound.
+
+        Args:
+            operation (ForItemsOperation): Items loop to inspect.
+            substitutors (tuple[ValueSubstitutor, ...]): Outer-scope
+                substitutions active for this loop.
+            known_values (dict[str, ValueBase]): Constants learned in the
+                enclosing operation sequence.
+            owned_blocks_on_path (frozenset[int]): Block object identities on
+                the active recursion path.
+
+        Raises:
+            ValidationError: If a reachable array access is out of bounds.
+        """
+        self._validate_values(operation.operands)
+        self._validate_values(region_arg.init for region_arg in operation.region_args)
+        self._validate_values(
+            rebind.before for rebind in operation.loop_carried_rebinds
+        )
+        entries = static_for_items_entries(operation)
+        iteration_bindings = (
+            None
+            if entries is None
+            else (
+                self._for_items_iteration_bindings(operation, key, value)
+                for key, value in entries
+            )
+        )
+        self._walk_loop_region(
+            operation,
+            iteration_bindings=iteration_bindings,
+            trip_count=None if entries is None else len(entries),
+            substitutors=substitutors,
+            known_values=known_values,
+            owned_blocks_on_path=owned_blocks_on_path,
+        )
+
+    def _walk_loop_region(
+        self,
+        operation: ForOperation | ForItemsOperation,
+        *,
+        iteration_bindings: Iterable[dict[str, ValueBase]] | None,
+        trip_count: int | None,
+        substitutors: tuple[ValueSubstitutor, ...],
+        known_values: dict[str, ValueBase],
+        owned_blocks_on_path: frozenset[int],
+    ) -> None:
+        """Validate and replay one counted or items loop region.
+
+        Args:
+            operation (ForOperation | ForItemsOperation): Loop to inspect.
+            iteration_bindings (Iterable[dict[str, ValueBase]] | None): Exact
+                induction or item values for each reachable iteration, or
+                ``None`` when the trip sequence remains symbolic.
+            trip_count (int | None): Exact cardinality aligned with
+                ``iteration_bindings``, or ``None`` when unresolved.
+            substitutors (tuple[ValueSubstitutor, ...]): Outer-scope
+                substitutions active for the loop.
+            known_values (dict[str, ValueBase]): Constants learned in the
+                enclosing operation sequence; loop results are published here.
+            owned_blocks_on_path (frozenset[int]): Block object identities on
+                the active recursion path.
+
+        Raises:
+            ValidationError: If a reachable array access is out of bounds.
+        """
+        region = operation.nested_regions()[0]
+        initial_values = [
+            self._resolve_replay_value(region_arg.init, substitutors, known_values)
+            for region_arg in operation.region_args
+        ]
+        if trip_count == 0:
+            for region_arg, initial in zip(
+                operation.region_args,
+                initial_values,
+                strict=True,
+            ):
+                known_values[region_arg.result.uuid] = initial
+            return
+
+        over_budget = (
+            iteration_bindings is not None
+            and trip_count is not None
+            and trip_count > self._remaining_replay_trips
+        )
+        if over_budget:
+            assert iteration_bindings is not None
+            first_bindings = next(iter(iteration_bindings))
+            self._replay_loop_iteration(
+                operation,
+                bindings=first_bindings,
+                carried=initial_values,
+                substitutors=substitutors,
+                known_values=known_values,
+                owned_blocks_on_path=owned_blocks_on_path,
+            )
+            self._validate_values(
+                rebind.after for rebind in operation.loop_carried_rebinds
+            )
+            return
+        if iteration_bindings is not None and trip_count is not None:
+            self._remaining_replay_trips -= trip_count
+
+        if iteration_bindings is None:
+            child_values = dict(known_values)
+            self._validate_substituted_values(
+                region.captures,
+                substitutors,
+                child_values,
+            )
+            self._walk_operations(
+                list(region.operations),
+                substitutors=substitutors,
+                known_values=child_values,
+                owned_blocks_on_path=owned_blocks_on_path,
+            )
+            self._validate_substituted_values(
+                region.yields,
+                substitutors,
+                child_values,
+            )
+            self._validate_values(
+                rebind.after for rebind in operation.loop_carried_rebinds
+            )
+            return
+
+        carried = initial_values
+        for bindings in iteration_bindings:
+            carried = self._replay_loop_iteration(
+                operation,
+                bindings=bindings,
+                carried=carried,
+                substitutors=substitutors,
+                known_values=known_values,
+                owned_blocks_on_path=owned_blocks_on_path,
+            )
+
+        self._validate_values(rebind.after for rebind in operation.loop_carried_rebinds)
+        for region_arg, final_value in zip(
+            operation.region_args,
+            carried,
+            strict=True,
+        ):
+            known_values[region_arg.result.uuid] = final_value
+
+    def _replay_loop_iteration(
+        self,
+        operation: ForOperation | ForItemsOperation,
+        *,
+        bindings: dict[str, ValueBase],
+        carried: Sequence[ValueBase],
+        substitutors: tuple[ValueSubstitutor, ...],
+        known_values: dict[str, ValueBase],
+        owned_blocks_on_path: frozenset[int],
+    ) -> list[ValueBase]:
+        """Validate one concrete loop iteration and resolve its carried yields.
+
+        Args:
+            operation (ForOperation | ForItemsOperation): Loop owning the body
+                and carried region arguments.
+            bindings (dict[str, ValueBase]): Concrete induction or item values
+                for this iteration.
+            carried (Sequence[ValueBase]): Values entering the carried region
+                arguments for this iteration.
+            substitutors (tuple[ValueSubstitutor, ...]): Outer-scope
+                substitutions active for the loop.
+            known_values (dict[str, ValueBase]): Constants learned before the
+                loop.
+            owned_blocks_on_path (frozenset[int]): Block object identities on
+                the active recursion path.
+
+        Returns:
+            list[ValueBase]: Resolved values yielded to the next iteration.
+
+        Raises:
+            ValidationError: If this reachable iteration contains an
+                out-of-bounds array access.
+        """
+        region = operation.nested_regions()[0]
+        iteration_values = dict(known_values)
+        iteration_values.update(bindings)
+        iteration_values.update(
+            (region_arg.block_arg.uuid, value)
+            for region_arg, value in zip(
+                operation.region_args,
+                carried,
+                strict=True,
+            )
+        )
+        self._validate_substituted_values(
+            region.captures,
+            substitutors,
+            iteration_values,
+        )
+        self._walk_operations(
+            list(region.operations),
+            substitutors=substitutors,
+            known_values=iteration_values,
+            owned_blocks_on_path=owned_blocks_on_path,
+        )
+        self._validate_substituted_values(
+            region.yields,
+            substitutors,
+            iteration_values,
+        )
+        return [
+            self._resolve_replay_value(
+                region_arg.yielded,
+                substitutors,
+                iteration_values,
+            )
+            for region_arg in operation.region_args
+        ]
+
+    def _for_items_iteration_bindings(
+        self,
+        operation: ForItemsOperation,
+        key: Any,
+        value: Any,
+    ) -> dict[str, ValueBase]:
+        """Build substitutions for one statically bound item.
+
+        Args:
+            operation (ForItemsOperation): Items loop owning the iteration
+                identities.
+            key (Any): Concrete mapping key for this iteration.
+            value (Any): Concrete mapping value for this iteration.
+
+        Returns:
+            dict[str, ValueBase]: UUID-keyed replacements for scalar key/value
+                formals and one-dimensional vector-key contents and length.
+        """
+        bindings: dict[str, ValueBase] = {}
+        key_values = operation.key_var_values or ()
+        if (
+            operation.key_is_vector
+            and len(key_values) == 1
+            and isinstance(key_values[0], ArrayValue)
+            and isinstance(key, (tuple, list))
+        ):
+            identity = key_values[0]
+            bound_key = identity.with_array_runtime_metadata(const_array=tuple(key))
+            bindings[identity.uuid] = bound_key
+            if identity.shape:
+                bindings[identity.shape[0].uuid] = identity.shape[0].with_const(
+                    len(key)
+                )
+        elif not operation.key_is_vector:
+            key_parts: tuple[Any, ...]
+            if len(key_values) == 1:
+                key_parts = (key,)
+            elif isinstance(key, (tuple, list)) and len(key) == len(key_values):
+                key_parts = tuple(key)
+            else:
+                key_parts = ()
+            for identity, item in zip(key_values, key_parts, strict=False):
+                replacement = self._constant_replacement(identity, item)
+                if replacement is not None:
+                    bindings[identity.uuid] = replacement
+        if operation.value_var_value is not None:
+            replacement = self._constant_replacement(
+                operation.value_var_value,
+                value,
+            )
+            if replacement is not None:
+                bindings[operation.value_var_value.uuid] = replacement
+        return bindings
+
+    def _substitute_operation(
+        self,
+        operation: Operation,
+        substitutors: tuple[ValueSubstitutor, ...],
+        known_values: dict[str, ValueBase],
+    ) -> Operation:
+        """Apply outer and replay substitutions to one operation.
+
+        Args:
+            operation (Operation): Operation to rewrite for validation.
+            substitutors (tuple[ValueSubstitutor, ...]): Stable outer-scope
+                substitutions in application order.
+            known_values (dict[str, ValueBase]): Mutable replay values known at
+                this operation's program point.
+
+        Returns:
+            Operation: Rewritten operation used only by this validation pass.
+        """
+        current = operation
+        for substitutor in substitutors:
+            current = substitutor.substitute_operation(current)
+        return ValueSubstitutor(
+            known_values,
+            transitive=True,
+        ).substitute_operation(current)
+
+    def _resolve_replay_value(
+        self,
+        value: ValueBase,
+        substitutors: tuple[ValueSubstitutor, ...],
+        known_values: dict[str, ValueBase],
+    ) -> ValueBase:
+        """Substitute and concretize one value in a replay environment.
+
+        Args:
+            value (ValueBase): Value to resolve.
+            substitutors (tuple[ValueSubstitutor, ...]): Stable outer-scope
+                substitutions in application order.
+            known_values (dict[str, ValueBase]): Replay values known at the
+                current program point.
+
+        Returns:
+            ValueBase: Substituted value, carrying constant metadata when its
+                scalar payload is compile-time resolvable.
+        """
+        current = value
+        for substitutor in substitutors:
+            current = substitutor.substitute_value(current)
+        current = ValueSubstitutor(
+            known_values,
+            transitive=True,
+        ).substitute_value(current)
+        if not isinstance(current, Value):
+            return current
+        resolved = ValueResolver().resolve(current)
+        replacement = self._constant_replacement(current, resolved)
+        return current if replacement is None else replacement
+
+    def _validate_substituted_values(
+        self,
+        values: Iterable[ValueBase],
+        substitutors: tuple[ValueSubstitutor, ...],
+        known_values: dict[str, ValueBase],
+    ) -> None:
+        """Validate values after applying a replay environment.
+
+        Args:
+            values (Iterable[ValueBase]): Values to rewrite and inspect.
+            substitutors (tuple[ValueSubstitutor, ...]): Stable outer-scope
+                substitutions in application order.
+            known_values (dict[str, ValueBase]): Replay values known at the
+                current program point.
+
+        Raises:
+            ValidationError: If a substituted array access is out of bounds.
+        """
+        self._validate_values(
+            self._resolve_replay_value(value, substitutors, known_values)
+            for value in values
+        )
+
+    def _record_folded_result(
+        self,
+        original: Operation,
+        current: Operation,
+        known_values: dict[str, ValueBase],
+    ) -> None:
+        """Record one replayable classical operation result.
+
+        Args:
+            original (Operation): Operation before validation substitutions.
+            current (Operation): Operation after validation substitutions.
+            known_values (dict[str, ValueBase]): Replay environment to update.
+
+        Returns:
+            None: Mutates ``known_values`` when ``current`` folds to a scalar.
+        """
+        if not isinstance(current, (BinOp, CompOp, CondOp, NotOp, UnaryMathOp)):
+            return
+        if not original.results or not current.results:
+            return
+        folded = fold_classical_op(
+            current,
+            ValueResolver().resolve,
+            set(),
+            FoldPolicy.COMPILE_TIME,
+        )
+        replacement = self._constant_replacement(current.results[0], folded)
+        if replacement is None:
+            return
+        known_values[original.results[0].uuid] = replacement
+        known_values[current.results[0].uuid] = replacement
+
+    def _constant_replacement(
+        self,
+        template: ValueBase,
+        payload: Any,
+    ) -> Value | None:
+        """Attach one supported Python scalar to an IR value identity.
+
+        Args:
+            template (ValueBase): Value whose identity and type should be
+                preserved.
+            payload (Any): Candidate resolved scalar payload.
+
+        Returns:
+            Value | None: Constant replacement, or ``None`` for structured,
+                missing, or unsupported payloads.
+        """
+        if not isinstance(template, Value) or payload is None:
+            return None
+        if isinstance(payload, np.generic):
+            payload = payload.item()
+        if not isinstance(payload, (bool, int, float)):
+            return None
+        return template.with_const(payload)
 
     def _walk_owned_blocks(
         self,
@@ -377,7 +903,7 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
         """
         if view.slice_of is None or not view.shape:
             return
-        length = _constant_integer(view.shape[0])
+        length = constant_integer(view.shape[0])
         if length is None or length <= 0:
             return
         self._validate_leading_coordinate(0, view)
@@ -397,35 +923,74 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
         for value in values:
             self._validate_element_access(value)
 
-    def _validate_element_access(self, value: ValueBase) -> None:
-        """Validate every concrete coordinate of one array element value.
+    def _validate_element_access(
+        self,
+        value: ValueBase,
+        seen: set[str] | None = None,
+    ) -> None:
+        """Validate array accesses recursively embedded in one IR value.
 
-        For the leading coordinate of a sliced vector, each view-local index is
-        validated before applying that view's affine map to its parent. This
-        prevents a zero-length view from borrowing an otherwise valid slot in
-        the root array.
+        Tuple elements, dictionary entries, array shapes, slice metadata,
+        parent arrays, and element indices all carry semantic value references
+        outside ordinary operation operands. For the leading coordinate of a
+        sliced vector, each view-local index is validated before applying that
+        view's affine map to its parent. This prevents a zero-length view from
+        borrowing an otherwise valid slot in the root array.
 
         Args:
-            value (ValueBase): Operation operand that may represent an array
-                element access.
+            value (ValueBase): Operation operand or structured boundary value
+                that may contain array element accesses.
+            seen (set[str] | None): Value UUIDs already inspected during this
+                recursive metadata walk. Defaults to a fresh set.
 
         Raises:
             ValidationError: If a concrete index falls outside a concrete
                 immediate-view or root-array extent.
         """
+        if seen is None:
+            seen = set()
+        if value.uuid in seen:
+            return
+        seen.add(value.uuid)
+
+        if isinstance(value, TupleValue):
+            for element in value.elements:
+                self._validate_element_access(element, seen)
+            return
+        if isinstance(value, DictValue):
+            for key, entry_value in value.entries:
+                self._validate_element_access(key, seen)
+                self._validate_element_access(entry_value, seen)
+            return
         if not isinstance(value, Value):
             return
+
+        if isinstance(value, ArrayValue):
+            for dimension in value.shape:
+                self._validate_element_access(dimension, seen)
+            if value.slice_of is not None:
+                self._validate_element_access(value.slice_of, seen)
+            if value.slice_start is not None:
+                self._validate_element_access(value.slice_start, seen)
+            if value.slice_step is not None:
+                self._validate_element_access(value.slice_step, seen)
+            self._validate_array_view(value)
+
         parent = value.parent_array
+        if parent is not None:
+            self._validate_element_access(parent, seen)
+        for index_value in value.element_indices:
+            self._validate_element_access(index_value, seen)
         if parent is None or not value.element_indices:
             return
 
         root = _root_array(parent)
-        leading_index = _constant_integer(value.element_indices[0])
+        leading_index = self._resolve_integer_index(value.element_indices[0])
         if leading_index is not None:
             self._validate_leading_coordinate(leading_index, parent)
 
         for dimension, index_value in enumerate(value.element_indices[1:], start=1):
-            index = _constant_integer(index_value)
+            index = self._resolve_integer_index(index_value)
             if index is None:
                 continue
             self._validate_coordinate(
@@ -435,6 +1000,28 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
                 accessed_parent=parent,
                 root=root,
             )
+
+    @staticmethod
+    def _resolve_integer_index(value: Value) -> int | None:
+        """Resolve an integer index from constants or bound array metadata.
+
+        Args:
+            value (Value): Scalar index value to resolve.
+
+        Returns:
+            int | None: Concrete non-boolean integer, or ``None`` when the
+                index remains symbolic or non-integral.
+        """
+        constant = constant_integer(value)
+        if constant is not None:
+            return constant
+        resolved = ValueResolver().resolve(value)
+        if isinstance(resolved, (bool, np.bool_)) or not isinstance(
+            resolved,
+            (int, np.integer),
+        ):
+            return None
+        return int(resolved)
 
     def _validate_leading_coordinate(
         self,
@@ -466,8 +1053,8 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
             )
             if current.slice_of is None:
                 break
-            start = _constant_integer(current.slice_start)
-            step = _constant_integer(current.slice_step)
+            start = constant_integer(current.slice_start)
+            step = constant_integer(current.slice_step)
             if start is None or step is None:
                 break
             current_index = start + step * current_index
@@ -514,7 +1101,7 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
             )
 
         extent_value = bounded_array.shape[dimension]
-        extent = _constant_integer(extent_value)
+        extent = constant_integer(extent_value)
         if extent is None or index < extent:
             return
 
@@ -526,7 +1113,7 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
             and accessed_parent.shape
         ):
             view_extent_value = accessed_parent.shape[0]
-            view_extent = _constant_integer(view_extent_value)
+            view_extent = constant_integer(view_extent_value)
             if view_extent is not None:
                 view_extent_name = view_extent_value.name or "dimension 0"
                 view_context = (

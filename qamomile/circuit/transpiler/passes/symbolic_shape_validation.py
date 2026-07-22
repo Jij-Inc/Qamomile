@@ -53,6 +53,8 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     HasNestedOps,
+    IfOperation,
+    WhileOperation,
 )
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.select import SelectOperation
@@ -70,6 +72,11 @@ from qamomile.circuit.transpiler.block_parameter_binding import (
 )
 from qamomile.circuit.transpiler.errors import QamomileCompileError
 from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.passes.control_flow_reachability import (
+    reachable_nested_regions,
+    same_exact_typed_constant,
+    static_loop_trip_count,
+)
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 
 # Shape dims created by ``func_to_block.create_dummy_input`` follow the
@@ -220,8 +227,81 @@ def _build_classical_dependency_graph(
                 operand_uuids = {value.uuid for value in input_values}
                 for result in op.results:
                     self.graph.setdefault(result.uuid, set()).update(operand_uuids)
+            self._record_control_flow_edges(op)
             for value in input_values:
                 self._record_value_reference_edges(value)
+
+        def _visit_control_flow(self, op: Operation) -> None:
+            """Visit only statically reachable nested regions.
+
+            Args:
+                op (Operation): Operation whose nested regions may be
+                    compile-time selectable.
+
+            Returns:
+                None: Recurses into reachable nested operations in place.
+            """
+            if isinstance(op, HasNestedOps):
+                for region in reachable_nested_regions(op):
+                    self.visit_operations(list(region.operations))
+
+        def _record_control_flow_edges(self, op: Operation) -> None:
+            """Record dataflow crossing a structured-control boundary.
+
+            Args:
+                op (Operation): Operation whose merge or loop-carried values
+                    should be connected.
+
+            Returns:
+                None: Mutates ``self.graph`` in place.
+            """
+            if isinstance(op, IfOperation):
+                for merge in op.iter_merges():
+                    dependencies = self.graph.setdefault(merge.result.uuid, set())
+                    if op.condition.is_constant():
+                        dependencies.add(
+                            merge.select(bool(op.condition.get_const())).uuid
+                        )
+                        continue
+                    dependencies.update((merge.true_value.uuid, merge.false_value.uuid))
+                    equal_constants = same_exact_typed_constant(
+                        merge.true_value,
+                        merge.false_value,
+                    )
+                    if not merge.is_identity and not equal_constants:
+                        dependencies.add(op.condition.uuid)
+                return
+
+            if isinstance(op, (ForOperation, ForItemsOperation)):
+                trip_count = static_loop_trip_count(op)
+                for region_arg in op.region_args:
+                    if trip_count == 0:
+                        self.graph.setdefault(region_arg.result.uuid, set()).add(
+                            region_arg.init.uuid
+                        )
+                        continue
+                    self.graph.setdefault(region_arg.block_arg.uuid, set()).add(
+                        region_arg.init.uuid
+                    )
+                    if trip_count is None or trip_count > 1:
+                        self.graph[region_arg.block_arg.uuid].add(
+                            region_arg.yielded.uuid
+                        )
+                    result_dependencies = self.graph.setdefault(
+                        region_arg.result.uuid, set()
+                    )
+                    result_dependencies.add(region_arg.yielded.uuid)
+                    if trip_count is None:
+                        result_dependencies.add(region_arg.init.uuid)
+                return
+
+            if isinstance(op, WhileOperation):
+                for region_arg in op.region_args:
+                    sources = (region_arg.init.uuid, region_arg.yielded.uuid)
+                    self.graph.setdefault(region_arg.block_arg.uuid, set()).update(
+                        sources
+                    )
+                    self.graph.setdefault(region_arg.result.uuid, set()).update(sources)
 
         def _record_value_reference_edges(
             self,
@@ -490,9 +570,9 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             )
             if isinstance(op, HasNestedOps):
                 nested_scope = enclosing_loop_vars | self._declared_loop_var_uuids(op)
-                for nested in op.nested_op_lists():
+                for region in reachable_nested_regions(op):
                     self._walk(
-                        nested,
+                        list(region.operations),
                         nested_scope,
                         dependency_graph,
                         aliased_shape_dims,
@@ -591,8 +671,8 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         Returns:
             frozenset[str]: UUIDs of the iteration variables ``op`` binds
                 for its body — ``loop_var_value`` for ``ForOperation``,
-                key/value variables for ``ForItemsOperation``, empty for
-                other control flow.
+                key/value variables and vector-key shape dimensions for
+                ``ForItemsOperation``, empty for other control flow.
         """
         uuids: set[str] = set()
         if isinstance(op, ForOperation) and op.loop_var_value is not None:
@@ -600,6 +680,8 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         if isinstance(op, ForItemsOperation):
             for value in op.key_var_values or ():
                 uuids.add(value.uuid)
+                if isinstance(value, ArrayValue):
+                    uuids.update(dimension.uuid for dimension in value.shape)
             if op.value_var_value is not None:
                 uuids.add(op.value_var_value.uuid)
         return frozenset(uuids)
@@ -681,7 +763,11 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         if not isinstance(width, Value) or width.is_constant():
             return
         shape_info = _looks_like_parameter_shape_dim(width)
-        if shape_info is not None and width.uuid not in aliased_shape_dims:
+        if (
+            shape_info is not None
+            and width.uuid not in enclosing_loop_vars
+            and width.uuid not in aliased_shape_dims
+        ):
             array_name, dim_index = shape_info
             input_shape_info = self._input_shape_dimensions.get(width.uuid)
             raise QamomileCompileError(
@@ -793,7 +879,11 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         if value.is_constant():
             return
         shape_info = _looks_like_parameter_shape_dim(value)
-        if shape_info is not None and value.uuid not in aliased_shape_dims:
+        if (
+            shape_info is not None
+            and value.uuid not in enclosing_loop_vars
+            and value.uuid not in aliased_shape_dims
+        ):
             array_name, dim_index = shape_info
             input_shape_info = self._input_shape_dimensions.get(value.uuid)
             raise QamomileCompileError(
@@ -864,7 +954,11 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             if not isinstance(operand, Value):
                 continue
             shape_info = _looks_like_parameter_shape_dim(operand)
-            if shape_info is not None and operand.uuid not in aliased_shape_dims:
+            if (
+                shape_info is not None
+                and operand.uuid not in enclosing_loop_vars
+                and operand.uuid not in aliased_shape_dims
+            ):
                 array_name, dim_index = shape_info
                 input_shape_info = self._input_shape_dimensions.get(operand.uuid)
                 location = f"a for-loop '{label}' bound (loop variable '{op.loop_var}')"

@@ -256,6 +256,201 @@ def _owned_control_array_element(values: qmc.Vector[qmc.Float]) -> qmc.Bit:
     return qmc.measure(target)
 
 
+@qmc.qkernel
+def _serialized_zero_trip_shape_body(
+    values: qmc.Vector[qmc.UInt],
+    repetitions: qmc.UInt,
+) -> qmc.Bit:
+    """Use a runtime shape only inside a possibly empty counted loop.
+
+    Args:
+        values (qmc.Vector[qmc.UInt]): Runtime array whose shape is structural.
+        repetitions (qmc.UInt): Compile-time outer-loop trip count.
+
+    Returns:
+        qmc.Bit: Measurement of the loop target.
+    """
+    target = qmc.qubit("target")
+    for _outer in qmc.range(repetitions):
+        for _inner in qmc.range(values.shape[0]):
+            target = qmc.x(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _serialized_for_items_shape_body(
+    values: qmc.Vector[qmc.UInt],
+    items: qmc.Dict[qmc.UInt, qmc.UInt],
+) -> qmc.Bit:
+    """Use a runtime shape only inside a compile-time items loop.
+
+    Args:
+        values (qmc.Vector[qmc.UInt]): Runtime array whose shape is structural.
+        items (qmc.Dict[qmc.UInt, qmc.UInt]): Compile-time loop entries.
+
+    Returns:
+        qmc.Bit: Measurement of the loop target.
+    """
+    target = qmc.qubit("target")
+    for _key, _value in qmc.items(items):
+        for _inner in qmc.range(values.shape[0]):
+            target = qmc.x(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _serialized_unknown_items_region_result(
+    initial: qmc.UInt,
+    items: qmc.Dict[qmc.UInt, qmc.Float],
+) -> qmc.Bit:
+    """Use a possibly zero-trip items-loop result as later structure.
+
+    Args:
+        initial (qmc.UInt): Runtime initializer selected when ``items`` is empty.
+        items (qmc.Dict[qmc.UInt, qmc.Float]): Runtime mapping with unresolved
+            compile-time cardinality.
+
+    Returns:
+        qmc.Bit: Measurement of the post-loop target.
+    """
+    count = initial
+    for _key, _value in qmc.items(items):
+        count = qmc.uint(1)
+    target = qmc.qubit("target")
+    for _index in qmc.range(count):
+        target = qmc.x(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _serialized_vector_key_shape_range(
+    items: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+) -> qmc.Bit:
+    """Use each bound vector-key length as a nested loop bound.
+
+    Args:
+        items (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Compile-time mapping
+            with vector keys whose lengths are resolved per item.
+
+    Returns:
+        qmc.Bit: Measurement of the loop target.
+    """
+    target = qmc.qubit("target")
+    for key, _value in qmc.items(items):
+        for _index in qmc.range(key.shape[0]):
+            target = qmc.x(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _serialized_vector_key_shape_select(
+    items: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+) -> qmc.Bit:
+    """Use a bound vector-key length as a SELECT index width.
+
+    Args:
+        items (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Compile-time mapping
+            with two-element vector keys.
+
+    Returns:
+        qmc.Bit: Measurement of the selected target.
+    """
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    for key, _value in qmc.items(items):
+        index, target = qmc.select(
+            [_structural_identity, _structural_x],
+            num_index_qubits=key.shape[0],
+        )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _serialized_vector_key_shape_control(
+    items: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+) -> qmc.Bit:
+    """Use a bound vector-key length as a controlled-unitary width.
+
+    Args:
+        items (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Compile-time mapping
+            with two-element vector keys.
+
+    Returns:
+        qmc.Bit: Measurement of the controlled target.
+    """
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    for key, _value in qmc.items(items):
+        controls, target = qmc.control(
+            qmc.x,
+            num_controls=key.shape[0],
+        )(controls, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _runtime_if_distinct_structural_bound(flag: qmc.UInt) -> qmc.Bit:
+    """Select two distinct loop bounds with a runtime condition.
+
+    Args:
+        flag (qmc.UInt): Runtime branch selector.
+
+    Returns:
+        qmc.Bit: Measurement of the loop target.
+    """
+    bound = qmc.uint(1)
+    if flag == 1:
+        bound = qmc.uint(1)
+    else:
+        bound = qmc.uint(2)
+    target = qmc.qubit("target")
+    for _index in qmc.range(bound):
+        target = qmc.x(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _runtime_if_equal_structural_bound(flag: qmc.UInt) -> qmc.Bit:
+    """Select the same loop bound from both runtime branches.
+
+    Args:
+        flag (qmc.UInt): Runtime branch selector.
+
+    Returns:
+        qmc.Bit: Measurement of the loop target.
+    """
+    bound = qmc.uint(0)
+    if flag == 1:
+        bound = qmc.uint(1)
+    else:
+        bound = qmc.uint(1)
+    target = qmc.qubit("target")
+    for _index in qmc.range(bound):
+        target = qmc.x(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _runtime_if_identity_structural_bound(flag: qmc.UInt) -> qmc.Bit:
+    """Preserve one loop-bound handle through both runtime branches.
+
+    Args:
+        flag (qmc.UInt): Runtime branch selector.
+
+    Returns:
+        qmc.Bit: Measurement of the loop target.
+    """
+    bound = qmc.uint(1)
+    if flag == 1:
+        bound = bound
+    else:
+        bound = bound
+    target = qmc.qubit("target")
+    for _index in qmc.range(bound):
+        target = qmc.x(target)
+    return qmc.measure(target)
+
+
 class TestRejection:
     """Patterns that Layer 3 should catch."""
 
@@ -390,6 +585,192 @@ class TestRejection:
         )
 
         assert executable.get_first_circuit() is not None
+
+
+class TestRegionBoundaryStructure:
+    """Region boundaries preserve structural provenance and reachability."""
+
+    def test_two_trip_runtime_scalar_region_arg_fails_before_emit(self) -> None:
+        """A runtime scalar carried into a nested bound keeps its source."""
+
+        @qmc.qkernel
+        def kernel(n: qmc.UInt) -> qmc.Bit:
+            """Use a runtime scalar through a two-trip RegionArg bound.
+
+            Args:
+                n (qmc.UInt): Runtime value carried as the nested loop bound.
+
+            Returns:
+                qmc.Bit: Measurement of the loop target.
+            """
+            target = qmc.qubit("target")
+            count = n
+            for _outer in qmc.range(2):
+                for _inner in qmc.range(count):
+                    target = qmc.x(target)
+                count = count + 0
+            return qmc.measure(target)
+
+        restored = deserialize(serialize(kernel))
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(restored, parameters=["n"])
+
+        assert type(exc_info.value) is QamomileCompileError
+        message = str(exc_info.value)
+        assert "Cannot unroll loop: bounds could not be resolved" in message
+        assert "runtime parameter 'n'" in message
+
+    def test_two_trip_runtime_shape_region_arg_fails_before_emit(self) -> None:
+        """A runtime shape carried into a nested bound keeps its source."""
+
+        @qmc.qkernel
+        def kernel(values: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+            """Use a runtime shape through a two-trip RegionArg bound.
+
+            Args:
+                values (qmc.Vector[qmc.UInt]): Runtime array whose shape is
+                    carried.
+
+            Returns:
+                qmc.Bit: Measurement of the loop target.
+            """
+            target = qmc.qubit("target")
+            count = values.shape[0]
+            for _outer in qmc.range(2):
+                for _inner in qmc.range(count):
+                    target = qmc.x(target)
+                count = count + 0
+            return qmc.measure(target)
+
+        restored = deserialize(serialize(kernel))
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(restored, parameters=["values"])
+
+        assert type(exc_info.value) is QamomileCompileError
+        message = str(exc_info.value)
+        assert "Parameter array 'values' has unresolved shape dimension 0" in message
+        assert "value_count" in message
+
+    def test_single_trip_region_arg_does_not_follow_unused_yield(self) -> None:
+        """A sole iteration reads its constant init, not its runtime yield."""
+
+        @qmc.qkernel
+        def kernel(values: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+            """Yield a runtime shape after the sole constant-bound use.
+
+            Args:
+                values (qmc.Vector[qmc.UInt]): Runtime array yielded after the
+                    only loop iteration.
+
+            Returns:
+                qmc.Bit: Measurement of the loop target.
+            """
+            target = qmc.qubit("target")
+            count = qmc.uint(1)
+            for _outer in qmc.range(1):
+                for _inner in qmc.range(count):
+                    target = qmc.x(target)
+                count = values.shape[0]
+            return qmc.measure(target)
+
+        restored = deserialize(serialize(kernel))
+
+        executable = QiskitTranspiler().transpile(
+            restored,
+            parameters=["values"],
+        )
+
+        assert executable.get_first_circuit() is not None
+
+    def test_post_loop_region_result_keeps_runtime_shape_source(self) -> None:
+        """A structural use after the loop follows the final yielded value."""
+
+        @qmc.qkernel
+        def kernel(values: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+            """Use a runtime shape after it exits a RegionArg loop.
+
+            Args:
+                values (qmc.Vector[qmc.UInt]): Runtime array whose shape is
+                    yielded.
+
+            Returns:
+                qmc.Bit: Measurement of the post-loop target.
+            """
+            target = qmc.qubit("target")
+            count = qmc.uint(1)
+            for _outer in qmc.range(2):
+                count = values.shape[0]
+            for _inner in qmc.range(count):
+                target = qmc.x(target)
+            return qmc.measure(target)
+
+        restored = deserialize(serialize(kernel))
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(restored, parameters=["values"])
+
+        assert type(exc_info.value) is QamomileCompileError
+        assert "Parameter array 'values' has unresolved shape dimension 0" in str(
+            exc_info.value
+        )
+
+    def test_serialized_zero_trip_for_skips_runtime_shape_body(self) -> None:
+        """A runtime shape inside a statically empty range loop is unreachable."""
+        restored = deserialize(serialize(_serialized_zero_trip_shape_body))
+
+        executable = QiskitTranspiler().transpile(
+            restored,
+            bindings={"repetitions": 0},
+            parameters=["values"],
+        )
+
+        assert executable.get_first_circuit() is not None
+
+    def test_serialized_nonempty_for_validates_runtime_shape_body(self) -> None:
+        """The same runtime shape is structural when the outer loop executes."""
+        restored = deserialize(serialize(_serialized_zero_trip_shape_body))
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(
+                restored,
+                bindings={"repetitions": 1},
+                parameters=["values"],
+            )
+
+        assert type(exc_info.value) is QamomileCompileError
+        assert "Parameter array 'values' has unresolved shape dimension 0" in str(
+            exc_info.value
+        )
+
+    def test_serialized_empty_for_items_skips_runtime_shape_body(self) -> None:
+        """A runtime shape inside an empty bound items loop is unreachable."""
+        restored = deserialize(serialize(_serialized_for_items_shape_body))
+
+        executable = QiskitTranspiler().transpile(
+            restored,
+            bindings={"items": {}},
+            parameters=["values"],
+        )
+
+        assert executable.get_first_circuit() is not None
+
+    def test_serialized_nonempty_for_items_validates_runtime_shape_body(self) -> None:
+        """The same items-body shape is structural for a nonempty Dict."""
+        restored = deserialize(serialize(_serialized_for_items_shape_body))
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(
+                restored,
+                bindings={"items": {0: 1}},
+                parameters=["values"],
+            )
+
+        assert type(exc_info.value) is QamomileCompileError
+        assert "Parameter array 'values' has unresolved shape dimension 0" in str(
+            exc_info.value
+        )
 
 
 class TestRuntimeParameterLoopBound:
@@ -1086,3 +1467,91 @@ class TestAcceptance:
             bindings={"width": 2},
         )
         assert executable.get_first_circuit() is not None
+
+
+class TestIfMergeStructure:
+    """Unknown classical branches preserve only genuine bound dependencies."""
+
+    def test_distinct_yields_track_runtime_condition_source(self) -> None:
+        """A structural merge of different constants depends on its condition."""
+        restored = deserialize(serialize(_runtime_if_distinct_structural_bound))
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(restored, parameters=["flag"])
+
+        assert type(exc_info.value) is QamomileCompileError
+        message = str(exc_info.value)
+        assert "Cannot unroll loop: bounds could not be resolved" in message
+        assert "runtime parameter 'flag'" in message
+
+    def test_equal_constant_yields_are_not_structural(self) -> None:
+        """Equal branch constants make the merged loop bound unconditional."""
+        restored = deserialize(serialize(_runtime_if_equal_structural_bound))
+
+        executable = QiskitTranspiler().transpile(restored, parameters=["flag"])
+
+        assert executable.get_first_circuit() is not None
+
+    def test_identity_yields_are_not_structural(self) -> None:
+        """Identity branch yields do not make a constant bound conditional."""
+        restored = deserialize(serialize(_runtime_if_identity_structural_bound))
+
+        executable = QiskitTranspiler().transpile(restored, parameters=["flag"])
+
+        assert executable.get_first_circuit() is not None
+
+
+class TestVectorKeyStructuralShape:
+    """Bound vector-key dimensions are item-loop structural variables."""
+
+    def test_variable_key_lengths_drive_nested_loop_bounds(self) -> None:
+        """Each vector key supplies its own concrete nested-loop trip count."""
+        restored = deserialize(serialize(_serialized_vector_key_shape_range))
+
+        executable = QiskitTranspiler().transpile(
+            restored,
+            bindings={"items": {(0, 1): 1.0, (2, 3, 4): 2.0}},
+        )
+
+        assert executable.get_first_circuit() is not None
+
+    def test_vector_key_length_drives_select_width(self) -> None:
+        """A bound vector-key dimension remains valid SELECT structure."""
+        restored = deserialize(serialize(_serialized_vector_key_shape_select))
+
+        executable = QiskitTranspiler().transpile(
+            restored,
+            bindings={"items": {(0, 1): 1.0, (2, 3): 2.0}},
+        )
+
+        assert executable.get_first_circuit() is not None
+
+    def test_vector_key_length_drives_control_width(self) -> None:
+        """A bound vector-key dimension remains valid controlled structure."""
+        restored = deserialize(serialize(_serialized_vector_key_shape_control))
+
+        executable = QiskitTranspiler().transpile(
+            restored,
+            bindings={"items": {(0, 1): 1.0, (2, 3): 2.0}},
+        )
+
+        assert executable.get_first_circuit() is not None
+
+
+class TestUnknownTripRegionResult:
+    """Unknown loop cardinality keeps zero-trip initializer provenance."""
+
+    def test_items_result_retains_runtime_initializer_source(self) -> None:
+        """A post-loop bound includes the possible zero-trip init value."""
+        restored = deserialize(serialize(_serialized_unknown_items_region_result))
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(
+                restored,
+                parameters=["initial", "items"],
+            )
+
+        assert type(exc_info.value) is QamomileCompileError
+        message = str(exc_info.value)
+        assert "Cannot unroll loop: bounds could not be resolved" in message
+        assert "runtime parameter 'initial'" in message
