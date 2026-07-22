@@ -21,11 +21,18 @@ from hugr import ops
 from hugr.package import Package
 from hugr.std.float import FloatVal
 
-from qamomile.circuit.ir.operation.control_flow import ForOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    ForOperation,
+    RegionArg,
+    WhileOperation,
+)
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.types import BitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.hugr import HugrTranspiler
+from qamomile.hugr.lowerer import _lower_while
 
 
 def _hugr_operation_names(package: Package) -> list[str]:
@@ -2898,6 +2905,44 @@ def test_hugr_threads_while_scalar_carry_through_tail_loop() -> None:
     package = HugrTranspiler().to_hugr(_hugr_while_scalar_carry)
 
     HugrTranspiler().target.validate(package)
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    "array_field",
+    ["init", "block_arg", "yielded", "result"],
+)
+def test_hugr_rejects_while_array_region_arg_before_tail_loop(
+    array_field: str,
+) -> None:
+    """Array RegionArgs fail with a targeted error before HUGR construction."""
+    values = {
+        field: Value(type=UIntType(), name=f"values_{field}")
+        for field in ("init", "block_arg", "yielded", "result")
+    }
+    values[array_field] = ArrayValue(
+        type=UIntType(),
+        name=f"values_{array_field}",
+    )
+    operation = WhileOperation(
+        operands=[Value(type=BitType(), name="condition")],
+        region_args=(
+            RegionArg(
+                "values",
+                values["init"],
+                values["block_arg"],
+                values["yielded"],
+                values["result"],
+            ),
+        ),
+        results=[values["result"]],
+    )
+
+    with pytest.raises(
+        EmitError,
+        match="array-valued region arguments \\(values\\)",
+    ):
+        _lower_while(operation, None, {}, {}, {})
 
 
 @pytest.mark.hugr

@@ -1468,12 +1468,33 @@ def _lower_while(
         functions (dict[CallableRef, Any]): Predeclared HUGR functions.
 
     Raises:
-        EmitError: If the condition or a captured body value is unresolved.
+        EmitError: If the condition or a captured body value is unresolved,
+            or if a region argument is array-valued.
     """
     try:
         validate_region_args(operation)
     except ValueError as error:
         raise EmitError(str(error), operation="WhileOperation") from error
+    array_region_args = [
+        region.var_name
+        for region in operation.region_args
+        if any(
+            isinstance(value, ArrayValue)
+            for value in (
+                region.init,
+                region.block_arg,
+                region.yielded,
+                region.result,
+            )
+        )
+    ]
+    if array_region_args:
+        raise EmitError(
+            "HUGR while loops do not support array-valued region arguments "
+            f"({', '.join(array_region_args)}); array state must be flattened "
+            "across TailLoop ports before lowering.",
+            operation="WhileOperation",
+        )
     quantum_rebinds = _unsupported_quantum_rebinds(operation)
     unsupported_rebinds = []
     for rebind in operation.loop_carried_rebinds:
