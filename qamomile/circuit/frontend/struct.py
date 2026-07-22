@@ -8,7 +8,7 @@ from typing import TypeVar, dataclass_transform
 _T = TypeVar("_T")
 
 
-@dataclass_transform(eq_default=False)
+@dataclass_transform(eq_default=False, frozen_default=True)
 def struct(cls: type[_T]) -> type[_T]:
     """Decorate a class as an immutable trace-time record.
 

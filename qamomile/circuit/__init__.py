@@ -120,7 +120,9 @@ from .frontend.qkernel import QKernel, qkernel
 from .frontend.struct import struct
 from .ir.effect import KernelEffect
 from .stdlib import (
+    IsingZBlockEncoding,
     LCUBlockEncoding,
+    LCUBlockEncodingTerm,
     PauliLCUBlockEncoding,
     PeriodicShiftLCUBlockEncoding,
     add_const,
@@ -133,7 +135,10 @@ from .stdlib import (
     controlled_modular_add_const_modulus,
     grover_iteration_count,
     grover_search,
+    identity_block_encoding,
     iqft,
+    ising_z_block_encoding,
+    lcu_block_encoding,
     lookup_xor,
     mcx,
     modmul_const,
@@ -272,6 +277,11 @@ __all__ = [
     "mcx",
     "multi_controlled_x",
     "LCUBlockEncoding",
+    "LCUBlockEncodingTerm",
+    "identity_block_encoding",
+    "lcu_block_encoding",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "computational_basis_state",
