@@ -173,6 +173,8 @@ def test_grover_qubit_count_is_linear() -> None:
 def test_grover_diffusion_uses_qiskit_native_ccx() -> None:
     """Concrete diffusion selects Qiskit's native two-control X gate."""
     pytest.importorskip("qiskit")
+    from qiskit.circuit.library import CCXGate
+
     from qamomile.qiskit import QiskitTranspiler
 
     executable = QiskitTranspiler().transpile(_grover_diffusion_kernel)
@@ -180,7 +182,7 @@ def test_grover_diffusion_uses_qiskit_native_ccx() -> None:
 
     operations = [instruction.operation for instruction in circuit.data]
     assert any(
-        operation.name == "ccx" and type(operation).__name__ == "CCXGate"
+        operation.name == "ccx" and isinstance(operation, CCXGate)
         for operation in operations
     )
 
