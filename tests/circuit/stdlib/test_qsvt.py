@@ -10,6 +10,8 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.ir.types import UIntType
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler.errors import (
     EmitError,
@@ -814,6 +816,50 @@ def test_phase_count_rejects_invalid_host_values(
                 phases,
                 block_encoding,
                 phase_count=phase_count,
+            )
+            return qmc.measure(signal), qmc.measure(system)
+
+        _ = invalid.block
+
+
+@pytest.mark.parametrize(
+    "constant",
+    [
+        pytest.param(True, id="bool"),
+        pytest.param(np.bool_(True), id="numpy-bool"),
+    ],
+)
+def test_phase_count_rejects_boolean_uint_constant(constant: Any) -> None:
+    """A boolean constant wrapped by a UInt handle remains invalid."""
+    wrapped = qmc.UInt(
+        value=Value(type=UIntType(), name="wrapped_bool").with_const(constant)
+    )
+
+    with pytest.raises(TypeError, match="phase_count.*not bool"):
+
+        @qmc.qkernel
+        def invalid(
+            block_encoding: qmc.LCUBlockEncoding,
+            phases: qmc.Vector[qmc.Float],
+        ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+            """Attempt to invoke QSVT with a boolean UInt phase count.
+
+            Args:
+                block_encoding (qmc.LCUBlockEncoding): Static block encoding.
+                phases (qmc.Vector[qmc.Float]): QSVT phase vector.
+
+            Returns:
+                tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measured
+                    signal and system registers.
+            """
+            signal = qmc.qubit_array(block_encoding.num_signal_qubits, "signal")
+            system = qmc.qubit_array(block_encoding.num_system_qubits, "system")
+            signal, system = qmc.qsvt(
+                signal,
+                system,
+                phases,
+                block_encoding,
+                phase_count=wrapped,
             )
             return qmc.measure(signal), qmc.measure(system)
 

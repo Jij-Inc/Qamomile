@@ -175,7 +175,7 @@ def _runtime_array_element_output(
     """Return the first runtime array element without an operation consumer.
 
     Args:
-        values (qmc.Vector[qmc.Float]): Compile-time output values.
+        values (qmc.Vector[qmc.Float]): Runtime output values.
 
     Returns:
         qmc.Float: First array element.

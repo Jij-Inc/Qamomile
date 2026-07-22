@@ -102,7 +102,10 @@ def _validate_phase_count(value: object) -> int | qmc.UInt:
     elif isinstance(value, qmc.UInt):
         if not value.value.is_constant():
             return value
-        normalized = int(value.value.get_const())
+        constant = value.value.get_const()
+        if isinstance(constant, (bool, np.bool_)):
+            raise TypeError("phase_count must be an integer or qmc.UInt, not bool.")
+        normalized = int(constant)
     else:
         raise TypeError("phase_count must be an integer or qmc.UInt.")
     if normalized <= 0:
