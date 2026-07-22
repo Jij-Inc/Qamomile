@@ -31,6 +31,7 @@ class Pass(ABC, Generic[InputT, OutputT]):
 
 # Import submodule passes after Pass is defined to avoid circular imports
 from .affine_validate import AffineValidationPass  # noqa: E402
+from .array_bounds_validation import ArrayBoundsValidationPass  # noqa: E402
 from .compile_time_if_lowering import CompileTimeIfLoweringPass  # noqa: E402
 from .constant_fold import ConstantFoldingPass  # noqa: E402
 from .control_flow_visitor import (  # noqa: E402
@@ -53,6 +54,7 @@ __all__ = [
     "ConstantFoldingPass",
     "CompileTimeIfLoweringPass",
     "AffineValidationPass",
+    "ArrayBoundsValidationPass",
     "SliceBorrowCheckPass",
     "ControlFlowVisitor",
     "OperationTransformer",

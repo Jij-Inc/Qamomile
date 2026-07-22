@@ -20,7 +20,11 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import superposition_vector
 from qamomile.circuit.algorithm.qaoa import qaoa_layers, x_mixer
-from qamomile.circuit.transpiler.errors import QamomileCompileError
+from qamomile.circuit.serialization import deserialize, serialize
+from qamomile.circuit.transpiler.errors import (
+    QamomileCompileError,
+    ValidationError,
+)
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
 
@@ -85,6 +89,28 @@ def _owned_array_shape_x(
 
 
 @qmc.qkernel
+def _owned_derived_array_shape_identity(
+    target: qmc.Qubit,
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Qubit:
+    """Keep a target unchanged through an owned derived-shape loop.
+
+    Args:
+        target (qmc.Qubit): Target qubit to preserve.
+        sizes (qmc.Vector[qmc.UInt]): Values whose symbolic length controls the
+            loop structure.
+
+    Returns:
+        qmc.Qubit: Unchanged target qubit.
+    """
+    pair_count = (sizes.shape[0] - 1) // 2
+    for index in qmc.range(pair_count):
+        if index < 0:
+            target = qmc.x(target)
+    return target
+
+
+@qmc.qkernel
 def _structural_identity(target: qmc.Qubit) -> qmc.Qubit:
     """Return a target unchanged for symbolic-structure tests."""
     return target
@@ -138,6 +164,94 @@ def _runtime_array_control_index(values: qmc.Vector[qmc.UInt]) -> qmc.Bit:
         controls,
         target,
         control_indices=[values[0]],
+    )
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _runtime_array_element_output(
+    values: qmc.Vector[qmc.Float],
+) -> qmc.Float:
+    """Return the first runtime array element without an operation consumer.
+
+    Args:
+        values (qmc.Vector[qmc.Float]): Compile-time output values.
+
+    Returns:
+        qmc.Float: First array element.
+    """
+    return values[0]
+
+
+@qmc.qkernel
+def _owned_array_element_rx(
+    target: qmc.Qubit,
+    values: qmc.Vector[qmc.Float],
+) -> qmc.Qubit:
+    """Rotate a target by the first operation-owned array element.
+
+    Args:
+        target (qmc.Qubit): Target qubit to rotate.
+        values (qmc.Vector[qmc.Float]): Compile-time angle values.
+
+    Returns:
+        qmc.Qubit: Rotated target qubit.
+    """
+    return qmc.rx(target, values[0])
+
+
+@qmc.qkernel
+def _owned_array_element_identity(
+    target: qmc.Qubit,
+    values: qmc.Vector[qmc.Float],
+) -> qmc.Qubit:
+    """Preserve a target through a signature-compatible SELECT case.
+
+    Args:
+        target (qmc.Qubit): Target qubit to preserve.
+        values (qmc.Vector[qmc.Float]): Unused angle values retained for the
+            shared SELECT signature.
+
+    Returns:
+        qmc.Qubit: Unchanged target qubit.
+    """
+    return target
+
+
+@qmc.qkernel
+def _owned_select_array_element(values: qmc.Vector[qmc.Float]) -> qmc.Bit:
+    """Use an array element inside a SELECT-owned case block.
+
+    Args:
+        values (qmc.Vector[qmc.Float]): Compile-time angle values.
+
+    Returns:
+        qmc.Bit: Measured target qubit.
+    """
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_owned_array_element_rx, _owned_array_element_identity]
+    )(index, target, values=values)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _owned_control_array_element(values: qmc.Vector[qmc.Float]) -> qmc.Bit:
+    """Use an array element inside a controlled-unitary block.
+
+    Args:
+        values (qmc.Vector[qmc.Float]): Compile-time angle values.
+
+    Returns:
+        qmc.Bit: Measured target qubit.
+    """
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(_owned_array_element_rx)(
+        control,
+        target,
+        values=values,
     )
     return qmc.measure(target)
 
@@ -198,7 +312,7 @@ class TestRejection:
         assert "betas" in msg
 
     def test_error_suggests_loop_counter(self):
-        """Error message also shows the ``p`` counter pattern."""
+        """Error message also shows a parameter-specific counter pattern."""
 
         @qmc.qkernel
         def kernel(
@@ -221,6 +335,61 @@ class TestRejection:
             )
         msg = str(exc_info.value)
         assert "qm.range" in msg
+        assert "gamma_count" in msg
+
+    def test_derived_array_shape_bound_names_array_and_counter(self):
+        """Arithmetic derived from a runtime array shape keeps its provenance."""
+
+        @qmc.qkernel
+        def kernel(phases: qmc.Vector[qmc.Float]) -> qmc.Bit:
+            """Use an arithmetic expression derived from a phase-vector shape.
+
+            Args:
+                phases (qmc.Vector[qmc.Float]): Runtime phase parameters.
+
+            Returns:
+                qmc.Bit: Measured output qubit.
+            """
+            q = qmc.qubit("q")
+            pair_count = (phases.shape[0] - 1) // 2
+            for pair in qmc.range(pair_count):
+                q = qmc.rx(q, phases[pair])
+            return qmc.measure(q)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(kernel, parameters=["phases"])
+
+        msg = str(exc_info.value)
+        assert "Parameter array 'phases' has unresolved shape dimension 0" in msg
+        assert "bindings={'phases': [...]}" in msg
+        assert "phase_count" in msg
+        assert "phases: qm.Vector[qm.Float]" in msg
+
+    def test_derived_array_shape_bound_accepts_compile_time_array(self):
+        """The derived bound becomes valid when the array shape is bound."""
+
+        @qmc.qkernel
+        def kernel(phases: qmc.Vector[qmc.Float]) -> qmc.Bit:
+            """Use a bound phase-vector shape as a compile-time loop bound.
+
+            Args:
+                phases (qmc.Vector[qmc.Float]): Compile-time phase values.
+
+            Returns:
+                qmc.Bit: Measured output qubit.
+            """
+            q = qmc.qubit("q")
+            pair_count = (phases.shape[0] - 1) // 2
+            for pair in qmc.range(pair_count):
+                q = qmc.rx(q, phases[pair])
+            return qmc.measure(q)
+
+        executable = QiskitTranspiler().transpile(
+            kernel,
+            bindings={"phases": [0.1, 0.2, 0.3]},
+        )
+
+        assert executable.get_first_circuit() is not None
 
 
 class TestRuntimeParameterLoopBound:
@@ -522,6 +691,15 @@ class TestOperationOwnedStructure:
 
         @qmc.qkernel
         def kernel(sizes: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+            """Select an owned callable whose loop uses an array shape.
+
+            Args:
+                sizes (qmc.Vector[qmc.UInt]): Runtime values with symbolic
+                    vector length.
+
+            Returns:
+                qmc.Bit: Measured target qubit.
+            """
             index = qmc.qubit("index")
             target = qmc.qubit("target")
             index, target = qmc.select(
@@ -533,8 +711,38 @@ class TestOperationOwnedStructure:
             QiskitTranspiler().transpile(kernel, parameters=["sizes"])
 
         msg = str(exc_info.value)
-        assert "Cannot unroll loop: bounds could not be resolved" in msg
-        assert "runtime parameter 'sizes'" in msg
+        assert "Parameter array 'sizes' has unresolved shape dimension 0" in msg
+        assert "bindings={'sizes': [...]}" in msg
+        assert "size_count" in msg
+
+    def test_derived_runtime_array_shape_traces_through_owned_formal(self):
+        """An owned derived shape follows its formal-to-actual dimension edge."""
+
+        @qmc.qkernel
+        def kernel(sizes: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+            """Route a runtime shape into an operation-owned derived loop.
+
+            Args:
+                sizes (qmc.Vector[qmc.UInt]): Runtime values with symbolic
+                    vector length.
+
+            Returns:
+                qmc.Bit: Measured target qubit.
+            """
+            index = qmc.qubit("index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [_owned_derived_array_shape_identity, _owned_array_shape_x]
+            )(index, target, sizes=sizes)
+            return qmc.measure(target)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(kernel, parameters=["sizes"])
+
+        msg = str(exc_info.value)
+        assert "Parameter array 'sizes' has unresolved shape dimension 0" in msg
+        assert "size_count" in msg
+        assert "sizes: qm.Vector[qm.UInt]" in msg
 
     def test_concrete_array_actual_shape_passes_in_select_case(self):
         """A concrete array actual resolves its owned formal shape."""
@@ -652,6 +860,73 @@ class TestOperationOwnedStructure:
         assert diagnostic in message
         assert "runtime parameter 'values'" in message
         assert "report this as a compiler bug" not in message
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [
+            _runtime_array_select_width,
+            _runtime_array_num_controls,
+            _runtime_array_control_power,
+            _runtime_array_control_index,
+        ],
+        ids=["select-width", "num-controls", "power", "control-index"],
+    )
+    def test_bound_empty_structural_array_fails_before_emit(self, kernel) -> None:
+        """Deserialized structural fields use the early array-bounds check."""
+        restored = deserialize(serialize(kernel))
+
+        with pytest.raises(ValidationError) as exc_info:
+            QiskitTranspiler().transpile(restored, bindings={"values": []})
+
+        message = str(exc_info.value)
+        assert "Index 0 is out of range" in message
+        assert "values" in message
+
+    def test_bound_empty_public_output_array_fails_before_emit(self) -> None:
+        """A deserialized output-only element access is checked before emit."""
+        restored = deserialize(serialize(_runtime_array_element_output))
+
+        with pytest.raises(ValidationError) as exc_info:
+            QiskitTranspiler().transpile(restored, bindings={"values": []})
+
+        message = str(exc_info.value)
+        assert "Index 0 is out of range" in message
+        assert "values" in message
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [_owned_select_array_element, _owned_control_array_element],
+        ids=["select-case", "controlled-body"],
+    )
+    def test_bound_empty_operation_owned_array_fails_before_emit(
+        self,
+        kernel,
+    ) -> None:
+        """Deserialized owned blocks inherit array bounds from call actuals."""
+        restored = deserialize(serialize(kernel))
+
+        with pytest.raises(ValidationError) as exc_info:
+            QiskitTranspiler().transpile(restored, bindings={"values": []})
+
+        message = str(exc_info.value)
+        assert "Index 0 is out of range" in message
+        assert "values" in message
+
+    @pytest.mark.parametrize(
+        "kernel",
+        [_owned_select_array_element, _owned_control_array_element],
+        ids=["select-case", "controlled-body"],
+    )
+    def test_bound_nonempty_operation_owned_array_compiles(self, kernel) -> None:
+        """Owned blocks accept an actual array covering every used index."""
+        restored = deserialize(serialize(kernel))
+
+        executable = QiskitTranspiler().transpile(
+            restored,
+            bindings={"values": [0.25]},
+        )
+
+        assert executable.get_first_circuit() is not None
 
     def test_compile_time_owned_and_control_structure_values_pass(self):
         """Compile-time bindings still resolve every newly checked structure."""

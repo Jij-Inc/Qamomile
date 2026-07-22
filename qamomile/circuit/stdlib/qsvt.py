@@ -11,46 +11,17 @@ provided.
 
 from __future__ import annotations
 
+import numpy as np
+
 import qamomile.circuit as qmc
+from qamomile.circuit.frontend.composite_gate import configure_composite
 from qamomile.circuit.frontend.operation.control_flow import for_loop
+from qamomile.circuit.ir.operation.callable import CallPolicy
 
 from .block_encoding import LCUBlockEncoding
 
 
-def _flip_projector_auxiliary(
-    signal: qmc.Vector[qmc.Qubit],
-    auxiliary: qmc.Qubit,
-) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
-    """Flip an auxiliary qubit exactly on the all-zero signal subspace.
-
-    The signal register is inverted around a multi-controlled X whose target is
-    ``auxiliary``. The control width is the complete signal width and is always
-    positive under the :class:`~qamomile.circuit.stdlib.LCUBlockEncoding`
-    contract, including the one-signal-qubit case.
-
-    Args:
-        signal (qmc.Vector[qmc.Qubit]): Non-empty block-encoding signal
-            register whose all-zero state defines the encoded block.
-        auxiliary (qmc.Qubit): Clean reusable auxiliary qubit.
-
-    Returns:
-        tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]: Preserved signal register and
-            auxiliary flipped exactly on its all-zero subspace.
-    """
-    num_signal = signal.shape[0]
-
-    with for_loop(0, num_signal, var_name="qsvt_signal_index") as index:
-        signal[index] = qmc.x(signal[index])
-
-    controlled_x = qmc.control(qmc.x, num_controls=num_signal)
-    signal, auxiliary = controlled_x(signal, auxiliary)
-
-    with for_loop(0, num_signal, var_name="qsvt_signal_index") as index:
-        signal[index] = qmc.x(signal[index])
-
-    return signal, auxiliary
-
-
+@qmc.composite_gate(name="qsvt_projector_phase_rotation")
 def _projector_phase_rotation(
     signal: qmc.Vector[qmc.Qubit],
     auxiliary: qmc.Qubit,
@@ -58,8 +29,9 @@ def _projector_phase_rotation(
 ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]:
     r"""Apply ``exp(i * phase * (2 |0><0| - I))`` to the signal register.
 
-    A clean auxiliary is flipped on the all-zero signal subspace, rotated by
-    ``RZ(2 * phase)``, and uncomputed. The auxiliary therefore returns to zero
+    The signal register is inverted once around two multi-controlled X gates.
+    A clean auxiliary is thereby flipped on the all-zero signal subspace,
+    rotated by ``RZ(2 * phase)``, and uncomputed. The auxiliary returns to zero
     and can be reused for every phase in one QSVT sequence. This branch-free
     construction also supports a one-qubit signal register.
 
@@ -73,35 +45,69 @@ def _projector_phase_rotation(
         tuple[qmc.Vector[qmc.Qubit], qmc.Qubit]: Rotated signal register and
             restored clean auxiliary.
     """
-    signal, auxiliary = _flip_projector_auxiliary(signal, auxiliary)
+    signal = qmc.x(signal)
+    signal, auxiliary = qmc.mcx(signal, auxiliary)
     auxiliary = qmc.rz(auxiliary, 2.0 * phase)
-    signal, auxiliary = _flip_projector_auxiliary(signal, auxiliary)
+    signal, auxiliary = qmc.mcx(signal, auxiliary)
+    signal = qmc.x(signal)
     return signal, auxiliary
 
 
-def _validate_phase_count(value: int | qmc.UInt) -> None:
+configure_composite(
+    _projector_phase_rotation,
+    name="qsvt_projector_phase_rotation",
+    namespace="qamomile.stdlib",
+    policy=CallPolicy.NATIVE_FIRST,
+)
+
+
+def _validate_phases(phases: object) -> qmc.Vector[qmc.Float]:
+    """Validate the frontend phase-vector handle.
+
+    Args:
+        phases (object): Candidate QSVT phase vector.
+
+    Returns:
+        qmc.Vector[qmc.Float]: The validated phase-vector handle.
+
+    Raises:
+        TypeError: If ``phases`` is not a ``qmc.Vector[qmc.Float]`` handle.
+    """
+    if not isinstance(phases, qmc.Vector) or phases.element_type is not qmc.Float:
+        raise TypeError(
+            f"phases must be qmc.Vector[qmc.Float], got {type(phases).__name__}."
+        )
+    return phases
+
+
+def _validate_phase_count(value: object) -> int | qmc.UInt:
     """Validate a concrete phase count when available.
 
     Args:
-        value (int | qmc.UInt): Concrete integer or UInt handle to inspect.
+        value (object): Concrete integer or UInt handle to inspect.
+
+    Returns:
+        int | qmc.UInt: Normalized Python integer or the original symbolic
+            UInt handle.
 
     Raises:
         TypeError: If ``value`` is a boolean or is neither an integer nor a
             UInt handle.
         ValueError: If a concrete integer is not positive.
     """
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise TypeError("phase_count must be an integer or qmc.UInt, not bool.")
-    if isinstance(value, int):
-        if value <= 0:
-            raise ValueError("phase_count must be positive.")
-        return
-    if not isinstance(value, qmc.UInt):
+    if isinstance(value, (int, np.integer)):
+        normalized: int | qmc.UInt = int(value)
+    elif isinstance(value, qmc.UInt):
+        if not value.value.is_constant():
+            return value
+        normalized = int(value.value.get_const())
+    else:
         raise TypeError("phase_count must be an integer or qmc.UInt.")
-    if value.value.is_constant():
-        resolved = int(value.value.get_const())
-        if resolved <= 0:
-            raise ValueError("phase_count must be positive.")
+    if normalized <= 0:
+        raise ValueError("phase_count must be positive.")
+    return normalized
 
 
 def qsvt(
@@ -171,7 +177,8 @@ def qsvt(
             and system registers.
 
     Raises:
-        TypeError: If an explicit ``phase_count`` is a boolean or is neither an
+        TypeError: If ``phases`` is not a ``qmc.Vector[qmc.Float]`` handle, or
+            if an explicit ``phase_count`` is a boolean or is neither an
             integer nor a UInt handle.
         ValueError: If a concrete count is not positive.
 
@@ -204,15 +211,12 @@ def qsvt(
         ...     },
         ... )
     """
-    phase_length = phases.shape[0]
-    resolved_count: int | qmc.UInt = (
-        phase_length if phase_count is None else phase_count
+    phases = _validate_phases(phases)
+    resolved_count = _validate_phase_count(
+        phases.shape[0] if phase_count is None else phase_count
     )
 
-    _validate_phase_count(resolved_count)
-
     selected_phases = phases[0:resolved_count]
-    selected_count = resolved_count
     inverse_unitary = qmc.inverse(encoding.unitary)
 
     projector_auxiliary = qmc.qubit("qsvt_projector_auxiliary")
@@ -222,10 +226,10 @@ def qsvt(
         selected_phases[0],
     )
 
-    remaining_count = selected_count - 1
+    remaining_count = resolved_count - 1
     pair_count = remaining_count // 2
     with for_loop(0, pair_count, var_name="qsvt_pair") as pair:
-        odd_index = pair + pair + 1
+        odd_index = 2 * pair + 1
         even_index = odd_index + 1
 
         signal, system = encoding.unitary(signal, system)
@@ -243,7 +247,7 @@ def qsvt(
 
     tail_count = remaining_count % 2
     with for_loop(0, tail_count, var_name="qsvt_tail"):
-        final_index = selected_count - 1
+        final_index = resolved_count - 1
         signal, system = encoding.unitary(signal, system)
         signal, projector_auxiliary = _projector_phase_rotation(
             signal,

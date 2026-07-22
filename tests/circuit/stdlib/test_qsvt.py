@@ -11,27 +11,12 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.serialization import deserialize, serialize
-from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.errors import (
+    EmitError,
+    QamomileCompileError,
+    ValidationError,
+)
 from qamomile.linalg import PauliLCU, PeriodicShiftLCU
-
-
-@qmc.qkernel
-def _prepare_basis(
-    system: qmc.Vector[qmc.Qubit],
-    bits: qmc.Vector[qmc.UInt],
-) -> qmc.Vector[qmc.Qubit]:
-    """Prepare one compile-time computational-basis state.
-
-    Args:
-        system (qmc.Vector[qmc.Qubit]): All-zero system register.
-        bits (qmc.Vector[qmc.UInt]): LSB-first basis bits.
-
-    Returns:
-        qmc.Vector[qmc.Qubit]: Prepared system register.
-    """
-    for index in qmc.range(system.shape[0]):
-        system[index] = qmc.rx(system[index], math.pi * bits[index])
-    return system
 
 
 @qmc.qkernel
@@ -75,7 +60,7 @@ def _runtime_sample_template(
     """
     signal = qmc.qubit_array(block_encoding.num_signal_qubits, "signal")
     system = qmc.qubit_array(block_encoding.num_system_qubits, "system")
-    system = _prepare_basis(system, initial_bits)
+    system = qmc.computational_basis_state(system, initial_bits)
     signal, _ = qmc.qsvt(
         signal,
         system,
@@ -108,7 +93,7 @@ def _runtime_expval_template(
     """
     signal = qmc.qubit_array(block_encoding.num_signal_qubits, "signal")
     system = qmc.qubit_array(block_encoding.num_system_qubits, "system")
-    system = _prepare_basis(system, initial_bits)
+    system = qmc.computational_basis_state(system, initial_bits)
     signal, _ = qmc.qsvt(
         signal,
         system,
@@ -258,9 +243,9 @@ def _two_term_encoding_unitary(
 def _four_term_pauli_encoding() -> tuple[qmc.PauliLCUBlockEncoding, np.ndarray]:
     """Build a signal-width-two Pauli encoding and its dense unitary.
 
-    Four equal positive coefficients make PREPARE exactly the two-qubit
-    Hadamard transform, so the complete block-encoding unitary has a compact
-    analytic construction independent of any backend.
+    Four equal positive coefficients make the Möttönen PREPARE apply
+    ``RY(pi / 2)`` to each signal qubit. This is ``H Z`` rather than ``H`` on
+    each qubit, so the complete block-encoding unitary includes those signs.
 
     Returns:
         tuple[qmc.PauliLCUBlockEncoding, np.ndarray]: Static descriptor and
@@ -305,8 +290,11 @@ def _four_term_pauli_encoding() -> tuple[qmc.PauliLCUBlockEncoding, np.ndarray]:
             signal_projector,
         )
 
-    hadamard = np.asarray([[1.0, 1.0], [1.0, -1.0]]) / math.sqrt(2.0)
-    prepare = np.kron(hadamard, hadamard)
+    ry_pi_over_two = np.asarray(
+        [[1.0, -1.0], [1.0, 1.0]],
+        dtype=np.complex128,
+    ) / math.sqrt(2.0)
+    prepare = np.kron(ry_pi_over_two, ry_pi_over_two)
     preparation = np.kron(np.eye(4, dtype=np.complex128), prepare)
     return encoding, preparation.conj().T @ selector @ preparation
 
@@ -393,6 +381,77 @@ def _zero_projector_observable(num_qubits: int) -> qm_o.Hamiltonian:
     return projector
 
 
+def _assert_serialized_runtime_qsvt_results(
+    sdk_transpiler: Any,
+    encoding: qmc.LCUBlockEncoding,
+    phases: list[float],
+    initial_bits: list[int],
+    observable: qm_o.Hamiltonian,
+    expected_zero_probability: float,
+    expected_observable: float,
+) -> None:
+    """Execute serialized runtime QSVT sampling and estimation on one SDK.
+
+    Args:
+        sdk_transpiler (Any): Cross-backend transpiler fixture case.
+        encoding (qmc.LCUBlockEncoding): Static block encoding to bind.
+        phases (list[float]): Runtime QSVT phase values.
+        initial_bits (list[int]): Compile-time system basis bits.
+        observable (qm_o.Hamiltonian): Signal observable to estimate.
+        expected_zero_probability (float): Expected all-zero signal probability.
+        expected_observable (float): Expected signal-observable value.
+
+    Returns:
+        None: Results and serialization round trips are asserted in place.
+    """
+    sample_payload = serialize(_runtime_sample_template)
+    expval_payload = serialize(_runtime_expval_template)
+    sample_template = deserialize(sample_payload)
+    expval_template = deserialize(expval_payload)
+    compile_bindings = {
+        "block_encoding": encoding,
+        "phase_count": len(phases),
+        "initial_bits": initial_bits,
+    }
+    sample_executable = sdk_transpiler.transpiler.transpile(
+        sample_template,
+        bindings=compile_bindings,
+        parameters=["phases"],
+    )
+    expval_executable = sdk_transpiler.transpiler.transpile(
+        expval_template,
+        bindings={**compile_bindings, "observable": observable},
+        parameters=["phases"],
+    )
+
+    shots = 2048
+    executor = sdk_transpiler.transpiler.executor()
+    sample_result = sample_executable.sample(
+        executor,
+        bindings={"phases": phases},
+        shots=shots,
+    ).result()
+    observed = float(
+        expval_executable.run(executor, bindings={"phases": phases}).result()
+    )
+
+    sampling_tolerance = (
+        6.0
+        * math.sqrt(
+            expected_zero_probability * (1.0 - expected_zero_probability) / shots
+        )
+        + 0.02
+    )
+    assert _zero_probability(sample_result.results) == pytest.approx(
+        expected_zero_probability,
+        abs=sampling_tolerance,
+    )
+    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed == pytest.approx(expected_observable, abs=expval_tolerance)
+    assert serialize(sample_template) == sample_payload
+    assert serialize(expval_template) == expval_payload
+
+
 @pytest.mark.parametrize(
     "phases",
     [
@@ -448,7 +507,56 @@ def test_qsvt_exact_sequence_for_one_through_four_phases(
     )
 
 
-def test_serialized_template_binds_differently_named_periodic_slot(
+def test_qiskit_preserves_named_projector_rotation_with_native_mcx(
+    qiskit_transpiler: Any,
+) -> None:
+    """A width-three projector rotation stays named and uses native MCX gates."""
+    from qiskit.circuit.library import MCXGate
+
+    identity = qmc.identity_block_encoding(1)
+    diagonal = qmc.ising_z_block_encoding({(): 0.3, (0,): -0.8}, 1)
+    inner = qmc.lcu_block_encoding(
+        (
+            qmc.LCUBlockEncodingTerm(0.6 + 0.2j, identity),
+            qmc.LCUBlockEncodingTerm(-0.4, diagonal),
+        )
+    )
+    encoding = qmc.lcu_block_encoding(
+        (
+            qmc.LCUBlockEncodingTerm(-0.7j, inner),
+            qmc.LCUBlockEncodingTerm(0.25, identity),
+        )
+    )
+    assert encoding.num_signal_qubits == 3
+
+    executable = qiskit_transpiler.transpile(
+        _compile_time_template,
+        bindings={"block_encoding": encoding, "phases": [0.37]},
+    )
+    top_level_operations = [
+        instruction.operation
+        for instruction in executable.quantum_circuit.data
+        if instruction.operation.name != "measure"
+    ]
+    assert [operation.name for operation in top_level_operations] == [
+        "qsvt_projector_phase_rotation"
+    ]
+
+    decomposed = executable.quantum_circuit.decompose(reps=2)
+    operation_counts = decomposed.count_ops()
+    assert operation_counts["x"] == 6
+    assert operation_counts["mcx"] == 2
+    assert operation_counts["rz"] == 1
+    mcx_operations = [
+        instruction.operation
+        for instruction in decomposed.data
+        if instruction.operation.name == "mcx"
+    ]
+    assert len(mcx_operations) == 2
+    assert all(isinstance(operation, MCXGate) for operation in mcx_operations)
+
+
+def test_serialized_template_binds_periodic_encoding_to_generic_slot(
     qiskit_transpiler: Any,
 ) -> None:
     """A received template resolves ``block_encoding`` and runtime phases."""
@@ -511,15 +619,21 @@ def test_serialized_template_binds_two_independent_encoding_slots(
     assert serialize(restored) == payload
 
 
-_PHASE_COUNTS = {0: 1, 1: 2, 2: 3, 42: 4}
-
-
 @pytest.mark.parametrize("system_width", [1, 2])
-@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+@pytest.mark.parametrize(
+    ("seed", "phase_count"),
+    [
+        pytest.param(0, 1, id="seed-0-one-phase"),
+        pytest.param(1, 2, id="seed-1-two-phases"),
+        pytest.param(2, 3, id="seed-2-three-phases"),
+        pytest.param(42, 4, id="seed-42-four-phases"),
+    ],
+)
 def test_serialized_qsvt_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
     system_width: int,
     seed: int,
+    phase_count: int,
 ) -> None:
     """Random phases, weights, states, and widths execute on every backend."""
     rng = np.random.default_rng(seed + 101 * system_width)
@@ -527,7 +641,6 @@ def test_serialized_qsvt_samples_and_estimates_on_every_sdk(
         1j * rng.uniform(-math.pi, math.pi)
     )
     shift_weight = rng.uniform(0.4, 1.2) * np.exp(1j * rng.uniform(-math.pi, math.pi))
-    phase_count = _PHASE_COUNTS[seed]
     phases = rng.uniform(-math.pi, math.pi, size=phase_count).tolist()
     initial_bits = rng.integers(0, 2, size=system_width).astype(int).tolist()
     initial_basis = sum(bit << index for index, bit in enumerate(initial_bits))
@@ -550,48 +663,15 @@ def test_serialized_qsvt_samples_and_estimates_on_every_sdk(
     signal_y = np.kron(np.eye(1 << system_width), pauli_y)
     expected_y = float(np.real(np.vdot(expected_state, signal_y @ expected_state)))
 
-    sample_payload = serialize(_runtime_sample_template)
-    expval_payload = serialize(_runtime_expval_template)
-    sample_template = deserialize(sample_payload)
-    expval_template = deserialize(expval_payload)
-    compile_bindings = {
-        "block_encoding": encoding,
-        "phase_count": phase_count,
-        "initial_bits": initial_bits,
-    }
-    sample_executable = sdk_transpiler.transpiler.transpile(
-        sample_template,
-        bindings=compile_bindings,
-        parameters=["phases"],
-    )
-    expval_executable = sdk_transpiler.transpiler.transpile(
-        expval_template,
-        bindings={**compile_bindings, "observable": qm_o.Y(0)},
-        parameters=["phases"],
-    )
-
-    shots = 2048
-    executor = sdk_transpiler.transpiler.executor()
-    sample_result = sample_executable.sample(
-        executor,
-        bindings={"phases": phases},
-        shots=shots,
-    ).result()
-    observed_y = float(
-        expval_executable.run(executor, bindings={"phases": phases}).result()
-    )
-
-    sampling_tolerance = (
-        6.0 * math.sqrt(expected_zero * (1.0 - expected_zero) / shots) + 0.02
-    )
-    assert _zero_probability(sample_result.results) == pytest.approx(
+    _assert_serialized_runtime_qsvt_results(
+        sdk_transpiler,
+        encoding,
+        phases,
+        initial_bits,
+        qm_o.Y(0),
         expected_zero,
-        abs=sampling_tolerance,
+        expected_y,
     )
-    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-    assert observed_y == pytest.approx(expected_y, abs=expval_tolerance)
-    assert serialize(sample_template) == sample_payload
-    assert serialize(expval_template) == expval_payload
 
 
 @pytest.mark.parametrize("seed", [0, 42])
@@ -614,49 +694,20 @@ def test_multisignal_repeated_qsvt_executes_on_every_sdk(
     initial_state[4 * initial_basis] = 1.0
     expected_state = qsvt_unitary @ initial_state
     expected_zero = float(np.sum(np.abs(expected_state[0::4]) ** 2))
-    pauli_z = np.asarray([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128)
-    signal_z = np.kron(np.eye(2, dtype=np.complex128), pauli_z)
-    full_signal_z = np.kron(np.eye(4, dtype=np.complex128), signal_z)
-    expected_z = float(np.real(np.vdot(expected_state, full_signal_z @ expected_state)))
+    pauli_y = np.asarray([[0.0, -1j], [1j, 0.0]], dtype=np.complex128)
+    signal_y = np.kron(np.eye(2, dtype=np.complex128), pauli_y)
+    full_signal_y = np.kron(np.eye(4, dtype=np.complex128), signal_y)
+    expected_y = float(np.real(np.vdot(expected_state, full_signal_y @ expected_state)))
 
-    compile_bindings = {
-        "block_encoding": encoding,
-        "phase_count": len(phases),
-        "initial_bits": initial_bits,
-    }
-    sample_template = deserialize(serialize(_runtime_sample_template))
-    expval_template = deserialize(serialize(_runtime_expval_template))
-    sample_executable = sdk_transpiler.transpiler.transpile(
-        sample_template,
-        bindings=compile_bindings,
-        parameters=["phases"],
-    )
-    expval_executable = sdk_transpiler.transpiler.transpile(
-        expval_template,
-        bindings={**compile_bindings, "observable": qm_o.Z(0)},
-        parameters=["phases"],
-    )
-
-    shots = 2048
-    executor = sdk_transpiler.transpiler.executor()
-    sample_result = sample_executable.sample(
-        executor,
-        bindings={"phases": phases},
-        shots=shots,
-    ).result()
-    observed_z = float(
-        expval_executable.run(executor, bindings={"phases": phases}).result()
-    )
-
-    sampling_tolerance = (
-        6.0 * math.sqrt(expected_zero * (1.0 - expected_zero) / shots) + 0.02
-    )
-    assert _zero_probability(sample_result.results) == pytest.approx(
+    _assert_serialized_runtime_qsvt_results(
+        sdk_transpiler,
+        encoding,
+        phases,
+        initial_bits,
+        qm_o.Y(0),
         expected_zero,
-        abs=sampling_tolerance,
+        expected_y,
     )
-    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-    assert observed_z == pytest.approx(expected_z, abs=expval_tolerance)
 
 
 def test_serialized_qsvt_with_recursive_lcu_executes_on_every_sdk(
@@ -710,61 +761,23 @@ def test_serialized_qsvt_with_recursive_lcu_executes_on_every_sdk(
         * normalized_squared
         * (1.0 - normalized_squared)
     )
-    compile_bindings = {
-        "block_encoding": encoding,
-        "phase_count": len(phases),
-        "initial_bits": [0],
-    }
-
-    sample_payload = serialize(_runtime_sample_template)
-    expval_payload = serialize(_runtime_expval_template)
-    sample_template = deserialize(sample_payload)
-    expval_template = deserialize(expval_payload)
-    sample_executable = sdk_transpiler.transpiler.transpile(
-        sample_template,
-        bindings=compile_bindings,
-        parameters=["phases"],
-    )
-    expval_executable = sdk_transpiler.transpiler.transpile(
-        expval_template,
-        bindings={
-            **compile_bindings,
-            "observable": _zero_projector_observable(
-                encoding.num_signal_qubits,
-            ),
-        },
-        parameters=["phases"],
-    )
-
-    shots = 2048
-    executor = sdk_transpiler.transpiler.executor()
-    sample_result = sample_executable.sample(
-        executor,
-        bindings={"phases": phases},
-        shots=shots,
-    ).result()
-    observed_zero = float(
-        expval_executable.run(executor, bindings={"phases": phases}).result()
-    )
-
-    sampling_tolerance = (
-        6.0 * math.sqrt(expected_zero * (1.0 - expected_zero) / shots) + 0.02
-    )
     assert encoding.num_signal_qubits == 3
-    assert _zero_probability(sample_result.results) == pytest.approx(
+    _assert_serialized_runtime_qsvt_results(
+        sdk_transpiler,
+        encoding,
+        phases,
+        [0],
+        _zero_projector_observable(encoding.num_signal_qubits),
         expected_zero,
-        abs=sampling_tolerance,
+        expected_zero,
     )
-    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-    assert observed_zero == pytest.approx(expected_zero, abs=expval_tolerance)
-    assert serialize(sample_template) == sample_payload
-    assert serialize(expval_template) == expval_payload
 
 
 @pytest.mark.parametrize(
     ("phase_count", "error", "message"),
     [
         pytest.param(True, TypeError, "not bool", id="bool"),
+        pytest.param(np.bool_(True), TypeError, "not bool", id="numpy-bool"),
         pytest.param(1.5, TypeError, "integer or qmc.UInt", id="float"),
         pytest.param(0, ValueError, "positive", id="zero"),
         pytest.param(-1, ValueError, "positive", id="negative"),
@@ -807,6 +820,118 @@ def test_phase_count_rejects_invalid_host_values(
         _ = invalid.block
 
 
+@pytest.mark.parametrize(
+    "invalid_phases",
+    [
+        pytest.param([0.1], id="list"),
+        pytest.param(np.asarray([0.1], dtype=np.float64), id="numpy-array"),
+    ],
+)
+def test_phases_reject_non_vector_host_values(invalid_phases: Any) -> None:
+    """Host sequences fail with the public phase argument and expected type."""
+    with pytest.raises(TypeError) as error:
+
+        @qmc.qkernel
+        def invalid(
+            block_encoding: qmc.LCUBlockEncoding,
+        ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+            """Attempt to pass a host sequence directly to QSVT.
+
+            Args:
+                block_encoding (qmc.LCUBlockEncoding): Static block encoding.
+
+            Returns:
+                tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measured
+                    signal and system registers.
+            """
+            signal = qmc.qubit_array(block_encoding.num_signal_qubits, "signal")
+            system = qmc.qubit_array(block_encoding.num_system_qubits, "system")
+            signal, system = qmc.qsvt(
+                signal,
+                system,
+                invalid_phases,
+                block_encoding,
+                phase_count=1,
+            )
+            return qmc.measure(signal), qmc.measure(system)
+
+        _ = invalid.block
+
+    message = str(error.value)
+    assert "phases" in message
+    assert "qmc.Vector[qmc.Float]" in message
+    assert type(invalid_phases).__name__ in message
+
+
+def test_phases_reject_uint_vector_handle() -> None:
+    """A UInt vector fails with the public phase argument and expected type."""
+    with pytest.raises(TypeError) as error:
+
+        @qmc.qkernel
+        def invalid(
+            block_encoding: qmc.LCUBlockEncoding,
+            phases: qmc.Vector[qmc.UInt],
+        ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+            """Attempt to pass an integer vector to QSVT.
+
+            Args:
+                block_encoding (qmc.LCUBlockEncoding): Static block encoding.
+                phases (qmc.Vector[qmc.UInt]): Invalid integer phase vector.
+
+            Returns:
+                tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measured
+                    signal and system registers.
+            """
+            signal = qmc.qubit_array(block_encoding.num_signal_qubits, "signal")
+            system = qmc.qubit_array(block_encoding.num_system_qubits, "system")
+            signal, system = qmc.qsvt(
+                signal,
+                system,
+                phases,
+                block_encoding,
+                phase_count=1,
+            )
+            return qmc.measure(signal), qmc.measure(system)
+
+        _ = invalid.block
+
+    message = str(error.value)
+    assert "phases" in message
+    assert "qmc.Vector[qmc.Float]" in message
+
+
+def test_phase_count_accepts_numpy_integer() -> None:
+    """A positive NumPy integer phase count traces as a host constant."""
+
+    @qmc.qkernel
+    def valid(
+        block_encoding: qmc.LCUBlockEncoding,
+        phases: qmc.Vector[qmc.Float],
+    ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+        """Apply QSVT with a positive NumPy integer phase count.
+
+        Args:
+            block_encoding (qmc.LCUBlockEncoding): Static block encoding.
+            phases (qmc.Vector[qmc.Float]): QSVT phase vector.
+
+        Returns:
+            tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measured signal and
+                system registers.
+        """
+        signal = qmc.qubit_array(block_encoding.num_signal_qubits, "signal")
+        system = qmc.qubit_array(block_encoding.num_system_qubits, "system")
+        signal, system = qmc.qsvt(
+            signal,
+            system,
+            phases,
+            block_encoding,
+            phase_count=np.int64(1),
+        )
+        return qmc.measure(signal), qmc.measure(system)
+
+    _ = valid.block
+
+
 def test_bound_phase_count_must_be_positive() -> None:
     """A symbolic count bound to zero is rejected during specialization."""
     encoding = _periodic_encoding({1: 1.0}, system_width=1)
@@ -818,6 +943,51 @@ def test_bound_phase_count_must_be_positive() -> None:
             phase_count=0,
             initial_bits=[0],
         )
+
+
+def test_serialized_runtime_phases_require_compile_time_phase_count(
+    qiskit_transpiler: Any,
+) -> None:
+    """Runtime phases without a count fail early with both argument names."""
+    encoding = _periodic_encoding({1: 1.0}, system_width=1)
+    restored = deserialize(serialize(_compile_time_template))
+
+    with pytest.raises(QamomileCompileError) as error:
+        qiskit_transpiler.transpile(
+            restored,
+            bindings={"block_encoding": encoding},
+            parameters=["phases"],
+        )
+
+    assert not isinstance(error.value, EmitError)
+    message = str(error.value)
+    assert "phases" in message
+    assert "phase_count" in message
+    assert "compile time" in message
+
+
+def test_serialized_zero_phase_count_has_clear_bounds_diagnostic(
+    qiskit_transpiler: Any,
+) -> None:
+    """A received zero count names phases and phase_count in its bounds error."""
+    encoding = _periodic_encoding({1: 1.0}, system_width=1)
+    restored = deserialize(serialize(_runtime_sample_template))
+
+    with pytest.raises(ValidationError) as error:
+        qiskit_transpiler.transpile(
+            restored,
+            bindings={
+                "block_encoding": encoding,
+                "phases": [0.1],
+                "phase_count": 0,
+                "initial_bits": [0],
+            },
+        )
+
+    message = str(error.value)
+    assert "out of range" in message
+    assert "phases" in message
+    assert "phase_count" in message
 
 
 def test_serialized_compile_time_phases_select_explicit_prefix(
@@ -856,26 +1026,35 @@ def test_serialized_compile_time_phases_select_explicit_prefix(
     )
 
 
+@pytest.mark.parametrize("phase_count", [2, 5])
 def test_serialized_compile_time_phases_reject_short_vector(
     qiskit_transpiler: Any,
+    phase_count: int,
 ) -> None:
-    """A compile-time phase prefix must cover its explicit phase count."""
+    """A compile-time phase prefix must cover its explicit phase count.
+
+    Args:
+        qiskit_transpiler (Any): Qiskit transpiler fixture.
+        phase_count (int): Explicit prefix length exceeding the bound vector.
+    """
     encoding = _periodic_encoding({1: 1.0}, system_width=1)
     restored = deserialize(serialize(_runtime_sample_template))
 
-    with pytest.raises(
-        EmitError,
-        match="Index 1 is out of range.*array 'phases' of length 1",
-    ):
+    with pytest.raises(ValidationError) as error:
         qiskit_transpiler.transpile(
             restored,
             bindings={
                 "block_encoding": encoding,
                 "phases": [0.1],
-                "phase_count": 2,
+                "phase_count": phase_count,
                 "initial_bits": [0],
             },
         )
+
+    message = str(error.value)
+    assert f"Index {phase_count - 1} is out of range" in message
+    assert "phases" in message
+    assert f"at least {phase_count}" in message
 
 
 @pytest.mark.parametrize(
@@ -928,8 +1107,13 @@ def test_serialized_empty_phase_vector_has_compile_diagnostic(
     encoding = _periodic_encoding({1: 1.0}, system_width=1)
     restored = deserialize(serialize(_compile_time_template))
 
-    with pytest.raises(EmitError, match="Index 0 is out of range.*'phases'"):
+    with pytest.raises(ValidationError) as error:
         qiskit_transpiler.transpile(
             restored,
             bindings={"block_encoding": encoding, "phases": []},
         )
+
+    message = str(error.value)
+    assert "Index 0 is out of range" in message
+    assert "phases" in message
+    assert "at least 1" in message
