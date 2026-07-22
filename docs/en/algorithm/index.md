@@ -22,8 +22,8 @@ End-to-end CNN + quantum variational circuit on Fashion-MNIST with the parameter
 
 :::{card}
 :header: **Möttönen Amplitude Encoding**
-:link: mottonen_amplitude_encoding
-Prepare an arbitrary real or complex amplitude vector via Gray-code Ry/Rz multiplexers, with three input modes (concrete, bound `Vector[Float]`, runtime-parametric angles).
+:link: mottonen_amplitude_encoding.ipynb
+Learn how to use Möttönen amplitude encoding in Qamomile to prepare arbitrary quantum states. This tutorial introduces state preparation based on `amplitude_encoding` and `mottonen_amplitude_encoding`.
 :::
 
 :::{card}
