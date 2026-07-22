@@ -21,6 +21,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeClassicalExpr,
     RuntimeOpKind,
 )
+from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -32,7 +33,7 @@ from qamomile.circuit.ir.operation.gate import (
     ProjectOperation,
 )
 from qamomile.circuit.ir.types.primitives import BitType
-from qamomile.circuit.ir.value import Value, resolve_root_array_index
+from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_array_index
 from qamomile.circuit.transpiler.errors import ValidationError
 
 from . import Pass
@@ -119,6 +120,16 @@ def is_measurement_backed(
     # measured array through the parent's ``slice_of`` chain.
     parent = getattr(value, "parent_array", None)
     if parent is not None:
+        if len(value.element_indices) == 1 and value.element_indices[0].is_constant():
+            element_index = int(value.element_indices[0].get_const())
+            result = _is_measurement_backed_array_slot(
+                parent,
+                element_index,
+                producer_map,
+                visiting,
+            )
+            visiting.discard(value.uuid)
+            return result
         cur: Value | None = parent
         while cur is not None:
             if is_measurement_backed(cur, producer_map, visiting):
@@ -156,6 +167,60 @@ def is_measurement_backed(
         return result
 
     visiting.discard(value.uuid)
+    return False
+
+
+def _is_measurement_backed_array_slot(
+    array: ArrayValue,
+    index: int,
+    producer_map: dict[str, Operation],
+    visiting: set[str],
+) -> bool:
+    """Trace measurement provenance for one classical array element.
+
+    Args:
+        array (ArrayValue): Current SSA array version containing the slot.
+        index (int): Concrete element index in ``array``.
+        producer_map (dict[str, Operation]): UUID-to-producer map.
+        visiting (set[str]): UUIDs on the active provenance traversal path.
+
+    Returns:
+        bool: ``True`` when the selected slot was written from a
+            measurement-backed value or belongs to a directly measured
+            vector.
+    """
+    producer = producer_map.get(array.uuid)
+    if isinstance(producer, MeasureVectorOperation):
+        return True
+    if isinstance(producer, StoreArrayElementOperation):
+        if len(producer.index_values) != 1:
+            return False
+        stored_index = producer.index_values[0]
+        if not stored_index.is_constant():
+            return False
+        if int(stored_index.get_const()) == index:
+            return is_measurement_backed(
+                producer.stored_value,
+                producer_map,
+                visiting,
+            )
+        return _is_measurement_backed_array_slot(
+            producer.array,
+            index,
+            producer_map,
+            visiting,
+        )
+    if array.slice_of is not None:
+        resolved = resolve_root_array_index(array, index)
+        if resolved is None:
+            return False
+        root, root_index = resolved
+        return _is_measurement_backed_array_slot(
+            root,
+            root_index,
+            producer_map,
+            visiting,
+        )
     return False
 
 

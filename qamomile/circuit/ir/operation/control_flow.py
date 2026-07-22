@@ -64,12 +64,39 @@ class IfMerge(typing.NamedTuple):
         return self.true_value.uuid == self.false_value.uuid
 
 
+@dataclasses.dataclass(frozen=True)
+class Region:
+    """Expose one structured-control region through a uniform interface.
+
+    This is a view over the existing semantic IR rather than a parallel value
+    system: every entry is an ordinary Qamomile ``ValueBase`` carrying the
+    current UUID identity. Control-flow operations remain the owners of the
+    stored fields and construct ``Region`` views through ``nested_regions``.
+
+    Args:
+        operations (tuple[Operation, ...]): Operations evaluated inside the
+            region in program order.
+        block_args (tuple[ValueBase, ...]): Values defined at region entry,
+            such as a loop induction variable or carried-value formal.
+        captures (tuple[ValueBase, ...]): Explicit outer-scope values read by
+            the region, ordered by first use.
+        yields (tuple[ValueBase, ...]): Values yielded at the region boundary
+            in result-slot order.
+    """
+
+    operations: tuple[Operation, ...]
+    block_args: tuple[ValueBase, ...] = ()
+    captures: tuple[ValueBase, ...] = ()
+    yields: tuple[ValueBase, ...] = ()
+
+
 class HasNestedOps:
     """Mixin for operations that contain nested operation lists.
 
-    Subclasses implement ``nested_op_lists()`` and ``rebuild_nested()``
-    so that generic passes can recurse into control flow without
-    isinstance chains.
+    ``nested_regions()`` is the canonical traversal API because it exposes
+    operations together with block arguments, captures, and yields.
+    ``nested_op_lists()`` / ``rebuild_nested()`` remain compatibility helpers
+    for specialized consumers while they migrate to the region interface.
     """
 
     def nested_op_lists(self) -> list[list[Operation]]:
@@ -82,6 +109,46 @@ class HasNestedOps:
         ``new_lists`` must have the same length/order as ``nested_op_lists()``.
         """
         raise NotImplementedError
+
+    def nested_regions(self) -> tuple[Region, ...]:
+        """Return uniform views of every nested operation region.
+
+        Subclasses with explicit block arguments, captures, or yields override
+        this method. The fallback keeps legacy operation-owned blocks visible
+        while consumers migrate from ``nested_op_lists``.
+
+        Returns:
+            tuple[Region, ...]: Region views in ``nested_op_lists`` order.
+        """
+        return tuple(
+            Region(operations=tuple(operations))
+            for operations in self.nested_op_lists()
+        )
+
+    def rebuild_regions(self, regions: typing.Sequence[Region]) -> Operation:
+        """Return a copy with replacement region operation sequences.
+
+        Concrete control-flow operations override this method to rebuild both
+        their body operations and boundary values. The fallback supports
+        legacy region owners whose boundary remains operation-specific.
+
+        Args:
+            regions (Sequence[Region]): Replacement regions in
+                ``nested_regions`` order.
+
+        Returns:
+            Operation: Rebuilt control-flow operation.
+
+        Raises:
+            ValueError: If the replacement region count differs from the
+                operation's current region count.
+        """
+        expected = len(self.nested_regions())
+        if len(regions) != expected:
+            raise ValueError(
+                f"Expected {expected} replacement regions, got {len(regions)}"
+            )
+        return self.rebuild_nested([list(region.operations) for region in regions])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -190,6 +257,49 @@ def _replace_region_arg_values(
             changed = True
         new_args.append(arg)
     return tuple(new_args) if changed else None
+
+
+def _replace_value_tuple(
+    values: tuple[ValueBase, ...],
+    mapping: dict[str, ValueBase],
+) -> tuple[ValueBase, ...] | None:
+    """Substitute a tuple of boundary values through a UUID mapping.
+
+    Args:
+        values (tuple[ValueBase, ...]): Region boundary values to rewrite.
+        mapping (dict[str, ValueBase]): UUID-keyed substitution map.
+
+    Returns:
+        tuple[ValueBase, ...] | None: Rewritten values, or ``None`` when no
+            entry changes.
+    """
+    rewritten = tuple(mapping.get(value.uuid, value) for value in values)
+    if all(before is after for before, after in zip(values, rewritten, strict=True)):
+        return None
+    return rewritten
+
+
+def _require_region_values(
+    values: typing.Sequence[ValueBase],
+    *,
+    label: str,
+) -> tuple[Value, ...]:
+    """Require scalar/array ``Value`` objects at a region boundary.
+
+    Args:
+        values (Sequence[ValueBase]): Boundary values to validate.
+        label (str): Boundary label used in diagnostics.
+
+    Returns:
+        tuple[Value, ...]: Values narrowed to the concrete IR value family.
+
+    Raises:
+        ValueError: If a tuple/dict aggregate appears where a region slot
+            requires a single SSA value.
+    """
+    if not all(isinstance(value, Value) for value in values):
+        raise ValueError(f"{label} must contain only scalar or array Values")
+    return typing.cast(tuple[Value, ...], tuple(values))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -354,12 +464,94 @@ class WhileOperation(HasNestedOps, Operation):
     max_iterations: int | None = None
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
     region_args: tuple[RegionArg, ...] = ()
+    captures: tuple[ValueBase, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
         return dataclasses.replace(self, operations=new_lists[0])
+
+    def nested_regions(self) -> tuple[Region, ...]:
+        """Return the while body with explicit boundary values.
+
+        Returns:
+            tuple[Region, ...]: One body region whose block arguments and
+                yields are aligned with ``region_args``. The updated
+                condition, when present, is appended as the final yield.
+        """
+        condition_yields: tuple[ValueBase, ...] = (
+            (self.operands[1],) if len(self.operands) > 1 else ()
+        )
+        return (
+            Region(
+                operations=tuple(self.operations),
+                block_args=tuple(arg.block_arg for arg in self.region_args),
+                captures=self.captures,
+                yields=(
+                    *(arg.yielded for arg in self.region_args),
+                    *condition_yields,
+                ),
+            ),
+        )
+
+    def rebuild_regions(self, regions: typing.Sequence[Region]) -> Operation:
+        """Rebuild the while body and its complete boundary interface.
+
+        Args:
+            regions (Sequence[Region]): Exactly one replacement body region.
+
+        Returns:
+            Operation: Rebuilt while operation.
+
+        Raises:
+            ValueError: If arity or boundary value kinds are inconsistent.
+        """
+        if len(regions) != 1:
+            raise ValueError(f"WhileOperation expects 1 region, got {len(regions)}")
+        region = regions[0]
+        block_args = _require_region_values(
+            region.block_args, label="WhileOperation block arguments"
+        )
+        if len(block_args) != len(self.region_args):
+            raise ValueError(
+                "WhileOperation block-argument count must match region_args"
+            )
+        if len(region.yields) not in {
+            len(self.region_args),
+            len(self.region_args) + 1,
+        }:
+            raise ValueError(
+                "WhileOperation yields must contain carried values and an "
+                "optional updated condition"
+            )
+        carried_yields = _require_region_values(
+            region.yields[: len(self.region_args)],
+            label="WhileOperation carried yields",
+        )
+        region_args = tuple(
+            dataclasses.replace(arg, block_arg=block_arg, yielded=yielded)
+            for arg, block_arg, yielded in zip(
+                self.region_args,
+                block_args,
+                carried_yields,
+                strict=True,
+            )
+        )
+        operands = list(self.operands[:1])
+        if len(region.yields) > len(self.region_args):
+            condition_yield = _require_region_values(
+                region.yields[len(self.region_args) :],
+                label="WhileOperation condition yield",
+            )[0]
+            operands.append(condition_yield)
+        return dataclasses.replace(
+            self,
+            operations=list(region.operations),
+            operands=operands,
+            region_args=region_args,
+            captures=tuple(region.captures),
+        )
 
     def all_input_values(self) -> list[ValueBase]:
         """Include rebind records and region args for cloning/substitution.
@@ -374,6 +566,7 @@ class WhileOperation(HasNestedOps, Operation):
                 region-argument values.
         """
         values = super().all_input_values()
+        values.extend(self.captures)
         values.extend(_rebind_input_values(self.loop_carried_rebinds))
         values.extend(_region_arg_values(self.region_args))
         return values
@@ -395,6 +588,9 @@ class WhileOperation(HasNestedOps, Operation):
         new_region_args = _replace_region_arg_values(result.region_args, mapping)
         if new_region_args is not None:
             result = dataclasses.replace(result, region_args=new_region_args)
+        new_captures = _replace_value_tuple(result.captures, mapping)
+        if new_captures is not None:
+            result = dataclasses.replace(result, captures=new_captures)
         return result
 
     @property
@@ -450,12 +646,77 @@ class ForOperation(HasNestedOps, Operation):
     operations: list[Operation] = dataclasses.field(default_factory=list)
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
     region_args: tuple[RegionArg, ...] = ()
+    captures: tuple[ValueBase, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
         return dataclasses.replace(self, operations=new_lists[0])
+
+    def nested_regions(self) -> tuple[Region, ...]:
+        """Return the range-loop body with its explicit interface.
+
+        Returns:
+            tuple[Region, ...]: One body region containing the induction
+                value, carried-value formals, captures, and carried yields.
+        """
+        block_args: list[ValueBase] = []
+        if self.loop_var_value is not None:
+            block_args.append(self.loop_var_value)
+        block_args.extend(arg.block_arg for arg in self.region_args)
+        return (
+            Region(
+                operations=tuple(self.operations),
+                block_args=tuple(block_args),
+                captures=self.captures,
+                yields=tuple(arg.yielded for arg in self.region_args),
+            ),
+        )
+
+    def rebuild_regions(self, regions: typing.Sequence[Region]) -> Operation:
+        """Rebuild the range-loop body and complete boundary interface.
+
+        Args:
+            regions (Sequence[Region]): Exactly one replacement body region.
+
+        Returns:
+            Operation: Rebuilt range-loop operation.
+
+        Raises:
+            ValueError: If arity or boundary value kinds are inconsistent.
+        """
+        if len(regions) != 1:
+            raise ValueError(f"ForOperation expects 1 region, got {len(regions)}")
+        region = regions[0]
+        formals = _require_region_values(
+            region.block_args, label="ForOperation block arguments"
+        )
+        offset = 1 if self.loop_var_value is not None else 0
+        if len(formals) != offset + len(self.region_args):
+            raise ValueError(
+                "ForOperation block arguments must contain its induction "
+                "value followed by region_args"
+            )
+        yields = _require_region_values(region.yields, label="ForOperation yields")
+        if len(yields) != len(self.region_args):
+            raise ValueError("ForOperation yield count must match region_args")
+        region_args = tuple(
+            dataclasses.replace(arg, block_arg=block_arg, yielded=yielded)
+            for arg, block_arg, yielded in zip(
+                self.region_args,
+                formals[offset:],
+                yields,
+                strict=True,
+            )
+        )
+        return dataclasses.replace(
+            self,
+            loop_var_value=formals[0] if offset else None,
+            operations=list(region.operations),
+            region_args=region_args,
+            captures=tuple(region.captures),
+        )
 
     def all_input_values(self) -> list[ValueBase]:
         """Include ``loop_var_value`` so cloning/substitution stays consistent.
@@ -470,6 +731,7 @@ class ForOperation(HasNestedOps, Operation):
         values = super().all_input_values()
         if self.loop_var_value is not None:
             values.append(self.loop_var_value)
+        values.extend(self.captures)
         values.extend(_rebind_input_values(self.loop_carried_rebinds))
         values.extend(_region_arg_values(self.region_args))
         return values
@@ -487,6 +749,9 @@ class ForOperation(HasNestedOps, Operation):
         new_region_args = _replace_region_arg_values(result.region_args, mapping)
         if new_region_args is not None:
             result = dataclasses.replace(result, region_args=new_region_args)
+        new_captures = _replace_value_tuple(result.captures, mapping)
+        if new_captures is not None:
+            result = dataclasses.replace(result, captures=new_captures)
         return result
 
     @property
@@ -547,12 +812,84 @@ class ForItemsOperation(HasNestedOps, Operation):
     operations: list[Operation] = dataclasses.field(default_factory=list)
     loop_carried_rebinds: tuple[LoopCarriedRebind, ...] = ()
     region_args: tuple[RegionArg, ...] = ()
+    captures: tuple[ValueBase, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         return [self.operations]
 
     def rebuild_nested(self, new_lists: list[list[Operation]]) -> Operation:
         return dataclasses.replace(self, operations=new_lists[0])
+
+    def nested_regions(self) -> tuple[Region, ...]:
+        """Return the items-loop body with its explicit interface.
+
+        Returns:
+            tuple[Region, ...]: One body region containing key/value formals,
+                carried-value formals, captures, and carried yields.
+        """
+        block_args: list[ValueBase] = []
+        if self.key_var_values is not None:
+            block_args.extend(self.key_var_values)
+        if self.value_var_value is not None:
+            block_args.append(self.value_var_value)
+        block_args.extend(arg.block_arg for arg in self.region_args)
+        return (
+            Region(
+                operations=tuple(self.operations),
+                block_args=tuple(block_args),
+                captures=self.captures,
+                yields=tuple(arg.yielded for arg in self.region_args),
+            ),
+        )
+
+    def rebuild_regions(self, regions: typing.Sequence[Region]) -> Operation:
+        """Rebuild the items-loop body and complete boundary interface.
+
+        Args:
+            regions (Sequence[Region]): Exactly one replacement body region.
+
+        Returns:
+            Operation: Rebuilt items-loop operation.
+
+        Raises:
+            ValueError: If arity or boundary value kinds are inconsistent.
+        """
+        if len(regions) != 1:
+            raise ValueError(f"ForItemsOperation expects 1 region, got {len(regions)}")
+        region = regions[0]
+        formals = _require_region_values(
+            region.block_args, label="ForItemsOperation block arguments"
+        )
+        key_count = len(self.key_var_values or ())
+        value_count = 1 if self.value_var_value is not None else 0
+        offset = key_count + value_count
+        if len(formals) != offset + len(self.region_args):
+            raise ValueError(
+                "ForItemsOperation block arguments must contain item formals "
+                "followed by region_args"
+            )
+        yields = _require_region_values(region.yields, label="ForItemsOperation yields")
+        if len(yields) != len(self.region_args):
+            raise ValueError("ForItemsOperation yield count must match region_args")
+        region_args = tuple(
+            dataclasses.replace(arg, block_arg=block_arg, yielded=yielded)
+            for arg, block_arg, yielded in zip(
+                self.region_args,
+                formals[offset:],
+                yields,
+                strict=True,
+            )
+        )
+        keys = tuple(formals[:key_count]) if self.key_var_values is not None else None
+        value_formal = formals[key_count] if value_count else None
+        return dataclasses.replace(
+            self,
+            key_var_values=keys,
+            value_var_value=value_formal,
+            operations=list(region.operations),
+            region_args=region_args,
+            captures=tuple(region.captures),
+        )
 
     def all_input_values(self) -> list[ValueBase]:
         """Include the per-key/value ``Value`` fields for cloning/substitution.
@@ -567,6 +904,7 @@ class ForItemsOperation(HasNestedOps, Operation):
             values.extend(self.key_var_values)
         if self.value_var_value is not None:
             values.append(self.value_var_value)
+        values.extend(self.captures)
         values.extend(_rebind_input_values(self.loop_carried_rebinds))
         values.extend(_region_arg_values(self.region_args))
         return values
@@ -602,6 +940,9 @@ class ForItemsOperation(HasNestedOps, Operation):
         new_region_args = _replace_region_arg_values(result.region_args, mapping)
         if new_region_args is not None:
             result = dataclasses.replace(result, region_args=new_region_args)
+        new_captures = _replace_value_tuple(result.captures, mapping)
+        if new_captures is not None:
+            result = dataclasses.replace(result, captures=new_captures)
         return result
 
     @property
@@ -839,6 +1180,8 @@ class IfOperation(HasNestedOps, Operation):
     true_yields: list[Value] = dataclasses.field(default_factory=list)
     false_yields: list[Value] = dataclasses.field(default_factory=list)
     branch_rebinds: tuple[BranchRebind, ...] = ()
+    true_captures: tuple[ValueBase, ...] = ()
+    false_captures: tuple[ValueBase, ...] = ()
 
     def nested_op_lists(self) -> list[list[Operation]]:
         """Return the two branch bodies (merge yields are not operations).
@@ -868,6 +1211,64 @@ class IfOperation(HasNestedOps, Operation):
             false_operations=new_lists[1],
         )
 
+    def nested_regions(self) -> tuple[Region, ...]:
+        """Return the true and false branch interfaces.
+
+        Returns:
+            tuple[Region, ...]: True and false regions in that order, with
+                branch-local captures and merge yields.
+        """
+        return (
+            Region(
+                operations=tuple(self.true_operations),
+                captures=self.true_captures,
+                yields=tuple(self.true_yields),
+            ),
+            Region(
+                operations=tuple(self.false_operations),
+                captures=self.false_captures,
+                yields=tuple(self.false_yields),
+            ),
+        )
+
+    def rebuild_regions(self, regions: typing.Sequence[Region]) -> Operation:
+        """Rebuild both branches and their complete boundary interfaces.
+
+        Args:
+            regions (Sequence[Region]): True and false replacement regions.
+
+        Returns:
+            Operation: Rebuilt conditional operation.
+
+        Raises:
+            ValueError: If region count, block arguments, or yield signatures
+                are inconsistent.
+        """
+        if len(regions) != 2:
+            raise ValueError(f"IfOperation expects 2 regions, got {len(regions)}")
+        true_region, false_region = regions
+        if true_region.block_args or false_region.block_args:
+            raise ValueError("IfOperation regions do not define block arguments")
+        if len(true_region.yields) != len(self.results) or len(
+            false_region.yields
+        ) != len(self.results):
+            raise ValueError("IfOperation branch yield counts must match results")
+        true_yields = _require_region_values(
+            true_region.yields, label="IfOperation true yields"
+        )
+        false_yields = _require_region_values(
+            false_region.yields, label="IfOperation false yields"
+        )
+        return dataclasses.replace(
+            self,
+            true_operations=list(true_region.operations),
+            false_operations=list(false_region.operations),
+            true_captures=tuple(true_region.captures),
+            false_captures=tuple(false_region.captures),
+            true_yields=list(true_yields),
+            false_yields=list(false_yields),
+        )
+
     def all_input_values(self) -> list[ValueBase]:
         """Include branch-yield values and rebind records for cloning/substitution.
 
@@ -885,6 +1286,8 @@ class IfOperation(HasNestedOps, Operation):
                 yields and rebind-record values.
         """
         values = super().all_input_values()
+        values.extend(self.true_captures)
+        values.extend(self.false_captures)
         values.extend(self.true_yields)
         values.extend(self.false_yields)
         values.extend(_branch_rebind_input_values(self.branch_rebinds))
@@ -910,6 +1313,12 @@ class IfOperation(HasNestedOps, Operation):
         new_rebinds = _replace_branch_rebind_values(result.branch_rebinds, mapping)
         if new_rebinds is not None:
             result = dataclasses.replace(result, branch_rebinds=new_rebinds)
+        new_true_captures = _replace_value_tuple(result.true_captures, mapping)
+        if new_true_captures is not None:
+            result = dataclasses.replace(result, true_captures=new_true_captures)
+        new_false_captures = _replace_value_tuple(result.false_captures, mapping)
+        if new_false_captures is not None:
+            result = dataclasses.replace(result, false_captures=new_false_captures)
         return result
 
     @property
@@ -1016,57 +1425,34 @@ class IfOperation(HasNestedOps, Operation):
 def genuine_input_values(op: Operation) -> list[ValueBase]:
     """Return an operation's input values that count as genuine reads.
 
-    ``Operation.all_input_values`` also surfaces the bookkeeping values
-    that ride along only for cloning / substitution: the ``before`` /
-    ``after`` of a loop operation's ``loop_carried_rebinds``, the
-    ``before`` of an ``IfOperation``'s ``branch_rebinds``, and the
-    loop-owned fields of a ``RegionArg`` (``block_arg`` / ``yielded`` /
-    ``result``). Those are NOT outer-scope data reads, so read-based
-    analyses (measurement-taint tracing, loop-carried stale-read
-    checks, segmentation demand) must exclude them. ``RegionArg.init``
-    stays: it is the genuine read of the pre-loop value.
-
-    LIVENESS IS THE EXCEPTION: ``RegionArg.yielded`` may be an
-    outer-scope value (the loop-invariant overwrite shape ``x = c``),
-    in which case the region back-edge is the producer's only read.
-    Dead-op elimination therefore re-adds yields on top of this
-    helper's result (``CompileTimeIfLoweringPass._collect_used_uuids``)
-    — a consumer deciding what may be DELETED must do the same.
-
-    The exclusion is by **last occurrence**, not by UUID set: a single
-    value can be BOTH a genuine input AND a rebind ``before``. The
-    canonical case is an else-less quantum discard (``if cond: q =
-    fresh``): the false side yields the pre-branch ``q``, so that value
-    is simultaneously a ``false_yields`` entry (a genuine read) and the
-    ``branch_rebinds`` ``before`` (a record). ``all_input_values``
-    appends the record values after the genuine ones, so dropping the
-    last matching occurrence strips the record and leaves the read
-    intact — a plain UUID-set subtraction would wrongly drop the yield
-    read too.
+    Structured operations derive reads from their explicit region interface:
+    enclosing operands, captures, loop initializers, and region yields.
+    Block arguments and operation results are definitions, while legacy
+    rebind records are diagnostics rather than dataflow. Leaf operations keep
+    their ordinary ``all_input_values`` contract.
 
     Args:
         op (Operation): Operation to inspect.
 
     Returns:
-        list[ValueBase]: ``all_input_values`` with one occurrence per
-            rebind-record value removed.
+        list[ValueBase]: Semantic reads in interface order.
     """
-    values = list(op.all_input_values())
-    record_values: list[ValueBase] = []
-    if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-        for loop_record in op.loop_carried_rebinds:
-            record_values.append(loop_record.before)
-            record_values.append(loop_record.after)
-        for region_arg in op.region_args:
-            record_values.append(region_arg.block_arg)
-            record_values.append(region_arg.yielded)
-            record_values.append(region_arg.result)
-    elif isinstance(op, IfOperation):
-        for branch_record in op.branch_rebinds:
-            record_values.append(branch_record.before)
-    for record_value in record_values:
-        for index in range(len(values) - 1, -1, -1):
-            if values[index].uuid == record_value.uuid:
-                del values[index]
-                break
-    return values
+    if isinstance(op, WhileOperation):
+        while_values: list[ValueBase] = list(op.operands[:1])
+        while_values.extend(op.captures)
+        while_values.extend(region_arg.init for region_arg in op.region_args)
+        while_values.extend(op.nested_regions()[0].yields)
+        return while_values
+    if isinstance(op, (ForOperation, ForItemsOperation)):
+        loop_values: list[ValueBase] = list(op.operands)
+        loop_values.extend(op.captures)
+        loop_values.extend(region_arg.init for region_arg in op.region_args)
+        loop_values.extend(op.nested_regions()[0].yields)
+        return loop_values
+    if isinstance(op, IfOperation):
+        branch_values: list[ValueBase] = list(op.operands)
+        for region in op.nested_regions():
+            branch_values.extend(region.captures)
+            branch_values.extend(region.yields)
+        return branch_values
+    return list(op.all_input_values())

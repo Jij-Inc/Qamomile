@@ -396,13 +396,20 @@ class InlinePass(Pass[Block, Block]):
                 result.append(substituted)
 
             elif isinstance(op, HasNestedOps):
-                # Generic recursion for For/ForItems/While: recurse into
-                # nested bodies, rebuild, then substitute values.
-                new_lists = [
-                    self._serialize_operations(body, value_map, visiting_blocks)
-                    for body in op.nested_op_lists()
-                ]
-                new_op = op.rebuild_nested(new_lists)
+                new_regions = tuple(
+                    dataclasses.replace(
+                        region,
+                        operations=tuple(
+                            self._serialize_operations(
+                                list(region.operations),
+                                value_map,
+                                visiting_blocks,
+                            )
+                        ),
+                    )
+                    for region in op.nested_regions()
+                )
+                new_op = op.rebuild_regions(new_regions)
                 new_op = self._substitute_values(new_op, value_map)
                 result.append(new_op)
 

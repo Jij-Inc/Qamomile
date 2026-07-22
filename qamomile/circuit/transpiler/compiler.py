@@ -12,12 +12,17 @@ from qamomile.circuit.frontend.static_binding import without_static_bindings
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.artifact import CompiledProgram
 from qamomile.circuit.transpiler.config import CompilerConfig
+from qamomile.circuit.transpiler.passes.effect_validation import (
+    EffectValidationPass,
+)
 from qamomile.circuit.transpiler.passes.entrypoint_validation import (
     EntrypointValidationPass,
 )
 from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
     ParameterShapeResolutionPass,
 )
+from qamomile.circuit.transpiler.passes.region_capture import RegionCapturePass
+from qamomile.circuit.transpiler.passes.region_validation import RegionValidationPass
 from qamomile.circuit.transpiler.passes.substitution import SubstitutionPass
 from qamomile.circuit.transpiler.prepared import PreparedModule, prepare_module
 from qamomile.circuit.transpiler.target import CompilationTarget
@@ -126,6 +131,9 @@ class QamomileCompiler:
         if self.config.substitutions.rules:
             block = SubstitutionPass(self.config.substitutions).run(block)
         block = ParameterShapeResolutionPass(ordinary_bindings).run(block)
+        block = RegionCapturePass().run(block)
+        RegionValidationPass().run(block)
+        EffectValidationPass().run(block)
         return prepare_module(block, ordinary_bindings)
 
     def compile(

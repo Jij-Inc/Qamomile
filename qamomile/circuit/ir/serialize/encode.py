@@ -49,6 +49,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
     RuntimeClassicalExpr,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
@@ -286,8 +287,8 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
         if isinstance(v, ValueBase):
             ctx.register_value(v)
     if isinstance(op, HasNestedOps):
-        for child_list in op.nested_op_lists():
-            for child in child_list:
+        for region in op.nested_regions():
+            for child in region.operations:
                 _walk_op_values(child, ctx)
     if isinstance(op, InvokeOperation):
         ctx.register_definition(op.definition)
@@ -1255,6 +1256,26 @@ def _encode_binop(op: BinOp, ctx: _EncodeContext) -> dict[str, Any]:
     return d
 
 
+def _encode_unary_math(
+    op: UnaryMathOp,
+    ctx: _EncodeContext,
+) -> dict[str, Any]:
+    """Encode a unary mathematical operation.
+
+    Args:
+        op (UnaryMathOp): Operation to encode.
+        ctx (_EncodeContext): Active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary plus its kind name.
+    """
+    del ctx
+    d = _base_op_dict("UnaryMathOp", op)
+    assert op.kind is not None
+    d["kind"] = op.kind.name
+    return d
+
+
 def _encode_compop(op: CompOp, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`CompOp`.
 
@@ -1397,6 +1418,7 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["region_args"] = _encode_region_args(op.region_args)
+    d["capture_refs"] = [value.uuid for value in op.captures]
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1430,6 +1452,7 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["region_args"] = _encode_region_args(op.region_args)
+    d["capture_refs"] = [value.uuid for value in op.captures]
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1455,6 +1478,7 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
     d["max_iterations"] = op.max_iterations
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["region_args"] = _encode_region_args(op.region_args)
+    d["capture_refs"] = [value.uuid for value in op.captures]
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1510,6 +1534,8 @@ def _encode_if(op: IfOperation, ctx: _EncodeContext) -> dict[str, Any]:
     d["true_yield_refs"] = [m.true_value.uuid for m in merges]
     d["false_yield_refs"] = [m.false_value.uuid for m in merges]
     d["branch_rebinds"] = _encode_branch_rebinds(op.branch_rebinds)
+    d["true_capture_refs"] = [value.uuid for value in op.true_captures]
+    d["false_capture_refs"] = [value.uuid for value in op.false_captures]
     return d
 
 
@@ -1838,6 +1864,7 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     ExpvalOp: _encode_expval,
     PauliEvolveOp: _encode_pauli_evolve,
     BinOp: _encode_binop,
+    UnaryMathOp: _encode_unary_math,
     CompOp: _encode_compop,
     CondOp: _encode_condop,
     NotOp: _encode_notop,
