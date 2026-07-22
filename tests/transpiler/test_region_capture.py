@@ -13,7 +13,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     RegionArg,
 )
 from qamomile.circuit.ir.types.primitives import BitType, UIntType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes.region_capture import RegionCapturePass
@@ -179,6 +179,81 @@ def test_capture_normalization_is_idempotent_and_preserves_block_identity() -> N
     assert [value.uuid for value in once_loop.captures] == [
         value.uuid for value in twice_loop.captures
     ]
+
+
+def test_declared_aggregate_capture_resolves_ambiguous_outer_versions() -> None:
+    """A frontend aggregate snapshot disambiguates multiple outer versions."""
+    condition = Value(type=BitType(), name="condition")
+    original = ArrayValue(type=UIntType(), name="items", shape=(_const(2, "size"),))
+    previous = original.next_version()
+    captured = previous.next_version()
+    index = _const(0, "index")
+    element = Value(
+        type=UIntType(),
+        name="items[0]",
+        parent_array=captured,
+        element_indices=(index,),
+    )
+    result = _uint("result")
+    branch = IfOperation(
+        operands=[condition],
+        true_operations=[
+            BinOp(
+                kind=BinOpKind.ADD,
+                operands=[element, _const(1, "one")],
+                results=[result],
+            )
+        ],
+        true_captures=(captured,),
+    )
+    block = Block(
+        kind=BlockKind.AFFINE,
+        input_values=[condition, original, previous],
+        label_args=["condition", "original", "previous"],
+        operations=[branch],
+    )
+
+    normalized = RegionCapturePass().run(block)
+    normalized_branch = normalized.operations[0]
+    assert isinstance(normalized_branch, IfOperation)
+    assert normalized_branch.true_captures == (captured,)
+    RegionValidationPass().run(normalized)
+
+
+def test_ambiguous_outer_versions_use_latest_dominating_capture() -> None:
+    """An undeclared aggregate read captures the latest outer SSA version."""
+    condition = Value(type=BitType(), name="condition")
+    original = ArrayValue(type=UIntType(), name="items", shape=(_const(2, "size"),))
+    latest = original.next_version()
+    branch_snapshot = latest.next_version()
+    element = Value(
+        type=UIntType(),
+        name="items[0]",
+        parent_array=branch_snapshot,
+        element_indices=(_const(0, "index"),),
+    )
+    branch = IfOperation(
+        operands=[condition],
+        true_operations=[
+            BinOp(
+                kind=BinOpKind.ADD,
+                operands=[element, _const(1, "one")],
+                results=[_uint("result")],
+            )
+        ],
+    )
+    block = Block(
+        kind=BlockKind.AFFINE,
+        input_values=[condition, original, latest],
+        label_args=["condition", "original", "latest"],
+        operations=[branch],
+    )
+
+    normalized = RegionCapturePass().run(block)
+    normalized_branch = normalized.operations[0]
+    assert isinstance(normalized_branch, IfOperation)
+    assert normalized_branch.true_captures == (latest,)
+    RegionValidationPass().run(normalized)
 
 
 def test_explicit_captures_round_trip_through_qkernel_serialization() -> None:

@@ -130,6 +130,7 @@ class RegionCapturePass(Pass[Block, Block]):
                     list(region.operations),
                     available,
                     region.block_args,
+                    region.captures,
                     region.yields,
                 )
                 regions.append(
@@ -148,6 +149,7 @@ class RegionCapturePass(Pass[Block, Block]):
         operations: list[Operation],
         outer_available: dict[str, ValueBase],
         block_args: Sequence[ValueBase],
+        declared_captures: Sequence[ValueBase],
         yields: Sequence[ValueBase],
     ) -> tuple[
         list[Operation],
@@ -161,6 +163,9 @@ class RegionCapturePass(Pass[Block, Block]):
             outer_available (dict[str, ValueBase]): Values visible immediately
                 outside the region.
             block_args (list[ValueBase]): Values defined at region entry.
+            declared_captures (Sequence[ValueBase]): Frontend or serialized
+                capture declarations that may identify aggregate snapshots
+                not materialized by a single producer operation.
             yields (list[ValueBase]): Values crossing the region exit.
 
         Returns:
@@ -174,6 +179,7 @@ class RegionCapturePass(Pass[Block, Block]):
         scope.update(local)
         captures: list[ValueBase] = []
         captured_ids: set[str] = set()
+        declared_by_id = {value.uuid: value for value in declared_captures}
         normalized: list[Operation] = []
 
         for operation in operations:
@@ -184,6 +190,7 @@ class RegionCapturePass(Pass[Block, Block]):
                     value,
                     local,
                     outer_available,
+                    declared_by_id,
                     captures,
                     captured_ids,
                 )
@@ -198,6 +205,7 @@ class RegionCapturePass(Pass[Block, Block]):
                 value,
                 local,
                 outer_available,
+                declared_by_id,
                 captures,
                 captured_ids,
             )
@@ -213,16 +221,18 @@ class RegionCapturePass(Pass[Block, Block]):
         Branch tracing uses independent frontend handle copies so affine
         consumption in mutually exclusive branches is isolated. Legacy traces
         can therefore expose a fresh UUID at the first operation in a branch,
-        even though its logical identity denotes an enclosing value. A unique
-        matching logical identity is the region-entry value and is normalized
-        before captures are derived.
+        even though its logical identity denotes an enclosing value. When
+        several SSA versions of that identity dominate the region, insertion
+        order reflects program order, so the latest compatible version is the
+        region-entry value.
 
         Args:
             value (ValueBase): Candidate branch-entry operand.
             outer_available (dict[str, ValueBase]): Enclosing values.
 
         Returns:
-            ValueBase | None: Type-compatible dominating value, or ``None``.
+            ValueBase | None: Latest type-compatible dominating value, or
+                ``None``.
         """
         if value.uuid in outer_available:
             return outer_available[value.uuid]
@@ -231,16 +241,14 @@ class RegionCapturePass(Pass[Block, Block]):
             for candidate in outer_available.values()
             if candidate.logical_id == value.logical_id and candidate.type == value.type
         ]
-        unique = {candidate.uuid: candidate for candidate in matches}
-        if len(unique) == 1:
-            return next(iter(unique.values()))
-        return None
+        return matches[-1] if matches else None
 
     @staticmethod
     def _record_capture(
         value: ValueBase,
         local: dict[str, ValueBase],
         outer_available: dict[str, ValueBase],
+        declared_captures: dict[str, ValueBase],
         captures: list[ValueBase],
         captured_ids: set[str],
     ) -> None:
@@ -252,34 +260,42 @@ class RegionCapturePass(Pass[Block, Block]):
                 by its block arguments.
             outer_available (dict[str, ValueBase]): Values defined before the
                 region in the enclosing scope.
+            declared_captures (dict[str, ValueBase]): Existing capture values
+                keyed by UUID, used to preserve frontend array snapshots.
             captures (list[ValueBase]): Ordered capture accumulator.
             captured_ids (set[str]): UUIDs already present in ``captures``.
         """
         if value.uuid in local or value.uuid in captured_ids or value.is_constant():
             return
         if value.uuid not in outer_available:
-            logical_match = RegionCapturePass._matching_outer_value(
-                value, outer_available
-            )
-            if logical_match is not None:
-                value = logical_match
+            declared = declared_captures.get(value.uuid)
+            if isinstance(declared, ArrayValue):
+                value = declared
             else:
-                root = value if isinstance(value, ArrayValue) else None
-                if isinstance(value, Value) and value.parent_array is not None:
-                    root = value.parent_array
-                while root is not None and root.slice_of is not None:
-                    root = root.slice_of
-                if root is None:
-                    return
-                if root.uuid in outer_available:
-                    value = outer_available[root.uuid]
+                logical_match = RegionCapturePass._matching_outer_value(
+                    value, outer_available
+                )
+                if logical_match is not None:
+                    value = logical_match
                 else:
-                    root_match = RegionCapturePass._matching_outer_value(
-                        root, outer_available
-                    )
-                    if root_match is None:
+                    root = value if isinstance(value, ArrayValue) else None
+                    if isinstance(value, Value) and value.parent_array is not None:
+                        root = value.parent_array
+                    while root is not None and root.slice_of is not None:
+                        root = root.slice_of
+                    if root is None:
                         return
-                    value = root_match
+                    if root.uuid in declared_captures:
+                        value = declared_captures[root.uuid]
+                    elif root.uuid in outer_available:
+                        value = outer_available[root.uuid]
+                    else:
+                        root_match = RegionCapturePass._matching_outer_value(
+                            root, outer_available
+                        )
+                        if root_match is None:
+                            return
+                        value = root_match
         if value.uuid in captured_ids:
             return
         captures.append(value)
