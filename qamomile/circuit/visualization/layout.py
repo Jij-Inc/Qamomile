@@ -168,7 +168,14 @@ class CircuitLayoutEngine:
     def _place_vinline_block(
         self, node: VInlineBlock, state: LayoutState, depth: int
     ) -> None:
-        """Place a VInlineBlock node for an inlined callable/control body."""
+        """Place one inlined callable or controlled body.
+
+        Args:
+            node (VInlineBlock): Pre-resolved inlined body to place.
+            state (LayoutState): Mutable layout state receiving coordinates
+                and block-range metadata.
+            depth (int): Current visual nesting depth.
+        """
         affected_qubits = node.affected_qubits
 
         # The box's visual extent spans every wire from ``min(affected)``
@@ -271,6 +278,7 @@ class CircuitLayoutEngine:
                     "end_x": actual_end,
                     "qubit_indices": affected_qubits,
                     "control_qubit_indices": node.control_qubit_indices,
+                    "control_pattern": node.control_pattern,
                     "power": node.power,
                     "depth": depth,
                     "max_gate_width": max_gate_width,

@@ -1,11 +1,15 @@
 """Expose standard-library quantum callables.
 
-The reader-facing API is function-oriented: use :func:`qft`, :func:`iqft`,
-and :func:`qpe` inside qkernels. Internally these functions emit named
-callables with Qamomile bodies and optional backend-native implementations.
+The reader-facing circuit API is function-oriented: use :func:`qft`,
+:func:`iqft`, :func:`qpe`, state-preparation helpers, arithmetic helpers, and
+:func:`mcx` inside qkernels. Factories that must also expose algorithm metadata
+may return frozen non-callable descriptors; invoke the descriptor's documented
+qkernel field rather than the descriptor itself. Internally these functions
+emit named callables with Qamomile bodies and optional backend-native
+implementations.
 
-QFT and IQFT use the same ``composite_gate`` mechanism as user callables; there
-is no separate class-based gate hierarchy.
+Standard composites use the same ``composite_gate`` mechanism as user
+callables; there is no separate class-based gate hierarchy.
 
 Example:
     ```python
@@ -19,26 +23,77 @@ Example:
 """
 
 from .arithmetic import (
+    add_const,
+    controlled_add_const,
     controlled_modular_add,
+    controlled_modular_add_const,
+    controlled_modular_add_const_modulus,
+    lookup_xor,
     modmul_const,
     modular_add,
+    modular_add_const,
+    modular_decrement,
+    modular_increment,
     ripple_carry_add,
 )
+from .block_encoding import (
+    IsingZBlockEncoding,
+    LCUBlockEncoding,
+    LCUBlockEncodingTerm,
+    PauliLCUBlockEncoding,
+    PeriodicShiftLCUBlockEncoding,
+    identity_block_encoding,
+    ising_z_block_encoding,
+    lcu_block_encoding,
+    pauli_lcu_block_encoding,
+    periodic_shift_lcu_block_encoding,
+)
 from .grover import grover_iteration_count, grover_search
+from .multi_controlled_x import mcx, multi_controlled_x
 from .qft import iqft, qft
 from .qpe import qpe
-from .shor import shor_order_finding
+from .state_preparation import (
+    amplitude_encoding,
+    amplitude_encoding_from_angles,
+    computational_basis_state,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
+)
 
 __all__ = [
     "qft",
     "iqft",
     "qpe",
-    # Arithmetic and algorithms
+    "mcx",
+    "multi_controlled_x",
+    "LCUBlockEncoding",
+    "LCUBlockEncodingTerm",
+    "identity_block_encoding",
+    "lcu_block_encoding",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
+    "PauliLCUBlockEncoding",
+    "pauli_lcu_block_encoding",
+    "PeriodicShiftLCUBlockEncoding",
+    "periodic_shift_lcu_block_encoding",
+    "computational_basis_state",
+    "amplitude_encoding",
+    "amplitude_encoding_from_angles",
+    "mottonen_amplitude_encoding",
+    "mottonen_amplitude_encoding_from_angles",
+    # Arithmetic
     "ripple_carry_add",
+    "add_const",
+    "controlled_add_const",
+    "modular_increment",
+    "modular_decrement",
     "modular_add",
     "controlled_modular_add",
+    "modular_add_const",
+    "controlled_modular_add_const",
+    "controlled_modular_add_const_modulus",
+    "lookup_xor",
     "modmul_const",
-    "shor_order_finding",
     "grover_search",
     "grover_iteration_count",
 ]

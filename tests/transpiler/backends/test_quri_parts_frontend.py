@@ -162,13 +162,12 @@ def _run_statevector(circuit, parameter_bindings=None) -> np.ndarray:
 
 
 def _strip_zero_ancillas(statevector: np.ndarray, num_data_qubits: int) -> np.ndarray:
-    """Project out trailing ancilla qubits that must have uncomputed to zero.
+    """Project out trailing internal qubits that must finish in zero.
 
-    The shared multi-controlled lowering appends clean ancilla qubits
-    after the kernel's data qubits and uncomputes them before the
-    circuit ends, so every amplitude with any ancilla bit set must be
-    zero and the data-qubit statevector is the leading
-    ``2**num_data_qubits`` amplitudes in the little-endian convention.
+    Multi-control ancillas and QURI's scalar-phase carrier are appended after
+    the qkernel's data qubits. Every amplitude with any internal bit set must
+    be zero, so the data-qubit statevector is the leading
+    ``2**num_data_qubits`` amplitudes in little-endian convention.
     Thin wrapper over :func:`assert_ancillas_uncomputed` expressing this
     module's natural unit (a data-qubit count); that helper holds the
     shared ancilla-uncomputation assertion.
@@ -1703,7 +1702,7 @@ class TestGateCombinations:
         """
 
         @qmc.qkernel
-        def circuit() -> qmc.Vector[qmc.Bit]:
+        def circuit() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
             # Alice's qubit to teleport (prepared in |1>)
             alice = qmc.qubit("alice")
             alice = qmc.x(alice)
@@ -1718,12 +1717,13 @@ class TestGateCombinations:
             alice, bell0 = qmc.cx(alice, bell0)
             alice = qmc.h(alice)
 
-            # Measure all three qubits
-            q = qmc.qubit_array(3, "out")
-            q[0] = alice
-            q[1] = bell0
-            q[2] = bell1
-            return qmc.measure(q)
+            # Measure all three independent resources without pretending a
+            # fresh array owns them.
+            return (
+                qmc.measure(alice),
+                qmc.measure(bell0),
+                qmc.measure(bell1),
+            )
 
         _, qc = _transpile_and_get_circuit(circuit)
         gates = _get_gates(qc)
@@ -2569,7 +2569,7 @@ class TestTranspilerPassesPipeline:
 
         block = transpiler.to_block(circuit)
         assert block is not None
-        assert len(block.operations) == 4
+        assert len(block.operations) == 3
 
     def test_inline(self, transpiler):
         """inline() flattens inline invocations from sub-kernel calls."""
@@ -3091,7 +3091,10 @@ class TestParametricGates:
         gates = _get_gates(qc, parameter_bindings=[angle])
         # P gate emits as RZ in parametric path (U1 in non-parametric)
         assert any(g.name == gate_names.RZ for g in gates)
-        sv = _run_statevector(qc, parameter_bindings=[angle])
+        sv = _strip_zero_ancillas(
+            _run_statevector(qc, parameter_bindings=[angle]),
+            1,
+        )
         expected = compute_expected_statevector(
             all_zeros_state(1), GATE_SPECS["P"].matrix_fn(angle)
         )
@@ -3116,7 +3119,10 @@ class TestParametricGates:
         gate_name_set = {g.name for g in gates}
         assert gate_names.RZ in gate_name_set
         assert gate_names.CNOT in gate_name_set
-        sv = _run_statevector(qc, parameter_bindings=[angle])
+        sv = _strip_zero_ancillas(
+            _run_statevector(qc, parameter_bindings=[angle]),
+            2,
+        )
         expected = compute_expected_statevector(
             all_zeros_state(2), GATE_SPECS["CP"].matrix_fn(angle)
         )
@@ -3381,7 +3387,7 @@ class TestStdlibQFT:
         assert np.allclose(sv, expected, atol=1e-10)
 
     def test_qft_decomposed_gate_set(self):
-        """Decomposed QFT uses basic gates (H, RZ, CNOT, SWAP)."""
+        """Decomposed QFT uses basic gates (H, RZ, U1, CNOT, SWAP)."""
 
         @qmc.qkernel
         def circuit() -> qmc.Vector[qmc.Bit]:
@@ -3391,15 +3397,17 @@ class TestStdlibQFT:
 
         _, circ = _transpile_and_get_circuit(circuit)
         gates = _get_gates(circ)
-        # 3-qubit QFT: 3 H gates + 3 CP (each → 3 RZ + 2 CNOT) + 1 SWAP = 19 gates
+        # 3-qubit QFT: 3 H + 3 CP (2 RZ + U1 + 2 CNOT) + 1 SWAP = 19 gates.
         h_gates = [g for g in gates if g.name == gate_names.H]
         rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        u1_gates = [g for g in gates if g.name == gate_names.U1]
         cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 3
         for i, g in enumerate(h_gates):
             assert g.target_indices == (2 - i,)
-        assert len(rz_gates) == 9  # 3 CP × 3 RZ each
+        assert len(rz_gates) == 6  # 3 CP × 2 RZ each
+        assert len(u1_gates) == 3  # 3 CP × 1 exact U1 factor each
         assert len(cx_gates) == 6  # 3 CP × 2 CNOT each
         assert len(swap_gates) == 1
         assert swap_gates[0].target_indices == (0, 2)
@@ -3712,6 +3720,43 @@ class TestControlledGate:
         )
         assert statevectors_equal(sv, expected)
 
+    @pytest.mark.parametrize("num_controls", [1, 4])
+    def test_multi_controlled_y_preserves_relative_phase_statevector(
+        self, num_controls
+    ):
+        """A coherently controlled Y has ``+i`` rather than ``-i`` phase.
+
+        Every control is put in superposition so an erroneous ``-Y`` cannot
+        hide as an unobservable global phase. The four-control case also
+        exercises the clean-ancilla conjunction used by wide SELECT calls.
+        """
+
+        @qmc.qkernel
+        def y_gate(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.y(q)
+
+        controlled_y = qmc.control(y_gate, num_controls=num_controls)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+            ctrl = qmc.qubit_array(num_controls, "ctrl")
+            target = qmc.qubit("target")
+            for i in qmc.range(num_controls):
+                ctrl[i] = qmc.h(ctrl[i])
+            ctrl, target = controlled_y(ctrl, target)
+            return qmc.measure(ctrl), qmc.measure(target)
+
+        _, circ = _transpile_and_get_circuit(circuit)
+        sv = _strip_zero_ancillas(_run_statevector(circ), num_controls + 1)
+        hadamard = GATE_SPECS["H"].matrix_fn()
+        preparation = tensor_product(identity(2), *([hadamard] * num_controls))
+        initial = preparation @ all_zeros_state(num_controls + 1)
+        expected = (
+            _multi_controlled_unitary(GATE_SPECS["Y"].matrix_fn(), num_controls)
+            @ initial
+        )
+        assert statevectors_equal(sv, expected)
+
     def test_multi_controlled_x_beyond_former_matrix_cap(self):
         """A 10-control X samples correctly despite its 11-local-qubit width.
 
@@ -3720,7 +3765,7 @@ class TestControlledGate:
         matrix), so a 10-control X was rejected. The Toffoli-cascade
         lowering scales linearly in the control count, so the same gate
         now emits and runs. All controls are prepared in |1>, so the
-        target flips deterministically; the nine cascade ancillas
+        target flips deterministically; the eight cascade ancillas
         uncompute and never appear in the measured register.
         """
 
@@ -3743,9 +3788,9 @@ class TestControlledGate:
         transpiler = QuriPartsTranspiler()
         exe = transpiler.transpile(circuit)
         circ = exe.compiled_quantum[0].circuit
-        # 10 controls need 9 cascade ancillas on top of the 11 data qubits.
-        assert circ.qubit_count == 20
-        # Directly verify the nine ancillas uncompute to |0>: with every
+        # A clean Toffoli chain needs n-2 ancillas: 8 on top of 11 data qubits.
+        assert circ.qubit_count == 19
+        # Directly verify the eight ancillas uncompute to |0>: with every
         # control in |1> the target flips, so all 11 data qubits end in
         # |1> and every amplitude with an ancilla bit set must be zero.
         sv = _strip_zero_ancillas(_run_statevector(circ), 11)
@@ -3802,7 +3847,7 @@ class TestControlledGate:
         addresses the parent circuit) must be suspended there; the shared
         cascade then falls back to gate-by-gate emission on the parent
         circuit, where the pool is valid. All three controls are |1>, so
-        inverse(3-control X) flips the target; the two cascade ancillas
+        inverse(3-control X) flips the target; the one cascade ancilla
         must uncompute back to |0> (asserted by ``_strip_zero_ancillas``).
         """
 
@@ -3823,8 +3868,8 @@ class TestControlledGate:
             return qmc.measure(q)
 
         _, circ = _transpile_and_get_circuit(circuit)
-        # 4 data qubits + 2 cascade ancillas for the embedded 3-control X.
-        assert circ.qubit_count == 6
+        # 4 data qubits + 1 cascade ancilla for the embedded 3-control X.
+        assert circ.qubit_count == 5
         sv = _strip_zero_ancillas(_run_statevector(circ), 4)
         assert statevectors_equal(sv, computational_basis_state(4, 0b1111))
 
@@ -4005,7 +4050,7 @@ class TestControlledGate:
         The Toffoli cascade uncomputes its ancillas before returning, so two
         irreducible multi-controlled gates in one segment reuse the same pool
         rather than each reserving its own. The count-only demand walk
-        reports the peak (two ancillas), so the circuit gains two ancillas,
+        reports the peak (one ancilla), so the circuit gains one ancilla,
         not four — the classic max-not-sum property of the reused pool.
         """
         mcx3 = qmc.control(qmc.x, num_controls=3)
@@ -4022,79 +4067,12 @@ class TestControlledGate:
             return qmc.measure(a), qmc.measure(b)
 
         _, circ = _transpile_and_get_circuit(circuit)
-        # 8 data qubits + 2 shared cascade ancillas (max of the two gates),
-        # not 4 (their sum).
-        assert circ.qubit_count == 10
+        # 8 data qubits + 1 shared cascade ancilla (max of the two gates),
+        # not 2 (their sum).
+        assert circ.qubit_count == 9
         sv = _strip_zero_ancillas(_run_statevector(circ), 8)
         # Every control is |1>, so both targets flip: all 8 data qubits |1>.
         assert statevectors_equal(sv, computational_basis_state(8, (1 << 8) - 1))
-
-    def test_suspended_mc_ancilla_pool_restores_pool(self):
-        """``_suspended_mc_ancilla_pool`` clears then restores the pool."""
-        from qamomile.circuit.transpiler.passes.emit_support import (
-            MultiControlAncillaPool,
-        )
-        from qamomile.quri_parts.transpiler import QuriPartsEmitPass
-
-        emit_pass = QuriPartsEmitPass()
-        pool = MultiControlAncillaPool(first_index=5, count=2)
-        emit_pass._mc_ancilla_pool = pool
-
-        with emit_pass._suspended_mc_ancilla_pool():
-            assert emit_pass._mc_ancilla_pool is None
-        assert emit_pass._mc_ancilla_pool is pool
-
-        # The pool is restored even when the suspended body raises.
-        with pytest.raises(RuntimeError):
-            with emit_pass._suspended_mc_ancilla_pool():
-                assert emit_pass._mc_ancilla_pool is None
-                raise RuntimeError("boom")
-        assert emit_pass._mc_ancilla_pool is pool
-
-    def test_blockvalue_to_gate_suspends_ancilla_pool(self):
-        """The shared reusable-gate probe emits its sub-circuit pool-suspended.
-
-        ``blockvalue_to_gate`` builds an independent sub-circuit for the
-        reusable-gate path; the segment ancilla pool addresses the parent
-        circuit and must be suspended there. This exercises the shared
-        probe directly (QURI overrides ``_blockvalue_to_gate`` to a no-op,
-        so its own emission never reaches the shared helper) and guards
-        against the pool-suspension being dropped from the helper: the spy
-        records the pool value seen during sub-circuit emission, which must
-        be None, and the pool must be restored afterwards. QURI's
-        ``circuit_to_gate`` returns None, so the probe itself yields None.
-        """
-        from qamomile.circuit.transpiler.passes.emit_support import (
-            MultiControlAncillaPool,
-        )
-        from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
-            blockvalue_to_gate,
-        )
-        from qamomile.quri_parts.transpiler import QuriPartsEmitPass
-
-        @qmc.qkernel
-        def h_leaf(q: qmc.Qubit) -> qmc.Qubit:
-            q = qmc.h(q)
-            return q
-
-        emit_pass = QuriPartsEmitPass()
-        pool = MultiControlAncillaPool(first_index=3, count=2)
-        emit_pass._mc_ancilla_pool = pool
-
-        seen_pools: list[MultiControlAncillaPool | None] = []
-        original_emit = emit_pass._emit_operations
-
-        def spy(*args, **kwargs):
-            seen_pools.append(emit_pass._mc_ancilla_pool)
-            return original_emit(*args, **kwargs)
-
-        emit_pass._emit_operations = spy  # type: ignore[method-assign]
-
-        result = blockvalue_to_gate(emit_pass, h_leaf.block, 1, {})
-
-        assert seen_pools == [None]  # pool suspended during sub-circuit emit
-        assert emit_pass._mc_ancilla_pool is pool  # restored afterwards
-        assert result is None  # QURI Parts has no reusable-gate object
 
 
 @qmc.composite_gate(name="bell_pair")
@@ -6672,15 +6650,16 @@ class TestGHZStateParametrised:
 class TestManualQFTCircuit:
     """Textbook QFT from scratch using CP + H + SWAP (Nielsen & Chuang).
 
-    In QuriParts, each CP gate is decomposed into 5 gates: 3×RZ + 2×CNOT.
-    Gate count assertions are adjusted accordingly.
+    In QuriParts, each concrete CP gate is decomposed into five gates:
+    2×RZ + 1×U1 + 2×CNOT. The U1 combines the control rotation with the
+    decomposition's exact scalar factor.
     """
 
     def test_manual_qft_2q_gate_counts(self):
         """2-qubit manual QFT gate counts with CP decomposition.
 
         Qiskit: 2H + 1CP + 1SWAP
-        QuriParts: 2H + (3RZ + 2CNOT) + 1SWAP = 2H + 3RZ + 2CNOT + 1SWAP
+        QuriParts: 2H + (2RZ + U1 + 2CNOT) + 1SWAP
         """
 
         @qmc.qkernel
@@ -6699,11 +6678,12 @@ class TestManualQFTCircuit:
         gates = _get_gates(circ)
         h_gates = [g for g in gates if g.name == gate_names.H]
         rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        u1_gates = [g for g in gates if g.name == gate_names.U1]
         cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 2
-        # CP decomposed: 3 RZ + 2 CNOT per CP, 1 CP total
-        assert len(rz_gates) == 3
+        assert len(rz_gates) == 2
+        assert len(u1_gates) == 1
         assert len(cx_gates) == 2
         assert len(swap_gates) == 1
         # H gates target qubits 0 and 1
@@ -6753,7 +6733,7 @@ class TestManualQFTCircuit:
         """3-qubit manual QFT gate counts with CP decomposition.
 
         Qiskit: 3H + 3CP + 1SWAP
-        QuriParts: 3H + 3×(3RZ + 2CNOT) + 1SWAP = 3H + 9RZ + 6CNOT + 1SWAP
+        QuriParts: 3H + 3×(2RZ + U1 + 2CNOT) + 1SWAP
         """
 
         @qmc.qkernel
@@ -6776,11 +6756,12 @@ class TestManualQFTCircuit:
         gates = _get_gates(circ)
         h_gates = [g for g in gates if g.name == gate_names.H]
         rz_gates = [g for g in gates if g.name == gate_names.RZ]
+        u1_gates = [g for g in gates if g.name == gate_names.U1]
         cx_gates = [g for g in gates if g.name == gate_names.CNOT]
         swap_gates = [g for g in gates if g.name == gate_names.SWAP]
         assert len(h_gates) == 3
-        # 3 CP gates, each decomposed to 3 RZ + 2 CNOT
-        assert len(rz_gates) == 9
+        assert len(rz_gates) == 6
+        assert len(u1_gates) == 3
         assert len(cx_gates) == 6
         assert len(swap_gates) == 1
         # H gates target qubits 0, 1, 2

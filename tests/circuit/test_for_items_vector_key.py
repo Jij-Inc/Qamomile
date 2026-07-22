@@ -4,6 +4,7 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.control_flow import ForItemsOperation
+from qamomile.circuit.ir.types.primitives import UIntType
 
 
 class TestForItemsVectorKeyIR:
@@ -104,6 +105,64 @@ class TestForItemsVectorKeyTranspile:
 
         rzz_count = sum(1 for inst in circuit.data if inst.operation.name == "rzz")
         assert rzz_count == 3, f"Expected 3 RZZ gates, got {rzz_count}"
+
+    def test_subqkernel_dict_vector_key_output_keeps_items_metadata(self):
+        """A dict returned by a sub-qkernel preserves vector-key metadata."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def identity(
+            interactions: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+        ) -> qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]:
+            return interactions
+
+        @qmc.qkernel
+        def higher_order(
+            n_qubits: qmc.UInt,
+            interactions: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+            gamma: qmc.Float,
+        ) -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(n_qubits, name="q")
+            returned = identity(interactions)
+            for key, coeff in qmc.items(returned):
+                for step in qmc.range(key.shape[0] - 1):
+                    q[key[step]], q[key[step + 1]] = qmc.rzz(
+                        q[key[step]], q[key[step + 1]], gamma * coeff
+                    )
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        executor = transpiler.transpile(
+            higher_order,
+            bindings={
+                "n_qubits": 3,
+                "interactions": {(0, 1): 1.0, (0, 1, 2): 0.3},
+                "gamma": 0.5,
+            },
+        )
+
+        circuit = executor.compiled_quantum[0].circuit
+        rzz_count = sum(1 for inst in circuit.data if inst.operation.name == "rzz")
+        assert rzz_count == 3
+
+    def test_subqkernel_dict_output_keeps_value_type(self):
+        """A returned Dict preserves its declared scalar value type."""
+
+        @qmc.qkernel
+        def identity(
+            values: qmc.Dict[qmc.UInt, qmc.UInt],
+        ) -> qmc.Dict[qmc.UInt, qmc.UInt]:
+            return values
+
+        @qmc.qkernel
+        def caller(values: qmc.Dict[qmc.UInt, qmc.UInt]) -> qmc.UInt:
+            returned = identity(values)
+            return returned[0]
+
+        block = caller.build(values={0: 7})
+
+        assert isinstance(block.output_values[0].type, UIntType)
 
     def test_vector_key_single_element(self):
         """Test Dict[Vector[UInt], Float] with single-element keys."""

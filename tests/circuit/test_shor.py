@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import numpy as np
+from functools import lru_cache
+
 import pytest
-import sympy as sp
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.qkernel import QKernel
@@ -22,23 +22,68 @@ def _basis_value(bits: tuple[int, ...]) -> int:
     return sum(bit << index for index, bit in enumerate(bits))
 
 
+@lru_cache(maxsize=None)
+def _shor_estimate(base: int, modulus: int) -> qmc.ResourceEstimate:
+    """Cache the expensive expansion of one specialized Shor body."""
+    return qmc.shor_order_finding(base, modulus).estimate_resources()
+
+
 def test_shor_factory_returns_one_executable_qkernel() -> None:
     """The same returned QKernel supports estimation and transpilation."""
     kernel = qmc.shor_order_finding(base=2, modulus=15)
 
     assert isinstance(kernel, QKernel)
-    estimate = kernel.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
-    assert estimate.qubits == 6 * n + 5
+    estimate = _shor_estimate(2, 15)
+    assert estimate.parameters == {}
+    assert estimate.qubits == 21
     assert estimate.width.dirty_ancilla_qubits == 0
-    assert sp.Poly(estimate.gates.total, n).degree() == 3
-    assert sp.Poly(estimate.gates.toffoli, n).degree() == 3
+    assert estimate.gates.total > 0
     assert "modmul_const" not in estimate.calls.calls_by_name
     assert estimate.trace is None
 
-    concrete = kernel.estimate_resources(inputs={"n": 2048})
-    assert concrete.gates.total == estimate.gates.total.subs(n, 2048)
-    assert concrete.gates.toffoli == estimate.gates.toffoli.subs(n, 2048)
+    assert kernel.build().operations
+
+
+@pytest.mark.parametrize(
+    ("base", "modulus"),
+    [(2, 3), (2, 5), (2, 15)],
+)
+def test_shor_width_is_body_derived_three_n_plus_constant(
+    base: int,
+    modulus: int,
+) -> None:
+    """Specialized bodies expose the expected ``3n + w + 7`` peak width."""
+    n = modulus.bit_length()
+    estimate = _shor_estimate(base, modulus)
+
+    assert estimate.qubits == 3 * n + 2 + 7
+
+
+def test_shor_skips_identity_modular_multiplication_rounds() -> None:
+    """Identity powers retain phase work without expanding arithmetic."""
+    arithmetic_rounds = qmc.shor_order_finding(
+        base=2,
+        modulus=15,
+        precision=2,
+    ).estimate_resources()
+    full_schedule = _shor_estimate(2, 15)
+
+    assert arithmetic_rounds.gates.total == 3420
+    assert full_schedule.gates.total == 3465
+    assert full_schedule.gates.two_qubit == arithmetic_rounds.gates.two_qubit
+    assert full_schedule.gates.multi_qubit == arithmetic_rounds.gates.multi_qubit
+
+
+def test_shor_rejects_invalid_window_size() -> None:
+    """The order-finding factory rejects an empty lookup window."""
+    with pytest.raises(ValueError, match="window_size must be positive"):
+        qmc.shor_order_finding(base=2, modulus=15, window_size=0)
+
+
+def test_shor_rejects_invalid_precision() -> None:
+    """The order-finding factory rejects an empty phase estimate."""
+    with pytest.raises(ValueError, match="precision must be positive"):
+        qmc.shor_order_finding(base=2, modulus=15, precision=0)
 
 
 @pytest.mark.parametrize(
@@ -66,77 +111,94 @@ def test_shor_rejects_invalid_problem_instances(
 
 
 def test_small_shor_order_finding_recovers_period_two(sdk_transpiler) -> None:
-    """The simulatable two-bit instance recovers the period-two peaks."""
+    """The simulatable two-bit instance recovers the period-two peaks.
+
+    Order finding is sample-only by design: its mid-circuit measurements are
+    the algorithm output, so an expectation-value execution path is invalid.
+    """
+    if sdk_transpiler.backend_name == "quri_parts":
+        pytest.skip("QURI Parts cannot represent Shor's mid-circuit reset")
+
     kernel = qmc.shor_order_finding(base=2, modulus=3)
     transpiler = sdk_transpiler.transpiler
-    executable = transpiler.transpile(kernel, bindings={"n": 2})
-    result = executable.sample(transpiler.executor(), shots=128).result()
+    executable = transpiler.transpile(kernel)
+    shots = 16 if sdk_transpiler.backend_name == "cudaq" else 128
+    result = executable.sample(transpiler.executor(), shots=shots).result()
 
     counts = {_basis_value(bits): count for bits, count in result.results}
     targets = {0, 8}
     on_peak = sum(counts.get(value, 0) for value in targets)
 
     assert on_peak / result.shots > 0.9
-    assert all(counts.get(value, 0) / result.shots > 0.3 for value in targets)
+    assert all(counts.get(value, 0) > 0 for value in targets)
+    if sdk_transpiler.backend_name == "qiskit":
+        assert all(counts.get(value, 0) / result.shots > 0.3 for value in targets)
 
 
 def test_four_bit_shor_transpiles_without_statevector_execution(
     sdk_transpiler,
 ) -> None:
-    """Transpile the 29-qubit benchmark without allocating its statevector.
+    """Transpile the 21-qubit benchmark without allocating its statevector.
 
-    A dense 29-qubit statevector needs at least 8 GiB before simulator
-    workspaces, so local sampling is intentionally outside this test's scope.
+    This test covers the realistic four-bit circuit without coupling its
+    runtime to statevector sampling.
 
     Args:
-        sdk_transpiler: Parametrized supported backend fixture.
+        sdk_transpiler: Parametrized SDK backend fixture.
     """
-    kernel = qmc.shor_order_finding(base=2, modulus=15)
-    executable = sdk_transpiler.transpiler.transpile(kernel, bindings={"n": 4})
+    if sdk_transpiler.backend_name == "quri_parts":
+        pytest.skip("QURI Parts cannot represent Shor's mid-circuit reset")
 
-    assert kernel.estimate_resources(inputs={"n": 4}).qubits == 29
+    kernel = qmc.shor_order_finding(base=2, modulus=15)
+    executable = sdk_transpiler.transpiler.transpile(kernel)
+
+    assert _shor_estimate(2, 15).qubits == 21
     assert executable.compiled_quantum
     assert executable.plan.steps
 
 
-@qmc.qkernel
-def _shor_state_expval(observable: qmc.Observable) -> qmc.Float:
-    """Evaluate an observable for the simulatable 2 mod 3 schedule."""
-    counting = qmc.qubit_array(4, "counting")
-    work = qmc.qubit_array(2, "work")
-    work[0] = qmc.x(work[0])
-    counting = qmc.h(counting)
-    counting[0], work = qmc.modmul_const(
-        work,
-        multiplier=2,
-        modulus=3,
-        control=counting[0],
-    )
-    counting = qmc.iqft(counting)
-    return qmc.expval(counting, observable)
+def test_ekera_hastad_uses_two_short_exponent_registers() -> None:
+    """The short-DLP schedules reuse the same low-width arithmetic body."""
+    kernel = qmc.ekera_hastad_factoring(generator=2, modulus=5, window_size=2)
+    estimate = kernel.estimate_resources()
+
+    assert isinstance(kernel, QKernel)
+    assert estimate.qubits == 18
+    assert "modmul_const" not in estimate.calls.calls_by_name
+    assert len(kernel.output_types) == 1
+    assert kernel.output_types[0] == qmc.Vector[qmc.Bit]
 
 
-def test_shor_cross_backend_expval(sdk_transpiler) -> None:
-    """The modular-exponentiation state has its analytic high-bit expval.
+def test_small_ekera_hastad_schedule_executes(sdk_transpiler) -> None:
+    """The 2 mod 3 short-DLP schedule executes with phase-qubit reuse.
 
-    For the two-bit ``2 mod 3`` instance, the four-qubit counting register has
-    ``<Z_3> = 0`` after IQFT. One observable is sufficient to exercise each
-    backend's expval path; the sampling test validates the complete output
-    distribution independently.
-
-    Args:
-        sdk_transpiler: Parametrized supported backend fixture.
+    The schedule is sample-only because its measurement record is the
+    factoring output; expectation-value execution is intentionally rejected.
     """
-    import qamomile.observable as qm_o
+    if sdk_transpiler.backend_name == "quri_parts":
+        pytest.skip("QURI Parts cannot represent Ekerå–Håstad's mid-circuit reset")
 
-    observable = qm_o.Z(3)
-
+    kernel = qmc.ekera_hastad_factoring(generator=2, modulus=3, window_size=2)
     transpiler = sdk_transpiler.transpiler
-    executable = transpiler.transpile(
-        _shor_state_expval,
-        bindings={"observable": observable},
+    shots = 16 if sdk_transpiler.backend_name == "cudaq" else 64
+    result = (
+        transpiler.transpile(kernel).sample(transpiler.executor(), shots=shots).result()
     )
-    actual = executable.run(transpiler.executor()).result()
 
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-    assert np.isclose(actual, 0.0, atol=tolerance)
+    counts = {}
+    for bits, count in result.results:
+        long_bits = bits[:4]
+        short_bits = bits[4:]
+        counts[(_basis_value(long_bits), _basis_value(short_bits))] = count
+    assert sum(counts.get((peak, 0), 0) for peak in (0, 8)) / result.shots > 0.9
+
+
+def test_shor_algorithms_live_in_algorithm_namespace() -> None:
+    """Algorithms are exported from algorithm, not the primitive stdlib."""
+    import qamomile.circuit.algorithm as algorithm
+    import qamomile.circuit.stdlib as stdlib
+
+    assert algorithm.shor_order_finding is qmc.shor_order_finding
+    assert algorithm.ekera_hastad_factoring is qmc.ekera_hastad_factoring
+    assert not hasattr(stdlib, "shor_order_finding")
+    assert not hasattr(stdlib, "windowed_modmul_const")

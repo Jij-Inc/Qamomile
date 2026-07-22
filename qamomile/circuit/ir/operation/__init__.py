@@ -61,6 +61,7 @@ from .cast import CastOperation
 from .classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from .control_flow import (
@@ -68,6 +69,8 @@ from .control_flow import (
     ForItemsOperation,
     HasNestedOps,
     LoopCarriedRebind,
+    RegionArg,
+    validate_region_args,
 )
 from .expval import ExpvalOp
 from .gate import (
@@ -82,9 +85,11 @@ from .gate import (
     ResetOperation,
     SymbolicControlledU,
 )
+from .global_phase import GlobalPhaseOperation
 from .inverse_block import InverseBlockOperation
 from .operation import Operation
 from .return_operation import ReturnOperation
+from .select import SelectOperation
 from .slice_array import ReleaseSliceViewOperation, SliceArrayOperation
 
 __all__ = [
@@ -98,6 +103,7 @@ __all__ = [
     "CallTransform",
     "InvokeOperation",
     "InverseBlockOperation",
+    "GlobalPhaseOperation",
     "CompositeGateType",
     "GateOperation",
     "GateOperationType",
@@ -109,8 +115,10 @@ __all__ = [
     "ControlledUOperation",
     "ConcreteControlledU",
     "SymbolicControlledU",
+    "SelectOperation",
     "DecodeQFixedOperation",
     "DictGetItemOperation",
+    "ReturnQuantumArrayElementOperation",
     "StoreArrayElementOperation",
     "CastOperation",
     # Control flow operations
@@ -118,6 +126,8 @@ __all__ = [
     "ForItemsOperation",
     "HasNestedOps",
     "LoopCarriedRebind",
+    "RegionArg",
+    "validate_region_args",
     # Expectation value operation
     "ExpvalOp",
     # Slice operation

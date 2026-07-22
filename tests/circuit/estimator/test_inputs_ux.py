@@ -157,7 +157,7 @@ def _messages(est) -> list[str]:
 def test_partially_supplied_branch_remains_exact_piecewise() -> None:
     """A partially specialized compile-time branch keeps its exact predicate."""
     est = _two_param_branch.estimate_resources(inputs={"n": 8})
-    m = sp.Symbol("m", integer=True, positive=True)
+    m = est.parameters["m"]
     assert est.gates.total == sp.Piecewise((1, m < 8), (2, True))
     messages = _messages(est)
     assert not any("'n'" in m and "ignored" in m for m in messages)
@@ -251,7 +251,7 @@ def _carried_branch(n: qmc.UInt) -> qmc.Qubit:
 def test_region_arg_drives_later_symbolic_loop() -> None:
     """A carried counter is published as the symbolic result ``n``."""
     estimate = _carried_loop_bound.estimate_resources()
-    n = sp.Symbol("n", integer=True, positive=True)
+    n = estimate.parameters["n"]
 
     assert sp.simplify(estimate.gates.total - n) == 0
     assert set(estimate.parameters) == {"n"}
@@ -312,7 +312,7 @@ def test_inputs_force_symbolic_over_python_default() -> None:
     expression rather than silently baking the execution default.
     """
     default = _toy_qpe.estimate_resources()
-    bits = sp.Symbol("bits", integer=True, positive=True)
+    bits = default.parameters["bits"]
     assert sp.simplify(default.qubits - (bits + 1)) == 0
 
     est = _toy_qpe.estimate_resources(inputs={"bits": 5})
@@ -343,6 +343,33 @@ def test_quantum_port_is_not_an_estimation_input() -> None:
 
     with pytest.raises(ValueError, match="neither free symbols"):
         quantum_input.estimate_resources(inputs={"q": 0})
+
+
+def test_interleaved_composite_signature_binds_resource_parameter() -> None:
+    """Resource estimation reweaves grouped operands to formal order."""
+
+    @qmc.composite_gate(name="interleaved_resource_box")
+    def interleaved_resource_box(
+        first: qmc.Qubit,
+        rounds: qmc.UInt,
+        second: qmc.Qubit,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Apply ``rounds`` X gates and one H gate."""
+        for _ in qmc.range(rounds):
+            first = qmc.x(first)
+        second = qmc.h(second)
+        return first, second
+
+    @qmc.qkernel
+    def algorithm(rounds: qmc.UInt) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Invoke the interleaved composite on two fresh qubits."""
+        first = qmc.qubit("first")
+        second = qmc.qubit("second")
+        return interleaved_resource_box(first, rounds, second)
+
+    estimate = algorithm.estimate_resources(inputs={"rounds": 3})
+
+    assert estimate.gates.total == 4
 
 
 def test_inputs_trace_structural_values_and_specialize_scalars() -> None:

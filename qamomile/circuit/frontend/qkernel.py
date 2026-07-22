@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import threading
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -22,6 +23,7 @@ from qamomile.circuit.frontend.qkernel_definition import (
     validate_quantum_rebinds,
 )
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.effect import KernelEffect
 from qamomile.circuit.ir.operation.callable import CallPolicy, CompositeGateType
 
 if TYPE_CHECKING:
@@ -60,6 +62,10 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         # Lazy initialization for hierarchical Block
         self._block: Block | None = None
         self._block_building: bool = False
+        # Serialize first access to the lazy block. An RLock is required:
+        # same-thread re-entry must reach the explicit recursion diagnostic,
+        # while another thread waits and then receives the shared cached block.
+        self._block_lock = threading.RLock()
         # Reentry guard for :meth:`__call__`'s call-time specialization
         # path. While the specialized re-trace runs the kernel body,
         # any self-call must fall back to the cached ``self.block`` to
@@ -79,6 +85,7 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         self._callable_policy = CallPolicy.INLINE
         self._callable_gate_type = CompositeGateType.CUSTOM
         self._callable_implementations: tuple[Any, ...] = ()
+        self._callable_semantic_arguments: dict[str, Any] = {}
 
         # AST-level quantum rebind analysis: a violation is a structural error
         # in the kernel definition itself, so raise eagerly at decoration time
@@ -99,6 +106,15 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
     def block(self) -> Block:
         """Compile the function to a hierarchical Block if not already compiled."""
         return get_or_build_block(self)
+
+    @property
+    def effects(self) -> KernelEffect:
+        """Return cached semantic effects of this qkernel.
+
+        Returns:
+            KernelEffect: Effects aggregated while building ``self.block``.
+        """
+        return self.block.effects
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> R:
         """Invoke this qkernel in the active tracing context.

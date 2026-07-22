@@ -109,6 +109,46 @@ class TestParamBindingsDisjoint:
         ).result()
         assert sum(count for _, count in result.results) == 4
 
+    def test_required_scalar_is_auto_detected_as_runtime_parameter(
+        self, qiskit_transpiler
+    ) -> None:
+        """The build manifest reaches emit when ``parameters`` is omitted."""
+        executable = qiskit_transpiler.transpile(_identity_kernel)
+        assert executable.parameter_names == ["theta"]
+
+        result = executable.sample(
+            qiskit_transpiler.executor(),
+            shots=4,
+            bindings={"theta": 0.3},
+        ).result()
+        assert sum(count for _, count in result.results) == 4
+
+    def test_unbound_scalar_next_to_binding_is_auto_detected(
+        self, qiskit_transpiler
+    ) -> None:
+        """A partially bound kernel preserves every remaining scalar symbol."""
+
+        @qmc.qkernel
+        def partially_bound(a: qmc.Float, b: qmc.Float) -> qmc.Bit:
+            """Use one compile-time and one runtime rotation angle."""
+            q = qmc.qubit("q")
+            q = qmc.rx(q, a)
+            q = qmc.rz(q, b)
+            return qmc.measure(q)
+
+        executable = qiskit_transpiler.transpile(
+            partially_bound,
+            bindings={"a": 0.7},
+        )
+        assert executable.parameter_names == ["b"]
+
+        result = executable.sample(
+            qiskit_transpiler.executor(),
+            shots=4,
+            bindings={"b": 0.2},
+        ).result()
+        assert sum(count for _, count in result.results) == 4
+
 
 class TestStepByStepDisjointness:
     """The disjointness rule is enforced on every entry point, not just transpile.
@@ -134,6 +174,35 @@ class TestStepByStepDisjointness:
                 bindings={"theta": 0.5},
                 parameters=["theta"],
             )
+
+    def test_to_block_without_arguments_applies_python_defaults(
+        self, qiskit_transpiler
+    ) -> None:
+        """``to_block`` uses the validated build path even with no options."""
+
+        @qmc.qkernel
+        def with_default(theta: qmc.Float = 0.75) -> qmc.Bit:
+            """Rotate by a Python-defaulted compile-time angle."""
+            q = qmc.qubit("q")
+            q = qmc.rx(q, theta)
+            return qmc.measure(q)
+
+        block = qiskit_transpiler.to_block(with_default)
+        theta_slot = next(slot for slot in block.param_slots if slot.name == "theta")
+        assert theta_slot.bound_value == 0.75
+
+    def test_to_block_without_arguments_validates_required_bindings(
+        self, qiskit_transpiler
+    ) -> None:
+        """A required non-parameterizable argument cannot bypass validation."""
+
+        @qmc.qkernel
+        def requires_bit(flag: qmc.Bit) -> qmc.Bit:
+            """Return a required compile-time Bit input."""
+            return flag
+
+        with pytest.raises(ValueError, match="Argument 'flag' must be provided"):
+            qiskit_transpiler.to_block(requires_bit)
 
     def test_emit_overlap_rejected(self, qiskit_transpiler) -> None:
         """``Transpiler.emit`` rejects the overlap on the step-by-step path.

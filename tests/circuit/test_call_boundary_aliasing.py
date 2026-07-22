@@ -1,26 +1,26 @@
 """Regression tests for call-boundary borrow aliasing (CB-1 / CB-2).
 
 Two shapes used to hand user code two "independent" quantum handles that
-were physically one wire, with no diagnostic:
+were physically one wire, with no diagnostic — measuring both gave only
+(0,0)/(1,1), perfect shot-by-shot correlation:
 
 - CB-1: a borrowed element and its parent register passed as two
-  arguments of ONE sub-kernel call. ``_prepare_call_inputs`` used to pop
-  the parent's borrow-table entry exactly when the borrowed element was
-  itself another argument, so the parent's consume-driven validation
-  never saw the overlap; the callee's two parameters landed on one
-  physical qubit (measuring both gave only (0,0)/(1,1) — perfect
-  shot-by-shot correlation).
+  arguments of ONE sub-kernel call. Now rejected at the call boundary by
+  the footprint-aware ``reject_aliased_quantum_args`` ("overlapping
+  physical region" ``QubitConsumedError``) — pinned here on the exact
+  borrowed-element-plus-parent shape.
 - CB-2: a callee borrowing an element and returning it ALONGSIDE its
   parent (``e = arr[0]; e = h(e); return e, arr``). The trace-end borrow
-  validator existed only on the ``func_to_block`` path; the
-  ``create_traced_block`` path (``.build()`` and call-time
-  specialization) never ran it, so the alias escaped and the caller
-  double-measured the slot.
+  validator (``_validate_returned_arrays``) existed only on the
+  ``func_to_block`` path; the ``create_traced_block`` path (``.build()``
+  and call-time specialization) never ran it, so the alias escaped and
+  the caller double-measured the slot. This suite's fix wires the
+  validator into ``create_traced_block``: co-returning the borrowed
+  element does not exempt the parent, and the documented
+  ``return arr``-only shape now raises on ``.build()`` too.
 
-Both now raise ``UnreturnedBorrowError``: the call boundary no longer
-releases co-passed borrows, and both trace paths validate returned
-arrays. Legal spellings (write back, disjoint slots) are pinned by
-execution, not just transpile success.
+Legal spellings (write back, disjoint slots) are pinned by execution,
+not just transpile success.
 """
 
 import pytest
@@ -74,8 +74,10 @@ class TestCoArgumentAliasingRejected:
     """CB-1: element + parent co-arguments raise at the call boundary."""
 
     def test_element_and_parent_same_call_rejected(self):
-        """The CB-1 shape raises UnreturnedBorrowError naming the slot,
-        instead of compiling with both callee params on one wire."""
+        """The CB-1 shape is rejected instead of compiling with both callee
+        params on one wire. The call-boundary footprint check
+        (``reject_aliased_quantum_args``) catches the element↔parent
+        overlap before argument consumption, with a dedicated message."""
 
         @qmc.qkernel
         def caller(dummy: qmc.UInt) -> tuple[qmc.Bit, qmc.Bit]:
@@ -84,7 +86,7 @@ class TestCoArgumentAliasingRejected:
             b1, b2 = _two_param_sub(e, qs)
             return b1, b2
 
-        with pytest.raises(UnreturnedBorrowError, match="unreturned borrowed"):
+        with pytest.raises(QubitConsumedError, match="overlapping physical region"):
             QiskitTranspiler().transpile(caller, bindings={"dummy": 0})
 
     def test_parent_with_outstanding_borrow_rejected(self):

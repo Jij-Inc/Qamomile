@@ -44,7 +44,7 @@ def greedy_graph_coloring(
 
     color_group: dict[int, list[int]] = {}
     for index, color in coloring.items():
-        if color not in coloring:
+        if color not in color_group:
             color_group[color] = []
         color_group[color].append(index)
 

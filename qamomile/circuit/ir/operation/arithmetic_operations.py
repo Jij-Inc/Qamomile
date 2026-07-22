@@ -58,6 +58,80 @@ class BinOpKind(enum.Enum):
     MIN = enum.auto()
 
 
+class UnaryMathOpKind(enum.Enum):
+    """Identify one abstract unary mathematical operation."""
+
+    LOG2 = enum.auto()
+    CEIL = enum.auto()
+
+
+@dataclasses.dataclass
+class UnaryMathOp(Operation):
+    """Represent one pure unary mathematical expression.
+
+    Args:
+        operands (list[Value]): Single numeric input value.
+        results (list[Value]): Single numeric result value.
+        kind (UnaryMathOpKind | None): Mathematical operation to apply.
+
+    Raises:
+        ValueError: If ``kind`` is missing or the operation does not have
+            exactly one operand and one result.
+    """
+
+    kind: UnaryMathOpKind | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the unary operation shape and kind.
+
+        Raises:
+            ValueError: If the operation kind or unary shape is invalid.
+        """
+        if self.kind is None:
+            raise ValueError("kind must be specified for UnaryMathOp.")
+        if len(self.operands) != 1 or len(self.results) != 1:
+            raise ValueError("UnaryMathOp requires one operand and one result.")
+
+    @property
+    def input(self) -> Value:
+        """Return the input value.
+
+        Returns:
+            Value: Sole numeric input.
+        """
+        return self.operands[0]
+
+    @property
+    def output(self) -> Value:
+        """Return the output value.
+
+        Returns:
+            Value: Sole numeric result.
+        """
+        return self.results[0]
+
+    @property
+    def signature(self) -> Signature:
+        """Return the typed unary signature.
+
+        Returns:
+            Signature: One-input, one-output classical signature.
+        """
+        return Signature(
+            operands=[ParamHint(name="input", type=self.input.type)],
+            results=[ParamHint(name="output", type=self.output.type)],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        """Classify the operation as classical.
+
+        Returns:
+            OperationKind: ``OperationKind.CLASSICAL``.
+        """
+        return OperationKind.CLASSICAL
+
+
 @dataclasses.dataclass
 class BinOp(BinaryOperationBase):
     """Binary arithmetic operation (ADD, SUB, MUL, DIV, FLOORDIV, MOD, POW, MIN)."""
@@ -180,6 +254,11 @@ class RuntimeOpKind(enum.Enum):
     FLOORDIV = enum.auto()
     MOD = enum.auto()
     POW = enum.auto()
+    # Branch merge: ``select(condition, true_value, false_value)``.
+    # Synthesized by ``ClassicalLoweringPass`` from a runtime
+    # ``IfOperation``'s scalar classical merge slot; has no compile-time
+    # per-family counterpart.
+    SELECT = enum.auto()
 
 
 @dataclasses.dataclass
@@ -197,6 +276,9 @@ class RuntimeClassicalExpr(Operation):
     - Binary kinds (EQ/NEQ/LT/LE/GT/GE/AND/OR/ADD/SUB/MUL/DIV/FLOORDIV/MOD/POW):
       ``operands = [lhs, rhs]``.
     - Unary kind (NOT): ``operands = [val]``.
+    - Ternary kind (SELECT): ``operands = [condition, true_value,
+      false_value]`` — the runtime form of a branch merge
+      (``result = true_value if condition else false_value``).
     - Result: ``results = [output_value]``.
 
     The single-node + unified-kind shape (vs four parallel subclasses)
@@ -217,6 +299,15 @@ class RuntimeClassicalExpr(Operation):
         if self.kind is RuntimeOpKind.NOT:
             return Signature(
                 operands=[ParamHint(name="input", type=self.operands[0].type)],
+                results=[ParamHint(name="output", type=self.results[0].type)],
+            )
+        if self.kind is RuntimeOpKind.SELECT:
+            return Signature(
+                operands=[
+                    ParamHint(name="condition", type=self.operands[0].type),
+                    ParamHint(name="true_value", type=self.operands[1].type),
+                    ParamHint(name="false_value", type=self.operands[2].type),
+                ],
                 results=[ParamHint(name="output", type=self.results[0].type)],
             )
         return Signature(

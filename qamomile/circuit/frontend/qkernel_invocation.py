@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from qamomile.circuit.frontend.func_to_block import is_array_type
+from qamomile.circuit.frontend.func_to_block import (
+    is_array_type,
+    is_dict_type,
+    is_tuple_type,
+)
 from qamomile.circuit.frontend.handle.array import ArrayBase, VectorView
+from qamomile.circuit.frontend.handle.containers import Dict, Tuple
 from qamomile.circuit.frontend.handle.primitives import Handle, UInt
 from qamomile.circuit.frontend.param_validation import _validate_bound_handles
 from qamomile.circuit.frontend.qkernel_callable import qkernel_invoke_block
@@ -22,7 +27,13 @@ from qamomile.circuit.frontend.qkernel_utils import (
 )
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueLike,
+)
 
 InputViewKey = tuple[str, str | None, str | None, str | None]
 
@@ -43,8 +54,16 @@ def _collect_input_view_metas(arguments: dict[str, Any]) -> dict[InputViewKey, A
             root_av = handle.value
             while root_av.slice_of is not None:
                 root_av = root_av.slice_of
-            start_uuid = handle._slice_start.value.uuid if handle._slice_start else None
-            step_uuid = handle._slice_step.value.uuid if handle._slice_step else None
+            start_uuid = (
+                handle._slice_start.value.uuid
+                if handle._slice_start is not None
+                else None
+            )
+            step_uuid = (
+                handle._slice_step.value.uuid
+                if handle._slice_step is not None
+                else None
+            )
             length_uuid = handle.value.shape[0].uuid if handle.value.shape else None
             input_view_metas[
                 (root_av.logical_id, start_uuid, step_uuid, length_uuid)
@@ -56,8 +75,12 @@ def _prepare_call_inputs(
     kernel: Any,
     arguments: dict[str, Any],
     reject_consumed_view_arg: Any,
-) -> tuple[dict[str, Value], dict[str, tuple[Any, tuple]], dict[InputViewKey, Any]]:
-    """Consume qkernel call arguments and collect provenance metadata.
+) -> tuple[
+    dict[str, ValueLike],
+    dict[str, tuple[Any, tuple, Handle]],
+    dict[InputViewKey, Any],
+]:
+    """Validate qkernel call arguments and collect input metadata.
 
     Args:
         kernel (Any): ``QKernel`` instance being invoked.
@@ -66,23 +89,16 @@ def _prepare_call_inputs(
             arguments.
 
     Returns:
-        tuple[dict[str, Value], dict[str, tuple[Any, tuple]], dict[InputViewKey, Any]]:
-        Input values by parameter name, scalar-borrow provenance by logical id,
-        and vector-view metadata by slice key.
+        tuple[dict[str, ValueLike], dict[str, tuple[Any, tuple, Handle]],
+        dict[InputViewKey, Any]]: Input values by parameter name,
+        scalar-borrow provenance with each current owner by logical id, and
+        vector-view metadata by slice key.
 
     Raises:
         TypeError: If an argument is not a frontend ``Handle``.
-        UnreturnedBorrowError: If an array argument still has outstanding
-            element/view borrows when it is consumed for the call —
-            including the case where the borrowed element itself is
-            another argument of the same call. A borrowed element and
-            its parent name one physical slot, so passing both would
-            hand the callee two "independent" parameters on one wire;
-            write the element back (``qs[i] = e``) before passing the
-            whole register.
     """
-    inputs_map: dict[str, Value] = {}
-    provenance_map: dict[str, tuple[Any, tuple]] = {}
+    inputs_map: dict[str, ValueLike] = {}
+    provenance_map: dict[str, tuple[Any, tuple, Handle]] = {}
 
     for name, handle in arguments.items():
         if not isinstance(handle, Handle):
@@ -94,15 +110,11 @@ def _prepare_call_inputs(
             and not is_array_type(type(handle))
             and handle._should_enforce_linear()
         ):
-            provenance_map[handle.value.logical_id] = (handle.parent, handle.indices)
-
-    # Deliberately NO borrow release here: an earlier revision popped the
-    # parent's ``_borrowed_indices`` entry when the borrowed element was
-    # itself another argument of the same call, which silently aliased the
-    # callee's two parameters onto one physical wire (measuring both gave
-    # perfectly correlated bits). Leaving the entry in place lets the
-    # parent's consume-driven ``validate_all_returned`` reject the overlap
-    # like any other unreturned borrow.
+            provenance_map[handle.value.logical_id] = (
+                handle.parent,
+                handle.indices,
+                handle,
+            )
 
     input_view_metas = _collect_input_view_metas(arguments)
 
@@ -111,19 +123,48 @@ def _prepare_call_inputs(
             continue
         if isinstance(handle, VectorView) and handle._should_enforce_linear():
             reject_consumed_view_arg(kernel.name, handle)
-            inputs_map[name] = handle.value
-            continue
         if handle._should_enforce_linear():
-            handle = handle.consume(operation_name=f"QKernel[{kernel.name}]")
+            handle.validate_consumable(operation_name=f"QKernel[{kernel.name}]")
         inputs_map[name] = handle.value
 
     return inputs_map, provenance_map, input_view_metas
 
 
+def _commit_call_inputs(
+    kernel: Any,
+    arguments: dict[str, Any],
+    provenance_map: dict[str, tuple[Any, tuple, Handle]],
+) -> None:
+    """Commit affine ownership only after call construction succeeds.
+
+    Args:
+        kernel (Any): ``QKernel`` instance being invoked.
+        arguments (dict[str, Any]): Validated bound call arguments.
+        provenance_map (dict[str, tuple[Any, tuple, Handle]]): Direct scalar
+            borrow provenance to update with each consume successor.
+
+    Returns:
+        None.
+    """
+    operation_name = f"QKernel[{kernel.name}]"
+    for handle in arguments.values():
+        if (
+            not isinstance(handle, Handle)
+            or not handle._should_enforce_linear()
+            or isinstance(handle, VectorView)
+        ):
+            continue
+        consumed = handle.consume(operation_name=operation_name)
+        provenance = provenance_map.get(handle.value.logical_id)
+        if provenance is not None:
+            parent, indices, _ = provenance
+            provenance_map[handle.value.logical_id] = (parent, indices, consumed)
+
+
 def _select_call_operation(
     kernel: Any,
     arguments: dict[str, Any],
-    inputs_map: dict[str, Value],
+    inputs_map: dict[str, ValueLike],
     invoke_block_factory: Any | None = None,
 ) -> tuple[Any, Block | None, dict[str, tuple[ArrayValue, Any]]]:
     """Build the invocation operation for a direct or self-recursive call.
@@ -131,15 +172,15 @@ def _select_call_operation(
     Args:
         kernel (Any): ``QKernel`` instance being invoked.
         arguments (dict[str, Any]): Bound frontend arguments.
-        inputs_map (dict[str, Value]): Consumed input values by parameter name.
+        inputs_map (dict[str, ValueLike]): Validated input values by parameter
+            name. Ownership is not committed yet.
         invoke_block_factory (Any | None): Optional callable used to create
             the invocation for a selected block. Defaults to a qkernel
             ``InvokeOperation`` factory.
-
     Returns:
         tuple[Any, Block | None, dict[str, tuple[ArrayValue, Any]]]: Invocation
-        operation, selected block if available, and caller view metadata for
-        formal inputs.
+            operation, selected block if available, and caller view metadata
+            for formal inputs.
     """
     if kernel._block_building:
         return emit_self_call_forward_ref(kernel, inputs_map), None, {}
@@ -158,12 +199,12 @@ def _select_call_operation(
 
     if invoke_block_factory is None:
 
-        def invoke_block_factory(block: Block, inputs: dict[str, Value]) -> Any:
+        def invoke_block_factory(block: Block, inputs: dict[str, ValueLike]) -> Any:
             """Create the default qkernel invocation operation.
 
             Args:
                 block (Block): Selected qkernel implementation block.
-                inputs (dict[str, Value]): Actual input values keyed by
+                inputs (dict[str, ValueLike]): Actual input values keyed by
                     callee parameter name.
 
             Returns:
@@ -208,11 +249,23 @@ def _wrap_array_result(
         type[ArrayBase[Any]],
         getattr(handle_type, "__origin__", handle_type),
     )
-    assert isinstance(val, ArrayValue)
+    if not isinstance(val, ArrayValue):
+        raise TypeError(
+            f"QKernel '{kernel.name}' declares array return type "
+            f"{handle_type!r}, but result {result_idx} is a scalar "
+            f"{type(val).__name__}. Update the return annotation or return "
+            "an array value."
+        )
 
-    if block_ir_for_call is not None and val.slice_of is not None:
+    formal_output = (
+        block_ir_for_call.output_values[result_idx]
+        if block_ir_for_call is not None
+        and result_idx < len(block_ir_for_call.output_values)
+        else None
+    )
+    if isinstance(formal_output, ArrayValue) and formal_output.slice_of is not None:
         for formal_input, input_view in formal_input_views.values():
-            if is_full_reslice_of_input(val, formal_input):
+            if is_full_reslice_of_input(formal_output, formal_input):
                 val = view_result_value_for_full_reslice(val, input_view)
                 call_op.results[result_idx] = val
                 break
@@ -254,11 +307,134 @@ def _wrap_array_result(
     return actual_class._create_from_value(value=val, shape=shape)
 
 
+def _wrap_nested_array_result(value: ArrayValue, handle_type: Any) -> ArrayBase[Any]:
+    """Wrap a classical array nested inside a structural call result.
+
+    Nested quantum arrays and views need ownership transfer through their
+    containing structural handle. That ownership contract is not yet modeled,
+    so this helper rejects them instead of producing an unsound alias.
+
+    Args:
+        value (ArrayValue): Nested array IR value.
+        handle_type (Any): Declared array handle annotation.
+
+    Returns:
+        ArrayBase[Any]: Frontend handle for a plain classical array.
+
+    Raises:
+        RuntimeError: If the nested array is quantum-backed or is a view.
+    """
+    if value.type.is_quantum() or value.slice_of is not None:
+        raise RuntimeError(
+            "Quantum arrays and array views nested inside qmc.Tuple or "
+            "qmc.Dict call results are not supported yet."
+        )
+    actual_class = cast(
+        type[ArrayBase[Any]],
+        getattr(handle_type, "__origin__", handle_type),
+    )
+    shape = tuple(UInt(value=dimension) for dimension in value.shape)
+    return actual_class._create_from_value(value=value, shape=shape)
+
+
+def _wrap_call_value(
+    value: ValueLike,
+    handle_type: Any,
+    provenance_map: dict[str, tuple[Any, tuple, Handle]],
+) -> Handle:
+    """Recursively wrap one invocation result value as a frontend handle.
+
+    Args:
+        value (ValueLike): Caller-local invocation result value.
+        handle_type (Any): Declared frontend handle annotation.
+        provenance_map (dict[str, tuple[Any, tuple, Handle]]): Scalar borrow
+            provenance and committed owner keyed by logical ID.
+
+    Returns:
+        Handle: Frontend handle matching ``handle_type``.
+
+    Raises:
+        RuntimeError: If the IR value graph does not match the declared return
+            annotation or contains an unsupported nested quantum array/view.
+    """
+    if is_tuple_type(handle_type):
+        if not isinstance(value, TupleValue):
+            raise RuntimeError(
+                f"Expected TupleValue for return type {handle_type!r}, "
+                f"got {type(value).__name__}."
+            )
+        element_types = getattr(handle_type, "__args__", ())
+        if len(value.elements) != len(element_types):
+            raise RuntimeError(
+                "Tuple call result does not match its return annotation: "
+                f"expected {len(element_types)} elements, got "
+                f"{len(value.elements)}."
+            )
+        elements = tuple(
+            _wrap_call_value(element, element_type, provenance_map)
+            for element, element_type in zip(
+                value.elements,
+                element_types,
+                strict=True,
+            )
+        )
+        actual_class = cast(
+            type[Tuple[Any, Any]],
+            getattr(handle_type, "__origin__", handle_type),
+        )
+        return actual_class(value=value, _elements=elements)
+
+    if is_dict_type(handle_type):
+        if not isinstance(value, DictValue):
+            raise RuntimeError(
+                f"Expected DictValue for return type {handle_type!r}, "
+                f"got {type(value).__name__}."
+            )
+        key_type, entry_type = getattr(handle_type, "__args__", (None, None))
+        entries = [
+            (
+                _wrap_call_value(key, key_type, provenance_map),
+                _wrap_call_value(entry_value, entry_type, provenance_map),
+            )
+            for key, entry_value in value.entries
+        ]
+        actual_class = cast(
+            type[Dict[Any, Any]],
+            getattr(handle_type, "__origin__", handle_type),
+        )
+        return actual_class(
+            value=value,
+            _entries=entries,
+            _key_type=key_type,
+            _value_type=entry_type,
+        )
+
+    if is_array_type(handle_type):
+        if not isinstance(value, ArrayValue):
+            raise RuntimeError(
+                f"Expected ArrayValue for return type {handle_type!r}, "
+                f"got {type(value).__name__}."
+            )
+        return _wrap_nested_array_result(value, handle_type)
+
+    if not isinstance(value, Value):
+        raise RuntimeError(
+            f"Expected scalar Value for return type {handle_type!r}, "
+            f"got {type(value).__name__}."
+        )
+    if value.logical_id in provenance_map:
+        parent, indices, intermediate = provenance_map.pop(value.logical_id)
+        output = handle_type(value=value, parent=parent, indices=indices)
+        intermediate._handoff_direct_borrow_to(output)
+        return output
+    return handle_type(value=value)
+
+
 def _wrap_call_results(
     *,
     kernel: Any,
     call_op: Any,
-    provenance_map: dict[str, tuple[Any, tuple]],
+    provenance_map: dict[str, tuple[Any, tuple, Handle]],
     input_view_metas: dict[InputViewKey, Any],
     block_ir_for_call: Block | None,
     formal_input_views: dict[str, tuple[ArrayValue, Any]],
@@ -268,8 +444,8 @@ def _wrap_call_results(
     Args:
         kernel (Any): ``QKernel`` instance being invoked.
         call_op (Any): Invocation operation.
-        provenance_map (dict[str, tuple[Any, tuple]]): Scalar borrow
-            provenance keyed by logical id.
+        provenance_map (dict[str, tuple[Any, tuple, Handle]]): Scalar borrow
+            provenance and committed owner keyed by logical id.
         input_view_metas (dict[InputViewKey, Any]): Caller view metadata.
         block_ir_for_call (Block | None): Selected callee block.
         formal_input_views (dict[str, tuple[ArrayValue, Any]]): Formal input
@@ -306,13 +482,7 @@ def _wrap_call_results(
             )
             continue
 
-        if val.logical_id in provenance_map:
-            parent, indices = provenance_map[val.logical_id]
-            wrapped_results.append(
-                handle_type(value=val, parent=parent, indices=indices)
-            )
-        else:
-            wrapped_results.append(handle_type(value=val))
+        wrapped_results.append(_wrap_call_value(val, handle_type, provenance_map))
 
     return wrapped_results
 
@@ -339,8 +509,9 @@ def invoke_qkernel_with_operation(
     Raises:
         TypeError: If an argument is not a frontend handle after literal
             promotion.
-        RuntimeError: If the generated invocation result count does not match
-            the qkernel return annotation.
+        RuntimeError: If no qkernel tracer is active, or if the generated
+            invocation result count does not match the qkernel return
+            annotation.
     """
     tracer = get_current_tracer()
     bound_args = kernel.signature.bind(*args, **kwargs)
@@ -372,6 +543,14 @@ def invoke_qkernel_with_operation(
         invoke_block_factory,
     )
 
+    if len(call_op.results) != len(kernel.output_types):
+        raise RuntimeError(
+            f"Mismatch in return values: expected {len(kernel.output_types)}, "
+            f"got {len(call_op.results)}"
+        )
+
+    _commit_call_inputs(kernel, bound_args.arguments, provenance_map)
+
     tracer.add_operation(call_op)
 
     wrapped_results = _wrap_call_results(
@@ -382,6 +561,9 @@ def invoke_qkernel_with_operation(
         block_ir_for_call=block_ir_for_call,
         formal_input_views=formal_input_views,
     )
+
+    for _parent, _indices, intermediate in provenance_map.values():
+        intermediate.consume(operation_name="qkernel call (scalar dropped)")
 
     for in_view in input_view_metas.values():
         if not in_view._consumed:
@@ -407,7 +589,8 @@ def invoke_qkernel(kernel: Any, *args: Any, **kwargs: Any) -> Any:
     Raises:
         TypeError: If an argument is not a frontend handle after literal
             promotion.
-        RuntimeError: If the generated invocation result count does not match
-            the qkernel return annotation.
+        RuntimeError: If no qkernel tracer is active, or if the generated
+            invocation result count does not match the qkernel return
+            annotation.
     """
     return invoke_qkernel_with_operation(kernel, None, *args, **kwargs)

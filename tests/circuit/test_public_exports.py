@@ -15,6 +15,8 @@ re-imported here, so the test also documents the back-compat contract.
 from __future__ import annotations
 
 import qamomile.circuit as qmc
+import qamomile.circuit.stdlib as stdlib
+import qamomile.circuit.stdlib.block_encoding as block_encoding
 from qamomile.circuit.estimator.resource_estimator import (
     OpaqueCallContext,
     ResourceEstimator,
@@ -22,6 +24,7 @@ from qamomile.circuit.estimator.resource_estimator import (
 )
 from qamomile.circuit.frontend.callable_signature import CallableSignature
 from qamomile.circuit.frontend.composite_gate import composite_gate
+from qamomile.circuit.frontend.operation.global_phase import global_phase
 from qamomile.circuit.frontend.operation.measurement import (
     measure_reset,
     project_x,
@@ -30,6 +33,24 @@ from qamomile.circuit.frontend.operation.measurement import (
     reset,
 )
 from qamomile.circuit.frontend.oracle import Oracle, opaque
+from qamomile.circuit.stdlib.block_encoding.ising_z import (
+    IsingZBlockEncoding,
+    ising_z_block_encoding,
+)
+from qamomile.circuit.stdlib.block_encoding.lcu import (
+    LCUBlockEncoding,
+    LCUBlockEncodingTerm,
+    identity_block_encoding,
+    lcu_block_encoding,
+)
+from qamomile.circuit.stdlib.block_encoding.pauli import (
+    PauliLCUBlockEncoding,
+    pauli_lcu_block_encoding,
+)
+from qamomile.circuit.stdlib.block_encoding.periodic_shift import (
+    PeriodicShiftLCUBlockEncoding,
+    periodic_shift_lcu_block_encoding,
+)
 from qamomile.circuit.transpiler import job as _job_module
 
 
@@ -97,6 +118,65 @@ def test_callable_helpers_are_publicly_reexported():
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"
         )
+
+
+def test_global_phase_is_publicly_reexported() -> None:
+    """The global-phase combinator is part of the curated circuit API."""
+    assert qmc.global_phase is global_phase
+    assert "global_phase" in qmc.__all__
+
+
+def test_pauli_lcu_block_encoding_api_is_publicly_reexported() -> None:
+    """The common descriptor, Pauli subtype, and factory are public."""
+    assert qmc.LCUBlockEncoding is LCUBlockEncoding
+    assert stdlib.LCUBlockEncoding is LCUBlockEncoding
+    assert qmc.PauliLCUBlockEncoding is PauliLCUBlockEncoding
+    assert stdlib.PauliLCUBlockEncoding is PauliLCUBlockEncoding
+    assert qmc.pauli_lcu_block_encoding is pauli_lcu_block_encoding
+    assert stdlib.pauli_lcu_block_encoding is pauli_lcu_block_encoding
+
+    for namespace in (qmc, stdlib):
+        assert "LCUBlockEncoding" in namespace.__all__
+        assert "PauliLCUBlockEncoding" in namespace.__all__
+        assert "pauli_lcu_block_encoding" in namespace.__all__
+        assert not hasattr(namespace, "pauli_lcu_num_selection_qubits")
+
+
+def test_recursive_lcu_block_encoding_api_is_publicly_reexported() -> None:
+    """Recursive LCU and Ising-Z construction APIs are public."""
+    exports = {
+        "LCUBlockEncoding": LCUBlockEncoding,
+        "LCUBlockEncodingTerm": LCUBlockEncodingTerm,
+        "identity_block_encoding": identity_block_encoding,
+        "lcu_block_encoding": lcu_block_encoding,
+        "IsingZBlockEncoding": IsingZBlockEncoding,
+        "ising_z_block_encoding": ising_z_block_encoding,
+    }
+    for namespace in (qmc, stdlib):
+        for name, value in exports.items():
+            assert getattr(namespace, name) is value
+            assert name in namespace.__all__
+
+
+def test_block_encoding_subpackage_groups_every_public_producer() -> None:
+    """The organized namespace contains every public producer."""
+    exports = {
+        "LCUBlockEncoding": LCUBlockEncoding,
+        "LCUBlockEncodingTerm": LCUBlockEncodingTerm,
+        "identity_block_encoding": identity_block_encoding,
+        "lcu_block_encoding": lcu_block_encoding,
+        "IsingZBlockEncoding": IsingZBlockEncoding,
+        "ising_z_block_encoding": ising_z_block_encoding,
+        "PauliLCUBlockEncoding": PauliLCUBlockEncoding,
+        "pauli_lcu_block_encoding": pauli_lcu_block_encoding,
+        "PeriodicShiftLCUBlockEncoding": PeriodicShiftLCUBlockEncoding,
+        "periodic_shift_lcu_block_encoding": periodic_shift_lcu_block_encoding,
+    }
+    for name, value in exports.items():
+        assert getattr(block_encoding, name) is value
+        assert getattr(stdlib, name) is value
+        assert getattr(qmc, name) is value
+        assert name in block_encoding.__all__
 
 
 def test_measurement_helpers_are_publicly_reexported():

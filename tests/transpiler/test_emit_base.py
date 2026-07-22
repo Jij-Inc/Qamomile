@@ -26,25 +26,36 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
+    CompOp,
+    CompOpKind,
 )
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     IfOperation,
+    RegionArg,
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
     GateOperation,
     GateOperationType,
     MeasureOperation,
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
+    SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
@@ -555,6 +566,39 @@ class TestIfMergeAllocation:
             == clbit_map[QubitAddress(true_bit.uuid)]
         )
 
+    def test_clbit_compaction_preserves_seeded_indices(self) -> None:
+        """Remove new merge holes without renumbering caller-owned clbits."""
+        cond = _make_value("cond", BitType)
+        true_bit = _make_value("true_bit", BitType)
+        false_bit = _make_value("false_bit", BitType)
+        merged = _make_value("merged", BitType)
+        tail = _make_value("tail", BitType)
+        qubit = _make_value("q", QubitType)
+        if_op = IfOperation(
+            operands=[cond],
+            true_operations=[MeasureOperation(operands=[qubit], results=[true_bit])],
+            false_operations=[MeasureOperation(operands=[qubit], results=[false_bit])],
+        )
+        if_op.add_merge(true_bit, false_bit, merged)
+
+        seeded_address = QubitAddress(cond.uuid)
+        allocator = ResourceAllocator()
+        _, clbit_map = allocator.allocate(
+            [
+                MeasureOperation(operands=[qubit], results=[cond]),
+                if_op,
+                MeasureOperation(operands=[qubit], results=[tail]),
+            ],
+            initial_clbit_map={seeded_address: 7},
+        )
+
+        assert clbit_map[seeded_address] == 7
+        assert clbit_map[QubitAddress(true_bit.uuid)] == 8
+        assert clbit_map[QubitAddress(false_bit.uuid)] == 8
+        assert clbit_map[QubitAddress(merged.uuid)] == 8
+        assert clbit_map[QubitAddress(tail.uuid)] == 9
+        assert set(clbit_map.values()) == {7, 8, 9}
+
     @pytest.mark.parametrize("array_size", [1, 2, 4])
     def test_merge_bit_array_consolidates_both_branches(self, array_size: int) -> None:
         """BitType ArrayValue merge must consolidate per-element clbits across branches."""
@@ -714,7 +758,7 @@ class TestIfMergeAllocation:
 
 
 # ===========================================================================
-# LoopAnalyzer._has_loop_var_binop
+# LoopAnalyzer classical-expression dependency detection
 # ===========================================================================
 
 
@@ -747,8 +791,103 @@ class TestLoopAnalyzerBinOp:
 
         assert self.analyzer.should_unroll(for_op, {}) is True
 
+    def test_direct_pauli_time_dependency_triggers_unroll(self) -> None:
+        """Pauli identity phase extraction needs a concrete loop time."""
+        loop_var = _uint_val("i")
+        qubits = _make_array_value(
+            "qubits",
+            (_uint_val("size", const=1),),
+        )
+        evolution = PauliEvolveOp(
+            operands=[
+                qubits,
+                Value(type=ObservableType(), name="hamiltonian"),
+                loop_var,
+            ],
+            results=[
+                _make_array_value(
+                    "evolved",
+                    (_uint_val("result_size", const=1),),
+                )
+            ],
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=3),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[evolution],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_controlled_body_parameter_from_loop_var_triggers_unroll(self) -> None:
+        """A controlled fresh scope receives a concrete iteration value."""
+        loop_var = _uint_val("i")
+        control = _qubit("control")
+        target = _qubit("target")
+        inner_target = _qubit("inner_target")
+        inner_selector = _uint_val("inner_selector")
+        controlled = ConcreteControlledU(
+            operands=[control, target, loop_var],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=Block(input_values=[inner_target, inner_selector]),
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[controlled],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
+    def test_controlled_predicate_from_loop_var_triggers_unroll(self) -> None:
+        """A loop-derived predicate passed into a fresh body forces unrolling."""
+        loop_var = _uint_val("i")
+        predicate = Value(type=BitType(), name="predicate")
+        comparison = CompOp(
+            operands=[loop_var, _uint_val("zero", const=0)],
+            results=[predicate],
+            kind=CompOpKind.EQ,
+        )
+        control = _qubit("control")
+        target = _qubit("target")
+        controlled = ConcreteControlledU(
+            operands=[control, target, predicate],
+            results=[control.next_version(), target.next_version()],
+            num_controls=1,
+            block=Block(
+                input_values=[
+                    _qubit("inner_target"),
+                    Value(type=BitType(), name="inner_predicate"),
+                ]
+            ),
+        )
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_var,
+            operations=[comparison, controlled],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
+
     def test_no_binop_no_unroll(self) -> None:
         """A loop with no BinOps and no array access should not unroll."""
+        loop_var_val = _uint_val("i")
         q = _qubit()
         gate = _make_gate(GateOperationType.H, [q])
 
@@ -760,6 +899,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[gate],
         )
 
@@ -767,6 +907,7 @@ class TestLoopAnalyzerBinOp:
 
     def test_binop_not_using_loop_var_no_unroll(self) -> None:
         """A BinOp not referencing the loop variable should not trigger unrolling."""
+        loop_var_val = _uint_val("i")
         a = _float_val("a", const=1.0)
         b = _float_val("b", const=2.0)
         binop, _ = _make_binop(a, b, BinOpKind.ADD)
@@ -782,6 +923,7 @@ class TestLoopAnalyzerBinOp:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_var_val,
             operations=[binop, gate],
         )
 
@@ -801,6 +943,7 @@ class TestLoopAnalyzerBinOp:
             operands=[inner_start, inner_stop, inner_step],
             results=[],
             loop_var="j",
+            loop_var_value=_uint_val("j"),
             operations=[binop],
         )
 
@@ -978,6 +1121,7 @@ class TestLoopAnalyzerThetaArrayAccess:
 
     def test_theta_array_element_without_loop_var_no_unroll(self) -> None:
         """Gate with theta = gammas[0] (constant index) should not unroll."""
+        loop_idx = Value(type=UIntType(), name="i")
         gammas_array = ArrayValue(type=FloatType(), name="gammas")
         const_idx = _uint_val("idx", const=0)
         theta_elem = Value(
@@ -998,10 +1142,27 @@ class TestLoopAnalyzerThetaArrayAccess:
             operands=[start, stop, step],
             results=[],
             loop_var="i",
+            loop_var_value=loop_idx,
             operations=[gate],
         )
 
         assert self.analyzer.should_unroll(for_op, {}) is False
+
+    def test_missing_loop_identity_fails_closed_to_unroll(self) -> None:
+        """Legacy IR without an index Value cannot select native emission."""
+        q = _qubit()
+        for_op = ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=1),
+                _uint_val("step", const=1),
+            ],
+            results=[],
+            loop_var="i",
+            operations=[_make_gate(GateOperationType.H, [q])],
+        )
+
+        assert self.analyzer.should_unroll(for_op, {}) is True
 
 
 # ===========================================================================
@@ -1121,6 +1282,143 @@ class TestLoopAnalyzerMeasurementArrayAccess:
         )
 
 
+class TestLoopAnalyzerGenericValueDependency:
+    """Test recursive loop-index discovery across generic operation inputs."""
+
+    def setup_method(self) -> None:
+        """Create a fresh analyzer for each generic dependency test."""
+        self.analyzer = LoopAnalyzer()
+
+    def _loop_with(self, operation: Operation, loop_idx: Value) -> ForOperation:
+        """Wrap one operation in a valid identity-bearing loop.
+
+        Args:
+            operation (Operation): Body operation whose structural inputs are
+                analyzed.
+            loop_idx (Value): UUID-bearing loop-index value.
+
+        Returns:
+            ForOperation: Minimal two-trip loop containing ``operation``.
+        """
+        return ForOperation(
+            operands=[
+                _uint_val("start", const=0),
+                _uint_val("stop", const=2),
+                _uint_val("step", const=1),
+            ],
+            loop_var="i",
+            loop_var_value=loop_idx,
+            operations=[operation],
+        )
+
+    def test_loop_index_comparison_triggers_unroll(self) -> None:
+        """A comparison input participates in generic dependency analysis."""
+        loop_idx = _uint_val("i")
+        comparison = CompOp(
+            operands=[loop_idx, _uint_val("zero", const=0)],
+            results=[Value(type=BitType(), name="condition")],
+            kind=CompOpKind.EQ,
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(comparison, loop_idx), {})
+
+    def test_array_slice_bound_with_loop_var_triggers_unroll(self) -> None:
+        """A vector view whose start is ``i`` requires emit-time unrolling."""
+        loop_idx = _uint_val("i")
+        one = _uint_val("one", const=1)
+        root = ArrayValue(
+            type=QubitType(),
+            name="root",
+            shape=(_uint_val("size", const=2),),
+        )
+        view = ArrayValue(
+            type=QubitType(),
+            name="view",
+            shape=(one,),
+            slice_of=root,
+            slice_start=loop_idx,
+            slice_step=one,
+        )
+        measure = MeasureVectorOperation(
+            operands=[view],
+            results=[ArrayValue(type=BitType(), name="bits", shape=(one,))],
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(measure, loop_idx), {})
+
+    def test_symbolic_control_index_with_loop_var_triggers_unroll(self) -> None:
+        """Subclass-specific ``control_indices`` participate in analysis."""
+        loop_idx = _uint_val("i")
+        pool = ArrayValue(
+            type=QubitType(),
+            name="pool",
+            shape=(_uint_val("pool_size", const=2),),
+        )
+        target = _qubit("target")
+        controlled = SymbolicControlledU(
+            operands=[pool, target],
+            results=[pool.next_version(), target.next_version()],
+            num_controls=_uint_val("num_controls", const=1),
+            control_indices=(loop_idx,),
+            block=Block(name="unitary"),
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(controlled, loop_idx), {})
+
+    def test_direct_invoke_parameter_with_loop_var_triggers_unroll(self) -> None:
+        """A boxed callee cannot capture its caller's native loop parameter."""
+        loop_idx = _uint_val("i")
+        target = _qubit("target")
+        invoke = InvokeOperation(
+            operands=[target, loop_idx],
+            results=[target.next_version()],
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(invoke, loop_idx), {})
+
+    def test_direct_select_parameter_with_loop_var_triggers_unroll(self) -> None:
+        """A SELECT case program cannot capture its caller's loop variable."""
+        loop_idx = _uint_val("i")
+        index = _qubit("index")
+        target = _qubit("target")
+        select = SelectOperation(
+            operands=[index, target, loop_idx],
+            results=[index.next_version(), target.next_version()],
+            num_index_qubits=1,
+            case_blocks=[Block(name="case_0"), Block(name="case_1")],
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(select, loop_idx), {})
+
+    def test_nested_region_arg_seeded_from_outer_index_triggers_unroll(self) -> None:
+        """A nested carry preserves the outer-index dependency edge."""
+        outer_index = _uint_val("outer_index")
+        block_arg = _uint_val("block_arg")
+        result = _uint_val("result")
+        inner = ForOperation(
+            operands=[
+                _uint_val("inner_start", const=0),
+                _uint_val("inner_stop", const=2),
+                _uint_val("inner_step", const=1),
+            ],
+            results=[result],
+            loop_var="inner_index",
+            loop_var_value=_uint_val("inner_index"),
+            operations=[],
+            region_args=(
+                RegionArg(
+                    "carry",
+                    outer_index,
+                    block_arg,
+                    block_arg,
+                    result,
+                ),
+            ),
+        )
+
+        assert self.analyzer.should_unroll(self._loop_with(inner, outer_index), {})
+
+
 # ===========================================================================
 # Integration tests — UInt BinOp (floordiv, pow) folding into loop bounds
 # ===========================================================================
@@ -1208,6 +1506,32 @@ def frontend_target_vars_leak_example() -> qmc.Bit:
         q[3] = qmc.x(q[3])  # |1>
 
     return qmc.measure(q[3])  # 1
+
+
+@qmc.qkernel
+def runtime_bit_merge_selects_external_source_example() -> qmc.Bit:
+    """A runtime Bit merge should select a pre-existing measured bit."""
+    q = qmc.qubit_array(4, "q")
+    q[2] = qmc.x(q[2])
+
+    selector = qmc.measure(q[0])  # 0
+    a = qmc.measure(q[1])  # 0
+    b = qmc.measure(q[2])  # 1
+
+    out = a
+    if selector:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = a
+    else:
+        q[3] = qmc.h(q[3])
+        q[3] = qmc.h(q[3])
+        out = b
+
+    if out:
+        q[3] = qmc.x(q[3])
+
+    return qmc.measure(q[3])
 
 
 @qmc.qkernel
@@ -1368,6 +1692,19 @@ class TestMergeAliasRegression:
         )
         assert count == 200
 
+    def test_runtime_bit_merge_selects_external_source(self) -> None:
+        """A runtime Bit merge must select between existing measured bits."""
+        transpiler = QiskitTranspiler()
+        exe = transpiler.transpile(runtime_bit_merge_selects_external_source_example)
+        executor = transpiler.executor()
+        job = exe.sample(executor, shots=200, bindings={})
+        results = job.result().results
+        # selector = 0 chooses b = 1, so q[3] is flipped.
+        assert len(results) == 1
+        bitstring, count = results[0]
+        assert bitstring == 1
+        assert count == 200
+
 
 class TestUIntBinOpFolding:
     """Tests for UInt BinOp kinds (``//``, ``%``, ``**``) that affect loop bounds.
@@ -1508,3 +1845,58 @@ class TestEmitArrayElementResolution:
         results = exe.sample(transpiler.executor(), shots=200).result().results
 
         assert results == [((1,), 200)]
+
+
+class TestAllocatorAnalysisStateIsolation:
+    """Nested allocations must not leak analysis state into the segment.
+
+    ``allocate`` recomputes the measurement-taint set, the safe
+    mixed-merge allowlist, and the monotonic counters for the operation
+    list it receives. Controlled-block emission reuses the segment
+    allocator on a sub-block mid-emission; without the
+    ``preserving_analysis_state`` snapshot, later
+    ``resolve_iteration_maps`` replays of the enclosing segment consult
+    the sub-block's (typically empty) sets — silently disarming the
+    runtime-mux guards.
+    """
+
+    def test_preserving_analysis_state_restores_segment_sets(self) -> None:
+        """The context manager restores every analysis field on exit."""
+        from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+            ResourceAllocator,
+        )
+
+        allocator = ResourceAllocator()
+        allocator._measurement_tainted = {"segment-tainted-uuid"}
+        allocator._safe_mixed_bit_merge_outputs = frozenset({"segment-safe-uuid"})
+        allocator._next_qubit_index = 5
+        allocator._next_clbit_index = 3
+
+        with allocator.preserving_analysis_state():
+            allocator._measurement_tainted = set()
+            allocator._safe_mixed_bit_merge_outputs = frozenset()
+            allocator._next_qubit_index = 0
+            allocator._next_clbit_index = 0
+
+        assert allocator._measurement_tainted == {"segment-tainted-uuid"}
+        assert allocator._safe_mixed_bit_merge_outputs == frozenset(
+            {"segment-safe-uuid"}
+        )
+        assert allocator._next_qubit_index == 5
+        assert allocator._next_clbit_index == 3
+
+    def test_preserving_analysis_state_restores_on_error(self) -> None:
+        """State is restored even when the nested work raises."""
+        from qamomile.circuit.transpiler.passes.emit_support.resource_allocator import (
+            ResourceAllocator,
+        )
+
+        allocator = ResourceAllocator()
+        allocator._measurement_tainted = {"segment-tainted-uuid"}
+
+        with pytest.raises(RuntimeError, match="nested failure"):
+            with allocator.preserving_analysis_state():
+                allocator._measurement_tainted = set()
+                raise RuntimeError("nested failure")
+
+        assert allocator._measurement_tainted == {"segment-tainted-uuid"}

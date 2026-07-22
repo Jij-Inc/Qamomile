@@ -1,11 +1,11 @@
-"""Intermediate dict → IR decoder.
+"""Private graph record → semantic IR block decoder.
 
-Reconstructs a ``Block`` from the dict envelope produced by
+Reconstructs a ``Block`` from the graph envelope produced by
 :mod:`qamomile.circuit.ir.serialize.encode`. The decoder NEVER
 performs dynamic class resolution: every ``$type`` tag is routed
-through a hard-coded factory table, and unknown tags raise
-``ValueError``. This is the load-bearing security invariant — see
-:mod:`qamomile.circuit.ir.serialize.schema` for the rationale.
+through a hard-coded factory table, and unknown tags raise ``ValueError``.
+This closed dispatch is the load-bearing security invariant for protobuf
+deserialization.
 
 Values are materialized lazily via depth-first recursion so any
 referenced ``parent_array`` / ``element_indices`` / shape Value is
@@ -30,6 +30,7 @@ from qamomile.circuit.ir.operation import (
     ForItemsOperation,
     GateOperation,
     GateOperationType,
+    GlobalPhaseOperation,
     InverseBlockOperation,
     InvokeOperation,
     MeasureOperation,
@@ -39,6 +40,7 @@ from qamomile.circuit.ir.operation import (
     ProjectOperation,
     ResetOperation,
     ReturnOperation,
+    SelectOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -50,12 +52,14 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
 )
-from qamomile.circuit.ir.operation.callable import signature_from_values
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
     DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import (
@@ -65,6 +69,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     LoopCarriedRebind,
     RegionArg,
     WhileOperation,
+    validate_region_args,
 )
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -82,6 +87,7 @@ from qamomile.circuit.ir.operation.slice_array import (
     SliceArrayOperation,
 )
 from qamomile.circuit.ir.parameter import ParamKind, ParamSlot
+from qamomile.circuit.ir.static_binding import StaticBindingField, StaticBindingSlot
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -105,52 +111,18 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
     ValueMetadata,
     _freeze_data,
 )
 
 from .hamiltonian_io import dict_to_hamiltonian, is_hamiltonian_wrapper
-from .numpy_io import dict_to_array, is_array_wrapper
-from .schema import SCHEMA_VERSION
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-def from_dict(envelope: dict[str, Any]) -> Block:
-    """Reconstruct a ``Block`` from a dict envelope.
-
-    Args:
-        envelope (dict[str, Any]): The dict produced by
-            :func:`qamomile.circuit.ir.serialize.encode.to_dict` (or
-            an equivalent producer that respects the schema).
-
-    Returns:
-        Block: The reconstructed Block at ``AFFINE`` or ``ANALYZED``.
-
-    Raises:
-        ValueError: If the envelope is malformed, the
-            ``schema_version`` does not match, or any ``$type`` tag
-            is unknown to the dispatch table.
-        TypeError: If a payload has an unexpected Python type.
-    """
-    if not isinstance(envelope, dict):
-        raise ValueError(
-            f"from_dict() expected a dict envelope, got {type(envelope).__name__}"
-        )
-    version = envelope.get("schema_version")
-    if version != SCHEMA_VERSION:
-        raise ValueError(
-            f"schema_version mismatch: payload reports {version!r}, this loader "
-            f"supports {SCHEMA_VERSION}. Cross-version migration is not yet "
-            f"implemented."
-        )
-    block_dict = envelope.get("block")
-    if not isinstance(block_dict, dict):
-        raise ValueError("envelope is missing a 'block' dict")
-    return _decode_block(block_dict, enforce_top_kind=True)
-
+from .numpy_io import (
+    dict_to_array,
+    dict_to_scalar,
+    is_array_wrapper,
+    is_scalar_wrapper,
+)
 
 # ---------------------------------------------------------------------------
 # Decoding context: lazy Value materialization
@@ -158,24 +130,33 @@ def from_dict(envelope: dict[str, Any]) -> Block:
 
 
 class _DecodeContext:
-    """Working state for one Block decode.
+    """Materialize module-wide Value and CallableDef registries.
 
     Holds the value-table dicts keyed by UUID so the recursive
     materializer can resolve cross-references depth-first.
     """
 
-    def __init__(self, value_table: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        value_table: list[dict[str, Any]],
+        callable_table: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Initialize a decode context.
 
         Args:
             value_table (list[dict[str, Any]]): The list of Value
                 dicts from the block envelope. Each entry must have a
                 ``uuid`` field; duplicates are an error.
+            callable_table (list[dict[str, Any]] | None): Callable definitions
+                keyed by module-local IDs. Defaults to an empty registry.
 
         Raises:
             ValueError: If a value-table dict lacks a ``uuid`` or if
-                two entries share the same UUID.
+                two entries share the same UUID, or if callable IDs are
+                malformed or duplicated.
         """
+        if callable_table is None:
+            callable_table = []
         self._by_uuid: dict[str, dict[str, Any]] = {}
         for entry in value_table:
             uuid = entry.get("uuid")
@@ -186,6 +167,63 @@ class _DecodeContext:
             self._by_uuid[uuid] = entry
         self._built: dict[str, ValueBase] = {}
         self._building: set[str] = set()
+        self._blocks: list[Block] = []
+        self._definition_entries: dict[str, dict[str, Any]] = {}
+        self._definitions: dict[str, CallableDef] = {}
+        for entry in callable_table:
+            if not isinstance(entry, dict):
+                raise ValueError("callable_table entries must be dicts")
+            definition_id = entry.get("id")
+            definition_payload = entry.get("definition")
+            if not isinstance(definition_id, str):
+                raise ValueError("callable_table entry is missing a string 'id'")
+            if definition_id in self._definition_entries:
+                raise ValueError(f"duplicate callable definition id {definition_id!r}")
+            if not isinstance(definition_payload, dict):
+                raise ValueError(
+                    f"callable_table entry {definition_id!r} is missing a "
+                    "'definition' dict"
+                )
+            ref = _decode_callable_ref(definition_payload.get("ref"))
+            self._definition_entries[definition_id] = definition_payload
+            self._definitions[definition_id] = CallableDef(ref=ref)
+
+    def register_block(self, block: Block) -> Block:
+        """Register a decoded block for post-link metadata refresh.
+
+        Args:
+            block (Block): Newly decoded semantic block.
+
+        Returns:
+            Block: The same block for convenient decoder composition.
+        """
+        self._blocks.append(block)
+        return block
+
+    def refresh_block_effects(self) -> None:
+        """Refresh derived effects after callable placeholders are linked.
+
+        Callable bodies are decoded through shared placeholders so recursive
+        and forward references can be reconstructed. Blocks created before a
+        referenced placeholder is populated initially have an incomplete
+        effect summary. Repeated refresh reaches the finite fixed point across
+        the decoded block graph without rescanning at later API access sites.
+        """
+        from qamomile.circuit.ir.effect import refresh_block_effects
+
+        while True:
+            previous = tuple(
+                (block.effects, block.measurement_result_indices)
+                for block in self._blocks
+            )
+            for block in self._blocks:
+                refresh_block_effects(block)
+            current = tuple(
+                (block.effects, block.measurement_result_indices)
+                for block in self._blocks
+            )
+            if current == previous:
+                return
 
     def materialize(self, uuid: str) -> ValueBase:
         """Return the ``ValueBase`` for ``uuid``, instantiating on demand.
@@ -216,25 +254,54 @@ class _DecodeContext:
         self._built[uuid] = built
         return built
 
+    def definition(self, definition_id: str) -> CallableDef:
+        """Resolve a module-local callable-definition reference.
+
+        Args:
+            definition_id (str): Definition ID from an InvokeOperation.
+
+        Returns:
+            CallableDef: Shared reconstructed definition object.
+
+        Raises:
+            ValueError: If the ID is absent from the callable table.
+        """
+        definition = self._definitions.get(definition_id)
+        if definition is None:
+            raise ValueError(
+                f"callable_table is missing definition id {definition_id!r}"
+            )
+        return definition
+
+    def populate_definitions(self) -> None:
+        """Populate callable placeholders after every graph node has an ID."""
+        for definition_id, payload in self._definition_entries.items():
+            decoded = _decode_callable_def(payload, self)
+            placeholder = self._definitions[definition_id]
+            if placeholder.ref != decoded.ref:
+                raise ValueError(
+                    f"callable definition {definition_id!r} changed ref while decoding"
+                )
+            placeholder.signature = decoded.signature
+            placeholder.body = decoded.body
+            placeholder.body_ref = decoded.body_ref
+            placeholder.implementations = decoded.implementations
+            placeholder.opaque_cost = decoded.opaque_cost
+            placeholder.default_policy = decoded.default_policy
+            placeholder.attrs = decoded.attrs
+
 
 # ---------------------------------------------------------------------------
 # Block decoder
 # ---------------------------------------------------------------------------
 
 
-def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block:
+def _decode_block(d: dict[str, Any], ctx: _DecodeContext) -> Block:
     """Decode a Block dict.
 
     Args:
-        d (dict[str, Any]): The block dict (see schema).
-        enforce_top_kind (bool): When ``True`` (only at the top-level
-            ``from_dict`` entry), reject any kind other than
-            ``AFFINE`` / ``ANALYZED``. Nested blocks (those embedded in
-            ``ControlledUOperation.block`` or
-            ``InvokeOperation.body``) may
-            legitimately be ``HIERARCHICAL`` — e.g., the cached
-            ``kernel.block`` form of a leaf kernel passed to
-            ``qmc.control``. Skip the kind check there.
+        d (dict[str, Any]): Internal graph record for one block.
+        ctx (_DecodeContext): Module-wide Value and CallableDef registry.
 
     Returns:
         Block: The reconstructed Block.
@@ -251,48 +318,101 @@ def _decode_block(d: dict[str, Any], *, enforce_top_kind: bool = False) -> Block
         kind = BlockKind[kind_name]
     except KeyError as exc:
         raise ValueError(f"unknown BlockKind {kind_name!r}") from exc
-    if enforce_top_kind and kind not in (BlockKind.AFFINE, BlockKind.ANALYZED):
-        raise ValueError(
-            f"from_dict only supports AFFINE / ANALYZED blocks at the top "
-            f"level; got {kind.name}"
-        )
-
-    value_table = d.get("value_table")
-    if not isinstance(value_table, list):
-        raise ValueError("block dict is missing 'value_table' list")
-    ctx = _DecodeContext(value_table)
-
     # Block I/O may legitimately carry ``DictValue`` / ``TupleValue``:
     # a ``qmc.Dict`` / ``qmc.Tuple`` kernel argument lands in
     # ``input_values`` and a container pass-through return lands in
-    # ``output_values``. The ``cast``s mirror the frontend, which
-    # stores these in the ``list[Value]``-typed slots at trace time.
-    input_values = cast(
-        list[Value],
-        [ctx.materialize(ref) for ref in d["input_value_refs"]],
-    )
-    output_values = cast(
-        list[Value],
-        [ctx.materialize(ref) for ref in d["output_value_refs"]],
-    )
+    # ``output_values``. Parameters are scalar / array ``Value``s plus the
+    # one structural exception: a runtime-parameter ``Dict`` keeps its
+    # ``DictValue`` in ``Block.parameters`` (paired with a ``DictType``
+    # slot in ``param_slots``).
+    input_values = [
+        _materialize_as_value_like(ctx, ref) for ref in d["input_value_refs"]
+    ]
+    output_values = [
+        _materialize_as_value_like(ctx, ref) for ref in d["output_value_refs"]
+    ]
+    # The cast mirrors the frontend: ``Block.parameters`` is annotated
+    # ``dict[str, Value]`` while a runtime-parameter ``Dict`` stores its
+    # ``DictValue`` there (the same widening #562 applies at build time).
     parameters = cast(
-        dict[str, Value],
-        {k: ctx.materialize(ref) for k, ref in d["parameters"].items()},
+        "dict[str, Value]",
+        {k: _materialize_as_parameter(ctx, ref) for k, ref in d["parameters"].items()},
     )
-    param_slots = tuple(_decode_param_slot(s, ctx) for s in d.get("param_slots", ()))
+    static_bindings: list[StaticBindingSlot] = []
+    for raw_slot in d.get("static_bindings", ()):
+        if not isinstance(raw_slot, dict):
+            raise ValueError("static binding record must be a dictionary")
+        name = raw_slot.get("name")
+        type_key = raw_slot.get("type_key")
+        raw_fields = raw_slot.get("fields")
+        if (
+            not isinstance(name, str)
+            or not isinstance(type_key, str)
+            or not isinstance(raw_fields, list)
+        ):
+            raise ValueError("static binding record is malformed")
+        fields: list[StaticBindingField] = []
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, dict):
+                raise ValueError("static binding field must be a dictionary")
+            field_name = raw_field.get("name")
+            value_ref = raw_field.get("value_ref")
+            if not isinstance(field_name, str) or not isinstance(value_ref, str):
+                raise ValueError("static binding field is malformed")
+            fields.append(
+                StaticBindingField(
+                    name=field_name,
+                    value=_materialize_as_value(ctx, value_ref),
+                )
+            )
+        static_bindings.append(
+            StaticBindingSlot(name=name, type_key=type_key, fields=tuple(fields))
+        )
 
     operations = [_decode_operation(op_dict, ctx) for op_dict in d["operations"]]
 
-    return Block(
-        name=d.get("name", ""),
-        kind=kind,
-        label_args=list(d.get("label_args", ())),
-        input_values=input_values,
-        output_values=output_values,
-        output_names=list(d.get("output_names", ())),
-        operations=operations,
-        parameters=parameters,
-        param_slots=param_slots,
+    inferred_slots = [
+        ParamSlot(
+            name=name,
+            type=value.type,
+            kind=ParamKind.RUNTIME_PARAMETER,
+            ndim=len(value.shape) if isinstance(value, ArrayValue) else 0,
+        )
+        for name, value in parameters.items()
+    ]
+    inferred_names = set(parameters)
+    for name, value in zip(d.get("label_args", ()), input_values, strict=True):
+        if (
+            not isinstance(name, str)
+            or name in inferred_names
+            or isinstance(value, TupleValue)
+            or value.type.is_quantum()
+            or not value.is_parameter()
+        ):
+            continue
+        inferred_slots.append(
+            ParamSlot(
+                name=name,
+                type=value.type,
+                kind=ParamKind.RUNTIME_PARAMETER,
+                ndim=len(value.shape) if isinstance(value, ArrayValue) else 0,
+            )
+        )
+        inferred_names.add(name)
+
+    return ctx.register_block(
+        Block(
+            name=d.get("name", ""),
+            kind=kind,
+            label_args=list(d.get("label_args", ())),
+            input_values=input_values,
+            output_values=output_values,
+            output_names=list(d.get("output_names", ())),
+            operations=operations,
+            parameters=parameters,
+            param_slots=tuple(inferred_slots),
+            static_bindings=tuple(static_bindings),
+        )
     )
 
 
@@ -300,10 +420,10 @@ def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
     """Materialize a UUID reference and assert it resolves to a ``Value``.
 
     Used in positions that must hold a scalar / array ``Value`` (e.g.
-    operation results, ``ForOperation.loop_var_value``, slice refs).
-    Block-level I/O and the operands of container-carrying operations
-    go through :meth:`_DecodeContext.materialize` instead, because the
-    frontend legitimately stores ``DictValue`` / ``TupleValue`` there.
+    operation results, ``ForOperation.loop_var_value``, and slice refs).
+    Block-level I/O goes through ``_materialize_as_value_like`` and
+    ``Block.parameters`` through ``_materialize_as_parameter`` instead,
+    because those positions may carry structural container values.
 
     Args:
         ctx (_DecodeContext): The active decode context.
@@ -320,6 +440,64 @@ def _materialize_as_value(ctx: _DecodeContext, uuid: str) -> Value:
     if not isinstance(v, Value):
         raise ValueError(
             f"expected Value or ArrayValue at uuid {uuid!r}, got {type(v).__name__}"
+        )
+    return v
+
+
+def _materialize_as_parameter(ctx: _DecodeContext, uuid: str) -> Value | DictValue:
+    """Materialize a UUID reference for a ``Block.parameters`` entry.
+
+    Parameters are scalar / array ``Value``s with one structural exception:
+    a ``Dict`` kept as a runtime parameter stays in ``Block.parameters`` as
+    a ``DictValue`` (its per-key values are rebound per call, mirrored by a
+    ``DictType`` ``RUNTIME_PARAMETER`` entry in ``param_slots``).
+    ``TupleValue`` never appears here — tuples cannot be runtime parameters.
+
+    Args:
+        ctx (_DecodeContext): The active decode context.
+        uuid (str): The parameter Value UUID.
+
+    Returns:
+        Value | DictValue: The materialized scalar, array, or dict parameter
+            value.
+
+    Raises:
+        ValueError: If the materialized object is neither a ``Value`` nor a
+            ``DictValue``.
+    """
+    v = ctx.materialize(uuid)
+    if not isinstance(v, (Value, DictValue)):
+        raise ValueError(
+            f"expected Value, ArrayValue, or DictValue at parameter uuid "
+            f"{uuid!r}, got {type(v).__name__}"
+        )
+    return v
+
+
+def _materialize_as_value_like(ctx: _DecodeContext, uuid: str) -> ValueLike:
+    """Materialize a UUID reference as any block-output value type.
+
+    Block inputs and outputs can be structural values such as ``TupleValue``
+    and ``DictValue`` in addition to scalar ``Value`` / ``ArrayValue``.
+    ``Block.parameters`` goes through ``_materialize_as_parameter`` instead,
+    which additionally rejects ``TupleValue``.
+
+    Args:
+        ctx (_DecodeContext): The active decode context.
+        uuid (str): The Value-like UUID.
+
+    Returns:
+        ValueLike: The materialized scalar, array, tuple, or dict value.
+
+    Raises:
+        ValueError: If the materialized object is not a supported output value
+            type.
+    """
+    v = ctx.materialize(uuid)
+    if not isinstance(v, (Value, TupleValue, DictValue)):
+        raise ValueError(
+            f"expected Value, ArrayValue, TupleValue, or DictValue at uuid "
+            f"{uuid!r}, got {type(v).__name__}"
         )
     return v
 
@@ -374,8 +552,6 @@ def _decode_value(d: dict[str, Any], ctx: _DecodeContext) -> ValueBase:
             shape=tuple(
                 _materialize_as_value(ctx, ref) for ref in d.get("shape_refs", ())
             ),
-            # Slice-view refs are additive fields: payloads written
-            # before they existed decode to a non-sliced array.
             slice_of=(
                 _materialize_array(ctx, d["slice_of_ref"])
                 if d.get("slice_of_ref")
@@ -396,7 +572,8 @@ def _decode_value(d: dict[str, Any], ctx: _DecodeContext) -> ValueBase:
         return TupleValue(
             name=d.get("name", ""),
             elements=tuple(
-                _materialize_as_value(ctx, ref) for ref in d.get("element_refs", ())
+                _materialize_as_value_like(ctx, ref)
+                for ref in d.get("element_refs", ())
             ),
             metadata=_decode_metadata(d.get("metadata"), ctx),
             uuid=d["uuid"],
@@ -526,12 +703,73 @@ def _decode_qfixed_metadata(d: Any) -> QFixedMetadata | None:
     )
 
 
+def _decode_array_parent_uuids(values: Any) -> tuple[str, ...]:
+    """Decode array-parent UUIDs and restore the standalone sentinel.
+
+    Args:
+        values (Any): Sequence of parent UUID strings or ``None`` entries from
+            optional protobuf fields.
+
+    Returns:
+        tuple[str, ...]: Parent UUIDs with missing entries normalized to ``""``.
+
+    Raises:
+        ValueError: If the collection is not a list or tuple, or an entry is
+            neither ``str`` nor ``None``.
+    """
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("element_parent_uuids must be a list or tuple")
+    decoded: list[str] = []
+    for index, value in enumerate(values):
+        if value is None:
+            decoded.append("")
+        elif isinstance(value, str):
+            decoded.append(value)
+        else:
+            raise ValueError(
+                f"element_parent_uuids[{index}] must be str or None, "
+                f"got {type(value).__name__}"
+            )
+    return tuple(decoded)
+
+
+def _decode_array_parent_indices(values: Any) -> tuple[int, ...]:
+    """Decode array-parent indices and restore the standalone sentinel.
+
+    Args:
+        values (Any): Sequence of plain integer indices or ``None`` entries
+            from optional protobuf fields.
+
+    Returns:
+        tuple[int, ...]: Parent indices with missing entries normalized to
+            ``-1``.
+
+    Raises:
+        ValueError: If the collection is not a list or tuple, or an entry is
+            neither a plain ``int`` nor ``None``.
+    """
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("element_parent_indices must be a list or tuple")
+    decoded: list[int] = []
+    for index, value in enumerate(values):
+        if value is None:
+            decoded.append(-1)
+        elif is_plain_int(value):
+            decoded.append(value)
+        else:
+            raise ValueError(
+                f"element_parent_indices[{index}] must be int or None, "
+                f"got {type(value).__name__}"
+            )
+    return tuple(decoded)
+
+
 def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
     """Decode :class:`ArrayRuntimeMetadata` (or ``None``).
 
     ``const_array`` is re-frozen after payload decoding: the in-memory
     canonical form is all-tuples (``with_array_runtime_metadata`` runs
-    ``_freeze_data`` at construction), but JSON / msgpack can only
+    ``_freeze_data`` at construction), while the intermediate graph can only
     carry lists. Without re-freezing, a decoded block would silently
     hold lists where the original held tuples.
 
@@ -540,6 +778,10 @@ def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
 
     Returns:
         ArrayRuntimeMetadata | None: The metadata, or ``None`` if absent.
+
+    Raises:
+        ValueError: If array-parent metadata has an invalid collection or
+            entry type.
     """
     if d is None:
         return None
@@ -547,8 +789,12 @@ def _decode_array_runtime_metadata(d: Any) -> ArrayRuntimeMetadata | None:
         const_array=_freeze_data(_decode_payload(d.get("const_array"))),
         element_uuids=tuple(d.get("element_uuids", ())),
         element_logical_ids=tuple(d.get("element_logical_ids", ())),
-        element_parent_uuids=tuple(d.get("element_parent_uuids", ())),
-        element_parent_indices=tuple(d.get("element_parent_indices", ())),
+        element_parent_uuids=_decode_array_parent_uuids(
+            d.get("element_parent_uuids", ())
+        ),
+        element_parent_indices=_decode_array_parent_indices(
+            d.get("element_parent_indices", ())
+        ),
     )
 
 
@@ -557,7 +803,7 @@ def _decode_dict_runtime_metadata(d: Any) -> DictRuntimeMetadata | None:
 
     Entries are re-frozen after payload decoding: bound dict keys are
     tuples in the in-memory canonical form (``_freeze_data`` runs at
-    construction time), but JSON / msgpack flatten them to lists.
+    construction time), while the intermediate graph flattens them to lists.
     Without re-freezing, ``DictValue.get_bound_data()`` and
     ``content_hash`` would fail on a decoded block with
     ``TypeError: unhashable type: 'list'``.
@@ -579,42 +825,6 @@ def _decode_dict_runtime_metadata(d: Any) -> DictRuntimeMetadata | None:
 
 
 # ---------------------------------------------------------------------------
-# ParamSlot decoder
-# ---------------------------------------------------------------------------
-
-
-def _decode_param_slot(d: dict[str, Any], ctx: _DecodeContext) -> ParamSlot:
-    """Decode a ``ParamSlot`` dict.
-
-    Args:
-        d (dict[str, Any]): The slot dict.
-        ctx (_DecodeContext): The active decode context (passed
-            through to ``_decode_value_type`` in case the type carries
-            a symbolic-width Value reference).
-
-    Returns:
-        ParamSlot: The reconstructed slot.
-
-    Raises:
-        ValueError: If ``kind`` is not a known ``ParamKind`` value.
-    """
-    kind_str = d.get("kind")
-    try:
-        kind = ParamKind(kind_str)
-    except ValueError as exc:
-        raise ValueError(f"unknown ParamKind value {kind_str!r}") from exc
-    return ParamSlot(
-        name=d["name"],
-        type=_decode_value_type(d["type"], ctx),
-        kind=kind,
-        ndim=int(d.get("ndim", 0)),
-        default=_decode_payload(d.get("default")),
-        bound_value=_decode_payload(d.get("bound_value")),
-        differentiable=bool(d.get("differentiable", False)),
-    )
-
-
-# ---------------------------------------------------------------------------
 # Payload decoder for arbitrary Python data (numpy arrays, primitives, ...)
 # ---------------------------------------------------------------------------
 
@@ -626,10 +836,13 @@ def _decode_payload(value: Any) -> Any:
         value (Any): The wire-form payload.
 
     Returns:
-        Any: The reconstructed Python value (primitives unchanged,
-            list / dict recursed, numpy wrappers expanded into
-            ``np.ndarray``, Hamiltonian wrappers expanded into
-            ``qamomile.observable.Hamiltonian``).
+        Any: Reconstructed Python value with tuple/list, set/frozenset,
+            arbitrary-key mapping, complex-number, numpy, and Hamiltonian
+            identity preserved.
+
+    Raises:
+        ValueError: If a tagged container wrapper is malformed, contains an
+            unhashable mapping key, or repeats a mapping key.
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -637,13 +850,66 @@ def _decode_payload(value: Any) -> Any:
         return bytes(value)
     if is_array_wrapper(value):
         return dict_to_array(value)
+    if is_scalar_wrapper(value):
+        return dict_to_scalar(value)
     if is_hamiltonian_wrapper(value):
         return dict_to_hamiltonian(value)
     if isinstance(value, list):
         return [_decode_payload(x) for x in value]
     if isinstance(value, dict):
-        # Plain dict (not a numpy / Hamiltonian wrapper); recurse on values.
-        return {k: _decode_payload(v) for k, v in value.items()}
+        if len(value) != 1:
+            raise ValueError(
+                "payload tagged dictionaries must contain exactly one wrapper key"
+            )
+        if "$tuple" in value:
+            raw_items = value["$tuple"]
+            if not isinstance(raw_items, list):
+                raise ValueError("$tuple payload must contain a list")
+            return tuple(_decode_payload(item) for item in raw_items)
+        if "$set" in value:
+            raw_items = value["$set"]
+            if not isinstance(raw_items, list):
+                raise ValueError("$set payload must contain a list")
+            try:
+                return set(_decode_payload(item) for item in raw_items)
+            except TypeError as error:
+                raise ValueError("$set payload contains an unhashable item") from error
+        if "$frozenset" in value:
+            raw_items = value["$frozenset"]
+            if not isinstance(raw_items, list):
+                raise ValueError("$frozenset payload must contain a list")
+            try:
+                return frozenset(_decode_payload(item) for item in raw_items)
+            except TypeError as error:
+                raise ValueError(
+                    "$frozenset payload contains an unhashable item"
+                ) from error
+        if "$complex_number" in value:
+            raw_parts = value["$complex_number"]
+            if not isinstance(raw_parts, list) or len(raw_parts) != 2:
+                raise ValueError("$complex_number payload must contain [real, imag]")
+            real, imag = raw_parts
+            if not isinstance(real, (int, float)) or not isinstance(imag, (int, float)):
+                raise ValueError("complex real and imaginary parts must be numeric")
+            return complex(real, imag)
+        if "$map" in value:
+            raw_entries = value["$map"]
+            if not isinstance(raw_entries, list):
+                raise ValueError("$map payload must contain a list of pairs")
+            decoded: dict[Any, Any] = {}
+            for entry in raw_entries:
+                if not isinstance(entry, list) or len(entry) != 2:
+                    raise ValueError("$map entries must be [key, value] pairs")
+                key = _decode_payload(entry[0])
+                item = _decode_payload(entry[1])
+                try:
+                    if key in decoded:
+                        raise ValueError(f"$map contains duplicate key {key!r}")
+                    decoded[key] = item
+                except TypeError as exc:
+                    raise ValueError(f"$map key {key!r} is not hashable") from exc
+            return decoded
+        raise ValueError(f"unknown payload wrapper {next(iter(value))!r}")
     return value
 
 
@@ -852,6 +1118,26 @@ def _operands_results(
     return operands, results
 
 
+def _value_like_operands_results(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> tuple[list[ValueLike], list[ValueLike]]:
+    """Materialize structural operation operands and results.
+
+    Args:
+        d (dict[str, Any]): The operation dict.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        tuple[list[ValueLike], list[ValueLike]]: Materialized operands and
+        results, including TupleValue and DictValue containers.
+    """
+    operands = [
+        _materialize_as_value_like(ctx, ref) for ref in d.get("operand_refs", ())
+    ]
+    results = [_materialize_as_value_like(ctx, ref) for ref in d.get("result_refs", ())]
+    return operands, results
+
+
 def _container_operands_results(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> tuple[list[Value], list[Value]]:
@@ -1023,6 +1309,22 @@ def _decode_store_array_element(
     return StoreArrayElementOperation(operands=operands, results=results)
 
 
+def _decode_return_quantum_array_element(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> ReturnQuantumArrayElementOperation:
+    """Decode :class:`ReturnQuantumArrayElementOperation`.
+
+    Args:
+        d (dict[str, Any]): Serialized operation dictionary.
+        ctx (_DecodeContext): Active decoding context.
+
+    Returns:
+        ReturnQuantumArrayElementOperation: Reconstructed operation.
+    """
+    operands, results = _operands_results(d, ctx)
+    return ReturnQuantumArrayElementOperation(operands=operands, results=results)
+
+
 def _decode_dict_getitem(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> DictGetItemOperation:
@@ -1139,7 +1441,7 @@ def _decode_return(d: dict[str, Any], ctx: _DecodeContext) -> ReturnOperation:
     Returns:
         ReturnOperation: The reconstructed op.
     """
-    operands, results = _operands_results(d, ctx)
+    operands, results = _container_operands_results(d, ctx)
     return ReturnOperation(operands=operands, results=results)
 
 
@@ -1188,6 +1490,27 @@ def _decode_binop(d: dict[str, Any], ctx: _DecodeContext) -> BinOp:
     operands, results = _operands_results(d, ctx)
     kind = _enum_by_name(BinOpKind, d.get("kind"), "BinOpKind")
     return BinOp(operands=operands, results=results, kind=kind)
+
+
+def _decode_unary_math(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+) -> UnaryMathOp:
+    """Decode a unary mathematical operation.
+
+    Args:
+        d (dict[str, Any]): Encoded operation dictionary.
+        ctx (_DecodeContext): Active decoding context.
+
+    Returns:
+        UnaryMathOp: Reconstructed unary mathematical operation.
+
+    Raises:
+        ValueError: If ``kind`` is not a known ``UnaryMathOpKind`` name.
+    """
+    operands, results = _operands_results(d, ctx)
+    kind = _enum_by_name(UnaryMathOpKind, d.get("kind"), "UnaryMathOpKind")
+    return UnaryMathOp(operands=operands, results=results, kind=kind)
 
 
 def _decode_compop(d: dict[str, Any], ctx: _DecodeContext) -> CompOp:
@@ -1281,8 +1604,11 @@ def _decode_loop_carried_rebinds(
     return tuple(
         LoopCarriedRebind(
             var_name=str(r.get("var_name", "")),
-            before=_materialize_as_value(ctx, r["before_ref"]),
-            after=_materialize_as_value(ctx, r["after_ref"]),
+            # Rebind diagnostics also cover structural containers.  Keep
+            # their concrete ``ValueBase`` subtype instead of forcing the
+            # scalar-only helper used by executable operands/results.
+            before=ctx.materialize(r["before_ref"]),
+            after=ctx.materialize(r["after_ref"]),
             before_synthesized=bool(r.get("before_synthesized", False)),
         )
         for r in d.get("loop_carried_rebinds", ())
@@ -1292,6 +1618,7 @@ def _decode_loop_carried_rebinds(
 def _decode_region_args(
     d: dict[str, Any],
     ctx: _DecodeContext,
+    results: list[Value],
 ) -> tuple[RegionArg, ...]:
     """Decode loop region-argument records from a loop op dict.
 
@@ -1299,12 +1626,34 @@ def _decode_region_args(
         d (dict[str, Any]): The loop op dict, possibly carrying a
             ``region_args`` list.
         ctx (_DecodeContext): The active decode context.
+        results (list[Value]): The loop operation's materialized
+            results. Every region argument must own the corresponding
+            result by both position and UUID.
 
     Returns:
         tuple[RegionArg, ...]: The reconstructed records; empty when
             the key is absent.
+
+    Raises:
+        ValueError: If a removed parallel-list carry payload is present,
+            a region argument's four values have different types, or its
+            result does not align with the loop operation's results.
     """
-    return tuple(
+    legacy_keys = {
+        "carried_names",
+        "iter_arg_refs",
+        "body_arg_refs",
+        "body_yield_refs",
+    }
+    present_legacy_keys = sorted(legacy_keys.intersection(d))
+    if present_legacy_keys:
+        raise ValueError(
+            "Legacy parallel-list loop carry fields are not supported: "
+            f"{', '.join(present_legacy_keys)}. Re-encode the block with "
+            "RegionArg records."
+        )
+
+    region_args = tuple(
         RegionArg(
             var_name=str(r.get("var_name", "")),
             init=_materialize_as_value(ctx, r["init_ref"]),
@@ -1314,6 +1663,28 @@ def _decode_region_args(
         )
         for r in d.get("region_args", ())
     )
+    if len(region_args) != len(results):
+        raise ValueError(
+            "Loop RegionArg payload is inconsistent: "
+            f"{len(region_args)} region args for {len(results)} results."
+        )
+    for index, (arg, result) in enumerate(zip(region_args, results, strict=True)):
+        if arg.result.uuid != result.uuid:
+            raise ValueError(
+                "Loop RegionArg payload is inconsistent: "
+                f"region_args[{index}].result_ref does not match "
+                f"result_refs[{index}]."
+            )
+        if not (
+            arg.init.type == arg.block_arg.type == arg.yielded.type == arg.result.type
+        ):
+            raise ValueError(
+                f"Loop RegionArg '{arg.var_name}' has mismatched slot types: "
+                f"init={arg.init.type}, block_arg={arg.block_arg.type}, "
+                f"yielded={arg.yielded.type}, result={arg.result.type}. "
+                "All four values of a RegionArg must share a type."
+            )
+    return region_args
 
 
 def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
@@ -1324,23 +1695,29 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         ctx (_DecodeContext): The active decode context.
 
     Returns:
-        ForOperation: The reconstructed op, including the
-            materialized loop variable and the recursively-decoded
+        ForOperation: The reconstructed op, including the materialized
+            loop variable, region arguments, and recursively-decoded
             loop body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _operands_results(d, ctx)
     loop_var_ref = d.get("loop_var_value_ref")
     loop_var_value = _materialize_as_value(ctx, loop_var_ref) if loop_var_ref else None
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return ForOperation(
+    op = ForOperation(
         operands=operands,
         results=results,
         loop_var=d.get("loop_var", ""),
         loop_var_value=loop_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
-        region_args=_decode_region_args(d, ctx),
+        region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperation:
@@ -1353,6 +1730,10 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
     Returns:
         ForItemsOperation: The reconstructed op, including key /
             value identity Values and the recursively-decoded body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _container_operands_results(d, ctx)
     key_refs = d.get("key_var_value_refs")
@@ -1364,7 +1745,7 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
     value_ref = d.get("value_var_value_ref")
     value_var_value = _materialize_as_value(ctx, value_ref) if value_ref else None
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return ForItemsOperation(
+    op = ForItemsOperation(
         operands=operands,
         results=results,
         key_vars=list(d.get("key_vars", ())),
@@ -1374,8 +1755,10 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         value_var_value=value_var_value,
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
-        region_args=_decode_region_args(d, ctx),
+        region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
@@ -1388,17 +1771,23 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
     Returns:
         WhileOperation: The reconstructed op, including the
             recursively-decoded loop body.
+
+    Raises:
+        ValueError: If the region arguments are inconsistent (see
+            :func:`_decode_region_args`).
     """
     operands, results = _operands_results(d, ctx)
     body = [_decode_operation(child, ctx) for child in d.get("body", ())]
-    return WhileOperation(
+    op = WhileOperation(
         operands=operands,
         results=results,
         operations=body,
         max_iterations=d.get("max_iterations"),
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
-        region_args=_decode_region_args(d, ctx),
+        region_args=_decode_region_args(d, ctx, results),
     )
+    validate_region_args(op)
+    return op
 
 
 def _decode_branch_rebinds(
@@ -1445,29 +1834,15 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
             records.
 
     Raises:
-        ValueError: If the payload carries the removed pre-yields
-            ``phi_ops`` field, or if the yield-reference lists disagree
-            with each other or with ``results`` in length (corrupted
-            payload).
+        ValueError: If the yield-reference lists disagree with each other or
+            with ``results`` in length.
+        KeyError: If a required current-format field is absent.
     """
     operands, results = _operands_results(d, ctx)
-    # Reject a pre-yields payload explicitly. The length check below only
-    # catches a legacy ``phi_ops`` op that also carried its merge outputs
-    # in ``results``; a ``phi_ops``-only op with no ``result_refs`` would
-    # otherwise decode as a merge-less IfOperation. Failing loud here keeps
-    # the "old payloads are rejected, never silently down-decoded" contract
-    # (see serialize/schema.py) true for every pre-yields shape.
-    if "phi_ops" in d:
-        raise ValueError(
-            "IfOperation payload uses the removed 'phi_ops' field, a "
-            "pre-yields serialization that is no longer supported. "
-            "Re-serialize with the current revision, which stores branch "
-            "merges as 'true_yield_refs' / 'false_yield_refs'."
-        )
-    true_body = [_decode_operation(child, ctx) for child in d.get("true_body", ())]
-    false_body = [_decode_operation(child, ctx) for child in d.get("false_body", ())]
-    true_refs = list(d.get("true_yield_refs", ()))
-    false_refs = list(d.get("false_yield_refs", ()))
+    true_body = [_decode_operation(child, ctx) for child in d["true_body"]]
+    false_body = [_decode_operation(child, ctx) for child in d["false_body"]]
+    true_refs = list(d["true_yield_refs"])
+    false_refs = list(d["false_yield_refs"])
     if len(true_refs) != len(false_refs) or len(true_refs) != len(results):
         raise ValueError(
             "IfOperation merge data is inconsistent: "
@@ -1489,6 +1864,28 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
     return op
 
 
+def _decode_control_value(d: dict[str, Any], operation_name: str) -> int | None:
+    """Decode an optional coherent-control activation value.
+
+    Args:
+        d (dict[str, Any]): Encoded operation payload.
+        operation_name (str): Operation name used in malformed-payload errors.
+
+    Returns:
+        int | None: Decoded activation value, or ``None`` for all-ones control.
+
+    Raises:
+        ValueError: If the encoded value is not a plain Python integer or null.
+    """
+    control_value = d.get("control_value")
+    if control_value is not None and not is_plain_int(control_value):
+        raise ValueError(
+            f"{operation_name}.control_value must be a Python int or null, "
+            f"got {control_value!r}."
+        )
+    return cast(int | None, control_value)
+
+
 def _decode_concrete_controlled(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> ConcreteControlledU:
@@ -1501,19 +1898,25 @@ def _decode_concrete_controlled(
     Returns:
         ConcreteControlledU: The reconstructed op, including its
             nested unitary block.
+
+    Raises:
+        ValueError: If ``control_value`` is present but is not a Python
+            ``int``. Width validation is performed by ``ConcreteControlledU``.
     """
     operands, results = _operands_results(d, ctx)
     block = (
-        _decode_block(d["unitary_block"])
+        _decode_block(d["unitary_block"], ctx)
         if d.get("unitary_block") is not None
         else None
     )
     callable_attrs = _decode_callable_attrs(d.get("callable_attrs"))
+    control_value = _decode_control_value(d, "ConcreteControlledU")
     return ConcreteControlledU(
         operands=operands,
         results=results,
-        num_controls=int(d.get("num_controls", 1)),
-        power=_decode_power(d.get("power", 1), ctx),
+        num_controls=int(d["num_controls"]),
+        control_value=control_value,
+        power=_decode_power(d["power"], ctx),
         block=block,
         callable_ref=(
             _decode_callable_ref(d.get("callable_ref"))
@@ -1524,18 +1927,68 @@ def _decode_concrete_controlled(
     )
 
 
+def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
+    """Decode a quantum multiplexer and its callable bodies.
+
+    Args:
+        d (dict[str, Any]): Encoded operation payload.
+        ctx (_DecodeContext): Active decode context.
+
+    Returns:
+        SelectOperation: Reconstructed operation.
+
+    Raises:
+        ValueError: If the concrete/reference width union, index-argument
+            count, or case list is malformed.
+    """
+    operands, results = _operands_results(d, ctx)
+    has_concrete_width = "num_index_qubits" in d
+    has_symbolic_width = "num_index_qubits_ref" in d
+    if has_concrete_width == has_symbolic_width:
+        raise ValueError(
+            "SelectOperation requires exactly one of num_index_qubits and "
+            "num_index_qubits_ref."
+        )
+    if has_concrete_width:
+        num_index_qubits = d["num_index_qubits"]
+        if not is_plain_int(num_index_qubits):
+            raise ValueError(
+                "SelectOperation.num_index_qubits must be a Python int, "
+                f"got {num_index_qubits!r}."
+            )
+        num_index_args = d.get("num_index_args", num_index_qubits)
+    else:
+        width_ref = d["num_index_qubits_ref"]
+        if not isinstance(width_ref, str):
+            raise ValueError(
+                "SelectOperation.num_index_qubits_ref must be a string, "
+                f"got {width_ref!r}."
+            )
+        num_index_qubits = _materialize_as_value(ctx, width_ref)
+        if "num_index_args" not in d:
+            raise ValueError("A symbolic SelectOperation requires num_index_args.")
+        num_index_args = d["num_index_args"]
+    if not is_plain_int(num_index_args) or num_index_args < 1:
+        raise ValueError(
+            "SelectOperation.num_index_args must be a positive Python int, "
+            f"got {num_index_args!r}."
+        )
+    raw_case_blocks = d.get("case_blocks")
+    if not isinstance(raw_case_blocks, list):
+        raise ValueError("SelectOperation.case_blocks must be a list.")
+    return SelectOperation(
+        operands=operands,
+        results=results,
+        num_index_qubits=cast("int | Value", num_index_qubits),
+        case_blocks=[_decode_block(block, ctx) for block in raw_case_blocks],
+        num_index_args=cast(int, num_index_args),
+    )
+
+
 def _decode_symbolic_controlled(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> SymbolicControlledU:
     """Decode :class:`SymbolicControlledU`.
-
-    The ``num_control_args`` field is treated as additive: payloads
-    that omit it (either pre-multi-arg encoders or the legacy single-
-    pool form, which the encoder skips for compactness) decode with
-    the dataclass default ``1``.  Newer payloads carry the actual
-    count so the emit pass can split ``operands`` at the correct
-    boundary between the control prefix and the sub-kernel quantum
-    tail.
 
     Args:
         d (dict[str, Any]): The op dict.
@@ -1546,12 +1999,12 @@ def _decode_symbolic_controlled(
     """
     operands, results = _operands_results(d, ctx)
     block = (
-        _decode_block(d["unitary_block"])
+        _decode_block(d["unitary_block"], ctx)
         if d.get("unitary_block") is not None
         else None
     )
     callable_attrs = _decode_callable_attrs(d.get("callable_attrs"))
-    controlled_refs = d.get("control_index_refs")
+    controlled_refs = d["control_index_refs"]
     control_indices: tuple[Value, ...] | None
     if controlled_refs is None:
         control_indices = None
@@ -1564,9 +2017,9 @@ def _decode_symbolic_controlled(
         results=results,
         num_controls=_materialize_as_value(ctx, d["num_controls_ref"]),
         control_indices=control_indices,
-        power=_decode_power(d.get("power", 1), ctx),
+        power=_decode_power(d["power"], ctx),
         block=block,
-        num_control_args=int(d.get("num_control_args", 1)),
+        num_control_args=int(d["num_control_args"]),
         callable_ref=(
             _decode_callable_ref(d.get("callable_ref"))
             if d.get("callable_ref") is not None
@@ -1673,11 +2126,15 @@ def _decode_callable_body_ref(d: Any) -> CallableBodyRef | None:
     )
 
 
-def _decode_callable_implementation(d: Any) -> CallableImplementation:
+def _decode_callable_implementation(
+    d: Any,
+    ctx: _DecodeContext,
+) -> CallableImplementation:
     """Decode a callable implementation candidate.
 
     Args:
         d (Any): Serialized implementation payload.
+        ctx (_DecodeContext): Module-wide graph registry.
 
     Returns:
         CallableImplementation: Reconstructed implementation.
@@ -1696,7 +2153,7 @@ def _decode_callable_implementation(d: Any) -> CallableImplementation:
         transform=_enum_by_name(CallTransform, d.get("transform"), "CallTransform"),
         backend=d.get("backend"),
         strategy=d.get("strategy"),
-        body=_decode_block(d["body"]) if d.get("body") is not None else None,
+        body=(_decode_block(d["body"], ctx) if d.get("body") is not None else None),
         body_ref=_decode_callable_body_ref(d.get("body_ref")),
         attrs=attrs,
     )
@@ -1747,7 +2204,7 @@ def _decode_signature(d: Any, ctx: _DecodeContext) -> Signature | None:
     return Signature(operands=operands, results=results)
 
 
-def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef | None:
+def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
     """Decode a callable definition.
 
     Args:
@@ -1755,13 +2212,11 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef | None:
         ctx (_DecodeContext): Active decode context.
 
     Returns:
-        CallableDef | None: Reconstructed definition, or ``None``.
+        CallableDef: Reconstructed definition.
 
     Raises:
         ValueError: If the payload is malformed.
     """
-    if d is None:
-        return None
     if not isinstance(d, dict):
         raise ValueError("CallableDef payload must be a dict")
     attrs = _decode_payload(d.get("attrs"))
@@ -1773,12 +2228,13 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef | None:
     return CallableDef(
         ref=_decode_callable_ref(d.get("ref")),
         signature=_decode_signature(d.get("signature"), ctx),
-        body=_decode_block(d["body"]) if d.get("body") is not None else None,
+        body=(_decode_block(d["body"], ctx) if d.get("body") is not None else None),
         body_ref=_decode_callable_body_ref(d.get("body_ref")),
         implementations=[
-            _decode_callable_implementation(impl)
+            _decode_callable_implementation(impl, ctx)
             for impl in d.get("implementations", [])
         ],
+        opaque_cost=None,
         default_policy=_enum_by_name(CallPolicy, raw_policy, "CallPolicy"),
         attrs=attrs,
     )
@@ -1797,26 +2253,17 @@ def _decode_invoke_operation(d: dict[str, Any], ctx: _DecodeContext) -> InvokeOp
     Raises:
         ValueError: If transform names are unknown.
     """
-    operands, results = _operands_results(d, ctx)
+    operands, results = _value_like_operands_results(d, ctx)
     transform = _enum_by_name(CallTransform, d.get("transform"), "CallTransform")
     attrs = _decode_payload(d.get("attrs"))
     if attrs is None:
         attrs = {}
     if not isinstance(attrs, dict):
         raise ValueError("InvokeOperation attrs must decode to a dict")
-    definition = _decode_callable_def(d.get("definition"), ctx)
-    if definition is None:
-        body = _decode_block(d["body"]) if d.get("body") is not None else None
-        definition = CallableDef(
-            ref=_decode_callable_ref(d.get("target")),
-            signature=(
-                signature_from_values(operands, results)
-                if operands or results
-                else None
-            ),
-            body=body,
-            attrs=attrs,
-        )
+    raw_definition_ref = d.get("definition_ref")
+    if not isinstance(raw_definition_ref, str):
+        raise ValueError("InvokeOperation definition_ref must be a string")
+    definition = ctx.definition(raw_definition_ref)
     return InvokeOperation(
         operands=operands,
         results=results,
@@ -1842,10 +2289,12 @@ def _decode_inverse_block(
     """
     operands, results = _container_operands_results(d, ctx)
     source_block = (
-        _decode_block(d["source_block"]) if d.get("source_block") is not None else None
+        _decode_block(d["source_block"], ctx)
+        if d.get("source_block") is not None
+        else None
     )
     implementation_block = (
-        _decode_block(d["implementation_block"])
+        _decode_block(d["implementation_block"], ctx)
         if d.get("implementation_block") is not None
         else None
     )
@@ -1863,7 +2312,24 @@ def _decode_inverse_block(
             else None
         ),
         callable_attrs=_decode_callable_attrs(d.get("callable_attrs")),
+        control_value=_decode_control_value(d, "InverseBlockOperation"),
     )
+
+
+def _decode_global_phase_operation(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> GlobalPhaseOperation:
+    """Decode a zero-qubit global-phase operation.
+
+    Args:
+        d (dict[str, Any]): Serialized operation dictionary.
+        ctx (_DecodeContext): Active decode context.
+
+    Returns:
+        GlobalPhaseOperation: Reconstructed operation.
+    """
+    operands, results = _operands_results(d, ctx)
+    return GlobalPhaseOperation(operands=operands, results=results)
 
 
 _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] = {
@@ -1876,6 +2342,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "DecodeQFixedOperation": _decode_decode_qfixed,
     "DictGetItemOperation": _decode_dict_getitem,
     "StoreArrayElementOperation": _decode_store_array_element,
+    "ReturnQuantumArrayElementOperation": _decode_return_quantum_array_element,
     "CastOperation": _decode_cast,
     "QInitOperation": _decode_qinit,
     "CInitOperation": _decode_cinit,
@@ -1885,6 +2352,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "ExpvalOp": _decode_expval,
     "PauliEvolveOp": _decode_pauli_evolve,
     "BinOp": _decode_binop,
+    "UnaryMathOp": _decode_unary_math,
     "CompOp": _decode_compop,
     "CondOp": _decode_condop,
     "NotOp": _decode_notop,
@@ -1895,6 +2363,8 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "IfOperation": _decode_if,
     "ConcreteControlledU": _decode_concrete_controlled,
     "SymbolicControlledU": _decode_symbolic_controlled,
+    "SelectOperation": _decode_select,
     "InvokeOperation": _decode_invoke_operation,
     "InverseBlockOperation": _decode_inverse_block,
+    "GlobalPhaseOperation": _decode_global_phase_operation,
 }

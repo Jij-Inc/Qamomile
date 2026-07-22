@@ -27,14 +27,14 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit]"
 
 # %%
 import matplotlib.pyplot as plt
 import numpy as np
+
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm import amplitude_encoding
-from qamomile.circuit.stdlib.qft import QFT
+from qamomile.circuit.stdlib import mottonen_amplitude_encoding
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.qiskit import QiskitTranspiler
 
@@ -214,7 +214,7 @@ plt.show()
 # %% [markdown]
 # ### Multidimensional QFT
 #
-# Use Qamomile's `QFT` class to implement multidimensional QFT.
+# Use Qamomile's `qmc.qft` composite to implement multidimensional QFT.
 
 
 # %%
@@ -222,7 +222,7 @@ plt.show()
 def qft_for_multidimension(inputs: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
     N = Nqx + Nqy
     q = qmc.qubit_array(N, name="q")
-    q = amplitude_encoding(q, inputs)
+    q = mottonen_amplitude_encoding(q, inputs)
     q[0:Nqx] = qmc.qft(q[0:Nqx])
     q[Nqx:N] = qmc.qft(q[Nqx:N])
     return qmc.measure(q)

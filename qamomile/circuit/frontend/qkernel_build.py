@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, cast
 
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.func_to_block import (
@@ -13,9 +13,11 @@ from qamomile.circuit.frontend.func_to_block import (
     is_array_type,
 )
 from qamomile.circuit.frontend.handle import Observable
-from qamomile.circuit.frontend.handle.primitives import Handle
 from qamomile.circuit.frontend.param_validation import (
     validate_bindings_parameters_disjoint,
+)
+from qamomile.circuit.frontend.qkernel_definition import (
+    refresh_qkernel_function_namespace,
 )
 from qamomile.circuit.frontend.qkernel_inputs import (
     auto_detect_parameters,
@@ -26,10 +28,14 @@ from qamomile.circuit.frontend.qkernel_inputs import (
 )
 from qamomile.circuit.frontend.qkernel_metadata import extract_return_names
 from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
+from qamomile.circuit.frontend.static_binding import (
+    is_static_binding_annotation,
+    validate_static_binding_argument,
+)
 from qamomile.circuit.frontend.tracer import Tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueLike
 
 
 def build_specialized_block(
@@ -46,7 +52,7 @@ def build_specialized_block(
         parameters (list[str]): Classical argument names that remain symbolic
             in the specialized block.
         bindings (dict[str, Any]): Concrete Python values for classical
-            arguments.
+            arguments and caller-owned proxies for unresolved static bindings.
         qubit_sizes (dict[str, int]): First-axis sizes for ``Vector[Qubit]``
             arguments supplied by the caller.
 
@@ -81,7 +87,8 @@ def create_traced_block(
     Args:
         kernel (Any): QKernel-like object to trace.
         parameters (list[str]): Argument names to keep as unbound parameters.
-        kwargs (dict[str, Any]): Concrete values for non-parameter arguments.
+        kwargs (dict[str, Any]): Concrete values for non-parameter arguments
+            and caller-owned proxies for unresolved static bindings.
         qubit_sizes (dict[str, int] | None): Optional mapping from
             ``Vector[Qubit]`` parameter names to integer sizes. Defaults to
             ``None``.
@@ -99,6 +106,10 @@ def create_traced_block(
         UnreturnedBorrowError: If a returned quantum array still has
             outstanding element/view borrows at trace end (whether or
             not the borrowed element is co-returned with it).
+        TypeError: If a static binding declares a default, a concrete static
+            binding has the wrong registered type, or a symbolic static
+            binding does not preserve the parameter's slot identity.
+        ValueError: If a required static binding is absent from ``kwargs``.
     """
     if qubit_sizes is None:
         qubit_sizes = {}
@@ -106,19 +117,36 @@ def create_traced_block(
     tracer = Tracer()
     tracked_parameters: dict[str, Value] = {}
 
+    refresh_qkernel_function_namespace(kernel)
+
     with trace(tracer):
-        dummy_inputs: dict[str, Handle] = {}
+        dummy_inputs: dict[str, Any] = {}
 
         for name, param in kernel.signature.parameters.items():
             param_type = kernel.input_types.get(name, param.annotation)
 
-            is_scalar_observable = param_type is Observable
-            is_unbound_observable_array = (
+            if is_static_binding_annotation(param_type):
+                if param.default is not inspect.Parameter.empty:
+                    raise TypeError(
+                        f"Static binding parameter {name!r} cannot have a "
+                        "default value; provide it through bindings when "
+                        "building or transpiling the qkernel."
+                    )
+                if name not in kwargs:
+                    raise ValueError(
+                        f"Static binding argument {name!r} must be provided "
+                        "through bindings."
+                    )
+                handle = validate_static_binding_argument(
+                    param_type,
+                    name,
+                    kwargs[name],
+                )
+            elif param_type is Observable or (
                 is_array_type(param_type)
                 and get_array_element_type(param_type) is Observable
                 and name not in kwargs
-            )
-            if is_scalar_observable or is_unbound_observable_array:
+            ):
                 handle = create_parameter_input(param_type, name)
                 tracked_parameters[name] = handle.value
             elif name in parameters:
@@ -158,9 +186,21 @@ def create_traced_block(
         _validate_returned_arrays(result)
         output_values = _extract_output_values(result)
         if emit_return_op:
-            tracer.add_operation(ReturnOperation(operands=output_values, results=[]))
+            tracer.add_operation(
+                ReturnOperation(
+                    operands=cast(list[Value], output_values),
+                    results=[],
+                )
+            )
 
-    input_values = [handle.value for handle in dummy_inputs.values()]
+    ordinary_inputs = {
+        name: handle
+        for name, handle in dummy_inputs.items()
+        if not is_static_binding_annotation(kernel.input_types[name])
+    }
+    input_values: list[ValueLike] = [
+        cast(ValueLike, handle.value) for handle in ordinary_inputs.values()
+    ]
     param_slots = build_param_slots(
         signature=kernel.signature,
         input_types=kernel.input_types,
@@ -172,7 +212,7 @@ def create_traced_block(
 
     return Block(
         operations=tracer.operations,
-        label_args=list(dummy_inputs.keys()),
+        label_args=list(ordinary_inputs),
         input_values=input_values,
         output_values=output_values,
         name=kernel.name,
@@ -225,23 +265,23 @@ def build_qkernel(
     return block
 
 
-def _extract_output_values(result: Any) -> list[Value]:
+def _extract_output_values(result: Any) -> list[ValueLike]:
     """Extract IR output values from a qkernel return object.
 
     Args:
         result (Any): Return value from the traced qkernel body.
 
     Returns:
-        list[Value]: Values carried by handle-like return objects.
+        list[ValueLike]: Values carried by handle-like return objects.
     """
-    output_values: list[Value] = []
+    output_values: list[ValueLike] = []
     if result is None:
         return output_values
     if isinstance(result, tuple):
         for item in result:
             if hasattr(item, "value"):
-                output_values.append(item.value)
+                output_values.append(cast(ValueLike, item.value))
         return output_values
     if hasattr(result, "value"):
-        output_values.append(result.value)
+        output_values.append(cast(ValueLike, result.value))
     return output_values

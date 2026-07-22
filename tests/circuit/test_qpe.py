@@ -125,6 +125,39 @@ def builtin_qpe(n: int, phase: float) -> qmc.Float:
 
 
 @qmc.qkernel
+def _swap_with_private_workspace(
+    work: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply an order-two unitary while restoring private workspace.
+
+    Args:
+        work (qmc.Vector[qmc.Qubit]): Two-qubit value register.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Register with its two basis bits swapped.
+    """
+    workspace = qmc.qubit("workspace")
+    workspace = qmc.x(workspace)
+    workspace = qmc.x(workspace)
+    work[0], work[1] = qmc.swap(work[0], work[1])
+    return work
+
+
+@qmc.qkernel
+def qpe_with_private_workspace_unitary() -> qmc.Float:
+    """Estimate the order-two phase of a workspace-allocating unitary.
+
+    Returns:
+        qmc.Float: Two-bit phase estimate, either zero or one half.
+    """
+    counting = qmc.qubit_array(2, name="counting")
+    work = qmc.qubit_array(2, name="work")
+    work[0] = qmc.x(work[0])
+    phase = qmc.qpe(work, counting, _swap_with_private_workspace)
+    return qmc.measure(phase)
+
+
+@qmc.qkernel
 def builtin_qpe_with_composite_unitary(n: int, phase: float) -> qmc.Float:
     """Run QPE with a qkernel-backed composite gate callable as U."""
     q_phase = qmc.qubit_array(n, name="phase_reg")
@@ -370,9 +403,11 @@ class TestQPEBuiltin:
         assert {op.callable_ref.name for op in controlled_ops if op.callable_ref} == {
             "_p_gate"
         }
-        assert {
-            op.callable_ref.namespace for op in controlled_ops if op.callable_ref
-        } == {"user.qkernel"}
+        assert all(
+            op.callable_ref.namespace.startswith("user.qkernel.")
+            for op in controlled_ops
+            if op.callable_ref
+        )
         assert {op.callable_attrs["kind"] for op in controlled_ops} == {"qkernel"}
         assert {op.callable_attrs["default_policy"] for op in controlled_ops} == {
             "INLINE"
@@ -392,9 +427,11 @@ class TestQPEBuiltin:
 
         assert controlled_ops
         assert all(op.callable_ref is not None for op in controlled_ops)
-        assert {
-            op.callable_ref.namespace for op in controlled_ops if op.callable_ref
-        } == {"user.composite"}
+        assert all(
+            op.callable_ref.namespace.startswith("user.composite.")
+            for op in controlled_ops
+            if op.callable_ref
+        )
         assert {op.callable_ref.name for op in controlled_ops if op.callable_ref} == {
             "boxed_p_gate"
         }
@@ -431,6 +468,15 @@ class TestQPEBuiltin:
             assert value == pytest.approx(0.125), (
                 f"Built-in QPE: expected 0.125, got {value} (count={count})"
             )
+
+    def test_qpe_controls_unitary_with_private_workspace(self, qiskit_transpiler):
+        """QPE reserves and controls a unitary's internal ancilla wires."""
+        executable = qiskit_transpiler.transpile(qpe_with_private_workspace_unitary)
+        result = executable.sample(qiskit_transpiler.executor(), shots=64).result()
+
+        phases = {value for value, _ in result.results}
+        assert phases <= {0.0, 0.5}
+        assert phases == {0.0, 0.5}
 
 
 class TestQPEFallbackVectorViewPhase:

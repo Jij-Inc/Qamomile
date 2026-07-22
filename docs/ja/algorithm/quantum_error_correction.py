@@ -33,9 +33,9 @@
 
 # %%
 # 最新のQamomileをpipからインストールします。
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit]"
 # # or
-# # !uv add qamomile
+# # !uv add "qamomile[qiskit]"
 
 # %% [markdown]
 # ## 1. なぜ量子の誤り訂正は難しいのか

@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Generic, TypeVar
 
+from qamomile.circuit.ir.value import ValueLike
+
 # Re-export for backward compatibility (used by backends and passes)
 from qamomile.circuit.transpiler.classical_executor import (
     ClassicalExecutor as ClassicalExecutor,  # noqa: F401
@@ -18,6 +20,8 @@ from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.job import ExpvalJob, RunJob, SampleJob
 from qamomile.circuit.transpiler.parameter_binding import (
+    ParameterArrayInfo,
+    ParameterContainerKind,
     ParameterInfo,
     ParameterMetadata,
 )
@@ -32,6 +36,8 @@ __all__ = [
     "CompiledQuantumSegment",
     "ExecutableProgram",
     "ExecutionContext",
+    "ParameterArrayInfo",
+    "ParameterContainerKind",
     "ParameterInfo",
     "ParameterMetadata",
     "QuantumExecutor",
@@ -71,11 +77,8 @@ class ExecutableProgram(Generic[T]):
         default_factory=list
     )
 
-    # Final output references
-    output_refs: list[str] = dataclasses.field(default_factory=list)
-
-    # Number of output bits (for result conversion)
-    num_output_bits: int = 0
+    # Final output values
+    output_values: list[ValueLike] = dataclasses.field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Data access properties

@@ -16,7 +16,10 @@ from qamomile.circuit.frontend.handle import (
     Vector,
 )
 from qamomile.circuit.frontend.handle.primitives import Float
-from qamomile.circuit.frontend.operation.control_flow import _create_merge_for_values
+from qamomile.circuit.frontend.operation.control_flow import (
+    _create_merge_for_values,
+    _merged_logical_identity,
+)
 from qamomile.circuit.frontend.qkernel import qkernel
 from qamomile.circuit.ir.operation.control_flow import (
     IfMerge,
@@ -300,6 +303,74 @@ class TestIfElseErrorHandling:
 
         with pytest.raises(TypeError, match="Type mismatch in if-else branches"):
             _create_merge_for_values(true_val, false_val, if_op)
+
+    def test_merge_preserves_common_logical_identity(self):
+        """Two SSA versions of one resource remain one resource after merge."""
+        condition = Value(type=BitType(), name="cond")
+        if_op = IfOperation(operands=[condition])
+        source = Value(type=QubitType(), name="q")
+        true_val = Qubit(value=source.next_version())
+        false_val = Qubit(value=source.next_version())
+
+        merged = _create_merge_for_values(true_val, false_val, if_op)
+
+        assert merged.value.logical_id == source.logical_id
+        assert merged.value.uuid not in {true_val.value.uuid, false_val.value.uuid}
+
+    def test_merge_does_not_unify_distinct_resources(self):
+        """A branch-dependent resource selection receives a fresh identity."""
+        condition = Value(type=BitType(), name="cond")
+        if_op = IfOperation(operands=[condition])
+        true_val = Qubit(value=Value(type=QubitType(), name="q_true"))
+        false_val = Qubit(value=Value(type=QubitType(), name="q_false"))
+
+        merged = _create_merge_for_values(true_val, false_val, if_op)
+
+        assert merged.value.logical_id not in {
+            true_val.value.logical_id,
+            false_val.value.logical_id,
+        }
+
+    def test_merge_does_not_unify_mismatched_array_shapes(self):
+        """Equal array logical IDs do not override incompatible extents."""
+        from qamomile.circuit.ir.types.primitives import UIntType
+        from qamomile.circuit.ir.value import ArrayValue
+
+        logical_id = "shared"
+        true_value = ArrayValue(
+            type=QubitType(),
+            name="true",
+            logical_id=logical_id,
+            shape=(Value(type=UIntType(), name="three").with_const(3),),
+        )
+        false_value = ArrayValue(
+            type=QubitType(),
+            name="false",
+            logical_id=logical_id,
+            shape=(Value(type=UIntType(), name="two").with_const(2),),
+        )
+
+        assert _merged_logical_identity(true_value, false_value) is None
+
+    def test_if_preserves_prebranch_array_alias_group(self):
+        """Aliased array names cannot fork into two post-If resources."""
+        from qamomile.circuit.transpiler.errors import QubitBorrowConflictError
+
+        @qkernel
+        def invalid_alias_use(
+            qubits: Vector[Qubit],
+            flag: qm.Bit,
+        ) -> Vector[Qubit]:
+            alias = qubits
+            if flag:
+                qubits[0] = qm.x(qubits[0])
+            else:
+                qubits[0] = qm.z(qubits[0])
+            alias[0], qubits[0] = qm.cx(alias[0], qubits[0])
+            return qubits
+
+        with pytest.raises(QubitBorrowConflictError, match="already borrowed"):
+            _ = invalid_alias_use.block
 
     def test_merge_preserves_qfixed_handle_type_and_metadata(self):
         """QFixed merge should keep the QFixed handle and carrier metadata."""

@@ -17,6 +17,11 @@ from __future__ import annotations
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    RuntimeClassicalExpr,
+    RuntimeOpKind,
+)
+from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
@@ -28,7 +33,7 @@ from qamomile.circuit.ir.operation.gate import (
     ProjectOperation,
 )
 from qamomile.circuit.ir.types.primitives import BitType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_array_index
 from qamomile.circuit.transpiler.errors import ValidationError
 
 from . import Pass
@@ -115,6 +120,16 @@ def is_measurement_backed(
     # measured array through the parent's ``slice_of`` chain.
     parent = getattr(value, "parent_array", None)
     if parent is not None:
+        if len(value.element_indices) == 1 and value.element_indices[0].is_constant():
+            element_index = int(value.element_indices[0].get_const())
+            result = _is_measurement_backed_array_slot(
+                parent,
+                element_index,
+                producer_map,
+                visiting,
+            )
+            visiting.discard(value.uuid)
+            return result
         cur: Value | None = parent
         while cur is not None:
             if is_measurement_backed(cur, producer_map, visiting):
@@ -138,7 +153,74 @@ def is_measurement_backed(
         visiting.discard(value.uuid)
         return False
 
+    if (
+        isinstance(producer, RuntimeClassicalExpr)
+        and producer.kind is RuntimeOpKind.SELECT
+    ):
+        # ``ClassicalLoweringPass`` lowers a runtime-if merge to
+        # ``select(cond, t, f)``; like the merge it lowers, the value is
+        # measurement-backed when both branch sources are.
+        result = is_measurement_backed(
+            producer.operands[1], producer_map, visiting
+        ) and is_measurement_backed(producer.operands[2], producer_map, visiting)
+        visiting.discard(value.uuid)
+        return result
+
     visiting.discard(value.uuid)
+    return False
+
+
+def _is_measurement_backed_array_slot(
+    array: ArrayValue,
+    index: int,
+    producer_map: dict[str, Operation],
+    visiting: set[str],
+) -> bool:
+    """Trace measurement provenance for one classical array element.
+
+    Args:
+        array (ArrayValue): Current SSA array version containing the slot.
+        index (int): Concrete element index in ``array``.
+        producer_map (dict[str, Operation]): UUID-to-producer map.
+        visiting (set[str]): UUIDs on the active provenance traversal path.
+
+    Returns:
+        bool: ``True`` when the selected slot was written from a
+            measurement-backed value or belongs to a directly measured
+            vector.
+    """
+    producer = producer_map.get(array.uuid)
+    if isinstance(producer, MeasureVectorOperation):
+        return True
+    if isinstance(producer, StoreArrayElementOperation):
+        if len(producer.index_values) != 1:
+            return False
+        stored_index = producer.index_values[0]
+        if not stored_index.is_constant():
+            return False
+        if int(stored_index.get_const()) == index:
+            return is_measurement_backed(
+                producer.stored_value,
+                producer_map,
+                visiting,
+            )
+        return _is_measurement_backed_array_slot(
+            producer.array,
+            index,
+            producer_map,
+            visiting,
+        )
+    if array.slice_of is not None:
+        resolved = resolve_root_array_index(array, index)
+        if resolved is None:
+            return False
+        root, root_index = resolved
+        return _is_measurement_backed_array_slot(
+            root,
+            root_index,
+            producer_map,
+            visiting,
+        )
     return False
 
 
@@ -215,6 +297,182 @@ class ValidateWhileContractPass(Pass[Block, Block]):
             self._check_operand(op.operands[0], "condition", producer_map)
         if len(op.operands) > 1:
             self._check_operand(op.operands[1], "loop-carried condition", producer_map)
+            initial = self._unwrap_value(op.operands[0])
+            carried = self._unwrap_value(op.operands[1])
+            if initial is not None and carried is not None:
+                body_operation_ids = self._collect_operation_ids(op.operations)
+                if not self._is_loop_local_update(
+                    carried,
+                    initial,
+                    body_operation_ids,
+                    producer_map,
+                ):
+                    raise ValidationError(
+                        "WhileOperation loop-carried Bit conditions must be "
+                        "updated by measurements produced inside the loop "
+                        "body, or preserve the current condition value. "
+                        "Reusing a different measurement taken before the "
+                        "loop cannot safely update the backend condition.",
+                        value_name=carried.name,
+                    )
+
+    @staticmethod
+    def _collect_operation_ids(operations: list[Operation]) -> set[int]:
+        """Collect operation identities from a nested operation tree.
+
+        Args:
+            operations (list[Operation]): Operations to scan recursively.
+
+        Returns:
+            set[int]: Python identities of all operations in the tree.
+        """
+        operation_ids: set[int] = set()
+        for operation in operations:
+            operation_ids.add(id(operation))
+            if isinstance(operation, HasNestedOps):
+                for body in operation.nested_op_lists():
+                    operation_ids.update(
+                        ValidateWhileContractPass._collect_operation_ids(body)
+                    )
+        return operation_ids
+
+    @staticmethod
+    def _same_condition_location(left: Value, right: Value) -> bool:
+        """Check whether two values address the same measured bit location.
+
+        Args:
+            left (Value): First condition value.
+            right (Value): Second condition value.
+
+        Returns:
+            bool: True for the same scalar UUID or the same constant-indexed
+                element of a shared measured vector, including slice views.
+        """
+        if left.uuid == right.uuid:
+            return True
+        if (
+            left.parent_array is None
+            or right.parent_array is None
+            or len(left.element_indices) != 1
+            or len(right.element_indices) != 1
+        ):
+            return False
+        left_index = left.element_indices[0]
+        right_index = right.element_indices[0]
+        if not left_index.is_constant() or not right_index.is_constant():
+            return False
+        left_location = resolve_root_array_index(
+            left.parent_array, int(left_index.get_const())
+        )
+        right_location = resolve_root_array_index(
+            right.parent_array, int(right_index.get_const())
+        )
+        if left_location is None or right_location is None:
+            return False
+        left_root, left_root_index = left_location
+        right_root, right_root_index = right_location
+        return left_root.uuid == right_root.uuid and left_root_index == right_root_index
+
+    def _is_loop_local_update(
+        self,
+        value: Value,
+        initial: Value,
+        body_operation_ids: set[int],
+        producer_map: dict[str, Operation],
+        visiting: set[str] | None = None,
+    ) -> bool:
+        """Check that a carried condition is updated within its while body.
+
+        The current condition may pass through an identity branch unchanged.
+        Every other reachable leaf must be a measurement produced in the
+        loop body. This prevents the allocator from aliasing unrelated
+        pre-loop measurement clbits onto the mutable while-condition clbit.
+
+        Args:
+            value (Value): Candidate carried condition value.
+            initial (Value): Initial while-condition value.
+            body_operation_ids (set[int]): Identities of operations inside
+                the while body.
+            producer_map (dict[str, Operation]): Global UUID-to-producer map.
+            visiting (set[str] | None): UUIDs on the current recursion path.
+                Defaults to None.
+
+        Returns:
+            bool: True when every update path is loop-local or preserves the
+                initial condition.
+        """
+        if self._same_condition_location(value, initial):
+            return True
+        if visiting is None:
+            visiting = set()
+        if value.uuid in visiting:
+            return False
+        visiting.add(value.uuid)
+
+        producer = producer_map.get(value.uuid)
+        if isinstance(producer, (MeasureOperation, MeasureVectorOperation)):
+            result = id(producer) in body_operation_ids
+            visiting.discard(value.uuid)
+            return result
+        if (
+            isinstance(producer, ProjectOperation)
+            and producer.results[1].uuid == value.uuid
+        ):
+            result = id(producer) in body_operation_ids
+            visiting.discard(value.uuid)
+            return result
+
+        parent = value.parent_array
+        while parent is not None:
+            parent_producer = producer_map.get(parent.uuid)
+            if isinstance(parent_producer, (MeasureOperation, MeasureVectorOperation)):
+                result = id(parent_producer) in body_operation_ids
+                visiting.discard(value.uuid)
+                return result
+            parent = parent.slice_of
+
+        if isinstance(producer, IfOperation):
+            for merge in producer.iter_merges():
+                if merge.result.uuid != value.uuid:
+                    continue
+                result = self._is_loop_local_update(
+                    merge.true_value,
+                    initial,
+                    body_operation_ids,
+                    producer_map,
+                    visiting,
+                ) and self._is_loop_local_update(
+                    merge.false_value,
+                    initial,
+                    body_operation_ids,
+                    producer_map,
+                    visiting,
+                )
+                visiting.discard(value.uuid)
+                return result
+
+        if (
+            isinstance(producer, RuntimeClassicalExpr)
+            and producer.kind is RuntimeOpKind.SELECT
+        ):
+            result = self._is_loop_local_update(
+                producer.operands[1],
+                initial,
+                body_operation_ids,
+                producer_map,
+                visiting,
+            ) and self._is_loop_local_update(
+                producer.operands[2],
+                initial,
+                body_operation_ids,
+                producer_map,
+                visiting,
+            )
+            visiting.discard(value.uuid)
+            return result
+
+        visiting.discard(value.uuid)
+        return False
 
     @staticmethod
     def _unwrap_value(operand: object) -> Value | None:

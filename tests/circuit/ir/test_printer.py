@@ -8,6 +8,7 @@ comparing them to strings breaks parameter binding.
 import qamomile.circuit as qmc
 from qamomile.circuit.ir import format_value, pretty_print_block
 from qamomile.circuit.ir.block import BlockKind
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.qiskit import QiskitTranspiler
 
 # ---------------------------------------------------------------------------
@@ -21,6 +22,105 @@ def _bell(q0: qmc.Qubit, q1: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
     q0 = qmc.h(q0)
     q0, q1 = qmc.cx(q0, q1)
     return q0, q1
+
+
+@qmc.composite_gate(name="printer_composite_x")
+def _printer_composite_x(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply X inside a preserved callable."""
+    return qmc.x(q)
+
+
+@qmc.qkernel
+def _printer_patterned_concrete(
+    c0: qmc.Qubit,
+    c1: qmc.Qubit,
+    target: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    """Apply a concrete control on the LSB-first value two."""
+    return qmc.control(qmc.x, num_controls=2, control_value=2)(c0, c1, target)
+
+
+@qmc.qkernel
+def _printer_patterned_composite(
+    c0: qmc.Qubit,
+    c1: qmc.Qubit,
+    target: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    """Apply a boxed control on the LSB-first value two."""
+    return qmc.control(
+        _printer_composite_x,
+        num_controls=2,
+        control_value=2,
+    )(c0, c1, target)
+
+
+@qmc.qkernel
+def _printer_patterned_inverse(
+    c0: qmc.Qubit,
+    c1: qmc.Qubit,
+    target: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    """Invert a qkernel containing a patterned boxed control."""
+    return qmc.inverse(_printer_patterned_composite)(c0, c1, target)
+
+
+@qmc.qkernel
+def _printer_select_identity(target: qmc.Qubit) -> qmc.Qubit:
+    """Return a SELECT target unchanged."""
+    return target
+
+
+@qmc.qkernel
+def _printer_select_x(target: qmc.Qubit) -> qmc.Qubit:
+    """Apply X in a SELECT case."""
+    return qmc.x(target)
+
+
+@qmc.qkernel
+def _printer_select_h(target: qmc.Qubit) -> qmc.Qubit:
+    """Apply H in a SELECT case."""
+    return qmc.h(target)
+
+
+@qmc.qkernel
+def _printer_select_z(target: qmc.Qubit) -> qmc.Qubit:
+    """Apply Z in a SELECT case."""
+    return qmc.z(target)
+
+
+@qmc.qkernel
+def _printer_select_identity_x() -> qmc.Bit:
+    """Apply an identity/X SELECT for printer tests."""
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    index, target = qmc.select([_printer_select_identity, _printer_select_x])(
+        index, target
+    )
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _printer_select_h_z() -> qmc.Bit:
+    """Apply an H/Z SELECT for printer tests."""
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    index, target = qmc.select([_printer_select_h, _printer_select_z])(
+        index,
+        target,
+    )
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _printer_symbolic_select(width: qmc.UInt) -> qmc.Bit:
+    """Apply a SELECT whose index width remains symbolic while printing."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_printer_select_identity, _printer_select_x],
+        num_index_qubits=width,
+    )(index, target)
+    return qmc.measure(target)
 
 
 @qmc.qkernel
@@ -155,6 +255,92 @@ def test_invoke_depth_one_expands_body():
     assert any(
         "invoke " in ln and ln.rstrip().endswith("{") for ln in out.splitlines()
     ), f"depth=1 should open a nested invoke block:\n{out}"
+
+
+def test_select_depth_zero_shows_metadata_and_case_names():
+    """Depth zero distinguishes SELECTs by width and named case list."""
+    transpiler = QiskitTranspiler()
+    identity_x = pretty_print_block(
+        transpiler.to_block(_printer_select_identity_x),
+        depth=0,
+    )
+    h_z = pretty_print_block(
+        transpiler.to_block(_printer_select_h_z),
+        depth=0,
+    )
+
+    assert identity_x != h_z
+    assert "index_width=1" in identity_x
+    assert "index_args=1" in identity_x
+    assert "0:_printer_select_identity" in identity_x
+    assert "1:_printer_select_x" in identity_x
+    assert not any(
+        line.lstrip().startswith("case ") for line in identity_x.splitlines()
+    )
+
+
+def test_select_depth_one_expands_each_case_body():
+    """Positive depth opens named SELECT cases and prints their operations."""
+    out = pretty_print_block(
+        QiskitTranspiler().to_block(_printer_select_h_z),
+        depth=1,
+    )
+
+    assert "case 0 _printer_select_h {" in out
+    assert "case 1 _printer_select_z {" in out
+    assert " = h(" in out
+    assert " = z(" in out
+
+
+def test_select_symbolic_width_is_visible():
+    """A symbolic SELECT width is rendered as its runtime parameter."""
+    block = QiskitTranspiler().to_block(
+        _printer_symbolic_select,
+        parameters=["width"],
+    )
+    out = pretty_print_block(block)
+
+    assert "index_width=param(width)" in out
+    assert "index_args=1" in out
+
+
+def test_select_metadata_survives_every_block_kind():
+    """SELECT metadata remains visible through inline, partial eval, and analyze."""
+    transpiler = QiskitTranspiler()
+    hierarchical = transpiler.to_block(_printer_select_identity_x)
+    affine = transpiler.inline(hierarchical)
+    partially_evaluated = transpiler.partial_eval(affine, bindings={})
+    analyzed = transpiler.analyze(partially_evaluated)
+
+    for block in (hierarchical, affine, partially_evaluated, analyzed):
+        out = pretty_print_block(block)
+        assert "index_width=1" in out
+        assert "0:_printer_select_identity" in out
+        assert "1:_printer_select_x" in out
+
+
+def test_patterned_control_metadata_is_visible_for_every_call_representation():
+    """Pretty printing distinguishes zero/one activation patterns."""
+    transpiler = QiskitTranspiler()
+
+    concrete = pretty_print_block(transpiler.to_block(_printer_patterned_concrete))
+    assert "controlled x(" in concrete
+    assert "control_value=2" in concrete
+
+    invoke = pretty_print_block(transpiler.to_block(_printer_patterned_composite))
+    assert "transform=CONTROLLED" in invoke
+    assert "controls=2" in invoke
+    assert "control_value=2" in invoke
+
+    inverse_entry = transpiler.to_block(_printer_patterned_inverse)
+    [outer_inverse] = [
+        op for op in inverse_entry.operations if isinstance(op, InverseBlockOperation)
+    ]
+    assert outer_inverse.implementation_block is not None
+    inverse = pretty_print_block(outer_inverse.implementation_block)
+    assert "inverse printer_composite_x_inverse(" in inverse
+    assert "controls=2" in inverse
+    assert "control_value=2" in inverse
 
 
 # ---------------------------------------------------------------------------

@@ -72,7 +72,7 @@ def test_composite_call_stays_named_with_body() -> None:
     [invoke] = _invokes(use_bell_pair)
 
     assert invoke.custom_name == "bell_pair"
-    assert invoke.target.namespace == "user.composite"
+    assert invoke.target.namespace.startswith("user.composite.")
     assert invoke.transform is CallTransform.DIRECT
     assert invoke.effective_body() is bell_pair.block
 
@@ -134,6 +134,33 @@ def test_qmc_control_accepts_vector_composite_targets() -> None:
     assert controlled.num_control_qubits == 1
 
 
+def test_interleaved_composite_operands_classify_by_type() -> None:
+    """Quantum targets remain visible after an interleaved parameter."""
+
+    @qmc.composite_gate(name="interleaved_box")
+    def interleaved_box(
+        first: qmc.Qubit,
+        theta: qmc.Float,
+        second: qmc.Qubit,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Rotate the first qubit and flip the second qubit."""
+        first = qmc.ry(first, theta)
+        second = qmc.x(second)
+        return first, second
+
+    @qmc.qkernel
+    def circuit(theta: qmc.Float) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Invoke a composite whose Python signature interleaves operand kinds."""
+        first = qmc.qubit("first")
+        second = qmc.qubit("second")
+        return interleaved_box(first, theta, second)
+
+    [invoke] = _invokes(circuit)
+
+    assert [value.name for value in invoke.target_qubits] == ["first", "second"]
+    assert [value.name for value in invoke.parameters] == ["theta"]
+
+
 def test_inverse_accepts_a_composite_qkernel() -> None:
     """Inverse preserves the same callable identity and uses a transform."""
     inverse_bell = qmc.inverse(bell_pair)
@@ -152,6 +179,11 @@ def test_inverse_accepts_a_composite_qkernel() -> None:
     assert inverse.definition is not None
     assert inverse.definition.body is bell_pair.block
     assert inverse.implementation_for() is not None
+
+
+def test_inverse_of_inverse_composite_returns_original_kernel() -> None:
+    """Applying the inverse transform twice cancels at the frontend boundary."""
+    assert qmc.inverse(qmc.inverse(bell_pair)) is bell_pair
 
 
 def test_composite_resource_estimate_is_derived_from_its_body() -> None:
@@ -204,14 +236,20 @@ def test_symbolic_composite_transforms_remain_estimable() -> None:
     assert len({operation.target for operation in invokes}) == 1
 
 
-def test_custom_composite_transpiles_through_its_body() -> None:
-    """A backend without a native emitter lowers the embedded qkernel body."""
+def test_custom_composite_retains_a_decomposable_named_body() -> None:
+    """A generic backend gate keeps identity and an equivalent fallback body."""
     pytest.importorskip("qiskit")
     from qamomile.qiskit import QiskitTranspiler
 
     executable = QiskitTranspiler().transpile(use_bell_pair)
 
     assert executable.quantum_circuit.num_qubits == 2
-    decomposed = executable.quantum_circuit.decompose()
+    [boxed] = [
+        instruction
+        for instruction in executable.quantum_circuit.data
+        if instruction.operation.name != "measure"
+    ]
+    assert boxed.operation.label == "bell_pair"
+    decomposed = executable.quantum_circuit.decompose(reps=2)
     assert decomposed.count_ops()["h"] == 1
     assert decomposed.count_ops()["cx"] == 1

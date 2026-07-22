@@ -7,10 +7,6 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.arithmetic import (
-    modular_decrement,
-    modular_increment,
-)
 from qamomile.circuit.algorithm.basic import (
     cx_entangling_layer,
     cz_entangling_layer,
@@ -28,18 +24,13 @@ from qamomile.circuit.algorithm.fqaoa import (
     mixer_layer,
 )
 from qamomile.circuit.algorithm.qaoa import x_mixer
-from qamomile.circuit.algorithm.state_preparation import (
-    amplitude_encoding,
-    amplitude_encoding_from_angles,
-    computational_basis_state,
-)
 from qamomile.circuit.estimator import estimate_resources
 from qamomile.circuit.frontend.operation.inverse import (
     _BlockInverter,
     _InverseRotationCallable,
     _static_quantum_width,
 )
-from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.frontend.tracer import get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.callable import (
@@ -62,6 +53,16 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+from qamomile.circuit.stdlib import (
+    modular_decrement,
+    modular_increment,
+)
+from qamomile.circuit.stdlib.state_preparation import (
+    computational_basis_state,
+    mottonen_amplitude_encoding,
+    mottonen_amplitude_encoding_from_angles,
+)
+from qamomile.circuit.transpiler.errors import QubitConsumedError
 from qamomile.circuit.visualization.analyzer import CircuitAnalyzer
 from qamomile.circuit.visualization.style import CircuitStyle
 from tests.circuit.conftest import run_statevector
@@ -799,6 +800,112 @@ def test_inverse_qkernel_can_be_assigned_before_calling() -> None:
     ]
 
 
+def test_inverse_duplicate_inputs_leave_handles_unconsumed() -> None:
+    """Aliased inverse arguments fail before affine ownership moves."""
+
+    @qmc.qkernel
+    def pair(
+        left: qmc.Qubit,
+        right: qmc.Qubit,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Return two inputs unchanged.
+
+        Args:
+            left (qmc.Qubit): First input qubit.
+            right (qmc.Qubit): Second input qubit.
+
+        Returns:
+            tuple[qmc.Qubit, qmc.Qubit]: Original inputs.
+        """
+        return left, right
+
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    with trace():
+        with pytest.raises(QubitConsumedError, match="overlapping physical"):
+            qmc.inverse(pair)(qubit, qubit)
+
+    assert not qubit._consumed
+
+
+def test_inverse_missing_tracer_leaves_input_unconsumed() -> None:
+    """Tracer validation happens before inverse ownership commit."""
+
+    @qmc.qkernel
+    def identity(qubit: qmc.Qubit) -> qmc.Qubit:
+        """Return one input unchanged.
+
+        Args:
+            qubit (qmc.Qubit): Input qubit.
+
+        Returns:
+            qmc.Qubit: Original input.
+        """
+        return qubit
+
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    with pytest.raises(RuntimeError, match="No active tracer"):
+        qmc.inverse(identity)(qubit)
+
+    assert not qubit._consumed
+
+
+def test_inverse_specialization_failure_leaves_input_unconsumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed inverse specialization does not consume its input."""
+    from qamomile.circuit.frontend.operation import inverse as inverse_module
+
+    def fail_specialization(*_args, **_kwargs):
+        """Raise a synthetic specialization failure.
+
+        Args:
+            *_args (object): Ignored positional arguments.
+            **_kwargs (object): Ignored keyword arguments.
+
+        Raises:
+            RuntimeError: Always, to exercise the transaction boundary.
+        """
+        raise RuntimeError("specialization failed")
+
+    monkeypatch.setattr(
+        inverse_module,
+        "select_specialized_block",
+        fail_specialization,
+    )
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    with trace():
+        with pytest.raises(RuntimeError, match="specialization failed"):
+            qmc.inverse(_inverse_layer)(qubit, 0.5)
+
+    assert not qubit._consumed
+
+
+def test_inverse_construction_failure_leaves_input_unconsumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed inverse-block construction does not consume its input."""
+
+    def fail_inversion(*_args, **_kwargs):
+        """Raise a synthetic block-inversion failure.
+
+        Args:
+            *_args (object): Ignored positional arguments.
+            **_kwargs (object): Ignored keyword arguments.
+
+        Raises:
+            RuntimeError: Always, to exercise the transaction boundary.
+        """
+        raise RuntimeError("inversion failed")
+
+    monkeypatch.setattr(_BlockInverter, "invert_block", fail_inversion)
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    with trace():
+        with pytest.raises(RuntimeError, match="inversion failed"):
+            qmc.inverse(_inverse_layer)(qubit, 0.5)
+
+    assert not qubit._consumed
+
+
 def test_inverse_qkernel_keeps_inverse_fallback_block() -> None:
     """inverse(qkernel) stores a backend-native source and fallback block."""
 
@@ -1027,6 +1134,51 @@ def test_inverse_pauli_evolve_matches_manual_negative_time(qiskit_transpiler) ->
 # ---------------------------------------------------------------------------
 # Inverse of inverse
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("with_body", [True, False], ids=["body", "opaque"])
+def test_block_inverter_cancels_inverse_invoke_transform(with_body: bool) -> None:
+    """An inverse invocation returns to its direct callable definition."""
+    callee_input = Value(type=QubitType(), name="callee_input")
+    callee_output = callee_input.next_version()
+    callee_body = Block(
+        name="callee",
+        input_values=[callee_input],
+        output_values=[callee_output],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [callee_input],
+                [callee_output],
+            )
+        ],
+    )
+    ref = CallableRef(namespace="test", name="inverse_call")
+    definition = CallableDef(ref=ref, body=callee_body if with_body else None)
+    source = Value(type=QubitType(), name="source")
+    transformed = source.next_version()
+    inverse_call = InvokeOperation(
+        operands=[source],
+        results=[transformed],
+        target=ref,
+        transform=CallTransform.INVERSE,
+        definition=definition,
+    )
+    block = Block(
+        name="inverse_invoke",
+        input_values=[source],
+        output_values=[transformed],
+        operations=[inverse_call],
+        kind=BlockKind.HIERARCHICAL,
+    )
+
+    inverted = _BlockInverter().invert_block(block)
+    [direct_call] = inverted.operations
+
+    assert isinstance(direct_call, InvokeOperation)
+    assert direct_call.transform is CallTransform.DIRECT
+    assert direct_call.definition is definition
+    assert direct_call.body is (callee_body if with_body else None)
 
 
 def test_inverse_of_inverse_restores_source_operations() -> None:
@@ -1786,7 +1938,7 @@ def test_inverse_accepts_qkernel_backed_composite_decorator() -> None:
     assert len(inverse_ops) == 1
     op = inverse_ops[0]
     assert op.transform is CallTransform.INVERSE
-    assert op.target.namespace == "user.composite"
+    assert op.target.namespace.startswith("user.composite.")
     assert op.target.name == "boxed_h"
     assert op.attrs["kind"] == "composite"
     assert op.attrs["custom_name"] == "boxed_h"
@@ -1990,27 +2142,12 @@ def test_qiskit_emitter_falls_back_on_qiskit_error() -> None:
     assert emitter.gate_inverse(BadGate()) is None
 
 
-def test_inverse_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None:
-    """inverse(qkernel) uses QURI Parts inverse_circuit when available."""
+def test_inverse_qkernel_lowers_directly_to_quri_parts_gates() -> None:
+    """inverse(qkernel) lowers directly through the QURI materializer."""
     pytest.importorskip("quri_parts")
     pytest.importorskip("quri_parts.qulacs")
 
-    import quri_parts.circuit as qp_c
-
     from qamomile.quri_parts import QuriPartsTranspiler
-
-    # The emitter looks up `qp_c.inverse_circuit` at call time, so patching
-    # the quri_parts.circuit module attribute observes the backend-native
-    # inverse path without changing its behavior.
-    original_inverse_circuit = qp_c.inverse_circuit
-    inverse_calls = []
-
-    def inverse_circuit_spy(circuit):
-        """Record backend inverse calls while preserving QURI Parts behavior."""
-        inverse_calls.append(circuit)
-        return original_inverse_circuit(circuit)
-
-    monkeypatch.setattr(qp_c, "inverse_circuit", inverse_circuit_spy)
 
     @qmc.qkernel
     def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2023,7 +2160,6 @@ def test_inverse_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None
     executable = transpiler.transpile(circuit)
     gates = executable.compiled_quantum[0].circuit.gates
 
-    assert len(inverse_calls) == 1
     assert [(gate.name, gate.target_indices) for gate in gates] == [
         ("H", (1,)),
         ("RZ", (1,)),
@@ -2038,27 +2174,12 @@ def test_inverse_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None
     ]
 
 
-def test_inverse_vector_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) -> None:
-    """inverse(qkernel) keeps Vector inputs atomic for QURI Parts inversion."""
+def test_inverse_vector_qkernel_lowers_directly_to_quri_parts_gates() -> None:
+    """inverse(qkernel) preserves vector order during direct QURI lowering."""
     pytest.importorskip("quri_parts")
     pytest.importorskip("quri_parts.qulacs")
 
-    import quri_parts.circuit as qp_c
-
     from qamomile.quri_parts import QuriPartsTranspiler
-
-    # The emitter looks up `qp_c.inverse_circuit` at call time, so patching
-    # the quri_parts.circuit module attribute observes the backend-native
-    # inverse path without changing its behavior.
-    original_inverse_circuit = qp_c.inverse_circuit
-    inverse_calls = []
-
-    def inverse_circuit_spy(circuit):
-        """Record backend inverse calls while preserving QURI Parts behavior."""
-        inverse_calls.append(circuit)
-        return original_inverse_circuit(circuit)
-
-    monkeypatch.setattr(qp_c, "inverse_circuit", inverse_circuit_spy)
 
     @qmc.qkernel
     def circuit() -> qmc.Vector[qmc.Bit]:
@@ -2070,7 +2191,6 @@ def test_inverse_vector_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) 
     executable = transpiler.transpile(circuit)
     gates = executable.compiled_quantum[0].circuit.gates
 
-    assert len(inverse_calls) == 1
     assert [(gate.name, gate.target_indices, gate.params) for gate in gates] == [
         ("RX", (1,), (-0.37,)),
         ("RX", (0,), (-0.37,)),
@@ -2078,8 +2198,8 @@ def test_inverse_vector_qkernel_prefers_quri_parts_backend_inverse(monkeypatch) 
 
 
 @pytest.mark.cudaq
-def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
-    """inverse(qkernel) uses CUDA-Q cudaq.adjoint when available.
+def test_inverse_qkernel_uses_cudaq_adjoint_helper() -> None:
+    """inverse(qkernel) preserves a named helper and uses CUDA-Q adjoint.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2100,10 +2220,12 @@ def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
     quantum_step = executable.compiled_quantum[0]
     cudaq_circuit = quantum_step.circuit
 
-    assert "def _qamomile_adjoint_0(t0: cudaq.qubit, thetas: list[float]):" in (
+    assert "def _qamomile_U_0(q0: cudaq.qubit, thetas: list[float]):" in (
         cudaq_circuit.source
     )
-    assert "cudaq.adjoint(_qamomile_adjoint_0, q[1], thetas)" in cudaq_circuit.source
+    assert "rz(thetas[0], q0)" in cudaq_circuit.source
+    assert "cudaq.adjoint(_qamomile_U_0, q0, thetas)" in cudaq_circuit.source
+    assert "_adjoint_1(q[1], thetas)" in cudaq_circuit.entry_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -2118,8 +2240,8 @@ def test_inverse_qkernel_prefers_cudaq_backend_adjoint() -> None:
 
 
 @pytest.mark.cudaq
-def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
-    """inverse(qkernel) keeps Vector inputs atomic for CUDA-Q adjoint.
+def test_inverse_vector_qkernel_uses_cudaq_adjoint_helper() -> None:
+    """Vector inverse stays atomic in a named CUDA-Q adjoint helper.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2141,12 +2263,12 @@ def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
     cudaq_circuit = quantum_step.circuit
 
     assert (
-        "def _qamomile_adjoint_0(t0: cudaq.qubit, t1: cudaq.qubit, "
-        "thetas: list[float]):"
+        "def _qamomile_U_0(q0: cudaq.qubit, q1: cudaq.qubit, thetas: list[float]):"
     ) in cudaq_circuit.source
-    assert (
-        "cudaq.adjoint(_qamomile_adjoint_0, q[0], q[1], thetas)" in cudaq_circuit.source
-    )
+    assert "rx(thetas[0], q0)" in cudaq_circuit.source
+    assert "rx(thetas[0], q1)" in cudaq_circuit.source
+    assert "cudaq.adjoint(_qamomile_U_0, q0, q1, thetas)" in (cudaq_circuit.source)
+    assert "_adjoint_1(q[0], q[1], thetas)" in cudaq_circuit.entry_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -2161,8 +2283,8 @@ def test_inverse_vector_qkernel_prefers_cudaq_backend_adjoint() -> None:
 
 
 @pytest.mark.cudaq
-def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
-    """CUDA-Q inverse-of-inverse falls back before nested adjoint emission.
+def test_inverse_of_inverse_cudaq_collapses_transparent_fallback() -> None:
+    """Nested adjoint collapses its transparent late-fallback wrapper.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2192,7 +2314,8 @@ def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
         "@cudaq.kernel\ndef _qamomile_kernel",
         maxsplit=1,
     )
-    assert "cudaq.adjoint(" not in helper_source
+    assert helper_source.count("cudaq.adjoint(") == 1
+    assert "def _qamomile_U_inverse_" not in helper_source
 
     bound = transpiler.executor().bind_parameters(
         cudaq_circuit,
@@ -2206,7 +2329,7 @@ def test_inverse_of_inverse_cudaq_falls_back_without_nested_adjoint() -> None:
     assert np.allclose(statevector, expected, atol=1e-8)
 
 
-# The two layers below are shared by the CUDA-Q adjoint-source test in this
+# The two layers below are shared by the CUDA-Q adjoint-helper test in this
 # section and by the nested-call wire-availability test in the nested
 # qkernel call section.
 @qmc.qkernel
@@ -2231,8 +2354,8 @@ def _inverse_runtime_call_then_gate_layer(
 
 
 @pytest.mark.cudaq
-def test_inverse_cudaq_adjoint_inlines_nested_source_block() -> None:
-    """CUDA-Q adjoint helpers include nested qkernel call bodies.
+def test_inverse_cudaq_materializer_preserves_nested_adjoint_helper() -> None:
+    """CUDA-Q keeps a nested body named and applies adjoint at the call site.
 
     Runs in ``-m cudaq`` sessions only: loading cudaq into a default
     session is unsafe — see tests/_cudaq_isolation.py.
@@ -2250,10 +2373,10 @@ def test_inverse_cudaq_adjoint_inlines_nested_source_block() -> None:
     executable = CudaqTranspiler().transpile(circuit, parameters=["rotation_angle"])
     source = executable.compiled_quantum[0].circuit.source
 
-    assert "def _qamomile_adjoint_0(t0: cudaq.qubit, thetas: list[float]):" in source
-    assert "h(t0)" in source
-    assert "rx(thetas[0], t0)" in source
-    assert "cudaq.adjoint(_qamomile_adjoint_0, q[0], thetas)" in source
+    assert "h(q0)" in source
+    assert "rx(thetas[0], q0)" in source
+    assert "cudaq.adjoint(_qamomile_U_0, q0, thetas)" in source
+    assert "_adjoint_1(q[0], thetas)" in source
 
 
 # ---------------------------------------------------------------------------
@@ -2814,7 +2937,7 @@ def _rx_layer_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
 
 
 def _modular_increment_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
-    """Build algorithm modular_increment inverse roundtrip kernels.
+    """Build standard-library modular_increment inverse roundtrip kernels.
 
     The register stays at two qubits so the QURI Parts modular-arithmetic
     support documented in LIMITATIONS.md is not exceeded by the forward op.
@@ -3079,7 +3202,7 @@ def _x_mixer_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
 
 
 def _modular_decrement_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
-    """Build algorithm modular_decrement inverse roundtrip kernels.
+    """Build standard-library modular_decrement inverse roundtrip kernels.
 
     The register stays at two qubits so the QURI Parts modular-arithmetic
     support documented in LIMITATIONS.md is not exceeded by the forward op.
@@ -3153,8 +3276,8 @@ def _computational_basis_state_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKe
     return sample_circuit, expval_circuit
 
 
-def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
-    """Build state-preparation amplitude_encoding inverse roundtrip kernels.
+def _mottonen_amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
+    """Build state-preparation mottonen_amplitude_encoding inverse roundtrip kernels.
 
     Both legs go through a register-parameterized qkernel wrapper,
     exercising Möttönen custom-composite inlining and inversion.
@@ -3169,7 +3292,7 @@ def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     @qmc.qkernel
     def amplitude_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply Mottonen amplitude encoding to the whole register."""
-        qs = amplitude_encoding(qs, amplitudes)
+        qs = mottonen_amplitude_encoding(qs, amplitudes)
         return qs
 
     @qmc.qkernel
@@ -3189,15 +3312,15 @@ def _amplitude_encoding_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
     return sample_circuit, expval_circuit
 
 
-def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
+def _mottonen_amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     qmc.QKernel, qmc.QKernel
 ]:
-    """Build state-preparation amplitude_encoding_from_angles roundtrip kernels.
+    """Build state-preparation mottonen_amplitude_encoding_from_angles roundtrip kernels.
 
-    The parametric companion to `amplitude_encoding`: pre-computed Mottonen
+    The parametric companion to `mottonen_amplitude_encoding`: pre-computed Mottonen
     Ry angles are emitted as elementary gates rather than through a custom
     composite operation. The wrapper path is included for symmetry with
-    `amplitude_encoding`, but it does not exercise `_inline_composite`.
+    `mottonen_amplitude_encoding`, but it does not exercise `_inline_composite`.
 
     Returns:
         tuple[qmc.QKernel, qmc.QKernel]: Sampling kernel that measures
@@ -3212,7 +3335,7 @@ def _amplitude_encoding_from_angles_roundtrip_kernels() -> tuple[
     @qmc.qkernel
     def amplitude_angles_layer(qs: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
         """Apply angle-driven Mottonen amplitude encoding to the register."""
-        qs = amplitude_encoding_from_angles(qs, ry_angles)
+        qs = mottonen_amplitude_encoding_from_angles(qs, ry_angles)
         return qs
 
     @qmc.qkernel
@@ -3467,13 +3590,13 @@ STDLIB_ALGO_ROUNDTRIP_CASES = [
         _modular_increment_roundtrip_kernels,
         2,
         {},
-        id="algorithm-modular-increment",
+        id="stdlib-modular-increment",
     ),
     pytest.param(
         _modular_decrement_roundtrip_kernels,
         2,
         {},
-        id="algorithm-modular-decrement",
+        id="stdlib-modular-decrement",
     ),
     pytest.param(
         _computational_basis_state_roundtrip_kernels,
@@ -3482,16 +3605,16 @@ STDLIB_ALGO_ROUNDTRIP_CASES = [
         id="algorithm-computational-basis-state",
     ),
     pytest.param(
-        _amplitude_encoding_roundtrip_kernels,
+        _mottonen_amplitude_encoding_roundtrip_kernels,
         2,
         {},
-        id="algorithm-amplitude-encoding",
+        id="algorithm-mottonen-amplitude-encoding",
     ),
     pytest.param(
-        _amplitude_encoding_from_angles_roundtrip_kernels,
+        _mottonen_amplitude_encoding_from_angles_roundtrip_kernels,
         2,
         {},
-        id="algorithm-amplitude-encoding-from-angles",
+        id="algorithm-mottonen-amplitude-encoding-from-angles",
     ),
     pytest.param(
         _initial_occupations_roundtrip_kernels,
@@ -3614,6 +3737,22 @@ def test_inverse_block_operation_rejects_interleaved_parameters() -> None:
             results=[q0.next_version(), q1.next_version()],
             num_control_qubits=0,
             num_target_qubits=2,
+        )
+
+
+def test_inverse_block_operation_rejects_vector_control_operand() -> None:
+    """The constructor rejects controls whose operand width exceeds one qubit."""
+    dimension = Value(type=UIntType(), name="dimension").with_const(3)
+    control = ArrayValue(type=QubitType(), name="control", shape=(dimension,))
+    target = Value(type=QubitType(), name="target")
+
+    with pytest.raises(ValueError, match="control operands must be scalar qubits"):
+        InverseBlockOperation(
+            operands=[control, target],
+            results=[control.next_version(), target.next_version()],
+            num_control_qubits=1,
+            num_target_qubits=1,
+            control_value=0,
         )
 
 

@@ -15,6 +15,7 @@ from qamomile.circuit.ir.types.primitives import (
 )
 from qamomile.circuit.ir.value import Value, ValueBase
 
+from .control_value import normalize_control_value
 from .operation import Operation, OperationKind, ParamHint, Signature
 
 
@@ -247,7 +248,16 @@ class ControlledUOperation(Operation):
 
     @property
     def param_operands(self) -> list[Value]:
-        """Get parameter operands (non-qubit, non-block)."""
+        """Get the controlled operation's classical/object arguments.
+
+        Returns:
+            list[Value]: Non-quantum operands after the control prefix, in
+            wrapped-kernel signature order.
+
+        Raises:
+            NotImplementedError: Always, because subclasses define their
+                concrete operand layout.
+        """
         raise NotImplementedError  # pragma: no cover
 
     @property
@@ -287,9 +297,30 @@ class ConcreteControlledU(ControlledUOperation):
 
     Operand layout: ``[ctrl_0, ..., ctrl_n, tgt_0, ..., tgt_m, params...]``
     Result layout:  ``[ctrl_0', ..., ctrl_n', tgt_0', ..., tgt_m']``
+
+    Attributes:
+        num_controls (int): Number of leading scalar control operands.
+        control_value (int | None): LSB-first computational-basis value that
+            activates the control. ``None`` is the canonical ordinary
+            all-ones state.
     """
 
     num_controls: int = 1
+    control_value: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate and canonicalize concrete control metadata.
+
+        Raises:
+            TypeError: If ``control_value`` is not a Python ``int`` or
+                ``None``.
+            ValueError: If ``num_controls`` is not positive or the activation
+                value does not fit in the control-register width.
+        """
+        self.control_value = normalize_control_value(
+            self.control_value,
+            self.num_controls,
+        )
 
     @property
     def control_operands(self) -> list[Value]:
@@ -301,8 +332,16 @@ class ConcreteControlledU(ControlledUOperation):
 
     @property
     def param_operands(self) -> list[Value]:
+        """Get classical/object operands after the concrete control prefix.
+
+        Returns:
+            list[Value]: Classical and object operands in wrapped-kernel
+            signature order.
+        """
         return [
-            op for op in self.operands[self.num_controls :] if op.type.is_classical()
+            op
+            for op in self.operands[self.num_controls :]
+            if op.type.is_classical() or op.type.is_object()
         ]
 
     @property
@@ -393,10 +432,16 @@ class SymbolicControlledU(ControlledUOperation):
 
     @property
     def param_operands(self) -> list[Value]:
+        """Get classical/object operands after the symbolic control prefix.
+
+        Returns:
+            list[Value]: Classical and object operands in wrapped-kernel
+            signature order.
+        """
         return [
             op
             for op in self.operands[self.num_control_args :]
-            if op.type.is_classical()
+            if op.type.is_classical() or op.type.is_object()
         ]
 
     @property
@@ -476,7 +521,8 @@ class MeasureQFixedOperation(Operation):
 
     Encoding:
         For QPE phase (int_bits=0):
-            float_value = 0.b0b1b2... = b0*0.5 + b1*0.25 + b2*0.125 + ...
+            Qubits are stored least-significant first. For ``n`` qubits,
+            bit ``i`` has weight ``2**(-n + i)``.
     """
 
     num_bits: int = 0

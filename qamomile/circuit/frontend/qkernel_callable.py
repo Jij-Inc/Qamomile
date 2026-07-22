@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from qamomile.circuit.ir.block import Block
@@ -10,9 +11,10 @@ from qamomile.circuit.ir.operation.callable import (
     CallableRef,
     CallPolicy,
     InvokeOperation,
+    block_call_operands_and_results,
     signature_from_block,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ValueLike
 
 
 def _qkernel_callable_name(kernel: Any) -> str:
@@ -30,39 +32,6 @@ def _qkernel_callable_name(kernel: Any) -> str:
     )
 
 
-def block_call_operands_and_results(
-    block: Block,
-    inputs_map: dict[str, Value],
-) -> tuple[list[Value], list[Value]]:
-    """Map a callee block's ports to call operands and result values.
-
-    Args:
-        block (Block): Callee body whose labels, inputs, and outputs define
-            the call contract.
-        inputs_map (dict[str, Value]): Actual argument values keyed by callee
-            label.
-
-    Returns:
-        tuple[list[Value], list[Value]]: Call operands in callee-label order
-        and result values with pass-through inputs advanced to their next SSA
-        version.
-    """
-    inputs = [inputs_map[label] for label in block.label_args]
-    dummy_inputs = {
-        value.logical_id: idx for idx, value in enumerate(block.input_values)
-    }
-
-    results: list[Value] = []
-    for dummy_return in block.output_values:
-        if dummy_return.logical_id in dummy_inputs:
-            input_idx = dummy_inputs[dummy_return.logical_id]
-            results.append(inputs[input_idx].next_version())
-        else:
-            results.append(dummy_return)
-
-    return inputs, results
-
-
 def qkernel_callable_attrs(kernel: Any) -> dict[str, Any]:
     """Return compiler attrs for a qkernel invocation.
 
@@ -76,11 +45,16 @@ def qkernel_callable_attrs(kernel: Any) -> dict[str, Any]:
     Returns:
         dict[str, Any]: Serializer-friendly callable attributes.
     """
+    preserved_attrs = getattr(kernel, "_callable_attrs_override", None)
+    if isinstance(preserved_attrs, dict):
+        return dict(preserved_attrs)
+
     kind = getattr(kernel, "_callable_kind", "qkernel")
     policy = getattr(kernel, "_callable_policy", CallPolicy.INLINE)
     attrs: dict[str, Any] = {
         "kind": kind,
         "default_policy": policy.name,
+        "origin_qualified": getattr(kernel, "_callable_namespace", None) is None,
     }
     if kind == "composite":
         gate_type = getattr(kernel, "_callable_gate_type", None)
@@ -93,6 +67,9 @@ def qkernel_callable_attrs(kernel: Any) -> dict[str, Any]:
                 "strategy_name": None,
             }
         )
+        semantic_arguments = getattr(kernel, "_callable_semantic_arguments", {})
+        if semantic_arguments:
+            attrs["semantic_arguments"] = dict(semantic_arguments)
     return attrs
 
 
@@ -105,11 +82,21 @@ def qkernel_callable_ref(kernel: Any) -> CallableRef:
     Returns:
         CallableRef: Stable reference used by ``InvokeOperation`` call sites.
     """
+    preserved_ref = getattr(kernel, "_callable_ref_override", None)
+    if isinstance(preserved_ref, CallableRef):
+        return preserved_ref
+
     kind = getattr(kernel, "_callable_kind", "qkernel")
     name = _qkernel_callable_name(kernel)
-    namespace = "user.composite" if kind == "composite" else "user.qkernel"
-    if getattr(kernel, "_callable_namespace", None) is not None:
-        namespace = kernel._callable_namespace
+    namespace = getattr(kernel, "_callable_namespace", None)
+    if namespace is None:
+        raw_func = getattr(kernel, "raw_func", None)
+        module = getattr(raw_func, "__module__", type(kernel).__module__)
+        qualname = getattr(raw_func, "__qualname__", name)
+        code = getattr(raw_func, "__code__", None)
+        first_line = getattr(code, "co_firstlineno", 0)
+        family = "composite" if kind == "composite" else "qkernel"
+        namespace = f"user.{family}.{module}.{qualname}:{first_line}"
     return CallableRef(namespace=namespace, name=name)
 
 
@@ -137,15 +124,15 @@ def qkernel_callable_def(kernel: Any, block: Block) -> CallableDef:
 def qkernel_invoke_block(
     kernel: Any,
     block: Block,
-    inputs_map: dict[str, Value],
+    inputs_map: Mapping[str, ValueLike],
 ) -> InvokeOperation:
     """Create an ``InvokeOperation`` for a qkernel call.
 
     Args:
         kernel (Any): QKernel-like object carrying callable metadata.
         block (Block): Callee body referenced by the callable definition.
-        inputs_map (dict[str, Value]): Actual argument values keyed by callee
-            label.
+        inputs_map (Mapping[str, ValueLike]): Actual argument values keyed by
+            callee label.
 
     Returns:
         InvokeOperation: Inline-by-default qkernel invocation.

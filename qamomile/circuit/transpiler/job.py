@@ -3,11 +3,51 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Hashable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar
+
+import numpy as np
 
 T = TypeVar("T")
+
+
+def _typed_result_key(value: Any) -> Hashable:
+    """Build an exact hashable key for one public sample value.
+
+    Args:
+        value (Any): Converted public result value.
+
+    Returns:
+        Hashable: Structure-, type-, dtype-, and shape-preserving key.
+            Unknown unhashable objects use identity because Qamomile's public
+            result contract does not define equality for arbitrary objects.
+    """
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_typed_result_key(element) for element in value))
+    if isinstance(value, list):
+        return ("list", tuple(_typed_result_key(element) for element in value))
+    if isinstance(value, dict):
+        return (
+            "dict",
+            frozenset(
+                (_typed_result_key(key), _typed_result_key(entry_value))
+                for key, entry_value in value.items()
+            ),
+        )
+    if isinstance(value, np.ndarray):
+        return (
+            "ndarray",
+            value.dtype.str,
+            tuple(value.shape),
+            tuple(_typed_result_key(element) for element in value.reshape(-1).tolist()),
+        )
+    if isinstance(value, np.generic):
+        return ("np_scalar", value.dtype.str, _typed_result_key(value.item()))
+    if isinstance(value, Hashable):
+        return ("scalar", type(value), value)
+    return ("identity", id(value))
 
 
 def _aggregate_typed_results(
@@ -27,27 +67,13 @@ def _aggregate_typed_results(
             summed.
     """
     aggregated: list[tuple[T, int]] = []
-    hashable_positions: dict[T, int] = {}
+    positions: dict[Hashable, int] = {}
     for value, count in results:
-        try:
-            position = hashable_positions.get(value)
-        except TypeError:
-            position = None
-            for index, (existing, _) in enumerate(aggregated):
-                try:
-                    equal = bool(existing == value)
-                except (TypeError, ValueError):
-                    equal = False
-                if equal:
-                    position = index
-                    break
+        key = _typed_result_key(value)
+        position = positions.get(key)
         if position is None:
-            position = len(aggregated)
+            positions[key] = len(aggregated)
             aggregated.append((value, count))
-            try:
-                hashable_positions[value] = position
-            except TypeError:
-                pass
             continue
         existing, existing_count = aggregated[position]
         aggregated[position] = (existing, existing_count + count)

@@ -187,13 +187,40 @@ class TestForItemsValueVarSubstitutesIntoBinOpLabels:
             )
 
         # Every concrete coefficient should appear in exactly one label.
-        expected_substrings = {f"{v}*gamma" for v in coeffs.values()}
+        expected_substrings = {"-0.6*gamma", "gamma", "1.4*gamma"}
         seen = {sub for sub in expected_substrings if any(sub in lbl for lbl in labels)}
         assert seen == expected_substrings, (
             f"Concrete coefficients missing from labels; "
             f"expected substrings {sorted(expected_substrings)}, "
             f"saw {sorted(seen)} in {labels}"
         )
+
+
+def test_vector_key_elements_rebind_for_each_unfolded_entry() -> None:
+    """Each bound Vector key supplies its own concrete element values."""
+
+    @qmc.qkernel
+    def circuit(
+        data: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    ) -> qmc.Bit:
+        """Scale each entry value by the second element of its Vector key."""
+        q = qmc.qubit("q")
+        for key, value in qmc.items(data):
+            q = qmc.rx(q, value * key[1])
+        return qmc.measure(q)
+
+    vc = _build_visual_circuit(
+        circuit,
+        fold_loops=False,
+        data={(2, 3): 0.5, (4, 5): 0.5},
+    )
+    labels = [
+        node.label
+        for node in _walk_visual_nodes(vc.children)
+        if isinstance(node, VGate)
+    ]
+
+    assert labels == ["$R_x$(1.50)", "$R_x$(2.50)", "M"]
 
 
 class TestForLoopVariableSubstitutesIntoArrayIndices:

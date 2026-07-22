@@ -18,7 +18,10 @@ from typing import TYPE_CHECKING, Any
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.errors import EmitError
-from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+from qamomile.circuit.transpiler.passes.emit_support.control_value_emission import (
+    bracket_control_value,
+)
+from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
     _bind_and_populate_block_inputs,
     _emitter_supports_reusable_gates,
     _expand_quantum_operands_to_phys,
@@ -73,9 +76,12 @@ def _normalize_inverse_block_op(
     Raises:
         EmitError: If a marker-bearing nested block is already past the
             stages that can be safely checked.
-        SliceBorrowViolationError: If a nested block's slice usage
-            violates the same linearity rules enforced for top-level
-            blocks.
+        QubitBorrowConflictError: If nested slice views have overlapping live
+            ownership.
+        QubitConsumedError: If a nested block accesses a qubit slot after a
+            destructive operation consumed it.
+        ValidationError: If nested slice ownership cannot be represented
+            safely across a control-flow boundary.
     """
     source_block = _prepare_nested_block_for_emit(op.source_block, bindings)
     implementation_block = _prepare_nested_block_for_emit(
@@ -166,15 +172,20 @@ def emit_inverse_block_at_indices(
         emit_pass (StandardEmitPass): Active emit pass.
         circuit (Any): Backend circuit being emitted into.
         op (InverseBlockOperation): Inverse block operation to emit.
-        control_indices (list[int]): Physical control qubits.
+        control_indices (list[int]): Physical control qubits in enclosing-first
+            order, followed by this operation's own controls.
         target_indices (list[int]): Physical target qubits.
         bindings (dict[str, Any]): Active emit bindings.
 
     Raises:
         EmitError: If required source/fallback blocks are missing or no
             emission path can represent the operation.
-        SliceBorrowViolationError: If a nested block's slice usage fails
-            the borrow check run by ``_normalize_inverse_block_op``.
+        QubitBorrowConflictError: If nested slice views have overlapping live
+            ownership.
+        QubitConsumedError: If a nested block accesses a qubit slot after a
+            destructive operation consumed it.
+        ValidationError: If nested slice ownership cannot be represented
+            safely across a control-flow boundary.
     """
     if op.source_block is None or op.implementation_block is None:
         raise EmitError(
@@ -197,6 +208,50 @@ def emit_inverse_block_at_indices(
     # ill-defined and would otherwise leak a raw backend error (Qiskit) or
     # compile silently and crash the simulator (CUDA-Q).
     reject_duplicate_physical_indices("inverse block", control_indices + target_indices)
+
+    # Nested emission prepends enclosing controls. InverseBlockOperation
+    # validates one scalar qubit per control operand, so num_control_qubits is
+    # also the physical width of this operation's trailing control segment.
+    activation_controls = (
+        control_indices[-op.num_control_qubits :] if op.num_control_qubits else []
+    )
+    with bracket_control_value(
+        emit_pass,
+        circuit,
+        activation_controls,
+        op.control_value,
+    ):
+        _emit_all_ones_inverse_block_at_indices(
+            emit_pass,
+            circuit,
+            op,
+            control_indices,
+            target_indices,
+            bindings,
+        )
+
+
+def _emit_all_ones_inverse_block_at_indices(
+    emit_pass: "StandardEmitPass",
+    circuit: Any,
+    op: InverseBlockOperation,
+    control_indices: list[int],
+    target_indices: list[int],
+    bindings: dict[str, Any],
+) -> None:
+    """Emit an inverse block after activation controls are normalized.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (InverseBlockOperation): Normalized inverse block operation.
+        control_indices (list[int]): Physical all-ones control qubits.
+        target_indices (list[int]): Physical target qubits.
+        bindings (dict[str, Any]): Active emit bindings.
+
+    Returns:
+        None.
+    """
 
     input_operands = [*op.target_qubits, *op.parameters]
     can_build_reusable_gate = _emitter_supports_reusable_gates(emit_pass._emitter)

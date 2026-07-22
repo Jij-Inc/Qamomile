@@ -20,11 +20,16 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOpKind,
     CompOp,
     CompOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
 )
 from qamomile.circuit.ir.operation.callable import CallTransform
+from qamomile.circuit.ir.operation.operation import Operation
+from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
-from ._utils import BINOP_TO_SYMPY
+from ._utils import BINOP_TO_SYMPY, UNARY_MATH_TO_SYMPY
 
 
 class UnresolvedValueError(Exception):
@@ -41,16 +46,21 @@ class ExprResolver:
     Resolution strategy (deterministic, single path):
       1. Already sp.Basic                        → return as-is
       2. Not a Value (int, float, bool)           → direct conversion
-      3. UUID in context (call_context / BinOp)   → return mapped expression
+      3. UUID in context (call context / expression) → return mapped expression
       4. Constant value                           → sp.Integer / sp.Float
       5. Unbound parameter                        → sp.Symbol (symbolic) or raise (concrete)
-      6. Loop variable (name-based)               → return mapped symbol
-      7. BinOp/CompOp result                      → trace in block operations
-      8. Search parent blocks                     → trace in ancestors
-      9. Fallback                                 → sp.Symbol (symbolic) or raise (concrete)
+      6. Arithmetic/comparison result              → trace in block operations
+      7. Search parent blocks                     → trace in ancestors
+      8. Fallback                                 → identity-qualified symbol or raise
     """
 
-    __slots__ = ("_block", "_context", "_loop_var_names", "_parent_blocks")
+    __slots__ = (
+        "_block",
+        "_context",
+        "_loop_var_names",
+        "_parent_blocks",
+        "_producer_maps",
+    )
 
     def __init__(
         self,
@@ -58,12 +68,13 @@ class ExprResolver:
         context: dict[str, sp.Expr] | None = None,
         loop_var_names: dict[str, sp.Expr] | None = None,
         parent_blocks: list[Any] | None = None,
+        producer_maps: dict[int, tuple[Any, dict[str, Operation]]] | None = None,
     ):
         """Initialise an ExprResolver.
 
         Args:
             block (Any): The current block (Block or _LocalBlock)
-                whose operations are searched for BinOp/CompOp traces.
+                whose operations are searched for classical expression traces.
             context (dict[str, sp.Expr] | None): UUID → resolved expression
                 mapping for values passed across scope boundaries (e.g.
                 call arguments, composite-gate operands).
@@ -71,11 +82,17 @@ class ExprResolver:
                 expression mapping for loop variables in scope.
             parent_blocks (list[Any] | None): Ancestor blocks to search
                 when tracing fails in the current block.
+            producer_maps (dict[int, tuple[Any, dict[str, Operation]]] | None):
+                Shared block-identity index containing a strong block reference
+                and its result UUID to producer-operation map. Child resolvers
+                reuse it so every block is indexed at most once. Defaults to
+                ``None``.
         """
         self._block = block
         self._context: dict[str, sp.Expr] = dict(context or {})
         self._loop_var_names: dict[str, sp.Expr] = dict(loop_var_names or {})
         self._parent_blocks: list[Any] = list(parent_blocks or [])
+        self._producer_maps = producer_maps if producer_maps is not None else {}
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
@@ -154,6 +171,7 @@ class ExprResolver:
             context=ctx,
             loop_var_names=lvn,
             parent_blocks=new_parents,
+            producer_maps=self._producer_maps,
         )
 
     def call_child_scope(
@@ -209,10 +227,7 @@ class ExprResolver:
             actual_operands = actual_operands[call_op.num_control_qubits :]
 
         extra: dict[str, sp.Expr] = {}
-        for i, formal in enumerate(called_block.input_values):
-            if i >= len(actual_operands):
-                break
-            actual = actual_operands[i]
+        for formal, actual in pair_block_operands(called_block, actual_operands):
             extra[formal.uuid] = self.resolve(actual)
             # Map array shape dimension UUIDs
             if isinstance(actual, ArrayValue) and isinstance(formal, ArrayValue):
@@ -227,6 +242,7 @@ class ExprResolver:
             context=ctx,
             loop_var_names=self._loop_var_names.copy(),
             parent_blocks=[],
+            producer_maps=self._producer_maps,
         )
 
     def bind(self, value: Value, expression: sp.Expr) -> None:
@@ -316,28 +332,53 @@ class ExprResolver:
             if pname is not None:
                 if concrete:
                     raise UnresolvedValueError(v.uuid, f"Symbolic parameter '{pname}'")
-                return sp.Symbol(pname, integer=True, positive=True)
+                return _parameter_symbol(v, pname)
 
-        # 6. Loop variable (name-based lookup)
-        if v.name in self._loop_var_names:
-            return self._loop_var_names[v.name]
-
-        # 7. Trace BinOp / CompOp in current block
+        # 6. Trace BinOp / CompOp in current block
         if self._block is not None:
             traced = self._trace(v, self._block, set(), concrete)
             if traced is not None:
                 return traced
 
-        # 8. Parent blocks
+        # 7. Parent blocks
         for pb in reversed(self._parent_blocks):
             traced = self._trace(v, pb, set(), concrete)
             if traced is not None:
                 return traced
 
-        # 9. Fallback
+        # 8. Public input shapes retain their stable names. Other unresolved
+        # values use the complete UUID because display names are not identity
+        # and canonical UUIDs commonly share long prefixes.
         if concrete:
             raise UnresolvedValueError(v.uuid, f"Unresolvable: '{v.name}'")
-        return sp.Symbol(v.name, integer=True, positive=True)
+        if self._is_input_shape_dimension(v):
+            return sp.Symbol(v.name, integer=True, nonnegative=True)
+        fallback_name = f"{v.name}_{v.uuid}"
+        if isinstance(v.type, FloatType):
+            return sp.Symbol(fallback_name, real=True)
+        if isinstance(v.type, (BitType, UIntType)):
+            return sp.Symbol(fallback_name, integer=True, nonnegative=True)
+        return sp.Symbol(fallback_name)
+
+    def _is_input_shape_dimension(self, value: Value) -> bool:
+        """Return whether a value is a public input-array dimension.
+
+        Args:
+            value (Value): Unresolved value considered for symbolic fallback.
+
+        Returns:
+            bool: Whether ``value`` appears in an input array's shape in the
+                current or an enclosing block.
+        """
+        for block in (self._block, *reversed(self._parent_blocks)):
+            if not isinstance(block, Block):
+                continue
+            for input_value in block.input_values:
+                if isinstance(input_value, ArrayValue) and any(
+                    dimension.uuid == value.uuid for dimension in input_value.shape
+                ):
+                    return True
+        return False
 
     def _trace(
         self, v: Value, block: Any, visited: set[int], concrete: bool
@@ -352,38 +393,82 @@ class ExprResolver:
             concrete (bool): Passed through to :meth:`_resolve`.
 
         Returns:
-            sp.Expr | None: Resolved expression if a defining BinOp or
-                CompOp was found; ``None`` otherwise.
+            sp.Expr | None: Resolved expression if a supported defining
+                classical operation was found; ``None`` otherwise.
         """
         vid = id(v)
         if vid in visited:
             return None
         visited.add(vid)
 
-        for op in block.operations:
-            if not hasattr(op, "results") or not op.results:
-                continue
-            if op.results[0] != v:
-                continue
+        op = self._producer_map(block).get(v.uuid)
+        if isinstance(op, BinOp):
+            left = self._resolve(op.operands[0], concrete)
+            right = self._resolve(op.operands[1], concrete)
+            assert op.kind is not None
+            return _apply_binop(op.kind, left, right)
 
-            if isinstance(op, BinOp):
-                left = self._resolve(op.operands[0], concrete)
-                right = self._resolve(op.operands[1], concrete)
-                assert op.kind is not None
-                return _apply_binop(op.kind, left, right)
+        if isinstance(op, CompOp):
+            left = self._resolve(op.operands[0], concrete)
+            right = self._resolve(op.operands[1], concrete)
+            assert op.kind is not None
+            return _apply_compop(op.kind, left, right)
 
-            if isinstance(op, CompOp):
-                left = self._resolve(op.operands[0], concrete)
-                right = self._resolve(op.operands[1], concrete)
-                assert op.kind is not None
-                return _apply_compop(op.kind, left, right)
+        if isinstance(op, UnaryMathOp):
+            operand = self._resolve(op.input, concrete)
+            assert op.kind is not None
+            return _apply_unary_math(op.kind, operand)
 
         return None
+
+    def _producer_map(self, block: Any) -> dict[str, Operation]:
+        """Return the cached producer index for one block.
+
+        Args:
+            block (Any): Block-like object exposing an ``operations`` list.
+
+        Returns:
+            dict[str, Operation]: Result UUID to defining operation. All
+                operation results are indexed, not only the first result.
+        """
+        block_id = id(block)
+        cached = self._producer_maps.get(block_id)
+        if cached is None or cached[0] is not block:
+            producers = {
+                result.uuid: operation
+                for operation in block.operations
+                for result in operation.results
+            }
+            self._producer_maps[block_id] = (block, producers)
+            return producers
+        return cached[1]
 
 
 # ------------------------------------------------------------------ #
 #  Module-level helpers                                               #
 # ------------------------------------------------------------------ #
+
+
+def _parameter_symbol(value: Value, name: str) -> sp.Symbol:
+    """Create a symbol matching an IR parameter's scalar domain.
+
+    Args:
+        value (Value): Parameter value whose IR type defines assumptions.
+        name (str): Public parameter name used for the symbol.
+
+    Returns:
+        sp.Symbol: A nonnegative integer for UInt/Bit, a real symbol for
+            Float, or an unconstrained symbol for other value types.
+    """
+    if isinstance(value.type, FloatType):
+        return sp.Symbol(name, real=True)
+    if isinstance(value.type, (BitType, UIntType)):
+        # Zero is a valid UInt/Bit value. Assuming strict positivity lets SymPy
+        # erase ``value == 0`` branches and zero-trip width guards before a
+        # later substitution can recover them.
+        return sp.Symbol(name, integer=True, nonnegative=True)
+    return sp.Symbol(name)
+
 
 _COMPOP_MAP = {
     CompOpKind.EQ: sp.Eq,
@@ -413,6 +498,28 @@ def _apply_binop(kind: BinOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
     if fn is None:
         raise ValueError(f"Unknown BinOpKind: {kind}")
     return fn(left, right)
+
+
+def _apply_unary_math(
+    kind: UnaryMathOpKind,
+    operand: sp.Expr,
+) -> sp.Expr:
+    """Apply one exact symbolic unary mathematical operation.
+
+    Args:
+        kind (UnaryMathOpKind): Mathematical operation kind.
+        operand (sp.Expr): Symbolic numeric operand.
+
+    Returns:
+        sp.Expr: Exact SymPy expression.
+
+    Raises:
+        ValueError: If ``kind`` has no symbolic implementation.
+    """
+    fn = UNARY_MATH_TO_SYMPY.get(kind)
+    if fn is None:
+        raise ValueError(f"Unknown UnaryMathOpKind: {kind}")
+    return fn(operand)
 
 
 def _apply_compop(kind: CompOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:

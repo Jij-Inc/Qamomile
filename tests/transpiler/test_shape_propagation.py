@@ -10,7 +10,163 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
-from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.operation import CInitOperation
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.types.primitives import UIntType
+from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.transpiler.passes.inline import InlinePass
+
+
+def _scalar_returning_block(name: str) -> tuple[Block, Value]:
+    """Build a callee block that returns one scalar value."""
+    output = Value(type=UIntType(), name=f"{name}_out")
+    block = Block(
+        name=name,
+        output_values=[output],
+        operations=[
+            CInitOperation(results=[output]),
+            ReturnOperation(operands=[output]),
+        ],
+        kind=BlockKind.HIERARCHICAL,
+    )
+    return block, output
+
+
+def _block_with_structural_output_call(name: str) -> tuple[Block, Value, Value]:
+    """Build a block whose tuple output contains a call result placeholder."""
+    callee, _ = _scalar_returning_block(f"{name}_callee")
+    sibling = Value(type=UIntType(), name=f"{name}_sibling")
+    call = callee.call()
+    call_result = call.results[0]
+    output = TupleValue(name=f"{name}_tuple", elements=(call_result, sibling))
+    block = Block(
+        name=name,
+        output_values=[output],
+        operations=[call],
+        kind=BlockKind.HIERARCHICAL,
+    )
+    return block, call_result, sibling
+
+
+class TestInlineStructuralOutputSubstitution:
+    """Test structural block outputs updated by InlinePass substitutions."""
+
+    def test_top_level_tuple_output_rewrites_inlined_call_result(self):
+        """InlinePass rewrites call result placeholders inside TupleValue
+        block outputs."""
+        block, call_result, sibling = _block_with_structural_output_call("top")
+
+        inlined = InlinePass().run(block)
+
+        output = inlined.output_values[0]
+        assert isinstance(output, TupleValue)
+        assert output.elements[0].uuid != call_result.uuid
+        assert output.elements[0].name == "top_callee_out"
+        assert output.elements[1] == sibling
+
+    def test_nested_block_tuple_output_rewrites_inlined_call_result(self):
+        """Nested blocks owned by operations rewrite structural output
+        elements after inlining."""
+        nested, call_result, sibling = _block_with_structural_output_call("nested")
+        outer = Block(
+            name="outer",
+            operations=[InverseBlockOperation(source_block=nested)],
+            kind=BlockKind.HIERARCHICAL,
+        )
+
+        inlined = InlinePass().run(outer)
+
+        inverse_op = inlined.operations[0]
+        assert isinstance(inverse_op, InverseBlockOperation)
+        assert inverse_op.source_block is not None
+        output = inverse_op.source_block.output_values[0]
+        assert isinstance(output, TupleValue)
+        assert output.elements[0].uuid != call_result.uuid
+        assert output.elements[0].name == "nested_callee_out"
+        assert output.elements[1] == sibling
+
+    def test_dict_output_tuple_key_rewrites_inlined_call_result(self):
+        """InlinePass rewrites call results nested inside DictValue keys."""
+        callee, _ = _scalar_returning_block("dict_callee")
+        sibling = Value(type=UIntType(), name="dict_sibling")
+        value = Value(type=UIntType(), name="dict_value")
+        call = callee.call()
+        call_result = call.results[0]
+        key = TupleValue(name="dict_key", elements=(call_result, sibling))
+        output = DictValue(name="dict_output", entries=((key, value),))
+        block = Block(
+            name="dict_outer",
+            output_values=[output],
+            operations=[call],
+            kind=BlockKind.HIERARCHICAL,
+        )
+
+        inlined = InlinePass().run(block)
+
+        dict_output = inlined.output_values[0]
+        assert isinstance(dict_output, DictValue)
+        key_output, value_output = dict_output.entries[0]
+        assert isinstance(key_output, TupleValue)
+        assert key_output.elements[0].uuid != call_result.uuid
+        assert key_output.elements[0].name == "dict_callee_out"
+        assert key_output.elements[1] == sibling
+        assert value_output == value
+
+
+class TestStructuralCallResultMaterialization:
+    """Test caller-local structural result graphs produced by ``Block.call``."""
+
+    def test_result_metadata_references_caller_local_sibling(self):
+        """Metadata references are remapped after the full result graph is known."""
+        element = Value(type=UIntType(), name="element")
+        dimension = Value(type=UIntType(), name="dimension").with_const(1)
+        array = ArrayValue(
+            type=UIntType(),
+            name="array",
+            shape=(dimension,),
+        ).with_array_runtime_metadata(
+            element_uuids=(element.uuid,),
+            element_logical_ids=(element.logical_id,),
+        )
+        output = TupleValue(name="output", elements=(element, array))
+        block = Block(name="metadata", output_values=[output])
+
+        result = block.call().results[0]
+
+        assert isinstance(result, TupleValue)
+        result_element, result_array = result.elements
+        assert isinstance(result_array, ArrayValue)
+        assert result_element.uuid != element.uuid
+        assert result_array.metadata.array_runtime is not None
+        assert result_array.metadata.array_runtime.element_uuids == (
+            result_element.uuid,
+        )
+        assert result_array.metadata.array_runtime.element_logical_ids == (
+            result_element.logical_id,
+        )
+
+    def test_empty_formal_dict_pass_through_preserves_actual_entries(self):
+        """A symbolic empty formal dict does not erase populated actual data."""
+        formal = DictValue(name="formal", entries=())
+        key_element = Value(type=UIntType(), name="key_element").with_const(2)
+        key = TupleValue(name="key", elements=(key_element,))
+        entry = Value(type=UIntType(), name="entry").with_const(7)
+        actual = DictValue(name="actual", entries=((key, entry),))
+        block = Block(
+            name="identity_dict",
+            label_args=["mapping"],
+            input_values=[formal],
+            output_values=[formal],
+            operations=[ReturnOperation(operands=[formal])],
+        )
+
+        result = block.call(mapping=actual).results[0]
+
+        assert isinstance(result, DictValue)
+        assert result.uuid != actual.uuid
+        assert result.entries == actual.entries
 
 
 class TestXMixerShapePropagation:
@@ -128,7 +284,10 @@ class TestNewArrayValueShapePropagation:
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
-        return QiskitTranspiler(use_native_composite=False)
+        return QiskitTranspiler(
+            use_native_composite=False,
+            use_native_pauli_evolution=False,
+        )
 
     def test_new_array_shape_propagates_through_inline(self, qiskit_transpiler):
         """A callee that creates a new ArrayValue and returns it should
@@ -177,7 +336,8 @@ class TestNewArrayValueShapePropagation:
         )
         qc = exe.compiled_quantum[0].circuit
 
-        # Count gates: should have RZ (from fallback evolve) + RX (from mixer)
+        # This fixture disables native composites, so evolution is legalized
+        # to RZ gadgets while the mixer emits RX.
         gate_names = [inst.operation.name for inst in qc.data]
         assert "rz" in gate_names, f"Expected RZ from evolve, got {gate_names}"
         assert "rx" in gate_names, f"Expected RX from mixer, got {gate_names}"
