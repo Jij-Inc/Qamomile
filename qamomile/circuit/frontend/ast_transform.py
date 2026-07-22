@@ -2557,7 +2557,10 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
             target = node.targets[0]
             if isinstance(target, ast.Name):
                 self._check_single_assign(target.id, node.value, node.lineno)
-            elif isinstance(target, ast.Tuple):
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                # ``[a] = [expr]`` is the same unpacking assignment as
+                # ``a, = expr,`` — route list targets through the tuple
+                # path so the spelling cannot dodge the rebind rules.
                 self._check_tuple_assign(target, node.value, node.lineno)
         else:
             # Chained ``a = b = ...``. Conservative: flag if any target
@@ -2858,36 +2861,50 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
     # ------------------------------------------------------------------
 
     def _check_tuple_assign(
-        self, targets: ast.Tuple, value: ast.expr, lineno: int
+        self, targets: ast.Tuple | ast.List, value: ast.expr, lineno: int
     ) -> None:
-        """Apply rebind rules to a tuple-unpacking assignment.
+        """Apply rebind rules to an unpacking assignment.
 
         Args:
-            targets (ast.Tuple): The LHS tuple expression.
-            value (ast.expr): RHS expression. Supports ``ast.Call`` (the
-                existing permissive logic preserves swap-via-call) and
-                ``ast.Tuple`` (element-wise with pure-quantum permutation
-                special case).
+            targets (ast.Tuple | ast.List): The LHS tuple / list
+                expression (Python unpacking semantics are identical).
+            value (ast.expr): RHS expression. ``ast.Tuple`` /
+                ``ast.List`` literals are paired element-wise —
+                flat all-``Name`` shapes keep the pure-quantum
+                permutation special case, and mixed shapes (nested
+                tuples / lists, a starred target) go through the
+                recursive target-tree walk. ``ast.Call`` keeps the
+                existing permissive logic that preserves
+                swap-via-call.
             lineno (int): Source line for diagnostic reporting.
         """
         target_names = [elt.id for elt in targets.elts if isinstance(elt, ast.Name)]
-        if not target_names:
+        flat_all_names = len(target_names) == len(targets.elts)
+        if not target_names and flat_all_names:
+            # Empty target list — nothing to check.
             return
 
-        # Tuple-literal RHS: pair each target with the same-position RHS
-        # element. Only take this path when every LHS target is a plain
-        # ``Name``; if any LHS element is a ``Subscript`` / ``Starred`` /
-        # nested ``Tuple``, ``target_names`` is shorter than
-        # ``targets.elts`` and ``zip(target_names, value.elts)`` would
-        # mis-associate Name targets with RHS positions belonging to the
-        # non-Name targets. Defer mixed shapes to the call path (which
-        # leaves them alone) until a proper target-tree walker is added.
-        if (
-            isinstance(value, ast.Tuple)
-            and len(targets.elts) == len(value.elts)
-            and len(target_names) == len(targets.elts)
-        ):
-            self._check_tuple_literal_rhs(target_names, value.elts, lineno)
+        # Literal RHS: pair each target with the same-position RHS
+        # element. Flat all-``Name`` shapes keep the dedicated
+        # permutation-aware path; every other shape (nested tuple /
+        # list targets, a starred target, non-``Name`` leaves) goes
+        # through the recursive target-tree walk so a rebind cannot
+        # dodge the rules by spelling — ``a, *rest = x(b), pad`` and
+        # ``a, (m, n) = x(b), (c, d)`` are the same rebind of ``a``
+        # as ``a = x(b)``.
+        if isinstance(value, (ast.Tuple, ast.List)):
+            if flat_all_names and len(targets.elts) == len(value.elts):
+                self._check_tuple_literal_rhs(target_names, value.elts, lineno)
+            else:
+                self._check_target_tree_literal(
+                    list(targets.elts), list(value.elts), lineno
+                )
+            return
+
+        if not target_names:
+            # Mixed non-literal shapes with no plain-``Name`` leaf at
+            # this level (e.g. ``(m, n), obj.attr = f()``): nothing the
+            # call path below can classify.
             return
 
         if not isinstance(value, ast.Call):
@@ -2958,6 +2975,209 @@ class QuantumRebindAnalyzer(ast.NodeVisitor):
 
             # For new targets (or mismatched existing ones), track mapped origin.
             self.quantum_vars[tgt] = mapped_origin
+
+    def _check_target_tree_literal(
+        self,
+        target_elts: list[ast.expr],
+        value_elts: list[ast.expr],
+        lineno: int,
+    ) -> None:
+        """Pair a mixed / nested target tree with a literal RHS, recursively.
+
+        The target-tree walk for unpacking shapes the flat path cannot
+        represent: starred targets (``a, *rest = x(b), pad``), nested
+        tuple / list targets (``a, (m, n) = x(b), (c, d)``), and any
+        combination thereof. Each ``Name`` leaf paired with its RHS
+        element dispatches to :meth:`_check_single_assign`, so every
+        spelling of ``a = x(b)`` meets the same rebind rules.
+
+        Python grammar allows at most one starred target per level:
+        prefix targets pair with prefix RHS elements, suffix targets
+        with the RHS tail, and the starred name absorbs the middle as
+        a plain Python list.
+
+        Known non-flagged corners (conservative toward allowing):
+        an *existing* quantum name as the starred target is untracked
+        rather than flagged (it now holds a Python list — the heap
+        boundary below); ``Subscript`` / ``Attribute`` leaves are heap
+        or object stores the static analyzer cannot model (see the
+        canonical in-place form ``qs[i] = qm.h(qs[i])``, which shares
+        their syntax); a nested pattern unpacking a non-literal RHS
+        element is left to runtime.
+
+        Args:
+            target_elts (list[ast.expr]): LHS elements at this nesting
+                level.
+            value_elts (list[ast.expr]): RHS literal elements at the
+                same level.
+            lineno (int): Source line for diagnostic reporting.
+        """
+        # Whole-subtree pure-quantum permutation escape FIRST: a 1-to-1
+        # swap can span nesting levels and coexist with a star
+        # (``a, (b,) = b, (a,)``; ``a, b, *rest = b, a, pad``), which a
+        # per-level check cannot see. If every ``Name`` leaf of this
+        # subtree maps to an existing quantum origin and the target and
+        # value origin multisets match, it is a permutation — apply the
+        # swap and stop, so a legal reordering is never flagged.
+        if self._apply_permutation_escape(target_elts, value_elts):
+            return
+
+        star_idx = next(
+            (i for i, t in enumerate(target_elts) if isinstance(t, ast.Starred)),
+            None,
+        )
+        if star_idx is None:
+            if len(target_elts) != len(value_elts):
+                # Arity mismatch raises ValueError at runtime; there is
+                # no sound positional pairing to classify.
+                return
+            pairs = list(zip(target_elts, value_elts))
+        else:
+            n_fixed = len(target_elts) - 1
+            if len(value_elts) < n_fixed:
+                # Runtime ValueError (not enough values to unpack).
+                return
+            suffix_len = n_fixed - star_idx
+            pairs = list(zip(target_elts[:star_idx], value_elts[:star_idx]))
+            if suffix_len:
+                pairs += list(
+                    zip(
+                        target_elts[star_idx + 1 :],
+                        value_elts[len(value_elts) - suffix_len :],
+                    )
+                )
+            starred = target_elts[star_idx]
+            if isinstance(starred, ast.Starred) and isinstance(starred.value, ast.Name):
+                self.quantum_vars.pop(starred.value.id, None)
+
+        for tgt, elt in pairs:
+            if isinstance(tgt, ast.Name):
+                self._check_single_assign(tgt.id, elt, lineno)
+            elif isinstance(tgt, (ast.Tuple, ast.List)) and isinstance(
+                elt, (ast.Tuple, ast.List)
+            ):
+                # A nested level re-enters this method, so its own subtree
+                # gets the permutation escape (a legal swap nested inside
+                # a larger non-permutation statement stays legal) before
+                # any element is flagged.
+                self._check_target_tree_literal(list(tgt.elts), list(elt.elts), lineno)
+            else:
+                # Non-Name, non-recursable leaf (heap / object store, or
+                # a nested pattern over a non-literal element) — out of
+                # the static model, documented above.
+                pass
+
+    def _flat_leaf_pairs(
+        self, target_elts: list[ast.expr], value_elts: list[ast.expr]
+    ) -> list[tuple[ast.expr, ast.expr | None]] | None:
+        """Structurally zip a target tree with a literal RHS into leaf pairs.
+
+        Descends into matching nested ``Tuple`` / ``List`` levels so a
+        cross-level permutation flattens to one leaf list. One starred
+        target per level is allowed; it contributes a single
+        ``(Starred, None)`` leaf (it binds a Python list, not a quantum
+        value) and absorbs the middle RHS elements. Returns ``None`` when
+        the shapes cannot be aligned (arity mismatch, or a ``Tuple`` /
+        ``List`` target paired with a non-sequence RHS element) — the
+        permutation escape then does not apply.
+
+        Args:
+            target_elts (list[ast.expr]): LHS elements at this level.
+            value_elts (list[ast.expr]): RHS literal elements at this level.
+
+        Returns:
+            list[tuple[ast.expr, ast.expr | None]] | None: Flattened
+                ``(target_leaf, value_leaf)`` pairs, or ``None`` if the
+                structures do not align.
+        """
+        star_idx = next(
+            (i for i, t in enumerate(target_elts) if isinstance(t, ast.Starred)),
+            None,
+        )
+        result: list[tuple[ast.expr, ast.expr | None]] = []
+        if star_idx is None:
+            if len(target_elts) != len(value_elts):
+                return None
+            seq = list(zip(target_elts, value_elts))
+        else:
+            n_fixed = len(target_elts) - 1
+            if len(value_elts) < n_fixed:
+                return None
+            suffix_len = n_fixed - star_idx
+            seq = list(zip(target_elts[:star_idx], value_elts[:star_idx]))
+            if suffix_len:
+                seq += list(
+                    zip(
+                        target_elts[star_idx + 1 :],
+                        value_elts[len(value_elts) - suffix_len :],
+                    )
+                )
+            result.append((target_elts[star_idx], None))
+        for tgt, elt in seq:
+            if isinstance(tgt, (ast.Tuple, ast.List)):
+                if not isinstance(elt, (ast.Tuple, ast.List)):
+                    return None
+                sub = self._flat_leaf_pairs(list(tgt.elts), list(elt.elts))
+                if sub is None:
+                    return None
+                result.extend(sub)
+            else:
+                result.append((tgt, elt))
+        return result
+
+    def _apply_permutation_escape(
+        self, target_elts: list[ast.expr], value_elts: list[ast.expr]
+    ) -> bool:
+        """Apply the swap and return ``True`` iff this subtree is a permutation.
+
+        The subtree is a pure-quantum permutation when, across all
+        flattened leaves, every non-starred target is an already-tracked
+        quantum ``Name``, every paired RHS leaf contributes exactly one
+        quantum origin, and the two origin multisets are equal. That is
+        the generalisation of :meth:`_check_tuple_literal_rhs`'s flat
+        escape to nested / starred shapes (``a, (b,) = b, (a,)``;
+        ``a, b, *rest = b, a, pad``). On a match the swapped origins are
+        assigned simultaneously and any starred quantum name is dropped
+        (it now holds a Python list); nothing is flagged.
+
+        Args:
+            target_elts (list[ast.expr]): LHS elements at this level.
+            value_elts (list[ast.expr]): RHS literal elements at this level.
+
+        Returns:
+            bool: ``True`` if a permutation was recognised and applied;
+                ``False`` if the caller should fall back to element-wise
+                classification.
+        """
+        pairs = self._flat_leaf_pairs(target_elts, value_elts)
+        if pairs is None:
+            return False
+        name_pairs: list[tuple[str, str]] = []
+        for tgt, elt in pairs:
+            if isinstance(tgt, ast.Starred):
+                continue
+            if not isinstance(tgt, ast.Name) or elt is None:
+                # A heap / object-store leaf (Subscript / Attribute) or a
+                # missing RHS: not a clean 1-to-1 quantum permutation.
+                return False
+            target_origin = self.quantum_vars.get(tgt.id)
+            value_origin = self._single_quantum_origin(elt)
+            if target_origin is None or value_origin is None:
+                return False
+            name_pairs.append((tgt.id, value_origin))
+        if not name_pairs:
+            return False
+        if sorted(o for _, o in name_pairs) != sorted(
+            self.quantum_vars[n] for n, _ in name_pairs
+        ):
+            return False
+        # Simultaneous swap: value_origins were computed before mutation.
+        for name, value_origin in name_pairs:
+            self.quantum_vars[name] = value_origin
+        for tgt, _ in pairs:
+            if isinstance(tgt, ast.Starred) and isinstance(tgt.value, ast.Name):
+                self.quantum_vars.pop(tgt.value.id, None)
+        return True
 
     def _check_tuple_literal_rhs(
         self, target_names: list[str], value_elts: list[ast.expr], lineno: int
