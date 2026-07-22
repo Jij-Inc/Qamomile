@@ -8,7 +8,8 @@ from enum import Enum, auto
 from typing import TypeAlias
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import Value, ValueLike
+from qamomile.circuit.transpiler.errors import SeparationError
 
 
 class SegmentKind(Enum):
@@ -114,7 +115,7 @@ class HybridBoundary:
     value_ref: str
 
 
-class MultipleQuantumSegmentsError(Exception):
+class MultipleQuantumSegmentsError(SeparationError):
     """Raised when a program cannot fit the single-quantum-segment model.
 
     Qamomile enforces a single quantum circuit execution pattern:
@@ -160,8 +161,8 @@ class MultipleQuantumSegmentsError(Exception):
 class ProgramABI:
     """Runtime-visible ABI for a segmented program."""
 
-    public_inputs: dict[str, Value] = dataclasses.field(default_factory=dict)
-    output_refs: list[str] = dataclasses.field(default_factory=list)
+    public_inputs: dict[str, ValueLike] = dataclasses.field(default_factory=dict)
+    output_values: list[ValueLike] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass

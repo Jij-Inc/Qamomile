@@ -17,7 +17,7 @@
 # tags: [integration, optimization, variational]
 # ---
 #
-# # OMMX Quantum Benchmarksの活用 (1): Qamomileによる量子アルゴリズムの実装とベンチマーク
+# # OMMX Quantum Benchmarksの活用: Qamomileによる量子アルゴリズムの実装とベンチマーク
 #
 # 本チュートリアルでは、公開ベンチマークデータセットの問題にQamomileの量子アルゴリズムを適用し、その解の品質を同じワークフロー上で古典ソルバーと比較する方法を示します。
 #
@@ -25,7 +25,7 @@
 
 # %%
 # 本チュートリアルで追加で必要なパッケージのインストール
-# # !pip install qamomile ommx-quantum-benchmarks ommx-pyscipopt-adapter
+# # !pip install "qamomile[qiskit]" ommx-quantum-benchmarks ommx-pyscipopt-adapter
 
 # %%
 import os

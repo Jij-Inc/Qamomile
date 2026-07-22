@@ -1,4 +1,4 @@
-"""Hamiltonian wrapper used by both JSON and msgpack pipelines.
+"""Build validated Hamiltonian records for the protobuf payload union.
 
 ``ParamSlot.bound_value`` and ``ArrayRuntimeMetadata.const_array`` may
 carry :class:`qamomile.observable.Hamiltonian` objects — the bound
@@ -8,16 +8,18 @@ module defines the tagged-dict wire representation for those payloads:
 a sum of Pauli products plus a constant offset and the declared qubit
 register width.
 
-The wrapper is JSON-native (numbers, strings, lists, dicts — no raw
-bytes), so both wire formats carry it unchanged.
+The protobuf bridge converts this semantic record into a typed ``Hamiltonian``
+message with ordered terms and exact numeric variants.
 
 Two fidelity properties are load-bearing:
 
 - **Term order is preserved.** ``Hamiltonian``'s term dict iteration
-  order is observable through ``repr`` and therefore feeds
-  ``content_hash`` (canonical bytes stringify opaque payloads via
-  ``repr``). The encoder emits terms in iteration order and the
-  decoder re-adds them in wire order.
+  order is observable through ``repr`` and ``__iter__``, so a faithful
+  round-trip must not reorder terms. The encoder emits terms in
+  iteration order and the decoder re-adds them in wire order.
+  (``content_hash`` is deliberately order-*independent*: canonical
+  bytes sort the term tokens, matching ``Hamiltonian.__eq__``'s
+  dict-based term comparison — see ``canonical._hamiltonian_token``.)
 - **Coefficient types are preserved.** ``repr(1.2)`` differs from
   ``repr((1.2+0j))``, so int / float coefficients are written as plain
   numbers while complex ones get an explicit ``$complex`` sub-wrapper.
@@ -118,8 +120,7 @@ def dict_to_hamiltonian(d: dict[str, Any]) -> Hamiltonian:
 
     Args:
         d (dict[str, Any]): A wrapper dict previously produced by
-            :func:`hamiltonian_to_dict` (possibly after a JSON /
-            msgpack round-trip).
+            :func:`hamiltonian_to_dict` after protobuf decoding.
 
     Returns:
         Hamiltonian: The reconstructed Hamiltonian, equal to the
@@ -303,7 +304,7 @@ def _num_qubits_to_wire(num_qubits: Any) -> int | None:
         num_qubits (Any): The declared width (``Hamiltonian._num_qubits``):
             ``None``, a Python ``int``, or a ``numpy`` integer scalar. A
             ``numpy`` scalar is coerced to its Python equivalent via
-            ``.item()`` so the wrapper stays JSON / msgpack-serializable.
+            ``.item()`` before protobuf conversion.
 
     Returns:
         int | None: ``None`` unchanged, or a non-negative Python ``int``.

@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import math
 import numbers
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from qamomile.circuit.ir.value import resolve_root_qubit_address
+from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
+from qamomile.circuit.transpiler.block_parameter_binding import (
+    block_parameter_binding_keys,
+    pair_block_parameter_operands,
+)
 from qamomile.circuit.transpiler.errors import EmitError, ResolutionFailureReason
 from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
     QubitMap,
 )
-
-if TYPE_CHECKING:
-    from qamomile.circuit.ir.value import ArrayValue, Value
 
 
 @dataclass
@@ -60,6 +63,12 @@ class ValueResolver:
     """Resolves Value objects to concrete indices or values."""
 
     def __init__(self, parameters: set[str] | None = None):
+        """Create an emit-time resolver.
+
+        Args:
+            parameters (set[str] | None): Names preserved as backend runtime
+                parameters. Defaults to None.
+        """
         self.parameters = parameters or set()
 
     def resolve_qubit_index(
@@ -68,6 +77,16 @@ class ValueResolver:
         qubit_map: QubitMap,
         bindings: dict[str, Any],
     ) -> int | None:
+        """Resolve a qubit value to its physical index.
+
+        Args:
+            v (Value): Scalar or indexed qubit value.
+            qubit_map (QubitMap): Physical resource mapping.
+            bindings (dict[str, Any]): Active UUID/parameter bindings.
+
+        Returns:
+            int | None: Physical index, or ``None`` when unresolved.
+        """
         result = self.resolve_qubit_index_detailed(v, qubit_map, bindings)
         return result.index if result.success else None
 
@@ -120,15 +139,19 @@ class ValueResolver:
                             f"non-numeric type: {type(bound_val).__name__}"
                         ),
                     )
-            elif idx_value.name in bindings:
-                idx = self._resolve_numeric_index(bindings[idx_value.name])
+            elif (
+                idx_value.is_parameter()
+                and (parameter_name := idx_value.parameter_name()) in bindings
+            ):
+                idx = self._resolve_numeric_index(bindings[parameter_name])
                 if idx is None:
-                    bound_val = bindings[idx_value.name]
+                    bound_val = bindings[parameter_name]
                     return QubitResolutionResult(
                         success=False,
                         failure_reason=ResolutionFailureReason.INDEX_NOT_NUMERIC,
                         failure_details=(
-                            f"Index '{idx_value.name}' resolved to non-numeric type: "
+                            f"Index parameter '{parameter_name}' resolved to "
+                            f"non-numeric type: "
                             f"{type(bound_val).__name__}"
                         ),
                     )
@@ -360,7 +383,7 @@ class ValueResolver:
 
     def lookup_in_bindings(
         self,
-        value: "Value",
+        value: Any,
         bindings: dict[str, Any],
         *,
         index_array: bool = False,
@@ -378,75 +401,90 @@ class ValueResolver:
         Resolution order (each step returns immediately on a hit):
 
         1. ``value`` is already a concrete Python scalar (no ``uuid``).
-        2. ``value.is_constant()`` — return ``value.get_const()``.
-        3. ``value.is_parameter()`` and its parameter name is in
-           ``bindings`` — return that.
-        4. ``value.uuid`` is in ``bindings`` — return that. This is where
+        2. ``value.uuid`` is in ``bindings`` — return that. This is where
            emit-time-computed intermediates (``evaluate_binop`` /
-           ``evaluate_classical_predicate`` results) and phi aliases live.
-        5. ``value.name`` is in ``bindings`` — return that. This is where
-           kernel parameters and loop iteration variables live. NOT a
-           reliable channel for auto-generated tmp names like
-           ``"uint_tmp"`` — those are intentionally written by UUID only.
+           ``evaluate_classical_predicate`` results) and merge aliases live.
+        3. A compile-time array or dict payload stored in typed metadata.
+        4. ``value.is_constant()`` — return ``value.get_const()``.
+        5. ``value.is_parameter()`` and its parameter name is in
+           ``bindings`` — return that.
         6. (When ``index_array=True``) ``value`` is an array element with
            a resolvable parent in ``bindings`` — index into it.
+        7. A non-empty display name is present in ``bindings``. This is a
+           compatibility bridge for programmatically constructed Values and
+           older transforms that do not carry parameter metadata; UUID and
+           explicit parameter provenance always take precedence.
+
+        Compiler-created temporaries are anonymous and compiler-internal
+        writers use UUID keys, so the compatibility bridge cannot merge two
+        same-named temporaries. Kernel parameters should normally resolve via
+        explicit parameter metadata, while loop variables and intermediates
+        remain UUID-keyed.
 
         Args:
-            value: The IR Value (or already-concrete Python scalar) to
+            value (Any): The IR value (or already-concrete Python scalar) to
                 resolve.
-            bindings: The active bindings dict.
-            index_array: When True, also resolve array-element accesses
+            bindings (dict[str, Any]): The active bindings dictionary.
+            index_array (bool): When True, also resolve array-element accesses
                 via ``parent_array`` indexing. Off by default because not
                 all callers want to index into bound containers.
 
         Returns:
-            The resolved Python value, or ``None`` if no step matched.
+            Any: The resolved Python value, or ``None`` if no step matched.
         """
         # 1. Already concrete (Python scalar that was passed through).
         if not hasattr(value, "uuid"):
             return value
-        # 2. IR constant.
-        if hasattr(value, "is_constant") and value.is_constant():
+        # 2. UUID-keyed entries (intermediates, loop variables, runtime
+        #    expressions, merge aliases, and nested-block formal aliases).
+        if value.uuid in bindings:
+            return bindings[value.uuid]
+        # 3. Compile-time-bound containers carry their payload in typed
+        # metadata. Check these before ``is_constant``: an empty DictValue is
+        # vacuously constant but has no scalar ``get_const()`` payload.
+        # Resolve the whole container here as well as individual elements so
+        # nested/inverse block parameter binding never has to recover it from
+        # the display-only ArrayValue name.
+        get_const_array = getattr(value, "get_const_array", None)
+        if callable(get_const_array):
+            const_array = get_const_array()
+            if const_array is not None:
+                return const_array
+        metadata = getattr(value, "metadata", None)
+        if getattr(metadata, "dict_runtime", None) is not None:
+            get_bound_data = getattr(value, "get_bound_data", None)
+            if callable(get_bound_data):
+                return get_bound_data()
+        # 4. IR scalar constant.
+        if isinstance(value, Value) and value.is_constant():
             return value.get_const()
-        # 3. Kernel parameter — keyed by parameter name (the only
-        #    legitimate name-keyed path; user supplies parameters by name
-        #    at the public API boundary).
+        # 5. Kernel parameter — keyed by parameter name (the only legitimate
+        #    name-keyed path; users supply parameters by name at the public API
+        #    boundary).
         if hasattr(value, "is_parameter") and value.is_parameter():
             param_name = value.parameter_name()
             if param_name and param_name in bindings:
                 return bindings[param_name]
-        # 4. UUID-keyed entries (intermediates, loop variables, runtime
-        #    exprs, phi aliases — every internally-created binding keys
-        #    on Value UUID).
-        if value.uuid in bindings:
-            return bindings[value.uuid]
-        # 5. User-parameter compat path: a non-empty Value name that
-        #    matches a binding entry. Reaches here for:
-        #      - kernel parameters whose ``is_parameter()`` flag was
-        #        dropped during a transform (e.g. some inline/substitute
-        #        paths) but whose ``name`` still matches the original
-        #        parameter (``theta``, ``n``, ``obs``, …);
-        #      - parameter array shape dimensions bound by name
-        #        (``indices_dim0``, ``key_dim0``).
-        #    Phase 1 anonymous tmp Values (``name=""``) skip this path
-        #    naturally — there is no remaining "name collision among
-        #    auto-generated tmps" risk. Eliminating this step entirely
-        #    requires guaranteeing ``is_parameter()`` survives all IR
-        #    transforms, which is a separate, larger refactor.
-        if getattr(value, "name", None) and value.name in bindings:
-            return bindings[value.name]
         # 6. Array-element access via parent_array (opt-in).
         if (
             index_array
             and getattr(value, "parent_array", None) is not None
             and getattr(value, "element_indices", None)
         ):
-            return self._index_into_array(value, bindings)
+            resolved = self._index_into_array(value, bindings)
+            if resolved is not None:
+                return resolved
+        # 7. Compatibility bridge for older/programmatic IR. Keep this last:
+        # a public binding named like an internal constant/container must not
+        # shadow typed metadata or structural element resolution.
+        name = getattr(value, "name", None)
+        if name and name in bindings:
+            return bindings[name]
         return None
 
     def resolve_operand_for_binding(
         self,
-        operand: "Value",
+        operand: Any,
         bindings: dict[str, Any],
     ) -> Any:
         """Resolve an operand to a concrete value for block parameter binding.
@@ -454,6 +492,13 @@ class ValueResolver:
         Used when calling a sub-block (e.g. a controlled-U body): each
         param operand at the call site must resolve to a value to seed the
         callee's parameter bindings.
+
+        Args:
+            operand (Any): Call-site value or already-concrete operand.
+            bindings (dict[str, Any]): Parent emit-time bindings.
+
+        Returns:
+            Any: Resolved value, or ``None`` when the operand is symbolic.
         """
         return self.lookup_in_bindings(operand, bindings, index_array=True)
 
@@ -462,22 +507,62 @@ class ValueResolver:
         block_value: Any,
         param_operands: list["Value"],
         bindings: dict[str, Any],
+        *,
+        parameter_factory: Callable[[str, str], Any] | None = None,
     ) -> dict[str, Any]:
-        """Create local bindings by matching block parameter inputs to operands."""
+        """Create local bindings by matching block inputs to call-site operands.
+
+        Args:
+            block_value (Any): Nested block whose classical/object inputs are
+                bound. Objects without ``input_values`` receive no additional
+                local bindings for compatibility with optional backend recipes.
+            param_operands (list[Value]): Classical/object call-site operands
+                in the controlled operation's signature order.
+            bindings (dict[str, Any]): Parent emit-time bindings used to
+                resolve the call-site operands.
+            parameter_factory (Callable[[str, str], Any] | None): Optional
+                backend parameter factory used when an operand is a declared
+                runtime parameter rather than a concrete binding. Defaults to
+                None so standalone resolver use remains backend-neutral.
+
+        Returns:
+            dict[str, Any]: Parent bindings with each inner formal rebound under
+                both its UUID and sanctioned parameter-name key.
+        """
         local_bindings = bindings.copy()
         if not hasattr(block_value, "input_values"):
             return local_bindings
-        param_inputs = [
-            iv
-            for iv in block_value.input_values
-            if hasattr(iv, "type") and (iv.type.is_classical() or iv.type.is_object())
-        ]
-        for i, operand in enumerate(param_operands):
-            if i >= len(param_inputs):
-                break
+        for param_input in block_value.input_values:
+            if not (param_input.type.is_classical() or param_input.type.is_object()):
+                continue
+            for key in block_parameter_binding_keys(param_input):
+                local_bindings.pop(key, None)
+        for param_input, operand in pair_block_parameter_operands(
+            block_value, param_operands
+        ):
+            inner_keys = block_parameter_binding_keys(param_input)
             resolved = self.resolve_operand_for_binding(operand, bindings)
+            if (
+                resolved is None
+                and isinstance(param_input, ArrayValue)
+                and isinstance(operand, ArrayValue)
+            ):
+                # Runtime arrays are structural aliases, not scalar backend
+                # parameters. Preserve the actual array identity so element
+                # lookups in the callee can recover keys such as
+                # ``actual_name[2]`` even when the formal has another name.
+                resolved = operand
+            if (
+                resolved is None
+                and parameter_factory is not None
+                and isinstance(operand, Value)
+            ):
+                param_key = self.get_parameter_key(operand, bindings)
+                if param_key is not None:
+                    resolved = parameter_factory(param_key, operand.uuid)
             if resolved is not None:
-                local_bindings[param_inputs[i].name] = resolved
+                for key in inner_keys:
+                    local_bindings[key] = resolved
         return local_bindings
 
     def resolve_bound_value(
@@ -491,6 +576,13 @@ class ValueResolver:
         ``arr[i]`` accesses against a bound container resolve to the
         element. Does **not** coerce the result — callers that need a
         numeric scalar should go through :meth:`resolve_classical_value`.
+
+        Args:
+            value (Value): Value to resolve.
+            bindings (dict[str, Any]): Active UUID/parameter bindings.
+
+        Returns:
+            Any: Raw bound object, or ``None`` when unresolved.
         """
         return self.lookup_in_bindings(value, bindings, index_array=True)
 
@@ -508,6 +600,13 @@ class ValueResolver:
         the like. ``bool`` is preserved (not coerced to ``int``).
         Non-numeric values (Hamiltonians, strings, dict values, …)
         pass through unchanged.
+
+        Args:
+            value (Value): Classical value to resolve.
+            bindings (dict[str, Any]): Active UUID/parameter bindings.
+
+        Returns:
+            Any: Resolved native scalar/object, or ``None`` when unresolved.
         """
         raw = self.resolve_bound_value(value, bindings)
         if raw is None or isinstance(raw, bool):
@@ -522,8 +621,8 @@ class ValueResolver:
     ) -> Any | None:
         """Index into a bound array container at the operand's element indices.
 
-        Refuses to index when the parent array's name is in
-        ``self.parameters``. That short-circuit is the same invariant
+        Refuses to index when the parent array's declared parameter name is
+        in ``self.parameters``. That short-circuit is the same invariant
         ``fold_classical_op(... EMIT_RESPECT_PARAMS)`` enforces at the
         op level: a runtime parameter array's "value" is symbolic, and
         any concrete data the user supplied alongside is a placeholder
@@ -571,8 +670,16 @@ class ValueResolver:
             return None
         root_parent, indices = location
         # Runtime parameter arrays are symbolic even if placeholder data is
-        # present in bindings; never index them at emit time.
-        if root_parent.name in self.parameters:
+        # present in bindings; never index them at emit time. Prefer typed
+        # parameter metadata, with a non-empty-name fallback for legacy or
+        # hand-built ArrayValues whose runtime-parameter contract is supplied
+        # only through ``ValueResolver(parameters=...)``.
+        parameter_name = root_parent.parameter_name()
+        if (parameter_name is not None and parameter_name in self.parameters) or (
+            parameter_name is None
+            and bool(root_parent.name)
+            and root_parent.name in self.parameters
+        ):
             return None
         # Prefer const_array metadata, then explicit bindings for the root
         # container. A missing container means the element stays unresolved.
@@ -683,26 +790,36 @@ class ValueResolver:
 
         root_index = resolved_indices[0]
         cur = parent
-        # Compose each VectorView affine map back to the root container:
-        # root_index = slice_start + slice_step * local_index.
-        while cur.slice_of is not None:
-            # A sliced view must carry both affine-map operands. If either is
-            # absent, keep this access unresolved instead of inventing bounds.
-            if cur.slice_start is None or cur.slice_step is None:
+        visited_aliases: set[str] = set()
+        while True:
+            # Compose each VectorView affine map back to the root container:
+            # root_index = slice_start + slice_step * local_index.
+            while cur.slice_of is not None:
+                # A sliced view must carry both affine-map operands. If either is
+                # absent, keep this access unresolved instead of inventing bounds.
+                if cur.slice_start is None or cur.slice_step is None:
+                    return None
+                start = self.resolve_int_value(cur.slice_start, bindings)
+                step = self.resolve_int_value(cur.slice_step, bindings)
+                if start is None or step is None:
+                    # Symbolic slice bounds stay unresolved at emit time.
+                    return None
+                if start < 0 or step <= 0:
+                    # Bounds resolved from bindings must satisfy the same
+                    # contract the frontend enforces for constant bounds
+                    # (non-negative start, positive step); anything else
+                    # would compose a wrong root index.
+                    return None
+                root_index = start + step * root_index
+                cur = cur.slice_of
+
+            alias = bindings.get(cur.uuid)
+            if not isinstance(alias, ArrayValue) or alias.uuid == cur.uuid:
+                break
+            if cur.uuid in visited_aliases:
                 return None
-            start = self.resolve_int_value(cur.slice_start, bindings)
-            step = self.resolve_int_value(cur.slice_step, bindings)
-            if start is None or step is None:
-                # Symbolic slice bounds stay unresolved at emit time.
-                return None
-            if start < 0 or step <= 0:
-                # Bounds resolved from bindings must satisfy the same
-                # contract the frontend enforces for constant bounds
-                # (non-negative start, positive step); anything else
-                # would compose a wrong root index.
-                return None
-            root_index = start + step * root_index
-            cur = cur.slice_of
+            visited_aliases.add(cur.uuid)
+            cur = alias
 
         return cur, (root_index, *resolved_indices[1:])
 
@@ -722,17 +839,28 @@ class ValueResolver:
             Any: The concrete array-like container, or ``None`` if the
                 parent is unresolved.
         """
-        # Prefer compile-time literal metadata over explicit bindings.
+        # Emit-local loop bindings are UUID-scoped. Prefer them so nested
+        # ``for_items`` keys with the same display name cannot shadow an
+        # outer key that remains live in the inner body. Public caller
+        # bindings normally have no UUID entry and therefore still resolve
+        # through the stable parameter name below.
+        container = bindings.get(parent.uuid)
+        if container is not None:
+            return container
+        # Compile-time literal metadata is the next authoritative source.
         container = parent.get_const_array()
         if container is not None:
             return container
-
-        # Fall back to caller-supplied or emit-local array bindings by
-        # stable public name first, then by internal UUID.
-        container = bindings.get(parent.name)
-        if container is not None:
-            return container
-        return bindings.get(parent.uuid)
+        if parent.is_parameter():
+            parameter_name = parent.parameter_name()
+            if parameter_name and parameter_name in bindings:
+                return bindings[parameter_name]
+        # Compatibility with programmatically constructed ArrayValues and
+        # legacy transforms that have not preserved parameter metadata. The
+        # UUID path above remains authoritative for compiler-internal arrays.
+        if parent.name:
+            return bindings.get(parent.name)
+        return None
 
     def resolve_int_value(
         self,
@@ -761,28 +889,55 @@ class ValueResolver:
         value: "Value",
         bindings: dict[str, Any],
     ) -> str | None:
-        """Get parameter key if this value should be a symbolic parameter."""
-        if value.name in self.parameters:
-            return value.name
+        """Get the backend parameter key for a symbolic scalar.
+
+        Args:
+            value (Value): Scalar value or array element to identify.
+            bindings (dict[str, Any]): Active bindings used to resolve
+                element indices and slice offsets.
+
+        Returns:
+            str | None: Scalar name or root-array indexed key, or ``None``
+                when an array element's root location is unresolved.
+        """
+        parameter_name = (
+            value.parameter_name()
+            if hasattr(value, "is_parameter") and value.is_parameter()
+            else None
+        )
+        if parameter_name in self.parameters:
+            return parameter_name
 
         if value.parent_array is not None:
-            parent_name = value.parent_array.name
-            if parent_name in self.parameters:
-                if value.element_indices and len(value.element_indices) > 0:
-                    idx_value = value.element_indices[0]
-                    idx = self.resolve_int_value(idx_value, bindings)
-                    if idx is not None:
-                        return f"{parent_name}[{idx}]"
-
-        if value.type.is_classical() and value.name:
-            return value.name
+            location = self._resolve_array_element_location(
+                value.parent_array, value.element_indices, bindings
+            )
+            if location is None:
+                return None
+            root, indices = location
+            root_name = root.parameter_name() if root.is_parameter() else None
+            if root_name in self.parameters and indices:
+                suffix = "".join(f"[{index}]" for index in indices)
+                return f"{root_name}{suffix}"
 
         return None
 
     def _resolve_numeric_index(self, value: Any) -> int | None:
-        """Resolve a bound numeric scalar to a Python int."""
+        """Resolve an exactly integral bound scalar to a Python int.
+
+        Args:
+            value (Any): Candidate Python or NumPy numeric scalar.
+
+        Returns:
+            int | None: Exact integer value, or ``None`` for a non-integral,
+            non-finite, or non-numeric value.
+        """
         numeric = self._resolve_numeric_value(value)
         if numeric is None:
+            return None
+        if isinstance(numeric, int):
+            return numeric
+        if not math.isfinite(numeric) or not numeric.is_integer():
             return None
         return int(numeric)
 

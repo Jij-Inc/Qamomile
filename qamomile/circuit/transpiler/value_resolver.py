@@ -10,11 +10,14 @@ deterministic resolution order:
 
 1. **Context map** — caller-supplied ``UUID → concrete value`` dict
    (e.g. ``folded_values``, ``concrete_values``).
-2. **Constant** — ``value.is_constant() → value.get_const()``.
-3. **Compile-time array element** — ``arr[i]`` or ``arr[a:b][i]``
+2. **Container metadata** — whole compile-time arrays and dictionaries.
+3. **Constant** — ``value.is_constant() → value.get_const()``.
+4. **Compile-time array element** — ``arr[i]`` or ``arr[a:b][i]``
    resolves from the root array's ``const_array`` metadata or binding.
-4. **Bindings by parameter name** — ``value.is_parameter() → bindings[param_name]``.
-5. **Bindings by value name** — ``value.name → bindings[name]``.
+5. **Bindings by parameter name** — ``value.is_parameter() → bindings[param_name]``.
+   This is the only name-keyed rule: resolution never falls back to the
+   display ``Value.name``, which is excluded from canonical hashing and
+   carries no binding provenance.
 6. Returns ``None`` if none of the above match.
 """
 
@@ -79,32 +82,114 @@ class ValueResolver:
         # 1. Context map (folded values, concrete values)
         if value.uuid in self._context:
             ctx_val = self._context[value.uuid]
+            found, container = self._container_payload(ctx_val)
+            if found:
+                return container
             # The context may store Value objects (constant_fold) or raw
             # scalars (compile_time_if_lowering).  Unwrap Value → const.
             if hasattr(ctx_val, "get_const"):
                 return ctx_val.get_const()
             return ctx_val
 
-        # 2. Constant
-        if hasattr(value, "is_constant") and value.is_constant():
+        # 2. Whole compile-time container. This precedes ``is_constant``
+        # because an empty DictValue is vacuously constant but has no scalar
+        # ``get_const()`` payload.
+        if isinstance(value, ArrayValue) and value.slice_of is not None:
+            found, view = self._resolve_array_view(value)
+            if found:
+                return view
+        found, container = self._container_payload(value)
+        if found:
+            return container
+
+        # 3. Scalar constant
+        if isinstance(value, Value) and value.is_constant():
             return value.get_const()
 
-        # 3. Compile-time array element
+        # 4. Compile-time array element
         array_element = self._resolve_array_element(value)
         if array_element is not None:
             return array_element
 
-        # 4. Bindings by parameter name
+        # 5. Bindings by parameter name.
+        #
+        # Resolution against ``bindings`` is keyed *only* on the sanctioned
+        # ``ScalarMetadata.parameter_name`` provenance channel — never on the
+        # display ``Value.name``. A bare-name fallback (``value.name in
+        # bindings``) silently mis-resolved any non-parameter value that
+        # happened to share a name with a binding key — e.g. an inlined
+        # callee-local variable named like a caller binding — which
+        # ``CompileTimeIfLoweringPass`` could then fold into deleting a live
+        # branch. Display names are also excluded from canonical hashing, so a
+        # name-keyed resolution made two structurally identical blocks compile
+        # differently under the same bindings. Parameter provenance is the
+        # single source of truth.
         if hasattr(value, "is_parameter") and value.is_parameter():
             param_name = value.parameter_name()
             if param_name and param_name in self._bindings:
                 return self._bindings[param_name]
 
-        # 5. Bindings by value name
-        if hasattr(value, "name") and value.name and value.name in self._bindings:
-            return self._bindings[value.name]
-
         return None
+
+    def _resolve_array_view(self, value: ArrayValue) -> tuple[bool, Any]:
+        """Materialize a compile-time array view from its root container.
+
+        Args:
+            value (ArrayValue): Sliced array whose shape and slice ancestry
+                should be resolved.
+
+        Returns:
+            tuple[bool, Any]: ``(True, tuple(elements))`` when the complete
+                view resolves, including an empty view; otherwise
+                ``(False, None)``.
+        """
+        if not value.shape:
+            return False, None
+        length = self.resolve(value.shape[0])
+        if isinstance(length, bool) or not isinstance(length, numbers.Integral):
+            return False, None
+        length_int = int(length)
+        if length_int < 0:
+            return False, None
+
+        elements: list[Any] = []
+        for index in range(length_int):
+            index_value = _constant_index_like(value.shape[0], index)
+            element = Value(
+                type=value.type,
+                name="",
+                parent_array=value,
+                element_indices=(index_value,),
+            )
+            resolved = self._resolve_array_element(element)
+            if resolved is None:
+                return False, None
+            elements.append(resolved)
+        return True, tuple(elements)
+
+    @staticmethod
+    def _container_payload(value: Any) -> tuple[bool, Any]:
+        """Read a whole compile-time container from typed metadata.
+
+        Args:
+            value (Any): Candidate ArrayValue or DictValue.
+
+        Returns:
+            tuple[bool, Any]: ``(True, payload)`` when metadata explicitly
+                carries a bound container, including an empty dictionary;
+                otherwise ``(False, None)``.
+        """
+        get_const_array = getattr(value, "get_const_array", None)
+        if callable(get_const_array):
+            const_array = get_const_array()
+            if const_array is not None:
+                return True, const_array
+        metadata = getattr(value, "metadata", None)
+        if getattr(metadata, "dict_runtime", None) is not None:
+            get_bound_data = getattr(value, "get_bound_data", None)
+            if callable(get_bound_data):
+                return True, get_bound_data()
+        return False, None
 
     def _resolve_array_element(self, value: Any) -> Any | None:
         """Resolve an array-element Value from compile-time array data.
@@ -162,11 +247,17 @@ class ValueResolver:
             # element store) must not resolve to it — staying unresolved is
             # a conservative, loud outcome, while a stale hit would bake
             # pre-store contents into the compiled program silently.
-            parent_name = getattr(root_array, "name", None)
+            parameter_name = (
+                root_array.parameter_name() if root_array.is_parameter() else None
+            )
             parent_uuid = getattr(root_array, "uuid", None)
             parent_version = getattr(root_array, "version", 0)
-            if parent_name in self._bindings and parent_version == 0:
-                container = self._bindings[parent_name]
+            if (
+                parameter_name
+                and parameter_name in self._bindings
+                and parent_version == 0
+            ):
+                container = self._bindings[parameter_name]
             elif parent_uuid in self._bindings:
                 container = self._bindings[parent_uuid]
         if container is None:

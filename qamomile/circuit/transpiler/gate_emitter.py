@@ -253,6 +253,13 @@ class GateEmitter(Protocol[T]):
         """Emit Phase gate (P(θ) = diag(1, e^(iθ)))."""
         ...
 
+    # ``emit_global_phase(circuit, angle)`` is a structural lowering hook rather
+    # than a required gate primitive. CircuitGateEmitter implements it to
+    # collect a region phase in CircuitProgram. An adapter that omits the hook
+    # fails explicitly instead of silently discarding a user-requested phase.
+    # Target-specific preservation and controlled-call correction belong to
+    # CircuitCapabilities and the materializer after this semantic boundary.
+
     # Two-qubit gates
     @abstractmethod
     def emit_cx(self, circuit: T, control: int, target: int) -> None:
@@ -329,6 +336,18 @@ class GateEmitter(Protocol[T]):
     def emit_measure(self, circuit: T, qubit: int, clbit: int) -> None:
         """Emit measurement operation."""
         ...
+
+    def emit_reset(self, circuit: T, qubit: int) -> None:
+        """Emit a reset-to-zero operation.
+
+        Args:
+            circuit: Backend circuit to emit into.
+            qubit: Physical qubit index to reset.
+
+        Raises:
+            NotImplementedError: If the backend cannot represent reset.
+        """
+        raise NotImplementedError("This backend does not support reset emission.")
 
     # Barrier (optional, for visual separation)
     @abstractmethod

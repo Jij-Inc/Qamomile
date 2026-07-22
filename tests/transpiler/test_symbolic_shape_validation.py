@@ -36,6 +36,112 @@ def _make_h() -> qm_o.Hamiltonian:
     return H
 
 
+@qmc.qkernel
+def _owned_expression_identity(
+    target: qmc.Qubit,
+    repetitions: qmc.UInt,
+) -> qmc.Qubit:
+    """Keep a target unchanged through a case-local expression-bound loop."""
+    for iteration in qmc.range(repetitions + 1):
+        if iteration < 0:
+            target = qmc.x(target)
+    return target
+
+
+@qmc.qkernel
+def _owned_direct_x(
+    target: qmc.Qubit,
+    repetitions: qmc.UInt,
+) -> qmc.Qubit:
+    """Apply X through a directly parameter-bound operation-owned loop."""
+    for iteration in qmc.range(repetitions):
+        if iteration >= 0:
+            target = qmc.x(target)
+    return target
+
+
+@qmc.qkernel
+def _owned_array_shape_identity(
+    target: qmc.Qubit,
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Qubit:
+    """Keep a target unchanged through an owned array-shape loop."""
+    for index in qmc.range(sizes.shape[0]):
+        if index < 0:
+            target = qmc.x(target)
+    return target
+
+
+@qmc.qkernel
+def _owned_array_shape_x(
+    target: qmc.Qubit,
+    sizes: qmc.Vector[qmc.UInt],
+) -> qmc.Qubit:
+    """Apply X through an owned array-shape loop."""
+    for index in qmc.range(sizes.shape[0]):
+        if index >= 0:
+            target = qmc.x(target)
+    return target
+
+
+@qmc.qkernel
+def _structural_identity(target: qmc.Qubit) -> qmc.Qubit:
+    """Return a target unchanged for symbolic-structure tests."""
+    return target
+
+
+@qmc.qkernel
+def _structural_x(target: qmc.Qubit) -> qmc.Qubit:
+    """Apply X to a target for symbolic-structure tests."""
+    return qmc.x(target)
+
+
+@qmc.qkernel
+def _runtime_array_select_width(values: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+    """Use a runtime array element as a SELECT width."""
+    index = qmc.qubit_array(2, "index")
+    target = qmc.qubit("target")
+    index, target = qmc.select(
+        [_structural_identity, _structural_x],
+        num_index_qubits=values[0],
+    )(index, target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _runtime_array_num_controls(values: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+    """Use a runtime array element as a controlled-U width."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(qmc.x, num_controls=values[0])(
+        controls,
+        target,
+    )
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _runtime_array_control_power(values: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+    """Use a runtime array element as a controlled-U power."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(qmc.x)(control, target, power=values[0])
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _runtime_array_control_index(values: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+    """Use a runtime array element as a control-pool index."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(qmc.x, num_controls=qmc.uint(1))(
+        controls,
+        target,
+        control_indices=[values[0]],
+    )
+    return qmc.measure(target)
+
+
 class TestRejection:
     """Patterns that Layer 3 should catch."""
 
@@ -248,6 +354,38 @@ class TestRuntimeParameterLoopBound:
         assert "Cannot unroll loop: bounds could not be resolved at compile time" in msg
         assert "'n'" in msg
 
+    def test_runtime_parameter_select_width_raises_actionable_error(self):
+        """A runtime SELECT width fails before semantic lowering."""
+
+        @qmc.qkernel
+        def identity(target: qmc.Qubit) -> qmc.Qubit:
+            """Return a SELECT target unchanged."""
+            return target
+
+        @qmc.qkernel
+        def flipped(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply X to a SELECT target."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def kernel(width: qmc.UInt) -> qmc.Bit:
+            """Use a runtime parameter as SELECT's structural width."""
+            index = qmc.qubit_array(2, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(kernel, parameters=["width"])
+
+        msg = str(exc_info.value)
+        assert "Cannot resolve SELECT index width at compile time" in msg
+        assert "runtime parameter 'width'" in msg
+        assert "bindings={'width': <int>}" in msg
+
     def test_runtime_parameter_array_element_bound_raises(self):
         """A bound indexing a runtime parameter array names the array.
 
@@ -327,6 +465,240 @@ class TestRuntimeParameterLoopBound:
         msg = str(exc_info.value)
         assert "Cannot unroll loop: bounds could not be resolved at compile time" in msg
         assert "'idxs'" in msg
+
+
+class TestOperationOwnedStructure:
+    """Operation-owned blocks and controlled fields fail before emit."""
+
+    def test_runtime_parameter_select_case_bound_raises_actionable_error(self):
+        """A SELECT case expression inherits runtime provenance from its actual."""
+
+        @qmc.qkernel
+        def kernel(repetitions: qmc.UInt) -> qmc.Bit:
+            index = qmc.qubit("index")
+            target = qmc.qubit("target")
+            index, target = qmc.select([_owned_expression_identity, _owned_direct_x])(
+                index, target, repetitions=repetitions
+            )
+            return qmc.measure(target)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(
+                kernel,
+                parameters=["repetitions"],
+            )
+
+        msg = str(exc_info.value)
+        assert "Cannot unroll loop: bounds could not be resolved" in msg
+        assert "runtime parameter 'repetitions'" in msg
+        assert "report this as a compiler bug" not in msg
+
+    def test_runtime_parameter_controlled_body_bound_raises_actionable_error(self):
+        """A controlled body inherits runtime provenance from its call actual."""
+
+        @qmc.qkernel
+        def kernel(repetitions: qmc.UInt) -> qmc.Bit:
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control, target = qmc.control(_owned_direct_x)(
+                control,
+                target,
+                repetitions=repetitions,
+            )
+            return qmc.measure(target)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(
+                kernel,
+                parameters=["repetitions"],
+            )
+
+        msg = str(exc_info.value)
+        assert "Cannot unroll loop: bounds could not be resolved" in msg
+        assert "runtime parameter 'repetitions'" in msg
+
+    def test_runtime_array_actual_shape_raises_in_select_case(self):
+        """An owned formal shape traces through its runtime array actual."""
+
+        @qmc.qkernel
+        def kernel(sizes: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+            index = qmc.qubit("index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [_owned_array_shape_identity, _owned_array_shape_x]
+            )(index, target, sizes=sizes)
+            return qmc.measure(target)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(kernel, parameters=["sizes"])
+
+        msg = str(exc_info.value)
+        assert "Cannot unroll loop: bounds could not be resolved" in msg
+        assert "runtime parameter 'sizes'" in msg
+
+    def test_concrete_array_actual_shape_passes_in_select_case(self):
+        """A concrete array actual resolves its owned formal shape."""
+
+        @qmc.qkernel
+        def kernel(sizes: qmc.Vector[qmc.UInt]) -> qmc.Bit:
+            index = qmc.qubit("index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [_owned_array_shape_identity, _owned_array_shape_x]
+            )(index, target, sizes=sizes)
+            return qmc.measure(target)
+
+        executable = QiskitTranspiler().transpile(
+            kernel,
+            bindings={"sizes": [1, 2]},
+        )
+        assert executable.get_first_circuit() is not None
+
+    def test_runtime_parameter_num_controls_raises_before_emit(self):
+        """A runtime symbolic control width gets the structural diagnostic."""
+
+        @qmc.qkernel
+        def kernel(num_controls: qmc.UInt) -> qmc.Bit:
+            controls = qmc.qubit_array(2, "controls")
+            target = qmc.qubit("target")
+            controls, target = qmc.control(
+                qmc.x,
+                num_controls=num_controls,
+            )(controls, target)
+            return qmc.measure(target)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(
+                kernel,
+                parameters=["num_controls"],
+            )
+
+        msg = str(exc_info.value)
+        assert "controlled-unitary num_controls" in msg
+        assert "runtime parameter 'num_controls'" in msg
+
+    def test_runtime_parameter_control_power_raises_before_emit(self):
+        """A runtime controlled-U power gets the structural diagnostic."""
+
+        @qmc.qkernel
+        def kernel(power: qmc.UInt) -> qmc.Bit:
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control, target = qmc.control(qmc.x)(
+                control,
+                target,
+                power=power,
+            )
+            return qmc.measure(target)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(kernel, parameters=["power"])
+
+        msg = str(exc_info.value)
+        assert "controlled-unitary power" in msg
+        assert "runtime parameter 'power'" in msg
+
+    def test_runtime_parameter_control_index_raises_before_emit(self):
+        """A runtime control-pool index gets the structural diagnostic."""
+
+        @qmc.qkernel
+        def kernel(num_controls: qmc.UInt, selected: qmc.UInt) -> qmc.Bit:
+            controls = qmc.qubit_array(2, "controls")
+            target = qmc.qubit("target")
+            controls, target = qmc.control(
+                qmc.x,
+                num_controls=num_controls,
+            )(
+                controls,
+                target,
+                control_indices=[selected],
+            )
+            return qmc.measure(target)
+
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(
+                kernel,
+                bindings={"num_controls": 1},
+                parameters=["selected"],
+            )
+
+        msg = str(exc_info.value)
+        assert "controlled-unitary control_indices[0]" in msg
+        assert "runtime parameter 'selected'" in msg
+
+    @pytest.mark.parametrize(
+        ("kernel", "diagnostic"),
+        [
+            (_runtime_array_select_width, "SELECT index width"),
+            (_runtime_array_num_controls, "controlled-unitary num_controls"),
+            (_runtime_array_control_power, "controlled-unitary power"),
+            (
+                _runtime_array_control_index,
+                "controlled-unitary control_indices[0]",
+            ),
+        ],
+        ids=["select-width", "num-controls", "power", "control-index"],
+    )
+    def test_runtime_array_element_structure_raises_before_emit(
+        self,
+        kernel,
+        diagnostic: str,
+    ) -> None:
+        """Subclass-specific structural inputs retain runtime provenance."""
+        with pytest.raises(QamomileCompileError) as exc_info:
+            QiskitTranspiler().transpile(kernel, parameters=["values"])
+
+        message = str(exc_info.value)
+        assert diagnostic in message
+        assert "runtime parameter 'values'" in message
+        assert "report this as a compiler bug" not in message
+
+    def test_compile_time_owned_and_control_structure_values_pass(self):
+        """Compile-time bindings still resolve every newly checked structure."""
+
+        @qmc.qkernel
+        def select_kernel(repetitions: qmc.UInt) -> qmc.Bit:
+            index = qmc.qubit("index")
+            target = qmc.qubit("target")
+            index, target = qmc.select([_owned_expression_identity, _owned_direct_x])(
+                index, target, repetitions=repetitions
+            )
+            return qmc.measure(target)
+
+        @qmc.qkernel
+        def control_kernel(
+            num_controls: qmc.UInt,
+            power: qmc.UInt,
+            selected: qmc.UInt,
+        ) -> qmc.Bit:
+            controls = qmc.qubit_array(2, "controls")
+            target = qmc.qubit("target")
+            controls, target = qmc.control(
+                qmc.x,
+                num_controls=num_controls,
+            )(
+                controls,
+                target,
+                power=power,
+                control_indices=[selected],
+            )
+            return qmc.measure(target)
+
+        transpiler = QiskitTranspiler()
+        assert (
+            transpiler.transpile(
+                select_kernel,
+                bindings={"repetitions": 1},
+            ).get_first_circuit()
+            is not None
+        )
+        assert (
+            transpiler.transpile(
+                control_kernel,
+                bindings={"num_controls": 1, "power": 2, "selected": 0},
+            ).get_first_circuit()
+            is not None
+        )
 
 
 class TestAcceptance:
@@ -409,3 +781,33 @@ class TestAcceptance:
         # 2 H (init) + 2 * 2 = 4 Rx from x_mixer(2*beta) unrolled for 2 layers
         assert circuit.size() >= 2
         assert circuit.num_qubits == H.num_qubits
+
+    def test_compile_time_bound_select_width_passes(self):
+        """A UInt SELECT width supplied in bindings reaches lowering."""
+
+        @qmc.qkernel
+        def identity(target: qmc.Qubit) -> qmc.Qubit:
+            """Return a SELECT target unchanged."""
+            return target
+
+        @qmc.qkernel
+        def flipped(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply X to a SELECT target."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def kernel(width: qmc.UInt) -> qmc.Bit:
+            """Apply SELECT with a compile-time-bound structural width."""
+            index = qmc.qubit_array(2, "index")
+            target = qmc.qubit("target")
+            index, target = qmc.select(
+                [identity, flipped],
+                num_index_qubits=width,
+            )(index, target)
+            return qmc.measure(target)
+
+        executable = QiskitTranspiler().transpile(
+            kernel,
+            bindings={"width": 2},
+        )
+        assert executable.get_first_circuit() is not None

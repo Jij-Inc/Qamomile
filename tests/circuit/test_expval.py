@@ -28,6 +28,61 @@ from __future__ import annotations
 import pytest
 
 import qamomile.circuit as qmc
+import qamomile.observable as qm_o
+from qamomile.circuit.frontend.tracer import trace
+from qamomile.circuit.ir.types import ObservableType, QubitType
+from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.errors import QubitConsumedError
+
+
+def _standalone_expval_inputs() -> tuple[qmc.Qubit, qmc.Observable]:
+    """Create frontend handles for direct expval ownership tests.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Observable]: Standalone qubit and observable.
+    """
+    qubit = qmc.Qubit(value=Value(type=QubitType(), name="q"))
+    observable = qmc.Observable(value=Value(type=ObservableType(), name="observable"))
+    return qubit, observable
+
+
+def test_tuple_expval_alias_failure_leaves_qubit_unconsumed() -> None:
+    """Duplicate tuple operands fail before destructive ownership commit."""
+    qubit, observable = _standalone_expval_inputs()
+
+    with trace():
+        with pytest.raises(QubitConsumedError, match="overlapping physical"):
+            qmc.expval((qubit, qubit), observable)
+
+    assert not qubit._consumed
+
+
+def test_expval_missing_tracer_leaves_qubit_unconsumed() -> None:
+    """Tracer validation precedes expval's destructive consume."""
+    qubit, observable = _standalone_expval_inputs()
+
+    with pytest.raises(RuntimeError, match="No active tracer"):
+        qmc.expval(qubit, observable)
+
+    assert not qubit._consumed
+
+
+def test_expval_rejects_observable_index_outside_view() -> None:
+    """Observable indices are logical positions within the expval operand."""
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    @qmc.qkernel
+    def kernel(observable: qmc.Observable) -> qmc.Float:
+        """Evaluate an observable over a two-qubit view."""
+        q = qmc.qubit_array(4, name="q")
+        return qmc.expval(q[2:4], observable)
+
+    with pytest.raises(ValueError, match="outside the register passed to expval"):
+        QiskitTranspiler().transpile(
+            kernel,
+            bindings={"observable": qm_o.Z(2)},
+        )
 
 
 class TestExpvalIsDestructiveConsume:
@@ -220,10 +275,7 @@ class TestExpvalOverConsumedSlots:
         violation.
         """
         pytest.importorskip("qiskit")
-        from qamomile.circuit.transpiler.errors import (
-            QubitConsumedError,
-            SliceBorrowViolationError,
-        )
+        from qamomile.circuit.transpiler.errors import QubitConsumedError
 
         @qmc.qkernel
         def kern(obs: qmc.Observable) -> qmc.Float:
@@ -236,5 +288,5 @@ class TestExpvalOverConsumedSlots:
             q[1] = qmc.x(q[1])  # direct access after measure(q[1::2]) — consumed
             return qmc.expval(q[0::2], obs)
 
-        with pytest.raises((QubitConsumedError, SliceBorrowViolationError)):
+        with pytest.raises(QubitConsumedError):
             kern.block

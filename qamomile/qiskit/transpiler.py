@@ -10,777 +10,20 @@ from typing import TYPE_CHECKING, Any, Sequence, cast
 
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
-    from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
     from qiskit import QuantumCircuit
 
-from qamomile.circuit.ir.operation.arithmetic_operations import (
-    CompOp,
-    CompOpKind,
-    CondOp,
-    CondOpKind,
-    NotOp,
-    RuntimeClassicalExpr,
-    RuntimeOpKind,
+from qamomile.circuit.transpiler.circuit_ir import (
+    CircuitBackendEmitPass,
+    CompilationPolicy,
 )
-from qamomile.circuit.ir.operation.control_flow import (
-    ForOperation,
-    IfOperation,
-    WhileOperation,
-)
-from qamomile.circuit.ir.value import Value
-from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
     QuantumExecutor,
 )
 from qamomile.circuit.transpiler.passes.emit import EmitPass
-from qamomile.circuit.transpiler.passes.emit_support import (
-    ClbitMap,
-    QubitAddress,
-    QubitMap,
-    resolve_condition_address,
-    resolve_if_condition,
-)
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
-from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.transpiler import Transpiler
-from qamomile.qiskit.emitter import QiskitGateEmitter
-
-
-class QiskitEmitPass(StandardEmitPass["QuantumCircuit"]):
-    """Qiskit-specific emission pass.
-
-    Extends StandardEmitPass with Qiskit-specific control flow handling
-    using context managers.
-    """
-
-    def __init__(
-        self,
-        bindings: dict[str, Any] | None = None,
-        parameters: list[str] | None = None,
-        use_native_composite: bool = True,
-    ):
-        """Initialize the Qiskit emit pass.
-
-        Args:
-            bindings: Parameter bindings for the circuit
-            parameters: List of parameter names to preserve as backend parameters
-            use_native_composite: If True, use native Qiskit implementations
-                                  for QFT/IQFT. If False, use manual decomposition.
-        """
-        emitter = QiskitGateEmitter()
-        composite_emitters = self._init_emitters() if use_native_composite else []
-        super().__init__(emitter, bindings, parameters, composite_emitters)
-        self._use_native_composite = use_native_composite
-
-    def _init_emitters(self) -> list:
-        """Initialize native CompositeGate emitters."""
-        from qamomile.qiskit.emitters import QiskitQFTEmitter
-
-        return [QiskitQFTEmitter()]
-
-    def _emit_for(
-        self,
-        circuit: "QuantumCircuit",
-        op: ForOperation,
-        qubit_map: QubitMap,
-        clbit_map: ClbitMap,
-        bindings: dict[str, Any],
-        force_unroll: bool = False,
-    ) -> None:
-        """Emit a for loop using Qiskit's native for_loop context manager."""
-        from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-            resolve_loop_bounds,
-        )
-
-        start, stop, step = resolve_loop_bounds(self._resolver, op, bindings)
-
-        if start is None or stop is None or step is None:
-            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
-            return
-
-        indexset = range(start, stop, step)
-        if len(indexset) == 0:
-            return
-
-        if force_unroll:
-            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
-            return
-
-        if self._loop_analyzer.should_unroll(op, bindings):
-            self._emit_for_unrolled(circuit, op, qubit_map, clbit_map, bindings)
-            return
-
-        # Use Qiskit's native for_loop context manager
-        with circuit.for_loop(indexset) as loop_param:  # type: ignore[call-overload]
-            loop_bindings = bindings.copy()
-            from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
-                _bind_loop_var,
-            )
-
-            _bind_loop_var(loop_bindings, op, loop_param)
-            self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, loop_bindings
-            )
-
-    def _emit_if(
-        self,
-        circuit: "QuantumCircuit",
-        op: IfOperation,
-        qubit_map: QubitMap,
-        clbit_map: ClbitMap,
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit if/else using Qiskit's if_test context manager."""
-        condition = op.condition
-
-        # Compile-time constant conditions are handled by the base class.
-        if resolve_if_condition(condition, bindings) is not None:
-            super()._emit_if(circuit, op, qubit_map, clbit_map, bindings)
-            return
-
-        if_test_condition = self._resolve_runtime_condition(
-            circuit, condition, clbit_map, bindings
-        )
-
-        with circuit.if_test(if_test_condition) as else_:
-            self._emit_operations(
-                circuit, op.true_operations, qubit_map, clbit_map, bindings
-            )
-        with else_:
-            self._emit_operations(
-                circuit, op.false_operations, qubit_map, clbit_map, bindings
-            )
-
-    def _emit_while(
-        self,
-        circuit: "QuantumCircuit",
-        op: WhileOperation,
-        qubit_map: QubitMap,
-        clbit_map: ClbitMap,
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit while loop using Qiskit's while_loop context manager."""
-        if not op.operands:
-            raise EmitError(
-                "WhileOperation requires a condition operand.",
-                operation="WhileOperation",
-            )
-
-        condition = op.operands[0]
-        condition_value = condition.value if hasattr(condition, "value") else condition
-        while_condition = self._resolve_runtime_condition(
-            circuit, condition_value, clbit_map, bindings
-        )
-
-        with circuit.while_loop(while_condition):  # type: ignore[call-overload]
-            self._emit_operations(
-                circuit, op.operations, qubit_map, clbit_map, bindings
-            )
-
-    def _resolve_runtime_condition(
-        self,
-        circuit: "QuantumCircuit",
-        condition: Any,
-        clbit_map: ClbitMap,
-        bindings: dict[str, Any],
-    ) -> Any:
-        """Resolve a runtime if/while condition to a Qiskit ``if_test`` argument.
-
-        The returned value is suitable for passing to
-        ``QuantumCircuit.if_test`` / ``while_loop``: either a
-        ``(clbit, value)`` tuple for a single-bit measurement condition, or
-        a ``qiskit.circuit.classical.expr.Expr`` for a compound predicate
-        (``CondOp`` / ``NotOp`` / ``CompOp`` over measurement bits)
-        previously stored in ``bindings`` by ``_build_runtime_predicate_expr``.
-
-        Args:
-            circuit: The Qiskit circuit being emitted (for clbit lookup).
-            condition: The IR condition Value.
-            clbit_map: Map from ``QubitAddress`` to physical clbit index.
-            bindings: Current bindings; may hold a backend ``Expr`` keyed by
-                the condition's UUID.
-
-        Returns:
-            A condition object accepted by ``if_test`` / ``while_loop``.
-
-        Raises:
-            EmitError: If the condition is neither a measurement clbit nor a
-                stored runtime expression.
-        """
-        condition_uuid = (
-            condition.uuid if hasattr(condition, "uuid") else str(condition)
-        )
-
-        # Compound predicate built earlier by _build_runtime_predicate_expr.
-        stored = bindings.get(condition_uuid)
-        if stored is not None and not isinstance(stored, (bool, int, float)):
-            return stored
-
-        if isinstance(condition, Value):
-            condition_addr = resolve_condition_address(
-                condition, bindings, self._resolver
-            )
-        else:
-            condition_addr = QubitAddress(condition_uuid)
-        if condition_addr in clbit_map:
-            clbit_idx = clbit_map[condition_addr]
-            return (circuit.clbits[clbit_idx], 1)
-
-        raise EmitError(
-            "Runtime control-flow conditions (if / while) must come from "
-            "measurement results or be bound before transpilation. The "
-            "condition value was neither resolved at compile time nor "
-            "backed by a measurement result."
-        )
-
-    def _emit_runtime_classical_expr(
-        self,
-        circuit: "QuantumCircuit",
-        op: RuntimeClassicalExpr,
-        clbit_map: ClbitMap,
-        bindings: dict[str, Any],
-    ) -> None:
-        """Lower ``RuntimeClassicalExpr`` to a Qiskit ``expr.Expr``.
-
-        Counterpart of (and supersedes for the runtime path) the legacy
-        ``_build_runtime_predicate_expr``. The IR has already declared
-        this op runtime via ``ClassicalLoweringPass``, so we go straight
-        to expression construction without a fold attempt.
-
-        Args:
-            circuit: The Qiskit circuit being emitted.
-            op: The runtime classical expression to lower.
-            clbit_map: Map from ``QubitAddress`` → physical clbit index.
-            bindings: Current bindings; result is stored here.
-
-        Raises:
-            EmitError: If an operand cannot be resolved to a clbit /
-                sub-expression / constant — meaning the IR is malformed
-                or the lowering pass missed a case.
-        """
-        from qamomile.circuit.transpiler.errors import EmitError
-        from qiskit.circuit.classical import expr
-
-        # Typed-slot lookups when bindings is an EmitContext; fall back to
-        # flat-dict access for legacy plain-dict callers (compat shim).
-        get_runtime_expr = getattr(bindings, "get_runtime_expr", None)
-        get_loop_var = getattr(bindings, "get_loop_var", None)
-        params_slot = getattr(bindings, "_params", None)
-
-        def resolve_operand(v: Any) -> Any:
-            """Resolve an operand to a Qiskit ``Expr`` / ``Clbit`` / Python literal.
-
-            Identity policy:
-              1. Backend ``expr.Expr`` from a prior ``RuntimeClassicalExpr``:
-                 read from the ``runtime_exprs`` typed slot via UUID.
-              2. Constants: ``v.get_const()`` returns the IR-typed value
-                 (Bit→bool, UInt→int, Float→float). No ``bool(...)``
-                 coercion — that would clobber numeric arithmetic.
-              3. Clbit references: ``resolve_condition_address(v, ...)``
-                 keyed lookup in ``clbit_map`` — a scalar bit resolves to
-                 ``QubitAddress(v.uuid)`` while a measured ``Vector[Bit]``
-                 element resolves to ``QubitAddress(root_array.uuid,
-                 root_index)`` (walking ``parent_array`` / ``slice_of``).
-              4. User parameters: read from the ``parameters`` typed slot
-                 by parameter name (the only legitimate name path).
-              5. Loop variables: read from the ``loop_vars`` typed slot
-                 via UUID (preserved through inline by the all_input_values
-                 / replace_values protocol).
-
-            No name fallback — every step keys on UUID or an explicit
-            ``is_parameter()`` flag, never on display names.
-            """
-            if not hasattr(v, "uuid"):
-                return None
-
-            # 1. Backend expr already built for this Value (UUID-keyed).
-            if callable(get_runtime_expr):
-                expr_obj = get_runtime_expr(v.uuid)
-                if expr_obj is not None:
-                    return expr_obj
-            else:
-                stored = bindings.get(v.uuid) if hasattr(bindings, "get") else None
-                if stored is not None and not isinstance(stored, (bool, int, float)):
-                    return stored
-
-            # 2. Constant — preserve IR type.
-            if hasattr(v, "is_constant") and v.is_constant():
-                return v.get_const()
-
-            # 3. Clbit reference. ``Vector[Bit]`` element accesses route
-            #    through ``QubitAddress(parent_array.uuid, index)``; scalar
-            #    bits use ``QubitAddress(v.uuid)``.
-            addr = resolve_condition_address(v, bindings, self._resolver)
-            if addr in clbit_map:
-                return circuit.clbits[clbit_map[addr]]
-
-            # 4. User parameter (name-keyed by definition; surface from
-            #    typed slot when available).
-            if hasattr(v, "is_parameter") and v.is_parameter():
-                pname = v.parameter_name()
-                if pname:
-                    if params_slot is not None and pname in params_slot:
-                        return params_slot[pname]
-                    if hasattr(bindings, "get"):
-                        bound = bindings.get(pname)
-                        if bound is not None:
-                            return bound
-
-            # 5. Loop variable (UUID-keyed).
-            if callable(get_loop_var):
-                lv = get_loop_var(v.uuid)
-                if lv is not None:
-                    return lv
-
-            # 6. Legacy compat shim: plain-dict caller, scalar binding.
-            if hasattr(bindings, "get"):
-                stored = bindings.get(v.uuid)
-                if isinstance(stored, (bool, int, float)):
-                    return stored
-
-            return None
-
-        kind = op.kind
-        if kind is RuntimeOpKind.NOT:
-            inner = resolve_operand(op.operands[0])
-            if inner is None:
-                raise EmitError(
-                    f"Cannot resolve operand for RuntimeClassicalExpr(NOT): "
-                    f"{op.operands[0]!r}"
-                )
-            result = expr.logic_not(inner)
-        else:
-            assert kind is not None
-            lhs = resolve_operand(op.operands[0])
-            rhs = resolve_operand(op.operands[1])
-            if lhs is None or rhs is None:
-                raise EmitError(
-                    f"Cannot resolve operands for RuntimeClassicalExpr({kind!r})"
-                )
-            result = self._build_qiskit_binary_expr(kind, lhs, rhs)
-            if result is None:
-                raise EmitError(
-                    f"Unsupported RuntimeClassicalExpr kind for Qiskit backend: {kind}"
-                )
-
-        # Store result so downstream ``_emit_if`` / ``_emit_while`` /
-        # nested ``RuntimeClassicalExpr`` can consume it.
-        set_runtime_expr = getattr(bindings, "set_runtime_expr", None)
-        if callable(set_runtime_expr):
-            set_runtime_expr(op.results[0].uuid, result)
-        else:
-            bindings[op.results[0].uuid] = result
-
-    @staticmethod
-    def _build_qiskit_binary_expr(kind: RuntimeOpKind, lhs: Any, rhs: Any) -> Any:
-        """Map a binary ``RuntimeOpKind`` to its Qiskit ``expr`` constructor.
-
-        Every arm of ``RuntimeOpKind`` (except ``NOT``, which is handled
-        upstream) is dispatched here. Kinds without a Qiskit ``expr``
-        equivalent — currently ``FLOORDIV``, ``MOD`` and ``POW`` — raise
-        ``NotImplementedError`` rather than silently returning ``None``,
-        so the contract gap is loud at emit time instead of producing a
-        misleading "Unsupported kind" error.
-        """
-        from qiskit.circuit.classical import expr
-
-        match kind:
-            # Logical
-            case RuntimeOpKind.AND:
-                return expr.logic_and(lhs, rhs)
-            case RuntimeOpKind.OR:
-                return expr.logic_or(lhs, rhs)
-            # Comparison
-            case RuntimeOpKind.EQ:
-                return expr.equal(lhs, rhs)
-            case RuntimeOpKind.NEQ:
-                return expr.not_equal(lhs, rhs)
-            case RuntimeOpKind.LT:
-                return expr.less(lhs, rhs)
-            case RuntimeOpKind.LE:
-                return expr.less_equal(lhs, rhs)
-            case RuntimeOpKind.GT:
-                return expr.greater(lhs, rhs)
-            case RuntimeOpKind.GE:
-                return expr.greater_equal(lhs, rhs)
-            # Arithmetic
-            case RuntimeOpKind.ADD:
-                return expr.add(lhs, rhs)
-            case RuntimeOpKind.SUB:
-                return expr.sub(lhs, rhs)
-            case RuntimeOpKind.MUL:
-                return expr.mul(lhs, rhs)
-            case RuntimeOpKind.DIV:
-                return expr.div(lhs, rhs)
-            case RuntimeOpKind.FLOORDIV | RuntimeOpKind.MOD | RuntimeOpKind.POW:
-                raise NotImplementedError(
-                    f"RuntimeOpKind.{kind.name} is not supported by the Qiskit "
-                    f"backend (Qiskit's classical expr has no equivalent). "
-                    f"If you need this kind, fold it at compile time before "
-                    f"the runtime classical-lowering pass."
-                )
-            case _:
-                raise NotImplementedError(
-                    f"Unhandled RuntimeOpKind in _build_qiskit_binary_expr: {kind!r}"
-                )
-
-    def _build_runtime_predicate_expr(
-        self,
-        circuit: "QuantumCircuit",
-        op: "CompOp | CondOp | NotOp",
-        clbit_map: ClbitMap,
-        bindings: dict[str, Any],
-    ) -> Any:
-        """Build a Qiskit ``expr.Expr`` for an unlowered runtime predicate.
-
-        Fallback path used by ``StandardEmitPass`` only when a
-        ``CompOp``/``CondOp``/``NotOp`` reaches emit without having been
-        rewritten to ``RuntimeClassicalExpr`` by ``ClassicalLoweringPass``
-        — i.e., predicates that depend on emit-time-bound values not
-        visible to the pre-emit lowering pass (e.g. computed from a loop
-        variable that wraps a measurement). The primary path is
-        ``_emit_runtime_classical_expr``; prefer extending the lowering
-        pass over adding new cases here.
-
-        Recursively resolves operands to either Qiskit ``Clbit`` references
-        (via ``clbit_map``), constants, or already-built sub-expressions
-        stored in ``bindings``. Returns ``None`` when any operand cannot be
-        resolved — the caller leaves the predicate unbound, and the
-        downstream ``if`` / ``while`` falls back to its (failing) clbit
-        lookup, which raises a clear ``EmitError``.
-
-        Supported ops:
-            * ``CondOp(AND/OR)`` → ``expr.logic_and`` / ``expr.logic_or``
-            * ``NotOp`` → ``expr.logic_not``
-            * ``CompOp(EQ/NEQ)`` over Bit operands → ``expr.equal`` /
-              ``expr.not_equal``
-
-        Args:
-            circuit: The Qiskit circuit being emitted (for clbit lookup).
-            op: The unresolved classical predicate.
-            clbit_map: Map from ``QubitAddress`` → physical clbit index.
-            bindings: Current bindings; may hold sub-expression results
-                keyed by Value UUIDs.
-
-        Returns:
-            A ``qiskit.circuit.classical.expr.Expr`` object, or ``None`` if
-            the predicate cannot be expressed.
-        """
-        from qiskit.circuit.classical import expr
-
-        def resolve_operand(v: Any) -> Any:
-            """Operand → Qiskit ``Expr`` / ``Clbit`` / Python literal, or None."""
-            if hasattr(v, "uuid"):
-                stored_v = bindings.get(v.uuid)
-                if stored_v is not None and not isinstance(stored_v, (bool, int)):
-                    return stored_v
-                if hasattr(v, "is_constant") and v.is_constant():
-                    return bool(v.get_const())
-                addr = (
-                    resolve_condition_address(v, bindings, self._resolver)
-                    if isinstance(v, Value)
-                    else QubitAddress(v.uuid)
-                )
-                if addr in clbit_map:
-                    return circuit.clbits[clbit_map[addr]]
-                if isinstance(stored_v, (bool, int)):
-                    return bool(stored_v)
-            return None
-
-        if isinstance(op, NotOp):
-            inner = resolve_operand(op.operands[0])
-            if inner is None:
-                return None
-            return expr.logic_not(inner)
-
-        lhs = resolve_operand(op.operands[0])
-        rhs = resolve_operand(op.operands[1])
-        if lhs is None or rhs is None:
-            return None
-
-        if isinstance(op, CondOp):
-            if op.kind is CondOpKind.AND:
-                return expr.logic_and(lhs, rhs)
-            if op.kind is CondOpKind.OR:
-                return expr.logic_or(lhs, rhs)
-            return None
-
-        if isinstance(op, CompOp):
-            if op.kind is CompOpKind.EQ:
-                return expr.equal(lhs, rhs)
-            if op.kind is CompOpKind.NEQ:
-                return expr.not_equal(lhs, rhs)
-            return None
-
-        return None  # type: ignore[unreachable]
-
-    def _emit_pauli_evolve(
-        self,
-        circuit: "QuantumCircuit",
-        op: "PauliEvolveOp",
-        qubit_map: QubitMap,
-        bindings: dict[str, Any],
-    ) -> None:
-        """Emit Pauli evolution using Qiskit's PauliEvolutionGate.
-
-        Falls back to the shared gadget decomposition — always via
-        ``_emit_gadget_pauli_evolve``, which completes the Hamiltonian's
-        constant term as a circuit global phase — when native composite
-        emission is disabled or the native path cannot resolve the
-        Hamiltonian, gamma, or qubit indices.
-
-        Args:
-            circuit (QuantumCircuit): Qiskit circuit being emitted into.
-            op (PauliEvolveOp): The Pauli evolution operation to emit.
-            qubit_map (QubitMap): Physical qubit map the operation's
-                quantum operands resolve against; updated in place with
-                the evolved-register result addresses.
-            bindings (dict[str, Any]): Active emit bindings used to
-                resolve the Hamiltonian, gamma, and register shape.
-
-        Raises:
-            EmitError: If the Hamiltonian is non-Hermitian (a term or the
-                constant has a non-real coefficient), the Hamiltonian is
-                larger than the register, or the gadget fallback cannot
-                resolve the Hamiltonian, gamma, or a term qubit.
-        """
-        import qamomile.observable as qm_o
-
-        if not self._use_native_composite:
-            self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
-            return
-
-        # Resolve Hamiltonian from bindings
-        obs_value = op.observable
-        hamiltonian = None
-        if hasattr(obs_value, "name") and obs_value.name in bindings:
-            hamiltonian = bindings[obs_value.name]
-        if hamiltonian is None and hasattr(obs_value, "uuid"):
-            hamiltonian = bindings.get(obs_value.uuid)
-        if not isinstance(hamiltonian, qm_o.Hamiltonian):
-            self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
-            return
-
-        # Resolve gamma: concrete float OR backend Parameter for parametric
-        # gamma (scalar / array element). Qiskit's PauliEvolutionGate accepts
-        # a Parameter (or ParameterExpression) as ``time``.
-        from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
-            _resolve_gamma,
-            validate_hamiltonian_within_register,
-        )
-
-        gamma = _resolve_gamma(self, op, bindings)
-        if gamma is None:
-            self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
-            return
-
-        # Validate qubit count: logical array size vs Hamiltonian. A
-        # Hamiltonian smaller than the register is embedded into the
-        # register (identity on the untouched qubits) by appending the
-        # evolution gate onto only its declared qubits below.
-        input_array = op.qubits
-        num_h_qubits = hamiltonian.num_qubits
-        from qamomile.circuit.ir.value import ArrayValue
-
-        if isinstance(input_array, ArrayValue) and input_array.shape:
-            n_resolved = self._resolver.resolve_int_value(
-                input_array.shape[0], bindings
-            )
-            if n_resolved is not None:
-                validate_hamiltonian_within_register(num_h_qubits, n_resolved)
-
-        # Validate Hermitian (real coefficients)
-        from qamomile.observable.hamiltonian import (
-            HERMITIAN_IMAG_ATOL,
-            PAULI_TERM_ZERO_ATOL,
-        )
-
-        for operators, coeff in hamiltonian:
-            if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
-                raise EmitError(
-                    f"PauliEvolveOp requires a Hermitian Hamiltonian "
-                    f"(real coefficients), but found complex coefficient "
-                    f"{coeff} on term {operators}.",
-                    operation="PauliEvolveOp",
-                )
-
-        # Hamiltonian.__iter__ yields only the Pauli terms, so the loop
-        # above never sees the constant (identity) term. Validate it here
-        # for ALL Hamiltonians so the native path rejects a non-real
-        # constant with the same clean EmitError as the gadget fallback,
-        # instead of letting it slip through to a raw Qiskit ValueError
-        # inside PauliEvolutionGate (for num_h_qubits > 0).
-        if abs(hamiltonian.constant.imag) > HERMITIAN_IMAG_ATOL:
-            raise EmitError(
-                f"PauliEvolveOp requires a Hermitian Hamiltonian "
-                f"(real coefficients), but found a complex constant "
-                f"{hamiltonian.constant}.",
-                operation="PauliEvolveOp",
-            )
-
-        if num_h_qubits == 0:
-            # An empty / constant-only Hamiltonian evolves the register by
-            # the global phase exp(-i*gamma*constant) only. Record it as
-            # the circuit's global phase instead of skipping it: standalone
-            # it stays unobservable, but when this circuit is converted to
-            # a gate and placed under controls (``_blockvalue_to_gate`` +
-            # ``Gate.control``) Qiskit promotes the definition's global
-            # phase to the observable relative phase on the all-controls-on
-            # subspace — matching how the shared controlled path and CUDA-Q
-            # re-apply the constant term under ``qmc.control``. Building
-            # the evolution gate instead would fail:
-            # ``hamiltonian_to_sparse_pauli_op`` widens a 0-qubit
-            # Hamiltonian to a 1-qubit ``SparsePauliOp(["I"])`` whose
-            # ``PauliEvolutionGate`` cannot be appended onto the empty
-            # qubit list. (For ``num_h_qubits > 0`` the constant is already
-            # carried inside the ``SparsePauliOp``, so this branch must not
-            # apply.) The result register stays resolvable through the
-            # allocator's element aliases. The constant's Hermiticity was
-            # already validated above for all Hamiltonians, so only the
-            # magnitude check remains here.
-            constant = hamiltonian.constant
-            if abs(constant) > PAULI_TERM_ZERO_ATOL:
-                # Works for both concrete float gamma and a backend
-                # Parameter (ParameterExpression global phase is bound
-                # together with the rest of the circuit parameters).
-                circuit.global_phase += -float(constant.real) * gamma
-            return
-
-        qubit_indices: list[int] = []
-        for i in range(num_h_qubits):
-            addr = QubitAddress(input_array.uuid, i)
-            if addr in qubit_map:
-                qubit_indices.append(qubit_map[addr])
-            else:
-                self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
-                return
-
-        try:
-            from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
-            from qiskit.circuit.library import PauliEvolutionGate
-
-            sparse_op = hamiltonian_to_sparse_pauli_op(hamiltonian)
-            # ``time`` accepts both ``float`` and Qiskit ``Parameter`` /
-            # ``ParameterExpression``. For parametric gamma we pass the
-            # backend parameter through so it can be bound at run-time.
-            time_arg = float(gamma) if isinstance(gamma, (int, float)) else gamma
-            evo_gate = PauliEvolutionGate(sparse_op, time=time_arg)
-            circuit.append(evo_gate, qubit_indices)
-        except ImportError:
-            # Fallback to manual decomposition when Qiskit library unavailable
-            self._emit_gadget_pauli_evolve(circuit, op, qubit_map, bindings)
-            return
-
-        # Map result array to same physical qubits
-        result_array = op.evolved_qubits
-        for i, phys_idx in enumerate(qubit_indices):
-            result_addr = QubitAddress(result_array.uuid, i)
-            if result_addr not in qubit_map:
-                qubit_map[result_addr] = phys_idx
-
-    def _emit_gadget_pauli_evolve(
-        self,
-        circuit: "QuantumCircuit",
-        op: "PauliEvolveOp",
-        qubit_map: QubitMap,
-        bindings: dict[str, Any],
-    ) -> None:
-        """Delegate to the shared gadget emitter and complete the constant term.
-
-        The shared gadget decomposition emits only the Hamiltonian's
-        Pauli terms — a constant (identity) term contributes no gates
-        there, so it is silently dropped. Every gadget delegation from
-        ``_emit_pauli_evolve`` goes through this wrapper so the dropped
-        constant is re-applied as a Qiskit global phase exactly once,
-        keeping the fallback's phase behavior aligned with the native
-        ``PauliEvolutionGate`` path (whose ``SparsePauliOp`` carries the
-        constant).
-
-        Args:
-            circuit (QuantumCircuit): Qiskit circuit being emitted into.
-            op (PauliEvolveOp): The Pauli evolution operation to emit.
-            qubit_map (QubitMap): Physical qubit map the operation's
-                quantum operands resolve against; updated in place with
-                the evolved-register result addresses.
-            bindings (dict[str, Any]): Active emit bindings used to
-                resolve the Hamiltonian, gamma, and register shape.
-
-        Raises:
-            EmitError: Propagated from the shared gadget emitter
-                (unresolvable Hamiltonian / gamma / term qubit,
-                non-Hermitian term coefficient, or a Hamiltonian larger
-                than the register), or raised by the constant-phase
-                completion when the constant term has a non-real
-                coefficient.
-        """
-        super()._emit_pauli_evolve(circuit, op, qubit_map, bindings)
-        self._emit_gadget_constant_phase(circuit, op, bindings)
-
-    def _emit_gadget_constant_phase(
-        self,
-        circuit: "QuantumCircuit",
-        op: "PauliEvolveOp",
-        bindings: dict[str, Any],
-    ) -> None:
-        """Re-apply the constant term dropped by the gadget decomposition.
-
-        ``exp(-i*gamma*H)`` with ``H = ... + c`` carries the phase
-        ``exp(-i*gamma*c)``. Standalone this is an unobservable global
-        phase, but when the emitted circuit is converted to a gate and
-        placed under controls (``_blockvalue_to_gate`` + ``Gate.control``)
-        Qiskit promotes the definition's global phase to the observable
-        relative phase on the all-controls-on subspace — matching the
-        native ``PauliEvolutionGate`` path, the shared controlled path's
-        explicit ``P(-gamma*c)`` on a control, and CUDA-Q's controlled
-        constant re-application. Hamiltonian and gamma resolution mirrors
-        the shared gadget emitter (same resolver and ``_resolve_gamma``),
-        so whenever the gadget emission succeeded the constant resolves
-        identically; if either is unresolvable this method is a no-op
-        (every such reachable case has already raised inside the gadget
-        emission).
-
-        Args:
-            circuit (QuantumCircuit): Circuit the gadget fallback just
-                emitted into; its ``global_phase`` is updated in place.
-            op (PauliEvolveOp): The Pauli evolution operation being
-                emitted.
-            bindings (dict[str, Any]): Active emit bindings used to
-                resolve the Hamiltonian and gamma.
-
-        Raises:
-            EmitError: If the constant term has a non-real coefficient
-                (non-Hermitian Hamiltonian).
-        """
-        import qamomile.observable as qm_o
-        from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
-            _resolve_gamma,
-        )
-        from qamomile.observable.hamiltonian import (
-            HERMITIAN_IMAG_ATOL,
-            PAULI_TERM_ZERO_ATOL,
-        )
-
-        hamiltonian = self._resolver.resolve_bound_value(op.observable, bindings)
-        if not isinstance(hamiltonian, qm_o.Hamiltonian):
-            return
-        constant = hamiltonian.constant
-        if abs(constant) <= PAULI_TERM_ZERO_ATOL:
-            return
-        if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
-            raise EmitError(
-                f"PauliEvolveOp requires a Hermitian Hamiltonian "
-                f"(real coefficients), but found a complex constant "
-                f"{constant}.",
-                operation="PauliEvolveOp",
-            )
-        gamma = _resolve_gamma(self, op, bindings)
-        if gamma is None:
-            return
-        # Works for both concrete float gamma and a backend Parameter
-        # (ParameterExpression global phase is bound together with the
-        # rest of the circuit parameters).
-        circuit.global_phase += -float(constant.real) * gamma
+from qamomile.qiskit.materializer import QiskitMaterializer
 
 
 class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
@@ -797,12 +40,14 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
         exp_val = executor.estimate(circuit, observable)
     """
 
-    def __init__(self, backend=None, estimator=None):
+    def __init__(self, backend: Any = None, estimator: Any = None):
         """Initialize executor with backend and optional estimator.
 
         Args:
-            backend: Qiskit backend (defaults to AerSimulator if available)
-            estimator: Optional QiskitExpectationEstimator for expectation values
+            backend (Any): Qiskit backend. Defaults to an ``AerSimulator``
+                when available.
+            estimator (Any): Optional Qiskit expectation estimator. Defaults
+                to None.
         """
         self.backend = backend
         self._estimator = estimator
@@ -811,7 +56,7 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
             try:
                 from qiskit_aer import AerSimulator
 
-                self.backend = AerSimulator(max_parallel_threads=1)
+                self.backend = AerSimulator()
             except ImportError:
                 try:
                     from qiskit.providers.basic_provider import BasicSimulator
@@ -824,12 +69,21 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
         """Execute circuit and return bitstring counts.
 
         Args:
-            circuit: The quantum circuit to execute
-            shots: Number of measurement shots
+            circuit (QuantumCircuit): Qiskit circuit to execute.
+            shots (int): Number of measurement shots.
 
         Returns:
-            Dictionary mapping bitstrings to counts (e.g., {"00": 512, "11": 512})
+            dict[str, int]: Dictionary mapping bitstrings to counts. A circuit
+            without quantum or classical bits returns ``{"": shots}``.
+
+        Raises:
+            RuntimeError: If no Qiskit backend is available for execution, or
+                if Aer would still receive an empty-parameter multiplexer after
+                the workaround decomposition.
         """
+        if circuit.num_qubits == 0 and circuit.num_clbits == 0:
+            return {"": shots}
+
         from qiskit import transpile
 
         if self.backend is None:
@@ -837,6 +91,10 @@ class QiskitExecutor(QuantumExecutor["QuantumCircuit"]):
 
         circuit_with_meas = self._ensure_measurements(circuit)
         transpiled = transpile(circuit_with_meas, self.backend)
+        if type(self.backend).__module__.startswith("qiskit_aer."):
+            transpiled = _decompose_empty_parameter_multiplexers(
+                transpiled, self.backend
+            )
         job = self.backend.run(transpiled, shots=shots)
         return job.result().get_counts()
 
@@ -947,9 +205,11 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
     Converts Qamomile QKernels into Qiskit QuantumCircuits.
 
     Args:
-        use_native_composite: If True (default), use native Qiskit library
-                              implementations for QFT/IQFT. If False, use
-                              manual decomposition for all composite gates.
+        use_native_composite (bool): Whether to prefer native Qiskit library
+            realizations for semantic composites such as QFT/IQFT. Defaults
+            to ``True``.
+        use_native_pauli_evolution (bool): Whether to prefer
+            ``PauliEvolutionGate`` over gate gadgets. Defaults to ``True``.
 
     Example:
         from qamomile.qiskit import QiskitTranspiler
@@ -966,16 +226,30 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
         print(circuit.draw())
     """
 
-    def __init__(self, use_native_composite: bool = True):
+    def __init__(
+        self,
+        use_native_composite: bool = True,
+        use_native_pauli_evolution: bool = True,
+    ) -> None:
         """Initialize the Qiskit transpiler.
 
         Args:
-            use_native_composite: If True, use native Qiskit implementations
-                                  for QFT/IQFT. If False, use manual decomposition.
+            use_native_composite (bool): Whether to prefer backend-native
+                realizations of semantic composites such as QFT, state
+                preparation, arithmetic, and multi-controlled X. Defaults to
+                ``True``.
+            use_native_pauli_evolution (bool): Whether to prefer native Pauli
+                evolution over gate gadgets. Defaults to ``True``.
         """
         self._use_native_composite = use_native_composite
+        self._use_native_pauli_evolution = use_native_pauli_evolution
 
     def _create_segmentation_pass(self) -> SegmentationPass:
+        """Create the host-orchestrated circuit segmentation pass.
+
+        Returns:
+            SegmentationPass: Standard single-quantum-segment planner.
+        """
         return SegmentationPass()
 
     def _create_emit_pass(
@@ -983,20 +257,98 @@ class QiskitTranspiler(Transpiler["QuantumCircuit"]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> EmitPass["QuantumCircuit"]:
-        return QiskitEmitPass(
-            bindings, parameters, use_native_composite=self._use_native_composite
+        """Create the capability-driven Qiskit materialization pipeline.
+
+        Args:
+            bindings (dict[str, Any] | None): Compile-time bindings. Defaults
+                to ``None``.
+            parameters (list[str] | None): Runtime parameter names. Defaults
+                to ``None``.
+
+        Returns:
+            EmitPass[QuantumCircuit]: Circuit lowering, legalization, and
+                Qiskit materialization pass.
+        """
+        return CircuitBackendEmitPass(
+            QiskitMaterializer(),
+            bindings,
+            parameters,
+            policy=CompilationPolicy(
+                prefer_native_semantic_ops=self._use_native_composite,
+                prefer_native_pauli_evolution=self._use_native_pauli_evolution,
+            ),
         )
 
     def executor(  # type: ignore[override]
         self,
-        backend=None,
+        backend: Any = None,
     ) -> QiskitExecutor:
         """Create a Qiskit executor.
 
         Args:
-            backend: Qiskit backend (defaults to AerSimulator)
+            backend (Any): Qiskit backend. Defaults to an ``AerSimulator``.
 
         Returns:
-            QiskitExecutor configured with the backend
+            QiskitExecutor: Executor configured with the backend.
         """
         return QiskitExecutor(backend)
+
+
+def _contains_empty_parameter_multiplexer(circuit: "QuantumCircuit") -> bool:
+    """Return whether a circuit contains Aer's unsafe multiplexer form.
+
+    Args:
+        circuit (QuantumCircuit): Qiskit circuit to inspect, including any
+            nested control-flow blocks reachable through ``ControlFlowOp``.
+
+    Returns:
+        bool: True when the circuit contains a ``multiplexer`` instruction
+            whose parameter list is empty, otherwise False.
+    """
+    from qiskit.circuit import ControlFlowOp
+
+    for instruction in circuit.data:
+        operation = instruction.operation
+        if operation.name == "multiplexer" and not operation.params:
+            return True
+        if isinstance(operation, ControlFlowOp) and any(
+            _contains_empty_parameter_multiplexer(block) for block in operation.blocks
+        ):
+            return True
+    return False
+
+
+def _decompose_empty_parameter_multiplexers(
+    circuit: "QuantumCircuit", backend: Any
+) -> "QuantumCircuit":
+    """Decompose Aer's unsafe empty-parameter multiplexers before execution.
+
+    Args:
+        circuit (QuantumCircuit): Transpiled Qiskit circuit to sanitize.
+        backend (Any): Qiskit backend used for the follow-up transpilation.
+
+    Returns:
+        QuantumCircuit: The original circuit when no unsafe multiplexer is
+            present, otherwise a re-transpiled circuit with matching
+            multiplexers decomposed through nested control-flow blocks.
+
+    Raises:
+        RuntimeError: If an empty-parameter multiplexer remains after the
+            decomposition pass and re-transpilation.
+    """
+    if not _contains_empty_parameter_multiplexer(circuit):
+        return circuit
+
+    from qiskit import transpile
+    from qiskit.circuit import ControlFlowOp
+
+    decomposed = transpile(
+        circuit.decompose(gates_to_decompose=["multiplexer", ControlFlowOp], reps=4),
+        backend,
+    )
+    if _contains_empty_parameter_multiplexer(decomposed):
+        raise RuntimeError(
+            "Aer execution would receive an empty-parameter multiplexer that "
+            "can crash native assembly."
+        )
+    return decomposed

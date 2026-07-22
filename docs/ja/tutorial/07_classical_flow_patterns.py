@@ -30,7 +30,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import os
@@ -249,10 +249,12 @@ def repeat_until_zero() -> qmc.Bit:
     bit = qmc.measure(q)
 
     while bit:
-        # 0 が得られるまで再準備と再測定を繰り返す
-        q = qmc.qubit("q2")
-        q = qmc.h(q)
-        bit = qmc.measure(q)
+        # 0 が得られるまで再準備と再測定を繰り返す。レジスタは body-local な
+        # 名前にする。外側の `q` を本体内で確保したレジスタに再束縛する形は、
+        # runtime ループが単一のレジスタをリセットなしで再実行するため拒否される。
+        q2 = qmc.qubit("q2")
+        q2 = qmc.h(q2)
+        bit = qmc.measure(q2)
 
     return bit
 
@@ -289,10 +291,10 @@ def measure_and_correct() -> qmc.Bit:
             q1 = qmc.x(q1)
         else:
             q1 = q1
-        # 再準備と再測定
-        q0 = qmc.qubit("q0_retry")
-        q0 = qmc.h(q0)
-        bit = qmc.measure(q0)
+        # 再準備と再測定(前述と同じく body-local なレジスタ名にする)
+        q0_retry = qmc.qubit("q0_retry")
+        q0_retry = qmc.h(q0_retry)
+        bit = qmc.measure(q0_retry)
 
     return qmc.measure(q1)
 

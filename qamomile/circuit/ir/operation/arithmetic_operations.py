@@ -1,7 +1,6 @@
 import dataclasses
 import enum
 
-from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import Value
 
 from .operation import Operation, OperationKind, ParamHint, Signature
@@ -57,6 +56,80 @@ class BinOpKind(enum.Enum):
     MOD = enum.auto()
     POW = enum.auto()
     MIN = enum.auto()
+
+
+class UnaryMathOpKind(enum.Enum):
+    """Identify one abstract unary mathematical operation."""
+
+    LOG2 = enum.auto()
+    CEIL = enum.auto()
+
+
+@dataclasses.dataclass
+class UnaryMathOp(Operation):
+    """Represent one pure unary mathematical expression.
+
+    Args:
+        operands (list[Value]): Single numeric input value.
+        results (list[Value]): Single numeric result value.
+        kind (UnaryMathOpKind | None): Mathematical operation to apply.
+
+    Raises:
+        ValueError: If ``kind`` is missing or the operation does not have
+            exactly one operand and one result.
+    """
+
+    kind: UnaryMathOpKind | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the unary operation shape and kind.
+
+        Raises:
+            ValueError: If the operation kind or unary shape is invalid.
+        """
+        if self.kind is None:
+            raise ValueError("kind must be specified for UnaryMathOp.")
+        if len(self.operands) != 1 or len(self.results) != 1:
+            raise ValueError("UnaryMathOp requires one operand and one result.")
+
+    @property
+    def input(self) -> Value:
+        """Return the input value.
+
+        Returns:
+            Value: Sole numeric input.
+        """
+        return self.operands[0]
+
+    @property
+    def output(self) -> Value:
+        """Return the output value.
+
+        Returns:
+            Value: Sole numeric result.
+        """
+        return self.results[0]
+
+    @property
+    def signature(self) -> Signature:
+        """Return the typed unary signature.
+
+        Returns:
+            Signature: One-input, one-output classical signature.
+        """
+        return Signature(
+            operands=[ParamHint(name="input", type=self.input.type)],
+            results=[ParamHint(name="output", type=self.output.type)],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        """Classify the operation as classical.
+
+        Returns:
+            OperationKind: ``OperationKind.CLASSICAL``.
+        """
+        return OperationKind.CLASSICAL
 
 
 @dataclasses.dataclass
@@ -181,6 +254,11 @@ class RuntimeOpKind(enum.Enum):
     FLOORDIV = enum.auto()
     MOD = enum.auto()
     POW = enum.auto()
+    # Branch merge: ``select(condition, true_value, false_value)``.
+    # Synthesized by ``ClassicalLoweringPass`` from a runtime
+    # ``IfOperation``'s scalar classical merge slot; has no compile-time
+    # per-family counterpart.
+    SELECT = enum.auto()
 
 
 @dataclasses.dataclass
@@ -198,6 +276,9 @@ class RuntimeClassicalExpr(Operation):
     - Binary kinds (EQ/NEQ/LT/LE/GT/GE/AND/OR/ADD/SUB/MUL/DIV/FLOORDIV/MOD/POW):
       ``operands = [lhs, rhs]``.
     - Unary kind (NOT): ``operands = [val]``.
+    - Ternary kind (SELECT): ``operands = [condition, true_value,
+      false_value]`` — the runtime form of a branch merge
+      (``result = true_value if condition else false_value``).
     - Result: ``results = [output_value]``.
 
     The single-node + unified-kind shape (vs four parallel subclasses)
@@ -218,6 +299,15 @@ class RuntimeClassicalExpr(Operation):
         if self.kind is RuntimeOpKind.NOT:
             return Signature(
                 operands=[ParamHint(name="input", type=self.operands[0].type)],
+                results=[ParamHint(name="output", type=self.results[0].type)],
+            )
+        if self.kind is RuntimeOpKind.SELECT:
+            return Signature(
+                operands=[
+                    ParamHint(name="condition", type=self.operands[0].type),
+                    ParamHint(name="true_value", type=self.operands[1].type),
+                    ParamHint(name="false_value", type=self.operands[2].type),
+                ],
                 results=[ParamHint(name="output", type=self.results[0].type)],
             )
         return Signature(
@@ -282,56 +372,3 @@ def runtime_kind_from_condop(kind: "CondOpKind") -> RuntimeOpKind:
             }
         )
     return _CONDOP_KIND_TO_RUNTIME[kind]
-
-
-@dataclasses.dataclass
-class PhiOp(Operation):
-    """SSA Phi function: merge point after conditional branch.
-
-    This operation selects one of two values based on a condition.
-    Used to merge values from different branches of an if-else statement.
-
-    Attributes:
-        operands[0]: condition (Bit) - which branch was taken
-        operands[1]: true_value - value from the true branch
-        operands[2]: false_value - value from the false branch
-        results[0]: output - merged value
-
-    Example:
-        if condition:
-            x = x + 1  # true_value
-        else:
-            x = x + 2  # false_value
-        # x is now PhiOp(condition, true_value, false_value)
-    """
-
-    @property
-    def condition(self) -> Value:
-        return self.operands[0]
-
-    @property
-    def true_value(self) -> Value:
-        return self.operands[1]
-
-    @property
-    def false_value(self) -> Value:
-        return self.operands[2]
-
-    @property
-    def output(self) -> Value:
-        return self.results[0]
-
-    @property
-    def signature(self) -> Signature:
-        return Signature(
-            operands=[
-                ParamHint(name="condition", type=BitType()),
-                ParamHint(name="true_value", type=self.operands[1].type),
-                ParamHint(name="false_value", type=self.operands[2].type),
-            ],
-            results=[ParamHint(name="output", type=self.results[0].type)],
-        )
-
-    @property
-    def operation_kind(self) -> OperationKind:
-        return OperationKind.CLASSICAL

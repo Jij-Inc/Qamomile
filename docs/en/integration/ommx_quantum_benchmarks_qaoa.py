@@ -17,7 +17,7 @@
 # tags: [integration, optimization, variational]
 # ---
 #
-# # Using OMMX Quantum Benchmarks (1): Implementing and Benchmarking Quantum Algorithms with Qamomile
+# # Using OMMX Quantum Benchmarks: Implementing and Benchmarking Quantum Algorithms with Qamomile
 #
 # This tutorial shows how to run a Qamomile quantum algorithm on a problem
 # from a public benchmark dataset and compare its solution quality with a
@@ -34,7 +34,7 @@
 
 # %%
 # Install the additional packages used in this tutorial.
-# # !pip install qamomile ommx-quantum-benchmarks ommx-pyscipopt-adapter
+# # !pip install "qamomile[qiskit]" ommx-quantum-benchmarks ommx-pyscipopt-adapter
 
 # %%
 import os

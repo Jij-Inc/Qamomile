@@ -51,13 +51,22 @@ uv sync
 ```
 
 This installs the default development dependency group.
-In the current `pyproject.toml`, that gives you the core Qiskit-based environment together with documentation and test tooling.
+In the current `pyproject.toml`, that gives you Qiskit, circuit visualization,
+documentation, and test tooling.
 Optional backend integrations such as QURI Parts, qBraid, and CUDA-Q still need their corresponding extras.
 
 Runtime-only environment from source:
 
 ```bash
 uv sync --no-dev
+```
+
+The compiler core is backend-independent. To run the Qiskit-based Quick Start
+and render `draw()` output in a runtime-only environment, install the matching
+extras:
+
+```bash
+uv sync --no-dev --extra qiskit --extra visualization
 ```
 
 Runtime-only environment from source with QURI Parts support:
@@ -95,6 +104,7 @@ If you prefer an explicit editable install inside your environment, this also wo
 
 ```bash
 pip install -e .
+pip install -e ".[qiskit,visualization]"  # Qiskit Quick Start + draw()
 pip install -e ".[quri_parts]"   # optional
 pip install -e ".[qbraid]"       # optional
 pip install -e ".[cudaq-cu12]"   # optional, CUDA 12.x

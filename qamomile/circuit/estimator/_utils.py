@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import sympy as sp
 
-from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOpKind,
+    UnaryMathOpKind,
+)
 
 
 def _smart_floordiv(lhs: sp.Expr, r: sp.Expr) -> sp.Expr:
@@ -27,7 +30,7 @@ def _smart_floordiv(lhs: sp.Expr, r: sp.Expr) -> sp.Expr:
         return quotient
     if isinstance(quotient, sp.Pow):
         _, exp = quotient.as_base_exp()
-        if exp.is_nonnegative is not False:
+        if exp.is_nonnegative is True:
             return quotient
     return sp.floor(lhs / r)
 
@@ -40,6 +43,13 @@ BINOP_TO_SYMPY = {
     BinOpKind.FLOORDIV: _smart_floordiv,
     BinOpKind.MOD: lambda lhs, r: sp.Mod(lhs, r),
     BinOpKind.POW: lambda lhs, r: lhs**r,
+    BinOpKind.MIN: lambda lhs, r: sp.Min(lhs, r),
+}
+
+
+UNARY_MATH_TO_SYMPY = {
+    UnaryMathOpKind.LOG2: lambda value: sp.log(value, 2),
+    UnaryMathOpKind.CEIL: sp.ceiling,
 }
 
 

@@ -230,28 +230,72 @@ def remap_value_metadata_references(
     )
 
 
-@typing.runtime_checkable
-class ValueBase(typing.Protocol):
-    """Protocol for IR values with typed metadata.
+class ValueBase:
+    """Nominal base for every typed IR value.
 
-    Attributes are declared as read-only properties to match frozen
-    dataclass fields in concrete implementations (Value, ArrayValue, etc.).
+    Runtime compiler passes inspect values in their innermost loops. A nominal
+    base keeps those checks constant-time; a runtime-checkable protocol would
+    repeatedly scan the protocol members on Python versions that do not cache
+    structural checks.
     """
 
-    @property
-    def uuid(self) -> str: ...
-    @property
-    def logical_id(self) -> str: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def metadata(self) -> ValueMetadata: ...
+    uuid: str
+    logical_id: str
+    name: str
+    metadata: ValueMetadata
 
-    def next_version(self) -> ValueBase: ...
-    def is_parameter(self) -> bool: ...
-    def parameter_name(self) -> str | None: ...
-    def is_constant(self) -> bool: ...
-    def get_const(self) -> int | float | bool | None: ...
+    if typing.TYPE_CHECKING:
+
+        @property
+        def type(self) -> ValueType:
+            """Return the static IR type carried by this value.
+
+            Returns:
+                ValueType: Concrete scalar or container type.
+            """
+            raise NotImplementedError
+
+    def next_version(self) -> ValueBase:
+        """Create the next SSA version of this value.
+
+        Returns:
+            ValueBase: A value with a fresh version UUID and preserved logical
+                identity.
+        """
+        raise NotImplementedError
+
+    def is_parameter(self) -> bool:
+        """Return whether this value represents a runtime parameter.
+
+        Returns:
+            bool: Whether parameter metadata is present.
+        """
+        raise NotImplementedError
+
+    def parameter_name(self) -> str | None:
+        """Return the public parameter name carried by this value.
+
+        Returns:
+            str | None: Parameter name, or ``None`` for a non-parameter value.
+        """
+        raise NotImplementedError
+
+    def is_constant(self) -> bool:
+        """Return whether this value carries a scalar constant.
+
+        Returns:
+            bool: Whether scalar constant metadata is present.
+        """
+        raise NotImplementedError
+
+    def get_const(self) -> int | float | bool | None:
+        """Return the scalar constant carried by this value.
+
+        Returns:
+            int | float | bool | None: Constant value, or ``None`` when the
+                value is not constant.
+        """
+        raise NotImplementedError
 
 
 ValueLike: typing.TypeAlias = "Value | ArrayValue | TupleValue | DictValue"
@@ -526,7 +570,7 @@ class _MetadataValueMixin:
 
 
 @dataclasses.dataclass(frozen=True)
-class Value(_MetadataValueMixin, typing.Generic[T]):
+class Value(_MetadataValueMixin, ValueBase, typing.Generic[T]):
     """A typed SSA value in the IR.
 
     The ``name`` field is **display-only**: it labels the value for
@@ -536,10 +580,10 @@ class Value(_MetadataValueMixin, typing.Generic[T]):
 
     An empty string (``name=""``) is the **anonymous marker** used by
     auto-generated tmp values (arithmetic results, comparison results,
-    coerced constants). Name-based readers must guard with truthiness
-    (``if value.name and value.name in bindings: ...``) so anonymous values
-    never collide on a shared empty key. User-supplied parameter names and
-    array names continue to be non-empty.
+    coerced constants). Compiler-internal identity and writes use UUIDs or
+    explicit parameter metadata. Compatibility readers may consult a non-empty
+    label only after those identity channels, so anonymous temporaries cannot
+    collide through a shared display key.
     """
 
     type: T
@@ -694,6 +738,103 @@ def resolve_root_array_index(
     return current, idx
 
 
+def array_static_length(array: "ArrayValue") -> int | None:
+    """Resolve a one-dimensional array's compile-time length.
+
+    Args:
+        array (ArrayValue): Array whose sole shape dimension is inspected.
+
+    Returns:
+        int | None: Non-negative static length, or None when the array is not
+            one-dimensional, its length is symbolic/non-integral, or it is
+            malformed with a negative length. Boolean constants are rejected
+            even though ``bool`` is an ``int`` subclass.
+    """
+    if len(array.shape) != 1:
+        return None
+    length_value = array.shape[0]
+    if not length_value.is_constant():
+        return None
+    length = length_value.get_const()
+    if isinstance(length, bool) or not isinstance(length, int) or length < 0:
+        return None
+    return int(length)
+
+
+def array_physical_region(
+    array: "ArrayValue",
+) -> tuple[str, tuple[int, ...]] | None:
+    """Resolve a one-dimensional array to its ordered physical region.
+
+    The region is expressed independently of SSA version UUIDs: the first
+    element is the root array's ``logical_id`` and the second is the ordered
+    tuple of root-space indices addressed by the array. This makes a root
+    register and its full view compare equal while keeping partial, strided,
+    reordered, and different-root registers distinct.
+
+    Args:
+        array (ArrayValue): Root array or nested sliced view to resolve. The
+            array must be one-dimensional and have a compile-time integer
+            length; every slice bound in its ancestry must also be constant.
+
+    Returns:
+        tuple[str, tuple[int, ...]] | None: ``(root_logical_id, indices)``
+            when the complete ordered coverage is statically known, otherwise
+            ``None``. Symbolic shapes or slice bounds remain unresolved so
+            callers can defer to emit-time physical mappings.
+    """
+    length = array_static_length(array)
+    if length is None:
+        return None
+
+    root: ArrayValue | None = None
+    root_indices: list[int] = []
+    for local_index in range(length):
+        resolved = resolve_root_array_index(array, local_index)
+        if resolved is None:
+            return None
+        element_root, root_index = resolved
+        if root is None:
+            root = element_root
+        elif element_root.logical_id != root.logical_id:
+            return None
+        root_indices.append(root_index)
+
+    # Empty views do not visit an element above, but their slice ancestry still
+    # identifies the physical root unambiguously when all bounds are valid.
+    if root is None:
+        resolved = resolve_root_array_index(array, 0)
+        if resolved is None:
+            return None
+        root = resolved[0]
+    return root.logical_id, tuple(root_indices)
+
+
+def arrays_share_physical_region(left: "ArrayValue", right: "ArrayValue") -> bool:
+    """Return whether two arrays denote the same ordered physical region.
+
+    Args:
+        left (ArrayValue): First root array or sliced view.
+        right (ArrayValue): Second root array or sliced view.
+
+    Returns:
+        bool: ``True`` for the same SSA value/version lineage, when both arrays
+            resolve to the same root logical identity and ordered root indices,
+            or when both resolve to empty regions (whose root is unobservable).
+            Returns ``False`` for non-empty divergent regions and unresolved
+            symbolic coverage.
+    """
+    if left.uuid == right.uuid:
+        return True
+    if array_static_length(left) == 0 and array_static_length(right) == 0:
+        return True
+    left_region = array_physical_region(left)
+    right_region = array_physical_region(right)
+    if left_region is None or right_region is None:
+        return False
+    return left_region == right_region
+
+
 def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
     """Resolve an array-element value to its root ``(array_uuid, index)``.
 
@@ -769,11 +910,11 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
 
 
 @dataclasses.dataclass(frozen=True)
-class TupleValue(_MetadataValueMixin):
+class TupleValue(_MetadataValueMixin, ValueBase):
     """A tuple of IR values for structured data."""
 
     name: str
-    elements: tuple[Value, ...] = dataclasses.field(default_factory=tuple)
+    elements: tuple[ValueLike, ...] = dataclasses.field(default_factory=tuple)
     metadata: ValueMetadata = dataclasses.field(default_factory=ValueMetadata)
     uuid: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
     logical_id: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
@@ -794,11 +935,11 @@ class TupleValue(_MetadataValueMixin):
         )
 
     def is_constant(self) -> bool:
-        return all(isinstance(e, Value) and e.is_constant() for e in self.elements)
+        return all(element.is_constant() for element in self.elements)
 
 
 @dataclasses.dataclass(frozen=True)
-class DictValue(_MetadataValueMixin):
+class DictValue(_MetadataValueMixin, ValueBase):
     """A dictionary value stored as stable ordered entries."""
 
     name: str
@@ -830,3 +971,50 @@ class DictValue(_MetadataValueMixin):
 
     def __len__(self) -> int:
         return len(self.entries)
+
+
+def collect_value_like_uuids(value: "ValueLike") -> set[str]:
+    """Collect UUIDs contained in a value-like IR object.
+
+    Args:
+        value (ValueLike): Value-like object to inspect.
+
+    Returns:
+        set[str]: UUIDs for ``value`` itself, recursively contained tuple/dict
+            elements, and array view/element dependencies.
+    """
+    uuids: set[str] = set()
+
+    def collect(current: ValueLike) -> None:
+        """Collect one value and recursively embedded dependencies.
+
+        Args:
+            current (ValueLike): Value-like object to visit.
+        """
+        if current.uuid in uuids:
+            return
+        uuids.add(current.uuid)
+        if isinstance(current, TupleValue):
+            for element in current.elements:
+                collect(element)
+        elif isinstance(current, DictValue):
+            for key, entry_value in current.entries:
+                collect(key)
+                collect(entry_value)
+        elif isinstance(current, ArrayValue):
+            for dimension in current.shape:
+                collect(dimension)
+            if current.slice_of is not None:
+                collect(current.slice_of)
+            if current.slice_start is not None:
+                collect(current.slice_start)
+            if current.slice_step is not None:
+                collect(current.slice_step)
+        elif isinstance(current, Value):
+            if current.parent_array is not None:
+                collect(current.parent_array)
+            for index in current.element_indices:
+                collect(index)
+
+    collect(value)
+    return uuids

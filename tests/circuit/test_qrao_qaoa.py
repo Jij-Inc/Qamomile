@@ -157,7 +157,7 @@ def test_fallback_x_term():
     H.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 0.5)
 
     gamma = 0.7
-    transpiler = QiskitTranspiler(use_native_composite=False)
+    transpiler = QiskitTranspiler(use_native_pauli_evolution=False)
     exe = transpiler.transpile(
         _wrap_pauli_evolve,
         bindings={"n": 1, "hamiltonian": H, "gamma": gamma},
@@ -178,7 +178,7 @@ def test_fallback_y_term():
     H.add_term((qm_o.PauliOperator(qm_o.Pauli.Y, 0),), 0.3)
 
     gamma = 0.7
-    transpiler = QiskitTranspiler(use_native_composite=False)
+    transpiler = QiskitTranspiler(use_native_pauli_evolution=False)
     exe = transpiler.transpile(
         _wrap_pauli_evolve,
         bindings={"n": 1, "hamiltonian": H, "gamma": gamma},
@@ -200,7 +200,7 @@ def test_fallback_xz_two_qubit():
     )
 
     gamma = 0.5
-    transpiler = QiskitTranspiler(use_native_composite=False)
+    transpiler = QiskitTranspiler(use_native_pauli_evolution=False)
     exe = transpiler.transpile(
         _wrap_pauli_evolve,
         bindings={"n": 2, "hamiltonian": H, "gamma": gamma},
@@ -300,7 +300,7 @@ def test_native_fallback_statevector_match():
     bindings = {"n": 2, "hamiltonian": H, "gamma": 0.7}
 
     native_exe = QiskitTranspiler().transpile(_wrap_pauli_evolve, bindings=bindings)
-    fallback_exe = QiskitTranspiler(use_native_composite=False).transpile(
+    fallback_exe = QiskitTranspiler(use_native_pauli_evolution=False).transpile(
         _wrap_pauli_evolve, bindings=bindings
     )
 
@@ -339,7 +339,7 @@ def test_smaller_hamiltonian_is_identity_padded():
     H.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)  # 1-qubit
 
     for use_native in (True, False):
-        exe = QiskitTranspiler(use_native_composite=use_native).transpile(
+        exe = QiskitTranspiler(use_native_pauli_evolution=use_native).transpile(
             _wrap_pauli_evolve,
             bindings={"n": 2, "hamiltonian": H, "gamma": 0.5},
         )
@@ -386,7 +386,7 @@ def test_zero_qubit_hamiltonian_evolves_as_global_phase(use_native, constant):
     H = qm_o.Hamiltonian()
     H += constant
 
-    exe = QiskitTranspiler(use_native_composite=use_native).transpile(
+    exe = QiskitTranspiler(use_native_pauli_evolution=use_native).transpile(
         _wrap_pauli_evolve,
         bindings={"n": 2, "hamiltonian": H, "gamma": gamma},
     )
@@ -470,7 +470,7 @@ def test_controlled_constant_only_hamiltonian_relative_phase(use_native, invert)
         q[1:2] = targets
         return qmc.measure(q)
 
-    exe = QiskitTranspiler(use_native_composite=use_native).transpile(
+    exe = QiskitTranspiler(use_native_pauli_evolution=use_native).transpile(
         controlled_const, bindings={"hamiltonian": H, "gamma": gamma}
     )
     circuit = exe.compiled_quantum[0].circuit.remove_final_measurements(inplace=False)
@@ -530,7 +530,7 @@ def test_controlled_constant_plus_pauli_relative_phase(invert, gamma, constant):
 
     states = {}
     for use_native in (True, False):
-        exe = QiskitTranspiler(use_native_composite=use_native).transpile(
+        exe = QiskitTranspiler(use_native_pauli_evolution=use_native).transpile(
             controlled_evolution, bindings={"hamiltonian": H, "gamma": gamma}
         )
         circuit = exe.compiled_quantum[0].circuit.remove_final_measurements(
@@ -579,7 +579,7 @@ def test_parametric_gamma_carries_constant_phase(use_native, gamma, constant):
     H.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)
     H += constant
 
-    exe = QiskitTranspiler(use_native_composite=use_native).transpile(
+    exe = QiskitTranspiler(use_native_pauli_evolution=use_native).transpile(
         _wrap_pauli_evolve,
         bindings={"n": 1, "hamiltonian": H},
         parameters=["gamma"],
@@ -618,7 +618,7 @@ def test_larger_hamiltonian_raises(use_native):
         1.0,
     )  # acts on 3 qubits
 
-    transpiler = QiskitTranspiler(use_native_composite=use_native)
+    transpiler = QiskitTranspiler(use_native_pauli_evolution=use_native)
     with pytest.raises(EmitError, match="qubit count mismatch"):
         transpiler.transpile(
             _wrap_pauli_evolve,
@@ -637,7 +637,7 @@ def test_complex_coefficient_raises(use_native):
     H = qm_o.Hamiltonian()
     H.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0 + 0.5j)  # complex
 
-    transpiler = QiskitTranspiler(use_native_composite=use_native)
+    transpiler = QiskitTranspiler(use_native_pauli_evolution=use_native)
     with pytest.raises(EmitError, match="Hermitian"):
         transpiler.transpile(
             _wrap_pauli_evolve,
@@ -659,7 +659,7 @@ def test_complex_constant_raises(use_native):
     H = qm_o.Hamiltonian()
     H += 2.0j
 
-    transpiler = QiskitTranspiler(use_native_composite=use_native)
+    transpiler = QiskitTranspiler(use_native_pauli_evolution=use_native)
     with pytest.raises(EmitError, match="complex constant"):
         transpiler.transpile(
             _wrap_pauli_evolve,
@@ -681,7 +681,7 @@ def test_complex_constant_with_pauli_term_raises(use_native):
     H.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0)
     H += 2.0j
 
-    transpiler = QiskitTranspiler(use_native_composite=use_native)
+    transpiler = QiskitTranspiler(use_native_pauli_evolution=use_native)
     with pytest.raises(EmitError, match="complex constant"):
         transpiler.transpile(
             _wrap_pauli_evolve,

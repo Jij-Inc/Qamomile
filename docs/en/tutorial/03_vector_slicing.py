@@ -26,7 +26,7 @@
 
 # %%
 # Install the latest Qamomile from pip.
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import qamomile.circuit as qmc
@@ -310,7 +310,7 @@ else:
 # `transpile()` rather than `draw()`.
 
 # %%
-from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
+from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -327,12 +327,12 @@ def release_inside_loop() -> qmc.Vector[qmc.Bit]:
 
 try:
     transpiler.transpile(release_inside_loop)
-except SliceBorrowViolationError as e:
+except ValidationError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
 else:
     raise AssertionError(
-        "expected SliceBorrowViolationError, but transpile() returned normally"
+        "expected ValidationError, but transpile() returned normally"
     )
 
 # %% [markdown]

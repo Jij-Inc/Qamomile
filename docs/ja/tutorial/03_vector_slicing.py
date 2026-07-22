@@ -23,7 +23,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします。
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import qamomile.circuit as qmc
@@ -274,7 +274,7 @@ else:
 # viewを返却するスライス代入は、viewを作成したのと**同じスコープ**で行う必要があります。外側で作成したviewを`for` / `while`本体（や`if`分岐）の内部で返却することは拒否されます。コンパイラは借用状態を1つの静的なテーブルで追跡しており、本体は0回も複数回も実行され得るため、「このviewは返却されたかもしれないし、されていないかもしれない」という状態を表現できないからです。ループ本体のケースはスライス境界が解決された後のトランスパイル時に検出されるので、エラーは`draw()`ではなく`transpile()`から送出されます。
 
 # %%
-from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
+from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
@@ -291,12 +291,12 @@ def release_inside_loop() -> qmc.Vector[qmc.Bit]:
 
 try:
     transpiler.transpile(release_inside_loop)
-except SliceBorrowViolationError as e:
+except ValidationError as e:
     print(f"Error type: {type(e).__name__}")
     print(f"Error message: {e}")
 else:
     raise AssertionError(
-        "expected SliceBorrowViolationError, but transpile() returned normally"
+        "expected ValidationError, but transpile() returned normally"
     )
 
 # %% [markdown]

@@ -6,7 +6,6 @@ Provides ``emit_measure``, ``emit_measure_vector`` and
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -38,9 +37,15 @@ def emit_measure(
     scalar qubits and array element qubits with composite keys).
 
     Raises:
-        warnings.warn: If the qubit or clbit cannot be resolved, a
-            warning is emitted instead of silently dropping the
-            measurement.
+        EmitError: If the qubit or clbit cannot be resolved to a physical
+            address. A dropped measurement is never recoverable inside a
+            quantum segment — the emitted circuit would silently return
+            results with a measured bit missing — so this is a hard error
+            rather than a warning. The most common trigger is a
+            ``measure(q[i])`` whose index ``i`` is an unresolved native-loop
+            parameter; ``LoopAnalyzer.should_unroll`` is expected to have
+            forced such loops to unroll before emit, so reaching this path
+            indicates a real resolution failure.
     """
     qubit_val = op.operands[0]
     clbit_uuid = op.results[0].uuid
@@ -72,9 +77,13 @@ def emit_measure(
             )
         if clbit_addr not in clbit_map:
             details.append(f"clbit (uuid: {clbit_uuid[:8]}...) not found in clbit_map")
-        warnings.warn(
-            f"Measurement dropped: {'; '.join(details)}.",
-            stacklevel=2,
+        raise EmitError(
+            f"Measurement could not be emitted: {'; '.join(details)}. "
+            f"A measurement inside a native backend loop indexed by the loop "
+            f"variable (e.g. `measure(q[i])`) must be unrolled; if you reached "
+            f"this error the loop was not unrolled or the qubit was never "
+            f"allocated.",
+            operation="MeasureOperation",
         )
 
 
@@ -142,7 +151,7 @@ def emit_measure_vector(
     )
     is_view = root_av is not qubits_array
 
-    emitted = 0
+    resolved_measurements: list[tuple[int, int]] = []
     for i in range(size):
         if not is_view and element_uuids and i < len(element_uuids):
             # Non-view fast path: preserve the composite-key lookup so
@@ -156,10 +165,22 @@ def emit_measure_vector(
         if qubit_addr in qubit_map and clbit_addr in clbit_map:
             q_idx = qubit_map[qubit_addr]
             c_idx = clbit_map[clbit_addr]
-            emit_pass._emitter.emit_measure(circuit, q_idx, c_idx)
-            if emit_pass._emitter.measurement_mode == MeasurementMode.STATIC:
-                emit_pass._measurement_qubit_map[c_idx] = q_idx
-            emitted += 1
+            resolved_measurements.append((q_idx, c_idx))
+
+    vector_emitter = getattr(emit_pass._emitter, "emit_measure_vector", None)
+    if resolved_measurements and callable(vector_emitter):
+        vector_emitter(
+            circuit,
+            tuple(qubit for qubit, _ in resolved_measurements),
+            tuple(clbit for _, clbit in resolved_measurements),
+        )
+    else:
+        for qubit, clbit in resolved_measurements:
+            emit_pass._emitter.emit_measure(circuit, qubit, clbit)
+
+    if emit_pass._emitter.measurement_mode == MeasurementMode.STATIC:
+        for qubit, clbit in resolved_measurements:
+            emit_pass._measurement_qubit_map[clbit] = qubit
 
     # Raise on the specific "view produced zero measurements" case that
     # previously silently returned ``[(None, shots)]`` — a data-integrity
@@ -168,7 +189,7 @@ def emit_measure_vector(
     # other paths (pauli_evolve result, qfixed, sub-kernel returns) and
     # raising here would regress established tests without catching new
     # bugs.
-    if is_view and emitted == 0 and size > 0:
+    if is_view and not resolved_measurements and size > 0:
         raise EmitError(
             f"MeasureVectorOperation on view '{qubits_array.name}' emitted "
             f"no measurements: none of the {size} element(s) resolved to a "

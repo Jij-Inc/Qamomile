@@ -3,8 +3,8 @@
 These tests pin the controlled-fallback lowering of ``exp(-i * gamma * H)``
 wrapped by ``qmc.control``: the shared walker emits the basis change and CX
 ladder uncontrolled and routes only the central ``RZ`` through the
-multi-control machinery (``emit_crz`` for one control, the backend's dense
-``UnitaryMatrix`` hook for two or more).
+multi-control machinery (``emit_crz`` for one control, the shared
+Toffoli-cascade lowering on clean ancillas for two or more).
 
 QURI Parts is the backend that exercises the shared
 ``emit_controlled_pauli_evolve`` helper through its recursive fallback
@@ -38,6 +38,9 @@ import qamomile.circuit as qmc  # noqa: E402
 import qamomile.observable as qm_o  # noqa: E402
 from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 from qamomile.qiskit import QiskitTranspiler  # noqa: E402
+from tests.transpiler._ancilla_assertions import (  # noqa: E402
+    assert_ancillas_uncomputed,
+)
 
 pytestmark = pytest.mark.quri_parts
 
@@ -83,12 +86,17 @@ def _qiskit_statevector(circuit: Any) -> np.ndarray:
     return np.asarray(sim.run(stripped).result().get_statevector())
 
 
-def _quri_statevector(qp_circuit: Any) -> np.ndarray:
+def _quri_statevector(
+    qp_circuit: Any,
+    parameter_values: list[float] | None = None,
+) -> np.ndarray:
     """Bind any (empty) parameters and simulate a QURI Parts circuit on Qulacs.
 
     Args:
         qp_circuit (Any): Compiled QURI Parts circuit from
             ``executable.compiled_quantum[0].circuit``.
+        parameter_values (list[float] | None): Runtime parameter values in
+            circuit ABI order. Defaults to zeros for every parameter.
 
     Returns:
         np.ndarray: Complex amplitudes of the prepared state.
@@ -97,13 +105,41 @@ def _quri_statevector(qp_circuit: Any) -> np.ndarray:
     from quri_parts.qulacs.simulator import evaluate_state_to_vector
 
     if hasattr(qp_circuit, "parameter_count") and qp_circuit.parameter_count > 0:
-        bound = qp_circuit.bind_parameters([0.0] * qp_circuit.parameter_count)
+        values = (
+            [0.0] * qp_circuit.parameter_count
+            if parameter_values is None
+            else parameter_values
+        )
+        bound = qp_circuit.bind_parameters(values)
     elif hasattr(qp_circuit, "bind_parameters"):
         bound = qp_circuit.bind_parameters([])
     else:
         bound = qp_circuit
     state = GeneralCircuitQuantumState(bound.qubit_count, bound)
     return np.array(evaluate_state_to_vector(state).vector)
+
+
+def _strip_zero_ancillas(statevector: np.ndarray, dim: int) -> np.ndarray:
+    """Project a statevector onto its leading ``dim`` amplitudes.
+
+    The QURI Parts lowering of multi-controlled gates appends clean
+    ancilla qubits after the data qubits and uncomputes them before the
+    circuit ends, so every amplitude beyond the data-qubit dimension
+    must be zero. Qiskit's native controlled gates use no ancillas, so
+    trimming to the Qiskit statevector's size aligns the two for
+    fidelity comparison. Thin wrapper over
+    :func:`assert_ancillas_uncomputed` expressing this module's natural
+    unit (the Qiskit statevector size); that helper holds the shared
+    ancilla-uncomputation assertion.
+
+    Args:
+        statevector (np.ndarray): Full statevector including ancillas.
+        dim (int): Data-qubit dimension to keep (the Qiskit size).
+
+    Returns:
+        np.ndarray: Statevector restricted to the data qubits.
+    """
+    return assert_ancillas_uncomputed(statevector, dim)
 
 
 def _fidelity_err(sv_a: np.ndarray, sv_b: np.ndarray) -> float:
@@ -446,8 +482,8 @@ _CASES: list[tuple[str, Any, Any, int, int, Callable[[np.random.Generator], Any]
     ("c2t1_Z", None, _cpe_sample_c2t1, 2, 1, _single_z),
     ("c2t2_XX", _cpe_run_c2t2, _cpe_sample_c2t2, 2, 2, _two_xx),
     ("c2t2_heisenberg", _cpe_run_c2t2, _cpe_sample_c2t2, 2, 2, _two_heisenberg),
-    # Constant (identity) Hamiltonian terms: dropped uncontrolled (global
-    # phase) but an observable relative phase once controlled.
+    # Constant (identity) Hamiltonian terms: retained as a standalone phase,
+    # and observable as a relative phase once controlled.
     ("c1t1_X_const", _cpe_run_c1t1, _cpe_sample_c1t1, 1, 1, _single_x_plus_const),
     ("c2t1_X_const", None, _cpe_sample_c2t1, 2, 1, _single_x_plus_const),
     (
@@ -519,7 +555,9 @@ def test_controlled_pauli_evolve_statevector_matches_qiskit(
     qp_exe = _quri_parts_transpiler().transpile(sample_kernel, bindings=bindings)
 
     sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
-    sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
+    sv_qp = _strip_zero_ancillas(
+        _quri_statevector(qp_exe.compiled_quantum[0].circuit), sv_qk.size
+    )
 
     assert _fidelity_err(sv_qk, sv_qp) < 1e-9
 
@@ -538,7 +576,9 @@ def test_controlled_pauli_evolve_boundary_gamma_matches_qiskit(
     qp_exe = _quri_parts_transpiler().transpile(sample_kernel, bindings=bindings)
 
     sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
-    sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
+    sv_qp = _strip_zero_ancillas(
+        _quri_statevector(qp_exe.compiled_quantum[0].circuit), sv_qk.size
+    )
 
     assert _fidelity_err(sv_qk, sv_qp) < 1e-9
 
@@ -633,28 +673,50 @@ def test_controlled_pauli_evolve_sample_matches_qiskit(
     [
         (_cpe_sample_c1t1, qm_o.X(0)),
         (_cpe_sample_c2t2, qm_o.X(0) * qm_o.X(1)),
-        # Pure constant: the constant-term phase scaling (gamma * constant),
-        # not the per-term RZ, is what cannot be expressed parametrically.
-        (_cpe_sample_c1t1, qm_o.X(0) * 0.0 + 0.8),
     ],
-    ids=["one-control", "two-controls", "constant-term"],
+    ids=["one-control", "two-controls"],
 )
 def test_controlled_pauli_evolve_parametric_gamma_raises_on_quri_parts(
     kernel: Any, ham: qm_o.Hamiltonian
 ) -> None:
     """Runtime-parametric gamma raises a clean ``EmitError`` on QURI Parts.
 
-    The central RZ angle is ``2 * coeff * gamma`` and the constant-term phase
-    is ``-gamma * constant``; QURI Parts' Rust-backed runtime ``Parameter``
-    exposes no Python arithmetic, so neither scaling can be expressed (the
-    same pre-existing limitation as uncontrolled ``pauli_evolve``). For two or
-    more controls the dense ``UnitaryMatrix`` path independently requires a
-    compile-time-numeric angle. Either way the controlled lowering surfaces a
-    clear ``EmitError`` at transpile time rather than a raw ``TypeError``.
+    The central RZ angle is ``2 * coeff * gamma``. QURI Parts' Rust-backed
+    runtime ``Parameter`` exposes no Python multiplication, so this scaling
+    cannot be expressed. The controlled lowering surfaces a clear
+    ``EmitError`` at transpile time rather than a raw ``TypeError``. Pure
+    constant Hamiltonians are supported separately through the symbolic
+    global-phase path.
     """
     qp_tr = _quri_parts_transpiler()
     with pytest.raises(EmitError):
         qp_tr.transpile(kernel, bindings={"ham": ham}, parameters=["gamma"])
+
+
+def test_controlled_constant_pauli_evolve_accepts_parametric_gamma() -> None:
+    """A pure constant uses QURI Parts' symbolic controlled-phase path."""
+    hamiltonian = qm_o.Hamiltonian.identity(0.8, num_qubits=1)
+    gamma = 0.61
+    qiskit_executable = QiskitTranspiler().transpile(
+        _cpe_sample_c1t1,
+        bindings={"ham": hamiltonian, "gamma": gamma},
+    )
+    quri_executable = _quri_parts_transpiler().transpile(
+        _cpe_sample_c1t1,
+        bindings={"ham": hamiltonian},
+        parameters=["gamma"],
+    )
+
+    qiskit_state = _qiskit_statevector(qiskit_executable.compiled_quantum[0].circuit)
+    quri_state = _strip_zero_ancillas(
+        _quri_statevector(
+            quri_executable.compiled_quantum[0].circuit,
+            [gamma],
+        ),
+        qiskit_state.size,
+    )
+
+    assert _fidelity_err(qiskit_state, quri_state) < 1e-9
 
 
 @pytest.mark.parametrize("seed", [0, 1, 7])
@@ -679,7 +741,9 @@ def test_controlled_pauli_evolve_distinct_hamiltonians_resolve_independently(
         _cpe_two_hamiltonians, bindings=bindings
     )
     sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
-    sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
+    sv_qp = _strip_zero_ancillas(
+        _quri_statevector(qp_exe.compiled_quantum[0].circuit), sv_qk.size
+    )
 
     assert _fidelity_err(sv_qk, sv_qp) < 1e-9
 
@@ -706,6 +770,8 @@ def test_controlled_pauli_evolve_vector_observable_element(seed: int) -> None:
         _cpe_vector_hamiltonian, bindings=bindings
     )
     sv_qk = _qiskit_statevector(qk_exe.compiled_quantum[0].circuit)
-    sv_qp = _quri_statevector(qp_exe.compiled_quantum[0].circuit)
+    sv_qp = _strip_zero_ancillas(
+        _quri_statevector(qp_exe.compiled_quantum[0].circuit), sv_qk.size
+    )
 
     assert _fidelity_err(sv_qk, sv_qp) < 1e-9
