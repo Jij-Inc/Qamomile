@@ -1108,6 +1108,8 @@ class ResourceEstimator:
         Raises:
             ValueError: If an input name is neither a free symbol nor a declared
                 kernel argument.
+            ValidationError: If concrete array inputs make a reachable array
+                access fall outside its resolved extent.
         """
         build_inputs, estimation_inputs = _partition_estimation_inputs(kernel, inputs)
         block_or_ops = self._coerce_input(
