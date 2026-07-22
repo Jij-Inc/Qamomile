@@ -274,6 +274,9 @@ message Operation {
   repeated string true_yield_refs = 44;
   repeated string false_yield_refs = 45;
   repeated BranchRebind branch_rebinds = 46;
+  repeated string capture_refs = 47;
+  repeated string true_capture_refs = 48;
+  repeated string false_capture_refs = 49;
 
   optional sint64 num_controls = 60;
   optional string num_controls_ref = 61;
