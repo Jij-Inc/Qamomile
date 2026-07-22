@@ -267,5 +267,54 @@ except AffineTypeError as e:
 else:
     raise AssertionError("expected AffineTypeError, but draw() returned normally")
 
+
+# %% [markdown]
+# ### ループや分岐の内部でviewを返却する
+#
+# viewを返却するスライス代入は、viewを作成したのと**同じスコープ**で行う必要があります。外側で作成したviewを`for` / `while`本体（や`if`分岐）の内部で返却することは拒否されます。コンパイラは借用状態を1つの静的なテーブルで追跡しており、本体は0回も複数回も実行され得るため、「このviewは返却されたかもしれないし、されていないかもしれない」という状態を表現できないからです。ループ本体のケースはスライス境界が解決された後のトランスパイル時に検出されるので、エラーは`draw()`ではなく`transpile()`から送出されます。
+
+# %%
+from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
+
+
+@qmc.qkernel
+def release_inside_loop() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(4, name="q")
+    even = q[0::2]
+    for _ in qmc.range(2):
+        q[0::2] = even  # 外側のviewを本体内部で返却しているためエラー
+    return qmc.measure(q)
+
+
+try:
+    transpiler.transpile(release_inside_loop)
+except SliceBorrowViolationError as e:
+    print(f"Error type: {type(e).__name__}")
+    print(f"Error message: {e}")
+else:
+    raise AssertionError(
+        "expected SliceBorrowViolationError, but transpile() returned normally"
+    )
+
+# %% [markdown]
+# 修正方法は、借用と返却のサイクルを1つのスコープ内に収めることです。スライス代入を制御フローの外側で行う（このページのこれまでの例はすべてこの形です）か、ループ本体自体がviewを必要とする場合は、viewを本体の**内部**で作成して、各イテレーションが局所的に借用・返却するようにします:
+
+
+# %%
+@qmc.qkernel
+def view_per_iteration() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(4, name="q")
+    for _ in qmc.range(2):
+        even = q[0::2]  # 本体の内部で借用し...
+        even = qmc.x(even)
+        q[0::2] = even  # ...同じ本体の内部で返却する
+    return qmc.measure(q)
+
+
+view_per_iteration.draw()
+
 # %% [markdown]
 # **次へ**: [制御ゲート](04_controlled_gates.ipynb) — `qmc.control`によるビルトインゲートやサブカーネルの制御、concrete/symbolicの制御数の指定、合成できないパターンのカタログを扱います。
