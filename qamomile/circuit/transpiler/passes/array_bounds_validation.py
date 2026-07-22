@@ -499,18 +499,26 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
         """
         if dimension >= len(bounded_array.shape):
             return
-        extent_value = bounded_array.shape[dimension]
-        extent = _constant_integer(extent_value)
-        if extent is None or 0 <= index < extent:
-            return
 
         root_name = root.name or "<anonymous>"
         parent_name = accessed_parent.name or root_name
-        extent_name = extent_value.name or f"dimension {dimension}"
         if accessed_parent.slice_of is None:
             subject = f"array '{root_name}'"
         else:
             subject = f"array view '{parent_name}' of root array '{root_name}'"
+        if index < 0:
+            raise ValidationError(
+                f"Index {index} is out of range for {subject} at dimension "
+                f"{dimension}. Array indices must be non-negative.",
+                value_name=root_name,
+            )
+
+        extent_value = bounded_array.shape[dimension]
+        extent = _constant_integer(extent_value)
+        if extent is None or index < extent:
+            return
+
+        extent_name = extent_value.name or f"dimension {dimension}"
         view_context = ""
         if (
             accessed_parent.slice_of is not None
@@ -525,12 +533,8 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
                     f"The view extent '{view_extent_name}' resolved to {view_extent}. "
                 )
         requirement = (
-            "Array indices must be non-negative."
-            if index < 0
-            else (
-                f"The extent '{extent_name}' must resolve to at least "
-                f"{index + 1} for this access."
-            )
+            f"The extent '{extent_name}' must resolve to at least "
+            f"{index + 1} for this access."
         )
         raise ValidationError(
             f"Index {index} is out of range for {subject} at dimension "

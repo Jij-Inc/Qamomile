@@ -160,6 +160,25 @@ def test_top_level_output_element_is_validated() -> None:
         ArrayBoundsValidationPass().run(block)
 
 
+def test_negative_index_is_rejected_with_unresolved_extent() -> None:
+    """A constant negative index is invalid even before its extent resolves."""
+    values = ArrayValue(
+        type=FloatType(),
+        name="values",
+        shape=(Value(type=UIntType(), name="values_length"),),
+    )
+    output = Value(
+        type=FloatType(),
+        name="values[-1]",
+        parent_array=values,
+        element_indices=(_uint("output_index", -1),),
+    )
+    block = Block(output_values=[output], kind=BlockKind.AFFINE)
+
+    with pytest.raises(ValidationError, match="Index -1.*non-negative"):
+        ArrayBoundsValidationPass().run(block)
+
+
 def test_owned_block_output_is_specialized_before_validation() -> None:
     """A case output uses its call-site array extent, not its formal shape."""
     formal = ArrayValue(
