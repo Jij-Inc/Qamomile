@@ -526,8 +526,8 @@ def _inline_expval_operations(
                 for region_arg in getattr(operation, "region_args", ()):
                     for value in _iter_value_graph(region_arg.block_arg):
                         nested_scope[value.uuid] = value
-                for nested in operation.nested_op_lists():
-                    walk(nested, dict(nested_scope))
+                for region in operation.nested_regions():
+                    walk(list(region.operations), dict(nested_scope))
 
             for result in operation.results:
                 for value in _iter_result_producers(result):
@@ -740,8 +740,8 @@ def _iter_operations(operations: Iterable[Operation]) -> Iterable[Operation]:
     for operation in operations:
         yield operation
         if isinstance(operation, HasNestedOps):
-            for nested in operation.nested_op_lists():
-                yield from _iter_operations(nested)
+            for region in operation.nested_regions():
+                yield from _iter_operations(region.operations)
 
 
 def _iter_value_graph(value: ValueBase) -> Iterable[ValueBase]:
@@ -879,8 +879,8 @@ def _validate_operation(
         _validate_static_binding_invoke(operation, state, location)
 
     if isinstance(operation, HasNestedOps):
-        for region_index, operations in enumerate(operation.nested_op_lists()):
-            for child_index, child in enumerate(operations):
+        for region_index, region in enumerate(operation.nested_regions()):
+            for child_index, child in enumerate(region.operations):
                 _validate_operation(
                     child,
                     state,

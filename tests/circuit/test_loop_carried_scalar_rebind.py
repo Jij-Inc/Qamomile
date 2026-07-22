@@ -16,11 +16,12 @@ executor and emit-time unrolling thread ``init → block_arg → yielded →
 result`` per iteration. ``sum(range(4))`` now compiles to ``6``; these
 tests pin Python-exact execution for the previously rejected shapes.
 
-``while`` loops keep the record-based rejection for non-condition
-carries: a runtime while loop cannot be unrolled, so a per-iteration
-classical carry (other than the aliased condition pair) is still not
-representable. Measurement-backed ``Bit`` carries in ``for`` loops keep
-their targeted rejection too.
+``while`` loops expose non-condition scalar carries as ``RegionArg`` values
+in the semantic IR. Circuit targets still reject a genuinely changing carry
+because their runtime-loop APIs cannot portably thread classical state;
+identity carries are lowered normally, and HUGR can consume the explicit
+interface. Measurement-backed ``Bit`` carries in ``for`` loops keep their
+targeted rejection too.
 """
 
 import math
@@ -1215,9 +1216,10 @@ class TestRejectedRebinds:
     def test_while_counter_rejected(self):
         """A classical counter inside a measurement-conditioned while is rejected.
 
-        A runtime while loop cannot be unrolled, so a non-condition
-        classical carry has no emit-time threading; the record-based
-        rejection stays.
+        The frontend represents the counter as a RegionArg, but circuit
+        targets cannot portably thread that state through their runtime loop
+        APIs and reject it before materialization. HUGR TailLoop lowering is
+        covered separately and accepts the same semantic interface.
         """
 
         @qmc.qkernel
@@ -2839,11 +2841,16 @@ class TestRegionArgSerialization:
         assert found_region_args, "fixture must produce at least one region arg"
 
 
-class TestRebindRecordSerialization:
-    """LoopCarriedRebind records round-trip with their qkernel."""
+class TestWhileRegionArgSerialization:
+    """Explicit while region arguments round-trip with their qkernel."""
 
-    def _build_block_with_records(self):
-        """Build a block whose WhileOperation carries rebind records."""
+    def _build_kernel_with_region_args(self) -> qmc.QKernel:
+        """Build a kernel whose WhileOperation carries explicit state.
+
+        Returns:
+            qmc.QKernel: Kernel containing a measurement-controlled loop with
+                one non-condition region argument.
+        """
 
         @qmc.qkernel
         def kernel(dummy: qmc.UInt) -> qmc.UInt:
@@ -2860,14 +2867,14 @@ class TestRebindRecordSerialization:
 
         return kernel
 
-    def test_records_roundtrip(self):
-        """Records survive a serialize/deserialize cycle."""
+    def test_region_args_roundtrip(self) -> None:
+        """While region arguments survive a serialization cycle."""
         from qamomile.circuit.serialization import (
             deserialize,
             serialize,
         )
 
-        kernel = self._build_block_with_records()
+        kernel = self._build_kernel_with_region_args()
         transpiler = QiskitTranspiler()
         affine = transpiler.inline(kernel.block)
 
@@ -2876,23 +2883,18 @@ class TestRebindRecordSerialization:
         original_loops = _find_loops(affine.operations)
         restored_loops = _find_loops(restored.operations)
         assert len(original_loops) == len(restored_loops)
-        found_records = False
+        found_region_args = False
         for orig, rest in zip(original_loops, restored_loops, strict=True):
-            assert len(orig.loop_carried_rebinds) == len(rest.loop_carried_rebinds)
-            for orig_rec, rest_rec in zip(
-                orig.loop_carried_rebinds,
-                rest.loop_carried_rebinds,
+            assert len(orig.region_args) == len(rest.region_args)
+            for orig_arg, rest_arg in zip(
+                orig.region_args,
+                rest.region_args,
                 strict=True,
             ):
-                found_records = True
-                assert orig_rec.var_name == rest_rec.var_name
-                assert orig_rec.before.type == rest_rec.before.type
-                assert orig_rec.after.type == rest_rec.after.type
-                assert (orig_rec.before.uuid == orig_rec.after.uuid) == (
-                    rest_rec.before.uuid == rest_rec.after.uuid
-                )
-                assert (orig_rec.before.logical_id == orig_rec.after.logical_id) == (
-                    rest_rec.before.logical_id == rest_rec.after.logical_id
-                )
-                assert orig_rec.before_synthesized == rest_rec.before_synthesized
-        assert found_records, "fixture must produce at least one rebind record"
+                found_region_args = True
+                assert orig_arg.var_name == rest_arg.var_name
+                assert orig_arg.init.type == rest_arg.init.type
+                assert orig_arg.block_arg.type == rest_arg.block_arg.type
+                assert orig_arg.yielded.type == rest_arg.yielded.type
+                assert orig_arg.result.type == rest_arg.result.type
+        assert found_region_args, "fixture must produce at least one region argument"
