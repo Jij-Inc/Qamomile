@@ -33,6 +33,7 @@ from qamomile.circuit.frontend.operation.measurement import (
     reset,
 )
 from qamomile.circuit.frontend.oracle import Oracle, opaque
+from qamomile.circuit.frontend.struct import struct
 from qamomile.circuit.stdlib.block_encoding.ising_z import (
     IsingZBlockEncoding,
     ising_z_block_encoding,
@@ -118,6 +119,12 @@ def test_callable_helpers_are_publicly_reexported():
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"
         )
+
+
+def test_struct_is_publicly_reexported() -> None:
+    """The trace-time record decorator is part of the circuit API."""
+    assert qmc.struct is struct
+    assert "struct" in qmc.__all__
 
 
 def test_global_phase_is_publicly_reexported() -> None:
