@@ -8,6 +8,7 @@ import sympy as sp
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.transpiler.errors import ValidationError
 
 
 @qmc.composite_gate(name="phase_u")
@@ -345,6 +346,21 @@ def test_quantum_port_is_not_an_estimation_input() -> None:
         quantum_input.estimate_resources(inputs={"q": 0})
 
 
+def test_quantum_ports_are_not_counted_as_body_allocations() -> None:
+    """Direct quantum-I/O estimation counts each caller-owned port once."""
+    encoding = qmc.identity_block_encoding(num_system_qubits=2)
+
+    estimate = encoding.unitary.estimate_resources()
+    signal_width = estimate.parameters["signal_dim0"]
+    system_width = estimate.parameters["system_dim0"]
+    input_width = signal_width + system_width
+
+    assert sp.simplify(estimate.width.input_qubits - input_width) == 0
+    assert estimate.width.allocated_qubits == 0
+    assert sp.simplify(estimate.width.peak_qubits - input_width) == 0
+    assert sp.simplify(estimate.qubits - input_width) == 0
+
+
 def test_interleaved_composite_signature_binds_resource_parameter() -> None:
     """Resource estimation reweaves grouped operands to formal order."""
 
@@ -412,4 +428,36 @@ def test_numeric_vector_input_specializes_shape(angles: object) -> None:
 
     assert estimate.qubits == 3
     assert estimate.gates.total == 3
+    assert estimate.assumptions == ()
     assert estimate.parameters == {}
+
+
+def test_numeric_vector_input_with_unused_shape_is_accepted() -> None:
+    """An unused derived array dimension does not become an unknown input."""
+
+    @qmc.qkernel
+    def fixed_width_probe(angles: qmc.Vector[qmc.Float]) -> qmc.Qubit:
+        """Apply one rotation whose angle does not change its resource cost."""
+        qubit = qmc.qubit("qubit")
+        return qmc.rx(qubit, angles[0])
+
+    estimate = fixed_width_probe.estimate_resources(inputs={"angles": [0.1]})
+
+    assert estimate.gates.total == 1
+    assert [assumption.message for assumption in estimate.assumptions] == [
+        "input(s) 'angles' do not affect any resource metric; ignored"
+    ]
+    assert estimate.parameters == {}
+
+
+def test_numeric_vector_input_rejects_reachable_out_of_bounds_access() -> None:
+    """Concrete shape validation remains consistent with compilation."""
+
+    @qmc.qkernel
+    def first_rotation(angles: qmc.Vector[qmc.Float]) -> qmc.Qubit:
+        """Apply the first supplied rotation angle."""
+        qubit = qmc.qubit("qubit")
+        return qmc.rx(qubit, angles[0])
+
+    with pytest.raises(ValidationError, match="Index 0 is out of range"):
+        first_rotation.estimate_resources(inputs={"angles": []})
