@@ -43,7 +43,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## 背景: フーリエ変換
 #
-# フーリエ変換は、データを周波数の成分として書き直します。どの周波数がどれだけ含まれているかを調べる方法です。有限長のベクトルに対してよく使うのが**離散フーリエ変換**（Discrete Fourier Transform、DFT）です。
+# フーリエ変換は、データを周波数成分として表し、各周波数がどれだけ含まれているかを調べる方法です。有限長のベクトルに対してよく使うのが**離散フーリエ変換**（Discrete Fourier Transform、DFT）です。
 #
 # ベクトル$x = (x_0, x_1, \ldots, x_{N-1})$に対して、このノートブックでは次の正規化を使います。
 #
@@ -66,9 +66,9 @@ transpiler = QiskitTranspiler()
 #
 # 一般の量子状態$\lvert\psi\rangle = \sum_{j=0}^{N-1} a_j\lvert j\rangle$に対しては、QFTは線形性により各計算基底状態$\lvert j\rangle$への作用を重ね合わせた状態を返します。
 #
-# 古典のDFTでは、出力ベクトル全体を得られます。一方、QFTは量子状態の振幅を変換し、変換後の量子状態を返します。QFTの直後に測定しても、得られるのはサンプルだけです。ただし、位相推定のように、後続の量子演算では変換後の位相情報を利用できます。
+# 古典のDFTでは、出力ベクトル全体を得られます。一方で、QFTは量子状態の振幅を変換し、変換後の量子状態を返します。このため、QFTの直後に測定しても、得られるのは変換後の確率分布に従う計算基底の測定結果だけです。ただし、位相推定のようにサブルーチンとして使用する場合は、変換後の位相情報をそのまま利用することができます。
 #
-# 標準的なQFT回路は、アダマールゲート、制御付き位相回転、最後のスワップで構成されます。$n$量子ビットのレジスタでは、密な$2^n \times 2^n$行列を直接使うのではなく、$O(n^2)$個のゲートで実装できます。位相を表すために、次の2進小数表記を使います。
+# 標準的なQFT回路は、アダマールゲート、制御付き位相回転、最後のスワップで構成されます。$n$量子ビットのレジスタでは、$O(n^2)$個のゲートで実装できます。位相を表すために、次の2進小数表記を使います。
 #
 # $$
 # [0.x_jx_{j+1}\ldots x_n] =
@@ -182,7 +182,7 @@ transpiler = QiskitTranspiler()
 # = \lvert f\rangle.
 # $$
 #
-# したがって、$f=5$のとき、出力は周波数インデックス$k=5$に集中するはずです。
+# したがって、$f=5$のとき、出力は周波数インデックス$k=5$に集中するはずです。実際に古典DFTを実行して確かめてみましょう。NumPyの`np.fft.ifft`を利用して計算します。
 
 # %%
 num_qubits = 4
@@ -314,6 +314,8 @@ assert estimate_4.gates.clifford_gates == 6
 
 # %% [markdown]
 # 長さ$N$のベクトルを古典DFTで直接計算すると、$O(N^2)$回の演算が必要です。高速フーリエ変換（FFT）を使うと、これを$O(N\log N)$まで減らせます。一方、$N = 2^n$と書くと、厳密QFTは$O(n^2)=O((\log N)^2)$個のゲートで実装できます。したがって、直接計算する古典DFTと比べると、$N$に対して指数的に少ないゲートで同じ変換を状態に適用できます。ただし、測定だけで$N$個すべてのフーリエ係数を読み出せるわけではありません。QFTの利点は、変換後の振幅を後続の量子演算でそのまま使える場合に現れます。
+#
+# Qamomileの`.estimate_resources()`を利用して、`qft`のゲート数と、QFTおよびDFTの計算量スケーリングを比較します。プロットは量子ビット数と`qft`および理論的な計算量がどのようにスケールするかを示しています。
 
 # %%
 qft_qubit_counts = np.arange(3, 10)
@@ -323,8 +325,9 @@ for n in qft_qubit_counts:
     estimate_n = make_qft_resource_kernel(int(n)).estimate_resources().simplify()
     qft_total_gates.append(int(estimate_n.gates.total))
 
-quadratic_reference = qft_qubit_counts**2
-quadratic_reference = quadratic_reference / quadratic_reference[0] * qft_total_gates[0]
+theoretical_qft_gate_counts = [
+    n + n * (n - 1) // 2 + n // 2 for n in qft_qubit_counts
+]
 
 dimension_counts = 2**qft_qubit_counts
 nlogn_reference = dimension_counts * qft_qubit_counts
@@ -340,10 +343,10 @@ ax.plot(
 )
 ax.plot(
     qft_qubit_counts,
-    quadratic_reference,
+    theoretical_qft_gate_counts,
     linestyle="--",
     color="#FF6B6B",
-    label=r"theory: QFT $O(n^2)$",
+    label="theory: exact QFT gate count",
 )
 ax.plot(
     qft_qubit_counts,
@@ -360,11 +363,8 @@ ax.grid(alpha=0.3)
 ax.legend()
 plt.show()
 
-expected_total_gates = [
-    n + n * (n - 1) // 2 + n // 2 for n in qft_qubit_counts
-]
-assert qft_total_gates == expected_total_gates
-assert len(quadratic_reference) == len(qft_total_gates)
+assert qft_total_gates == theoretical_qft_gate_counts
+assert len(theoretical_qft_gate_counts) == len(qft_total_gates)
 assert len(nlogn_reference) == len(qft_total_gates)
 
 # %% [markdown]

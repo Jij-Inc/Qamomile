@@ -43,7 +43,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## Background: Fourier Transform
 #
-# A Fourier transform rewrites data in terms of frequencies. It tells us which frequencies are present and how strongly. For finite vectors, the version we usually use is the **Discrete Fourier Transform** (DFT).
+# A Fourier transform represents data in terms of frequency components and reveals how much of each frequency is present. For finite vectors, the version we usually use is the **Discrete Fourier Transform** (DFT).
 #
 # For a vector $x = (x_0, x_1, \ldots, x_{N-1})$, this notebook uses the following normalized DFT:
 #
@@ -66,9 +66,9 @@ transpiler = QiskitTranspiler()
 #
 # For a general quantum state $\lvert\psi\rangle = \sum_{j=0}^{N-1} a_j\lvert j\rangle$, QFT returns the state obtained by linearly combining the action on each computational basis state $\lvert j\rangle$.
 #
-# The key difference from a classical DFT is what we can read out. A classical DFT returns the full output vector. QFT transforms the amplitudes of a quantum state and returns the transformed quantum state. A measurement immediately after QFT returns only samples. Later quantum operations can still use the phase information, as in phase estimation.
+# A classical DFT returns the full output vector. In contrast, QFT transforms the amplitudes of a quantum state and returns the transformed quantum state. Therefore, a measurement immediately after QFT gives only a computational-basis outcome sampled according to the transformed probability distribution. However, when QFT is used as a subroutine, as in phase estimation, the transformed phase information can be used directly.
 #
-# The standard QFT circuit uses Hadamard gates, controlled phase rotations, and final swaps. For an $n$-qubit register, the exact circuit uses $O(n^2)$ gates, much fewer than applying a dense $2^n \times 2^n$ matrix directly. It is useful to write the phases as binary fractions:
+# The standard QFT circuit uses Hadamard gates, controlled phase rotations, and final swaps. For an $n$-qubit register, the exact circuit uses $O(n^2)$ gates. It is useful to write the phases as binary fractions:
 #
 # $$
 # [0.x_jx_{j+1}\ldots x_n] =
@@ -182,7 +182,7 @@ transpiler = QiskitTranspiler()
 # = \lvert f\rangle.
 # $$
 #
-# Therefore, when $f=5$, the output should be concentrated at frequency index $k=5$.
+# Therefore, when $f=5$, the output should be concentrated at frequency index $k=5$. Let's verify this by performing a classical DFT. We compute it using NumPy's `np.fft.ifft`.
 
 # %%
 num_qubits = 4
@@ -314,6 +314,8 @@ assert estimate_4.gates.clifford_gates == 6
 
 # %% [markdown]
 # A direct classical DFT on a length-$N$ vector uses $O(N^2)$ arithmetic operations, and the fast Fourier transform (FFT) uses $O(N\log N)$. If $N = 2^n$, the exact QFT circuit uses $O(n^2)=O((\log N)^2)$ gates. Compared with the direct classical DFT, this is exponentially smaller in $N$. The caveat is important: measuring the state does not give all $N$ Fourier coefficients. QFT is useful when later quantum steps can use the transformed amplitudes without reading out the whole vector.
+#
+# We use Qamomile's `.estimate_resources()` to compare the gate count of `qft` with the computational complexity scaling of QFT and DFT. The plot shows how `qft` and the theoretical computational complexities scale with the number of qubits.
 
 # %%
 qft_qubit_counts = np.arange(3, 10)
@@ -323,8 +325,9 @@ for n in qft_qubit_counts:
     estimate_n = make_qft_resource_kernel(int(n)).estimate_resources().simplify()
     qft_total_gates.append(int(estimate_n.gates.total))
 
-quadratic_reference = qft_qubit_counts**2
-quadratic_reference = quadratic_reference / quadratic_reference[0] * qft_total_gates[0]
+theoretical_qft_gate_counts = [
+    n + n * (n - 1) // 2 + n // 2 for n in qft_qubit_counts
+]
 
 dimension_counts = 2**qft_qubit_counts
 nlogn_reference = dimension_counts * qft_qubit_counts
@@ -340,10 +343,10 @@ ax.plot(
 )
 ax.plot(
     qft_qubit_counts,
-    quadratic_reference,
+    theoretical_qft_gate_counts,
     linestyle="--",
     color="#FF6B6B",
-    label=r"theory: QFT $O(n^2)$",
+    label="theory: exact QFT gate count",
 )
 ax.plot(
     qft_qubit_counts,
@@ -360,11 +363,8 @@ ax.grid(alpha=0.3)
 ax.legend()
 plt.show()
 
-expected_total_gates = [
-    n + n * (n - 1) // 2 + n // 2 for n in qft_qubit_counts
-]
-assert qft_total_gates == expected_total_gates
-assert len(quadratic_reference) == len(qft_total_gates)
+assert qft_total_gates == theoretical_qft_gate_counts
+assert len(theoretical_qft_gate_counts) == len(qft_total_gates)
 assert len(nlogn_reference) == len(qft_total_gates)
 
 # %% [markdown]
