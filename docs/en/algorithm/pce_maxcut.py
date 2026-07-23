@@ -17,7 +17,7 @@
 # tags: [algorithm, optimization, variational]
 # ---
 #
-# # Pauli Correlation Encoding (PCE)
+# # Pauli Correlation Encoding
 #
 # In this tutorial we solve the MaxCut problem with Pauli Correlation
 # Encoding (PCE) using Qamomile's `PCEConverter`. PCE maps $N$ spin

@@ -17,7 +17,7 @@
 # tags: [algorithm, optimization, variational]
 # ---
 #
-# # Pauli Correlation Encoding (PCE)
+# # Pauli Correlation Encoding
 #
 # このチュートリアルでは、Qamomileの`PCEConverter`を用いて、Pauli Correlation Encoding(PCE)でMaxCut問題を解いてみます。PCEは$N$個のスピン変数を、$n = \mathcal{O}(N^{1/k})$量子ビットのレジスタ上の$k$体Pauli相関演算子の期待値に写像します。これにより、変数1つあたり1量子ビットを使うQAOA定式化よりも必要な量子ビット数を減らします。
 #

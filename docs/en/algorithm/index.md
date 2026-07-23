@@ -33,7 +33,7 @@ Implement multidimensional QFT and classical preprocessing for inputs whose grid
 :::
 
 :::{card}
-:header: **Pauli Correlation Encoding (PCE)**
+:header: **Pauli Correlation Encoding**
 :link: pce_maxcut
 An example of using Pauli Correlation Encoding (PCE) with Qamomile. It solves MaxCut for a 20-node graph using 3-qubit PCE and compares the result with the exact solution.
 :::
