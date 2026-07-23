@@ -576,6 +576,11 @@ assert decoded_manual.energy_mean() == decoded_builtin.energy_mean()
 # %%
 cuts = sorted(cut_distribution.keys())
 counts = [cut_distribution[c] for c in cuts]
+near_optimal_shots = sum(
+    count for cut, count in cut_distribution.items() if cut >= best_cut - 2
+)
+# Here, "near" means within two cut edges of the known optimum.
+assert near_optimal_shots / sample_shots > 0.8
 
 plt.figure(figsize=(8, 4))
 plt.bar([str(c) for c in cuts], counts, color="#2696EB")
