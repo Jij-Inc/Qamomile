@@ -17,15 +17,29 @@
 # tags: [algorithm, sample-based]
 # ---
 #
-# # Quantum-enhanced Markov chain Monte Carlo
+# # Quantum-enhanced Markov chain Monte Carlo (QeMCMC)
 #
 # This tutorial demonstrates how to implement Quantum-enhanced Markov chain
-# Monte Carlo (QeMCMC) [](https://doi.org/10.1038/s41586-023-06095-4) using
+# Monte Carlo (QeMCMC) {cite:p}`10.1038/s41586-023-06095-4` using
 # Qamomile.
 
 # %%
 # Install the latest Qamomile through pip!
 # # !pip install "qamomile[qiskit]"
+
+# %%
+import os
+from typing import Any, Callable
+
+import matplotlib.pyplot as plt
+import numpy as np
+from qiskit_aer import AerSimulator
+
+import qamomile.circuit as qmc
+from qamomile.circuit.algorithm import trotterized_time_evolution
+from qamomile.circuit.stdlib import computational_basis_state
+from qamomile.observable.hamiltonian import Hamiltonian, X, Z
+from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # ---
@@ -70,13 +84,10 @@
 # values of the inverse temperature $\beta$.
 
 # %%
-import os
-from typing import Any, Callable
-
-import matplotlib.pyplot as plt
-import numpy as np
-
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+RANDOM_SEED = 42
+QAOA_BLUE = "#2696EB"
+QAOA_RED = "#FF6B6B"
 
 n_spins = 6
 J = 1.0
@@ -109,7 +120,7 @@ for ax, beta in zip(axes, betas):
     weights = np.exp(-beta * energies)
     probs = weights / weights.sum()
     e_probs = np.array([probs[energies == e].sum() for e in unique_energies])
-    ax.bar(unique_energies, e_probs, width=0.8)
+    ax.bar(unique_energies, e_probs, width=0.8, color=QAOA_BLUE)
     ax.set_xlabel(r"Energy $E(\mathbf{x})$")
     ax.set_title(rf"$\beta = {beta}$")
 axes[0].set_ylabel(r"Probability $\mu(E)$")
@@ -125,7 +136,7 @@ plt.show()
 # It achieves sampling from a target distribution $\mu(\bm{x})$ by exploiting
 # a stochastic process called a Markov chain.
 # Here we introduce the Metropolis-Hastings (MH) algorithm
-# [](https://doi.org/10.1093/biomet/57.1.97) , a common implementation of MCMC.
+# {cite:p}`10.1093/biomet/57.1.97`, a common implementation of MCMC.
 #
 # The MH algorithm generates a new transition $\bm{x} \rightarrow \bm{y}$
 # of the Markov chain according to a proposal probability $Q(\bm{y}|\bm{x})$,
@@ -148,7 +159,7 @@ plt.show()
 # simplest one, which picks a single random spin and flips it.
 
 # %%
-rng = np.random.default_rng(seed=0)
+rng = np.random.default_rng(seed=RANDOM_SEED)
 
 
 def local_update(state: np.ndarray) -> np.ndarray:
@@ -256,10 +267,10 @@ theoretical_magnetization = np.sum(probs * magnetization_per_state)
 assert theoretical_magnetization == 0.0
 assert np.isclose(probs.sum(), 1.0)
 
-plt.plot(sample_magnetization, label="MCMC estimate")
+plt.plot(sample_magnetization, color=QAOA_BLUE, label="MCMC estimate")
 plt.axhline(
     theoretical_magnetization,
-    color="red",
+    color="black",
     linestyle="--",
     label=f"Theoretical ({theoretical_magnetization:.3f})",
 )
@@ -276,7 +287,7 @@ plt.show()
 # %% [markdown]
 # The Quantum-enhanced MCMC algorithm is an MCMC that uses sampling from a
 # quantum circuit as its proposal distribution
-# [](https://doi.org/10.1038/s41586-023-06095-4).
+# {cite:p}`10.1038/s41586-023-06095-4`.
 # Starting from the current state $\bm{x}$, we apply a quantum circuit $U$
 # and measure in the computational basis to obtain a new state $\bm{y}$.
 # The resulting proposal distribution $Q(\bm{y}|\bm{x})$ is:
@@ -292,20 +303,20 @@ plt.show()
 # we can use a trotterized time evolution under a time-independent Hamiltonian:
 # $$
 # U(\gamma, t) = \exp(-i H t), \quad \quad
-# H = (1-\gamma) \alpha H_M + \gamma H_C.
+# H = (1-\gamma) \alpha H_C + \gamma H_M.
 # $$
 # Here, $H_M$ is called the mixer Hamiltonian and generates quantum
 # transitions between states, while $H_C$ is the Ising Hamiltonian.
-# $\gamma \in [0,1]$ is a parameter that controls the relative weights
-# of the two terms.
-# $\alpha$ is a normalization factor used to ensure that the eigenvalues
-# of the mixer and cost Hamiltonians are on the same scale.
+# $\gamma \in [0,1]$ controls the weight of the mixer Hamiltonian.
+# The normalization factor
+# $\alpha = \lVert H_M \rVert_F / \lVert H_C \rVert_F$ places the mixer and
+# cost Hamiltonians on the same Frobenius-norm scale.
 # $(\gamma, t)$ are tunable parameters that determine the efficiency of the
 # MCMC process.
 
 # %% [markdown]
 # ---
-# ## Implementation
+# ## Implementation with Qamomile
 
 # %% [markdown]
 # ### 1. Preparing the Hamiltonians
@@ -314,8 +325,6 @@ plt.show()
 # sample and the mixer Hamiltonian $H_M$ for the proposal circuit $U$.
 
 # %%
-from qamomile.observable.hamiltonian import Hamiltonian, X, Z
-
 mixer_hamiltonian = Hamiltonian()
 for i in range(n_spins):
     mixer_hamiltonian += X(i)
@@ -323,6 +332,13 @@ for i in range(n_spins):
 cost_hamiltonian = Hamiltonian()
 for i in range(n_spins - 1):
     cost_hamiltonian += -J * Z(i) * Z(i + 1)
+
+# The common 2**(n_spins / 2) factor in both Frobenius norms cancels.
+alpha = np.sqrt(
+    sum(abs(coefficient) ** 2 for coefficient in mixer_hamiltonian.terms.values())
+    / sum(abs(coefficient) ** 2 for coefficient in cost_hamiltonian.terms.values())
+)
+assert np.isclose(alpha, np.sqrt(n_spins / ((n_spins - 1) * J**2)))
 
 # %% [markdown]
 # ### 2. Building the Quantum Circuit
@@ -336,12 +352,8 @@ for i in range(n_spins - 1):
 # We use `trotterized_time_evolution` to build the circuit for the
 # Hamiltonians we just prepared.
 
+
 # %%
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm import trotterized_time_evolution
-from qamomile.circuit.stdlib import computational_basis_state
-
-
 @qmc.qkernel
 def qemcmc_circuit(
     n: qmc.UInt,
@@ -371,15 +383,13 @@ def qemcmc_circuit(
 #
 # We transpile the kernel.
 # Running the quantum circuit requires fixed values for the Hamiltonian
-# mixing coefficient $\gamma$ and the simulation time $t$.
-# Following [](https://doi.org/10.1103/PhysRevA.111.042615) , we set
+# mixer weight $\gamma$ and the simulation time $t$.
+# Following {cite:t}`10.1103/PhysRevA.111.042615`, we set
 # $\gamma=0.45$, $t=12$, and $\Delta t = 0.8$.
 # At transpile time we bind `n`, `order`, `time`, and `step`, while keeping `input_bits`
 # as a runtime parameter.
 # %%
-from qamomile.qiskit import QiskitTranspiler
-
-gamma = 0.45  # Mixing coefficient
+gamma = 0.45  # Mixer weight
 time = 12.0  # Total evolution time
 delta_t = 0.8  # Trotter step size
 step = int(time / delta_t)  # Number of Trotter steps
@@ -387,8 +397,8 @@ order = 2  # Suzuki-Trotter approximation order
 assert step == 15  # 12.0 / 0.8
 
 Hs = [
-    (1 - gamma) * mixer_hamiltonian,
-    gamma * cost_hamiltonian,
+    gamma * mixer_hamiltonian,
+    (1 - gamma) * alpha * cost_hamiltonian,
 ]
 assert len(Hs) == 2
 
@@ -404,6 +414,21 @@ executable = transpiler.transpile(
         "step": step,
     },
     parameters=["input_bits"],
+)
+
+# %% [markdown]
+# The diagram below shows the Qamomile-level proposal circuit for a
+# representative alternating input state. Loops are folded to keep the
+# repeated Suzuki-Trotter structure compact.
+
+# %%
+qemcmc_circuit.draw(
+    n=n_spins,
+    input_bits=[i % 2 for i in range(n_spins)],
+    Hs=Hs,
+    order=order,
+    time=time,
+    step=step,
 )
 
 # %% [markdown]
@@ -476,29 +501,37 @@ def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.nd
 
 # %% [markdown]
 # ---
-# ## Example Run
+# ## Result
 
 # %% [markdown]
 # Let us run the QeMCMC algorithm we just implemented.
-# We switch to a lower temperature $\beta = 1.0$ where classical local
+# We switch to a lower temperature $\beta = 2.0$ where classical local
 # updates mix slowly, so that we can observe the behavior of the quantum
 # proposal distribution under conditions that are harder for the classical
 # baseline. For a fair comparison, we also run a classical MCMC at the same
-# $\beta = 1.0$ alongside the quantum run.
+# $\beta = 2.0$ alongside the quantum run.
 
 # %%
-from qiskit_aer import AerSimulator
-
-beta = 1.0  # Switch to a lower temperature where local updates mix slowly
+beta = 2.0  # Switch to a lower temperature where local updates mix slowly
 T_quantum = (
     20 if docs_test_mode else 1000
 )  # Kept small because quantum-circuit simulation is costly
 
-# Recompute the theoretical average magnetization for the new beta=1.0
+# Generate a reproducible sequence of distinct seeds without resetting every
+# sampling job to the same pseudorandom stream.
+quantum_job_seeds = np.random.default_rng(seed=RANDOM_SEED).integers(
+    0,
+    np.iinfo(np.uint32).max,
+    size=T_quantum,
+    dtype=np.uint32,
+)
+assert np.unique(quantum_job_seeds).size == T_quantum
+
+# Recompute the theoretical average magnetization for the new beta=2.0
 weights = np.exp(-beta * energies)
 probs = weights / weights.sum()
 theoretical_magnetization = np.sum(probs * magnetization_per_state)
-# Still zero by Z2 symmetry — beta only reweights pairs, it does not break
+# Still zero by Z2 symmetry: beta only reweights pairs, it does not break
 # the {+spins, -spins} degeneracy.
 assert theoretical_magnetization == 0.0
 
@@ -511,10 +544,12 @@ for t in range(T_quantum):
     classical_compare_sample[t] = state
 
 # QeMCMC
-executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
+quantum_backend = AerSimulator()
+executor = transpiler.executor(backend=quantum_backend)
 quantum_sample = np.zeros((T_quantum, n_spins), dtype=int)
 state = np.ones(n_spins, dtype=int)  # Initial state
-for t in range(T_quantum):
+for t, job_seed in enumerate(quantum_job_seeds):
+    quantum_backend.set_options(seed_simulator=int(job_seed))
     proposed_state = quantum_proposal(state, executable, executor)
     state = metropolis_hastings(state, proposed_state, ising_energy, beta)
     quantum_sample[t] = state
@@ -527,21 +562,24 @@ assert set(np.unique(quantum_sample).tolist()).issubset({-1, 1})
 
 # %% [markdown]
 # We compute the estimator of the average magnetization and compare it with
-# the classical MCMC result obtained at the same $\beta = 1.0$.
+# the classical MCMC result obtained at the same $\beta = 2.0$.
 
 # %%
 quantum_sample_magnetization = np.array(
     [average_magnetization(quantum_sample[:i]) for i in range(1, T_quantum + 1)]
 )
 classical_compare_magnetization = np.array(
-    [average_magnetization(classical_compare_sample[:i]) for i in range(1, T_quantum + 1)]
+    [
+        average_magnetization(classical_compare_sample[:i])
+        for i in range(1, T_quantum + 1)
+    ]
 )
 
-plt.plot(classical_compare_magnetization, label="MCMC estimate")
-plt.plot(quantum_sample_magnetization, label="QeMCMC estimate")
+plt.plot(classical_compare_magnetization, color=QAOA_BLUE, label="MCMC estimate")
+plt.plot(quantum_sample_magnetization, color=QAOA_RED, label="QeMCMC estimate")
 plt.axhline(
     theoretical_magnetization,
-    color="red",
+    color="black",
     linestyle="--",
     label=f"Theoretical ({theoretical_magnetization:.3f})",
 )
@@ -552,18 +590,22 @@ plt.legend()
 plt.show()
 
 # %% [markdown]
+# At low temperatures, local updates are less likely to transition to a
+# different configuration, making mixing extremely slow. In contrast, QeMCMC
+# uses transitions generated by the quantum circuit, allowing the state to
+# change frequently even at low temperatures and the estimate to converge
+# toward the exact value.
+
+# %% [markdown]
 # ---
 # ## Summary
 #
-# In this tutorial, we began with a review of classical Metropolis-Hastings
-# MCMC and then implemented Quantum-enhanced MCMC (QeMCMC) on top of
-# Qamomile, using the quantum circuit $U(\gamma, t) = \exp(-i t H)$ with
-# $H = (1-\gamma) H_M + \gamma H_C$ as the proposal distribution.
-# Specifically, after preparing the mixer and cost Hamiltonians with
-# `qamomile.observable`, we built the proposal circuit via Suzuki-Trotter
-# time evolution using `trotterized_time_evolution` inside an `@qkernel`.
-# Finally, we plugged the quantum proposal into the existing MH loop
-# through the transpiled executor and compared the convergence of the
-# average magnetization for classical MCMC and QeMCMC on the same Ising
-# chain, confirming that the end-to-end quantum-classical hybrid loop
-# behaves as intended.
+# In this notebook, we:
+#
+# - Reviewed how classical Metropolis-Hastings MCMC samples a Boltzmann
+#   distribution and why local updates mix slowly at low temperatures.
+# - Implemented time evolution under mixer and cost Hamiltonians with
+#   `trotterized_time_evolution` and built a QeMCMC proposal circuit in
+#   Qamomile.
+# - Integrated quantum proposals into the Metropolis-Hastings procedure and
+#   compared QeMCMC with classical MCMC.
