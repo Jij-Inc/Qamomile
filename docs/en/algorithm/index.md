@@ -53,7 +53,7 @@ Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-i
 :::{card}
 :header: **Quantum-enhanced Markov chain Monte Carlo**
 :link: qe_mcmc
-Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution.
+This example implements Quantum-enhanced MCMC (QeMCMC) with Qamomile. It runs QeMCMC to sample from the Boltzmann distribution of an Ising model and compares the results with classical MCMC.
 :::
 
 :::{card}
