@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 import pytest
 
-import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.qsvt_filter import QSVTFilterConverter
@@ -92,23 +91,13 @@ def test_encoding_captures_the_full_cost_hamiltonian() -> None:
     assert converter.normalization == pytest.approx(3.5)
 
 
-def test_cost_hamiltonian_matches_the_spin_model() -> None:
-    """The reported Hamiltonian is the Ising operator being block encoded."""
-    coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0, (0, 1, 2): 0.25}
-    model = BinaryModel.from_higher_ising(coefficients, constant=0.5)
+def test_cost_hamiltonian_is_not_exposed() -> None:
+    """The converter block encodes the cost operator instead of exposing it."""
+    model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0})
     converter = QSVTFilterConverter(model)
 
-    hamiltonian = converter.get_cost_hamiltonian()
-    expected = qm_o.Hamiltonian()
-    for indices, coefficient in coefficients.items():
-        expected.add_term(
-            tuple(qm_o.PauliOperator(qm_o.Pauli.Z, index) for index in indices),
-            coefficient,
-        )
-    expected.constant = 0.5
-
-    assert hamiltonian.terms == expected.terms
-    assert hamiltonian.constant == pytest.approx(expected.constant)
+    with pytest.raises(NotImplementedError, match="cost Hamiltonian"):
+        converter.get_cost_hamiltonian()
 
 
 @pytest.mark.parametrize("mu", [-2.0, 0.0, 1.5])
@@ -117,7 +106,7 @@ def test_shifted_encoding_normalization_grows_with_the_shift(mu: float) -> None:
     model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0})
     converter = QSVTFilterConverter(model)
 
-    shifted = converter.shifted_encoding(mu)
+    shifted = converter._shifted_encoding(mu)
 
     assert shifted.num_system_qubits == converter.encoding.num_system_qubits
     assert shifted.normalization == pytest.approx(converter.normalization + abs(mu))
@@ -130,18 +119,18 @@ def test_qsp_phases_are_odd_length_and_cached() -> None:
     model = BinaryModel.from_higher_ising({(0,): 1.0})
     converter = QSVTFilterConverter(model)
 
-    phases = converter.qsp_phases(degree=11, delta=5)
+    phases = converter._qsp_phases(degree=11, delta=5)
     assert len(phases) == 12
 
-    cached = converter.qsp_phases(degree=11, delta=5)
+    cached = converter._qsp_phases(degree=11, delta=5)
     assert cached == phases
     # The cache hands out copies, so callers cannot corrupt it.
     cached[0] = 0.0
-    assert converter.qsp_phases(degree=11, delta=5) == phases
+    assert converter._qsp_phases(degree=11, delta=5) == phases
 
     for degree in (0, -1, 10):
         with pytest.raises(ValueError, match="degree"):
-            converter.qsp_phases(degree=degree)
+            converter._qsp_phases(degree=degree)
 
 
 def test_transpile_rejects_odd_length_phase_sequences(transpiler: Any) -> None:
@@ -160,11 +149,15 @@ def test_transpile_sizes_the_circuit_from_the_shifted_encoding(
     """The probe allocates one projector qubit plus signal and system."""
     model = BinaryModel.from_higher_ising({(0,): 1.0, (1,): -1.0, (0, 1): -1.0})
     converter = QSVTFilterConverter(model)
-    shifted = converter.shifted_encoding(0.5)
+    shifted = converter._shifted_encoding(0.5)
 
     executable = converter.transpile(transpiler, mu=0.5, phi=[0.1, 0.2])
 
-    expected = 1 + shifted.num_signal_qubits + shifted.num_system_qubits
+    # One projector qubit, the signal and system registers, plus the single
+    # clean auxiliary qmc.qsvt allocates for its projector rotations. That
+    # auxiliary is restored to zero and never measured, so it is not part of
+    # the post-selected ancilla block.
+    expected = 2 + shifted.num_signal_qubits + shifted.num_system_qubits
     assert executable.quantum_circuit.num_qubits == expected
     assert converter.num_ancilla_bits == 1 + shifted.num_signal_qubits
 
@@ -186,7 +179,7 @@ def test_success_probability_counts_the_states_below_the_threshold(
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     model = BinaryModel.from_higher_ising(coefficients)
     converter = QSVTFilterConverter(model)
-    phases = converter.qsp_phases()
+    phases = converter._qsp_phases()
 
     probability = _exact_success_probability(converter, transpiler, mu, phases, 2)
 
@@ -201,7 +194,7 @@ def test_sampled_filter_recovers_the_ground_states(transpiler: Any) -> None:
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     model = BinaryModel.from_higher_ising(coefficients)
     converter = QSVTFilterConverter(model)
-    phases = converter.qsp_phases()
+    phases = converter._qsp_phases()
 
     executable = converter.transpile(transpiler, mu=-0.5, phi=phases)
     result = executable.sample(transpiler.executor(), shots=2000).result()

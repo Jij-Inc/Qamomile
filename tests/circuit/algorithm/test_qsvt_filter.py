@@ -1,4 +1,10 @@
-"""Tests for the QSVT and eigenstate-filtering kernels."""
+"""Tests for the QSVT eigenstate-filtering kernels.
+
+The quantum singular value transformation itself is covered by
+``tests/circuit/stdlib/test_qsvt.py``; these tests exercise only the Lin & Tong
+wrapper this module adds on top of :func:`qmc.qsvt`: the Hadamard-test projector
+and the sampling probe.
+"""
 
 from __future__ import annotations
 
@@ -13,8 +19,6 @@ import qamomile.observable as qm_o
 from qamomile.circuit.algorithm import (
     eigenstate_filter_probe,
     eigenstate_filter_projector,
-    qsvt_alternation,
-    qsvt_projector_phase,
 )
 
 
@@ -148,9 +152,9 @@ def _ising_diagonal(
 def _wx_qsp_polynomial(wx_phases: np.ndarray, x: float) -> complex:
     """Evaluate the Wx-convention QSP product at one signal value.
 
-    This is the textbook reference the QSVT alternation must reproduce: the
-    2x2 product of signal rotations ``W(x)`` and phase rotations, read at its
-    top-left entry.
+    This is the textbook reference the QSVT sequence reproduces on a
+    single-signal-qubit block encoding: the 2x2 product of signal rotations
+    ``W(x)`` and phase rotations, read at its top-left entry.
 
     Args:
         wx_phases (np.ndarray): Phases in the Wx (signal-rotation) convention.
@@ -172,13 +176,19 @@ def _wx_qsp_polynomial(wx_phases: np.ndarray, x: float) -> complex:
 
 
 def _to_reflection_phases(wx_phases: np.ndarray) -> list[float]:
-    """Convert Wx-convention phases to the reflection convention.
+    """Convert Wx-convention phases to the projector-rotation convention.
+
+    On a single-signal-qubit block encoding, feeding these phases to
+    :func:`qmc.qsvt` makes its good block equal ``-i`` times
+    :func:`_wx_qsp_polynomial`. This is the test-side inverse of the convention
+    ``qmc.qsvt`` documents and is independent of the converter's own phase
+    synthesis.
 
     Args:
         wx_phases (np.ndarray): Phases as produced by ``pyqsp``.
 
     Returns:
-        list[float]: Phases the QSVT kernels consume.
+        list[float]: Phases the QSVT primitive consumes.
     """
     phases = np.asarray(wx_phases, dtype=float).copy()
     phases[0] += math.pi / 4
@@ -187,98 +197,71 @@ def _to_reflection_phases(wx_phases: np.ndarray) -> list[float]:
     return [float(phase) for phase in phases]
 
 
-def test_projector_phase_rejects_invalid_widths() -> None:
-    """The builder refuses widths that cannot host a signal register."""
-    for width in (0, -1):
-        with pytest.raises(ValueError, match="num_signal_qubits"):
-            qsvt_projector_phase(width)
-    for width in (1.0, True, "1"):
-        with pytest.raises(TypeError, match="num_signal_qubits"):
-            qsvt_projector_phase(width)  # type: ignore[arg-type]
+def _reference_qsvt(
+    encoding_unitary: np.ndarray,
+    phases: list[float],
+    signal_dimension: int,
+) -> np.ndarray:
+    """Compose the documented QSVT sequence as a dense unitary.
+
+    Args:
+        encoding_unitary (np.ndarray): Dense block-encoding unitary.
+        phases (list[float]): Projector phases in sequence order.
+        signal_dimension (int): Dimension of the signal register.
+
+    Returns:
+        np.ndarray: Dense QSVT unitary in Qiskit qubit order.
+    """
+    dimension = encoding_unitary.shape[0]
+    system_dimension = dimension // signal_dimension
+
+    def projector_rotation(phase: float) -> np.ndarray:
+        signal = np.eye(signal_dimension, dtype=np.complex128) * np.exp(-1j * phase)
+        signal[0, 0] = np.exp(1j * phase)
+        return np.kron(np.eye(system_dimension), signal)
+
+    transformed = projector_rotation(phases[0])
+    for index, phase in enumerate(phases[1:]):
+        step = encoding_unitary if index % 2 == 0 else encoding_unitary.conj().T
+        transformed = projector_rotation(phase) @ step @ transformed
+    return transformed
 
 
-def test_alternation_rejects_non_descriptors() -> None:
-    """Only block-encoding descriptors can drive the alternation."""
-    with pytest.raises(TypeError, match="LCUBlockEncoding"):
-        qsvt_alternation(object())  # type: ignore[arg-type]
+def _encoding_unitary(encoding: qmc.LCUBlockEncoding) -> np.ndarray:
+    """Return the dense unitary of a block encoding in Qiskit qubit order.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Descriptor whose ``unitary`` kernel is
+            compiled.
+
+    Returns:
+        np.ndarray: Dense block-encoding unitary, signal on the low bits.
+    """
+    num_signal_qubits = encoding.num_signal_qubits
+    num_system_qubits = encoding.num_system_qubits
+
+    @qmc.qkernel
+    def encoding_top() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+        """Apply the encoding unitary to freshly allocated registers."""
+        signal = qmc.qubit_array(num_signal_qubits, "signal")
+        system = qmc.qubit_array(num_system_qubits, "system")
+        signal, system = encoding.unitary(signal, system)
+        return qmc.measure(signal), qmc.measure(system)
+
+    return _qiskit_unitary(encoding_top)
+
+
+def test_filter_builders_reject_non_descriptors() -> None:
+    """Only block-encoding descriptors can drive the filter builders."""
     with pytest.raises(TypeError, match="LCUBlockEncoding"):
         eigenstate_filter_projector(object())  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="LCUBlockEncoding"):
         eigenstate_filter_probe(object())  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("num_signal_qubits", [1, 2, 3])
-@pytest.mark.parametrize("phase", [0.0, 0.7, math.pi / 2, math.pi, 2 * math.pi])
-def test_projector_phase_matches_its_analytic_operator(
-    num_signal_qubits: int, phase: float
-) -> None:
-    """The kernel realizes exp(i*phase*(2*Pi - I)) with no residual phase."""
-    pytest.importorskip("qiskit")
-    kernel = qsvt_projector_phase(num_signal_qubits)
-
-    @qmc.qkernel
-    def top(angle: qmc.Float) -> qmc.Vector[qmc.Bit]:
-        """Apply the projector phase to a fresh signal register."""
-        signal = qmc.qubit_array(num_signal_qubits, "signal")
-        signal = kernel(signal, angle)
-        return qmc.measure(signal)
-
-    unitary = _qiskit_unitary(top, angle=phase)
-    dimension = 1 << num_signal_qubits
-    expected = np.exp(-1j * phase) * np.eye(dimension, dtype=complex)
-    expected[0, 0] = np.exp(1j * phase)
-
-    np.testing.assert_allclose(unitary, expected, atol=1e-10, rtol=0.0)
-
-
-@pytest.mark.parametrize(
-    ("coefficients", "num_system_qubits", "num_phases"),
-    [
-        ({(0,): 1.0}, 1, 2),
-        ({(0,): 1.0, (1,): -0.5, (0, 1): 0.25}, 2, 4),
-        ({(0,): 1.0, (1,): 0.5}, 2, 6),
-    ],
-    ids=["degree1_single_term", "degree3_multi_term", "degree5"],
-)
-@pytest.mark.parametrize("seed", [0, 1, 2, 42])
-def test_alternation_block_matches_the_qsp_reference(
-    coefficients: dict[tuple[int, ...], float],
-    num_system_qubits: int,
-    num_phases: int,
-    seed: int,
-) -> None:
-    """The good block equals -i times the Wx-convention QSP polynomial.
-
-    The alternation is exact for every eigenvalue of a diagonal encoding, so
-    random phases are a complete check of the convention: the block's real
-    part is the polynomial a ``pyqsp`` sequence targets.
-    """
-    pytest.importorskip("qiskit")
-    rng = np.random.default_rng(seed)
-    wx_phases = rng.uniform(-math.pi, math.pi, size=num_phases)
-    encoding = qmc.ising_z_block_encoding(coefficients, num_system_qubits)
-    alternation = qsvt_alternation(encoding)
-
-    @qmc.qkernel
-    def top(phi: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
-        """Apply the alternation to freshly allocated registers."""
-        signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
-        system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        signal, system = alternation(signal, system, phi)
-        return qmc.measure(signal)
-
-    unitary = _qiskit_unitary(top, phi=_to_reflection_phases(wx_phases))
-    block = _top_left_block(unitary, encoding.num_signal_qubits, num_system_qubits)
-    signal_values = _ising_diagonal(coefficients, num_system_qubits)
-    signal_values = signal_values / encoding.normalization
-    expected = np.diag([-1j * _wx_qsp_polynomial(wx_phases, x) for x in signal_values])
-
-    np.testing.assert_allclose(block, expected, atol=1e-8, rtol=0.0)
-
-
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 def test_projector_block_is_the_filtered_half_sum(seed: int) -> None:
-    """The Hadamard test realizes (I - R)/2 for the alternation block R."""
+    """The Hadamard test realizes (I - R)/2 for the QSVT reflection block R."""
     pytest.importorskip("qiskit")
     rng = np.random.default_rng(seed)
     coefficients = {
@@ -286,7 +269,7 @@ def test_projector_block_is_the_filtered_half_sum(seed: int) -> None:
         (1,): float(rng.uniform(-1.0, 1.0)),
         (0, 1): float(rng.uniform(-1.0, 1.0)),
     }
-    wx_phases = rng.uniform(-math.pi, math.pi, size=4)
+    phases = rng.uniform(-math.pi, math.pi, size=4).tolist()
     encoding = qmc.ising_z_block_encoding(coefficients, 2)
     projector = eigenstate_filter_projector(encoding)
 
@@ -300,13 +283,18 @@ def test_projector_block_is_the_filtered_half_sum(seed: int) -> None:
         return qmc.measure(proj)
 
     num_ancilla = 1 + encoding.num_signal_qubits
-    unitary = _qiskit_unitary(top, phi=_to_reflection_phases(wx_phases))
-    block = _top_left_block(unitary, num_ancilla, 2)
-    signal_values = _ising_diagonal(coefficients, 2) / encoding.normalization
-    reflection = np.array(
-        [-1j * _wx_qsp_polynomial(wx_phases, x) for x in signal_values]
+    block = _top_left_block(_qiskit_unitary(top, phi=phases), num_ancilla, 2)
+
+    reflection = _top_left_block(
+        _reference_qsvt(
+            _encoding_unitary(encoding),
+            phases,
+            1 << encoding.num_signal_qubits,
+        ),
+        encoding.num_signal_qubits,
+        2,
     )
-    expected = np.diag((1.0 - reflection) / 2.0)
+    expected = (np.eye(1 << 2) - reflection) / 2.0
 
     np.testing.assert_allclose(block, expected, atol=1e-8, rtol=0.0)
 
@@ -320,17 +308,20 @@ def test_probe_samples_and_estimates_on_every_sdk(
 ) -> None:
     """The probe's all-zero ancilla rate matches its exact success probability.
 
-    Random phases keep the circuit short (degree 3) while still exercising the
-    full stack — encoding, inverse encoding, projector phases, and the
-    controlled alternation — on every backend, through both the sampler and
-    the estimator primitive.
+    The encodings here have a single signal qubit, so the QSVT good block is
+    ``-i`` times the Wx-convention QSP polynomial and the success probability
+    has a closed form. Random phases keep the circuit short (degree 3) while
+    exercising the full stack — encoding, inverse encoding, the controlled QSVT
+    reflection — on every backend, through both the sampler and the estimator.
     """
     rng = np.random.default_rng(seed)
-    words = ((0,),) if num_system_qubits == 1 else ((0,), (1,), (0, 1))
+    # At most two Ising terms keep the encoding to one signal qubit.
+    words = ((0,),) if num_system_qubits == 1 else ((0,), (1,))
     coefficients = {word: float(rng.uniform(-1.0, 1.0)) for word in words}
     wx_phases = rng.uniform(-math.pi, math.pi, size=4)
     phases = _to_reflection_phases(wx_phases)
     encoding = qmc.ising_z_block_encoding(coefficients, num_system_qubits)
+    assert encoding.num_signal_qubits == 1
     num_ancilla = 1 + encoding.num_signal_qubits
     probe = eigenstate_filter_probe(encoding)
 

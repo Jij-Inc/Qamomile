@@ -19,8 +19,8 @@ import numpy as np
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile._utils import is_close_zero
-from qamomile.circuit.algorithm.qsvt import eigenstate_filter_probe
-from qamomile.circuit.stdlib.lcu_block_encoding import LCUBlockEncoding
+from qamomile.circuit.algorithm.qsvt_filter import eigenstate_filter_probe
+from qamomile.circuit.stdlib.block_encoding import LCUBlockEncoding
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -34,8 +34,12 @@ DEFAULT_POLYNOMIAL_DEGREE = 61
 DEFAULT_TRANSITION_WIDTH = 20
 """``pyqsp`` ``delta`` parameter controlling the sharpness of the step."""
 
-DEFAULT_POLYNOMIAL_SCALE = 1.10
-"""Rescaling applied to the sign polynomial before phase extraction."""
+DEFAULT_POLYNOMIAL_SCALE = -1.10
+"""Rescaling applied to the sign polynomial before phase extraction.
+
+The sign fixes the filter's orientation: the negative default keeps the
+eigenstates *below* the threshold. The magnitude sharpens the step.
+"""
 
 
 class QSVTFilterConverter(MathematicalProblemConverter):
@@ -83,41 +87,27 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         self._phase_cache: dict[tuple[int, float, float], list[float]] = {}
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-        """Construct the Ising cost Hamiltonian from the spin model.
+        """Report that this converter exposes no cost Hamiltonian.
 
-        This is the operator the converter block encodes, so its spectrum is
-        the one the binary search brackets.
+        The Ising cost Hamiltonian is block encoded internally (see
+        :meth:`__post_init__`) and consumed by the QSVT sign filter; it is
+        never handed back as a Pauli observable. Following the base-class
+        convention for converters that do not use a cost Hamiltonian, this
+        always raises.
 
         Returns:
-            qm_o.Hamiltonian: Pauli-Z cost Hamiltonian including the constant.
+            qm_o.Hamiltonian: Never returns.
+
+        Raises:
+            NotImplementedError: Always; the converter does not expose a cost
+                Hamiltonian.
         """
-        hamiltonian = qm_o.Hamiltonian()
+        raise NotImplementedError(
+            "QSVTFilterConverter does not expose a cost Hamiltonian; the Ising "
+            "operator is block encoded internally for the QSVT sign filter."
+        )
 
-        for i, hi in self.spin_model.linear.items():
-            if not is_close_zero(hi):
-                hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
-
-        for (i, j), coefficient in self.spin_model.quad.items():
-            if not is_close_zero(coefficient):
-                hamiltonian.add_term(
-                    (
-                        qm_o.PauliOperator(qm_o.Pauli.Z, i),
-                        qm_o.PauliOperator(qm_o.Pauli.Z, j),
-                    ),
-                    coefficient,
-                )
-
-        for indices, coefficient in self.spin_model.higher.items():
-            if not is_close_zero(coefficient):
-                hamiltonian.add_term(
-                    tuple(qm_o.PauliOperator(qm_o.Pauli.Z, idx) for idx in indices),
-                    coefficient,
-                )
-
-        hamiltonian.constant = self.spin_model.constant
-        return hamiltonian
-
-    def shifted_encoding(self, mu: float) -> LCUBlockEncoding:
+    def _shifted_encoding(self, mu: float) -> LCUBlockEncoding:
         r"""Compose a block encoding of :math:`H - \mu I`.
 
         Written as an LCU *of block encodings*, so the Hamiltonian is decomposed
@@ -141,7 +131,7 @@ class QSVTFilterConverter(MathematicalProblemConverter):
             ]
         )
 
-    def qsp_phases(
+    def _qsp_phases(
         self,
         degree: int = DEFAULT_POLYNOMIAL_DEGREE,
         delta: float = DEFAULT_TRANSITION_WIDTH,
@@ -151,10 +141,15 @@ class QSVTFilterConverter(MathematicalProblemConverter):
 
         ``pyqsp`` builds an odd polynomial approximation of
         :math:`\mathrm{sign}(x)` and returns its phases in the Wx (signal
-        rotation) convention. They are converted to the reflection convention
-        the QSVT kernels expect by adding :math:`\pi/4` to the two end phases
-        and :math:`\pi/2` to every interior phase. Results are cached per
-        ``(degree, delta, scale)``; they do not depend on :math:`\mu`.
+        rotation) convention. They are converted to the projector-rotation
+        convention :func:`~qamomile.circuit.qsvt` consumes,
+        :math:`R(\phi) = e^{i\phi(2\Pi - I)}`: the raw ``sym_qsp`` output is
+        first turned into a genuine Wx sequence by adding :math:`\pi/4` to the
+        two end phases, then mapped by adding :math:`(2d - 1)\pi/4` to the first
+        phase, subtracting :math:`\pi/2` from every interior phase and
+        :math:`\pi/4` from the last, and wrapping into :math:`(-\pi, \pi]`.
+        Results are cached per ``(degree, delta, scale)``; they do not depend on
+        :math:`\mu`.
 
         Args:
             degree (int): Odd degree of the sign approximation. Higher degree
@@ -163,11 +158,11 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 is, the steeper the step near the origin.
             scale (float): Factor applied to the polynomial coefficients before
                 phase extraction. Its sign fixes the filter's orientation — the
-                positive default keeps the eigenstates *below* the threshold —
+                negative default keeps the eigenstates *below* the threshold —
                 and its magnitude sharpens the step, ``pyqsp``'s
                 ``ensure_bounded`` leaving headroom under the QSP bound
-                :math:`\lvert p \rvert \le 1`. Values much above ``1.2`` push
-                the polynomial outside that bound and the phases become
+                :math:`\lvert p \rvert \le 1`. Magnitudes much above ``1.2``
+                push the polynomial outside that bound and the phases become
                 meaningless.
 
         Returns:
@@ -191,7 +186,7 @@ class QSVTFilterConverter(MathematicalProblemConverter):
             from pyqsp.poly import PolySign
         except ImportError as error:  # pragma: no cover - depends on install
             raise ImportError(
-                "QSVTFilterConverter.qsp_phases requires pyqsp. Install it with "
+                "QSVTFilterConverter._qsp_phases requires pyqsp. Install it with "
                 "`pip install 'qamomile[qsvt]'`, or pass precomputed phases via "
                 "the `phi` argument of transpile()."
             ) from error
@@ -208,12 +203,21 @@ class QSVTFilterConverter(MathematicalProblemConverter):
             coefficients, method="sym_qsp", chebyshev_basis=True
         )
 
-        phases = [float(phase) for phase in wx_phases]
-        phases[0] += math.pi / 4
-        phases[-1] += math.pi / 4
-        for index in range(1, len(phases) - 1):
-            phases[index] += math.pi / 2
+        # sym_qsp raw output -> genuine Wx sequence.
+        wx = np.asarray(wx_phases, dtype=float)
+        wx = wx.copy()
+        wx[0] += math.pi / 4
+        wx[-1] += math.pi / 4
 
+        # Genuine Wx -> projector-rotation (reflection) convention.
+        degree_out = len(wx) - 1
+        reflection = np.empty_like(wx)
+        reflection[0] = wx[0] + (2 * degree_out - 1) * math.pi / 4
+        reflection[1:-1] = wx[1:-1] - math.pi / 2
+        reflection[-1] = wx[-1] - math.pi / 4
+        reflection = (reflection + math.pi) % (2 * math.pi) - math.pi
+
+        phases = [float(phase) for phase in reflection]
         self._phase_cache[key] = list(phases)
         return phases
 
@@ -242,10 +246,10 @@ class QSVTFilterConverter(MathematicalProblemConverter):
             mu (float): Energy threshold. The filter keeps eigenstates of the
                 cost Hamiltonian with energy below ``mu``.
             degree (int): Degree of the sign approximation, passed to
-                :meth:`qsp_phases`. Ignored when ``phi`` is given.
+                :meth:`_qsp_phases`. Ignored when ``phi`` is given.
             delta (float): Transition-width parameter, passed to
-                :meth:`qsp_phases`. Ignored when ``phi`` is given.
-            scale (float): Polynomial rescaling, passed to :meth:`qsp_phases`.
+                :meth:`_qsp_phases`. Ignored when ``phi`` is given.
+            scale (float): Polynomial rescaling, passed to :meth:`_qsp_phases`.
                 Ignored when ``phi`` is given.
             phi (list[float] | None): Precomputed reflection-convention phases.
                 Defaults to None, meaning they are computed with ``pyqsp``.
@@ -258,14 +262,16 @@ class QSVTFilterConverter(MathematicalProblemConverter):
             ValueError: If ``phi`` has odd or fewer than two entries.
             ImportError: If ``phi`` is omitted and ``pyqsp`` is not installed.
         """
-        phases = list(phi) if phi is not None else self.qsp_phases(degree, delta, scale)
+        phases = (
+            list(phi) if phi is not None else self._qsp_phases(degree, delta, scale)
+        )
         if len(phases) < 2 or len(phases) % 2 != 0:
             raise ValueError(
                 "phi must hold an even number of at least two phases "
                 f"(odd polynomial degree); got {len(phases)}."
             )
 
-        encoding = self.shifted_encoding(mu)
+        encoding = self._shifted_encoding(mu)
         self.num_ancilla_bits = 1 + encoding.num_signal_qubits
         return transpiler.transpile(
             eigenstate_filter_probe(encoding),
