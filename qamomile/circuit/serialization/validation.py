@@ -39,6 +39,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
 )
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -524,8 +526,8 @@ def _inline_expval_operations(
                 for region_arg in getattr(operation, "region_args", ()):
                     for value in _iter_value_graph(region_arg.block_arg):
                         nested_scope[value.uuid] = value
-                for nested in operation.nested_op_lists():
-                    walk(nested, dict(nested_scope))
+                for region in operation.nested_regions():
+                    walk(list(region.operations), dict(nested_scope))
 
             for result in operation.results:
                 for value in _iter_result_producers(result):
@@ -738,8 +740,8 @@ def _iter_operations(operations: Iterable[Operation]) -> Iterable[Operation]:
     for operation in operations:
         yield operation
         if isinstance(operation, HasNestedOps):
-            for nested in operation.nested_op_lists():
-                yield from _iter_operations(nested)
+            for region in operation.nested_regions():
+                yield from _iter_operations(region.operations)
 
 
 def _iter_value_graph(value: ValueBase) -> Iterable[ValueBase]:
@@ -877,8 +879,8 @@ def _validate_operation(
         _validate_static_binding_invoke(operation, state, location)
 
     if isinstance(operation, HasNestedOps):
-        for region_index, operations in enumerate(operation.nested_op_lists()):
-            for child_index, child in enumerate(operations):
+        for region_index, region in enumerate(operation.nested_regions()):
+            for child_index, child in enumerate(region.operations):
                 _validate_operation(
                     child,
                     state,
@@ -1070,6 +1072,8 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
             raise ValueError(f"{location} result type must match its quantum input")
     elif isinstance(operation, BinOp):
         _validate_binop(operation, location)
+    elif isinstance(operation, UnaryMathOp):
+        _validate_unary_math(operation, location)
     elif isinstance(operation, CompOp):
         _validate_comparison(operation, location)
     elif isinstance(operation, CondOp):
@@ -1221,6 +1225,26 @@ def _validate_binop(operation: BinOp, location: str) -> None:
         if not isinstance(result_type, (UIntType, FloatType)):
             raise ValueError(f"{location} result must be UIntType or FloatType")
         expected_result = result_type
+    _require_types(operation.results, [expected_result], location, "result")
+
+
+def _validate_unary_math(operation: UnaryMathOp, location: str) -> None:
+    """Validate one exact unary mathematical operation.
+
+    Args:
+        operation (UnaryMathOp): Mathematical operation to validate.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If arity or scalar types do not match the operation kind.
+    """
+    _require_arity(operation, 1, 1, location)
+    operand_type = operation.operands[0].type
+    if not isinstance(operand_type, (UIntType, FloatType)):
+        raise ValueError(f"{location} operand must be UIntType or FloatType")
+    expected_result = (
+        FloatType() if operation.kind is UnaryMathOpKind.LOG2 else UIntType()
+    )
     _require_types(operation.results, [expected_result], location, "result")
 
 

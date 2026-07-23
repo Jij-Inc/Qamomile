@@ -19,7 +19,12 @@ from qamomile.circuit.frontend.qkernel_callable import (
     qkernel_callable_ref,
 )
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.arithmetic_operations import CompOp, CompOpKind
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    CompOp,
+    CompOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
+)
 from qamomile.circuit.ir.operation.callable import (
     CallableBodyRef,
     CallableImplementation,
@@ -76,6 +81,12 @@ def _array_shaped(values: qmc.Vector[qmc.Float]) -> qmc.Bit:
     for i in qmc.range(values.shape[0]):
         q[i] = qmc.rx(q[i], values[i])
     return qmc.measure(q[0])
+
+
+@qmc.qkernel
+def _unary_math_width(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+    """Allocate a register from independent log2 and ceil operations."""
+    return qmc.qubit_array(qmc.ceil(qmc.log2(n)), "q")
 
 
 @qmc.qkernel
@@ -798,6 +809,12 @@ def test_schema_has_one_qkernel_root() -> None:
     ]
 
 
+def test_unary_math_operation_type_is_appended_to_wire_enum() -> None:
+    """Adding unary math leaves every previously assigned enum value intact."""
+    assert pb.RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION == 33
+    assert pb.UNARY_MATH_OPERATION == 34
+
+
 def test_every_encodable_operation_has_a_protobuf_mapping() -> None:
     """The IR encoder and the protobuf operation table cover the same ops.
 
@@ -873,6 +890,23 @@ def test_bit_comparison_operations_round_trip() -> None:
         CompOpKind.NEQ,
         CompOpKind.EQ,
         CompOpKind.NEQ,
+    ]
+    assert serialize(restored) == payload
+
+
+def test_unary_math_operations_round_trip() -> None:
+    """Independent log2 and ceil operations survive protobuf serialization."""
+    payload = serialize(_unary_math_width)
+    restored = deserialize(payload)
+    operations = [
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, UnaryMathOp)
+    ]
+
+    assert [operation.kind for operation in operations] == [
+        UnaryMathOpKind.LOG2,
+        UnaryMathOpKind.CEIL,
     ]
     assert serialize(restored) == payload
 

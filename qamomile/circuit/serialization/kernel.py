@@ -481,8 +481,8 @@ def _collect_reachable_values(block: Block) -> list[ValueBase]:
         for result in operation.results:
             visit_value(result)
         if isinstance(operation, HasNestedOps):
-            for nested in operation.nested_op_lists():
-                for child in nested:
+            for region in operation.nested_regions():
+                for child in region.operations:
                     visit_operation(child)
         if isinstance(operation, InvokeOperation):
             definition = operation.definition
@@ -581,8 +581,8 @@ def _validate_materialized_expval_parent_indices(block: Block) -> None:
                                     f"{parent_index} is outside array width {size}"
                                 )
         if isinstance(operation, HasNestedOps):
-            for nested in operation.nested_op_lists():
-                for child in nested:
+            for region in operation.nested_regions():
+                for child in region.operations:
                     visit_operation(child)
         if isinstance(operation, InvokeOperation):
             definition = operation.definition
@@ -730,8 +730,8 @@ class _StaticBindingResolver:
                 owned block's call ABI is malformed.
         """
         if isinstance(operation, HasNestedOps):
-            for items in operation.nested_op_lists():
-                for item in items:
+            for region in operation.nested_regions():
+                for item in region.operations:
                     self._validate_operation_call_widths(
                         item,
                         widths,
@@ -1001,11 +1001,16 @@ class _StaticBindingResolver:
             regions when present.
         """
         if isinstance(operation, HasNestedOps):
-            operation = operation.rebuild_nested(
-                [
-                    [self._resolve_operation(item) for item in items]
-                    for items in operation.nested_op_lists()
-                ]
+            operation = operation.rebuild_regions(
+                tuple(
+                    dataclasses.replace(
+                        region,
+                        operations=tuple(
+                            self._resolve_operation(item) for item in region.operations
+                        ),
+                    )
+                    for region in operation.nested_regions()
+                )
             )
 
         if isinstance(operation, InvokeOperation):
@@ -1413,17 +1418,22 @@ def _replace_operations(
             continue
         new_operation = substitutor.substitute_operation(operation)
         if isinstance(new_operation, HasNestedOps):
-            nested = [
-                _replace_operations(
-                    items,
-                    substitutor,
-                    bound_formal_uuids,
-                    replacements,
-                    block_cache,
+            nested = tuple(
+                dataclasses.replace(
+                    region,
+                    operations=tuple(
+                        _replace_operations(
+                            list(region.operations),
+                            substitutor,
+                            bound_formal_uuids,
+                            replacements,
+                            block_cache,
+                        )
+                    ),
                 )
-                for items in new_operation.nested_op_lists()
-            ]
-            new_operation = new_operation.rebuild_nested(nested)
+                for region in new_operation.nested_regions()
+            )
+            new_operation = new_operation.rebuild_regions(nested)
         _replace_owned_blocks(new_operation, replacements, block_cache)
         rewritten.append(new_operation)
     return rewritten

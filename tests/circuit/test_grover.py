@@ -7,16 +7,26 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qmc
-from qamomile.circuit.stdlib.grover import grover_iteration_count, grover_search
+from qamomile.circuit.stdlib.grover import (
+    _diffusion,
+    grover_iteration_count,
+    grover_search,
+)
 
 
 @qmc.composite_gate(name="mark_all_ones")
 def mark_all_ones(reg: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Flip the phase of the all-ones basis state via a multi-controlled Z."""
+    """Flip the phase of the all-ones basis state via a multi-controlled Z.
+
+    Args:
+        reg (qmc.Vector[qmc.Qubit]): Search register to phase-mark.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Phase-marked search register.
+    """
     top = reg.shape[0] - 1
     reg[top] = qmc.h(reg[top])
-    mcx = qmc.control(qmc.x, num_controls=top)
-    reg[0:top], reg[top] = mcx(reg[0:top], reg[top])
+    reg[0:top], reg[top] = qmc.mcx(reg[0:top], reg[top])
     reg[top] = qmc.h(reg[top])
     return reg
 
@@ -53,6 +63,17 @@ _query_oracle = qmc.opaque(
     ),
     cost=_QueryCost(),
 )
+
+
+@qmc.qkernel
+def _grover_diffusion_kernel() -> qmc.Vector[qmc.Bit]:
+    """Build a concrete three-qubit Grover diffusion circuit.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measured register after one diffusion operation.
+    """
+    reg = qmc.qubit_array(3, name="reg")
+    return qmc.measure(_diffusion(reg))
 
 
 @qmc.qkernel
@@ -147,6 +168,23 @@ def test_grover_qubit_count_is_linear() -> None:
     est = _grover_estimate_kernel.estimate_resources()
     n = est.parameters["n"]
     assert sp.simplify(est.qubits - n) == 0
+
+
+def test_grover_diffusion_uses_qiskit_native_ccx() -> None:
+    """Concrete diffusion selects Qiskit's native two-control X gate."""
+    pytest.importorskip("qiskit")
+    from qiskit.circuit.library import CCXGate
+
+    from qamomile.qiskit import QiskitTranspiler
+
+    executable = QiskitTranspiler().transpile(_grover_diffusion_kernel)
+    circuit = executable.compiled_quantum[0].circuit
+
+    operations = [instruction.operation for instruction in circuit.data]
+    assert any(
+        operation.name == "ccx" and isinstance(operation, CCXGate)
+        for operation in operations
+    )
 
 
 @pytest.mark.parametrize("n", [2, 3])

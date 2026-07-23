@@ -52,6 +52,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
@@ -1490,6 +1492,27 @@ def _decode_binop(d: dict[str, Any], ctx: _DecodeContext) -> BinOp:
     return BinOp(operands=operands, results=results, kind=kind)
 
 
+def _decode_unary_math(
+    d: dict[str, Any],
+    ctx: _DecodeContext,
+) -> UnaryMathOp:
+    """Decode a unary mathematical operation.
+
+    Args:
+        d (dict[str, Any]): Encoded operation dictionary.
+        ctx (_DecodeContext): Active decoding context.
+
+    Returns:
+        UnaryMathOp: Reconstructed unary mathematical operation.
+
+    Raises:
+        ValueError: If ``kind`` is not a known ``UnaryMathOpKind`` name.
+    """
+    operands, results = _operands_results(d, ctx)
+    kind = _enum_by_name(UnaryMathOpKind, d.get("kind"), "UnaryMathOpKind")
+    return UnaryMathOp(operands=operands, results=results, kind=kind)
+
+
 def _decode_compop(d: dict[str, Any], ctx: _DecodeContext) -> CompOp:
     """Decode :class:`CompOp`.
 
@@ -1692,6 +1715,9 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
         region_args=_decode_region_args(d, ctx, results),
+        captures=tuple(
+            _materialize_as_value_like(ctx, ref) for ref in d.get("capture_refs", ())
+        ),
     )
     validate_region_args(op)
     return op
@@ -1733,6 +1759,9 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
         region_args=_decode_region_args(d, ctx, results),
+        captures=tuple(
+            _materialize_as_value_like(ctx, ref) for ref in d.get("capture_refs", ())
+        ),
     )
     validate_region_args(op)
     return op
@@ -1762,6 +1791,9 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
         max_iterations=d.get("max_iterations"),
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
         region_args=_decode_region_args(d, ctx, results),
+        captures=tuple(
+            _materialize_as_value_like(ctx, ref) for ref in d.get("capture_refs", ())
+        ),
     )
     validate_region_args(op)
     return op
@@ -1831,6 +1863,14 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
         true_operations=true_body,
         false_operations=false_body,
         branch_rebinds=_decode_branch_rebinds(d, ctx),
+        true_captures=tuple(
+            _materialize_as_value_like(ctx, ref)
+            for ref in d.get("true_capture_refs", ())
+        ),
+        false_captures=tuple(
+            _materialize_as_value_like(ctx, ref)
+            for ref in d.get("false_capture_refs", ())
+        ),
     )
     for true_ref, false_ref, result in zip(true_refs, false_refs, results, strict=True):
         op.add_merge(
@@ -2329,6 +2369,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "ExpvalOp": _decode_expval,
     "PauliEvolveOp": _decode_pauli_evolve,
     "BinOp": _decode_binop,
+    "UnaryMathOp": _decode_unary_math,
     "CompOp": _decode_compop,
     "CondOp": _decode_condop,
     "NotOp": _decode_notop,

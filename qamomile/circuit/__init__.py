@@ -84,6 +84,7 @@ from .frontend.operation.control_flow import for_items, items, range
 from .frontend.operation.expval import expval
 from .frontend.operation.global_phase import global_phase
 from .frontend.operation.inverse import inverse
+from .frontend.operation.math import ceil, log2
 from .frontend.operation.measurement import (
     measure,
     measure_reset,
@@ -116,9 +117,12 @@ from .frontend.operation.qubit_gates import (
 from .frontend.operation.select import select
 from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
+from .frontend.struct import struct
 from .ir.effect import KernelEffect
 from .stdlib import (
+    IsingZBlockEncoding,
     LCUBlockEncoding,
+    LCUBlockEncodingTerm,
     PauliLCUBlockEncoding,
     PeriodicShiftLCUBlockEncoding,
     add_const,
@@ -131,7 +135,10 @@ from .stdlib import (
     controlled_modular_add_const_modulus,
     grover_iteration_count,
     grover_search,
+    identity_block_encoding,
     iqft,
+    ising_z_block_encoding,
+    lcu_block_encoding,
     lookup_xor,
     mcx,
     modmul_const,
@@ -146,6 +153,7 @@ from .stdlib import (
     periodic_shift_lcu_block_encoding,
     qft,
     qpe,
+    qsvt,
     ripple_carry_add,
 )
 
@@ -189,6 +197,7 @@ from .algorithm.shor import (  # noqa: E402, I001
 
 __all__ = [
     "qkernel",
+    "struct",
     "KernelEffect",
     "composite_gate",
     "Oracle",
@@ -210,6 +219,8 @@ __all__ = [
     "inverse",
     "global_phase",
     "cast",
+    "ceil",
+    "log2",
     "bit",
     "bit_array",
     "float_",
@@ -264,9 +275,15 @@ __all__ = [
     "modular_decrement",
     "modular_increment",
     "qpe",
+    "qsvt",
     "mcx",
     "multi_controlled_x",
     "LCUBlockEncoding",
+    "LCUBlockEncodingTerm",
+    "identity_block_encoding",
+    "lcu_block_encoding",
+    "IsingZBlockEncoding",
+    "ising_z_block_encoding",
     "PauliLCUBlockEncoding",
     "pauli_lcu_block_encoding",
     "computational_basis_state",

@@ -168,6 +168,17 @@ def _pauli_specific_template(
 
 
 @qmc.qkernel
+def _ising_specific_template(
+    encoding: qmc.IsingZBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+    """Retain a stable producer-specific Ising-Z annotation."""
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    signal, system = encoding.unitary(signal, system)
+    return qmc.measure(signal), qmc.measure(system)
+
+
+@qmc.qkernel
 def _inverse_template(
     encoding: qmc.LCUBlockEncoding,
 ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
@@ -685,6 +696,22 @@ def _encoding(matrix: np.ndarray) -> qmc.LCUBlockEncoding:
     return qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(matrix, atol=1e-12))
 
 
+def _recursive_ising_encoding() -> qmc.LCUBlockEncoding:
+    r"""Build a two-level complex encoding without Pauli LCU conversion.
+
+    Returns:
+        qmc.LCUBlockEncoding: Encoding of ``0.5 Z + 0.75j I`` with
+            normalization ``1.75``.
+    """
+    inner = qmc.ising_z_block_encoding({(): 1.0j, (0,): 0.5}, 1)
+    return qmc.lcu_block_encoding(
+        (
+            qmc.LCUBlockEncodingTerm(1.0, inner),
+            qmc.LCUBlockEncodingTerm(-0.25j, qmc.identity_block_encoding(1)),
+        )
+    )
+
+
 def _alternative_encoding(matrix: np.ndarray) -> qmc.LCUBlockEncoding:
     """Wrap one unitary as a distinct producer-specific LCU descriptor.
 
@@ -944,6 +971,21 @@ def test_pauli_specific_static_manifest_remains_compatible() -> None:
     _assert_static_binding_resolved(specialized)
 
 
+def test_ising_specific_static_manifest_has_a_stable_adapter() -> None:
+    """The Ising-Z subtype annotation round-trips with its nominal type key."""
+    payload = serialize(_ising_specific_template)
+    restored = deserialize(payload)
+
+    assert restored.input_types == {"encoding": qmc.IsingZBlockEncoding}
+    assert restored.block.static_bindings[0].type_key == (
+        "qamomile.stdlib.ising_z_block_encoding"
+    )
+    specialized = restored.build(
+        encoding=qmc.ising_z_block_encoding({(): 1.0j, (0,): 0.5}, 1)
+    )
+    _assert_static_binding_resolved(specialized)
+
+
 def test_graph_encoder_rejects_an_empty_static_binding_type() -> None:
     """An empty type key cannot satisfy the graph parameter type union."""
     envelope = kernel_to_dict(_direct_template)
@@ -1156,8 +1198,10 @@ def test_generic_slot_accepts_an_alternative_lcu_descriptor_subclass() -> None:
     pauli = _encoding(1j * I2 + 0.5 * X)
     generic = _generic_encoding(1j * I2 + 0.5 * X)
     alternative = _alternative_encoding(1j * I2 + 0.5 * X)
+    ising = qmc.ising_z_block_encoding({(): 1.0j, (0,): 0.5}, 1)
+    recursive = _recursive_ising_encoding()
 
-    for encoding in (generic, pauli, alternative):
+    for encoding in (generic, pauli, alternative, ising, recursive):
         specialized = restored.build(encoding=encoding)
         assert specialized.kind is BlockKind.TRACED
         _assert_static_binding_resolved(specialized)
@@ -1725,6 +1769,16 @@ def test_static_member_reports_concrete_system_width_after_deserialization() -> 
     )
 
 
+def test_recursive_static_member_reports_concrete_signal_width() -> None:
+    """A recursive descriptor retains its validator after deserialization."""
+    restored = deserialize(serialize(_wrong_signal_direct))
+
+    with pytest.raises(ValueError) as error:
+        restored.build(encoding=_recursive_ising_encoding())
+
+    assert str(error.value) == ("LCU block encoding requires 2 signal qubits, got 1.")
+
+
 def test_serialized_static_binding_executes_phase_sample_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
@@ -1928,6 +1982,100 @@ def test_serialized_complex_transforms_execute_on_every_sdk(
     assert observed_expval == pytest.approx(expected_expval, abs=expval_tolerance)
 
 
+@pytest.mark.parametrize(
+    (
+        "sample_template",
+        "expval_template",
+        "expected_zero_probability",
+        "expected_expval",
+    ),
+    [
+        (
+            _complex_inverse_sample_template,
+            _complex_inverse_expval_template,
+            2.0 / 7.0,
+            -3.0 / 7.0,
+        ),
+        (
+            _complex_static_argument_inverse_sample_template,
+            _complex_static_argument_inverse_expval_template,
+            2.0 / 7.0,
+            -3.0 / 7.0,
+        ),
+        (
+            _complex_control_sample_template,
+            _complex_control_expval_template,
+            5.0 / 7.0,
+            3.0 / 7.0,
+        ),
+        (
+            _complex_select_sample_template,
+            _complex_select_expval_template,
+            5.0 / 7.0,
+            3.0 / 7.0,
+        ),
+    ],
+    ids=[
+        "inverse",
+        "inverse_static_argument",
+        "outer_control",
+        "nested_select",
+    ],
+)
+def test_serialized_recursive_lcu_transforms_execute_on_every_sdk(
+    sdk_transpiler: Any,
+    sample_template: Any,
+    expval_template: Any,
+    expected_zero_probability: float,
+    expected_expval: float,
+) -> None:
+    r"""Every SDK executes a recursively composed static descriptor.
+
+    The Ising-Z child encodes ``iI + Z/2`` with normalization ``3/2``.
+    Combining that child with ``-iI/4`` produces ``Z/2 + 3iI/4`` and parent
+    normalization ``7/4``. Its all-zero overlap on ``|0>`` is therefore
+    ``2/7 + 3i/7``. The expected interference values exercise child
+    normalization, recursive SELECT, explicit coefficient phase, static
+    binding, inverse, outer control, and outer SELECT together.
+    """
+    import qamomile.observable as qm_o
+
+    encoding = _recursive_ising_encoding()
+    restored_sample = deserialize(serialize(sample_template))
+    restored_expval = deserialize(serialize(expval_template))
+    shots = 2048
+    executor = _executor(sdk_transpiler)
+
+    sample_executable = sdk_transpiler.transpiler.transpile(
+        restored_sample,
+        bindings={"encoding": encoding},
+    )
+    sample_result = sample_executable.sample(executor, shots=shots).result()
+    observed_zero_probability = (
+        sum(count for outcome, count in sample_result.results if int(outcome) == 0)
+        / shots
+    )
+    sampling_tolerance = (
+        6.0
+        * math.sqrt(
+            expected_zero_probability * (1.0 - expected_zero_probability) / shots
+        )
+        + 0.02
+    )
+    assert observed_zero_probability == pytest.approx(
+        expected_zero_probability,
+        abs=sampling_tolerance,
+    )
+
+    expval_executable = sdk_transpiler.transpiler.transpile(
+        restored_expval,
+        bindings={"encoding": encoding, "observable": qm_o.Y(0)},
+    )
+    observed_expval = float(expval_executable.run(executor).result())
+    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert observed_expval == pytest.approx(expected_expval, abs=expval_tolerance)
+
+
 def test_static_binding_deserializes_and_builds_in_fresh_interpreter() -> None:
     """A fresh process resolves the registered type without sender state."""
     payload = base64.b64encode(serialize(_direct_template)).decode("ascii")
@@ -1944,6 +2092,34 @@ from qamomile.linalg import PauliLCU
 restored = deserialize(base64.b64decode(sys.argv[1]))
 matrix = np.array([[0, 1], [1, 0]], dtype=np.complex128)
 encoding = qmc.pauli_lcu_block_encoding(PauliLCU.from_matrix(matrix, atol=1e-12))
+block = restored.build(encoding=encoding)
+assert block.kind.name == "TRACED"
+assert block.static_bindings == ()
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script, payload],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_ising_static_binding_deserializes_in_fresh_interpreter() -> None:
+    """A fresh process resolves the Ising-Z producer-specific type key."""
+    payload = base64.b64encode(serialize(_ising_specific_template)).decode("ascii")
+    script = """
+import base64
+import sys
+
+import qamomile.circuit as qmc
+from qamomile.circuit.serialization import deserialize
+
+restored = deserialize(base64.b64decode(sys.argv[1]))
+encoding = qmc.ising_z_block_encoding({(): 1.0j, (0,): 0.5}, 1)
 block = restored.build(encoding=encoding)
 assert block.kind.name == "TRACED"
 assert block.static_bindings == ()
