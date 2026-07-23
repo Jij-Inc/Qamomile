@@ -137,7 +137,7 @@ print(f"Classes: {CLASS_NAMES}")
 
 
 # %% [markdown]
-# ## Algorithm: Hybrid Quantum-Classical Convolutional Neural Network
+# ## Algorithm
 #
 # Encoding a high-dimensional image directly into a quantum state and running an expressive QCNN would require many qubits and deep circuits. Because circuits of that scale are impractical on NISQ devices, the image dimensionality must first be reduced to a size that a quantum circuit can accept. We therefore use a classical convolutional block as a front-end feature extractor: it compresses local image features into a small vector, which is then processed by a compact parameterized quantum circuit. This **hybrid quantum neural network (HQNN)** workflow follows the NISQ-oriented strategy of combining dimensionality reduction by a classical CNN with feature transformation by a quantum layer {cite:p}`10.1088/2632-2153/ad2aef`.
 #
@@ -174,7 +174,7 @@ print(f"Classes: {CLASS_NAMES}")
 # \right), \qquad l \in \mathcal{L}_{\mathrm{CNN}},
 # $$
 #
-# where $*$ denotes convolution and $\mathcal{L}_{\mathrm{CNN}}$ is the index set of convolution blocks. The resulting tensor is flattened and projected to an $n$-dimensional feature vector. These features are converted into quantum rotation angles by
+# where $\operatorname{Pool}$ denotes pooling over a $p_h \times p_w$ window, $*$ denotes convolution, and $\mathcal{L}_{\mathrm{CNN}}$ is the index set of convolution blocks. The resulting tensor is flattened and projected to an $n$-dimensional feature vector. These features are converted into quantum rotation angles by
 #
 # $$
 # \mathbf{x} = \alpha\,\sigma\!\left(
@@ -232,7 +232,13 @@ print(f"Classes: {CLASS_NAMES}")
 # \mathbf{p}=\operatorname{softmax}(\mathbf{s}).
 # $$
 #
-# If $\mathcal{C}$ denotes the class index set, training minimizes the cross-entropy loss $\mathcal{L}=-\sum_{c\in\mathcal{C}} y_c\log p_c$ for a one-hot label $\mathbf{y}$. This loss serves as the objective for jointly learning the classical and quantum parameters.
+# If $\mathcal{C}$ denotes the class index set, training minimizes the cross-entropy loss
+#
+# $$
+# \mathcal{L} = -\sum_{c \in \mathcal{C}} y_c \log p_c.
+# $$
+#
+# Here, $\mathbf{y}$ is a one-hot label. This loss serves as the objective for jointly learning the classical and quantum parameters.
 
 # %% [markdown]
 # ## Implementation with Qamomile
