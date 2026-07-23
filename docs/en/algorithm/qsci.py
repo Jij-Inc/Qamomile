@@ -17,7 +17,7 @@
 # tags: [algorithm, sample-based]
 # ---
 #
-# # Quantum Selected Configuration Interaction (QSCI)
+# # Quantum-Selected Configuration Interaction (QSCI)
 #
 # **Quantum-Selected Configuration Interaction (QSCI)**
 # {cite:p}`10.1103/dmn4-snfx` is a hybrid quantum–classical algorithm

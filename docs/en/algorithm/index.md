@@ -57,7 +57,7 @@ Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution.
 :::
 
 :::{card}
-:header: **Quantum Selected Configuration Interaction (QSCI)**
+:header: **Quantum-Selected Configuration Interaction (QSCI)**
 :link: qsci
 This example implements Quantum-Selected Configuration Interaction (QSCI) with Qamomile. It uses `solve_subspace` to construct the effective Hamiltonian and runs QSCI on a four-qubit transverse-field Ising model.
 :::
