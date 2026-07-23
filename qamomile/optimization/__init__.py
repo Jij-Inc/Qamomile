@@ -8,8 +8,10 @@ This package turns classical combinatorial optimization problems
 decodes measurement results back into classical solutions. It hosts the
 converter family: ``QAOAConverter`` (``qaoa.py``, QUBO/Ising and HUBO via
 phase gadgets), ``FQAOAConverter`` (``fqaoa.py``, fermionic mixers with
-particle-number constraints), the QRAC converters (``qrao/``), and
-``PCEConverter`` (``pce.py``, Pauli correlation encoding).
+particle-number constraints), the QRAC converters (``qrao/``),
+``PCEConverter`` (``pce.py``, Pauli correlation encoding), and
+``QSVTFilterConverter`` (``qsvt_filter.py``, QSVT eigenstate filtering for the
+Lin & Tong ground-energy search).
 
 Layering constraint (inviolable)
 --------------------------------

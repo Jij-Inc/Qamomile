@@ -27,6 +27,10 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
+from .qsvt_filter import (
+    eigenstate_filter_probe,
+    eigenstate_filter_projector,
+)
 from .shor import ekera_hastad_factoring, shor_order_finding
 from .trotter import trotterized_time_evolution
 
@@ -60,4 +64,7 @@ __all__ = [
     "fqaoa_state",
     # Trotterization
     "trotterized_time_evolution",
+    # QSVT eigenstate filtering
+    "eigenstate_filter_projector",
+    "eigenstate_filter_probe",
 ]
