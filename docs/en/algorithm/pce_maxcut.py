@@ -17,7 +17,7 @@
 # tags: [algorithm, optimization, variational]
 # ---
 #
-# # Pauli Correlation Encoding (PCE)
+# # Pauli Correlation Encoding
 #
 # In this tutorial we solve the MaxCut problem with Pauli Correlation
 # Encoding (PCE) using Qamomile's `PCEConverter`. PCE maps $N$ spin
@@ -56,10 +56,10 @@ from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # (problem-settings)=
-# ## Problem Settings
+# ## Problem Settings: MaxCut
 
 # %% [markdown]
-# ### What is MaxCut?
+# ### Problem Definition
 #
 # Given an undirected graph $G = (V, E)$, the MaxCut problem asks for
 # a partition of the vertices into two sets $S$ and $\bar{S}$ so that the
@@ -195,7 +195,7 @@ plt.show()
 # $\beta$ (regularizer strength), and $\nu$ (overall scale). Their
 # values affect optimizer convergence and final solution quality. The
 # concrete values used in this tutorial follow the original paper and
-# are configured in [](#pce-step5).
+# are configured in [](#pce-optimize-variational-parameters).
 #
 # For MaxCut specifically, the spin model has $h_i = 0$ and
 # $J_{ij} = +\tfrac{1}{2}$ on every edge, so the data term is minimized
@@ -220,7 +220,7 @@ plt.show()
 # ## Implementation
 
 # %% [markdown]
-# ### Step 1: Build the `BinaryModel` and `PCEConverter`
+# ### Build the `BinaryModel` and `PCEConverter`
 #
 # We build the Ising form derived in [](#problem-settings) with
 # `BinaryModel.from_ising`: $h_i = 0$, $J_{ij} = 1/2$ on every edge, and
@@ -249,7 +249,7 @@ assert converter.num_qubits == 3
 assert converter.correlator_order == 2
 
 # %% [markdown]
-# ### Step 2: Inspect the Per-Variable Pauli Observables
+# ### Inspect the Per-Variable Pauli Observables
 #
 # `get_encoded_pauli_list()` returns one Hamiltonian per variable, each
 # containing exactly one $k$-body Pauli string with coefficient $1$.
@@ -271,7 +271,7 @@ for P_i in observables:
     assert len(coeffs) == 1 and abs(coeffs[0] - 1.0) < 1e-12
 
 # %% [markdown]
-# ### Step 3: Define the Ansatz
+# ### Define the Ansatz
 #
 # PCE leaves the circuit choice open. The original paper uses a
 # **hardware-efficient ansatz**: alternating layers of
@@ -284,7 +284,7 @@ for P_i in observables:
 # per $P_i$.
 #
 # :::{note}
-# **Gate convention.** Qamomile's rotation gates carry the standard
+# Qamomile's rotation gates carry the standard
 # $1/2$ factor: $\text{RY}(\theta) = e^{-i \theta Y / 2}$ and
 # $\text{RZ}(\theta) = e^{-i \theta Z / 2}$. Every entry of the `thetas`
 # vector is a variational parameter. The optimizer can scale it, so the
@@ -322,7 +322,7 @@ def pce_ansatz(
 pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
 
 # %% [markdown]
-# ### Step 4: Transpile One `ExecutableProgram` per Observable
+# ### Transpile One `ExecutableProgram` per Observable
 #
 # Each $P_i$ must be fixed at transpile time, so we transpile the kernel
 # once per observable and cache the resulting executables. Each
@@ -356,8 +356,8 @@ assert len(executables) == len(observables)
 assert num_thetas == 2 * n * depth
 
 # %% [markdown]
-# (pce-step5)=
-# ### Step 5: Optimize the Variational Parameters
+# (pce-optimize-variational-parameters)=
+# ### Optimize the Variational Parameters
 #
 # The classical loop estimates $\langle P_i \rangle$ for every
 # observable at the current `thetas`, plugs those values into the
@@ -437,8 +437,8 @@ plt.title("PCE Optimization Progress")
 plt.show()
 
 # %% [markdown]
-# (pce-step6)=
-# ### Step 6: Decode the Optimized Expectations
+# (pce-decode-optimized-expectations)=
+# ### Decode the Optimized Expectations
 #
 # `PCEConverter.decode(expectations)` takes the per-variable expectation
 # values, sign-rounds each one to a spin, and returns a single-sample
@@ -508,7 +508,7 @@ assert best_cut == 26
 # its cut value with the brute-force optimum from
 # [](#pce-classical-baseline). As a consistency check, the cut
 # value should equal $-1$ times the spin energy reported in
-# [](#pce-step6).
+# [](#pce-decode-optimized-expectations).
 
 # %%
 sample = sampleset.samples[0]
