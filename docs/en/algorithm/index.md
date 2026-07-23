@@ -69,6 +69,12 @@ Sample bitstrings from a quantum state, build an effective Hamiltonian, and diag
 :::
 
 :::{card}
+:header: **Introduction to Quantum Phase Estimation (QPE)**
+:link: qpe
+Apply the built-in `qpe` helper to a 4x4 unitary, sample the decoded phase, and compare precision as the counting register grows.
+:::
+
+:::{card}
 :header: **Quantum Kernel Classification**
 :link: quantum_kernel_classification
 Use quantum feature maps and kernel methods for classification on the make_circles dataset.
