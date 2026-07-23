@@ -204,7 +204,7 @@ print(f"Classes: {CLASS_NAMES}")
 # |\mathbf{0}\rangle_{\mathcal{Q}},
 # $$
 #
-# If each layer has $d$ trainable rotation parameters per qubit, the circuit has $L_{\mathrm{Q}}nd$ quantum parameters. Let $\mathcal{O}$ be an index set of observables. The quantum output is the vector of Pauli-$Z$ expectation values
+# If each layer has $d$ trainable rotation parameters per qubit ($d=3$ here, for RZ–RY–RZ), the circuit has $L_{\mathrm{Q}} \times n \times d$ quantum parameters. Let $\mathcal{O}$ be an index set of observables. The quantum output is the vector of Pauli-$Z$ expectation values
 #
 # $$
 # q_j = \langle\psi(\mathbf{x},\boldsymbol{\theta})|Z_j|

@@ -204,7 +204,7 @@ print(f"クラス: {CLASS_NAMES}")
 # |\mathbf{0}\rangle_{\mathcal{Q}}
 # $$
 #
-# です。各層・各量子ビットあたりの学習可能な回転パラメータ数を$d$とすると、量子パラメータの総数は$L_{\mathrm{Q}}nd$です。観測量の添字集合を$\mathcal{O}$とし、量子回路層の出力にはPauli-$Z$期待値のベクトル
+# です。各層・各量子ビットあたりの学習可能な回転パラメータ数を$d$とすると、この回路ではRZ-RY-RZ回転の3つに対応するため$d=3$です。量子パラメータの総数は$L_{\mathrm{Q}} \times n \times d$です。観測量の添字集合を$\mathcal{O}$とし、量子回路層の出力にはPauli-$Z$期待値のベクトル
 #
 # $$
 # q_j = \langle\psi(\mathbf{x},\boldsymbol{\theta})|Z_j|
