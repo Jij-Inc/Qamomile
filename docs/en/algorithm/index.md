@@ -17,7 +17,7 @@ Trotter–Suzuki product formulas on the Rabi model with empirical convergence o
 :::{card}
 :header: **Hybrid Quantum Neural Network (HQNN)**
 :link: hybrid_qnn
-End-to-end CNN + quantum variational circuit on Fashion-MNIST with the parameter shift rule.
+This example implements a hybrid quantum neural network (HQNN) that combines a classical neural network with a variational quantum circuit using Qamomile.
 :::
 
 :::{card}
