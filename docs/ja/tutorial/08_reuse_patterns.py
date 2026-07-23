@@ -78,10 +78,7 @@ print("GHZ result:", result.results)
 assert result.shots == 128
 assert sum(count for _, count in result.results) == 128
 # 4 量子ビット GHZ 状態 → (0, 0, 0, 0) と (1, 1, 1, 1) のみ出現。
-assert all(
-    outcome in {(0, 0, 0, 0), (1, 1, 1, 1)}
-    for outcome, _ in result.results
-)
+assert all(outcome in {(0, 0, 0, 0), (1, 1, 1, 1)} for outcome, _ in result.results)
 
 # %% [markdown]
 # ヘルパー`entangle_once`により、呼び出し側のコードが読みやすくなります。トランスパイル後の回路ではインライン展開されるため、サブブロックではなく個々のCXゲートが見えます。
@@ -118,6 +115,77 @@ def helper_with_literals(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
 
 
 helper_with_literals.draw(n=3, fold_loops=False, inline=True)
+
+# %% [markdown]
+# ## 大きなワークスペースを`qmc.struct`で整理する
+#
+# 小さなヘルパーでは、使用する量子ビットやレジスタを個別の引数として渡しても十分に読みやすく保てます。一方、多くの量子ビットや補助レジスタを同時に扱う実装では、関数の引数と戻り値が長くなりがちです。
+#
+# `@qmc.struct`を使うと、関連するQamomileハンドルを名前付きフィールドにまとめられます。次の例では、Bell状態の準備に使う2つの量子ビットを`BellWorkspace`として扱います。
+
+
+# %%
+@qmc.struct
+class BellWorkspace:
+    control: qmc.Qubit
+    target: qmc.Qubit
+
+
+def prepare_bell(workspace: BellWorkspace) -> BellWorkspace:
+    control = qmc.h(workspace.control)
+    control, target = qmc.cx(control, workspace.target)
+    return BellWorkspace(control=control, target=target)
+
+
+@qmc.qkernel
+def bell_with_workspace() -> tuple[qmc.Bit, qmc.Bit]:
+    workspace = BellWorkspace(
+        control=qmc.qubit("control"),
+        target=qmc.qubit("target"),
+    )
+    workspace = prepare_bell(workspace)
+    return qmc.measure(workspace.control), qmc.measure(workspace.target)
+
+
+# %% [markdown]
+# `prepare_bell`はworkspaceを受け取り、ゲートが返した新しいハンドルを持つ`BellWorkspace`を返します。`qmc.struct`はimmutableなrecordとして扱い、呼び出し側では`workspace = prepare_bell(workspace)`と受け直します。これにより、現在のハンドルを保持するrecordがコード上で明確になります。
+#
+# フィールドに入っている`Qubit`や`Vector[Qubit]`には、通常と同じアフィン規則が適用されます。structを別の変数へ代入した場合、二つのrecordは同じ量子ハンドルを参照します。各量子操作が返したハンドルを新しいrecordへ渡し、以降の処理ではそのrecordを使います。`Vector[Qubit]`の要素に対するborrowと返却はVector自身が管理します。
+#
+# `BellWorkspace`は回路のトレース中に、関連するハンドルを名前付きフィールドへ整理します。生成されるIRにはフィールド内の量子操作が記録されます。リソース推定を使うと、2量子ビットのBell回路として構築されたことを確認できます。
+
+
+# %%
+workspace_estimate = bell_with_workspace.estimate_resources()
+
+assert bell_with_workspace.input_types == {}
+assert workspace_estimate.qubits == 2
+assert workspace_estimate.gates.single_qubit == 1
+assert workspace_estimate.gates.two_qubit == 1
+
+bell_with_workspace.draw()
+
+
+# %%
+workspace_result = (
+    transpiler.transpile(bell_with_workspace)
+    .sample(
+        transpiler.executor(),
+        shots=128,
+    )
+    .result()
+)
+print("Bell result:", workspace_result.results)
+assert workspace_result.shots == 128
+assert sum(count for _, count in workspace_result.results) == 128
+assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in workspace_result.results)
+
+# %% [markdown]
+# :::{note}
+# qkernelのシグネチャには`Qubit`、`Vector[Qubit]`、`UInt`などのQamomile型を使います。`qmc.struct`は、トレース時にそれらのハンドルを整理し、通常のPythonヘルパーへまとめて渡すrecordとして使います。
+# :::
+#
+# このようにワークスペースを一つの値として受け渡すと、多数のハンドルを長いタプルの代わりに名前付きフィールドで扱えます。
 
 # %% [markdown]
 # ## パターン2：`@composite_gate`
@@ -283,6 +351,7 @@ assert oracle_est_4.calls.oracle_queries == {"oracle": 5, "mixing": 4}
 # ## まとめ
 #
 # - ヘルパー`@qkernel`：ある量子カーネルから別の量子カーネルを呼び出してコードを再利用できます。トランスパイラがインライン展開し、結果はフラットな回路になります。
+# - `qmc.struct`：関連する量子ハンドルをトレース時のrecordにまとめ、更新後のstructを明示的に返すことで長いタプルを避けられます。
 # - `@composite_gate`：量子カーネルに名前付きの識別子を与え、図で一つのゲートとして可視化します。`@qkernel`の上に`@composite_gate`デコレータを重ねて書きます。
 # - **不透明オラクル**：`qmc.Oracle`により、実装なしでトップダウン設計ができます。
 # - `est.calls.oracle_calls`：`UnknownResourcePolicy.OPAQUE_CALL`を使うと、名前別の呼び出し回数を確認できます。

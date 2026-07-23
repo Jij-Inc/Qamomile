@@ -33,8 +33,8 @@ def walk_operations(operations: Sequence[Operation]) -> Iterable[Operation]:
     for operation in operations:
         yield operation
         if isinstance(operation, HasNestedOps):
-            for nested in operation.nested_op_lists():
-                yield from walk_operations(nested)
+            for region in operation.nested_regions():
+                yield from walk_operations(region.operations)
 
 
 def _seed_structural_edges(

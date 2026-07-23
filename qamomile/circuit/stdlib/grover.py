@@ -103,8 +103,7 @@ def _diffusion(reg: Vector[Qubit]) -> Vector[Qubit]:
     # Multi-controlled Z on the top qubit, controlled by the lower n-1 qubits.
     top = n - 1
     reg[top] = qmc.h(reg[top])
-    mcx = qmc.control(qmc.x, num_controls=top)
-    reg[0:top], reg[top] = mcx(reg[0:top], reg[top])
+    reg[0:top], reg[top] = qmc.mcx(reg[0:top], reg[top])
     reg[top] = qmc.h(reg[top])
     with for_loop(0, n, var_name="i") as i:
         reg[i] = qmc.x(reg[i])

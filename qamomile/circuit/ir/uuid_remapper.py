@@ -223,8 +223,8 @@ class UUIDRemapper:
                     remember(region_arg.block_arg)
                     self._collect_result_uuids(region_arg.block_arg, owned)
                 if isinstance(operation, HasNestedOps):
-                    for nested in operation.nested_op_lists():
-                        collect_operations(nested)
+                    for region in operation.nested_regions():
+                        collect_operations(list(region.operations))
 
         collect_operations(block.operations)
         for value in block.output_values:
@@ -310,8 +310,8 @@ class UUIDRemapper:
                 for value in operation.results:
                     reserve(value)
                 if isinstance(operation, HasNestedOps):
-                    for nested in operation.nested_op_lists():
-                        reserve_operations(nested)
+                    for region in operation.nested_regions():
+                        reserve_operations(list(region.operations))
 
         for value in block.input_values:
             reserve(value)
@@ -417,11 +417,12 @@ class UUIDRemapper:
         # fills the remap tables so ``_clone_metadata`` can resolve those
         # references; the value cache then hands the loops below the same
         # clones the bodies produced.
-        cloned_lists: list[list[Operation]] | None = None
+        cloned_region_operations: tuple[tuple[Operation, ...], ...] | None = None
         if isinstance(op, HasNestedOps):
-            cloned_lists = [
-                self.clone_operations(op_list) for op_list in op.nested_op_lists()
-            ]
+            cloned_region_operations = tuple(
+                tuple(self.clone_operations(list(region.operations)))
+                for region in op.nested_regions()
+            )
 
         # Subclass extras (loop_var_value, rebind records, if-merge
         # yields) exposed via all_input_values; already-cloned operands
@@ -440,8 +441,17 @@ class UUIDRemapper:
         # cloned outer Value (e.g. a parent ForOperation's loop_var_value)
         # resolve through ``self._value_cache`` and stay consistent with
         # the parent op's field.
-        if cloned_lists is not None:
-            new_op = cast(HasNestedOps, new_op).rebuild_nested(cloned_lists)
+        if cloned_region_operations is not None:
+            nested_owner = cast(HasNestedOps, new_op)
+            cloned_regions = tuple(
+                dataclasses.replace(region, operations=operations)
+                for region, operations in zip(
+                    nested_owner.nested_regions(),
+                    cloned_region_operations,
+                    strict=True,
+                )
+            )
+            new_op = nested_owner.rebuild_regions(cloned_regions)
 
         if isinstance(new_op, CastOperation) and new_op.qubit_mapping:
             new_op = dataclasses.replace(

@@ -909,13 +909,7 @@ def _for_capture_ids(
     Returns:
         list[str]: Stable UUID order for captured values.
     """
-    # A loop-invariant overwrite can yield an outer value without any body
-    # operation reading it. It still crosses the TailLoop boundary.
-    return _region_capture_ids(
-        operation.operations,
-        environment,
-        extra_values=[region.yielded for region in operation.region_args],
-    )
+    return _capture_environment_ids(operation.captures, environment)
 
 
 def _lower_if(
@@ -1474,12 +1468,33 @@ def _lower_while(
         functions (dict[CallableRef, Any]): Predeclared HUGR functions.
 
     Raises:
-        EmitError: If the condition or a captured body value is unresolved.
+        EmitError: If the condition or a captured body value is unresolved,
+            or if a region argument is array-valued.
     """
     try:
         validate_region_args(operation)
     except ValueError as error:
         raise EmitError(str(error), operation="WhileOperation") from error
+    array_region_args = [
+        region.var_name
+        for region in operation.region_args
+        if any(
+            isinstance(value, ArrayValue)
+            for value in (
+                region.init,
+                region.block_arg,
+                region.yielded,
+                region.result,
+            )
+        )
+    ]
+    if array_region_args:
+        raise EmitError(
+            "HUGR while loops do not support array-valued region arguments "
+            f"({', '.join(array_region_args)}); array state must be flattened "
+            "across TailLoop ports before lowering.",
+            operation="WhileOperation",
+        )
     quantum_rebinds = _unsupported_quantum_rebinds(operation)
     unsupported_rebinds = []
     for rebind in operation.loop_carried_rebinds:
@@ -1499,9 +1514,8 @@ def _lower_while(
             f"while loop without explicit linear region slots ({names}).",
             operation="WhileOperation",
         )
-    if operation.region_args or unsupported_rebinds:
-        names = [region.var_name for region in operation.region_args]
-        names.extend(rebind.var_name for rebind in unsupported_rebinds)
+    if unsupported_rebinds:
+        names = [rebind.var_name for rebind in unsupported_rebinds]
         raise EmitError(
             "HUGR cannot lower loop-carried classical values in a while loop "
             f"without explicit region arguments ({', '.join(names)}).",
@@ -1515,18 +1529,43 @@ def _lower_while(
     captured_ids = _loop_capture_ids(operation, environment)
     captured_wires = _flatten_environment_values(captured_ids, environment)
     captured_width = len(captured_wires)
-    loop = builder.add_tail_loop([], [condition_wire, *captured_wires])
+    region_init_wires = [
+        _resolve_classical_argument(region.init, builder, environment)
+        for region in operation.region_args
+    ]
+    loop = builder.add_tail_loop(
+        [],
+        [condition_wire, *captured_wires, *region_init_wires],
+    )
     loop_inputs = loop.inputs()
-    current_condition, *current_captured = loop_inputs
+    current_condition, *current_state = loop_inputs
+    current_captured = current_state[:captured_width]
+    current_region_args = current_state[captured_width:]
     loop_environment = dict(environment)
     loop_environment[condition.uuid] = current_condition
     _bind_region_inputs(captured_ids, current_captured, loop_environment)
+    loop_environment.update(
+        zip(
+            (region.block_arg.uuid for region in operation.region_args),
+            current_region_args,
+            strict=True,
+        )
+    )
 
     branch = loop.add_if(current_condition, *loop_inputs)
-    branch_condition, *branch_captured = branch.inputs()
+    branch_condition, *branch_state = branch.inputs()
+    branch_captured = branch_state[:captured_width]
+    branch_region_args = branch_state[captured_width:]
     true_environment = dict(loop_environment)
     true_environment[condition.uuid] = branch_condition
     _bind_region_inputs(captured_ids, branch_captured, true_environment)
+    true_environment.update(
+        zip(
+            (region.block_arg.uuid for region in operation.region_args),
+            branch_region_args,
+            strict=True,
+        )
+    )
     true_live = dict(live_qubits)
     true_parent_keys = set(true_live)
     true_region_keys = _rebind_captured_live_wires(
@@ -1549,16 +1588,21 @@ def _lower_while(
     control_type = tys.Sum([[], []])
     [continue_wire] = branch.add_op(ops.Tag(0, control_type))
     next_captured = _flatten_environment_values(captured_ids, true_environment)
+    next_region_args = [
+        _resolve_classical_argument(region.yielded, branch, true_environment)
+        for region in operation.region_args
+    ]
     _free_region_local_qubits(
         branch,
         true_live,
         true_protected_keys,
-        next_captured,
+        [*next_captured, *next_region_args],
     )
     branch.set_outputs(
         continue_wire,
         next_condition,
         *next_captured,
+        *next_region_args,
     )
 
     false_branch = branch.add_else()
@@ -1566,11 +1610,16 @@ def _lower_while(
     false_branch.set_outputs(break_wire, *false_branch.inputs())
 
     conditional_outputs = [
-        branch.conditional_node.out(index) for index in range(2 + captured_width)
+        branch.conditional_node.out(index)
+        for index in range(2 + captured_width + len(operation.region_args))
     ]
     loop.set_loop_outputs(*conditional_outputs)
-    loop_outputs = [loop.parent_node.out(index) for index in range(1 + captured_width)]
-    final_condition, *capture_outputs = loop_outputs
+    loop_outputs = [
+        loop.parent_node.out(index)
+        for index in range(1 + captured_width + len(operation.region_args))
+    ]
+    final_condition, *final_state = loop_outputs
+    capture_outputs = final_state[:captured_width]
     origins = _quantum_origins(operation.operations, captured_ids)
     _publish_captured_outputs(
         captured_ids,
@@ -1581,6 +1630,9 @@ def _lower_while(
     )
     if len(operation.operands) > 1:
         environment[operation.operands[1].uuid] = final_condition
+    region_outputs = final_state[captured_width:]
+    for region, wire in zip(operation.region_args, region_outputs, strict=True):
+        environment[region.result.uuid] = wire
 
 
 def _loop_capture_ids(
@@ -1596,8 +1648,8 @@ def _loop_capture_ids(
     Returns:
         list[str]: Stable UUID order for TailLoop carried values.
     """
-    return _region_capture_ids(
-        operation.operations,
+    return _capture_environment_ids(
+        operation.captures,
         environment,
         excluded={operation.operands[0].uuid},
     )
@@ -1616,136 +1668,66 @@ def _branch_capture_ids(
     Returns:
         list[str]: Stable UUID order for HUGR conditional inputs.
     """
-    operations = [*operation.true_operations, *operation.false_operations]
-    yields = [*operation.true_yields, *operation.false_yields]
-    return _region_capture_ids(
-        operations,
-        environment,
-        extra_values=yields,
-        excluded={operation.condition.uuid},
-    )
+    captures = [*operation.true_captures, *operation.false_captures]
+    return _capture_environment_ids(captures, environment)
 
 
-def _region_capture_ids(
-    operations: list[Operation],
+def _capture_environment_ids(
+    captures: list[ValueBase] | tuple[ValueBase, ...],
     environment: dict[str, Any],
-    extra_values: list[Value] | None = None,
     excluded: set[str] | None = None,
 ) -> list[str]:
-    """Collect stable, deduplicated captures for one nested HUGR region.
+    """Resolve declared semantic captures to parent-environment entries.
 
     Args:
-        operations (list[Operation]): Region operations to inspect recursively.
+        captures (list[ValueBase] | tuple[ValueBase, ...]): Explicit region
+            captures in semantic first-use order.
         environment (dict[str, Any]): Available parent-region wires.
-        extra_values (list[Value] | None): Region yields that cross the
-            boundary without an operation read. Defaults to ``None``.
         excluded (set[str] | None): UUIDs carried by dedicated region state
             rather than generic captures. Defaults to ``None``.
 
     Returns:
-        list[str]: Captured UUIDs in parent-environment order.
+        list[str]: Environment UUIDs in declared capture order, with array
+            elements collapsed to an available root carrier.
+
+    Raises:
+        EmitError: If a non-constant declared capture has no parent-region
+            environment entry.
     """
-    captured: set[str] = set()
-    for nested in operations:
-        captured.update(_captured_operand_ids(nested, environment))
-    extras = extra_values or []
-    for value in extras:
-        if value.uuid in environment:
-            captured.add(value.uuid)
+    result: list[str] = []
+    seen: set[str] = set()
+    excluded_ids = excluded or set()
+    declared_ids = {value.uuid for value in captures}
+    for value in captures:
+        if value.uuid in excluded_ids or value.is_constant():
             continue
-        root_uuid = _array_root_uuid(value)
-        if root_uuid is not None and root_uuid in environment:
-            captured.add(root_uuid)
-    _deduplicate_quantum_capture_ids(
-        operations,
-        captured,
-        extras,
-    )
-    captured.difference_update(excluded or ())
-    return [uuid for uuid in environment if uuid in captured]
-
-
-def _captured_operand_ids(
-    operation: Operation,
-    environment: dict[str, Any],
-) -> set[str]:
-    """Collect parent-environment operands used by an operation tree.
-
-    Args:
-        operation (Operation): Root operation to inspect recursively.
-        environment (dict[str, Any]): Available parent-region values.
-
-    Returns:
-        set[str]: UUIDs captured from the parent environment.
-    """
-    captured: set[str] = set()
-    for value in operation.all_input_values():
-        if value.uuid in environment:
-            captured.add(value.uuid)
-            continue
-        if not isinstance(value, Value):
-            continue
-        root_uuid = _array_root_uuid(value)
-        if root_uuid is not None and root_uuid in environment:
-            captured.add(root_uuid)
-    nested_lists = getattr(operation, "nested_op_lists", None)
-    if callable(nested_lists):
-        for nested_operations in nested_lists():
-            for nested in nested_operations:
-                captured.update(_captured_operand_ids(nested, environment))
-    return captured
-
-
-def _deduplicate_quantum_capture_ids(
-    operations: list[Operation],
-    captured: set[str],
-    extra_values: list[Value] | None = None,
-) -> None:
-    """Drop scalar element captures already covered by a captured root array.
-
-    Args:
-        operations (list[Operation]): Region operations whose values identify
-            array-element aliases.
-        captured (set[str]): Mutable set of captured environment UUIDs.
-        extra_values (list[Value] | None): Structural region yields not owned
-            by an operation. Defaults to ``None``.
-    """
-
-    def visit_value(value: ValueBase) -> None:
-        """Discard a captured element already represented by its root array.
-
-        Args:
-            value (ValueBase): Candidate quantum value to deduplicate.
-        """
-        if not isinstance(value, Value) or not value.type.is_quantum():
-            return
-        root_uuid = _array_root_uuid(value)
-        if (
-            root_uuid is not None
-            and root_uuid != value.uuid
-            and root_uuid in captured
-            and value.uuid in captured
-        ):
-            captured.discard(value.uuid)
-
-    def visit_operations(nested_operations: list[Operation]) -> None:
-        """Visit every input value in a nested operation tree.
-
-        Args:
-            nested_operations (list[Operation]): Operations to inspect
-                recursively.
-        """
-        for operation in nested_operations:
-            for value in operation.all_input_values():
-                visit_value(value)
-            nested_lists = getattr(operation, "nested_op_lists", None)
-            if callable(nested_lists):
-                for body in nested_lists():
-                    visit_operations(body)
-
-    visit_operations(operations)
-    for value in extra_values or ():
-        visit_value(value)
+        environment_id = value.uuid if value.uuid in environment else None
+        if isinstance(value, Value):
+            root_uuid = _array_root_uuid(value)
+            if (
+                root_uuid is not None
+                and root_uuid in environment
+                and root_uuid in declared_ids
+            ):
+                # A whole-array capture subsumes element aliases of the same
+                # linear resource. Resolve them all to the root even when the
+                # element appears first in semantic capture order.
+                environment_id = root_uuid
+            elif (
+                environment_id is None
+                and root_uuid is not None
+                and root_uuid in environment
+            ):
+                environment_id = root_uuid
+        if environment_id is None:
+            raise EmitError(
+                "Explicit region capture is unavailable in the parent HUGR "
+                f"environment ({value.name or value.uuid})."
+            )
+        if environment_id not in seen:
+            result.append(environment_id)
+            seen.add(environment_id)
+    return result
 
 
 def _flatten_environment_values(

@@ -12,17 +12,23 @@ from qamomile.circuit.frontend.ast_transform import (
 from qamomile.circuit.frontend.handle.primitives import Handle
 from qamomile.circuit.frontend.qkernel_rebind import format_rebind_violation
 from qamomile.circuit.frontend.qkernel_utils import quantum_param_names
+from qamomile.circuit.frontend.region_analysis import RegionLocation, RegionSignature
 from qamomile.circuit.transpiler.errors import (
     FrontendTransformError,
     QubitRebindError,
 )
 
 
-def transform_qkernel_function(func: Callable[..., Any]) -> Callable[..., Any]:
+def transform_qkernel_function(
+    func: Callable[..., Any],
+    region_signatures: dict[RegionLocation, RegionSignature] | None = None,
+) -> Callable[..., Any]:
     """Transform a Python function into the frontend DSL function.
 
     Args:
         func (Callable[..., Any]): Raw user function decorated as a qkernel.
+        region_signatures (dict[RegionLocation, RegionSignature] | None):
+            Precomputed explicit control-flow interfaces. Defaults to ``None``.
 
     Returns:
         Callable[..., Any]: AST-transformed function.
@@ -33,7 +39,7 @@ def transform_qkernel_function(func: Callable[..., Any]) -> Callable[..., Any]:
         SyntaxError: If the transform detects invalid syntax-level DSL usage.
     """
     try:
-        return transform_control_flow(func)
+        return transform_control_flow(func, region_signatures=region_signatures)
     except SyntaxError:
         raise
     except NotImplementedError as e:

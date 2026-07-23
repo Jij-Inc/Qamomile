@@ -44,25 +44,6 @@ def _periodic_encoding(
 
 
 @qmc.qkernel
-def _prepare_basis(
-    system: qmc.Vector[qmc.Qubit],
-    bits: qmc.Vector[qmc.UInt],
-) -> qmc.Vector[qmc.Qubit]:
-    """Prepare a flattened system register in an LSB-first basis state.
-
-    Args:
-        system (qmc.Vector[qmc.Qubit]): All-zero system register.
-        bits (qmc.Vector[qmc.UInt]): Compile-time basis bits.
-
-    Returns:
-        qmc.Vector[qmc.Qubit]: Prepared system register.
-    """
-    for index in qmc.range(system.shape[0]):
-        system[index] = qmc.rx(system[index], math.pi * bits[index])
-    return system
-
-
-@qmc.qkernel
 def _identity_registers(
     signal: qmc.Vector[qmc.Qubit],
     system: qmc.Vector[qmc.Qubit],
@@ -1504,7 +1485,7 @@ def test_binary_periodic_shifts_execute_on_every_sdk(
         """
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        system = _prepare_basis(system, bits)
+        system = qmc.computational_basis_state(system, bits)
         signal, system = encoding.unitary(signal, system)
         return qmc.measure(system)
 
@@ -1524,7 +1505,7 @@ def test_binary_periodic_shifts_execute_on_every_sdk(
         """
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        system = _prepare_basis(system, bits)
+        system = qmc.computational_basis_state(system, bits)
         signal, system = encoding.unitary(signal, system)
         return qmc.expval(system, observable)
 
@@ -1583,7 +1564,7 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
     ) -> qmc.Vector[qmc.Bit]:
         signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
         system = qmc.qubit_array(encoding.num_system_qubits, name="system")
-        system = _prepare_basis(system, initial_bits)
+        system = qmc.computational_basis_state(system, initial_bits)
         signal, system = encoding.unitary(signal, system)
         signal, system = qmc.inverse(encoding.unitary)(signal, system)
         _ = qmc.measure(signal)
@@ -1596,7 +1577,7 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
     ) -> qmc.Float:
         signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
         system = qmc.qubit_array(encoding.num_system_qubits, name="system")
-        system = _prepare_basis(system, initial_bits)
+        system = qmc.computational_basis_state(system, initial_bits)
         signal, system = encoding.unitary(signal, system)
         signal, system = qmc.inverse(encoding.unitary)(signal, system)
         return qmc.expval(system, observable)
