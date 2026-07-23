@@ -47,7 +47,7 @@ End-to-end optimization example using OMMX, JijModeling, and `QAOAConverter`.
 :::{card}
 :header: **QAOA for MaxCut: Building the Circuit from Scratch**
 :link: qaoa_maxcut
-Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-in `qaoa_state`.
+This example implements the Quantum Approximate Optimization Algorithm (QAOA) with Qamomile. It presents two approaches to MaxCut: building the circuit from scratch and using the built-in `qaoa_state`.
 :::
 
 :::{card}
