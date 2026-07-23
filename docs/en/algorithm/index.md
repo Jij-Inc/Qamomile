@@ -15,6 +15,12 @@ Trotter–Suzuki product formulas on the Rabi model with empirical convergence o
 :::
 
 :::{card}
+:header: **Introduction to Grover search**
+:link: grover_search
+Use a five-qubit phase-oracle example to compare search-state probabilities before and after amplitude amplification.
+:::
+
+:::{card}
 :header: **Hybrid Quantum Neural Network (HQNN)**
 :link: hybrid_qnn
 End-to-end CNN + quantum variational circuit on Fashion-MNIST with the parameter shift rule.
