@@ -154,8 +154,8 @@ def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
         ):
             return True
         if isinstance(op, HasNestedOps):
-            for body in op.nested_op_lists():
-                if _segment_may_reserve_ancillas(body):
+            for region in op.nested_regions():
+                if _segment_may_reserve_ancillas(list(region.operations)):
                     return True
     return False
 

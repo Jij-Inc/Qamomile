@@ -22,8 +22,8 @@ End-to-end CNN + quantum variational circuit on Fashion-MNIST with the parameter
 
 :::{card}
 :header: **Möttönen Amplitude Encoding**
-:link: mottonen_amplitude_encoding
-Prepare an arbitrary real or complex amplitude vector via Gray-code Ry/Rz multiplexers, with three input modes (concrete, bound `Vector[Float]`, runtime-parametric angles).
+:link: mottonen_amplitude_encoding.ipynb
+Learn how to use Möttönen amplitude encoding in Qamomile to prepare arbitrary quantum states. This tutorial introduces state preparation based on `amplitude_encoding` and `mottonen_amplitude_encoding`.
 :::
 
 :::{card}
@@ -33,15 +33,15 @@ QFT circuit steps, stdlib implementation, execution, and resource estimation.
 :::
 
 :::{card}
-:header: **Multidimensional Quantum Fourier Transform**
+:header: **Multidimensional QFT for Estimating Nanosheet Material Properties**
 :link: multidimensional_qft
-Implement multidimensional QFT and classical preprocessing for inputs whose grid sizes are not powers of two.
+This example implements a multidimensional quantum Fourier transform with Qamomile. For nanosheet material characterization, it uses a multidimensional QFT with data preprocessing to run a nanosheet simulation.
 :::
 
 :::{card}
-:header: **Pauli Correlation Encoding (PCE)**
+:header: **Pauli Correlation Encoding**
 :link: pce_maxcut
-Solve a 20-variable MaxCut on just 3 qubits with Pauli Correlation Encoding, training a hardware-efficient ansatz against a tanh-relaxed surrogate and decoding via sign rounding.
+An example of using Pauli Correlation Encoding (PCE) with Qamomile. It solves MaxCut for a 20-node graph using 3-qubit PCE and compares the result with the exact solution.
 :::
 
 :::{card}

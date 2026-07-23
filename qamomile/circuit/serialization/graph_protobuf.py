@@ -1163,6 +1163,7 @@ _OPERATION_TO_PROTO: dict[str, pb.OperationType] = {
     "ExpvalOp": pb.EXPVAL_OPERATION,
     "PauliEvolveOp": pb.PAULI_EVOLVE_OPERATION,
     "BinOp": pb.BIN_OPERATION,
+    "UnaryMathOp": pb.UNARY_MATH_OPERATION,
     "CompOp": pb.COMP_OPERATION,
     "CondOp": pb.COND_OPERATION,
     "NotOp": pb.NOT_OPERATION,
@@ -1202,6 +1203,7 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
     pb.EXPVAL_OPERATION: frozenset(),
     pb.PAULI_EVOLVE_OPERATION: frozenset(),
     pb.BIN_OPERATION: frozenset({"expression_kind"}),
+    pb.UNARY_MATH_OPERATION: frozenset({"expression_kind"}),
     pb.COMP_OPERATION: frozenset({"expression_kind"}),
     pb.COND_OPERATION: frozenset({"expression_kind"}),
     pb.NOT_OPERATION: frozenset(),
@@ -1212,6 +1214,7 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
             "loop_var_value_ref",
             "loop_carried_rebinds",
             "region_args",
+            "capture_refs",
             "body",
         }
     ),
@@ -1225,11 +1228,18 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
             "value_var_value_ref",
             "loop_carried_rebinds",
             "region_args",
+            "capture_refs",
             "body",
         }
     ),
     pb.WHILE_OPERATION: frozenset(
-        {"max_iterations", "loop_carried_rebinds", "region_args", "body"}
+        {
+            "max_iterations",
+            "loop_carried_rebinds",
+            "region_args",
+            "capture_refs",
+            "body",
+        }
     ),
     pb.IF_OPERATION: frozenset(
         {
@@ -1238,6 +1248,8 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
             "true_yield_refs",
             "false_yield_refs",
             "branch_rebinds",
+            "true_capture_refs",
+            "false_capture_refs",
         }
     ),
     pb.CONCRETE_CONTROLLED_OPERATION: frozenset(
@@ -1416,6 +1428,9 @@ def _operation_to_proto(value: dict[str, Any]) -> pb.Operation:
         "key_vars",
         "true_yield_refs",
         "false_yield_refs",
+        "capture_refs",
+        "true_capture_refs",
+        "false_capture_refs",
     ):
         if field in value:
             getattr(message, field).extend(value[field])
@@ -1555,6 +1570,9 @@ def _decode_operation_scalars(
         "key_vars",
         "true_yield_refs",
         "false_yield_refs",
+        "capture_refs",
+        "true_capture_refs",
+        "false_capture_refs",
     ):
         if getattr(message, field):
             result[field] = list(getattr(message, field))

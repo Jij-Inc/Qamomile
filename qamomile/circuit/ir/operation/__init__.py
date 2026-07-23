@@ -27,10 +27,11 @@ Design principles
   ``ControlledUOperation.power``, loop bounds) override both, so generic
   passes need no per-subclass special cases. A new operation with extra
   Value fields MUST override these or passes will silently miss them.
-- **``HasNestedOps`` protocol for control flow.** For / ForItems / If /
-  While (``control_flow.py``) implement ``nested_op_lists()`` /
-  ``rebuild_nested()``; passes recurse through this protocol instead of
-  isinstance chains, so new control-flow ops cannot be missed.
+- **Explicit ``Region`` protocol for control flow.** For / ForItems / If /
+  While (``control_flow.py``) expose operations, block arguments, captures,
+  and yields through ``nested_regions()`` / ``rebuild_regions()``; passes
+  recurse through this protocol instead of isinstance chains, so new
+  control-flow ops cannot be missed.
 - **Loop-carried classical scalars are explicit ``RegionArg``s**
   (``init`` / ``block_arg`` / ``yielded`` / ``result``, in the style of
   MLIR ``scf.for`` iter_args/yield) on For / ForItems / While, making
@@ -69,6 +70,7 @@ from .control_flow import (
     ForItemsOperation,
     HasNestedOps,
     LoopCarriedRebind,
+    Region,
     RegionArg,
     validate_region_args,
 )
@@ -126,6 +128,7 @@ __all__ = [
     "ForItemsOperation",
     "HasNestedOps",
     "LoopCarriedRebind",
+    "Region",
     "RegionArg",
     "validate_region_args",
     # Expectation value operation
