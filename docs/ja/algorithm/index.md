@@ -53,7 +53,7 @@ QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_stat
 :::{card}
 :header: **Quantum-enhanced Markov chain Monte Carlo**
 :link: qe_mcmc
-トロッター分解による時間発展を利用して、Quantum-enhanced MCMCを実装します。
+Quantum-enhanced MCMC（QeMCMC）をQamomileで実装する例です。イジング模型のボルツマン分布に対するサンプリングについて、QeMCMCを実行し、古典MCMCと比較します。
 :::
 
 :::{card}
