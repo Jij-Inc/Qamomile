@@ -59,7 +59,7 @@ QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_stat
 :::{card}
 :header: **Quantum Selected Configuration Interaction (QSCI)**
 :link: qsci
-量子状態からビット列をサンプリングして有効ハミルトニアンを構築し、変分原理の保証付きで古典的に対角化します。
+量子選択配置間相互作用法（QSCI）をQamomileで実装する例です。有効ハミルトニアン構築のための`solve_subspace`を利用し、4量子ビットの横磁場イジング模型に対してQSCIを実行します。
 :::
 
 :::{card}

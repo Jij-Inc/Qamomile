@@ -281,7 +281,7 @@ assert all(len(bits) == n_qubits for bits, _ in sample_results)
 
 
 # %% [markdown]
-# ### Steps 3 and 4: Build the QSCI subspace and diagonalize
+# #### Steps 3 and 4: Build the QSCI subspace and diagonalize
 #
 # We count the frequencies of the sampled bitstrings and select the top
 # $K$. We then use `solve_subspace` to construct the effective Hamiltonian
@@ -345,6 +345,6 @@ plt.show()
 #
 # In this tutorial, we used a four-qubit one-dimensional transverse-field Ising model to learn the QSCI workflow from its principles through its Qamomile implementation and accuracy evaluation.
 #
-# - **QSCI** : QSCI samples an input quantum state in the computational basis, selects the most frequent bitstrings to define a subspace, and classically diagonalizes the Hamiltonian projected into that subspace. The resulting energy obeys the variational principle, so it remains an upper bound on the exact ground-state energy even when the input state is noisy or only roughly optimised.
-# - **Implementation with Qamomile** : We used Qamomile quantum kernels to implement VQE for preparing the input state and sampling it in the Z basis, then executed them through the QURI Parts integration. Qamomile's `qamomile.linalg.solve_subspace` constructs the effective Hamiltonian from sampled bitstrings and provides convenient access to the eigenvalues and eigenvectors obtained by classical diagonalization.
-# - **Subspace size and accuracy** : In the experiment with the four-qubit one-dimensional transverse-field Ising model, the QSCI energy remained above the exact reference and became monotonically non-increasing as the subspace size $K$ grew. Selecting more sampled bitstrings therefore produced a more expressive subspace and brought the energy estimate closer to the exact ground-state energy.
+# - **QSCI:** QSCI samples an input quantum state in the computational basis, selects the most frequent bitstrings to define a subspace, and classically diagonalizes the Hamiltonian projected into that subspace. The resulting energy obeys the variational principle, so it remains an upper bound on the exact ground-state energy even when the input state is noisy or only roughly optimised.
+# - **Implementation with Qamomile:** We used Qamomile quantum kernels to implement VQE for preparing the input state and sampling it in the Z basis, then executed them through the QURI Parts integration. Qamomile's `qamomile.linalg.solve_subspace` constructs the effective Hamiltonian from sampled bitstrings and provides convenient access to the eigenvalues and eigenvectors obtained by classical diagonalization.
+# - **Subspace size and accuracy:** In the experiment with the four-qubit one-dimensional transverse-field Ising model, the QSCI energy remained above the exact reference and became monotonically non-increasing as the subspace size $K$ grew. Selecting more sampled bitstrings therefore produced a more expressive subspace and brought the energy estimate closer to the exact ground-state energy.
