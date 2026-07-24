@@ -296,6 +296,66 @@ except AffineTypeError as e:
 else:
     raise AssertionError("expected AffineTypeError, but draw() returned normally")
 
+
+# %% [markdown]
+# ### Returning a view inside a loop or branch
+#
+# The slice assignment that returns a view must happen at the **same
+# scope** where the view was created. Returning an outer view from
+# inside a `for` / `while` body (or an `if` branch) is rejected: the
+# compiler tracks borrows in one static table, and a body may run zero
+# times or many times, so "this view may or may not have been returned"
+# is not representable. For loop bodies this is caught at transpile
+# time — after slice bounds are resolved — so the error comes from
+# `transpile()` rather than `draw()`.
+
+# %%
+from qamomile.circuit.transpiler.errors import ValidationError
+from qamomile.qiskit import QiskitTranspiler
+
+transpiler = QiskitTranspiler()
+
+
+@qmc.qkernel
+def release_inside_loop() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(4, name="q")
+    even = q[0::2]
+    for _ in qmc.range(2):
+        q[0::2] = even  # returning an outer view inside the body — raises
+    return qmc.measure(q)
+
+
+try:
+    transpiler.transpile(release_inside_loop)
+except ValidationError as e:
+    print(f"Error type: {type(e).__name__}")
+    print(f"Error message: {e}")
+else:
+    raise AssertionError(
+        "expected ValidationError, but transpile() returned normally"
+    )
+
+# %% [markdown]
+# The fix is to keep every borrow-return cycle inside one scope. Either
+# perform the slice assignment outside the control-flow region (as every
+# earlier example on this page does), or — when the loop body itself
+# needs the view — create the view *inside* the body so each iteration
+# borrows and returns it locally:
+
+
+# %%
+@qmc.qkernel
+def view_per_iteration() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(4, name="q")
+    for _ in qmc.range(2):
+        even = q[0::2]  # borrow inside the body...
+        even = qmc.x(even)
+        q[0::2] = even  # ...and return inside the same body
+    return qmc.measure(q)
+
+
+view_per_iteration.draw()
+
 # %% [markdown]
 # **Next**: [Controlled Gates](04_controlled_gates.ipynb) — `qmc.control`
 # for built-in gates and sub-kernels, concrete vs symbolic control counts,

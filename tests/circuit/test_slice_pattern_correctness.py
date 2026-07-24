@@ -1133,6 +1133,75 @@ class TestControlFlowBodyViolations:
         with pytest.raises(ValidationError):
             transpiler.transpile(kern)
 
+    def test_release_of_outer_view_in_while_body_raises(self):
+        """Slice-assign that releases an outer view from inside a while body."""
+        from qamomile.circuit.transpiler.errors import ValidationError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            even = q[0::2]
+            t = qmc.qubit("t")
+            t = qmc.h(t)
+            bit = qmc.measure(t)
+            while bit:
+                q[0::2] = even
+                t2 = qmc.qubit("t2")
+                bit = qmc.measure(t2)
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(ValidationError):
+            transpiler.transpile(kern)
+
+    def test_release_of_outer_view_in_if_branch_raises(self):
+        """Slice-assign that releases an outer view from inside an if branch.
+
+        The runtime-``if`` variant is rejected before the IR guard ever
+        sees it: the frontend's branch-scope slice-assignment validation
+        raises at trace time (a broader ``AffineTypeError``, not the IR
+        pass's ``ValidationError``). Characterized here so the
+        cross-body-release contract is pinned for all three control-flow
+        kinds regardless of which layer enforces it.
+        """
+        from qamomile.circuit.transpiler.errors import AffineTypeError
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            even = q[0::2]
+            t = qmc.qubit("t")
+            t = qmc.h(t)
+            bit = qmc.measure(t)
+            if bit:
+                q[0::2] = even
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        with pytest.raises(AffineTypeError):
+            transpiler.transpile(kern)
+
+    def test_view_created_and_released_inside_body_allowed(self):
+        """Per-iteration borrow/return inside the body is the legal rewrite.
+
+        The view is created inside the loop body, so no enclosing
+        snapshot owns its entries and the in-body release is legal —
+        this is the rewrite the cross-body-release error message and
+        the vector-slicing tutorial point to.
+        """
+
+        @qmc.qkernel
+        def kern() -> qmc.Vector[qmc.Bit]:
+            q = qmc.qubit_array(4, "q")
+            for _ in qmc.range(2):
+                even = q[0::2]
+                even = qmc.x(even)
+                q[0::2] = even
+            return qmc.measure(q)
+
+        transpiler = QiskitTranspiler()
+        assert transpiler.transpile(kern) is not None
+
 
 class TestNestedSliceReturnOrder:
     """Nested slices must be returned inner→outer→root.
