@@ -51,9 +51,11 @@ from qamomile.circuit.transpiler.errors import (
 )
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
-    _same_exact_typed_constant,
     evaluate_classical_op_concrete,
     resolve_compile_time_condition,
+)
+from qamomile.circuit.transpiler.passes.control_flow_reachability import (
+    same_exact_typed_constant,
 )
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 from qamomile.circuit.transpiler.passes.validate_while import build_producer_map
@@ -1206,7 +1208,7 @@ def _check_loop_carried_rebinds(
             if (
                 isinstance(record.before, Value)
                 and isinstance(canon_value, Value)
-                and _same_exact_typed_constant(record.before, canon_value)
+                and same_exact_typed_constant(record.before, canon_value)
             ):
                 continue
             # Trace-time-folded accumulation: an all-constant update like
