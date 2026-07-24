@@ -18,11 +18,11 @@
 # tags: [algorithm, chemistry, simulation]
 # ---
 #
-# # Estimating Nanosheet Material Properties with Multidimensional Quantum Fourier Transform
+# # Multidimensional QFT for Estimating Nanosheet Material Properties
 #
 # The quantum Fourier transform (QFT) is widely used as a core primitive in quantum algorithms, and many applications have been proposed.
 # Conventional QFT-based constructions, however, are limited when input data is not naturally defined on power-of-two grid sizes.
-# This article summarizes an implementation of a multidimensional QFT for inputs with arbitrary grid sizes, following the method proposed in [](https://doi.org/10.1039/D5CP00030K).
+# This article summarizes an implementation of a multidimensional QFT for inputs with arbitrary grid sizes, following the method proposed in [](https://doi.org/10.1039/d4cp04399e).
 # Through this multidimensional QFT implementation, you can learn how to use Qamomile for this kind of workflow.
 
 # %%
@@ -73,7 +73,7 @@ from qamomile.qiskit import QiskitTranspiler
 # The ${\mathrm{initialize}}(\vert v \rangle)$ block in the figure represents a subroutine that initializes the quantum state according to the input data.
 # Several state-preparation methods are available; the implementation below uses the [Möttönen state-preparation routine for amplitude encoding](mottonen_amplitude_encoding).
 # However, the method in the figure assumes that each dimension size satisfies $N_i = 2^{n_i}$.
-# The method proposed in [](https://doi.org/10.1039/D5CP00030K) removes this restriction.
+# The method proposed in [](https://doi.org/10.1039/d4cp04399e) removes this restriction.
 # Qamomile includes a standard implementation of one-dimensional QFT.
 # By using Qamomile's features, multidimensional QFT can also be implemented easily.
 #
@@ -81,7 +81,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # Real-space crystal and nanosheet structures are not generally sampled on power-of-two grids.
 # Their lattice periodicities can correspond to arbitrary integer grid counts.
-# The method in [](https://doi.org/10.1039/D5CP00030K) therefore proposed a preprocessing technique for encoding crystal periodicity directly into a quantum state.
+# The method in [](https://doi.org/10.1039/d4cp04399e) therefore proposed a preprocessing technique for encoding crystal periodicity directly into a quantum state.
 #
 # ### Domain truncation and zero padding
 #

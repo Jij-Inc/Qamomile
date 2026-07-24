@@ -679,7 +679,7 @@ def _same_plain_scalar(true_val: typing.Any, false_val: typing.Any) -> bool:
     Returns:
         bool: True when both values are plain scalars of the exact same
             type and representation. Floats compare bit-exactly (matching
-            ``_same_exact_typed_constant`` on the lowering side): NaNs with
+            ``same_exact_typed_constant`` on the lowering side): NaNs with
             the same payload pass through, while distinct NaN payloads and a
             ``0.0`` / ``-0.0`` pair still promote so no payload or sign bit is
             frozen to one branch's value.

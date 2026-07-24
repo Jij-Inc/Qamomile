@@ -11,7 +11,6 @@ This prevents ``SegmentationPass`` from seeing classical-only compile-time
 from __future__ import annotations
 
 import dataclasses
-import struct
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -67,42 +66,19 @@ from qamomile.circuit.transpiler.value_resolver import (
 )
 
 from . import Pass
+from .control_flow_reachability import (
+    MAX_STATIC_REPLAY_TRIPS,
+    same_exact_typed_constant,
+)
 from .emit_support import resolve_if_condition
 from .eval_utils import FoldPolicy, fold_classical_op
 from .value_mapping import ValueSubstitutor
-
-_MAX_STATIC_CARRY_ITERATIONS = 10_000
 
 # Dead-result pruning is deliberately fail-closed. Operations outside this
 # tuple may have observable effects even when none of their SSA results remain
 # live (measurement is the canonical example), so only the scalar expression
 # nodes whose evaluation is known to be pure may be removed here.
 _PURE_CLASSICAL_EXPRESSION_TYPES = (BinOp, CompOp, CondOp, NotOp)
-
-
-def _same_exact_typed_constant(left: Value, right: Value) -> bool:
-    """Return whether two scalar Values carry the same exact typed constant.
-
-    Args:
-        left (Value): First scalar Value to compare.
-        right (Value): Second scalar Value to compare.
-
-    Returns:
-        bool: True only for constants of the same IR type and Python type with
-            equal value representations. Floating-point comparison preserves
-            the sign of zero and the payload bits of NaNs.
-    """
-    if isinstance(left, ArrayValue) or isinstance(right, ArrayValue):
-        return False
-    if left.type != right.type or not left.is_constant() or not right.is_constant():
-        return False
-    left_value = left.get_const()
-    right_value = right.get_const()
-    if type(left_value) is not type(right_value):
-        return False
-    if isinstance(left_value, float):
-        return struct.pack("!d", left_value) == struct.pack("!d", right_value)
-    return bool(left_value == right_value)
 
 
 def _is_identity_region_arg(region_arg: RegionArg) -> bool:
@@ -120,7 +96,7 @@ def _is_identity_region_arg(region_arg: RegionArg) -> bool:
         region_arg.init.uuid,
     }:
         return True
-    return _same_exact_typed_constant(region_arg.init, region_arg.yielded)
+    return same_exact_typed_constant(region_arg.init, region_arg.yielded)
 
 
 def resolve_compile_time_condition(
@@ -282,7 +258,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         self._bindings = bindings or {}
         self._under_controlled_unitary = _under_controlled_unitary
         self._active_block_ids = _active_block_ids or frozenset()
-        self._static_replay_remaining = _MAX_STATIC_CARRY_ITERATIONS
+        self._static_replay_remaining = MAX_STATIC_REPLAY_TRIPS
 
     @property
     def name(self) -> str:
@@ -314,7 +290,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # The replay limit is scoped to one pass invocation. Public pass
         # instances may be reused, and prior runs must not consume budget from
         # a later, independent block transformation.
-        self._static_replay_remaining = _MAX_STATIC_CARRY_ITERATIONS
+        self._static_replay_remaining = MAX_STATIC_REPLAY_TRIPS
         if input.kind not in (
             BlockKind.TRACED,
             BlockKind.AFFINE,
@@ -890,7 +866,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             for merge in merges
             if (
                 merge.true_value.uuid == merge.false_value.uuid
-                or _same_exact_typed_constant(
+                or same_exact_typed_constant(
                     merge.true_value,
                     merge.false_value,
                 )
@@ -1159,7 +1135,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             trip_count = len(indexset)
         except (OverflowError, ValueError):
             return None
-        if trip_count > _MAX_STATIC_CARRY_ITERATIONS:
+        if trip_count > MAX_STATIC_REPLAY_TRIPS:
             return None
         return indexset
 
@@ -1410,7 +1386,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                             break
                 if isinstance(candidate, dict):
                     entries = list(candidate.items())
-        if entries is None or len(entries) > _MAX_STATIC_CARRY_ITERATIONS:
+        if entries is None or len(entries) > MAX_STATIC_REPLAY_TRIPS:
             return None
         return entries
 

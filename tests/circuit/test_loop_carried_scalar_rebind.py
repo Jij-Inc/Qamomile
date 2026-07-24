@@ -808,7 +808,7 @@ class TestSupportedLoopCarriedScalars:
 
         monkeypatch.setattr(
             compile_time_if_lowering,
-            "_MAX_STATIC_CARRY_ITERATIONS",
+            "MAX_STATIC_REPLAY_TRIPS",
             8,
         )
 
@@ -844,7 +844,7 @@ class TestSupportedLoopCarriedScalars:
 
         monkeypatch.setattr(
             compile_time_if_lowering,
-            "_MAX_STATIC_CARRY_ITERATIONS",
+            "MAX_STATIC_REPLAY_TRIPS",
             3,
         )
 
