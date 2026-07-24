@@ -117,6 +117,7 @@ from .frontend.operation.qubit_gates import (
 from .frontend.operation.select import select
 from .frontend.oracle import Oracle, opaque
 from .frontend.qkernel import QKernel, qkernel
+from .frontend.struct import struct
 from .ir.effect import KernelEffect
 from .stdlib import (
     IsingZBlockEncoding,
@@ -152,6 +153,7 @@ from .stdlib import (
     periodic_shift_lcu_block_encoding,
     qft,
     qpe,
+    qsvt,
     ripple_carry_add,
 )
 
@@ -195,6 +197,7 @@ from .algorithm.shor import (  # noqa: E402, I001
 
 __all__ = [
     "qkernel",
+    "struct",
     "KernelEffect",
     "composite_gate",
     "Oracle",
@@ -272,6 +275,7 @@ __all__ = [
     "modular_decrement",
     "modular_increment",
     "qpe",
+    "qsvt",
     "mcx",
     "multi_controlled_x",
     "LCUBlockEncoding",

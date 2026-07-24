@@ -7,8 +7,9 @@ symbolic-parameter creation and shared a single phantom runtime parameter
 named ``angles[i]``. Binding that phantom then ran all out-of-range
 iterations with one shared value — a silent-wrong-result hazard.
 
-Transpilation must instead fail fast with an ``EmitError`` naming the
-array, index, and length, while in-range unrolling and runtime parameter
+Transpilation now rejects statically reachable accesses during array-bounds
+validation, before emit. The lower-level resolver retains its ``EmitError``
+defense for direct callers, while in-range unrolling and runtime parameter
 arrays keep working unchanged.
 """
 
@@ -18,7 +19,7 @@ import pytest
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
-from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
     ValueResolver,
 )
@@ -66,10 +67,10 @@ def test_out_of_range_loop_index_raises_at_transpile(array_len, num_rotations):
     angles = [0.1 * (k + 1) for k in range(array_len)]
 
     with pytest.raises(
-        EmitError,
+        ValidationError,
         match=(
-            rf"Index {array_len} is out of range .* "
-            rf"'rx_angles' of length {array_len}"
+            rf"Index {array_len} is out of range for array 'rx_angles'.*"
+            rf"resolved to {array_len}"
         ),
     ):
         transpiler.transpile(

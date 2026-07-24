@@ -89,6 +89,16 @@ there are **no reverse dependencies**.
 Before editing each modules, you have to read `__init__.py`.
 Because a design principal is written at docstring of `__init__.py` for each modules.
 
+### Placement of `algorithm` and `stdlib`
+
+Treat the boundary between `qamomile/circuit/algorithm/` and
+`qamomile/circuit/stdlib/` as a practical guideline rather than a strict
+semantic classification.
+
+- Put basic, reusable, or very widely used building blocks that are suitable as quantum-kernel subroutines in `stdlib`.
+- Put other algorithm-oriented implementations in `algorithm`.
+- Promote a component to `stdlib` when experience shows that it is broadly reused across multiple algorithms.
+
 ### IR Abstraction Principle
 
 **Keep the IR as abstract as possible; delegate concretization to the transpile
