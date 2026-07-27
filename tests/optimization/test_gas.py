@@ -400,29 +400,33 @@ def _all_integer(model: BinaryModel) -> bool:
 def test_approximate_real_valued_model_fractional_constant():
     """A fractional constant alone is rounded to the nearest integer."""
     model = BinaryModel.from_hubo({(0,): 1.0}, constant=0.5)
-    approx = GASConverter.approximate_real_valued_model(model)
+    approx, _ = GASConverter.approximate_real_valued_model(model)
     assert _all_integer(approx)
 
 
 def test_approximate_real_valued_model_fractional_coefficients():
     """Real-valued coefficients are all mapped to integers."""
     model = BinaryModel.from_hubo({(0,): 0.3, (1,): -1.2, (0, 1): 0.25}, constant=0.7)
-    approx = GASConverter.approximate_real_valued_model(model)
+    approx, _ = GASConverter.approximate_real_valued_model(model)
     assert _all_integer(approx)
 
 
 def test_approximate_real_valued_model_zero_model_unchanged():
     """All-zero model is returned as-is without raising divide-by-zero."""
     model = BinaryModel.from_hubo({(0,): 0.0, (1,): 0.0}, constant=0.0)
-    approx = GASConverter.approximate_real_valued_model(model)
-    assert approx.constant == 0.0
-    assert all(c == 0.0 for c in approx.coefficients.values())
+    approx, scale = GASConverter.approximate_real_valued_model(model)
+    assert np.isclose(approx.constant, 0.0, atol=1e-12)
+    assert all(np.isclose(c, 0.0, atol=1e-12) for c in approx.coefficients.values())
+    # Returned unchanged, so the model is already in the caller's scale.
+    assert np.isclose(scale, 1.0, atol=1e-12)
 
 
 def test_approximate_real_valued_model_preserves_signs():
     """Positive and negative coefficients retain their signs after approximation."""
     model = BinaryModel.from_hubo({(0,): 1.0, (1,): -2.0}, constant=0.0)
-    approx = GASConverter.approximate_real_valued_model(model, quantization_parameter=4)
+    approx, _ = GASConverter.approximate_real_valued_model(
+        model, quantization_parameter=4
+    )
     assert approx.coefficients[(0,)] > 0
     assert approx.coefficients[(1,)] < 0
 
@@ -433,20 +437,24 @@ def test_approximate_real_valued_model_explicit_quantization_parameter():
     With quantization_parameter=4 and max_coeff=4.0:
       round(4.0/4.0 * 2^3) = 8   (coefficient (0,))
       round(2.0/4.0 * 2^3) = 4   (coefficient (1,))
+    and the reported scale is 2^3 / 4.0 = 2.0.
     """
     model = BinaryModel.from_hubo({(0,): 4.0, (1,): 2.0}, constant=0.0)
-    approx = GASConverter.approximate_real_valued_model(model, quantization_parameter=4)
-    assert approx.coefficients[(0,)] == 8
-    assert approx.coefficients[(1,)] == 4
+    approx, scale = GASConverter.approximate_real_valued_model(
+        model, quantization_parameter=4
+    )
+    assert np.isclose(approx.coefficients[(0,)], 8.0, atol=1e-12)
+    assert np.isclose(approx.coefficients[(1,)], 4.0, atol=1e-12)
+    assert np.isclose(scale, 2.0, atol=1e-12)
 
 
 def test_approximate_real_valued_model_auto_vs_explicit_both_integer():
     """Auto (None) and explicit quantization_parameter both produce integer models."""
     model = BinaryModel.from_hubo({(0,): 0.3, (1,): 0.7}, constant=0.1)
-    approx_auto = GASConverter.approximate_real_valued_model(
+    approx_auto, _ = GASConverter.approximate_real_valued_model(
         model, quantization_parameter=None
     )
-    approx_explicit = GASConverter.approximate_real_valued_model(
+    approx_explicit, _ = GASConverter.approximate_real_valued_model(
         model, quantization_parameter=8
     )
     assert _all_integer(approx_auto)
@@ -460,7 +468,7 @@ def test_approximate_real_valued_model_auto_quantization_stays_float_exact_int()
     which may exceed exact integer representation in float-backed storage.
     """
     model = BinaryModel.from_hubo({(0,): 1 / 3, (1,): -2 / 3}, constant=0.1)
-    approx = GASConverter.approximate_real_valued_model(model)
+    approx, _ = GASConverter.approximate_real_valued_model(model)
 
     vals = [float(approx.constant)] + [float(v) for v in approx.coefficients.values()]
     assert all(v.is_integer() for v in vals)
@@ -553,7 +561,7 @@ def test_hubo_prep_dagger_restores_state(make_transpiler):
 
     @qmc.qkernel
     def wrap_prep_then_dagger(
-        n: qmc.UInt, m: qmc.UInt, y: qmc.UInt
+        n: qmc.UInt, m: qmc.UInt, y: qmc.Float
     ) -> qmc.Vector[qmc.Bit]:
         """Apply forward preparation then its dagger and measure the input register."""
         q_output = qmc.qubit_array(m, name="q_output")
@@ -564,7 +572,8 @@ def test_hubo_prep_dagger_restores_state(make_transpiler):
 
     exe = transpiler.transpile(
         wrap_prep_then_dagger,
-        bindings={"n": model.num_bits, "m": output_bits, "y": 0},
+        # y must be Float: both prep kernels declare `y: qmc.Float`.
+        bindings={"n": model.num_bits, "m": output_bits, "y": 0.0},
     )
     results = exe.sample(transpiler.executor(), shots=32).result().results
 
@@ -746,3 +755,130 @@ def test_hubo_grover_biases_toward_optimal_state(make_transpiler):
     assert optimal_count / total_shots >= 0.70, (
         f"Expected >= 70% optimal samples; got {optimal_count}/{total_shots}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Negative tests (backend-independent)
+# ---------------------------------------------------------------------------
+
+
+def test_get_cost_hamiltonian_raises_not_implemented():
+    """GAS is oracle-based, so requesting a cost Hamiltonian must fail loudly."""
+    conv = GASConverter(_make_qubo_model())
+    with pytest.raises(NotImplementedError, match="does not expose a cost Hamiltonian"):
+        conv.get_cost_hamiltonian()
+
+
+def test_compose_encoders_baked_rejects_length_mismatch():
+    """Mismatched encoder/coefficient lists raise instead of silently truncating."""
+    conv = GASConverter(_make_hubo_model())
+    encoders = [conv._make_term_encoding([0]), conv._make_term_encoding([1])]
+    with pytest.raises(ValueError, match="must have the same length"):
+        conv._compose_encoders_baked(encoders, [1.0])
+
+
+# ---------------------------------------------------------------------------
+# Converter state invariants (backend-independent)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("make_model", [_make_qubo_model, _make_hubo_model])
+def test_effective_model_available_before_transpile(make_model):
+    """effective_model/quantization_scale are set at construction, not by transpile().
+
+    The HUBO kernel factories read `effective_model`, so a freshly built
+    converter must already expose it; otherwise those factories raise
+    AttributeError when used standalone.
+    """
+    conv = GASConverter(make_model())
+    assert conv.effective_model is conv.binary_model
+    assert np.isclose(conv.quantization_scale, 1.0, atol=1e-12)
+    # The HUBO factories must be usable without transpile() having run.
+    assert conv._make_apply_function_preparation_hubo(output_bits=3) is not None
+    assert conv._make_apply_function_preparation_hubo_dagger(output_bits=3) is not None
+
+
+def test_integer_model_keeps_unit_quantization_scale():
+    """An already-integer model is not quantized, so the scale stays exactly 1."""
+    conv = GASConverter(_make_qubo_model())
+
+    class _CaptureTranspiler:
+        """Minimal stand-in that records the bindings transpile() would emit."""
+
+        def transpile(self, kernel, bindings=None):
+            """Return the bindings instead of compiling.
+
+            Args:
+                kernel: Kernel that would be compiled (unused).
+                bindings (dict | None): Bindings under test.
+
+            Returns:
+                dict | None: The bindings, verbatim.
+            """
+            return bindings
+
+    bindings = conv.transpile(_CaptureTranspiler(), y=2.0, num_iterations=1)
+    assert np.isclose(conv.quantization_scale, 1.0, atol=1e-12)
+    # y_circuit = constant - y * scale = 0.0 - 2.0 * 1.0
+    assert np.isclose(bindings["y"], -2.0, atol=1e-12)
+
+
+@pytest.mark.parametrize("y", [-2.0, -1.0, -0.5, 0.0, 0.5])
+def test_quantized_threshold_is_scaled_into_the_effective_domain(y):
+    """The oracle threshold tracks the coefficient quantization scale.
+
+    The circuit register holds ``y_circuit + (f_eff(x) - eff.constant)``. With
+    coefficients scaled by ``s``, that equals ``s * (f(x) - y)`` only if the
+    threshold is scaled too. Since ``s > 0``, the oracle's sign test then agrees
+    with ``f(x) < y`` for every x -- which is what this asserts. Leaving y
+    un-scaled makes the comparison mix the original and quantized domains and
+    mark the wrong states for any nonzero y.
+    """
+    # Non-integer coefficients, so the quantization path is taken.
+    model = BinaryModel.from_hubo({(0,): 0.5, (1,): -1.5, (0, 1): 0.25}, constant=0.0)
+
+    def f_orig(bits):
+        """Evaluate the original objective on a bit tuple.
+
+        Args:
+            bits (tuple[int, ...]): Assignment of the two decision variables.
+
+        Returns:
+            float: Objective value in the original scale.
+        """
+        return 0.5 * bits[0] - 1.5 * bits[1] + 0.25 * bits[0] * bits[1]
+
+    class _CaptureTranspiler:
+        """Minimal stand-in that records the bindings transpile() would emit."""
+
+        def transpile(self, kernel, bindings=None):
+            """Return the bindings instead of compiling.
+
+            Args:
+                kernel: Kernel that would be compiled (unused).
+                bindings (dict | None): Bindings under test.
+
+            Returns:
+                dict | None: The bindings, verbatim.
+            """
+            return bindings
+
+    conv = GASConverter(model)
+    with pytest.warns(UserWarning, match="non-integer coefficients"):
+        bindings = conv.transpile(_CaptureTranspiler(), y=y, num_iterations=1)
+
+    eff = conv.effective_model
+    scale = conv.quantization_scale
+    assert scale > 1.0, "expected the non-integer model to be rescaled"
+
+    for bits in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+        f_eff = (
+            eff.constant
+            + sum(eff.linear.get(i, 0.0) * bits[i] for i in range(2))
+            + sum(c * np.prod([bits[i] for i in key]) for key, c in eff.quad.items())
+        )
+        register = bindings["y"] + (f_eff - eff.constant)
+        assert (register < 0) == (f_orig(bits) < y), (
+            f"oracle disagrees with f(x) < y at x={bits}, y={y}: "
+            f"register={register}, f(x)={f_orig(bits)}, scale={scale}"
+        )

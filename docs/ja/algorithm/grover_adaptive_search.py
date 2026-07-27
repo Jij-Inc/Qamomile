@@ -29,6 +29,10 @@
 # 4. 回路を古典的なレイヤーの内側で実行し、繰り返し回数を制御しながら回路をサンプリングする。停止条件を満たすまで最良解を保持し続ける。
 #
 
+# %%
+# Qamomileの最新版をpipでインストールしましょう！
+# # !pip install "qamomile[qiskit,visualization]"
+
 # %% [markdown]
 # ## ポートフォリオ問題の定式化
 #
@@ -226,7 +230,7 @@ diffusion_op.draw(
 #
 # `converter.transpile(transpiler, y=y, num_iterations=num_iterations)` は現在の閾値 $y$ とGrover深度に対するGrover回路を構築します。
 #
-# `exec.sample(executor, shots=256)` はバックエンド上で回路を実行します。Groverであっても、NISQデバイスはノイジーであるため複数ショットが必要です。
+# `executable.sample(executor, shots=256)` はバックエンド上で回路を実行します。Groverであっても、NISQデバイスはノイジーであるため複数ショットが必要です。
 #
 # `converter.decode(result)` は生のビット列カウントを決定変数の割り当てにマッピングして返します。
 #
@@ -283,12 +287,12 @@ def grover_adaptive_search(
         #          量子Grover回路の呼び出し              #
         ####################################################
 
-        exec = converter.transpile(transpiler,
-                                y=y,
-                                num_iterations=num_iterations)
+        executable = converter.transpile(transpiler,
+                                         y=y,
+                                         num_iterations=num_iterations)
 
         # NISQデバイスはノイジーなため、回路を複数回実行する
-        job = exec.sample(executor, shots=256)
+        job = executable.sample(executor, shots=256)
         result = job.result()
         sample_set = converter.decode(result)
 
@@ -344,9 +348,53 @@ selected = [i+1 for i, xi in enumerate(x) if xi == 1]
 print(f"選択された資産: {selected}, 目的関数値: {y}")
 
 # %% [markdown]
-# $10$ 回のイテレーション後、解がそれ以上改善されないためアルゴリズムは停止します。
+# ## 結果の検証
 #
-# ポートフォリオ問題のグローバル最小値が返されます。
+# 探索は `max_no_improvement` 回続けて解が改善しなくなった時点で停止します。これは
+# ヒューリスティックな停止規則であり、それ自体が返された解の最適性を保証するもので
+# はありません。今回は資産が $9$ 個だけなので、$2^9 = 512$ 通りの割り当てをすべて
+# 列挙できます。最適性を思い込みで主張する代わりに、厳密な全探索の結果と照合して
+# 確認しましょう。
+
+# %%
+import itertools
+
+brute_force_x, brute_force_y = min(
+    (
+        (list(bits), instance.evaluate({i: b for i, b in enumerate(bits)}).objective)
+        for bits in itertools.product([0, 1], repeat=len(x))
+    ),
+    key=lambda candidate: candidate[1],
+)
+
+print(f"GAS   : x={x}, 目的関数値={y}")
+print(f"全探索 : x={brute_force_x}, 目的関数値={brute_force_y}")
+
+assert np.isclose(y, brute_force_y), (
+    f"GASは目的関数値 {y} を返しましたが、真の最適値は {brute_force_y} です"
+)
+print("\nGASは全探索の最適解と一致しました。")
+
+# %% [markdown]
+# 上のアサーションによって、このページは自己検証型になります。オラクルやデコード処理
+# にリグレッションが入った場合、より悪い解が静かにレンダリングされるのではなく、
+# ノートブックが失敗するようになります。
 #
-# 最適解は資産 $1$、$5$、$8$ を購入することです。
+# ## まとめ
 #
+# - **GASは単一の回路ではなくハイブリッドなループです。** 量子部分が答えるのは
+#   「どの $x$ が $f(x) < y$ を満たすか」という1つの固定された問いだけであり、
+#   古典レイヤーが改善が止まるまで $y$ を下げていきます。
+# - **`GASConverter` が量子側を担います。** `transpile()` は現在の閾値 $y$ とGrover
+#   の深さに対応する回路を構築し、`decode()` は生のビット列カウントをOMMXを通じて
+#   決定変数の割り当てに戻します。
+# - **目的関数は算術回路ではなく位相として符号化されます。** 各多項式項はFourier基底
+#   上の（制御）位相回転になり、最後の逆QFTが蓄積された位相を2の補数表現の整数に
+#   変換します。その符号ビットが、まさにオラクルの必要とする述語です。
+# - **高次項も同じ仕組みで扱えます。** 任意次数のHUBO目的関数に対応しており、
+#   2次を超える項がある場合は `GASConverter` がqkernelファクトリのパスに切り替えます。
+# - **閾値はモデル自身のスケールで比較されます。** `y` はそのままの目的関数値として
+#   渡してください。実数係数を整数に量子化する必要がある場合、コンバータが閾値も
+#   合わせてスケーリングします。
+# - **思い込まずに検証しましょう。** 停止規則はヒューリスティックなので、小さな
+#   インスタンスでは上記のように全探索と比較して確認してください。

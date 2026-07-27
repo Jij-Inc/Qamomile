@@ -1,3 +1,18 @@
+"""QFT-arithmetic building blocks for Grover Adaptive Search (GAS).
+
+These kernels implement the "quantum dictionary" state Σ|x, f(x)> for a QUBO
+objective ``f``: each polynomial term is encoded as a (controlled) phase
+rotation in the Fourier basis, and a closing inverse QFT turns the accumulated
+phase into a two's-complement integer in the output register. On top of that,
+this module provides the GAS oracle reflection, the diffusion operator, and the
+full fixed-threshold Grover kernel.
+
+The degree-specific encoders here cover degrees 0, 1, and 2, which is all a
+QUBO needs. Higher-degree (HUBO) terms are handled by
+``qamomile.optimization.gas``, which builds arbitrary-arity encoders from a
+factory over the same ``qft_encoding`` primitive.
+"""
+
 from __future__ import annotations
 
 import numpy as np
