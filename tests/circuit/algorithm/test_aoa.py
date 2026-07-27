@@ -114,7 +114,7 @@ _CUDAQ_PATTERNS: dict[str, re.Pattern] = {
 
 def _cudaq_gate_counts(exe) -> dict[str, int]:
     """Counts gates in the transpiled Cudaq circuit by name."""
-    source = exe.compiled_quantum[0].source
+    source = exe.compiled_quantum[0].circuit.source
     return {name: len(pat.findall(source)) for name, pat in _CUDAQ_PATTERNS.items()}
 
 
