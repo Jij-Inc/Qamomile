@@ -3,11 +3,81 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Hashable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar
+
+import numpy as np
 
 T = TypeVar("T")
+
+
+def _typed_result_key(value: Any) -> Hashable:
+    """Build an exact hashable key for one public sample value.
+
+    Args:
+        value (Any): Converted public result value.
+
+    Returns:
+        Hashable: Structure-, type-, dtype-, and shape-preserving key.
+            Unknown unhashable objects use identity because Qamomile's public
+            result contract does not define equality for arbitrary objects.
+    """
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_typed_result_key(element) for element in value))
+    if isinstance(value, list):
+        return ("list", tuple(_typed_result_key(element) for element in value))
+    if isinstance(value, dict):
+        return (
+            "dict",
+            frozenset(
+                (_typed_result_key(key), _typed_result_key(entry_value))
+                for key, entry_value in value.items()
+            ),
+        )
+    if isinstance(value, np.ndarray):
+        return (
+            "ndarray",
+            value.dtype.str,
+            tuple(value.shape),
+            tuple(_typed_result_key(element) for element in value.reshape(-1).tolist()),
+        )
+    if isinstance(value, np.generic):
+        return ("np_scalar", value.dtype.str, _typed_result_key(value.item()))
+    if isinstance(value, Hashable):
+        return ("scalar", type(value), value)
+    return ("identity", id(value))
+
+
+def _aggregate_typed_results(
+    results: list[tuple[T, int]],
+) -> list[tuple[T, int]]:
+    """Combine counts whose converted public result values are equal.
+
+    Backend raw bitstrings can differ only on qubits that are not part of the
+    program output. After result conversion those rows represent the same
+    public value and must appear as one ``SampleResult`` entry.
+
+    Args:
+        results (list[tuple[T, int]]): Converted result values and counts.
+
+    Returns:
+        list[tuple[T, int]]: Stable first-seen values with duplicate counts
+            summed.
+    """
+    aggregated: list[tuple[T, int]] = []
+    positions: dict[Hashable, int] = {}
+    for value, count in results:
+        key = _typed_result_key(value)
+        position = positions.get(key)
+        if position is None:
+            positions[key] = len(aggregated)
+            aggregated.append((value, count))
+            continue
+        existing, existing_count = aggregated[position]
+        aggregated[position] = (existing, existing_count + count)
+    return aggregated
 
 
 class JobStatus(Enum):
@@ -113,7 +183,9 @@ class SampleJob(Job[SampleResult[T]], Generic[T]):
             return self._result
 
         # Convert to typed results (returns list[tuple[T, int]])
-        typed_results = self._result_converter(self._raw_counts)
+        typed_results = _aggregate_typed_results(
+            self._result_converter(self._raw_counts)
+        )
 
         self._result = SampleResult(results=typed_results, shots=self._shots)
         return self._result

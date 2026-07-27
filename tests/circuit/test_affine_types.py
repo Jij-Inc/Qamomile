@@ -1,9 +1,9 @@
 """Tests for affine type enforcement in the circuit frontend."""
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qm
-from qamomile.circuit.frontend.composite_gate import CompositeGate
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
@@ -82,6 +82,57 @@ class TestDoubleUseDetection:
         with pytest.raises(QubitConsumedError):
             # Use parameters to mark theta as a parameter
             bad_circuit.build(parameters=["theta"])
+
+
+class TestOperationExceptionSafety:
+    """Primitive operations avoid partial affine ownership commits."""
+
+    @pytest.mark.parametrize(
+        "operation",
+        [qm.h, qm.project_z, qm.reset, qm.measure],
+        ids=["gate", "project", "reset", "measure"],
+    )
+    def test_missing_tracer_leaves_scalar_input_unconsumed(self, operation):
+        """A missing tracer is diagnosed before scalar ownership moves."""
+        from qamomile.circuit.ir.types.primitives import QubitType
+        from qamomile.circuit.ir.value import Value
+
+        qubit = Qubit(value=Value(type=QubitType(), name="q"))
+
+        with pytest.raises(RuntimeError, match="No active tracer"):
+            operation(qubit)
+
+        assert not qubit._consumed
+
+    def test_late_multi_gate_validation_leaves_earlier_input_unconsumed(self):
+        """A consumed second operand cannot partially consume the first."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            control = qm.qubit("control")
+            target = qm.qubit("target")
+            _target_successor = qm.h(target)
+
+            with pytest.raises(QubitConsumedError):
+                qm.cx(control, target)
+
+            assert not control._consumed
+
+    def test_missing_tracer_leaves_vector_input_unconsumed(self):
+        """Broadcast and vector measurement preflight the tracer."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            gate_register = qubit_array(2, "gate_register")
+            measure_register = qubit_array(2, "measure_register")
+
+        with pytest.raises(RuntimeError, match="No active tracer"):
+            qm.h(gate_register)
+        with pytest.raises(RuntimeError, match="No active tracer"):
+            qm.measure(measure_register)
+
+        assert not gate_register._consumed
+        assert not measure_register._consumed
 
 
 class TestProperReassignment:
@@ -176,6 +227,68 @@ class TestProperReassignment:
 
 class TestQubitAliasDetection:
     """Test that aliasing errors are detected (same qubit in both positions)."""
+
+    @pytest.mark.parametrize(
+        ("left", "right", "expected"),
+        [
+            ((0, 2, 4), (1, 2, 4), False),
+            ((0, 2, 4), (4, 3, 2), True),
+            ((10, 5, 1_000_000_000), (12, 7, 1_000_000_000), True),
+            ((0, 1, 0), (0, 1, 1), False),
+            (None, (0, 1, 1), False),
+        ],
+    )
+    def test_affine_region_overlap_is_exact_and_size_independent(
+        self,
+        left: tuple[int, int, int] | None,
+        right: tuple[int, int, int] | None,
+        expected: bool,
+    ):
+        """Finite strided regions intersect without enumerating their slots."""
+        from qamomile.circuit.frontend.qkernel_utils import _regions_may_overlap
+
+        assert _regions_may_overlap(left, right) is expected
+
+    def test_affine_region_overlap_matches_random_explicit_sets(self):
+        """Modular overlap agrees with enumerated finite regions for seed 8421."""
+        from qamomile.circuit.frontend.qkernel_utils import _regions_may_overlap
+
+        rng = np.random.default_rng(8421)
+        for _ in range(1_000):
+            left = (
+                int(rng.integers(0, 30)),
+                int(rng.integers(1, 9)),
+                int(rng.integers(0, 15)),
+            )
+            right = (
+                int(rng.integers(0, 30)),
+                int(rng.integers(1, 9)),
+                int(rng.integers(0, 15)),
+            )
+            left_slots = {left[0] + left[1] * index for index in range(left[2])}
+            right_slots = {right[0] + right[1] * index for index in range(right[2])}
+
+            assert _regions_may_overlap(left, right) is bool(left_slots & right_slots)
+
+    def test_distinct_fresh_subkernel_qubits_do_not_alias(self):
+        """Fresh allocations returned by separate calls have distinct logical IDs."""
+
+        @qkernel
+        def make_q() -> Qubit:
+            return qm.qubit("q")
+
+        @qkernel
+        def top() -> qm.Bit:
+            a = make_q()
+            b = make_q()
+            a, b = qm.cx(a, b)
+            return qm.measure(a)
+
+        graph = top.block
+        assert any(
+            isinstance(op, GateOperation) and op.gate_type == GateOperationType.CX
+            for op in graph.operations
+        )
 
     def test_cx_same_qubit_raises_alias_error(self):
         """Using same qubit as both control and target in cx should raise error."""
@@ -509,18 +622,16 @@ class TestSetitemConsumeAndValidation:
             with pytest.raises(AffineTypeError, match="not borrowed from this array"):
                 qs1[0] = rogue
 
-    def test_setitem_unborrowed_index_consumes_handle(self):
-        """Writing to an unborrowed index should consume the handle."""
+    def test_setitem_unborrowed_index_rejects_fresh_handle(self):
+        """Writing a fresh qubit to an unborrowed slot fails without mutation."""
         from qamomile.circuit.frontend.tracer import trace
 
         with trace():
             qs = qubit_array(2, "qs")
             rogue = qm.qubit("rogue")
-            # Fresh assignment to unborrowed index is allowed but consumes handle
-            qs[1] = rogue
-            # rogue is now consumed and cannot be reused
-            with pytest.raises(QubitConsumedError):
-                qm.h(rogue)
+            with pytest.raises(AffineTypeError, match="not representable"):
+                qs[1] = rogue
+            assert rogue._consumed is False
 
     def test_setitem_unborrowed_rejects_foreign_array_handle(self):
         """Writing a handle borrowed from another array to an unborrowed index should raise."""
@@ -640,24 +751,14 @@ class TestCallOperationsConsume:
 
     def test_composite_gate_call_consumes_target_qubit(self):
         """Reusing qubit after CompositeGate call should raise QubitConsumedError."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
 
-        class SimpleH(CompositeGate):
-            custom_name = "simple_h"
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                (q,) = qubits
-                return (qm.h(q),)
-
-        gate = SimpleH()
+        @qm.composite_gate(name="simple_h")
+        def gate(q: Qubit) -> Qubit:
+            return qm.h(q)
 
         @qkernel
         def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
-            (q2,) = gate(q)
+            q2 = gate(q)
             q3 = qm.x(q)  # ERROR: q consumed by gate call
             return q2, q3
 
@@ -666,25 +767,16 @@ class TestCallOperationsConsume:
 
     def test_composite_gate_call_consumes_control_qubit(self):
         """Reusing control qubit after CompositeGate call should raise QubitConsumedError."""
-        from qamomile.circuit.frontend.composite_gate import CompositeGate
 
-        class ControlledH(CompositeGate):
-            custom_name = "controlled_h"
-            num_control_qubits = 1
+        @qm.composite_gate(name="controlled_h")
+        def base_gate(q: Qubit) -> Qubit:
+            return qm.h(q)
 
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                (q,) = qubits
-                return (qm.h(q),)
-
-        gate = ControlledH()
+        gate = qm.control(base_gate)
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
-            ctrl_out, tgt_out = gate(tgt, controls=(ctrl,))
+            ctrl_out, tgt_out = gate(ctrl, tgt)
             ctrl_reuse = qm.x(ctrl)  # ERROR: ctrl consumed by gate call
             return ctrl_out, tgt_out, ctrl_reuse
 
@@ -821,6 +913,25 @@ class TestComputedIndexBorrowReturn:
 
         with pytest.raises(UnreturnedBorrowError):
             bad_circuit.build(n=3)
+
+    def test_symbolic_cross_index_write_is_rejected(self):
+        """A symbolic target cannot hide a write to a different quantum slot."""
+
+        @qkernel
+        def bad_cross_index(n: int) -> qm.Vector[qm.Bit]:
+            qubits = qubit_array(n, "q")
+            for i in qm.range(1):
+                qubits[i + 2] = qm.x(qubits[i])
+            return qm.measure(qubits)
+
+        with pytest.raises(
+            AffineTypeError, match="different symbolic index expression"
+        ) as exc_info:
+            bad_cross_index.build(n=4)
+
+        message = str(exc_info.value)
+        assert "'q[i]'" in message
+        assert "'q[(i + 2)]'" in message
 
 
 class TestAllSingleQubitGatesDoubleUse:
@@ -1229,52 +1340,25 @@ class TestVectorQubitPatterns:
             bad_circuit.build()
 
 
-class TestStubCompositeGateAffine:
-    """Stub composite gates must enforce affine usage on their qubit arguments."""
+class TestCustomCompositeGateAffine:
+    """Custom composite gates must enforce affine usage on their qubit arguments."""
 
     def _make_single_qubit_composite(self):
-        class StubSingleQubit(CompositeGate):
-            custom_name = "stub_h"
+        @qm.composite_gate(name="custom_h")
+        def custom_h(q: Qubit) -> Qubit:
+            return qm.h(q)
 
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                (q,) = qubits
-                return (qm.h(q),)
-
-        return StubSingleQubit()
+        return custom_h
 
     def _make_two_qubit_composite(self):
-        class StubTwoQubit(CompositeGate):
-            custom_name = "stub_cx"
+        @qm.composite_gate(name="custom_cx")
+        def custom_cx(q0: Qubit, q1: Qubit) -> tuple[Qubit, Qubit]:
+            return qm.cx(q0, q1)
 
-            @property
-            def num_target_qubits(self) -> int:
-                return 2
-
-            def _decompose(self, qubits):
-                q0, q1 = qubits
-                q0, q1 = qm.cx(q0, q1)
-                return (q0, q1)
-
-        return StubTwoQubit()
+        return custom_cx
 
     def _make_controlled_composite(self):
-        class StubControlled(CompositeGate):
-            custom_name = "stub_ctrl_h"
-            num_control_qubits = 1
-
-            @property
-            def num_target_qubits(self) -> int:
-                return 1
-
-            def _decompose(self, qubits):
-                (q,) = qubits
-                return (qm.h(q),)
-
-        return StubControlled()
+        return qm.control(self._make_single_qubit_composite())
 
     def test_single_qubit_composite_double_use_raises(self):
         """Reusing qubit after single-qubit composite gate should raise QubitConsumedError."""
@@ -1282,7 +1366,7 @@ class TestStubCompositeGateAffine:
 
         @qkernel
         def bad_circuit(q: Qubit) -> tuple[Qubit, Qubit]:
-            (q2,) = gate(q)
+            q2 = gate(q)
             q3 = qm.x(q)  # q already consumed
             return q2, q3
 
@@ -1295,7 +1379,7 @@ class TestStubCompositeGateAffine:
 
         @qkernel
         def good_circuit(q: Qubit) -> Qubit:
-            (q,) = gate(q)
+            q = gate(q)
             q = qm.x(q)
             return q
 
@@ -1362,7 +1446,7 @@ class TestStubCompositeGateAffine:
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
-            ctrl_out, tgt_out = gate(tgt, controls=(ctrl,))
+            ctrl_out, tgt_out = gate(ctrl, tgt)
             ctrl_bad = qm.x(ctrl)  # ctrl already consumed
             return ctrl_out, tgt_out, ctrl_bad
 
@@ -1375,7 +1459,7 @@ class TestStubCompositeGateAffine:
 
         @qkernel
         def bad_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit, Qubit]:
-            ctrl_out, tgt_out = gate(tgt, controls=(ctrl,))
+            ctrl_out, tgt_out = gate(ctrl, tgt)
             tgt_bad = qm.x(tgt)  # tgt already consumed
             return ctrl_out, tgt_out, tgt_bad
 
@@ -1388,7 +1472,7 @@ class TestStubCompositeGateAffine:
 
         @qkernel
         def good_circuit(ctrl: Qubit, tgt: Qubit) -> tuple[Qubit, Qubit]:
-            ctrl, tgt = gate(tgt, controls=(ctrl,))
+            ctrl, tgt = gate(ctrl, tgt)
             return ctrl, tgt
 
         graph = good_circuit.build()
@@ -1755,47 +1839,20 @@ _DIRECT_ELEMENT_FORBIDDEN_ERRORS = (
 )
 
 
-class _SingleRebindComposite(CompositeGate):
-    custom_name = "single_rebind_comp"
-
-    @property
-    def num_target_qubits(self) -> int:
-        return 1
-
-    def _decompose(self, qubits):
-        (q0,) = qubits
-        q0 = qm.h(q0)
-        return (q0,)
+@qm.composite_gate(name="single_rebind_comp")
+def _single_rebind_composite(q0: qm.Qubit) -> qm.Qubit:
+    return qm.h(q0)
 
 
-class _TwoRebindComposite(CompositeGate):
-    custom_name = "two_rebind_comp"
-
-    @property
-    def num_target_qubits(self) -> int:
-        return 2
-
-    def _decompose(self, qubits):
-        q0, q1 = qubits
-        q0, q1 = qm.cx(q0, q1)
-        return q0, q1
+@qm.composite_gate(name="two_rebind_comp")
+def _two_rebind_composite(
+    q0: qm.Qubit,
+    q1: qm.Qubit,
+) -> tuple[qm.Qubit, qm.Qubit]:
+    return qm.cx(q0, q1)
 
 
-class _ControlledRebindComposite(CompositeGate):
-    custom_name = "controlled_rebind_comp"
-
-    @property
-    def num_target_qubits(self) -> int:
-        return 1
-
-    @property
-    def num_control_qubits(self) -> int:
-        return 1
-
-    def _decompose(self, qubits):
-        (q0,) = qubits
-        q0 = qm.h(q0)
-        return (q0,)
+_controlled_rebind_composite = qm.control(_single_rebind_composite)
 
 
 def _make_rebind_subkernels():
@@ -2353,7 +2410,7 @@ class TestQuantumRebindDetectionComposite:
     """Composite gate rebind behavior and controlled-call regression."""
 
     def test_single_qubit_composite_overwrite_rejected(self):
-        gate = _SingleRebindComposite()
+        gate = _single_rebind_composite
 
         with pytest.raises(QubitRebindError):
 
@@ -2363,7 +2420,7 @@ class TestQuantumRebindDetectionComposite:
                 return a
 
     def test_single_qubit_composite_self_update_allowed(self):
-        gate = _SingleRebindComposite()
+        gate = _single_rebind_composite
 
         @qkernel
         def ok(a: qm.Qubit) -> qm.Qubit:
@@ -2374,7 +2431,7 @@ class TestQuantumRebindDetectionComposite:
         assert graph is not None
 
     def test_single_qubit_composite_new_binding_allowed(self):
-        gate = _SingleRebindComposite()
+        gate = _single_rebind_composite
 
         @qkernel
         def ok(a: qm.Qubit, b: qm.Qubit) -> qm.Qubit:
@@ -2385,7 +2442,7 @@ class TestQuantumRebindDetectionComposite:
         assert graph is not None
 
     def test_two_qubit_composite_tuple_mismatch_rejected(self):
-        gate = _TwoRebindComposite()
+        gate = _two_rebind_composite
 
         with pytest.raises(QubitRebindError):
 
@@ -2397,7 +2454,7 @@ class TestQuantumRebindDetectionComposite:
                 return q1, q2
 
     def test_two_qubit_composite_self_update_allowed(self):
-        gate = _TwoRebindComposite()
+        gate = _two_rebind_composite
 
         @qkernel
         def ok(q1: qm.Qubit, q2: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
@@ -2408,7 +2465,7 @@ class TestQuantumRebindDetectionComposite:
         assert graph is not None
 
     def test_two_qubit_composite_new_binding_allowed(self):
-        gate = _TwoRebindComposite()
+        gate = _two_rebind_composite
 
         @qkernel
         def ok(
@@ -2420,12 +2477,12 @@ class TestQuantumRebindDetectionComposite:
         graph = ok.build()
         assert graph is not None
 
-    def test_controlled_composite_keyword_controls_allowed(self):
-        gate = _ControlledRebindComposite()
+    def test_controlled_composite_uses_control_transform(self):
+        gate = _controlled_rebind_composite
 
         @qkernel
         def circuit(ctrl: qm.Qubit, tgt: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
-            ctrl, tgt = gate(tgt, controls=(ctrl,))
+            ctrl, tgt = gate(ctrl, tgt)
             return ctrl, tgt
 
         graph = circuit.build()
@@ -3023,10 +3080,12 @@ class TestQuantumRebindBranchScopeContract:
     The analyzer suppresses violations detected inside an ``if`` /
     ``for`` / ``while`` body so that legitimate compile-time-if
     dead-branch patterns (``if flag: ... ; else: alt = qubit_array(...);
-    q = alt``) decorate successfully. The IR-level
-    ``AffineValidationPass`` does NOT detect "silent discard" inside
-    runtime branches, so the suppression is a deliberate coverage gap
-    rather than a deferred check — see ``QubitRebindError`` and
+    q = alt``) decorate successfully. Runtime-branch and loop-body
+    silent discards are rejected later, at the IR layer, by
+    ``reject_control_flow_quantum_discard`` (see
+    ``tests/circuit/test_branch_quantum_discard.py``); decoration time
+    must stay silent for both so the compile-time idiom keeps working —
+    see ``QubitRebindError`` and
     ``QuantumRebindAnalyzer._visit_branch_scope`` docstrings. These
     tests lock that contract in so a future change that re-enables
     branch-internal raising (or breaks the legitimate dead-branch
@@ -3236,3 +3295,328 @@ class TestQuantumRebindErrorMessageDispatch:
             "q = some_classical_func(q, ...)"
         ) in msg
         assert "Or bind the new value to a different name" in msg
+
+
+class TestDuplicateQuantumCallArgs:
+    """Binding the same qubit register to two sub-kernel parameters must raise.
+
+    Regression tests for the deferred-view-consumption hole: identical
+    ``VectorView`` arguments used to collapse to a single
+    ``input_view_metas`` entry in ``QKernel.__call__``, silently aliasing
+    both formal registers onto the same physical qubits (or crashing with
+    a raw backend error once the callee entangled them).
+    """
+
+    @staticmethod
+    def _pair_kernel():
+        """Build a fresh two-register sub-kernel (H on ``a``, X on ``b``)."""
+
+        @qkernel
+        def pair(
+            a: qm.Vector[qm.Qubit], b: qm.Vector[qm.Qubit]
+        ) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+            a = qm.h(a)
+            b = qm.x(b)
+            return a, b
+
+        return pair
+
+    def test_same_view_twice_raises(self):
+        """The same VectorView bound to two parameters raises instead of
+        silently aliasing both formal registers onto the same qubits."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            v = q[0:2]
+            x, _y = pair(v, v)  # same view twice
+            q[0:2] = x
+            return qm.measure(q)
+
+        with pytest.raises(
+            QubitConsumedError, match="backed by the same qubit register"
+        ) as exc_info:
+            circuit.build()
+        assert "'a' and 'b'" in str(exc_info.value)
+
+    def test_same_view_twice_entangling_callee_raises(self):
+        """An entangling callee with an aliased view pair raises a Qamomile
+        affine error at trace time, not a raw backend error deep in emit."""
+
+        @qkernel
+        def entangle(
+            a: qm.Vector[qm.Qubit], b: qm.Vector[qm.Qubit]
+        ) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+            a0 = a[0]
+            b0 = b[0]
+            a0, b0 = qm.cx(a0, b0)
+            a[0] = a0
+            b[0] = b0
+            return a, b
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            v = q[0:2]
+            x, _y = entangle(v, v)  # same view twice
+            q[0:2] = x
+            return qm.measure(q)
+
+        with pytest.raises(
+            QubitConsumedError, match="backed by the same qubit register"
+        ):
+            circuit.build()
+
+    def test_stale_and_live_view_versions_raise(self):
+        """A stale SSA version and its live successor passed together raise.
+
+        A broadcast gate on a full view keeps the same backing ``Value``
+        (uuid preserved), so ``v`` and ``v2`` collide on the same-uuid
+        alias guard; either way the program is rejected (previously it
+        emitted the caller's gate twice on the same wires)."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            v = q[0:2]
+            v2 = qm.h(v)
+            x, _y = pair(v, v2)  # stale + live version of one register
+            q[0:2] = x
+            return qm.measure(q)
+
+        with pytest.raises(
+            QubitConsumedError, match="backed by the same qubit register"
+        ):
+            circuit.build()
+
+    def test_consumed_view_arg_raises(self):
+        """An already-consumed view passed as a call argument raises the
+        standard consumed error instead of slipping past deferred
+        consumption."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            v = q[0:2]
+            _v2 = qm.h(v)  # consumes v
+            x, y = pair(v, q[2:4])
+            q[0:2] = x
+            q[2:4] = y
+            return qm.measure(q)
+
+        with pytest.raises(QubitConsumedError, match="already consumed by 'H'"):
+            circuit.build()
+
+    def test_same_vector_twice_raises(self):
+        """A whole Vector bound to two parameters is rejected with the
+        argument-aliasing wording."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            x, _y = pair(q, q)  # same Vector twice
+            return qm.measure(x)
+
+        with pytest.raises(
+            QubitConsumedError, match="backed by the same qubit register"
+        ):
+            circuit.build()
+
+    @pytest.mark.parametrize("use_phase_wrapper", [False, True])
+    def test_parent_vector_and_borrowed_element_raise_without_consuming(
+        self,
+        use_phase_wrapper: bool,
+    ):
+        """A whole register and one of its elements cannot cross one call."""
+
+        @qkernel
+        def mixed(
+            register: qm.Vector[qm.Qubit],
+            element: qm.Qubit,
+        ) -> tuple[qm.Vector[qm.Qubit], qm.Qubit]:
+            """Return a register and scalar argument unchanged.
+
+            Args:
+                register (qm.Vector[qm.Qubit]): Register argument.
+                element (qm.Qubit): Scalar argument.
+
+            Returns:
+                tuple[qm.Vector[qm.Qubit], qm.Qubit]: Original arguments.
+            """
+            return register, element
+
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            register = qubit_array(2, "q")
+            element = register[0]
+            callable_ = qm.global_phase(mixed, 0.25) if use_phase_wrapper else mixed
+            with pytest.raises(
+                QubitConsumedError,
+                match="overlapping physical region",
+            ):
+                callable_(register, element)
+            assert not register._consumed
+            assert not element._consumed
+
+    def test_specialization_failure_does_not_consume_input(self, monkeypatch):
+        """A failed call-site specialization leaves affine ownership intact."""
+        from qamomile.circuit.frontend import qkernel_invocation
+        from qamomile.circuit.frontend.tracer import trace
+
+        @qkernel
+        def identity(q: qm.Qubit) -> qm.Qubit:
+            """Return one qubit unchanged.
+
+            Args:
+                q (qm.Qubit): Input qubit.
+
+            Returns:
+                qm.Qubit: Original input qubit.
+            """
+            return q
+
+        def fail_specialization(*_args, **_kwargs):
+            """Raise the synthetic specialization failure.
+
+            Args:
+                *_args (object): Ignored positional arguments.
+                **_kwargs (object): Ignored keyword arguments.
+
+            Raises:
+                RuntimeError: Always, to exercise pre-consume validation.
+            """
+            raise RuntimeError("specialization failed")
+
+        monkeypatch.setattr(
+            qkernel_invocation,
+            "select_specialized_block",
+            fail_specialization,
+        )
+        with trace():
+            q = qm.qubit("q")
+            with pytest.raises(RuntimeError, match="specialization failed"):
+                qm.global_phase(identity, 0.25)(q)
+            assert not q._consumed
+
+    def test_disjoint_views_accepted(self):
+        """Disjoint views of one array remain a valid argument pair."""
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            x, y = pair(q[0:2], q[2:4])
+            q[0:2] = x
+            q[2:4] = y
+            return qm.measure(q)
+
+        block = circuit.build()
+        assert block is not None
+
+    def test_inline_rejects_duplicate_quantum_call_operands(self):
+        """InlinePass rejects a hand-built InvokeOperation with duplicate args.
+
+        This defends against IR that did not come from ``QKernel.__call__``.
+        """
+        from qamomile.circuit.ir.operation.callable import InvokeOperation
+        from qamomile.circuit.ir.value import Value
+        from qamomile.circuit.transpiler.passes.inline import InlinePass
+
+        pair = self._pair_kernel()
+
+        @qkernel
+        def circuit() -> qm.Vector[qm.Bit]:
+            q = qubit_array(4, "q")
+            x, y = pair(q[0:2], q[2:4])
+            q[0:2] = x
+            q[2:4] = y
+            return qm.measure(q)
+
+        block = circuit.block
+        call_ops = [op for op in block.operations if isinstance(op, InvokeOperation)]
+        assert len(call_ops) == 1
+        call_op = call_ops[0]
+
+        # Positive control: the untampered block inlines cleanly.
+        InlinePass().run(block)
+
+        quantum_indices = [
+            i
+            for i, operand in enumerate(call_op.operands)
+            if isinstance(operand, Value) and operand.type.is_quantum()
+        ]
+        assert len(quantum_indices) == 2
+        call_op.operands[quantum_indices[1]] = call_op.operands[quantum_indices[0]]
+
+        with pytest.raises(QubitConsumedError, match="binds the same quantum value"):
+            InlinePass().run(block)
+
+
+class TestDirectElementBorrowHandoff:
+    """Operation results remain the owner of a directly borrowed slot."""
+
+    @pytest.mark.parametrize("operation", ["gate", "project", "reset"])
+    def test_destructive_followup_marks_the_slot_destroyed(self, operation: str):
+        """A returned scalar can be measured without leaving a stale owner."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            register = qubit_array(1, "q")
+            element = register[0]
+            if operation == "gate":
+                element = qm.h(element)
+            elif operation == "project":
+                element, _ = qm.project_z(element)
+            else:
+                element = qm.reset(element)
+            qm.measure(element)
+            with pytest.raises(QubitConsumedError, match="destructive"):
+                _ = register[0]
+
+
+class TestArrayIndexValidation:
+    """Array indexing rejects aliases and non-integral index types early."""
+
+    @pytest.mark.parametrize("index_kind", ["python_float", "float_handle"])
+    def test_non_integer_element_index_has_clear_type_error(
+        self,
+        index_kind: str,
+    ) -> None:
+        """Floats cannot silently floor or leak an AttributeError."""
+
+        @qkernel
+        def invalid_index() -> Qubit:
+            register = qubit_array(2, "q")
+            index = 1.0 if index_kind == "python_float" else qm.float_(1.0)
+            return register[index]  # type: ignore[index]
+
+        with pytest.raises(TypeError, match="plain int or qmc.UInt"):
+            invalid_index.build()
+
+    def test_nested_slice_rejects_slot_borrowed_from_outer_view(self) -> None:
+        """A nested slice cannot duplicate an outstanding element borrow."""
+
+        @qkernel
+        def aliased_nested_slice() -> qm.Vector[Qubit]:
+            register = qubit_array(4, "q")
+            outer = register[0:4]
+            borrowed = outer[1]
+            _ = borrowed
+            return outer[0:2]
+
+        with pytest.raises(QubitBorrowConflictError, match="already borrowed"):
+            aliased_nested_slice.build()
+
+    def test_vector_iteration_message_uses_shape(self) -> None:
+        """The suggested index loop only uses APIs Vector implements."""
+        from qamomile.circuit.frontend.tracer import trace
+
+        with trace():
+            register = qubit_array(2, "q")
+            with pytest.raises(TypeError, match=r"range\(vector\.shape\[0\]\)"):
+                iter(register)

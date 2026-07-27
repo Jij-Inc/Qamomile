@@ -45,14 +45,14 @@
 # For normal use:
 #
 # ```bash
-# pip install qamomile
+# pip install "qamomile[qiskit,visualization]"
 # ```
 #
 # In this tutorial we use Qiskit as the concrete quantum SDK. QuriParts is also supported, and more quantum SDKs will be added over time.
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import math

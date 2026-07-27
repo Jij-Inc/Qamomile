@@ -29,7 +29,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %% [markdown]
 # ## `UInt`と`Float`の役割

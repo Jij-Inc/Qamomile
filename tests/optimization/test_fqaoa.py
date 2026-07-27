@@ -1,4 +1,6 @@
 import jijmodeling as jm
+import numpy as np
+import ommx.v1
 import pytest
 
 from qamomile.optimization.binary_model import BinaryModel
@@ -76,6 +78,109 @@ def test_get_fqaoa_ansatz_transpile(simple_problem):
 
     assert circuit.num_qubits == fqaoa_converter.num_qubits
     assert len(circuit.parameters) == 4
+
+
+def test_odd_fermion_orbitals_are_orthonormal():
+    """Odd-fermion orbitals retain the constant mode and orthonormal rows."""
+    variables = [
+        ommx.v1.DecisionVariable.binary(
+            site * 2 + orbital,
+            name="x",
+            subscripts=[site, orbital],
+        )
+        for site in range(4)
+        for orbital in range(2)
+    ]
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=variables,
+        objective=0.0,
+        constraints=[(sum(variables) == 3).set_id(0)],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+    converter = FQAOAConverter(instance, num_fermions=3)
+
+    orbital = converter.get_fermi_orbital()
+
+    np.testing.assert_allclose(orbital @ orbital.T, np.eye(3), atol=1e-12)
+
+
+def test_flatten_givens_data_reverses_elimination_order(simple_problem):
+    """State preparation replays decomposition rotations in inverse order."""
+    converter = FQAOAConverter(simple_problem, num_fermions=4)
+    givens = [[(0, 1), 0.25], [(2, 3), -0.5], [(1, 2), 0.75]]
+
+    indices, angles = converter._flatten_givens_data(givens)
+
+    np.testing.assert_array_equal(indices, [[1, 2], [2, 3], [0, 1]])
+    assert angles == [0.75, -0.5, 0.25]
+
+
+def test_fqaoa_rejects_variables_without_two_subscripts():
+    """Malformed variable layout fails with an actionable ValueError."""
+    variable = ommx.v1.DecisionVariable.binary(0, name="x", subscripts=[0])
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=[variable],
+        objective=variable,
+        constraints=[],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+
+    with pytest.raises(ValueError, match="exactly two"):
+        FQAOAConverter(instance, num_fermions=1)
+
+
+def test_fqaoa_preserves_non_particle_constraints_in_cost():
+    """Constraints beyond fixed particle count remain penalty terms."""
+    variables = [
+        ommx.v1.DecisionVariable.binary(
+            site * 2 + orbital,
+            name="x",
+            subscripts=[site, orbital],
+        )
+        for site in range(2)
+        for orbital in range(2)
+    ]
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=variables,
+        objective=0.0,
+        constraints=[
+            (sum(variables) == 1).set_id(0),
+            (variables[0] == 0).set_id(1),
+        ],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+    converter = FQAOAConverter(
+        instance,
+        num_fermions=1,
+        uniform_penalty_weight=5.0,
+    )
+
+    forbidden = converter.spin_model.calc_energy([-1, 1, 1, 1])
+    allowed = converter.spin_model.calc_energy([1, -1, 1, 1])
+
+    assert forbidden > allowed
+
+
+def test_fqaoa_rejects_mismatched_cardinality_constraint():
+    """The prepared fermion sector must match an explicit cardinality RHS."""
+    variables = [
+        ommx.v1.DecisionVariable.binary(
+            site * 2 + orbital,
+            name="x",
+            subscripts=[site, orbital],
+        )
+        for site in range(2)
+        for orbital in range(2)
+    ]
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=variables,
+        objective=0.0,
+        constraints=[(sum(variables) == 2).set_id(17)],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+
+    with pytest.raises(ValueError, match="cardinality constraint 17"):
+        FQAOAConverter(instance, num_fermions=1)
 
 
 @pytest.mark.quri_parts

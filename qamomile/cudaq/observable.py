@@ -12,6 +12,28 @@ from typing import Any
 import qamomile.observable as qm_o
 
 
+def _real_coefficient(value: complex | float, label: str) -> float:
+    """Normalize a Hermitian coefficient to a Python float.
+
+    Args:
+        value (complex | float): Candidate real or complex-typed coefficient.
+        label (str): Diagnostic location.
+
+    Returns:
+        float: Real coefficient accepted by CUDA-Q.
+
+    Raises:
+        ValueError: If the coefficient has a non-negligible imaginary part.
+    """
+    coefficient = complex(value)
+    if not math.isclose(coefficient.imag, 0.0, abs_tol=1e-12):
+        raise ValueError(
+            f"CUDA-Q observable {label} must be real for a Hermitian "
+            f"Hamiltonian, got {value!r}."
+        )
+    return float(coefficient.real)
+
+
 def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
     """Convert qamomile.observable.Hamiltonian to cudaq.SpinOperator.
 
@@ -41,12 +63,14 @@ def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
     result = None
 
     # Add constant term
-    if not math.isclose(hamiltonian.constant, 0.0, abs_tol=1e-15):  # type: ignore[arg-type]
-        result = hamiltonian.constant * spin.i(0)  # type: ignore[attr-defined]
+    constant = _real_coefficient(hamiltonian.constant, "constant")
+    if not math.isclose(constant, 0.0, abs_tol=1e-15):
+        result = constant * spin.i(0)  # type: ignore[attr-defined]
 
     # Convert each term (skip near-zero coefficients to avoid noise)
     for operators, coeff in hamiltonian.terms.items():
-        if math.isclose(coeff, 0.0, abs_tol=1e-15):  # type: ignore[arg-type]
+        real_coeff = _real_coefficient(coeff, f"term {operators!r}")
+        if math.isclose(real_coeff, 0.0, abs_tol=1e-15):
             continue
         term = None
         for op in operators:
@@ -60,9 +84,9 @@ def hamiltonian_to_cudaq_spin_op(hamiltonian: qm_o.Hamiltonian) -> Any:
 
         if term is None:
             # All-identity term
-            scaled = coeff * spin.i(0)  # type: ignore[attr-defined]
+            scaled = real_coeff * spin.i(0)  # type: ignore[attr-defined]
         else:
-            scaled = coeff * term
+            scaled = real_coeff * term
 
         if result is None:
             result = scaled

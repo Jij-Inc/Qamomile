@@ -164,9 +164,16 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         if provider is not None:
             return provider.get_device(device_id)
 
-        from qbraid import (
-            QbraidProvider as _QbraidProvider,  # type: ignore[attr-defined]
-        )
+        try:
+            from qbraid import (
+                QbraidProvider as _QbraidProvider,  # type: ignore[attr-defined]
+            )
+        except ModuleNotFoundError as error:
+            raise ImportError(
+                "qBraid execution requires the optional qbraid dependencies. "
+                "Install them with `pip install 'qamomile[qbraid]'` or "
+                "`uv sync --extra qbraid`."
+            ) from error
 
         if api_key is not None:
             p = _QbraidProvider(api_key=api_key)

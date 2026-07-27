@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.frontend.handle import Float, Observable, Qubit, Vector
+from qamomile.circuit.frontend.qkernel_utils import reject_aliased_quantum_args
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.types.primitives import FloatType
@@ -56,6 +57,7 @@ def expval(
             further classical operations.
 
     Raises:
+        RuntimeError: If no qkernel tracer is active.
         QubitConsumedError: If ``qubits`` was already consumed (e.g.
             measured / cast earlier in the kernel), or if any covered
             slot of a passed view was destroyed by a prior destructive
@@ -85,14 +87,19 @@ def expval(
         executable = transpiler.transpile(vqe_step, bindings={"H": H})
         ```
     """
-    # Convert qubits to Value
+    tracer = get_current_tracer()
+
+    # Convert qubits to Value without consuming ownership until the complete
+    # ExpvalOp has been constructed successfully.
     if isinstance(qubits, tuple):
-        # Tuple of individual Qubits — consume each handle, mirroring
-        # ``measure``'s element path.  The IR operand still wraps the
-        # post-consume Values in a pseudo-ArrayValue so emit-time
-        # unpacking is unaffected.
-        consumed_qubits = tuple(q.consume(operation_name="expval") for q in qubits)
-        qubit_values = [q.value for q in consumed_qubits]
+        reject_aliased_quantum_args(
+            "expval",
+            {f"qubits[{index}]": qubit for index, qubit in enumerate(qubits)},
+            caller="expval",
+        )
+        for qubit in qubits:
+            qubit.validate_consumable("expval")
+        qubit_values = [q.value for q in qubits]
         # Snapshot each element's root ``(array_uuid, index)`` so emit can map
         # the observable's Pauli index to the physical qubit registered under
         # the root array's QInit key, even for a Vector element whose own UUID
@@ -141,13 +148,7 @@ def expval(
         # is skipped.
         if isinstance(qubits, Vector):
             qubits._check_no_consumed_slots("expval")
-        # Destructive consume: validates outstanding borrows, marks
-        # covered slots as consumed for ``VectorView`` operands, and
-        # flips ``_consumed`` so any later use of the handle raises
-        # ``QubitConsumedError``.  The post-consume value is what we
-        # feed into ``ExpvalOp`` so the IR sees the SSA version that
-        # ``consume`` produced.
-        qubits = qubits.consume(operation_name="expval")
+        qubits.validate_consumable("expval")
         qubits_value = qubits.value
 
     # Create result Float value
@@ -159,8 +160,14 @@ def expval(
         results=[result_value],
     )
 
-    # Emit to tracer
-    tracer = get_current_tracer()
+    if isinstance(qubits, tuple):
+        for qubit in qubits:
+            qubit.consume(operation_name="expval")
+    else:
+        # Destructive consume marks the scalar, whole register, or view slots
+        # unavailable only after every fallible construction step above.
+        qubits.consume(operation_name="expval")
+
     tracer.add_operation(op)
 
     return Float(value=result_value)

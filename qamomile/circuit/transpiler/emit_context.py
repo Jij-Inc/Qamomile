@@ -4,25 +4,25 @@ Background — what was wrong with the bare ``dict[str, Any]``:
 
 The pre-EmitContext design used a single ``bindings: dict[str, Any]``
 threaded through every emit-pipeline function. That dict served at least
-seven distinct semantic purposes simultaneously:
+eight distinct semantic purposes simultaneously:
 
 1. User-supplied kernel parameters (keyed by parameter name).
-2. Loop iteration variables (keyed by loop_var name; pushed on entry,
+2. Loop iteration variables (keyed by Value UUID; pushed on entry,
    restored on exit).
 3. Emit-time-computed intermediates — ``BinOp`` / ``CompOp`` /
    ``CondOp`` / ``NotOp`` results (keyed by Value UUID after Fix B;
    originally also keyed by Value name, which collided across tmps).
-4. Phi-output aliases (keyed by phi-output UUID; written by
-   ``register_classical_phi_aliases``).
+4. Merge-output aliases (keyed by merge-output UUID; written by
+   ``register_classical_merge_aliases``).
 5. Backend runtime expressions (e.g. ``qiskit.circuit.classical.expr.Expr``
    for compound runtime if-conditions).
-6. Array data (keyed by array name; bound iterables passed by user).
-7. Dict data (keyed by dict name; bound iterables passed by user).
-8. Pauli observables (keyed by observable name).
+6. Array data (keyed by ArrayValue UUID).
+7. Dict data (keyed by DictValue UUID).
+8. Pauli observables (keyed by Value UUID).
 
 This overloading was the structural cause of every name-collision bug
 class seen in this codebase: ``"bit_tmp"`` chained predicates,
-``j_phi_4`` phi aliases, the inline-pass ``DictValue`` drop, and the
+``j_merge_4`` merge aliases, the inline-pass ``DictValue`` drop, and the
 type-blind ``bool(...)`` coercion in ``resolve_operand``. Each was
 patched locally; the structural overloading remained.
 
@@ -85,7 +85,7 @@ class EmitContext(dict):
             user-chosen variable names in nested or sibling loops never
             collide.
         _values: Emit-time-computed intermediate values (``BinOp``
-            results, ``CompOp``/``CondOp``/``NotOp`` results, phi
+            results, ``CompOp``/``CondOp``/``NotOp`` results, merge
             aliases), keyed by Value UUID.
         _runtime_exprs: Backend runtime-expression objects (e.g. Qiskit
             ``expr.Expr`` for compound classical conditions), keyed by
@@ -194,7 +194,7 @@ class EmitContext(dict):
         """Bind an emit-time-computed intermediate by Value UUID.
 
         Use for ``BinOp`` / ``CompOp`` / ``CondOp`` / ``NotOp`` results,
-        phi aliases, and other UUID-identified intermediates.
+        merge aliases, and other UUID-identified intermediates.
         """
         self._values[uuid] = value
         self[uuid] = value
@@ -223,16 +223,14 @@ class EmitContext(dict):
         """Bind array data by ``ArrayValue.uuid``.
 
         Args:
-            uuid: The array Value's UUID.
-            data: The bound iterable / sequence / Vector handle.
-            display_name: Migration shim — also writes the flat-dict view
-                under the array's user-facing name. Remove once Phase 3
-                of #7 lands.
+            uuid (str): The array Value's UUID.
+            data (Any): The bound iterable / sequence / Vector handle.
+            display_name (str | None): Reserved for debug-only display. It is
+                not used as a binding key.
         """
+        del display_name
         self._array_data[uuid] = data
         self[uuid] = data
-        if display_name:
-            self[display_name] = data
 
     def get_array_data(self, uuid: str) -> Any:
         """Get array data by ``ArrayValue.uuid``, or None."""
@@ -247,14 +245,14 @@ class EmitContext(dict):
         """Bind dict data by ``DictValue.uuid``.
 
         Args:
-            uuid: The dict Value's UUID.
-            data: The bound dict / iterable.
-            display_name: Migration shim — see ``set_array_data``.
+            uuid (str): The dict Value's UUID.
+            data (Any): The bound dict / iterable.
+            display_name (str | None): Reserved for debug-only display. It is
+                not used as a binding key.
         """
+        del display_name
         self._dict_data[uuid] = data
         self[uuid] = data
-        if display_name:
-            self[display_name] = data
 
     def get_dict_data(self, uuid: str) -> Any:
         """Get dict data by ``DictValue.uuid``, or None."""
@@ -269,14 +267,14 @@ class EmitContext(dict):
         """Bind a Pauli observable by Value UUID.
 
         Args:
-            uuid: The observable Value's UUID.
-            observable: A ``qm_o.Hamiltonian`` (or backend-equivalent).
-            display_name: Migration shim — see ``set_array_data``.
+            uuid (str): The observable Value's UUID.
+            observable (Any): A ``qm_o.Hamiltonian`` (or backend-equivalent).
+            display_name (str | None): Reserved for debug-only display. It is
+                not used as a binding key.
         """
+        del display_name
         self._observables[uuid] = observable
         self[uuid] = observable
-        if display_name:
-            self[display_name] = observable
 
     def get_observable(self, uuid: str) -> Any:
         """Get a Pauli observable by Value UUID, or None."""
@@ -340,3 +338,50 @@ class EmitContext(dict):
         new._dict_data = self._dict_data.copy()
         new._observables = self._observables.copy()
         return new
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """Capture the dict body and every semantic slot for later restore.
+
+        Used to run a throwaway dry-run emission (ancilla demand counting)
+        against the same context object and then roll it back, so the count
+        run's intermediate fold results and parameters do not leak into the
+        real emission. Unlike ``copy`` this records enough to restore *this*
+        object in place, preserving its identity for callers that hold a
+        reference to it.
+
+        Returns:
+            dict[str, Any]: A snapshot passable to ``restore_state``.
+        """
+        return {
+            "body": dict(self),
+            "_params": self._params.copy(),
+            "_loop_vars": self._loop_vars.copy(),
+            "_values": self._values.copy(),
+            "_runtime_exprs": self._runtime_exprs.copy(),
+            "_array_data": self._array_data.copy(),
+            "_dict_data": self._dict_data.copy(),
+            "_observables": self._observables.copy(),
+        }
+
+    def restore_state(self, snapshot: dict[str, Any]) -> None:
+        """Restore the dict body and slots from ``snapshot`` in place.
+
+        The object's identity is preserved (the dict body is cleared and
+        repopulated rather than replaced), so references held elsewhere stay
+        valid.
+
+        Args:
+            snapshot (dict[str, Any]): A snapshot from ``snapshot_state``.
+
+        Returns:
+            None.
+        """
+        dict.clear(self)
+        dict.update(self, snapshot["body"])
+        self._params = snapshot["_params"]
+        self._loop_vars = snapshot["_loop_vars"]
+        self._values = snapshot["_values"]
+        self._runtime_exprs = snapshot["_runtime_exprs"]
+        self._array_data = snapshot["_array_data"]
+        self._dict_data = snapshot["_dict_data"]
+        self._observables = snapshot["_observables"]

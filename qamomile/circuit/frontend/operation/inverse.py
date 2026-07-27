@@ -1,0 +1,2669 @@
+"""Frontend helpers for applying inverse quantum operations."""
+
+from __future__ import annotations
+
+import dataclasses
+import inspect
+from collections.abc import Callable, Sequence
+from functools import partial
+from numbers import Real
+from typing import TYPE_CHECKING, Any, cast
+
+from qamomile.circuit.frontend.handle import Handle
+from qamomile.circuit.frontend.handle.array import ArrayBase, VectorView
+from qamomile.circuit.frontend.operation.control import (
+    _control_callable_metadata,
+    _qkernel_for_callable,
+)
+from qamomile.circuit.frontend.param_validation import _validate_bound_handles
+from qamomile.circuit.frontend.qkernel import QKernel
+from qamomile.circuit.frontend.qkernel_callable import (
+    qkernel_callable_attrs,
+    qkernel_callable_def,
+    qkernel_callable_ref,
+    qkernel_invoke_block,
+)
+from qamomile.circuit.frontend.qkernel_invocation import invoke_qkernel_with_operation
+from qamomile.circuit.frontend.qkernel_like import QKernelLike
+from qamomile.circuit.frontend.qkernel_specialization import (
+    select_specialized_block,
+)
+from qamomile.circuit.frontend.qkernel_utils import (
+    promote_literal_to_handle,
+    reject_aliased_quantum_args,
+)
+from qamomile.circuit.frontend.static_binding import (
+    StaticBindingProxy,
+    is_static_binding_annotation,
+    validate_static_binding_argument,
+)
+from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.effect import require_unitary_effects
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallPolicy,
+    CallTransform,
+    CompositeGateType,
+    InvokeOperation,
+    signature_from_block,
+    signature_from_values,
+)
+from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
+    IfOperation,
+    RegionArg,
+    WhileOperation,
+)
+from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
+    ControlledUOperation,
+    GateOperation,
+    GateOperationType,
+    MeasureOperation,
+    MeasureQFixedOperation,
+    MeasureVectorOperation,
+    SymbolicControlledU,
+)
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.operation import (
+    Operation,
+    OperationKind,
+    QInitOperation,
+)
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.types.primitives import FloatType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase, ValueLike
+from qamomile.circuit.ir.value_mapping import ValueSubstitutor
+
+if TYPE_CHECKING:
+    from inspect import BoundArguments
+
+
+_SELF_INVERSE_GATES: frozenset[GateOperationType] = frozenset(
+    {
+        GateOperationType.H,
+        GateOperationType.X,
+        GateOperationType.Y,
+        GateOperationType.Z,
+        GateOperationType.CX,
+        GateOperationType.CZ,
+        GateOperationType.SWAP,
+        GateOperationType.TOFFOLI,
+    }
+)
+
+_DAGGER_GATES: dict[GateOperationType, GateOperationType] = {
+    GateOperationType.S: GateOperationType.SDG,
+    GateOperationType.SDG: GateOperationType.S,
+    GateOperationType.T: GateOperationType.TDG,
+    GateOperationType.TDG: GateOperationType.T,
+}
+
+_ROTATION_GATES: frozenset[GateOperationType] = frozenset(
+    {
+        GateOperationType.P,
+        GateOperationType.RX,
+        GateOperationType.RY,
+        GateOperationType.RZ,
+        GateOperationType.CP,
+        GateOperationType.RZZ,
+    }
+)
+
+
+def _normalize_zero(value: float) -> float:
+    """Normalize signed floating zero to positive zero.
+
+    Args:
+        value (float): Floating-point value to normalize.
+
+    Returns:
+        float: `0.0` when `value` is either signed zero, otherwise `value`.
+    """
+    return abs(value) if value == 0.0 else value
+
+
+@dataclasses.dataclass(frozen=True)
+class _InverseRotationCallable:
+    """Apply the inverse of a native rotation gate callable.
+
+    Args:
+        rotation_callable (Callable[..., Any]): Native rotation gate
+            callable whose signature should be mirrored for argument
+            binding and invocation.
+        angle_param (str): Name of the angle parameter to negate before
+            invoking `rotation_callable`.
+    """
+
+    rotation_callable: Callable[..., Any]
+    angle_param: str
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Apply the native inverse rotation operation.
+
+        Args:
+            *args (Any): Positional arguments accepted by
+                `rotation_callable`.
+            **kwargs (Any): Keyword arguments accepted by
+                `rotation_callable`.
+
+        Returns:
+            Any: Result from `rotation_callable` with the angle negated.
+
+        Raises:
+            TypeError: If the supplied arguments do not match the rotation
+                gate signature.
+        """
+        signature = inspect.signature(self.rotation_callable)
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        negated = -bound.arguments[self.angle_param]
+        if isinstance(negated, Real):
+            negated = _normalize_zero(float(negated))
+        bound.arguments[self.angle_param] = negated
+        return self.rotation_callable(*bound.args, **bound.kwargs)
+
+
+@dataclasses.dataclass
+class _InputBinding:
+    """Track a bound inverse-call argument.
+
+    Args:
+        name (str): Python parameter name in the wrapped kernel.
+        handle (Handle): Original frontend handle supplied by the caller.
+        active_handle (Handle): Handle whose value should be used in IR.
+            Starts as a validation preview and becomes the consume successor
+            only when ownership is committed.
+        block_input (ValueBase): The corresponding input value in the
+            selected block.
+    """
+
+    name: str
+    handle: Handle
+    active_handle: Handle
+    block_input: ValueBase
+
+    @property
+    def is_quantum(self) -> bool:
+        """Return whether this binding carries quantum state.
+
+        Returns:
+            bool: True when the active handle's IR value is quantum typed.
+        """
+        return self.active_handle.value.type.is_quantum()
+
+
+@dataclasses.dataclass(frozen=True)
+class _RegionAffineSummary:
+    """Describe one independently affine loop-carried scalar.
+
+    Args:
+        init (Value): Carry value before the first loop iteration.
+        carry_type (UIntType | FloatType): Scalar IR type of the carry.
+        delta (int | float): Constant change over one complete iteration.
+    """
+
+    init: Value
+    carry_type: UIntType | FloatType
+    delta: int | float
+
+
+def _substitute_value(value: ValueBase, value_map: dict[str, ValueBase]) -> ValueBase:
+    """Resolve a value through an inverse-construction mapping.
+
+    Args:
+        value (ValueBase): Value to substitute.
+        value_map (dict[str, ValueBase]): UUID-keyed value mapping.
+
+    Returns:
+        ValueBase: The substituted value, with nested array metadata also
+            rewritten when needed.
+    """
+    return ValueSubstitutor(value_map, transitive=True).substitute_value(value)
+
+
+def _as_value(value: ValueBase, context: str) -> Value:
+    """Return an IR Value or raise a clear error.
+
+    Args:
+        value (ValueBase): Value candidate.
+        context (str): Human-readable context for the error message.
+
+    Returns:
+        Value: The same value narrowed to `Value`.
+
+    Raises:
+        TypeError: If `value` is not a `Value`.
+    """
+    if isinstance(value, Value):
+        return value
+    raise TypeError(f"{context} requires a Value, got {type(value).__name__}.")
+
+
+def _static_quantum_width(value: ValueBase) -> int | None:
+    """Return the compile-time scalar qubit width of a quantum value.
+
+    Args:
+        value (ValueBase): Scalar qubit or quantum array value. The width
+            is computed as the product over all shape dimensions so the
+            result stays correct for any array rank.
+
+    Returns:
+        int | None: Number of scalar qubits represented by ``value`` when
+            statically known, or None when the value is an array with no
+            shape or with any non-constant dimension.
+    """
+    if isinstance(value, ArrayValue):
+        if not value.shape:
+            return None
+        width = 1
+        for dim in value.shape:
+            if not dim.is_constant():
+                return None
+            const = dim.get_const()
+            assert const is not None
+            width *= int(const)
+        return width
+    return 1
+
+
+def _inverse_invoke_target_width(
+    op: InvokeOperation,
+    current_qubits: Sequence[ValueBase],
+) -> int:
+    """Return the scalar target width for an inverse invocation.
+
+    Args:
+        op (InvokeOperation): Invocation being inverted.
+        current_qubits (Sequence[ValueBase]): Current result-side quantum
+            values at the inverse call site.
+
+    Returns:
+        int: Static scalar target width when all target values have known
+            width, otherwise the invocation's recorded target width.
+    """
+    target_values = list(current_qubits[len(op.control_qubits) :])
+    widths = [_static_quantum_width(value) for value in target_values]
+    if widths and all(width is not None for width in widths):
+        return sum(cast(int, width) for width in widths)
+    return op.num_target_qubits
+
+
+def _fresh_result_value(
+    value: ValueBase,
+    value_map: dict[str, ValueBase],
+) -> ValueBase:
+    """Create a next-version result with mapped metadata fields.
+
+    Args:
+        value (ValueBase): Original result value to clone.
+        value_map (dict[str, ValueBase]): Current inverse value mapping.
+
+    Returns:
+        ValueBase: A fresh next-version value with parent arrays, shape
+            values, and slice metadata resolved through `value_map`.
+    """
+    return _substitute_value(value.next_version(), value_map)
+
+
+def _const_float(name: str, value: float) -> Value:
+    """Create a constant float IR value.
+
+    Args:
+        name (str): Display name for the constant.
+        value (float): Numeric value to store.
+
+    Returns:
+        Value: A `FloatType` value carrying `value` as metadata.
+    """
+    return Value(type=FloatType(), name=name).with_const(_normalize_zero(value))
+
+
+def _const_uint(name: str, value: int) -> Value:
+    """Create a constant UInt IR value.
+
+    Args:
+        name (str): Display name for the constant.
+        value (int): Integer value to store. Negative sentinel values are
+            accepted because existing loop IR uses `UIntType` for Python
+            range bounds such as `-1`.
+
+    Returns:
+        Value: A `UIntType` value carrying `value` as metadata.
+    """
+    return Value(type=UIntType(), name=name).with_const(value)
+
+
+def _validate_input_shape(
+    name: str,
+    block_input: ValueBase,
+    actual: ValueBase,
+) -> None:
+    """Validate that an inverse call argument matches the wrapped input shape.
+
+    Args:
+        name (str): Python argument name being checked.
+        block_input (ValueBase): Input value declared by the wrapped block.
+        actual (ValueBase): Caller-side value supplied to the inverse wrapper.
+
+    Returns:
+        None.
+
+    Raises:
+        TypeError: If one side is an array value and the other is scalar.
+    """
+    expected_array = isinstance(block_input, ArrayValue)
+    actual_array = isinstance(actual, ArrayValue)
+    if expected_array != actual_array:
+        expected = "Vector" if expected_array else "scalar"
+        got = "Vector" if actual_array else "scalar"
+        raise TypeError(
+            f"inverse(): argument {name!r} shape does not match the wrapped "
+            f"kernel input; expected {expected}, got {got}."
+        )
+
+
+def _inverse_opaque_name(name: str) -> str:
+    """Return an opaque inverse-callable name.
+
+    Args:
+        name (str): Original custom composite name.
+
+    Returns:
+        str: Name with an `_inv` suffix toggled.
+    """
+    return name[:-4] if name.endswith("_inv") else f"{name}_inv"
+
+
+def _operation_result_map(
+    op: Operation,
+    value_map: dict[str, ValueBase],
+) -> dict[str, ValueBase]:
+    """Build fresh result substitutions for an operation.
+
+    Args:
+        op (Operation): Operation whose results should be cloned.
+        value_map (dict[str, ValueBase]): Current inverse value mapping.
+
+    Returns:
+        dict[str, ValueBase]: Mapping from original result UUIDs to fresh
+            result values.
+    """
+    return {
+        result.uuid: _fresh_result_value(result, value_map) for result in op.results
+    }
+
+
+class _BlockInverter:
+    """Invert supported Qamomile IR blocks.
+
+    The inverter emits classical helper operations in original order, then
+    walks quantum operations in reverse order. It intentionally rejects
+    non-unitary operations and control flow whose inverse is not yet defined.
+
+    Args:
+        None.
+    """
+
+    def __init__(self) -> None:
+        """Initialize an empty recursion guard."""
+        self._active_blocks: set[int] = set()
+
+    def invert_block(
+        self,
+        block: Block,
+        extra_value_map: dict[str, ValueBase] | None = None,
+    ) -> Block:
+        """Create a standalone inverse block.
+
+        Args:
+            block (Block): Block to invert. Its quantum outputs must be
+                pass-through versions of its quantum inputs.
+            extra_value_map (dict[str, ValueBase] | None): Optional
+                UUID-keyed substitutions for auxiliary values such as
+                call-site-resolved vector shape dimensions. Defaults to
+                None.
+
+        Returns:
+            Block: A hierarchical block containing the inverse operations.
+
+        Raises:
+            NotImplementedError: If the block contains an unsupported
+                operation or a recursive cycle.
+            TypeError: If the block output contract is not unitary-like.
+        """
+        self._reject_unsupported_control_flow(block.operations)
+        interface_substitutor = ValueSubstitutor(extra_value_map or {})
+        input_values = [
+            cast(ValueLike, interface_substitutor.substitute_value(value))
+            for value in block.input_values
+        ]
+        value_map: dict[str, ValueBase] = {
+            original.uuid: specialized
+            for original, specialized in zip(
+                block.input_values,
+                input_values,
+                strict=True,
+            )
+        }
+        if extra_value_map is not None:
+            value_map.update(extra_value_map)
+        self._seed_output_values(block, value_map)
+        operations = self._invert_block_operations(block, value_map)
+        output_values = [
+            cast(Value, value_map[value.uuid])
+            for value in block.input_values
+            if value.type.is_quantum()
+        ]
+        return Block(
+            name=f"{block.name}_inverse",
+            label_args=list(block.label_args),
+            input_values=input_values,
+            output_values=cast(list[ValueLike], output_values),
+            operations=operations,
+            kind=BlockKind.HIERARCHICAL,
+            parameters={
+                name: cast(
+                    Value,
+                    interface_substitutor.substitute_value(parameter),
+                )
+                for name, parameter in block.parameters.items()
+            },
+            param_slots=block.param_slots,
+            static_bindings=block.static_bindings,
+        )
+
+    def invert_call_site(
+        self,
+        block: Block,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert a block into the caller's current operation list.
+
+        Args:
+            block (Block): Block to invert.
+            value_map (dict[str, ValueBase]): Caller-side mapping seeded
+                with block inputs and outputs.
+
+        Returns:
+            list[Operation]: Inverse operations ready to append to the
+                active tracer.
+
+        Raises:
+            NotImplementedError: If an unsupported operation is reached.
+            TypeError: If the block output contract is not unitary-like.
+        """
+        self._reject_unsupported_control_flow(block.operations)
+        self._seed_output_values(block, value_map)
+        return self._invert_block_operations(block, value_map)
+
+    def _reject_unsupported_control_flow(self, operations: list[Operation]) -> None:
+        """Raise early for control-flow forms whose inverse is undefined.
+
+        Args:
+            operations (list[Operation]): Operations to scan.
+
+        Returns:
+            None.
+
+        Raises:
+            NotImplementedError: If an unsupported control-flow operation is
+                found.
+        """
+        for op in operations:
+            if isinstance(op, (IfOperation, WhileOperation, ForItemsOperation)):
+                raise NotImplementedError(
+                    f"inverse() does not support {type(op).__name__} yet."
+                )
+            if isinstance(op, ForOperation):
+                self._reject_unsupported_control_flow(op.operations)
+
+    def _seed_output_values(
+        self,
+        block: Block,
+        value_map: dict[str, ValueBase],
+    ) -> None:
+        """Map block outputs to the current caller-side quantum values.
+
+        Args:
+            block (Block): Block whose outputs are being used as inverse
+                inputs.
+            value_map (dict[str, ValueBase]): Mapping to mutate.
+
+        Returns:
+            None.
+
+        Raises:
+            TypeError: If any output is non-quantum or does not correspond
+                to exactly one quantum input.
+        """
+        quantum_inputs = [
+            value for value in block.input_values if value.type.is_quantum()
+        ]
+        quantum_outputs = list(block.output_values)
+        if len(quantum_outputs) != len(quantum_inputs):
+            raise TypeError(
+                "inverse() can only invert kernels whose quantum outputs "
+                "preserve every quantum input."
+            )
+        output_logical_ids = [output.logical_id for output in quantum_outputs]
+        input_logical_ids = [input_value.logical_id for input_value in quantum_inputs]
+        if set(output_logical_ids) != set(input_logical_ids) or len(
+            output_logical_ids
+        ) != len(set(output_logical_ids)):
+            raise TypeError(
+                "inverse() can only invert kernels whose quantum outputs "
+                "preserve the logical identity of every input quantum value."
+            )
+        quantum_inputs_by_logical_id = {
+            value.logical_id: value for value in quantum_inputs
+        }
+        positional_values = [
+            value_map[input_value.uuid] for input_value in quantum_inputs
+        ]
+        for output, positional_value in zip(quantum_outputs, positional_values):
+            if not output.type.is_quantum():
+                raise TypeError(
+                    "inverse() can only invert kernels whose outputs are "
+                    "quantum values corresponding to quantum inputs."
+                )
+            input_value = quantum_inputs_by_logical_id.get(output.logical_id)
+            if input_value is None:
+                raise TypeError(
+                    "inverse() can only invert kernels whose quantum outputs "
+                    "preserve the logical identity of an input quantum value."
+                )
+            value_map[input_value.uuid] = positional_value
+            value_map[output.uuid] = positional_value
+
+    def _invert_block_operations(
+        self,
+        block: Block,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert all operations in a block.
+
+        Args:
+            block (Block): Block being inverted.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: Inverted operation list.
+
+        Raises:
+            NotImplementedError: If a recursive block cycle or unsupported
+                operation is encountered.
+        """
+        block_id = id(block)
+        if block_id in self._active_blocks:
+            raise NotImplementedError("inverse() does not support recursive kernels.")
+        self._active_blocks.add(block_id)
+        try:
+            return self._invert_operations(block.operations, value_map)
+        finally:
+            self._active_blocks.remove(block_id)
+
+    def _invert_operations(
+        self,
+        operations: list[Operation],
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert an operation list.
+
+        Args:
+            operations (list[Operation]): Operations to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: Classical clones followed by reversed quantum
+                inverses.
+
+        Raises:
+            NotImplementedError: If an unsupported operation is encountered.
+        """
+        inverted: list[Operation] = []
+        for op in operations:
+            if isinstance(op, ReturnOperation):
+                continue
+            if isinstance(op, ForOperation):
+                inverted.extend(self._prepare_region_results(op, value_map))
+            if op.operation_kind is OperationKind.CLASSICAL:
+                inverted.append(self._clone_classical_operation(op, value_map))
+
+        for op in reversed(operations):
+            if isinstance(op, ReturnOperation):
+                continue
+            if op.operation_kind is OperationKind.CLASSICAL:
+                continue
+            inverted.extend(self._invert_operation(op, value_map))
+        return inverted
+
+    def _prepare_region_results(
+        self,
+        operation: ForOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Materialize final values of static range-loop RegionArgs.
+
+        The inverse walk visits quantum operations after a loop before it
+        visits the loop itself. Publish each loop's final classical carry in
+        forward order first so post-loop gates and later loop bounds resolve
+        independently of that reversed quantum walk. Constant initial values
+        are folded eagerly to keep later static bounds trace-time resolvable.
+
+        Args:
+            operation (ForOperation): Static range loop to pre-analyze.
+            value_map (dict[str, ValueBase]): Active inverse substitutions to
+                update with each `RegionArg.result`.
+
+        Returns:
+            list[Operation]: Classical prefix operations needed for symbolic
+                UInt initial values.
+
+        Raises:
+            NotImplementedError: If a non-empty loop has an unsupported carry
+                or unresolved range bounds.
+        """
+        prefix: list[Operation] = []
+        if not operation.region_args:
+            return prefix
+        start, stop, step = self._resolve_range_constants(operation, value_map)
+        trip_count = self._range_trip_count(start, stop, step)
+        if trip_count == 0:
+            for region_arg in operation.region_args:
+                value_map[region_arg.result.uuid] = _substitute_value(
+                    region_arg.init,
+                    value_map,
+                )
+            return prefix
+
+        for region_arg in operation.region_args:
+            summary = self._analyze_region_arg(operation, region_arg, value_map)
+            if summary is None:
+                raise self._unsupported_region_arg_error(region_arg)
+            if isinstance(summary.carry_type, FloatType):
+                result = summary.init
+            else:
+                result = self._materialize_uint_offset(
+                    summary.init,
+                    cast(int, summary.delta) * trip_count,
+                    prefix,
+                    f"{region_arg.var_name}_inverse_final",
+                )
+            value_map[region_arg.result.uuid] = result
+        return prefix
+
+    def _materialize_uint_offset(
+        self,
+        base: Value,
+        offset: int,
+        operations: list[Operation],
+        label: str,
+    ) -> Value:
+        """Materialize an exact UInt base-plus-constant expression.
+
+        Args:
+            base (Value): Initial UInt value.
+            offset (int): Exact constant offset to add.
+            operations (list[Operation]): Destination for a required symbolic
+                arithmetic operation.
+            label (str): Diagnostic name for a newly created result.
+
+        Returns:
+            Value: Folded constant, unchanged base, or emitted arithmetic
+                result representing `base + offset`.
+        """
+        if offset == 0:
+            return base
+        constant = base.get_const()
+        if type(constant) is int:
+            return Value(type=UIntType(), name=label).with_const(constant + offset)
+        result = Value(type=UIntType(), name=label)
+        kind = BinOpKind.ADD if offset > 0 else BinOpKind.SUB
+        operations.append(
+            BinOp(
+                operands=[base, _const_uint(f"{label}_offset", abs(offset))],
+                results=[result],
+                kind=kind,
+            )
+        )
+        return result
+
+    def _unsupported_region_arg_error(
+        self,
+        region_arg: RegionArg,
+    ) -> NotImplementedError:
+        """Build the uniform unsupported-carry construction error.
+
+        Args:
+            region_arg (RegionArg): Carry that cannot be inverted safely.
+
+        Returns:
+            NotImplementedError: Error describing the supported carry forms.
+        """
+        return NotImplementedError(
+            "inverse() supports loop-carried UInt values only with a constant "
+            "additive recurrence, and Float values only with an identity "
+            "recurrence. Rewrite independent UInt carry "
+            f"{region_arg.var_name!r} as `carry = carry + constant`, leave a "
+            "Float carry unchanged, or remove it from the inverted quantum "
+            "loop. Coupled carries are not supported."
+        )
+
+    def _clone_classical_operation(
+        self,
+        op: Operation,
+        value_map: dict[str, ValueBase],
+    ) -> Operation:
+        """Clone a classical operation with substituted operands.
+
+        Args:
+            op (Operation): Classical operation to clone.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            Operation: The cloned operation.
+        """
+        result_map = _operation_result_map(op, value_map)
+        substitutor = ValueSubstitutor({**value_map, **result_map}, transitive=True)
+        cloned = substitutor.substitute_operation(op)
+        value_map.update(result_map)
+        return cloned
+
+    def _invert_operation(
+        self,
+        op: Operation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert a single non-classical operation.
+
+        Args:
+            op (Operation): Operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: One or more inverse operations.
+
+        Raises:
+            NotImplementedError: If the operation is unsupported or
+                non-unitary.
+        """
+        if isinstance(op, GateOperation):
+            return self._invert_gate(op, value_map)
+        if isinstance(op, InverseBlockOperation):
+            return self._invert_inverse_block(op, value_map)
+        if isinstance(op, InvokeOperation):
+            return self._invert_invoke(op, value_map)
+        if isinstance(op, GlobalPhaseOperation):
+            operations, phase = self._negate_angle(op.phase, value_map)
+            return [
+                *operations,
+                GlobalPhaseOperation(operands=[phase], results=[]),
+            ]
+        if isinstance(op, PauliEvolveOp):
+            return self._invert_pauli_evolve(op, value_map)
+        if isinstance(op, ControlledUOperation):
+            return self._invert_controlled_u(op, value_map)
+        if isinstance(op, SelectOperation):
+            return self._invert_select(op, value_map)
+        if isinstance(op, ForOperation):
+            return self._invert_for(op, value_map)
+        if isinstance(op, (IfOperation, WhileOperation, ForItemsOperation)):
+            raise NotImplementedError(
+                f"inverse() does not support {type(op).__name__} yet."
+            )
+        if isinstance(
+            op,
+            (
+                MeasureOperation,
+                MeasureVectorOperation,
+                MeasureQFixedOperation,
+            ),
+        ):
+            raise NotImplementedError(
+                f"inverse() cannot invert non-unitary {type(op).__name__}."
+            )
+        if isinstance(op, QInitOperation):
+            raise NotImplementedError(
+                "inverse() cannot invert kernels that allocate qubits internally."
+            )
+        raise NotImplementedError(
+            f"inverse() does not know how to invert {type(op).__name__}."
+        )
+
+    def _negate_angle(
+        self,
+        rotation_angle: Value,
+        value_map: dict[str, ValueBase],
+    ) -> tuple[list[Operation], Value]:
+        """Create the IR value representing `-theta`.
+
+        Args:
+            rotation_angle (Value): Angle value to negate.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            tuple[list[Operation], Value]: Extra classical operations and
+                the resulting negated angle value.
+        """
+        mapped_rotation_angle = _as_value(
+            _substitute_value(rotation_angle, value_map),
+            "angle",
+        )
+        if mapped_rotation_angle.is_constant():
+            const = mapped_rotation_angle.get_const()
+            assert const is not None
+            return [], _const_float(
+                f"{mapped_rotation_angle.name}_inverse",
+                -float(const),
+            )
+
+        minus_one = _const_float("inverse_minus_one", -1.0)
+        result = Value(type=FloatType(), name=f"{mapped_rotation_angle.name}_inverse")
+        op = BinOp(
+            operands=[mapped_rotation_angle, minus_one],
+            results=[result],
+            kind=BinOpKind.MUL,
+        )
+        return [op], result
+
+    def _invert_gate(
+        self,
+        op: GateOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert a native gate operation.
+
+        Args:
+            op (GateOperation): Gate operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: The inverse gate operation, plus any needed
+                classical angle-negation operation.
+
+        Raises:
+            NotImplementedError: If the gate type is unknown.
+        """
+        if op.gate_type in _SELF_INVERSE_GATES:
+            inverse_gate_type = op.gate_type
+        elif op.gate_type in _DAGGER_GATES:
+            inverse_gate_type = _DAGGER_GATES[op.gate_type]
+        elif op.gate_type in _ROTATION_GATES:
+            inverse_gate_type = op.gate_type
+        else:
+            raise NotImplementedError(
+                f"inverse() does not know how to invert {op.gate_type}."
+            )
+
+        current_qubits = [
+            _as_value(_substitute_value(result, value_map), "gate result")
+            for result in op.results
+        ]
+        new_results = [qubit.next_version() for qubit in current_qubits]
+        extra_ops: list[Operation] = []
+        rotation_angle = op.theta
+        if rotation_angle is None:
+            inverse_op = GateOperation.fixed(
+                inverse_gate_type,
+                current_qubits,
+                new_results,
+            )
+        else:
+            angle_ops, inverse_rotation_angle = self._negate_angle(
+                rotation_angle,
+                value_map,
+            )
+            extra_ops.extend(angle_ops)
+            inverse_op = GateOperation.rotation(
+                inverse_gate_type,
+                current_qubits,
+                inverse_rotation_angle,
+                new_results,
+            )
+
+        for operand, result in zip(op.qubit_operands, new_results):
+            value_map[operand.uuid] = result
+        return [*extra_ops, inverse_op]
+
+    def _invert_invoke(
+        self,
+        op: InvokeOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert a callable invocation.
+
+        Args:
+            op (InvokeOperation): Invocation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: Inlined inverse operations or a boxed inverse
+            invocation.
+
+        Raises:
+            NotImplementedError: If the invocation has no body and no known
+                inverse form.
+        """
+        current_qubits = [
+            _as_value(_substitute_value(result, value_map), "invoke result")
+            for result in op.results
+        ]
+        new_results = [qubit.next_version() for qubit in current_qubits]
+        mapped_params = [
+            _as_value(_substitute_value(param, value_map), "invoke parameter")
+            for param in op.parameters
+        ]
+
+        if op.transform is CallTransform.INVERSE:
+            direct_op = InvokeOperation(
+                operands=[*current_qubits, *mapped_params],
+                results=new_results,
+                target=op.target,
+                transform=CallTransform.DIRECT,
+                attrs=dict(op.attrs),
+                definition=op.definition,
+            )
+            self._update_quantum_value_map(
+                value_map,
+                op.control_qubits + op.target_qubits,
+                new_results,
+            )
+            return [direct_op]
+
+        attrs = dict(op.attrs)
+        target = op.target
+        body = op.body
+        opaque_cost = op.definition.opaque_cost if op.definition is not None else None
+        if op.transform is CallTransform.CONTROLLED:
+            transform = CallTransform.CONTROLLED
+        else:
+            transform = CallTransform.INVERSE
+
+        gate_type_name = str(attrs.get("gate_type", "CUSTOM"))
+        source_block = None
+
+        body_ref = op.body_ref
+        if body_ref is not None and body_ref.kind == "static_binding":
+            if op.transform is CallTransform.CONTROLLED:
+                raise NotImplementedError(
+                    "inverse() cannot represent the inverse of a controlled "
+                    "deferred static-binding invocation directly. Control the "
+                    "inverse wrapper instead."
+                )
+            attrs["default_policy"] = CallPolicy.PRESERVE_BOX.name
+            deferred_inverse_op = InvokeOperation(
+                operands=[*current_qubits, *mapped_params],
+                results=new_results,
+                target=target,
+                transform=transform,
+                attrs=attrs,
+                definition=op.definition,
+            )
+            self._update_quantum_value_map(
+                value_map,
+                op.control_qubits + op.target_qubits,
+                new_results,
+            )
+            return [deferred_inverse_op]
+
+        if gate_type_name == CompositeGateType.QFT.name:
+            from qamomile.circuit.stdlib.qft import iqft
+
+            attrs["gate_type"] = CompositeGateType.IQFT.name
+            attrs["custom_name"] = "iqft"
+            target = CallableRef(
+                namespace=op.target.namespace,
+                name="iqft",
+                version=op.target.version,
+            )
+            body = iqft.block
+            transform = (
+                CallTransform.CONTROLLED
+                if op.transform is CallTransform.CONTROLLED
+                else CallTransform.DIRECT
+            )
+        elif gate_type_name == CompositeGateType.IQFT.name:
+            from qamomile.circuit.stdlib.qft import qft
+
+            attrs["gate_type"] = CompositeGateType.QFT.name
+            attrs["custom_name"] = "qft"
+            target = CallableRef(
+                namespace=op.target.namespace,
+                name="qft",
+                version=op.target.version,
+            )
+            body = qft.block
+            transform = (
+                CallTransform.CONTROLLED
+                if op.transform is CallTransform.CONTROLLED
+                else CallTransform.DIRECT
+            )
+        elif op.body is not None:
+            source_block = op.body
+            body = self.invert_block(op.body)
+            opaque_cost = None
+            attrs["gate_type"] = CompositeGateType.CUSTOM.name
+            attrs["custom_name"] = f"{op.name}_inverse"
+        elif attrs.get("kind") in {"composite", "oracle"}:
+            if attrs.get("kind") == "composite" and gate_type_name not in {
+                CompositeGateType.CUSTOM.name,
+                "",
+            }:
+                raise NotImplementedError(
+                    "inverse() cannot invert an opaque native InvokeOperation "
+                    f"{gate_type_name!r}. Use an explicit inverse operation "
+                    "or provide an implementation body."
+                )
+            inverse_name = _inverse_opaque_name(op.name)
+            attrs["gate_type"] = CompositeGateType.CUSTOM.name
+            attrs["custom_name"] = inverse_name
+            target = CallableRef(
+                namespace=op.target.namespace,
+                name=inverse_name,
+                version=op.target.version,
+            )
+        else:
+            raise NotImplementedError(
+                "inverse() cannot invert an opaque InvokeOperation without "
+                "an implementation body."
+            )
+
+        if source_block is not None and body is not None:
+            inverse_op: Operation = InverseBlockOperation(
+                operands=[*current_qubits, *mapped_params],
+                results=new_results,
+                num_control_qubits=op.num_control_qubits,
+                num_target_qubits=_inverse_invoke_target_width(op, current_qubits),
+                custom_name=str(attrs.get("custom_name", op.name)),
+                source_block=source_block,
+                implementation_block=body,
+                callable_ref=op.target,
+                callable_attrs=(
+                    dict(op.definition.attrs) if op.definition is not None else {}
+                ),
+                control_value=op.control_value,
+            )
+        else:
+            policy = op.default_policy if body is not None else CallPolicy.PRESERVE_BOX
+            attrs["default_policy"] = policy.name
+            inverse_op = InvokeOperation(
+                operands=[*current_qubits, *mapped_params],
+                results=new_results,
+                target=target,
+                transform=transform,
+                attrs=attrs,
+                definition=CallableDef(
+                    ref=target,
+                    signature=(
+                        signature_from_block(body)
+                        if body is not None
+                        else signature_from_values(
+                            [*current_qubits, *mapped_params],
+                            new_results,
+                        )
+                    ),
+                    body=body,
+                    opaque_cost=opaque_cost,
+                    default_policy=policy,
+                    attrs=attrs,
+                ),
+            )
+
+        for operand, result in zip(op.control_qubits + op.target_qubits, new_results):
+            value_map[operand.uuid] = result
+        return [inverse_op]
+
+    def _invert_inverse_block(
+        self,
+        op: InverseBlockOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert an existing first-class inverse block operation.
+
+        Args:
+            op (InverseBlockOperation): Inverse block operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: Forward source-block operations cloned into
+                the current inverse construction site.
+
+        Raises:
+            NotImplementedError: If the inverse op lacks the source block
+                needed to reconstruct the forward operation.
+        """
+        if op.source_block is None:
+            raise NotImplementedError(
+                "inverse() cannot invert an InverseBlockOperation without "
+                "a source block."
+            )
+        self._reject_unsupported_control_flow(op.source_block.operations)
+        current_controls = [
+            _as_value(
+                _substitute_value(result, value_map),
+                "inverse block control result",
+            )
+            for result in op.results[: op.num_control_qubits]
+        ]
+        current_targets = [
+            _as_value(
+                _substitute_value(result, value_map),
+                "inverse block target result",
+            )
+            for result in op.results[op.num_control_qubits :]
+        ]
+        mapped_params = [_substitute_value(param, value_map) for param in op.parameters]
+        if len(current_targets) != len(op.target_qubits) or len(
+            op.source_block.output_values
+        ) != len(op.target_qubits):
+            raise TypeError(
+                "inverse() cannot restore an InverseBlockOperation whose "
+                "source block outputs do not match its stored target operands."
+            )
+
+        if op.num_control_qubits > 0:
+            return self._restore_controlled_inverse_block(
+                op,
+                current_controls,
+                current_targets,
+                mapped_params,
+                value_map,
+            )
+
+        local_map = dict(value_map)
+        self._bind_forward_block_inputs(
+            op.source_block,
+            current_targets,
+            mapped_params,
+            local_map,
+        )
+        operations = self._clone_forward_operations(
+            op.source_block.operations, local_map
+        )
+
+        for output, operand in zip(op.source_block.output_values, op.target_qubits):
+            resolved = _substitute_value(output, local_map)
+            value_map[operand.uuid] = resolved
+            if isinstance(operand, ArrayValue) and isinstance(resolved, ArrayValue):
+                for operand_dim, resolved_dim in zip(operand.shape, resolved.shape):
+                    if operand_dim.uuid != resolved_dim.uuid:
+                        value_map[operand_dim.uuid] = resolved_dim
+        return operations
+
+    def _restore_controlled_inverse_block(
+        self,
+        op: InverseBlockOperation,
+        current_controls: Sequence[ValueBase],
+        current_targets: Sequence[ValueBase],
+        mapped_params: Sequence[ValueBase],
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Restore a controlled forward block from an inverse block.
+
+        Args:
+            op (InverseBlockOperation): Controlled inverse block being
+                inverted.
+            current_controls (Sequence[ValueBase]): Current control values
+                flowing out of `op`.
+            current_targets (Sequence[ValueBase]): Current target values
+                flowing out of `op`.
+            mapped_params (Sequence[ValueBase]): Classical/object operands
+                after applying `value_map`.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map
+                to update with the restored operation results.
+
+        Returns:
+            list[Operation]: A single controlled forward operation.
+
+        Raises:
+            NotImplementedError: If the controlled inverse block has no
+                source block to restore.
+        """
+        if op.source_block is None:
+            raise NotImplementedError(
+                "inverse() cannot restore a controlled inverse block without "
+                "a source block."
+            )
+
+        new_controls = [control.next_version() for control in current_controls]
+        new_targets = [target.next_version() for target in current_targets]
+        restored = ConcreteControlledU(
+            operands=cast(
+                list[Value],
+                [*current_controls, *current_targets, *mapped_params],
+            ),
+            results=cast(list[Value], [*new_controls, *new_targets]),
+            num_controls=op.num_control_qubits,
+            block=op.source_block,
+            callable_ref=op.callable_ref,
+            callable_attrs=dict(op.callable_attrs),
+            control_value=op.control_value,
+        )
+
+        self._update_quantum_value_map(value_map, op.control_qubits, new_controls)
+        self._update_quantum_value_map(value_map, op.target_qubits, new_targets)
+        return [restored]
+
+    def _bind_forward_block_inputs(
+        self,
+        block: Block,
+        quantum_operands: Sequence[ValueBase],
+        parameter_operands: Sequence[ValueBase],
+        value_map: dict[str, ValueBase],
+    ) -> None:
+        """Bind a forward source block to inverse-of-inverse operands.
+
+        Args:
+            block (Block): Source block being restored.
+            quantum_operands (Sequence[ValueBase]): Current target quantum
+                values that feed the source block.
+            parameter_operands (Sequence[ValueBase]): Classical/object
+                operands for the source block.
+            value_map (dict[str, ValueBase]): Local mapping to mutate.
+
+        Returns:
+            None.
+
+        Raises:
+            TypeError: If the stored inverse block operands no longer match
+                the source block input contract.
+        """
+        quantum_inputs = [
+            value for value in block.input_values if value.type.is_quantum()
+        ]
+        parameter_inputs = [
+            value for value in block.input_values if not value.type.is_quantum()
+        ]
+        if len(quantum_inputs) != len(quantum_operands) or len(parameter_inputs) != len(
+            parameter_operands
+        ):
+            raise TypeError(
+                "inverse() cannot restore an InverseBlockOperation whose "
+                "source block inputs do not match its stored operands."
+            )
+
+        for block_input, operand in [
+            *zip(quantum_inputs, quantum_operands),
+            *zip(parameter_inputs, parameter_operands),
+        ]:
+            resolved = _substitute_value(operand, value_map)
+            value_map[block_input.uuid] = resolved
+            if isinstance(block_input, ArrayValue) and isinstance(resolved, ArrayValue):
+                for block_dim, operand_dim in zip(block_input.shape, resolved.shape):
+                    value_map[block_dim.uuid] = _substitute_value(
+                        operand_dim,
+                        value_map,
+                    )
+
+    def _clone_forward_operations(
+        self,
+        operations: list[Operation],
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Clone forward operations into the current inverse construction.
+
+        Args:
+            operations (list[Operation]): Source-block operations in
+                forward order.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: Cloned forward operations.
+        """
+        cloned: list[Operation] = []
+        for op in operations:
+            if isinstance(op, ReturnOperation):
+                continue
+            if isinstance(op, (IfOperation, WhileOperation, ForItemsOperation)):
+                raise NotImplementedError(
+                    f"inverse() does not support {type(op).__name__} yet."
+                )
+            if isinstance(op, ForOperation):
+                cloned.append(self._clone_forward_for(op, value_map))
+                continue
+            cloned.append(self._clone_forward_operation(op, value_map))
+        return cloned
+
+    def _clone_forward_operation(
+        self,
+        op: Operation,
+        value_map: dict[str, ValueBase],
+    ) -> Operation:
+        """Clone one forward operation and advance the local value map.
+
+        Args:
+            op (Operation): Source operation to clone.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            Operation: Cloned operation with substituted operands and fresh
+                results.
+        """
+        result_map = _operation_result_map(op, value_map)
+        substitutor = ValueSubstitutor({**value_map, **result_map}, transitive=True)
+        cloned = substitutor.substitute_operation(op)
+        value_map.update(result_map)
+        return cloned
+
+    def _clone_forward_for(
+        self,
+        op: ForOperation,
+        value_map: dict[str, ValueBase],
+    ) -> ForOperation:
+        """Clone a forward compile-time range loop.
+
+        Args:
+            op (ForOperation): Source loop operation to clone.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            ForOperation: Cloned loop with its body cloned in forward order.
+
+        Raises:
+            TypeError: If the loop variable cannot be represented as a
+                scalar IR value.
+        """
+        body_map = dict(value_map)
+        loop_var_value = None
+        if op.loop_var_value is not None:
+            loop_var_value = _as_value(
+                _fresh_result_value(op.loop_var_value, value_map),
+                "forward loop variable",
+            )
+            body_map[op.loop_var_value.uuid] = loop_var_value
+
+        body = self._clone_forward_operations(op.operations, body_map)
+        excluded_uuids = {op.loop_var_value.uuid} if op.loop_var_value else set()
+        self._merge_loop_body_map(value_map, body_map, excluded_uuids)
+
+        cloned = dataclasses.replace(
+            op,
+            loop_var_value=loop_var_value,
+            operations=body,
+        )
+        substitutor = ValueSubstitutor(value_map, transitive=True)
+        result = substitutor.substitute_operation(cloned)
+        assert isinstance(result, ForOperation)
+        return result
+
+    def _invert_pauli_evolve(
+        self,
+        op: PauliEvolveOp,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert a Pauli evolution operation.
+
+        Args:
+            op (PauliEvolveOp): Pauli evolution operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: The inverse Pauli evolution operation, plus
+                any needed angle-negation operation.
+        """
+        current_qubits = _as_value(
+            _substitute_value(op.evolved_qubits, value_map),
+            "pauli_evolve result",
+        )
+        observable = _as_value(
+            _substitute_value(op.observable, value_map),
+            "pauli_evolve observable",
+        )
+        angle_ops, inverse_evolution_time = self._negate_angle(op.gamma, value_map)
+        result = current_qubits.next_version()
+        inverse_op = PauliEvolveOp(
+            operands=[current_qubits, observable, inverse_evolution_time],
+            results=[result],
+        )
+        value_map[op.qubits.uuid] = result
+        return [*angle_ops, inverse_op]
+
+    def _invert_controlled_u(
+        self,
+        op: ControlledUOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert a controlled-U operation.
+
+        Args:
+            op (ControlledUOperation): Controlled operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: The inverse controlled operation.
+
+        Raises:
+            NotImplementedError: If the controlled block is missing.
+        """
+        if op.block is None:
+            raise NotImplementedError("inverse() cannot invert unresolved ControlledU.")
+        inverse_block = self.invert_block(op.block)
+        current_results = [
+            _as_value(_substitute_value(result, value_map), "ControlledU result")
+            for result in op.results
+        ]
+        new_results = [result.next_version() for result in current_results]
+        mapped_params = [
+            _as_value(_substitute_value(param, value_map), "ControlledU parameter")
+            for param in op.param_operands
+        ]
+        power: int | Value = op.power
+        if isinstance(power, Value):
+            power = _as_value(_substitute_value(power, value_map), "ControlledU power")
+
+        if isinstance(op, SymbolicControlledU):
+            num_controls = _as_value(
+                _substitute_value(op.num_controls, value_map),
+                "ControlledU num_controls",
+            )
+            control_indices = (
+                tuple(
+                    _as_value(
+                        _substitute_value(control_index, value_map),
+                        "ControlledU control index",
+                    )
+                    for control_index in op.control_indices
+                )
+                if op.control_indices is not None
+                else None
+            )
+            operands = [*current_results, *mapped_params]
+            inverse_op = SymbolicControlledU(
+                operands=operands,
+                results=new_results,
+                num_controls=num_controls,
+                control_indices=control_indices,
+                power=power,
+                block=inverse_block,
+                num_control_args=op.num_control_args,
+            )
+        elif isinstance(op, ConcreteControlledU):
+            operands = [*current_results, *mapped_params]
+            inverse_op = ConcreteControlledU(
+                operands=operands,
+                results=new_results,
+                num_controls=op.num_controls,
+                control_value=op.control_value,
+                power=power,
+                block=inverse_block,
+                callable_ref=op.callable_ref,
+                callable_attrs=dict(op.callable_attrs),
+            )
+        else:
+            raise NotImplementedError(f"inverse() cannot invert {type(op).__name__}.")
+
+        self._update_quantum_value_map(
+            value_map,
+            op.control_operands + op.target_operands,
+            new_results,
+        )
+        return [inverse_op]
+
+    def _invert_select(
+        self,
+        op: SelectOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert every callable body selected by a multiplexer.
+
+        Args:
+            op (SelectOperation): SELECT operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: One SELECT whose cases are the inverse bodies.
+        """
+        inverse_blocks = [self.invert_block(block) for block in op.case_blocks]
+        current_results = [
+            _as_value(_substitute_value(result, value_map), "Select result")
+            for result in op.results
+        ]
+        new_results = [result.next_version() for result in current_results]
+        mapped_params = [
+            _as_value(_substitute_value(param, value_map), "Select parameter")
+            for param in op.param_operands
+        ]
+        mapped_width = (
+            _as_value(
+                _substitute_value(op.num_index_qubits, value_map),
+                "Select index width",
+            )
+            if isinstance(op.num_index_qubits, Value)
+            else op.num_index_qubits
+        )
+        inverse_op = SelectOperation(
+            operands=[*current_results, *mapped_params],
+            results=new_results,
+            num_index_qubits=mapped_width,
+            case_blocks=inverse_blocks,
+            num_index_args=op.num_index_args,
+        )
+        self._update_quantum_value_map(
+            value_map,
+            op.index_operands + op.target_operands,
+            new_results,
+        )
+        return [inverse_op]
+
+    def _invert_for(
+        self,
+        op: ForOperation,
+        value_map: dict[str, ValueBase],
+    ) -> list[Operation]:
+        """Invert a compile-time range loop.
+
+        Args:
+            op (ForOperation): Loop operation to invert.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            list[Operation]: A reversed `ForOperation`, or an empty list for
+                an empty forward range.
+
+        Raises:
+            NotImplementedError: If the bounds are symbolic or invalid.
+        """
+        start, stop, step = self._resolve_range_constants(op, value_map)
+        # ``range`` supports O(1) emptiness, length, and indexing — do not
+        # materialize it: compile-time bounds can be arbitrarily large
+        # while the IR keeps the loop symbolic.
+        sequence = range(start, stop, step)
+        if not sequence:
+            return []
+        reverse_start = sequence[-1]
+        reverse_stop = sequence[0] - step
+        reverse_step = -step
+        loop_var = Value(type=UIntType(), name=op.loop_var or "_inverse_loop_idx")
+        body_map = dict(value_map)
+        if op.loop_var_value is not None:
+            body_map[op.loop_var_value.uuid] = loop_var
+        carry_prefix: list[Operation] = []
+        reverse_region_args: list[RegionArg] = []
+        for region_arg in op.region_args:
+            summary = self._analyze_region_arg(op, region_arg, body_map)
+            if summary is None:
+                raise self._unsupported_region_arg_error(region_arg)
+            reverse_init = _as_value(
+                _substitute_value(region_arg.result, value_map),
+                "inverse RegionArg final value",
+            )
+            reverse_block_arg = Value(
+                type=summary.carry_type,
+                name=f"{region_arg.var_name}_inverse_carry",
+            )
+            prefix, entry_value = self._inverse_region_entry(
+                region_arg,
+                summary,
+                reverse_block_arg,
+            )
+            carry_prefix.extend(prefix)
+            body_map[region_arg.block_arg.uuid] = entry_value
+            reverse_region_args.append(
+                RegionArg(
+                    var_name=region_arg.var_name,
+                    init=reverse_init,
+                    block_arg=reverse_block_arg,
+                    yielded=entry_value,
+                    result=Value(
+                        type=summary.carry_type,
+                        name=f"{region_arg.var_name}_inverse_result",
+                    ),
+                )
+            )
+        inverse_body = [
+            *carry_prefix,
+            *self._invert_operations(op.operations, body_map),
+        ]
+        excluded_uuids = {region_arg.block_arg.uuid for region_arg in op.region_args}
+        if op.loop_var_value is not None:
+            excluded_uuids.add(op.loop_var_value.uuid)
+        self._merge_loop_body_map(value_map, body_map, excluded_uuids)
+        return [
+            ForOperation(
+                # Match control_flow._value_to_ir_value: Python range sentinels
+                # such as -1 are represented with UIntType today.
+                operands=[
+                    _const_uint("inverse_loop_start", reverse_start),
+                    _const_uint("inverse_loop_stop", reverse_stop),
+                    _const_uint("inverse_loop_step", reverse_step),
+                ],
+                loop_var=op.loop_var,
+                loop_var_value=loop_var,
+                operations=inverse_body,
+                results=[region_arg.result for region_arg in reverse_region_args],
+                region_args=tuple(reverse_region_args),
+            )
+        ]
+
+    def _inverse_region_entry(
+        self,
+        region_arg: RegionArg,
+        summary: _RegionAffineSummary,
+        reverse_block_arg: Value,
+    ) -> tuple[list[Operation], Value]:
+        """Build one original carry value from the reverse carried value.
+
+        A forward iteration receives ``x[t]`` and yields ``x[t + 1]``. The
+        reversed loop therefore carries ``x[t + 1]``, subtracts the exact
+        UInt delta at the start of the iteration, uses ``x[t]`` for the
+        inverted body, and yields ``x[t]`` to the next reverse iteration.
+        Identity UInt/Float carries pass through without arithmetic.
+
+        Args:
+            region_arg (RegionArg): Forward carry being inverted.
+            summary (_RegionAffineSummary): Exact independent recurrence.
+            reverse_block_arg (Value): Reverse loop's current ``x[t + 1]``.
+
+        Returns:
+            tuple[list[Operation], Value]: Prefix arithmetic and the recovered
+                original iteration entry ``x[t]``.
+        """
+        if isinstance(summary.carry_type, FloatType):
+            return [], reverse_block_arg
+        delta = summary.delta
+        assert type(delta) is int
+        if delta == 0:
+            return [], reverse_block_arg
+        prefix: list[Operation] = []
+        entry = self._materialize_uint_offset(
+            reverse_block_arg,
+            -delta,
+            prefix,
+            f"{region_arg.var_name}_inverse_entry",
+        )
+        return prefix, entry
+
+    def _analyze_region_arg(
+        self,
+        op: ForOperation,
+        region_arg: RegionArg,
+        value_map: dict[str, ValueBase],
+    ) -> _RegionAffineSummary | None:
+        """Analyze one carry under the inverse fallback's exact contract.
+
+        UInt carries must be independently constant-additive. Float carries
+        may have unrelated derived values, but every offset on the backward
+        def-use slice of the actual yield must be exact zero; an algebraically
+        cancelling nonzero update is rejected because IEEE-754 iteration
+        cannot be reassociated safely.
+
+        Args:
+            op (ForOperation): Loop that owns `region_arg`.
+            region_arg (RegionArg): Candidate loop-carried scalar.
+            value_map (dict[str, ValueBase]): Active inverse substitutions.
+
+        Returns:
+            _RegionAffineSummary | None: Exact affine summary, or None when
+                the carry is unsupported or depends on a sibling carry.
+        """
+        init = _substitute_value(region_arg.init, value_map)
+        carry_type = region_arg.block_arg.type
+        if not isinstance(init, Value) or not isinstance(
+            carry_type,
+            (UIntType, FloatType),
+        ):
+            return None
+        if (
+            isinstance(carry_type, FloatType)
+            and region_arg.yielded.uuid == region_arg.block_arg.uuid
+        ):
+            return _RegionAffineSummary(
+                init=init,
+                carry_type=carry_type,
+                delta=0.0,
+            )
+        offsets, predecessors = self._constant_region_analysis(
+            op,
+            region_arg,
+            value_map,
+        )
+        delta = offsets.get(region_arg.yielded.uuid)
+        if delta is None:
+            return None
+        if isinstance(carry_type, UIntType):
+            if type(delta) is not int:
+                return None
+        else:
+            yield_slice = self._backward_region_slice(
+                region_arg.yielded.uuid,
+                predecessors,
+            )
+            if any(offsets.get(uuid, 0) for uuid in yield_slice):
+                return None
+        return _RegionAffineSummary(
+            init=init,
+            carry_type=carry_type,
+            delta=delta,
+        )
+
+    def _constant_region_analysis(
+        self,
+        op: ForOperation,
+        region_arg: RegionArg,
+        value_map: dict[str, ValueBase],
+    ) -> tuple[dict[str, int | float], dict[str, set[str]]]:
+        """Track exact offsets and def-use edges for one RegionArg.
+
+        Args:
+            op (ForOperation): Loop that owns `region_arg`.
+            region_arg (RegionArg): Carry whose derived offsets are tracked.
+            value_map (dict[str, ValueBase]): Active inverse substitutions for
+                external constants and static nested bounds.
+
+        Returns:
+            tuple[dict[str, int | float], dict[str, set[str]]]: UUID-keyed
+                offsets from the carry's block argument and backward def-use
+                edges for the tracked values. Missing yielded values denote
+                unsupported forms.
+        """
+        offsets: dict[str, int | float] = {region_arg.block_arg.uuid: 0}
+        predecessors: dict[str, set[str]] = {}
+        sibling_uuids = {
+            sibling.block_arg.uuid
+            for sibling in op.region_args
+            if sibling.block_arg.uuid != region_arg.block_arg.uuid
+        }
+        for operation in op.operations:
+            if isinstance(operation, BinOp):
+                if len(operation.operands) != 2:
+                    continue
+                left, right = operation.operands
+                left_offset = offsets.get(left.uuid)
+                right_offset = offsets.get(right.uuid)
+                if left_offset is not None and right_offset is None:
+                    constant = self._constant_numeric_value(
+                        right,
+                        value_map,
+                        sibling_uuids,
+                    )
+                    if constant is None:
+                        continue
+                    if operation.kind is BinOpKind.ADD:
+                        result_offset = left_offset + constant
+                    elif operation.kind is BinOpKind.SUB:
+                        result_offset = left_offset - constant
+                    else:
+                        continue
+                elif (
+                    right_offset is not None
+                    and left_offset is None
+                    and operation.kind is BinOpKind.ADD
+                ):
+                    constant = self._constant_numeric_value(
+                        left,
+                        value_map,
+                        sibling_uuids,
+                    )
+                    if constant is None:
+                        continue
+                    result_offset = constant + right_offset
+                else:
+                    continue
+                for result in operation.results:
+                    offsets[result.uuid] = result_offset
+                    predecessors[result.uuid] = {
+                        left.uuid if left_offset is not None else right.uuid
+                    }
+                continue
+
+            if not isinstance(operation, ForOperation):
+                continue
+            if any(operand.uuid in sibling_uuids for operand in operation.operands):
+                continue
+            try:
+                nested_start, nested_stop, nested_step = self._resolve_range_constants(
+                    operation,
+                    value_map,
+                )
+            except NotImplementedError:
+                continue
+            nested_trip_count = self._range_trip_count(
+                nested_start,
+                nested_stop,
+                nested_step,
+            )
+            for nested_arg in operation.region_args:
+                init_offset = offsets.get(nested_arg.init.uuid)
+                if init_offset is None:
+                    continue
+                if nested_trip_count == 0:
+                    offsets[nested_arg.result.uuid] = init_offset
+                    predecessors[nested_arg.result.uuid] = {nested_arg.init.uuid}
+                    continue
+                nested_offsets, nested_predecessors = self._constant_region_analysis(
+                    operation,
+                    nested_arg,
+                    value_map,
+                )
+                nested_delta = nested_offsets.get(nested_arg.yielded.uuid)
+                if nested_delta is None:
+                    continue
+                for uuid, nested_offset in nested_offsets.items():
+                    offsets[uuid] = init_offset + nested_offset
+                predecessors.update(nested_predecessors)
+                predecessors[nested_arg.block_arg.uuid] = {nested_arg.init.uuid}
+                predecessors[nested_arg.result.uuid] = {nested_arg.yielded.uuid}
+                offsets[nested_arg.result.uuid] = (
+                    init_offset + nested_delta * nested_trip_count
+                )
+        return offsets, predecessors
+
+    def _backward_region_slice(
+        self,
+        yielded_uuid: str,
+        predecessors: dict[str, set[str]],
+    ) -> set[str]:
+        """Collect values on the backward def-use slice of one yield.
+
+        Args:
+            yielded_uuid (str): UUID of the recurrence yield to start from.
+            predecessors (dict[str, set[str]]): UUID-keyed predecessor edges
+                recorded by additive carry analysis.
+
+        Returns:
+            set[str]: Yield UUID and every transitively contributing value.
+        """
+        visited: set[str] = set()
+        pending = [yielded_uuid]
+        while pending:
+            uuid = pending.pop()
+            if uuid in visited:
+                continue
+            visited.add(uuid)
+            pending.extend(predecessors.get(uuid, ()))
+        return visited
+
+    def _constant_numeric_value(
+        self,
+        value: Value,
+        value_map: dict[str, ValueBase],
+        forbidden_uuids: set[str],
+    ) -> int | float | None:
+        """Resolve an exact integer or floating constant for carry analysis.
+
+        Args:
+            value (Value): Candidate scalar operand.
+            value_map (dict[str, ValueBase]): Active inverse substitutions.
+            forbidden_uuids (set[str]): Sibling carry UUIDs that must remain
+                unsupported even if another analysis mapped them to constants.
+
+        Returns:
+            int | float | None: Exact numeric constant, excluding bool, or
+                None when the operand remains symbolic.
+        """
+        if value.uuid in forbidden_uuids:
+            return None
+        resolved = _substitute_value(value, value_map)
+        if not isinstance(resolved, Value):
+            return None
+        constant = resolved.get_const()
+        if type(constant) is int:
+            return constant
+        if type(constant) is float:
+            return constant
+        return None
+
+    def _range_trip_count(self, start: int, stop: int, step: int) -> int:
+        """Return a Python range's trip count without ``Py_ssize_t`` overflow.
+
+        Args:
+            start (int): Inclusive range start.
+            stop (int): Exclusive range stop.
+            step (int): Non-zero range step.
+
+        Returns:
+            int: Exact non-negative number of range iterations.
+
+        Raises:
+            ValueError: If ``step`` is zero.
+        """
+        if step == 0:
+            raise ValueError("range step cannot be zero.")
+        if step > 0:
+            if start >= stop:
+                return 0
+            return (stop - start + step - 1) // step
+        if start <= stop:
+            return 0
+        positive_step = -step
+        return (start - stop + positive_step - 1) // positive_step
+
+    def _merge_loop_body_map(
+        self,
+        value_map: dict[str, ValueBase],
+        body_map: dict[str, ValueBase],
+        excluded_uuids: set[str],
+    ) -> None:
+        """Propagate loop-body substitutions back to the surrounding scope.
+
+        Args:
+            value_map (dict[str, ValueBase]): Surrounding UUID-keyed value
+                map to update.
+            body_map (dict[str, ValueBase]): Loop-body map after cloning or
+                inverting the body.
+            excluded_uuids (set[str]): Loop-local UUIDs that must not leak
+                into the surrounding scope.
+
+        Returns:
+            None.
+        """
+        for uuid, value in body_map.items():
+            if uuid not in excluded_uuids:
+                value_map[uuid] = value
+
+    def _update_quantum_value_map(
+        self,
+        value_map: dict[str, ValueBase],
+        operands: Sequence[ValueBase],
+        results: Sequence[ValueBase],
+    ) -> None:
+        """Map quantum operands to their current result values.
+
+        Args:
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map
+                to update.
+            operands (Sequence[ValueBase]): Original quantum operands.
+            results (Sequence[ValueBase]): Current result values replacing
+                the operands.
+
+        Returns:
+            None.
+        """
+        for operand, result in zip(operands, results):
+            value_map[operand.uuid] = result
+            if isinstance(operand, ArrayValue) and isinstance(result, ArrayValue):
+                for operand_dim, result_dim in zip(operand.shape, result.shape):
+                    if operand_dim.uuid != result_dim.uuid:
+                        value_map[operand_dim.uuid] = result_dim
+
+    def _resolve_range_constants(
+        self,
+        op: ForOperation,
+        value_map: dict[str, ValueBase],
+    ) -> tuple[int, int, int]:
+        """Resolve loop bounds to Python integers.
+
+        Args:
+            op (ForOperation): Loop whose bounds should be resolved.
+            value_map (dict[str, ValueBase]): UUID-keyed current-value map.
+
+        Returns:
+            tuple[int, int, int]: Start, stop, and step.
+
+        Raises:
+            NotImplementedError: If a bound is symbolic or step is zero.
+        """
+        resolved: list[int] = []
+        for bound_name, operand in zip(("start", "stop", "step"), op.operands):
+            value = _as_value(
+                _substitute_value(operand, value_map),
+                f"ForOperation {bound_name}",
+            )
+            const = value.get_const()
+            if const is None:
+                raise NotImplementedError(
+                    "inverse() only supports ForOperation with compile-time "
+                    f"constant {bound_name} bounds."
+                )
+            resolved.append(int(const))
+        if resolved[2] == 0:
+            raise NotImplementedError("inverse() cannot invert a zero-step loop.")
+        return resolved[0], resolved[1], resolved[2]
+
+
+class InverseGate:
+    """Callable wrapper that applies a QKernel's inverse.
+
+    Args:
+        qkernel (QKernel): Kernel whose inverse should be emitted.
+    """
+
+    def __init__(
+        self,
+        qkernel: QKernel,
+        *,
+        callable_ref: CallableRef | None = None,
+        callable_attrs: dict[str, Any] | None = None,
+    ) -> None:
+        """Initialize the inverse wrapper.
+
+        Args:
+            qkernel (QKernel): Kernel whose inverse should be emitted.
+            callable_ref (CallableRef | None): Optional stable identity of the
+                source callable being inverted. Defaults to the qkernel ref.
+            callable_attrs (dict[str, Any] | None): Optional attrs copied from
+                the source callable. Defaults to qkernel attrs.
+        """
+        self._qkernel = qkernel
+        self._target_callable_ref = callable_ref
+        self._target_callable_attrs = (
+            dict(callable_attrs) if callable_attrs is not None else None
+        )
+
+    def _callable_ref(self) -> CallableRef:
+        """Return the source callable identity.
+
+        Returns:
+            CallableRef: Identity of the callable being inverted.
+        """
+        if self._target_callable_ref is not None:
+            return self._target_callable_ref
+        return qkernel_callable_ref(self._qkernel)
+
+    def _callable_attrs(self) -> dict[str, Any]:
+        """Return attrs copied from the source callable.
+
+        Returns:
+            dict[str, Any]: Serializer-friendly callable attrs.
+        """
+        if self._target_callable_attrs is not None:
+            return dict(self._target_callable_attrs)
+        return qkernel_callable_attrs(self._qkernel)
+
+    def _bind_arguments(self, *args: Any, **kwargs: Any) -> "BoundArguments":
+        """Bind and literal-promote call arguments.
+
+        Args:
+            *args (Any): Positional arguments supplied by the caller.
+            **kwargs (Any): Keyword arguments supplied by the caller.
+
+        Returns:
+            BoundArguments: Bound and default-filled argument mapping.
+
+        Raises:
+            TypeError: If a static binding has the wrong registered type, an
+                unresolved static binding does not preserve the callee slot
+                identity, any ordinary argument is not a frontend `Handle`,
+                or a bound `Handle` does not match its declared parameter
+                type -- a quantum handle bound to a classical parameter, a
+                scalar `Qubit` bound to a `Vector[Qubit]` parameter (or the
+                reverse), or an array of the wrong rank. The latter checks
+                are delegated to `param_validation._validate_bound_handles`.
+        """
+        bound_args = self._qkernel.signature.bind(*args, **kwargs)
+        bound_args.apply_defaults()
+        for name, value in list(bound_args.arguments.items()):
+            expected_type = self._qkernel.input_types.get(name)
+            if is_static_binding_annotation(expected_type):
+                bound_args.arguments[name] = validate_static_binding_argument(
+                    expected_type,
+                    name,
+                    value,
+                )
+                continue
+            if expected_type is not None:
+                bound_args.arguments[name] = promote_literal_to_handle(
+                    value,
+                    expected_type,
+                )
+        for name, value in bound_args.arguments.items():
+            expected_type = self._qkernel.input_types.get(name)
+            if is_static_binding_annotation(expected_type):
+                continue
+            if not isinstance(value, Handle):
+                raise TypeError(
+                    f"inverse(): argument {name!r} must be a Handle instance, "
+                    f"got {type(value).__name__}."
+                )
+        # Fail fast on argument type mismatches (a quantum handle bound to a
+        # classical parameter, a scalar / rank mismatch on a quantum array,
+        # ...) before any handle is consumed, using the same shared validator
+        # as the plain qkernel call and the controlled-gate call. Inverse does
+        # not broadcast, so allow_broadcast stays False.
+        _validate_bound_handles(
+            self._qkernel.input_types,
+            bound_args.arguments,
+            context=f"{self._qkernel.name}()",
+        )
+        return bound_args
+
+    def _select_block(self, arguments: dict[str, Any]) -> Block:
+        """Select a cached or call-time-specialized block.
+
+        Args:
+            arguments (dict[str, Any]): Bound call arguments.
+
+        Returns:
+            Block: Block whose operations should be inverted.
+        """
+        return select_specialized_block(
+            self._qkernel,
+            arguments,
+            require_handles=False,
+        )
+
+    def _validate_target_effects(self, block: Block) -> None:
+        """Reject effects unsupported by generic structural inversion.
+
+        Args:
+            block (Block): Call-site-specialized direct target body.
+
+        Raises:
+            ValueError: If generic inversion would reach non-unitary effects,
+                or an explicit inverse body is itself non-unitary.
+        """
+        definition = qkernel_callable_def(self._qkernel, block)
+        require_unitary_effects(
+            definition.effects_for(CallTransform.INVERSE),
+            operation="qmc.inverse()",
+            target=self._qkernel.name,
+            alternative=(
+                "Provide an explicit inverse implementation, or move "
+                "measurement, reset, and feed-forward outside qmc.inverse()."
+            ),
+        )
+
+    def _prepare_inputs(
+        self,
+        block: Block,
+        arguments: dict[str, Any],
+    ) -> list[_InputBinding]:
+        """Validate arguments and pair them with block inputs without consuming.
+
+        Args:
+            block (Block): Selected block.
+            arguments (dict[str, Any]): Bound call arguments.
+
+        Returns:
+            list[_InputBinding]: One preview binding per block input.
+        """
+        bindings: list[_InputBinding] = []
+        for name, block_input in zip(block.label_args, block.input_values):
+            handle = cast(Handle, arguments[name])
+            if handle._should_enforce_linear():
+                handle.validate_consumable(f"Inverse[{self._qkernel.name}]")
+            _validate_input_shape(name, block_input, handle.value)
+            bindings.append(
+                _InputBinding(
+                    name=name,
+                    handle=handle,
+                    active_handle=handle,
+                    block_input=block_input,
+                )
+            )
+        return bindings
+
+    def _commit_inputs(self, bindings: list[_InputBinding]) -> None:
+        """Commit ownership after inverse construction has succeeded.
+
+        ``VectorView`` ownership remains on the original view until result
+        wrapping can transfer its parent borrow directly to the new view.
+
+        Args:
+            bindings (list[_InputBinding]): Validated preview bindings.
+
+        Returns:
+            None.
+        """
+        operation_name = f"Inverse[{self._qkernel.name}]"
+        for binding in bindings:
+            handle = binding.handle
+            if handle._should_enforce_linear() and not isinstance(handle, VectorView):
+                binding.active_handle = handle.consume(operation_name)
+
+    def _initial_value_map(
+        self,
+        bindings: list[_InputBinding],
+    ) -> dict[str, ValueBase]:
+        """Build the input-side value map for inverse expansion.
+
+        Args:
+            bindings (list[_InputBinding]): Prepared input bindings.
+
+        Returns:
+            dict[str, ValueBase]: UUID-keyed value mapping.
+        """
+        value_map: dict[str, ValueBase] = {}
+        for binding in bindings:
+            actual = binding.active_handle.value
+            value_map[binding.block_input.uuid] = actual
+            if isinstance(binding.block_input, ArrayValue) and isinstance(
+                actual,
+                ArrayValue,
+            ):
+                for block_dim, actual_dim in zip(
+                    binding.block_input.shape,
+                    actual.shape,
+                ):
+                    value_map[block_dim.uuid] = actual_dim
+        return value_map
+
+    def _wrap_quantum_result(
+        self,
+        binding: _InputBinding,
+        value: ValueBase,
+    ) -> Handle:
+        """Wrap an inverse output value as a frontend handle.
+
+        Args:
+            binding (_InputBinding): Original input binding.
+            value (ValueBase): Final inverse output value.
+
+        Returns:
+            Handle: Frontend handle carrying `value`.
+
+        Raises:
+            TypeError: If an array input maps to a scalar output or vice
+                versa.
+        """
+        active = binding.active_handle
+        if isinstance(active, VectorView):
+            if not isinstance(value, ArrayValue):
+                raise TypeError("inverse(): VectorView input produced scalar output.")
+            new_view = VectorView._wrap_unregistered(
+                parent=active._slice_parent,
+                sliced_av=value,
+                length=active._shape[0],
+                start_uint=active._slice_start,
+                step_uint=active._slice_step,
+            )
+            active._transfer_borrow_to(new_view, f"Inverse[{self._qkernel.name}]")
+            return new_view
+        if isinstance(active, ArrayBase):
+            if not isinstance(value, ArrayValue):
+                raise TypeError("inverse(): array input produced scalar output.")
+            return type(active)._create_from_value(
+                value=value,
+                shape=active.shape,
+                name=active.value.name,
+            )
+        if not isinstance(value, Value) or isinstance(value, ArrayValue):
+            raise TypeError("inverse(): scalar input produced array output.")
+        output = type(active)(
+            value=value,
+            parent=active.parent,
+            indices=active.indices,
+            name=active.name,
+        )
+        active._handoff_direct_borrow_to(output)
+        return output
+
+    def _can_emit_atomic_inverse(
+        self,
+        block: Block,
+        bindings: list[_InputBinding],
+    ) -> bool:
+        """Return whether this inverse call can stay atomic until emit.
+
+        Args:
+            block (Block): Wrapped qkernel block.
+            bindings (list[_InputBinding]): Prepared call-site bindings.
+
+        Returns:
+            bool: True when every quantum input has a statically known
+                scalar qubit width and the inverse result order matches the
+                wrapped input order.
+        """
+        quantum_inputs = [
+            value for value in block.input_values if value.type.is_quantum()
+        ]
+        quantum_outputs = list(block.output_values)
+        preserves_output_order = len(quantum_inputs) == len(quantum_outputs) and all(
+            input_value.logical_id == output.logical_id
+            for input_value, output in zip(quantum_inputs, quantum_outputs)
+        )
+        return preserves_output_order and all(
+            _static_quantum_width(binding.active_handle.value) is not None
+            for binding in bindings
+            if binding.is_quantum
+        )
+
+    def _build_atomic_inverse(
+        self,
+        block: Block,
+        bindings: list[_InputBinding],
+    ) -> tuple[InverseBlockOperation, list[_InputBinding], list[Value]]:
+        """Build an atomic inverse composite without mutating tracer state.
+
+        Args:
+            block (Block): Wrapped qkernel block.
+            bindings (list[_InputBinding]): Prepared call-site bindings.
+
+        Returns:
+            tuple[InverseBlockOperation, list[_InputBinding], list[Value]]:
+                Operation, quantum bindings, and fresh result values ready for
+                ownership commit and emission.
+        """
+        shape_value_map: dict[str, ValueBase] = {}
+        for binding in bindings:
+            if isinstance(binding.block_input, ArrayValue) and isinstance(
+                binding.active_handle.value,
+                ArrayValue,
+            ):
+                for block_dim, actual_dim in zip(
+                    binding.block_input.shape,
+                    binding.active_handle.value.shape,
+                ):
+                    shape_value_map[block_dim.uuid] = actual_dim
+        inverse_block = _BlockInverter().invert_block(block, shape_value_map)
+        # The source and fallback are independent callable regions in the
+        # serialized graph. Keep their value namespaces disjoint even when
+        # call-site shape specialization preserves the source UUIDs.
+        from qamomile.circuit.ir.uuid_remapper import UUIDRemapper
+
+        inverse_block = UUIDRemapper().clone_block(inverse_block)
+        quantum_bindings = [binding for binding in bindings if binding.is_quantum]
+        quantum_values = [
+            _as_value(binding.active_handle.value, "inverse qkernel input")
+            for binding in quantum_bindings
+        ]
+        # `InverseBlockOperation` stores the scalar backend width separately
+        # from operand/results lists: a Vector[Qubit] contributes many scalar
+        # qubits here but remains a single operand/result value.
+        target_width = sum(
+            width
+            for value in quantum_values
+            if (width := _static_quantum_width(value)) is not None
+        )
+        parameter_values = [
+            binding.active_handle.value
+            for binding in bindings
+            if not binding.is_quantum
+        ]
+        result_values = [value.next_version() for value in quantum_values]
+        op = InverseBlockOperation(
+            operands=cast(list[Value], [*quantum_values, *parameter_values]),
+            results=result_values,
+            num_control_qubits=0,
+            num_target_qubits=target_width,
+            custom_name=f"{block.name}_inverse",
+            source_block=block,
+            implementation_block=inverse_block,
+            callable_ref=self._callable_ref(),
+            callable_attrs=self._callable_attrs(),
+        )
+        return op, quantum_bindings, result_values
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Apply the inverse at the current trace site.
+
+        Args:
+            *args (Any): Positional arguments for the wrapped kernel.
+            **kwargs (Any): Keyword arguments for the wrapped kernel.
+
+        Returns:
+            Any: Quantum output handle, or a tuple of handles when the
+                wrapped kernel has multiple quantum inputs.
+
+        Raises:
+            QubitConsumedError: If an input was consumed or two quantum
+                arguments overlap the same physical qubit.
+            RuntimeError: If no tracer is active or inverse construction
+                fails.
+            NotImplementedError: If the selected body contains an operation
+                that cannot be inverted structurally.
+        """
+        bound_args = self._bind_arguments(*args, **kwargs)
+        tracer = get_current_tracer()
+        reject_aliased_quantum_args(
+            self._qkernel.name,
+            {
+                name: handle
+                for name, handle in bound_args.arguments.items()
+                if isinstance(handle, Handle) and handle._should_enforce_linear()
+            },
+            caller="inverse()",
+        )
+        block = self._select_block(bound_args.arguments)
+        self._validate_target_effects(block)
+        bindings = self._prepare_inputs(block, bound_args.arguments)
+        has_symbolic_static_binding = any(
+            isinstance(value, StaticBindingProxy)
+            for value in bound_args.arguments.values()
+        )
+        if not has_symbolic_static_binding and self._can_emit_atomic_inverse(
+            block,
+            bindings,
+        ):
+            operation, quantum_bindings, result_values = self._build_atomic_inverse(
+                block,
+                bindings,
+            )
+            self._commit_inputs(bindings)
+            tracer.add_operation(operation)
+            outputs = [
+                self._wrap_quantum_result(binding, value)
+                for binding, value in zip(quantum_bindings, result_values)
+            ]
+            if len(outputs) == 1:
+                return outputs[0]
+            return tuple(outputs)
+
+        value_map = self._initial_value_map(bindings)
+        operations = _BlockInverter().invert_call_site(block, value_map)
+
+        self._commit_inputs(bindings)
+        for op in operations:
+            tracer.add_operation(op)
+
+        outputs = [
+            self._wrap_quantum_result(binding, value_map[binding.block_input.uuid])
+            for binding in bindings
+            if binding.is_quantum
+        ]
+        if len(outputs) == 1:
+            return outputs[0]
+        return tuple(outputs)
+
+
+def _inverse_composite_operation(
+    kernel: QKernel,
+    block: Block,
+    inputs: dict[str, Value],
+) -> InvokeOperation:
+    """Build one inverse invocation for a composite qkernel.
+
+    Args:
+        kernel (QKernel): Composite qkernel being inverted.
+        block (Block): Call-site-specialized direct implementation body.
+        inputs (dict[str, Value]): Actual call operands keyed by parameter name.
+
+    Returns:
+        InvokeOperation: Inverse callable invocation retaining the composite's
+        definition, models, and implementation identity.
+    """
+    operation = qkernel_invoke_block(kernel, block, inputs)
+    operation.transform = CallTransform.INVERSE
+    definition = operation.definition
+    assert definition is not None
+    require_unitary_effects(
+        definition.effects_for(CallTransform.INVERSE),
+        operation="qmc.inverse()",
+        target=kernel.name,
+        alternative=(
+            "Provide a unitary explicit inverse implementation, or move "
+            "measurement, reset, and feed-forward outside qmc.inverse()."
+        ),
+    )
+    if definition.implementation_for(transform=CallTransform.INVERSE) is None:
+        try:
+            inverse_body = _BlockInverter().invert_block(block)
+        except NotImplementedError:
+            # Keep the semantic inverse call available to analysis. A later
+            # compile with concrete structural bindings may materialize the
+            # inverse body; emit rejects it clearly if it remains unresolved.
+            inverse_body = None
+        if inverse_body is not None:
+            definition.implementations.append(
+                CallableImplementation(
+                    transform=CallTransform.INVERSE,
+                    body=inverse_body,
+                )
+            )
+    return operation
+
+
+@dataclasses.dataclass(frozen=True)
+class _InverseComposite:
+    """Expose inverse composite calls through the normal qkernel call protocol.
+
+    Args:
+        kernel (QKernel): Composite qkernel to invert.
+    """
+
+    kernel: QKernel
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Invoke the inverse composite at the current trace site.
+
+        Args:
+            *args (Any): Positional arguments accepted by the composite.
+            **kwargs (Any): Keyword arguments accepted by the composite.
+
+        Returns:
+            Any: Frontend handle or tuple matching the composite signature.
+        """
+        if any(
+            is_static_binding_annotation(annotation)
+            for annotation in self.kernel.input_types.values()
+        ):
+            # A static binding is not an IR operand, so the ordinary named
+            # composite invocation protocol cannot carry it. Specialize and
+            # structurally invert the body through the same path as a regular
+            # qkernel.
+            return InverseGate(self.kernel)(*args, **kwargs)
+        factory = partial(_inverse_composite_operation, self.kernel)
+        return invoke_qkernel_with_operation(self.kernel, factory, *args, **kwargs)
+
+
+def _inverse_known_qft_target(target: Any) -> Any | None:
+    """Return the direct QFT/IQFT function counterpart for known targets.
+
+    Stable composite metadata is used in addition to object identity so a
+    serialized and reconstructed QFT-family qkernel retains the same inverse
+    behavior as the original stdlib object.
+
+    Args:
+        target (Any): Object supplied to `inverse`.
+
+    Returns:
+        Any | None: The opposite stdlib function, or `None` when `target`
+            is not a known QFT/IQFT function.
+    """
+    from qamomile.circuit.stdlib.qft import iqft, qft
+
+    gate_type = getattr(target, "_callable_gate_type", None)
+    if target is qft or gate_type is CompositeGateType.QFT:
+        return iqft
+    if target is iqft or gate_type is CompositeGateType.IQFT:
+        return qft
+    return None
+
+
+def _inverse_native_gate_target(target: Any) -> Any | None:
+    """Return a native frontend inverse callable when `target` is known.
+
+    Args:
+        target (Any): Object supplied to `inverse`.
+
+    Returns:
+        Any | None: Callable native inverse wrapper, or None when `target` is
+            not a recognized native gate callable.
+    """
+    from qamomile.circuit.frontend.operation import qubit_gates
+
+    direct_map: dict[Callable[..., Any], Callable[..., Any]] = {
+        qubit_gates.h: qubit_gates.h,
+        qubit_gates.x: qubit_gates.x,
+        qubit_gates.y: qubit_gates.y,
+        qubit_gates.z: qubit_gates.z,
+        qubit_gates.cx: qubit_gates.cx,
+        qubit_gates.cz: qubit_gates.cz,
+        qubit_gates.swap: qubit_gates.swap,
+        qubit_gates.ccx: qubit_gates.ccx,
+        qubit_gates.s: qubit_gates.sdg,
+        qubit_gates.sdg: qubit_gates.s,
+        qubit_gates.t: qubit_gates.tdg,
+        qubit_gates.tdg: qubit_gates.t,
+    }
+    for forward_callable, inverse_callable in direct_map.items():
+        if target is forward_callable:
+            return inverse_callable
+
+    rotation_map: dict[Callable[..., Any], str] = {
+        qubit_gates.p: "theta",
+        qubit_gates.rx: "angle",
+        qubit_gates.ry: "angle",
+        qubit_gates.rz: "angle",
+        qubit_gates.cp: "theta",
+        qubit_gates.rzz: "angle",
+    }
+    for forward_callable, angle_param in rotation_map.items():
+        if target is forward_callable:
+            return _InverseRotationCallable(
+                rotation_callable=forward_callable,
+                angle_param=angle_param,
+            )
+    return None
+
+
+def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
+    """Create an inverse operation wrapper.
+
+    Native Qamomile gate functions are first synthesized into tiny
+    `QKernel` objects, then inverted with the same block walker used for
+    user-defined kernels. Qkernel-like composite gate callables created by
+    ``qmc.composite_gate`` reuse their wrapped qkernel body. Known QFT/IQFT
+    functions map directly to their counterpart so backend-native composite
+    emission remains available.
+
+    Args:
+        target (QKernelLike | Callable[..., Any]): Native gate function,
+            qkernel-like object, or supported stdlib function to invert.
+
+    Returns:
+        Any: A callable inverse wrapper, or the opposite QFT/IQFT function.
+
+    Raises:
+        TypeError: If `target` cannot be interpreted as a gate-like callable,
+            or if a body-free class-based composite instance is passed
+            directly.
+        NotImplementedError: If an inverted kernel uses unsupported
+            operations such as `if`/`while`/`for items` control flow,
+            `QInit`, or a `ForOperation` whose bounds are not compile-time
+            constants when the inverse wrapper is traced. Loop-carried
+            classical values are supported for UInt carries with a constant
+            additive recurrence and for unchanged Float carries. Nonzero Float
+            recurrences, non-additive recurrences, and coupled carries are
+            rejected uniformly before backend emission.
+
+    Example:
+        >>> import qamomile.circuit as qmc
+        >>> @qmc.qkernel
+        ... def layer(q: qmc.Qubit, angle: qmc.Float) -> qmc.Qubit:
+        ...     q = qmc.h(q)
+        ...     q = qmc.rz(q, angle)
+        ...     return q
+        >>> @qmc.qkernel
+        ... def circuit(angle: qmc.Float) -> qmc.Qubit:
+        ...     q = qmc.qubit("q")
+        ...     q = layer(q, angle)
+        ...     q = qmc.inverse(layer)(q, angle)
+        ...     return q
+    """
+    if isinstance(target, _InverseComposite):
+        return target.kernel
+    known_inverse = _inverse_known_qft_target(target)
+    if known_inverse is not None:
+        return known_inverse
+    native_inverse = _inverse_native_gate_target(target)
+    if native_inverse is not None:
+        return native_inverse
+    qkernel = _qkernel_for_callable(target, caller="inverse")
+    if getattr(qkernel, "_callable_kind", None) == "composite":
+        return _InverseComposite(qkernel)
+    callable_ref, callable_attrs = _control_callable_metadata(target, qkernel)
+    return InverseGate(
+        qkernel,
+        callable_ref=callable_ref,
+        callable_attrs=callable_attrs,
+    )

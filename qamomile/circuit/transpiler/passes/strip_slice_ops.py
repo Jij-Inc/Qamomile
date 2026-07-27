@@ -22,9 +22,13 @@ from qamomile.circuit.ir.operation import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
 )
-from qamomile.circuit.ir.operation.control_flow import ForItemsOperation, ForOperation
+from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    ForOperation,
+)
 
 from . import Pass
+from .analyze import _add_uuid_with_ancestry, _collect_loop_external_liveness
 from .control_flow_visitor import OperationTransformer
 
 
@@ -39,6 +43,11 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
 
     @property
     def name(self) -> str:
+        """Return the pass name.
+
+        Returns:
+            str: Stable name used by the transpiler pipeline.
+        """
         return "strip_slice_ops"
 
     def run(self, input: Block) -> Block:
@@ -52,11 +61,19 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
         resolution is unaffected.
 
         Args:
-            input: Block that has completed ``SliceBorrowCheckPass``.
+            input (Block): Block that has completed
+                ``SliceBorrowCheckPass``.
 
         Returns:
-            A new block with all slice marker ops removed.
+            Block: A new block with all slice marker ops removed.
         """
+
+        output_live_uuids: set[str] = set()
+        for output in input.output_values:
+            _add_uuid_with_ancestry(output, output_live_uuids)
+        loop_live_after, _ = _collect_loop_external_liveness(
+            input.operations, output_live_uuids
+        )
 
         class Stripper(OperationTransformer):
             def transform_operations(
@@ -64,16 +81,23 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
             ) -> list[Operation]:
                 """Transform operations and drop marker-only loop shells.
 
+                A loop whose body held only slice markers is an empty
+                shell — unless it carries classical values: a carried
+                loop with an empty body still computes its results (a
+                pure swap ``a, b = b, a`` traces to no body operations
+                at all), so it must survive.
+
                 Args:
                     operations (list[Operation]): Operations to rewrite.
 
                 Returns:
                     list[Operation]: Rewritten operations with slice
-                    markers and newly-empty ``For`` / ``ForItems``
-                    operations removed.
+                    markers and newly-empty carry-free ``For`` /
+                    ``ForItems`` operations removed.
                 """
                 result: list[Operation] = []
                 for op in operations:
+                    live_after = loop_live_after.get(id(op), set())
                     transformed = self.transform_operation(op)
                     if transformed is None:
                         continue
@@ -81,6 +105,28 @@ class StripSliceArrayOpsPass(Pass[Block, Block]):
                     if isinstance(transformed, (ForOperation, ForItemsOperation)) and (
                         not transformed.operations
                     ):
+                        live_records = tuple(
+                            record
+                            for record in transformed.loop_carried_rebinds
+                            if record.before.type.is_quantum()
+                            or record.after.type.is_quantum()
+                            or record.after.uuid in live_after
+                        )
+                        if live_records != transformed.loop_carried_rebinds:
+                            transformed = dataclasses.replace(
+                                transformed, loop_carried_rebinds=live_records
+                            )
+                        if transformed.region_args or live_records:
+                            result.append(transformed)
+                            continue
+                        # A loop shell left empty by marker stripping is
+                        # dead when neither region arguments nor same-path
+                        # classical residual rebind results escape it.
+                        # Quantum records are retained regardless of liveness
+                        # so downstream discard validation still sees them;
+                        # structural uses such as
+                        # ``selected = measured[index]`` keep the matching
+                        # classical record live through its index.
                         continue
                     result.append(transformed)
                 return result

@@ -13,10 +13,23 @@ from qamomile.optimization.qrao import (
     QRACSpaceEfficientEncoder,
     SignRounder,
 )
+from qamomile.optimization.qrao.graph_coloring import greedy_graph_coloring
 from qamomile.optimization.qrao.qrao_space_efficient import (
     numbering_space_efficient_encode,
     qrac_space_efficient_encode_ising,
 )
+
+
+def test_greedy_graph_coloring_seeds_color_groups() -> None:
+    """Initial colors populate their matching group without a KeyError."""
+    coloring, groups = greedy_graph_coloring(
+        [(0, 1), (1, 2)],
+        max_color_group_size=2,
+        init_coloring={0: 0},
+    )
+
+    assert coloring[0] == 0
+    assert groups[0] == [0, 2]
 
 
 class TestSpaceEfficientEncoder:
@@ -309,7 +322,7 @@ class TestSpaceEfficientEncodeIsingCoefficients:
     def test_encode_ising_exact_coefficients(self):
         """Test exact Hamiltonian coefficients for space-efficient encoding."""
         ising = BinaryModel.from_ising(
-            linear={2: 5.0, 3: 2.0},
+            linear={2: 5.0, 3: 2.0, 4: 7.0},
             quad={(0, 1): 2.0, (0, 2): 1.0},
             constant=6.0,
         )
@@ -317,21 +330,27 @@ class TestSpaceEfficientEncodeIsingCoefficients:
         expected_hamiltonian = qm_o.Hamiltonian()
         expected_hamiltonian.constant = 6.0
 
-        # All qubits encode 2 variables (k=2 for all)
+        # The (2,1)-QRAC magic-state map uses a fixed √3 linear scale.
         expected_hamiltonian.add_term(
-            (qm_o.PauliOperator(qm_o.Pauli.X, 1),), np.sqrt(2) * 5.0
+            (qm_o.PauliOperator(qm_o.Pauli.X, 1),), np.sqrt(3) * 5.0
         )
         expected_hamiltonian.add_term(
-            (qm_o.PauliOperator(qm_o.Pauli.Y, 1),), np.sqrt(2) * 2.0
+            (qm_o.PauliOperator(qm_o.Pauli.Y, 1),), np.sqrt(3) * 2.0
         )
-        # (0,2) interaction: different qubits -> √k_0 * √k_2 * coeff * P_i * P_j
+        # Different-qubit products have scale 3.
         expected_hamiltonian.add_term(
             (qm_o.PauliOperator(qm_o.Pauli.X, 0), qm_o.PauliOperator(qm_o.Pauli.X, 1)),
-            np.sqrt(2) * np.sqrt(2) * 1.0,
+            3.0,
         )
-        # (0,1) interaction: same qubit -> √k_0 * √k_1 * coeff * Z
+        # A same-qubit X/Y product is represented by √3 Z.
         expected_hamiltonian.add_term(
-            (qm_o.PauliOperator(qm_o.Pauli.Z, 0),), np.sqrt(2) * np.sqrt(2) * 2.0
+            (qm_o.PauliOperator(qm_o.Pauli.Z, 0),), np.sqrt(3) * 2.0
+        )
+
+        # The scale does not depend on whether the last qubit has one or two
+        # assigned variables.
+        expected_hamiltonian.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.X, 2),), np.sqrt(3) * 7.0
         )
 
         expected_encoding = {
@@ -339,6 +358,7 @@ class TestSpaceEfficientEncodeIsingCoefficients:
             1: qm_o.PauliOperator(qm_o.Pauli.Y, 0),
             2: qm_o.PauliOperator(qm_o.Pauli.X, 1),
             3: qm_o.PauliOperator(qm_o.Pauli.Y, 1),
+            4: qm_o.PauliOperator(qm_o.Pauli.X, 2),
         }
 
         hamiltonian, encoding = qrac_space_efficient_encode_ising(ising)

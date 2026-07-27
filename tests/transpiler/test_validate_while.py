@@ -26,20 +26,24 @@ class TestWhileContractPositive:
             q = qmc.h(q)
             bit = qmc.measure(q)
             while bit:
-                q = qmc.qubit("q2")
-                q = qmc.h(q)
-                bit = qmc.measure(q)
+                q2 = qmc.qubit("q2")
+                q2 = qmc.h(q2)
+                bit = qmc.measure(q2)
             return bit
 
         transpiler = QiskitTranspiler()
         result = transpiler.transpile(circuit)
         assert result is not None
 
-    def test_phi_merged_measurement_while_transpiles(self):
+    def test_merged_measurement_while_transpiles(self):
         """if sel: bit = measure(q1) else: bit = measure(q2); while bit: succeeds.
 
-        A phi-merged condition where every branch leaf is measurement-backed
-        must be accepted by the validator.
+        A merged condition where every branch leaf is measurement-backed
+        must be accepted by the validator. The while body measures a *fresh*
+        qubit per iteration: reusing ``q1`` or ``q2`` after the if would
+        violate the conditional-move rule (each is consumed on one branch),
+        so re-measuring an outer qubit here is deliberately avoided to keep
+        this focused on the merged-condition contract.
         """
 
         @qmc.qkernel
@@ -55,7 +59,9 @@ class TestWhileContractPositive:
             else:
                 bit = qmc.measure(q2)
             while bit:
-                bit = qmc.measure(q2)
+                q3 = qmc.qubit("q3")
+                q3 = qmc.h(q3)
+                bit = qmc.measure(q3)
             return bit
 
         transpiler = QiskitTranspiler()

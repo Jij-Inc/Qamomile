@@ -10,6 +10,7 @@ from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
+    DictValue,
     Value,
     ValueMetadata,
 )
@@ -30,9 +31,9 @@ def _array_element(array_type: Any, name: str = "values") -> Value:
     """
     parent = ArrayValue(
         type=array_type,
-        name=name,
+        name="display",
         shape=(Value(type=UIntType(), name="dim").with_const(1),),
-    )
+    ).with_parameter(name)
     index = Value(type=UIntType(), name="idx").with_const(0)
     return Value(
         type=array_type,
@@ -106,9 +107,9 @@ def test_sliced_array_element_resolves_from_root_binding():
     """A sliced array element maps its local index back to root bound data."""
     root = ArrayValue(
         type=UIntType(),
-        name="values",
+        name="display",
         shape=(Value(type=UIntType(), name="dim").with_const(4),),
-    )
+    ).with_parameter("values")
     sliced = ArrayValue(
         type=UIntType(),
         name="values[slice]",
@@ -130,3 +131,27 @@ def test_sliced_array_element_resolves_from_root_binding():
 
     assert resolved == 8
     assert type(resolved) is int
+
+
+def test_display_name_does_not_resolve_as_parameter_provenance():
+    """A same-named binding cannot capture an unrelated array element."""
+    parent = ArrayValue(
+        type=UIntType(),
+        name="values",
+        shape=(Value(type=UIntType(), name="dim").with_const(1),),
+    )
+    element = Value(
+        type=UIntType(),
+        name="values[0]",
+        parent_array=parent,
+        element_indices=(Value(type=UIntType(), name="idx").with_const(0),),
+    )
+
+    assert ValueResolver(bindings={"values": [7]}).resolve(element) is None
+
+
+def test_whole_empty_bound_dict_resolves_from_typed_metadata():
+    """An explicitly bound empty dict is distinct from an unresolved value."""
+    value = DictValue(name="display").with_dict_runtime_metadata({})
+
+    assert ValueResolver().resolve(value) == {}

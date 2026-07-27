@@ -10,15 +10,24 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "jijmodeling>=2.1.0",
-    "msgpack>=1.0.0",
     "ommx>=2.3.3",
-    "qiskit>=2.3.0",
-    "qiskit-aer>=0.17.2",
+    "protobuf>=5.29,<7",
     "sympy>=1.14.0",
 ]
 
 [tool.setuptools.packages.find]
 include = ["qamomile*"]
+
+[tool.setuptools.package-data]
+"qamomile" = ["py.typed"]
+"qamomile.circuit.serialization.proto" = ["*.proto", "*.pyi"]
+
+[[tool.mypy.overrides]]
+module = "qamomile.circuit.serialization.proto.qamomile_ir_pb2"
+disable_error_code = ["metaclass"]
+
+[tool.ruff]
+extend-exclude = ["*_pb2.py", "*_pb2.pyi"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
@@ -28,6 +37,13 @@ ignore = ["E501"]  # To ignore errors for documentations
 combine-as-imports = true
 
 [project.optional-dependencies]
+qiskit = [
+    "qiskit>=2.3.0",
+    "qiskit-aer>=0.17.2",
+]
+visualization = [
+    "matplotlib>=3.10.8",
+]
 cudaq-cu12 = [
     "cuda-quantum-cu12>=0.14,<0.15; sys_platform == 'linux'",
 ]
@@ -45,6 +61,11 @@ quri_parts = [
 qbraid = [
     "qbraid[qiskit]>=0.11.0",
 ]
+hugr = [
+    "hugr>=0.16,<0.17",
+    "selene-sim>=0.2,<0.3",
+    "tket-exts>=0.12,<0.13",
+]
 
 [dependency-groups]
 dev = [
@@ -55,28 +76,39 @@ dev = [
     "networkx>=3.0",
     "pytest>=9.0.2",
     "pylatexenc>=2.10",
+    "qiskit>=2.3.0",
+    "qiskit-aer>=0.17.2",
     "pytest-mpl>=0.17.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.14.11",
-    "torch>=2.0.0",
+    "torch>=2.13.0",
     "torchvision>=0.15.0",
     "zuban>=0.4.1",
     "griffe>=1.0.0",
     "ommx-pyscipopt-adapter>=2.3.0",
     "scikit-learn>=1.6.0",
-    "openfermion>=1.6.0",
+    "openfermion>=1.7.0",
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",
     "ommx-quantum-benchmarks>=0.0.2",
+    "grpcio-tools>=1.71,<2",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not docs and not quri_parts and not cudaq'"
+addopts = "-m 'not docs and not quri_parts and not cudaq and not quration and not hugr'"
+# Qiskit's PauliEvolutionGate.to_matrix() triggers these harmless conversions
+# inside scipy.sparse.linalg.expm. Keep other SparseEfficiencyWarnings visible.
+filterwarnings = [
+    "ignore:splu converted its input to CSC format:scipy.sparse.SparseEfficiencyWarning",
+    "ignore:spsolve is more efficient when sparse b is in the CSC matrix format:scipy.sparse.SparseEfficiencyWarning",
+]
 markers = [
     "docs: marks tests that run documentation examples",
     "quri_parts: marks tests that require quri-parts dependencies",
     "cudaq: marks tests that require CUDA-Q dependencies",
+    "quration: marks tests that require Quration/PyQret dependencies",
+    "hugr: marks tests that require HUGR and TKET extension dependencies",
 ]
 
 [tool.setuptools_scm]

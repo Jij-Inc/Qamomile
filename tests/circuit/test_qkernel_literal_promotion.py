@@ -60,8 +60,9 @@ except ImportError:  # pragma: no cover - covered when quri_parts is absent
 
 _HAS_CUDAQ = True
 try:  # pragma: no cover - presence check, not behaviour
-    import cudaq  # noqa: F401
-
+    # The lazy accessor raises ImportError when cudaq is missing, without
+    # loading the cudaq runtime at collection time when it is installed
+    # (see tests/_cudaq_isolation.py).
     from qamomile.cudaq import CudaqTranspiler
 except ImportError:  # pragma: no cover - covered when cudaq is absent
     _HAS_CUDAQ = False
@@ -83,9 +84,36 @@ BACKENDS = [
     pytest.param(
         CudaqTranspiler,
         id="cudaq",
-        marks=pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+        # The cudaq mark keeps this leg out of default sessions, where
+        # loading cudaq is unsafe (see tests/_cudaq_isolation.py).
+        marks=[
+            pytest.mark.skipif(not _HAS_CUDAQ, reason="cudaq not installed"),
+            pytest.mark.cudaq,
+        ],
     ),
 ]
+
+
+def test_plain_python_annotations_promote_nested_literals():
+    """Nested calls promote literals for plain Python scalar annotations."""
+
+    @qmc.qkernel
+    def callee(q: qmc.Qubit, count: int, angle: float, flag: bool) -> qmc.Qubit:
+        if flag:
+            q = qmc.rx(q, angle * count)
+        return q
+
+    @qmc.qkernel
+    def caller() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = callee(q, 2, math.pi / 2, True)
+        return qmc.measure(q)
+
+    transpiler = QiskitTranspiler()
+    executable = transpiler.transpile(caller)
+    result = executable.sample(transpiler.executor(), shots=32).result()
+
+    assert result.results == [(1, 32)]
 
 
 def _sum_z_hamiltonian(n: int):

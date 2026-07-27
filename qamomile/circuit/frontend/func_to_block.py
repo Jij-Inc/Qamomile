@@ -11,6 +11,11 @@ from qamomile.circuit.frontend.handle.primitives import (
     Qubit,
     UInt,
 )
+from qamomile.circuit.frontend.static_binding import (
+    StaticBindingProxy,
+    create_static_binding_proxy,
+    is_static_binding_annotation,
+)
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.operation import QInitOperation
@@ -25,7 +30,13 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
     ValueType,
 )
-from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueLike,
+)
 
 TYPE_MAPPING: dict[typing.Any, typing.Any] = {
     int: UIntType,
@@ -88,10 +99,13 @@ def build_param_slots(
     """Build a ``ParamSlot`` tuple for the classical arguments of a kernel.
 
     Mirrors the argument-classification logic in
-    ``QKernel._create_traced_block`` so the resulting slot list reflects
-    the same decisions that drive symbolic-vs-bound input creation. Only
-    classical (non-quantum, non-Tuple, non-Dict) arguments are included;
-    pure-quantum arguments live in ``Block.input_values`` instead.
+    ``qkernel_build.create_traced_block`` so the resulting slot list reflects
+    the same decisions that drive symbolic-vs-bound input creation.
+    Classical scalar / array arguments are always included; a ``Dict``
+    argument is included only when it is a runtime parameter (its slot
+    carries a ``DictType``). Pure-quantum arguments, ``Tuple`` arguments,
+    and compile-time-bound ``Dict`` arguments are excluded and live in
+    ``Block.input_values`` instead.
 
     Args:
         signature (inspect.Signature): The kernel function's signature.
@@ -119,6 +133,10 @@ def build_param_slots(
     Returns:
         tuple[ParamSlot, ...]: One slot per classical argument, in the
             order they appear in ``signature.parameters``.
+
+    Raises:
+        TypeError: If a non-static classical annotation cannot be represented
+            by an IR parameter type.
     """
     parameters_set = set(parameters or ())
     kwargs_map = kwargs or {}
@@ -128,8 +146,14 @@ def build_param_slots(
     for name, param in signature.parameters.items():
         param_type = input_types.get(name, param.annotation)
 
-        # Skip pure-quantum and structural-container arguments. These
-        # do not participate in the classical parameter contract.
+        # Static object slots are resolved before ordinary parameter binding.
+        # Their projected fields live in ``Block.static_bindings`` rather than
+        # the runtime/compile-time scalar parameter manifest.
+        if is_static_binding_annotation(param_type):
+            continue
+
+        # Skip pure-quantum arguments. These do not participate in the
+        # classical parameter contract.
         if param_type is Qubit:
             continue
         if name in qubit_sizes_set:
@@ -138,12 +162,36 @@ def build_param_slots(
             elem_handle_type = _array_element_type(param_type)
             if elem_handle_type is Qubit:
                 continue
-        if is_tuple_type(param_type) or is_dict_type(param_type):
+        # Tuple arguments are purely structural (multi-index keys) and are
+        # never runtime parameters, so they stay out of the manifest.
+        if is_tuple_type(param_type):
+            continue
+        # A Dict kept as a runtime parameter DOES participate in the
+        # contract: its per-key values are rebound per call, which is
+        # exactly what the manifest exists to describe. Emit a slot whose
+        # ``type`` is the ``DictType`` (it already captures the key and
+        # value types, so no extra ParamSlot fields are needed). A
+        # compile-time-bound Dict has no rebind role and — like Tuple —
+        # stays out; its ``DictValue`` lives in ``Block.input_values``.
+        if is_dict_type(param_type):
+            if name not in parameters_set:
+                continue
+            dict_default = (
+                param.default if param.default is not inspect.Parameter.empty else None
+            )
+            slots.append(
+                ParamSlot(
+                    name=name,
+                    type=handle_type_map(param_type),
+                    kind=ParamKind.RUNTIME_PARAMETER,
+                    ndim=0,
+                    default=dict_default,
+                )
+            )
             continue
 
         # Decide the slot's kind. ``Observable`` semantics mirror the
-        # tracer in ``QKernel._create_traced_block`` (see
-        # ``qamomile/circuit/frontend/qkernel.py``): a scalar
+        # tracer in ``qkernel_build.create_traced_block``: a scalar
         # ``Observable`` and an *unbound* ``Vector[Observable]`` are
         # always RUNTIME_PARAMETER (the value is supplied at execute
         # time and ``partial_eval`` cannot fold it). A *bound*
@@ -315,7 +363,7 @@ def create_dummy_input(
         emit_init (bool): If True, emit QInitOperation for qubit arrays
             (default: True). Set to False when creating a nested Block's
             internal dummy inputs, or when the dummy will receive its
-            qubits from a caller's CallBlockOperation.
+            qubits from a caller-side callable invocation.
         shape (tuple[int, ...] | None): Optional concrete shape for array
             types. When provided, the dummy array's shape Values carry
             compile-time constants instead of symbolic placeholders.
@@ -334,6 +382,13 @@ def create_dummy_input(
         TypeError: If ``param_type`` is not a supported parameter type,
             or if a Tuple/array annotation is missing its element
             type(s).
+        NotImplementedError: If ``param_type`` is a rank>1 quantum
+            array annotation (``Matrix[Qubit]`` / ``Tensor[Qubit]``).
+            The quantum addressing path is rank-1, so a higher-rank
+            register would silently alias distinct elements onto the
+            same physical qubit. This path constructs the handle via
+            ``object.__new__`` (bypassing ``ArrayBase.__post_init__``),
+            so it needs its own guard.
     """
     # Handle Tuple types (e.g., Tuple[UInt, UInt])
     if is_tuple_type(param_type):
@@ -382,6 +437,7 @@ def create_dummy_input(
             dict_handle.id = str(id(dict_handle))
             dict_handle._consumed = False
             dict_handle._key_type = param_type.__args__[0]
+            dict_handle._value_type = param_type.__args__[1]
             return dict_handle
         raise TypeError(f"Dict type missing key/value types: {param_type}")
 
@@ -400,6 +456,16 @@ def create_dummy_input(
 
         # Determine number of dimensions (Vector=1, Matrix=2, Tensor=3)
         ndim = _get_ndim(param_type)
+
+        if ndim > 1 and isinstance(element_ir_type, ir_types.QubitType):
+            raise NotImplementedError(
+                f"Parameter {name!r} is a rank-{ndim} quantum register "
+                f"({param_type}): the quantum addressing path is rank-1, "
+                f"so a higher-rank register would silently alias distinct "
+                f"elements onto the same physical qubit. Declare a 1-D "
+                f"Vector[Qubit] parameter and compute flat indices "
+                f"explicitly instead (e.g. q[i * ncols + j])."
+            )
 
         if shape is not None:
             if len(shape) != ndim:
@@ -486,8 +552,69 @@ def _validate_returned_arrays(result: typing.Any) -> None:
     _visit(result)
 
 
+def _validate_return_shape(
+    result: typing.Any,
+    annotation: typing.Any,
+    path: str = "return",
+) -> None:
+    """Validate scalar, array, and tuple structure against an annotation.
+
+    Args:
+        result (Any): Traced Python return value.
+        annotation (Any): Resolved frontend return annotation.
+        path (str): Diagnostic path for nested tuple elements.
+
+    Raises:
+        TypeError: If an array is returned for a scalar annotation, a scalar
+            is returned for an array annotation, or tuple structure differs.
+    """
+    from qamomile.circuit.frontend.handle.array import ArrayBase
+
+    if getattr(annotation, "__origin__", None) is tuple:
+        expected = annotation.__args__
+        if not isinstance(result, tuple):
+            raise TypeError(
+                f"{path} annotation declares a tuple, but the kernel returned "
+                f"{type(result).__name__}."
+            )
+        if len(result) != len(expected):
+            raise TypeError(
+                f"{path} annotation declares {len(expected)} tuple elements, "
+                f"but the kernel returned {len(result)}."
+            )
+        for index, (item, item_annotation) in enumerate(zip(result, expected)):
+            _validate_return_shape(item, item_annotation, f"{path}[{index}]")
+        return
+
+    expects_array = is_array_type(annotation)
+    returns_array = isinstance(result, ArrayBase)
+    if expects_array and not returns_array:
+        raise TypeError(
+            f"{path} annotation declares an array, but the kernel returned "
+            f"{type(result).__name__}."
+        )
+    if not expects_array and returns_array:
+        raise TypeError(
+            f"{path} annotation declares a scalar, but the kernel returned "
+            f"{type(result).__name__}."
+        )
+
+
 def func_to_block(func: typing.Callable) -> Block:
-    """Convert a function to a hierarchical Block.
+    """Convert a typed frontend function to a hierarchical block.
+
+    Args:
+        func (Callable): Typed frontend function to trace. Registered static
+            binding annotations are represented by typed proxy slots.
+
+    Returns:
+        Block: Hierarchical trace containing ordinary inputs and any deferred
+            static binding slots.
+
+    Raises:
+        TypeError: If an input or return annotation is missing or unsupported,
+            a static binding parameter declares a default, or the traced return
+            value does not match its annotation.
 
     Example:
         ```python
@@ -523,7 +650,16 @@ def func_to_block(func: typing.Callable) -> Block:
 
         # Use resolved type hint instead of raw annotation
         param_type = type_hints.get(param.name, param.annotation)
-        input_types[param.name] = handle_type_map(param_type)
+        if is_static_binding_annotation(param_type):
+            if param.default is not inspect.Parameter.empty:
+                raise TypeError(
+                    f"Static binding parameter {param.name!r} cannot have a "
+                    "default value; provide it through bindings when building "
+                    "or transpiling the qkernel."
+                )
+            input_types[param.name] = param_type
+        else:
+            input_types[param.name] = handle_type_map(param_type)
 
     if signature.return_annotation is inspect.Signature.empty:
         raise TypeError("Return type must have a type annotation")
@@ -542,17 +678,27 @@ def func_to_block(func: typing.Callable) -> Block:
 
     # Create dummy inputs from resolved type hints (preserving Array types)
     # Use emit_init=False to avoid emitting QInitOperation for nested Block inputs
-    dummy_inputs = {
-        name: create_dummy_input(
-            type_hints.get(name, param.annotation), name, emit_init=False
-        )
-        for name, param in signature.parameters.items()
-    }
+    dummy_inputs: dict[str, typing.Any] = {}
+    static_proxies: list[StaticBindingProxy] = []
+    for name, param in signature.parameters.items():
+        param_type = type_hints.get(name, param.annotation)
+        if is_static_binding_annotation(param_type):
+            proxy = create_static_binding_proxy(param_type, name)
+            dummy_inputs[name] = proxy
+            static_proxies.append(proxy)
+        else:
+            dummy_inputs[name] = create_dummy_input(
+                param_type,
+                name,
+                emit_init=False,
+            )
 
     # Trace the function execution to collect operations ========
     tracer = Tracer()
     with trace(tracer):
         result = func(**dummy_inputs)  # type: ignore
+
+    _validate_return_shape(result, return_type)
 
     # Validate that returned / live quantum arrays have no unreturned
     # borrows.  The existing ``validate_all_returned`` is consume-driven
@@ -566,11 +712,18 @@ def func_to_block(func: typing.Callable) -> Block:
     operations = tracer.operations
 
     # Extract the input Values from the dummy Handles
-    label_args = list(dummy_inputs.keys())
-    input_values = [h.value for h in dummy_inputs.values()]
+    ordinary_input_names = [
+        name
+        for name, param in signature.parameters.items()
+        if not is_static_binding_annotation(type_hints.get(name, param.annotation))
+    ]
+    label_args = ordinary_input_names
+    input_values: list[ValueLike] = [
+        dummy_inputs[name].value for name in ordinary_input_names
+    ]
 
     # Extract return Values from result
-    return_values: list[Value] = []
+    return_values: list[ValueLike] = []
     if result is not None:
         if isinstance(result, tuple):
             for r in result:
@@ -583,7 +736,10 @@ def func_to_block(func: typing.Callable) -> Block:
                 return_values.append(result.value)
 
     # Always emit ReturnOperation (even for void returns with empty operands)
-    return_op = ReturnOperation(operands=return_values, results=[])
+    return_op = ReturnOperation(
+        operands=typing.cast(list[Value], return_values),
+        results=[],
+    )
     tracer.add_operation(return_op)
 
     # Re-fetch operations after adding ReturnOperation
@@ -607,4 +763,5 @@ def func_to_block(func: typing.Callable) -> Block:
         operations=operations,
         kind=BlockKind.HIERARCHICAL,
         param_slots=param_slots,
+        static_bindings=tuple(proxy.slot for proxy in static_proxies),
     )

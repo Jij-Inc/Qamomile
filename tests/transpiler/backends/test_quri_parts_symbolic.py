@@ -162,12 +162,13 @@ class TestCombineSymbolicNonLinear:
 class TestSymbolicEndToEnd:
     """End-to-end transpile + bind + sample/estimate with symbolic angles.
 
-    Note: top-level ``rx(q, theta * 2.0)`` patterns (BinOp directly between
-    quantum gates without an enclosing for-items loop) are rejected by the
-    segmentation pass with ``MultipleQuantumSegmentsError`` on every backend
-    — this is a separate, pre-existing constraint of the NISQ segmentation
-    strategy, not a QURI-Parts-specific issue. The realistic and supported
-    pattern is BinOp-inside-loop, which the QAOA tests below exercise.
+    Note: a top-level ``rx(q, theta * 2.0)`` pattern (a BinOp gate angle
+    between quantum gates, without an enclosing for-items loop) is now
+    supported on every backend — the segmentation pass absorbs such a
+    non-measurement parameter-expression op into the surrounding quantum
+    segment instead of splitting on it (see the cross-backend
+    ``test_interleaved_param_expr_angle_sample_and_run``). The
+    BinOp-inside-loop pattern the QAOA tests below exercise is supported too.
     """
 
     def test_controlled_gate_before_runtime_param_sample_and_expval(self):
@@ -358,7 +359,14 @@ class TestSymbolicEndToEnd:
         assert np.isclose(val_qp, val_qk, atol=1e-8)
 
     def test_nonlinear_param_squared_raises_at_transpile(self):
-        """theta * theta inside an items loop surfaces our linear-only error."""
+        """theta * theta surfaces the linear-only capability diagnostic.
+
+        The check now runs at the target-capability boundary (circuit-IR
+        legality verification, before materialization), so the error is the
+        shared ``TargetCapabilityError`` naming the ``quri_parts`` target
+        rather than a failure raised from inside the materializer.
+        """
+        from qamomile.circuit.transpiler.errors import TargetCapabilityError
 
         @qmc.qkernel
         def circuit(
@@ -371,9 +379,10 @@ class TestSymbolicEndToEnd:
             return qmc.measure(q)
 
         transpiler = QuriPartsTranspiler()
-        with pytest.raises(QamomileQuriPartsTranspileError, match="non-linear"):
+        with pytest.raises(TargetCapabilityError, match="non-linear") as excinfo:
             transpiler.transpile(
                 circuit,
                 bindings={"coeffs": {0: 1.0}},
                 parameters=["theta"],
             )
+        assert excinfo.value.target == "quri_parts"

@@ -253,6 +253,13 @@ class GateEmitter(Protocol[T]):
         """Emit Phase gate (P(θ) = diag(1, e^(iθ)))."""
         ...
 
+    # ``emit_global_phase(circuit, angle)`` is a structural lowering hook rather
+    # than a required gate primitive. CircuitGateEmitter implements it to
+    # collect a region phase in CircuitProgram. An adapter that omits the hook
+    # fails explicitly instead of silently discarding a user-requested phase.
+    # Target-specific preservation and controlled-call correction belong to
+    # CircuitCapabilities and the materializer after this semantic boundary.
+
     # Two-qubit gates
     @abstractmethod
     def emit_cx(self, circuit: T, control: int, target: int) -> None:
@@ -330,6 +337,18 @@ class GateEmitter(Protocol[T]):
         """Emit measurement operation."""
         ...
 
+    def emit_reset(self, circuit: T, qubit: int) -> None:
+        """Emit a reset-to-zero operation.
+
+        Args:
+            circuit: Backend circuit to emit into.
+            qubit: Physical qubit index to reset.
+
+        Raises:
+            NotImplementedError: If the backend cannot represent reset.
+        """
+        raise NotImplementedError("This backend does not support reset emission.")
+
     # Barrier (optional, for visual separation)
     @abstractmethod
     def emit_barrier(self, circuit: T, qubits: list[int]) -> None:
@@ -349,6 +368,27 @@ class GateEmitter(Protocol[T]):
             Backend-specific gate object, or None if not supported
         """
         ...
+
+    def supports_reusable_gates(self) -> bool:
+        """Return whether ``circuit_to_gate`` can produce reusable gates.
+
+        Returns:
+            bool: True when the backend can convert emitted sub-circuits to
+                reusable gate objects. Defaults to False so emit paths can
+                avoid building throwaway sub-circuits for backends that only
+                support inline fallback emission.
+        """
+        return False
+
+    def supports_gate_inverse(self) -> bool:
+        """Return whether reusable gates can be inverted natively.
+
+        Returns:
+            bool: True when ``gate_inverse`` can return a backend-native
+                inverse for gates produced by ``circuit_to_gate``. Defaults
+                to False.
+        """
+        return False
 
     @abstractmethod
     def append_gate(
@@ -391,6 +431,19 @@ class GateEmitter(Protocol[T]):
             New controlled gate
         """
         ...
+
+    def gate_inverse(self, gate: Any) -> Any:
+        """Create a backend-native inverse gate when supported.
+
+        Args:
+            gate (Any): Backend-specific gate object returned by
+                `circuit_to_gate`.
+
+        Returns:
+            Any: Backend-specific inverse gate object, or None when the
+            backend cannot invert reusable gates natively.
+        """
+        return None
 
     # Control flow support (optional - backends can return False to fall back)
     def supports_for_loop(self) -> bool:
@@ -495,6 +548,14 @@ def default_combine_symbolic(
             return lhs / rhs if rhs != 0 else 0.0
         case BinOpKind.FLOORDIV:
             return lhs // rhs if rhs != 0 else 0
+        case BinOpKind.MOD:
+            # Unlike the div-by-zero degenerate convention above (return 0 to
+            # let emission continue), modulo by zero is undefined, and the
+            # compile-time fold path (evaluate_binop_values) treats it as
+            # non-foldable. Do not special-case rhs == 0 here: a concrete zero
+            # divisor raises loudly rather than silently producing a wrong
+            # value, keeping the symbolic path consistent with folding.
+            return lhs % rhs
         case BinOpKind.POW:
             return lhs**rhs
         case _:

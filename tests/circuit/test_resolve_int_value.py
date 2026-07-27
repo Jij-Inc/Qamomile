@@ -68,6 +68,167 @@ class TestResolveIntValueUuidLookup:
 class TestResolveArrayElementValue:
     """Tests for resolving bound array elements."""
 
+    def test_resolve_int_value_indexes_bound_array_element(self):
+        """Integer resolver should read array elements from explicit bindings."""
+        resolver = ValueResolver()
+
+        bounds = ArrayValue(type=UIntType(), name="bounds")
+        first = Value(type=UIntType(), name="idx_0").with_const(0)
+        bound = Value(
+            type=UIntType(),
+            name="bounds_0",
+            parent_array=bounds,
+            element_indices=(first,),
+        )
+        bindings = {"bounds": np.array([3], dtype=np.uint64)}
+
+        result = resolver.resolve_int_value(bound, bindings)
+
+        assert result == 3
+
+    def test_resolve_int_value_indexes_const_array_element(self):
+        """Integer resolver should read array elements from const_array metadata."""
+        resolver = ValueResolver()
+
+        bounds = ArrayValue(type=UIntType(), name="bounds").with_array_runtime_metadata(
+            const_array=[2, 5]
+        )
+        second = Value(type=UIntType(), name="idx_1").with_const(1)
+        bound = Value(
+            type=UIntType(),
+            name="bounds_1",
+            parent_array=bounds,
+            element_indices=(second,),
+        )
+
+        result = resolver.resolve_int_value(bound, bindings={})
+
+        assert result == 5
+
+    def test_const_array_takes_precedence_over_explicit_binding(self):
+        """Const array metadata should win over explicit parent array bindings."""
+        resolver = ValueResolver()
+
+        bounds = ArrayValue(type=UIntType(), name="bounds").with_array_runtime_metadata(
+            const_array=[7]
+        )
+        first = Value(type=UIntType(), name="idx_0").with_const(0)
+        bound = Value(
+            type=UIntType(),
+            name="bounds_0",
+            parent_array=bounds,
+            element_indices=(first,),
+        )
+        bindings = {"bounds": [3]}
+
+        result = resolver.resolve_int_value(bound, bindings)
+
+        assert result == 7
+
+    def test_symbolic_index_remains_unresolved(self):
+        """Unbound symbolic array indices should remain unresolved."""
+        resolver = ValueResolver()
+
+        bounds = ArrayValue(type=UIntType(), name="bounds").with_array_runtime_metadata(
+            const_array=[2, 5]
+        )
+        symbolic = Value(type=UIntType(), name="i")
+        bound = Value(
+            type=UIntType(),
+            name="bounds_i",
+            parent_array=bounds,
+            element_indices=(symbolic,),
+        )
+
+        result = resolver.resolve_int_value(bound, bindings={})
+
+        assert result is None
+
+    def test_resolve_int_value_indexes_vector_view_element(self):
+        """Integer resolver should map view-local indices back to the root array."""
+        resolver = ValueResolver()
+
+        bounds = ArrayValue(type=UIntType(), name="bounds").with_array_runtime_metadata(
+            const_array=[1, 2, 3, 4]
+        )
+        view = ArrayValue(
+            type=UIntType(),
+            name="bounds_view",
+            slice_of=bounds,
+            slice_start=Value(type=UIntType(), name="start").with_const(1),
+            slice_step=Value(type=UIntType(), name="step").with_const(2),
+        )
+        local_one = Value(type=UIntType(), name="idx_1").with_const(1)
+        bound = Value(
+            type=UIntType(),
+            name="bounds_view_1",
+            parent_array=view,
+            element_indices=(local_one,),
+        )
+
+        result = resolver.resolve_int_value(bound, bindings={})
+
+        assert result == 4
+
+    def test_resolve_int_value_indexes_nested_vector_view_element(self):
+        """Nested VectorView indices should compose every slice affine map."""
+        resolver = ValueResolver()
+
+        bounds = ArrayValue(type=UIntType(), name="bounds").with_array_runtime_metadata(
+            const_array=[1, 2, 3, 4, 5]
+        )
+        outer = ArrayValue(
+            type=UIntType(),
+            name="outer",
+            slice_of=bounds,
+            slice_start=Value(type=UIntType(), name="outer_start").with_const(1),
+            slice_step=Value(type=UIntType(), name="outer_step").with_const(2),
+        )
+        inner = ArrayValue(
+            type=UIntType(),
+            name="inner",
+            slice_of=outer,
+            slice_start=Value(type=UIntType(), name="inner_start").with_const(1),
+            slice_step=Value(type=UIntType(), name="inner_step").with_const(1),
+        )
+        local_zero = Value(type=UIntType(), name="idx_0").with_const(0)
+        bound = Value(
+            type=UIntType(),
+            name="inner_0",
+            parent_array=inner,
+            element_indices=(local_zero,),
+        )
+
+        result = resolver.resolve_int_value(bound, bindings={})
+
+        assert result == 4
+
+    def test_symbolic_slice_bound_remains_unresolved(self):
+        """Unbound symbolic VectorView slice bounds should remain unresolved."""
+        resolver = ValueResolver()
+
+        bounds = ArrayValue(type=UIntType(), name="bounds").with_array_runtime_metadata(
+            const_array=[1, 2, 3]
+        )
+        view = ArrayValue(
+            type=UIntType(),
+            name="bounds_view",
+            slice_of=bounds,
+            slice_start=Value(type=UIntType(), name="start"),
+            slice_step=Value(type=UIntType(), name="step").with_const(1),
+        )
+        local_zero = Value(type=UIntType(), name="idx_0").with_const(0)
+        bound = Value(
+            type=UIntType(),
+            name="bounds_view_0",
+            parent_array=view,
+            element_indices=(local_zero,),
+        )
+
+        result = resolver.resolve_int_value(bound, bindings={})
+
+        assert result is None
+
     def test_numpy_integer_array_element_is_accepted(self):
         """Nested array lookups should normalize NumPy integer results."""
         resolver = ValueResolver()
@@ -90,6 +251,24 @@ class TestResolveArrayElementValue:
 
         assert result == 1
         assert isinstance(result, int)
+
+    def test_operand_for_binding_indexes_array_element(self):
+        """Sub-block local bindings should receive concrete array elements."""
+        resolver = ValueResolver()
+
+        gammas = ArrayValue(type=FloatType(), name="gammas")
+        second = Value(type=UIntType(), name="idx_1").with_const(1)
+        gamma = Value(
+            type=FloatType(),
+            name="gammas_1",
+            parent_array=gammas,
+            element_indices=(second,),
+        )
+        bindings = {"gammas": np.array([0.1, 0.2])}
+
+        result = resolver.resolve_operand_for_binding(gamma, bindings)
+
+        assert result == np.float64(0.2)
 
 
 class TestResolveClassicalScalarNormalization:

@@ -25,7 +25,7 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit]"
 
 # %% [markdown]
 # ---
@@ -338,10 +338,8 @@ for i in range(n_spins - 1):
 
 # %%
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm import (
-    computational_basis_state,
-    trotterized_time_evolution,
-)
+from qamomile.circuit.algorithm import trotterized_time_evolution
+from qamomile.circuit.stdlib import computational_basis_state
 
 
 @qmc.qkernel

@@ -32,7 +32,7 @@
 # 3. 出現頻度が高い上位$K$個のビット列を離散部分空間$\{|s_i\rangle\}_{i=1}^{K}$として選ぶ。
 # 4. 有効ハミルトニアン$H^{\mathrm{sub}}_{ij} = \langle s_i | H | s_j \rangle$を構築し、古典的に対角化する。
 #
-# このチュートリアルでは4量子ビットの横磁場Isingモデルでフローを通しで歩きます。量子状態の準備とサンプリングは**QURI Parts**バックエンド（Qulacsシミュレータ）で実行し、部分空間の構築と対角化は`qamomile.linalg.solve_subspace`を使います。内部ではベクトル化されたZ基底ルーチン`subspace_hamiltonian`（XOR・パリティ計算のみで行列積不要）を呼びます。
+# このチュートリアルでは4量子ビットの横磁場Isingモデルでフローを通しで歩きます。量子状態の準備とサンプリングは**QURI Parts**連携（Qulacsシミュレータ）で実行し、部分空間の構築と対角化は`qamomile.linalg.solve_subspace`を使います。内部ではベクトル化されたZ基底ルーチン`subspace_hamiltonian`（XOR・パリティ計算のみで行列積不要）を呼びます。
 
 # %%
 import os
@@ -129,7 +129,7 @@ def ansatz_measure(
 
 
 # %% [markdown]
-# ## 両方のカーネルをQURI Partsバックエンドでコンパイル
+# ## 両方のカーネルをQURI Partsでコンパイル
 
 # %%
 transpiler = QuriPartsTranspiler()

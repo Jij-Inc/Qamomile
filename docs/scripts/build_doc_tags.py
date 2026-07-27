@@ -1,4 +1,4 @@
-"""Generate doc-tag indexes, per-tag pages, and inline tag chips.
+"""Generate doc-tag indexes, per-tag pages, inline tag chips, and card metadata.
 
 This script is the source of truth for tag-based discovery UX across the
 documentation. It scans every tagged article under
@@ -8,16 +8,22 @@ documentation. It scans every tagged article under
 (reading the MyST ``title`` / ``tags`` frontmatter inside the first
 ``# %% [markdown]`` cell), and writes:
 
-* ``docs/<lang>/tags/<tag>.md`` — one page per tag, listing every
-  article that carries that tag, grouped by section.
+* ``docs/<lang>/tags/<tag>.md`` — one page per tag, rendering every
+  article that carries that tag as a card, grouped by section.
 * ``docs/<lang>/tags/index.md`` — a tag-cloud landing page.
 * A chip block inserted right after the first H1 inside each tagged
   ``.py`` file's first markdown cell, so every rendered article shows
   clickable tag chips at the top.
 * A "Browse by tag" section (heading + chip cloud) inserted before
-  the first ``## `` heading in each section's ``index.md``,
-  presenting a proximity-grouped tag cloud (this section / other
-  sections).
+  the article card grid in each section's ``index.md``, presenting a
+  proximity-grouped tag cloud (this section / other sections).
+* Tag chips plus a thumbnail slot inserted into each section
+  ``index.md`` card in the build-dir copy. Cards keep their existing
+  descriptions, while article navigation moves to the card header so
+  tag chips can be independent links. When an article has no
+  ``thumbnail:`` frontmatter, the card uses the shared Qamomile logo.
+  Per-tag result cards reuse the same descriptions from the matching
+  section ``index.md`` card.
 
 The per-tag pages are picked up by mystmd via a
 ``- pattern: "tags/*.md"`` toc entry in ``myst.yml`` — the script
@@ -36,9 +42,10 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from html import escape
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import yaml
 
@@ -66,34 +73,36 @@ SECTIONS: tuple[str, ...] = (
 # effect. CI enforces the whitelist via tests/docs/test_tag_whitelist.py
 # — this script itself does not validate, so a stray tag does not crash
 # the build, only the test fails on the PR.
-ALLOWED_TAGS: frozenset[str] = frozenset({
-    # Section (1:1 with directory layout — every article carries the
-    # tag that matches its containing section)
-    "tutorial",
-    "algorithm",
-    "usage",
-    "integration",
-    # Domain
-    "chemistry",
-    "differential-equation",
-    "error-correction",
-    "finance",
-    "linear-system",
-    "machine-learning",
-    "optimization",
-    # Method family
-    "oracle-based",
-    "sample-based",
-    "simulation",
-    "variational",
-    # Article type
-    "primitive",
-    # Technique
-    "circuit-compilation",
-    "encoding",
-    # Other
-    "resource-estimation",
-})
+ALLOWED_TAGS: frozenset[str] = frozenset(
+    {
+        # Section (1:1 with directory layout — every article carries the
+        # tag that matches its containing section)
+        "tutorial",
+        "algorithm",
+        "usage",
+        "integration",
+        # Domain
+        "chemistry",
+        "differential-equation",
+        "error-correction",
+        "finance",
+        "linear-system",
+        "machine-learning",
+        "optimization",
+        # Method family
+        "oracle-based",
+        "sample-based",
+        "simulation",
+        "variational",
+        # Article type
+        "primitive",
+        # Technique
+        "circuit-compilation",
+        "encoding",
+        # Other
+        "resource-estimation",
+    }
+)
 
 # Locale-aware copy. Keep the taxonomy identical across locales; only
 # display strings differ. Adding a locale = adding an entry here.
@@ -157,7 +166,9 @@ class Article:
     slug: str  # filename stem, e.g. "qaoa_maxcut"
     title: str
     tags: tuple[str, ...]
+    thumbnail: str | None
     py_path: Path  # absolute path to the source .py
+    card_body: str | None = None  # section index card body, if available
 
 
 # --------------------------------------------------------------------- #
@@ -252,19 +263,20 @@ def _load_article(py_path: Path, section: str) -> Article | None:
     if not fm or not fm.get("tags"):
         return None
     title = str(
-        fm.get("title")
-        or _extract_h1(body)
-        or py_path.stem.replace("_", " ").title()
+        fm.get("title") or _extract_h1(body) or py_path.stem.replace("_", " ").title()
     )
     raw_tags: Any = fm.get("tags") or []
     if not isinstance(raw_tags, list):
         return None
     tags = tuple(str(t) for t in raw_tags)
+    raw_thumbnail: Any = fm.get("thumbnail")
+    thumbnail = str(raw_thumbnail) if raw_thumbnail else None
     return Article(
         section=section,
         slug=py_path.stem,
         title=title,
         tags=tags,
+        thumbnail=thumbnail,
         py_path=py_path,
     )
 
@@ -332,6 +344,32 @@ def _chip_from_article(tag: str) -> str:
     return _chip_html(tag, f"../tags/{tag}.md")
 
 
+def _markdown_link_text(text: str) -> str:
+    """Escape ``text`` for use as Markdown link text.
+
+    Only bracket characters need escaping for the generated article
+    titles we place inside ``[text](href)`` links. Other Markdown
+    affordances in hand-written card headers, such as ``**bold**``, are
+    intentionally left alone so existing header emphasis survives.
+    """
+    return text.replace("[", r"\[").replace("]", r"\]")
+
+
+def _card_header_link_target(header: str) -> str | None:
+    """Return the target from a simple Markdown link header, if present."""
+    match = re.search(r"\]\((?P<href>[^)]+)\)\s*$", header)
+    if match is None:
+        return None
+    return match.group("href")
+
+
+def _linked_card_header(header: str, href: str) -> str:
+    """Render ``header`` as a Markdown link unless it is already linked."""
+    if _card_header_link_target(header) is not None:
+        return header
+    return f"[{_markdown_link_text(header)}]({href})"
+
+
 def _render_tags_index(
     tag_map: dict[str, list[Article]],
     strings: dict[str, object],
@@ -347,9 +385,7 @@ def _render_tags_index(
     parts.append(str(strings["tags_index_lead"]))
     parts.append("")
     if tag_map:
-        chip_line = " ".join(
-            _chip_from_tags_dir(t) for t in sorted(tag_map)
-        )
+        chip_line = " ".join(_chip_from_tags_dir(t) for t in sorted(tag_map))
         parts.append(chip_line)
         parts.append("")
     return "\n".join(parts).rstrip() + "\n"
@@ -372,9 +408,7 @@ def _render_tag_page(
     parts.append("")
     parts.append(f"# {str(strings['tag_page_heading_fmt']).format(tag=tag)}")
     parts.append("")
-    parts.append(
-        str(strings["tag_page_lead"]).format(tag=tag, count=len(tag_articles))
-    )
+    parts.append(str(strings["tag_page_lead"]).format(tag=tag, count=len(tag_articles)))
     parts.append("")
     parts.append(f"[{strings['tag_page_back']}](./index.md)")
     parts.append("")
@@ -399,19 +433,19 @@ def _render_tag_page(
             continue
         parts.append(f"## {section_titles[section]}")
         parts.append("")
+        parts.append("::::{grid} 1 1 1 1")
+        parts.append("")
         for a in section_articles:
-            # Show every tag the article carries, including the current
-            # tag page's tag. Hiding it here used to read as "where did
-            # the tag we landed on go?" — a confusing experience even
-            # though we know why we're on the page.
-            chips = " ".join(_chip_from_tags_dir(t) for t in a.tags)
-            # (chips already space-separated; tag-chip CSS handles its own
-            # margin so no extra ` · ` separator is needed)
-            parts.append(f"### [{a.title}](../{a.section}/{a.slug}.ipynb)")
+            parts.append(
+                _render_article_card(
+                    a,
+                    f"../{a.section}/{a.slug}.ipynb",
+                    _chip_from_tags_dir,
+                )
+            )
             parts.append("")
-            if chips:
-                parts.append(f"**{strings['tags_label']}:** {chips}")
-                parts.append("")
+        parts.append("::::")
+        parts.append("")
     return "\n".join(parts).rstrip() + "\n"
 
 
@@ -439,11 +473,7 @@ CHIP_BLOCK_RE = re.compile(
 def _build_chip_block(article: Article, strings: dict[str, object]) -> str:
     """Build the per-article chip block (already prefixed with ``# `` for .py)."""
     chips = " ".join(_chip_from_article(t) for t in article.tags)
-    return (
-        f"{CHIP_BEGIN}\n"
-        f"# **{strings['tags_label']}:** {chips}\n"
-        f"{CHIP_END}"
-    )
+    return f"{CHIP_BEGIN}\n# **{strings['tags_label']}:** {chips}\n{CHIP_END}"
 
 
 def _inject_tag_chips(article: Article, strings: dict[str, object]) -> Path | None:
@@ -481,9 +511,7 @@ def _inject_tag_chips(article: Article, strings: dict[str, object]) -> Path | No
     while after < len(cell_lines) and cell_lines[after].rstrip("\n") == "#":
         after += 1
     new_cell = (
-        "".join(cell_lines[: h1_idx + 1])
-        + canonical
-        + "".join(cell_lines[after:])
+        "".join(cell_lines[: h1_idx + 1]) + canonical + "".join(cell_lines[after:])
     )
     new_text = text[:cell_start] + new_cell + text[cell_end:]
     return _write_if_changed(article.py_path, new_text)
@@ -516,6 +544,16 @@ BROWSE_END = "<!-- END browse-by-tag -->"
 BROWSE_BLOCK_RE = re.compile(
     re.escape(BROWSE_BEGIN) + r"[\s\S]*?" + re.escape(BROWSE_END),
 )
+BROWSE_SECTION_RE = re.compile(
+    r"\n*^## [^\n]+\n(?:[ \t]*\n)*"
+    + re.escape(BROWSE_BEGIN)
+    + r"[\s\S]*?"
+    + re.escape(BROWSE_END)
+    + r"\n*",
+    re.MULTILINE,
+)
+GRID_DIRECTIVE_RE = re.compile(r"^:{3,}\{grid\}(?:\s|$)", re.MULTILINE)
+H2_RE = re.compile(r"^## ", re.MULTILINE)
 
 # Bucket order = increasing distance from the index.md that hosts the
 # chip cloud. Each tag is shown in its closest non-empty bucket only
@@ -569,7 +607,8 @@ def _render_browse_by_tag_block(
             key=lambda b: _BUCKET_PRIORITY[b],
         )
         count = sum(
-            1 for a in articles
+            1
+            for a in articles
             if _classify_for_index(a.section, index_section) == closest
         )
         bucketed[closest][tag] = count
@@ -579,11 +618,35 @@ def _render_browse_by_tag_block(
         tag_counts = bucketed[bucket]
         if not tag_counts:
             continue
-        chip_line = " ".join(
-            _chip_from_section(t) for t in sorted(tag_counts)
-        )
+        chip_line = " ".join(_chip_from_section(t) for t in sorted(tag_counts))
         lines.append(f"**{bucket_labels[bucket]}:** {chip_line}")
     return "\n\n".join(lines)
+
+
+def _strip_browse_by_tag_section(text: str) -> str:
+    """Remove an existing auto-managed browse-by-tag section from ``text``."""
+    stripped, count = BROWSE_SECTION_RE.subn("\n\n", text, count=1)
+    if count:
+        return stripped
+    return BROWSE_BLOCK_RE.sub("", text, count=1)
+
+
+def _browse_by_tag_insert_at(text: str) -> int | None:
+    """Return the insertion offset for the section browse-by-tag block.
+
+    Prefer the first article card grid so the tag browser appears before
+    every article card. If a section still has an ``## All articles`` style
+    heading before that grid, place the browser before the heading instead.
+    """
+    grid_match = GRID_DIRECTIVE_RE.search(text)
+    h2_match = H2_RE.search(text)
+    if grid_match is not None and (
+        h2_match is None or h2_match.start() > grid_match.start()
+    ):
+        return grid_match.start()
+    if h2_match is not None:
+        return h2_match.start()
+    return None
 
 
 def _inject_browse_by_tag(
@@ -594,19 +657,12 @@ def _inject_browse_by_tag(
 ) -> Path | None:
     """Inject the auto-managed browse-by-tag block into a section index.
 
-    Two cases, mirroring the chip-block injection in article ``.py``
-    files:
-
-    1. The index already carries the sentinel pair
-       ``<!-- BEGIN browse-by-tag --> ... <!-- END browse-by-tag -->``
-       — replace the body in place.
-    2. No sentinel pair — synthesize the entire "Browse by tag"
-       section (heading + sentinels + chip cloud) and insert it
-       immediately before the first ``## `` heading in the body. This
-       is the supported flow for the build-dir model: contributors
-       keep the committed ``index.md`` free of any browse-by-tag
-       boilerplate, and ``build_doc_tags.py`` materialises the section
-       inside the ``_build_src/`` copy.
+    Existing generated sections are stripped first, then a fresh section
+    (heading + sentinels + chip cloud) is inserted before the article
+    card grid. This is the supported flow for the build-dir model:
+    contributors keep the committed ``index.md`` free of any
+    browse-by-tag boilerplate, and ``build_doc_tags.py`` materialises
+    the section inside the ``_build_src/`` copy.
 
     Returns the path if the file was modified, otherwise ``None``.
     """
@@ -614,26 +670,263 @@ def _inject_browse_by_tag(
         return None
     text = index_path.read_text(encoding="utf-8")
     block_body = _render_browse_by_tag_block(tag_map, index_section, strings)
-
-    # Case 1: sentinels present — fill them in place.
-    if BROWSE_BLOCK_RE.search(text):
-        canonical = f"{BROWSE_BEGIN}\n{block_body}\n{BROWSE_END}"
-        new_text = BROWSE_BLOCK_RE.sub(canonical, text, count=1)
-        return _write_if_changed(index_path, new_text)
-
-    # Case 2: no sentinels — synthesize the whole section and insert it
-    # right before the first H2. An index template without any H2 (an
-    # empty section landing) gets the section appended at the end.
     heading = str(strings["browse_by_tag"])
-    section_md = (
-        f"## {heading}\n\n"
-        f"{BROWSE_BEGIN}\n{block_body}\n{BROWSE_END}\n\n"
-    )
-    h2_match = re.search(r"^## ", text, re.MULTILINE)
-    if h2_match is not None:
-        new_text = text[: h2_match.start()] + section_md + text[h2_match.start() :]
+    section_md = f"## {heading}\n\n{BROWSE_BEGIN}\n{block_body}\n{BROWSE_END}\n\n"
+
+    stripped_text = _strip_browse_by_tag_section(text).strip()
+    insert_at = _browse_by_tag_insert_at(stripped_text)
+    if insert_at is None:
+        new_text = stripped_text.rstrip() + "\n\n" + section_md
     else:
-        new_text = text.rstrip() + "\n\n" + section_md
+        prefix = stripped_text[:insert_at].rstrip()
+        suffix = stripped_text[insert_at:].lstrip()
+        if prefix:
+            new_text = f"{prefix}\n\n{section_md}{suffix}"
+        else:
+            new_text = f"{section_md}{suffix}"
+    return _write_if_changed(index_path, new_text.rstrip() + "\n")
+
+
+# --------------------------------------------------------------------- #
+# Section index.md card metadata injection                              #
+# --------------------------------------------------------------------- #
+
+CARD_THUMB_BEGIN = "<!-- BEGIN auto-card-thumbnail -->"
+CARD_THUMB_END = "<!-- END auto-card-thumbnail -->"
+CARD_TAGS_BEGIN = "<!-- BEGIN auto-card-tags -->"
+CARD_TAGS_END = "<!-- END auto-card-tags -->"
+DEFAULT_CARD_THUMBNAIL = "../../assets/qamomile_logo.png"
+
+CARD_DIRECTIVE_RE = re.compile(
+    r"(?ms)^:::\{card\}\n(?P<body>.*?)^:::\s*$",
+)
+
+CARD_AUTO_BLOCK_RE = re.compile(
+    r"\n?(?:"
+    + re.escape(CARD_THUMB_BEGIN)
+    + r"[\s\S]*?"
+    + re.escape(CARD_THUMB_END)
+    + r"|"
+    + re.escape(CARD_TAGS_BEGIN)
+    + r"[\s\S]*?"
+    + re.escape(CARD_TAGS_END)
+    + r")\n?",
+    re.MULTILINE,
+)
+
+CARD_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+
+
+def _card_link_slug(link: str) -> str | None:
+    """Resolve a card ``:link:`` target to a sibling article slug.
+
+    Returns ``None`` for external links, empty links, or index-like
+    targets that do not represent an article in the current section.
+    """
+    cleaned = link.strip()
+    if (
+        not cleaned
+        or cleaned.startswith("//")
+        or re.match(r"^[a-z][a-z0-9+.-]*:", cleaned, re.IGNORECASE)
+    ):
+        return None
+    cleaned = cleaned.split("#", 1)[0].split("?", 1)[0].strip("/")
+    if not cleaned:
+        return None
+    name = Path(cleaned).name
+    if name in {"index", "index.md", "index.ipynb"}:
+        return None
+    return Path(name).stem
+
+
+def _card_thumbnail_html(article: Article) -> str:
+    """Render the thumbnail slot for a section index card."""
+    src = escape(article.thumbnail or DEFAULT_CARD_THUMBNAIL, quote=True)
+    if article.thumbnail:
+        alt = escape(f"{article.title} thumbnail", quote=True)
+    else:
+        alt = ""
+    extra_class = "" if article.thumbnail else " qamomile-section-card-thumb-default"
+    inner = (
+        f'<img class="qamomile-section-card-thumb{extra_class}" '
+        f'src="{src}" alt="{alt}">'
+    )
+    return (
+        f"{CARD_THUMB_BEGIN}\n"
+        '<div class="qamomile-section-card-thumb-wrap">\n'
+        f"{inner}\n"
+        "</div>\n"
+        f"{CARD_THUMB_END}"
+    )
+
+
+def _card_tags_html(
+    article: Article,
+    chip_renderer: Callable[[str], str],
+) -> str:
+    """Render clickable tag chips for an article card."""
+    chips = " ".join(chip_renderer(t) for t in article.tags)
+    return (
+        f"{CARD_TAGS_BEGIN}\n"
+        f'<div class="qamomile-section-card-tags">{chips}</div>\n'
+        f"{CARD_TAGS_END}"
+    )
+
+
+def _render_article_card(
+    article: Article,
+    article_href: str,
+    chip_renderer: Callable[[str], str],
+) -> str:
+    """Render one generated article card.
+
+    The card intentionally does not use the MyST ``:link:`` option:
+    article navigation lives on the card title, leaving the tag chips as
+    normal independent links.
+    """
+    title = _markdown_link_text(article.title)
+    lines = [
+        ":::{card}",
+        f":header: [**{title}**]({article_href})",
+        _card_thumbnail_html(article),
+    ]
+    if article.card_body:
+        lines.extend(["", article.card_body])
+    lines.extend(["", _card_tags_html(article, chip_renderer), ":::"])
+    return "\n".join(lines)
+
+
+def _extract_card_link(body: str) -> str | None:
+    """Return a card's article link from ``:link:`` or linked header metadata."""
+    link_match = re.search(r"^:link:\s*(?P<link>\S+)\s*$", body, re.MULTILINE)
+    if link_match is not None:
+        return link_match.group("link")
+    header_match = re.search(r"^:header:\s*(?P<header>.*?)\s*$", body, re.MULTILINE)
+    if header_match is None:
+        return None
+    return _card_header_link_target(header_match.group("header"))
+
+
+def _rewrite_card_options(
+    option_lines: list[str],
+    article_href: str,
+) -> list[str]:
+    """Rewrite card options so the title, not the whole card, is linked."""
+    rewritten: list[str] = []
+    for line in option_lines:
+        if re.match(r"^:link(?:-type)?:", line):
+            continue
+        header_match = re.match(r"^:header:\s*(?P<header>.*?)\s*$", line)
+        if header_match is not None:
+            header = _linked_card_header(header_match.group("header"), article_href)
+            rewritten.append(f":header: {header}")
+        else:
+            rewritten.append(line)
+    return rewritten
+
+
+def _render_card_body_content(content: str) -> str:
+    """Render Markdown-only affordances unsupported in MyST card bodies."""
+
+    def render_inline_code(match: re.Match[str]) -> str:
+        return f"<code>{escape(match.group(1), quote=False)}</code>"
+
+    return CARD_INLINE_CODE_RE.sub(render_inline_code, content)
+
+
+def _extract_section_card_bodies(index_path: Path) -> dict[str, str]:
+    """Extract hand-written card body text from a section ``index.md``.
+
+    The returned mapping is keyed by article slug. Auto-managed
+    thumbnail/tag blocks are stripped first so the extracted body stays
+    stable when this script is re-run against an already generated tree.
+    Inline code is rendered the same way as section card enhancement so
+    tag result cards and section cards display identical summaries.
+    """
+    if not index_path.is_file():
+        return {}
+    text = index_path.read_text(encoding="utf-8")
+    bodies: dict[str, str] = {}
+    for match in CARD_DIRECTIVE_RE.finditer(text):
+        body = CARD_AUTO_BLOCK_RE.sub("\n", match.group("body")).strip("\n")
+        article_href = _extract_card_link(body)
+        if article_href is None:
+            continue
+        slug = _card_link_slug(article_href)
+        if slug is None:
+            continue
+        lines = body.splitlines()
+        split_at = 0
+        while split_at < len(lines) and lines[split_at].startswith(":"):
+            split_at += 1
+        content = _render_card_body_content("\n".join(lines[split_at:]).strip("\n"))
+        if content:
+            bodies[slug] = content
+    return bodies
+
+
+def _attach_section_card_bodies(lang: str, articles: list[Article]) -> list[Article]:
+    """Attach section-index card bodies to matching articles."""
+    body_maps = {
+        section: _extract_section_card_bodies(DOCS_ROOT / lang / section / "index.md")
+        for section in SECTIONS
+    }
+    enriched: list[Article] = []
+    for article in articles:
+        card_body = body_maps.get(article.section, {}).get(article.slug)
+        enriched.append(replace(article, card_body=card_body))
+    return enriched
+
+
+def _enhance_card_block(
+    match: re.Match[str],
+    articles_by_slug: dict[str, Article],
+) -> str:
+    """Insert thumbnail and tag metadata into one card directive."""
+    body = match.group("body")
+    article_href = _extract_card_link(body)
+    if article_href is None:
+        return match.group(0)
+    slug = _card_link_slug(article_href)
+    if slug is None or slug not in articles_by_slug:
+        return match.group(0)
+
+    body = CARD_AUTO_BLOCK_RE.sub("\n", body).strip("\n")
+    lines = body.splitlines()
+    split_at = 0
+    while split_at < len(lines) and lines[split_at].startswith(":"):
+        split_at += 1
+
+    option_lines = _rewrite_card_options(lines[:split_at], article_href)
+    content = _render_card_body_content("\n".join(lines[split_at:]).strip("\n"))
+    article = articles_by_slug[slug]
+    enhanced_body = (
+        "\n".join(option_lines)
+        + "\n"
+        + _card_thumbnail_html(article)
+        + "\n"
+        + content
+        + "\n\n"
+        + _card_tags_html(article, _chip_from_section)
+    ).rstrip()
+    return f":::{{card}}\n{enhanced_body}\n:::"
+
+
+def _inject_section_card_metadata(
+    index_path: Path,
+    section_articles: list[Article],
+) -> Path | None:
+    """Add tag chips and thumbnail slots to cards in a section ``index.md``."""
+    if not index_path.is_file():
+        return None
+    articles_by_slug = {a.slug: a for a in section_articles}
+    if not articles_by_slug:
+        return None
+    text = index_path.read_text(encoding="utf-8")
+    new_text = CARD_DIRECTIVE_RE.sub(
+        lambda m: _enhance_card_block(m, articles_by_slug),
+        text,
+    )
     return _write_if_changed(index_path, new_text)
 
 
@@ -694,8 +987,12 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
     strings = STRINGS[lang]
 
     articles, untagged_paths = _walk_articles(lang)
+    articles = _attach_section_card_bodies(lang, articles)
     tag_map = _tag_map(articles)
     all_tags = sorted(tag_map)
+    articles_by_section: dict[str, list[Article]] = {}
+    for article in articles:
+        articles_by_section.setdefault(article.section, []).append(article)
 
     written: list[Path] = []
     removed: list[Path] = []
@@ -721,9 +1018,7 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
     removed.extend(_clean_stale(tags_dir, keep))
 
     tags_index = tags_dir / "index.md"
-    written_index = _write_if_changed(
-        tags_index, _render_tags_index(tag_map, strings)
-    )
+    written_index = _write_if_changed(tags_index, _render_tags_index(tag_map, strings))
     if written_index is not None:
         written.append(written_index)
 
@@ -734,18 +1029,28 @@ def _build_for_locale(lang: str) -> tuple[list[Path], list[Path]]:
         if written_page is not None:
             written.append(written_page)
 
-    # 3. Inject (or refresh) the browse-by-tag block in each section's
-    # hand-written index.md. ``_inject_browse_by_tag`` handles both:
-    # an existing sentinel pair (Case 1, replace in place) and a fully
-    # hand-written index without sentinels (Case 2, synthesise the
-    # entire ``## Browse by tag`` section before the first H2).
+    # 3. Enhance each section's hand-written card grid with auto-managed
+    # tag chips and thumbnail slots. The source cards stay hand-written;
+    # only the metadata surface is generated.
+    for section in SECTIONS:
+        index_path = DOCS_ROOT / lang / section / "index.md"
+        modified = _inject_section_card_metadata(
+            index_path,
+            articles_by_section.get(section, []),
+        )
+        if modified is not None:
+            written.append(modified)
+
+    # 4. Inject (or refresh) the browse-by-tag block in each section's
+    # hand-written index.md. Existing generated sections are moved if
+    # needed so the chip cloud appears before the article cards.
     for section in SECTIONS:
         index_path = DOCS_ROOT / lang / section / "index.md"
         modified = _inject_browse_by_tag(index_path, section, tag_map, strings)
         if modified is not None:
             written.append(modified)
 
-    # 4. Remove any leftover docs/<lang>/algorithm/tags/ from the old
+    # 5. Remove any leftover docs/<lang>/algorithm/tags/ from the old
     # layout so the build doesn't pick them up alongside the new path.
     legacy_dir = DOCS_ROOT / lang / "algorithm" / "tags"
     if legacy_dir.is_dir():

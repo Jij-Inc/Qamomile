@@ -304,11 +304,21 @@ pipeline runs [docs/scripts/build_doc_tags.py](scripts/build_doc_tags.py)
 against `_build_src/`
 (the scratch copy) and turns those declarations into:
 
+Section index cards can also show an article thumbnail. Add an optional
+`thumbnail:` field to the same article frontmatter; the value is emitted
+as written into the matching section card. When `thumbnail:` is omitted,
+the card uses `../../assets/qamomile_logo.png`. Paths should resolve from
+the section index page (for shared assets, that usually means
+`../../assets/<image>`). Inline code spans in card bodies are converted
+to raw `<code>` elements in the build copy because MyST card bodies do
+not currently parse inline Markdown there.
+
 | Output | Where it ends up | In git? |
 |---|---|---|
 | Tag landing page | `_build_src/<lang>/tags/index.md` | no |
-| Per-tag pages | `_build_src/<lang>/tags/<tag>.md` (one per tag) | no |
+| Per-tag pages with article cards | `_build_src/<lang>/tags/<tag>.md` (one per tag) | no |
 | Inline tag chips at the top of each article | injected into the `.py`/`.ipynb` inside `_build_src/<lang>/<section>/` | no |
+| Section-index card tag chips, thumbnail slots, and header links | injected into cards inside `_build_src/<lang>/<section>/index.md` | no |
 | Browse-by-tag chip cloud on each section's `index.md` | injected into `_build_src/<lang>/<section>/index.md` | no |
 
 Where the script injects in the build-dir copy:
@@ -316,14 +326,16 @@ Where the script injects in the build-dir copy:
 | Where | How the script finds the spot |
 |---|---|
 | Article `.py` body | inserted right after the first H1 |
-| Section `index.md` | a whole `## Browse by tag` section is synthesised and inserted right before the first H2 (e.g. before `## All articles`) |
+| Section `index.md` cards | matched by each card's `:link:` target (or an already linked header) and the corresponding article slug; generated output links the header so card tags can remain clickable |
+| Per-tag result cards | reuse the matching section `index.md` card body as the article summary |
+| Section `index.md` browse block | a whole `## Browse by tag` section is synthesised and inserted before the article card grid, or before the H2 that introduces that grid |
 
 The per-tag pages are picked up by mystmd via a single
 `- pattern: "tags/*.md"` toc entry in each language's `myst.yml`
 ([en](en/myst.yml), [ja](ja/myst.yml)) with `hidden: true`, so the
 script does **not** maintain any region inside those files. The committed
 source therefore has no tag-managed regions to track — articles and
-section index pages stay hand-written. The API reference has a separate
+section index page summaries stay hand-written. The API reference has a separate
 auto-generated TOC region in `myst.yml`, managed by
 [docs/generate_api.py](generate_api.py).
 

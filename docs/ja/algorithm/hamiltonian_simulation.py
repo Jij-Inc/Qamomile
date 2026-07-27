@@ -25,7 +25,7 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit]"
 
 # %%
 from typing import Any

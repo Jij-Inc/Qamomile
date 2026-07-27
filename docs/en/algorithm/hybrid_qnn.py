@@ -16,8 +16,7 @@
 # ---
 # tags: [algorithm, machine-learning, variational]
 # ---
-
-# %% [markdown]
+#
 # # Hybrid Quantum Neural Network (HQNN)
 #
 # This tutorial demonstrates how to build a **Hybrid Quantum Neural Network** (HQNN) on Fashion-MNIST that combines classical neural network layers with a quantum variational circuit layer. The quantum layer is defined using Qamomile's `@qkernel` API and integrated into a PyTorch training pipeline via the parameter shift rule.
@@ -143,7 +142,7 @@ executables = [
 ]
 
 est = variational_ansatz.estimate_resources(
-    bindings={"n_qubits": N_QUBITS, "n_layers": N_LAYERS},
+    inputs={"n_qubits": N_QUBITS, "n_layers": N_LAYERS},
 )
 print(est)
 assert est.qubits == 4

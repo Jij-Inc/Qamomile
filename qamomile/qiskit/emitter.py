@@ -82,6 +82,19 @@ class QiskitGateEmitter:
     def emit_p(self, circuit: "QuantumCircuit", qubit: int, angle: float | Any) -> None:
         circuit.p(angle, qubit)
 
+    def emit_global_phase(
+        self,
+        circuit: "QuantumCircuit",
+        angle: float | Any,
+    ) -> None:
+        """Accumulate an exact phase in Qiskit's native circuit metadata.
+
+        Args:
+            circuit (QuantumCircuit): Circuit whose phase is updated.
+            angle (float | Any): Concrete or Qiskit-native symbolic angle.
+        """
+        circuit.global_phase += angle
+
     # Two-qubit gates
     def emit_cx(self, circuit: "QuantumCircuit", control: int, target: int) -> None:
         circuit.cx(control, target)
@@ -135,6 +148,10 @@ class QiskitGateEmitter:
     def emit_measure(self, circuit: "QuantumCircuit", qubit: int, clbit: int) -> None:
         circuit.measure(qubit, clbit)
 
+    def emit_reset(self, circuit: "QuantumCircuit", qubit: int) -> None:
+        """Emit reset to the |0> state."""
+        circuit.reset(qubit)
+
     # Barrier
     def emit_barrier(self, circuit: "QuantumCircuit", qubits: list[int]) -> None:
         if qubits:
@@ -145,10 +162,21 @@ class QiskitGateEmitter:
         self, circuit: "QuantumCircuit", name: str = "U"
     ) -> "Gate | None":
         """Convert circuit to a reusable gate."""
+        from qiskit.circuit.exceptions import CircuitError
+        from qiskit.exceptions import QiskitError
+
         try:
             return circuit.to_gate(label=name)
-        except Exception:
+        except (CircuitError, QiskitError, ValueError, TypeError):
             return None
+
+    def supports_reusable_gates(self) -> bool:
+        """Return whether Qiskit can convert circuits to reusable gates.
+
+        Returns:
+            bool: Always True for Qiskit's ``QuantumCircuit.to_gate`` path.
+        """
+        return True
 
     def append_gate(
         self,
@@ -166,6 +194,31 @@ class QiskitGateEmitter:
     def gate_controlled(self, gate: Any, num_controls: int) -> Any:
         """Create controlled version of a gate."""
         return gate.control(num_controls)
+
+    def gate_inverse(self, gate: Any) -> Any:
+        """Create inverse version of a reusable Qiskit gate.
+
+        Args:
+            gate (Any): Qiskit gate to invert.
+
+        Returns:
+            Any: Inverse Qiskit gate, or None when inversion fails.
+        """
+        from qiskit.circuit.exceptions import CircuitError
+        from qiskit.exceptions import QiskitError
+
+        try:
+            return gate.inverse()
+        except (CircuitError, QiskitError, ValueError, TypeError, AttributeError):
+            return None
+
+    def supports_gate_inverse(self) -> bool:
+        """Return whether Qiskit reusable gates can be inverted natively.
+
+        Returns:
+            bool: Always True for Qiskit's ``Gate.inverse`` path.
+        """
+        return True
 
     # Control flow support
     def supports_for_loop(self) -> bool:
