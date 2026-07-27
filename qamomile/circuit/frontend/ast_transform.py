@@ -54,6 +54,49 @@ class VariableCollector(ast.NodeVisitor):
         self._store_names: set[str] = set()
         self._store_order: list[str] = []
 
+    def _prescan_call_targets(self, node: ast.AST) -> None:
+        """Record call-target names so exclusion is visit-order independent.
+
+        ``visit_Call`` excludes the name of a called function (``foo`` in
+        ``foo(q)``) from the collected variables. Doing so incrementally makes
+        the result depend on visit order: a name seen as a plain variable
+        *before* the call that names it would leak into ``vars``, while the same
+        name seen after the call would be excluded. Collecting every call target
+        up front removes that dependency. Nested function definitions (sync and
+        async) are not descended into, mirroring the main pass
+        (``visit_FunctionDef`` / ``visit_AsyncFunctionDef``), so their call
+        targets do not affect the enclosing scope's dataflow.
+
+        Args:
+            node (ast.AST): Subtree to scan for called-function names.
+        """
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            self._exclude.add(node.func.id)
+        for child in ast.iter_child_nodes(node):
+            self._prescan_call_targets(child)
+
+    def collect(self, *nodes: ast.AST) -> "VariableCollector":
+        """Collect variable dataflow over ``nodes`` in two order-independent passes.
+
+        The first pass records every call target across all nodes; the second
+        pass gathers variable dataflow while honouring those exclusions. Running
+        both passes over the full node set makes the result independent of the
+        order in which statements (and the calls within them) appear.
+
+        Args:
+            *nodes (ast.AST): Statements or expressions to collect over.
+
+        Returns:
+            VariableCollector: This collector, to allow fluent property access.
+        """
+        for node in nodes:
+            self._prescan_call_targets(node)
+        for node in nodes:
+            self.visit(node)
+        return self
+
     def visit_Call(self, node: ast.Call):
         """Exclude the function name of a call."""
         if isinstance(node.func, ast.Name):
@@ -154,7 +197,26 @@ class VariableCollector(ast.NodeVisitor):
             self.visit(target)
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        """Skip traversal of inner function definitions."""
+        """Skip traversal of inner function definitions.
+
+        A nested definition introduces its own scope; its names are not part of
+        the enclosing block's dataflow, so it is not descended into (which also
+        keeps this pass consistent with ``_prescan_call_targets``).
+
+        Args:
+            node (ast.FunctionDef): Inner function definition to skip.
+        """
+        pass
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        """Skip traversal of inner async function definitions.
+
+        Mirrors ``visit_FunctionDef`` so both function-definition kinds are
+        treated identically by the main pass and the call-target pre-scan.
+
+        Args:
+            node (ast.AsyncFunctionDef): Inner async function definition to skip.
+        """
         pass
 
     def visit_Name(self, node: ast.Name):
@@ -283,7 +345,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         per_stmt_collectors: list[VariableCollector] = []
         for stmt in body:
             c = VariableCollector(global_names=self._global_names)
-            c.visit(stmt)
+            c.collect(stmt)
             per_stmt_collectors.append(c)
 
         # Build suffix-union of read vars in reverse (O(n))
@@ -352,10 +414,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
     def _collect_variables(self, nodes: list[ast.AST] | ast.AST) -> list[str]:
         collector = VariableCollector(global_names=self._global_names)
         if isinstance(nodes, list):
-            for node in nodes:
-                collector.visit(node)
+            collector.collect(*nodes)
         else:
-            collector.visit(nodes)
+            collector.collect(nodes)
         # Targets variables that have a registered type or that appear in the nodes.
         # Global variables (modules, builtins, etc.) are excluded.
         return sorted(list(collector.vars))
@@ -765,7 +826,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             set[str]: Loaded local or closure variable names.
         """
         collector = VariableCollector(global_names=self._global_names)
-        collector.visit(node)
+        collector.collect(node)
         return set(collector.load_vars)
 
     def _stmt_live_in(self, stmt: ast.stmt, live_out: set[str]) -> set[str]:
@@ -816,7 +877,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             return post_loop_live | iter_loads | body_entry_live_in
 
         collector = VariableCollector(global_names=self._global_names)
-        collector.visit(stmt)
+        collector.collect(stmt)
         return set(collector.load_vars) | (set(live_out) - set(collector.store_vars))
 
     def _block_live_in(self, body: list[ast.stmt], live_out: set[str]) -> set[str]:
@@ -900,8 +961,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 reassigns no pre-existing variable.
         """
         collector = VariableCollector(global_names=self._global_names)
-        for stmt in body:
-            collector.visit(stmt)
+        collector.collect(*body)
         outer_defined = set(self._outer_defined_vars)
         pre_existing = outer_defined | self._lexical_defined_vars
         candidates = (collector.store_vars - bound_names) & pre_existing
@@ -947,8 +1007,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             SyntaxError: If a body-local name is live after the loop.
         """
         collector = VariableCollector(global_names=self._global_names)
-        for stmt in body:
-            collector.visit(stmt)
+        collector.collect(*body)
         escaping = (
             (collector.store_vars - bound_names) - set(self._outer_defined_vars)
         ) & set(self._after_stmt_load_vars)
@@ -1224,7 +1283,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # Also propagate loop back-edge liveness. VariableCollector.incoming_vars
         # is lexical and misses mixed-path Load-before-Store cases at loop entry.
         cond_collector = VariableCollector(global_names=self._global_names)
-        cond_collector.visit(node.test)
+        cond_collector.collect(node.test)
         cond_loads = set(cond_collector.load_vars)
         signature = self._region_signatures.get(
             RegionLocation("while", node.lineno, node.col_offset)
@@ -1903,16 +1962,14 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )
         # Collect variables from the pre-transform AST (post generic_visit would include generated names)
         collector_test = VariableCollector(global_names=self._global_names)
-        collector_test.visit(node.test)
+        collector_test.collect(node.test)
 
         collector_body = VariableCollector(global_names=self._global_names)
-        for stmt in node.body:
-            collector_body.visit(stmt)
+        collector_body.collect(*node.body)
 
         collector_orelse = VariableCollector(global_names=self._global_names)
         if node.orelse:
-            for stmt in node.orelse:
-                collector_orelse.visit(stmt)
+            collector_orelse.collect(*node.orelse)
 
         # --- Input/output variable separation ---
         # input_vars: variables that exist before the if (passed to inner funcs)
@@ -2308,6 +2365,16 @@ def transform_control_flow(
 
     # Collect global names (modules, builtins, etc.)
     global_names = set(func.__globals__.keys())
+
+    # A name assigned anywhere in the function body is a function-local by
+    # Python's scoping rules, even when a module global of the same name
+    # exists (common in notebooks, where a prior cell leaves a same-named
+    # global behind). Such a shadowed local must still be threaded as
+    # dataflow through control-flow branches, so it must not be treated as a
+    # global. ``co_varnames`` covers parameters and locally bound names;
+    # ``co_cellvars`` covers locals captured by nested functions.
+    local_names = set(func.__code__.co_varnames) | set(func.__code__.co_cellvars)
+    global_names -= local_names
 
     # Exclude closure variables too (so VariableCollector does not add them to target_vars).
     # Closure values are injected into name_space later, so inner functions can still access them.

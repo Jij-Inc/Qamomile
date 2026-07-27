@@ -460,6 +460,56 @@ class TestVariableCollectorAttributeAccess:
         assert "q" in collector.load_vars
 
 
+class TestVariableCollectorVisitOrderIndependence:
+    """Call-target exclusion must not depend on statement/visit order (FE-17)."""
+
+    @staticmethod
+    def _collect(source: str) -> VariableCollector:
+        """Collect variable dataflow from ``source`` with an empty global set."""
+        body = ast.parse(textwrap.dedent(source)).body
+        return VariableCollector(global_names=set()).collect(*body)
+
+    def test_call_target_excluded_regardless_of_statement_order(self):
+        """A name used as a call target is excluded whether it appears first or last.
+
+        Before the two-pass collection, a name seen as a plain variable
+        *before* the call that names it leaked into ``vars``, while the same
+        name seen after the call was excluded — so the two orderings below
+        disagreed on whether ``f`` was a variable.
+        """
+        store_then_call = self._collect(
+            """
+            f = g
+            f(a)
+            """
+        )
+        call_then_store = self._collect(
+            """
+            f(a)
+            f = g
+            """
+        )
+
+        # ``f`` is a call target, so it is excluded from the variable set in
+        # both orderings, and the two collections agree exactly.
+        assert "f" not in store_then_call.vars
+        assert "f" not in call_then_store.vars
+        assert store_then_call.vars == call_then_store.vars == {"g", "a"}
+
+    def test_call_target_in_later_statement_excludes_earlier_use(self):
+        """A call in a later statement still excludes the same name used earlier."""
+        collector = self._collect(
+            """
+            x = helper
+            y = helper + 1
+            helper(x)
+            """
+        )
+
+        assert "helper" not in collector.vars
+        assert collector.vars == {"x", "y"}
+
+
 class TestEmptyClosureCell:
     """Empty closure cells should now fail closed at decoration time."""
 
