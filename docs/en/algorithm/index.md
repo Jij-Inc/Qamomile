@@ -33,9 +33,9 @@ This example implements a multidimensional quantum Fourier transform with Qamomi
 :::
 
 :::{card}
-:header: **Pauli Correlation Encoding (PCE)**
+:header: **Pauli Correlation Encoding**
 :link: pce_maxcut
-Solve a 20-variable MaxCut on just 3 qubits with Pauli Correlation Encoding, training a hardware-efficient ansatz against a tanh-relaxed surrogate and decoding via sign rounding.
+An example of using Pauli Correlation Encoding (PCE) with Qamomile. It solves MaxCut for a 20-node graph using 3-qubit PCE and compares the result with the exact solution.
 :::
 
 :::{card}

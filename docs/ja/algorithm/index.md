@@ -33,9 +33,9 @@ CNN＋量子変分回路をFashion-MNISTでend-to-end学習し、パラメータ
 :::
 
 :::{card}
-:header: **Pauli Correlation Encoding (PCE)**
+:header: **Pauli Correlation Encoding**
 :link: pce_maxcut
-Pauli Correlation Encodingを使い、20変数MaxCutを3量子ビットで解きます。ハードウェア効率的なアンザッツをtanh緩和された代理損失で学習し、符号丸めで離散解を復元します。
+Pauli Correlation Encoding (PCE)をQamomileで使用する例です。20ノードのグラフに対するMaxCutを3量子ビットのPCEで解き、厳密解と比較します。
 :::
 
 :::{card}
