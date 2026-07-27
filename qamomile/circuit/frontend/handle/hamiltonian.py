@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 
+from qamomile.circuit.ir.value import Value
+
 from .handle import Handle
 
 
@@ -39,4 +41,15 @@ class Observable(Handle):
         ```
     """
 
-    pass
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "Observable":
+        """Wrap a merged value in a fresh ``Observable`` handle.
+
+        Args:
+            value (Value): Fresh IR value produced for the merge output.
+            counterpart (Value): The false-branch IR value (unused for
+                observables).
+
+        Returns:
+            Observable: Handle wrapping ``value``.
+        """
+        return Observable(value=value)

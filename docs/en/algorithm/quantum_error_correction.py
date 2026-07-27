@@ -33,9 +33,9 @@
 
 # %%
 # Install the latest Qamomile from pip.
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit]"
 # # or
-# # !uv add qamomile
+# # !uv add "qamomile[qiskit]"
 
 # %% [markdown]
 # ## 1. Why Quantum Error Correction Is Hard
@@ -118,7 +118,7 @@
 # From the next section on, we implement this flow with the simplest code — the 3-qubit bit-flip code.
 
 # %% [markdown]
-# Before getting into the implementation, we load Qamomile and the Qiskit backend and define two helper functions. `_first_bit_distribution` and `_sample_first_bit` are just utilities that compile and run a kernel and return the 0/1 counts of the first bit. They are not central to QEC, so feel free to skip them.
+# Before getting into the implementation, we load Qamomile and the Qiskit integration and define two helper functions. `_first_bit_distribution` and `_sample_first_bit` are just utilities that compile and run a kernel and return the 0/1 counts of the first bit. They are not central to QEC, so feel free to skip them.
 
 # %%
 import math

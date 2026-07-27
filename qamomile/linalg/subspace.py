@@ -547,16 +547,14 @@ def solve_subspace(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Solve the (generalized) subspace eigenvalue problem.
 
-    When ``bases`` is ``None`` every sample is treated as a Z-basis
-    bitstring, ``S_sub`` is the identity (assuming distinct samples),
-    and a standard Hermitian eigendecomposition of
-    :func:`subspace_hamiltonian` is returned. Otherwise the generalised
-    eigenvalue problem ``H_sub v = λ S_sub v`` is reduced to a standard
-    Hermitian one by whitening ``S_sub`` via its eigendecomposition,
-    using ``overlap_tol`` as the cutoff on the overlap eigenvalues. The
-    same projection step automatically handles a rank-deficient
-    ``S_sub`` (duplicate or near-duplicate samples make the overlap
-    singular).
+    Every input, including the default Z-basis path, is solved as the
+    generalised eigenvalue problem ``H_sub v = λ S_sub v``. When ``bases``
+    is ``None``, Z labels are synthesized and
+    :func:`generalized_subspace_matrices` builds both matrices. Whitening
+    ``S_sub`` via its eigendecomposition reduces the usable subspace to a
+    standard Hermitian problem, with ``overlap_tol`` as the cutoff. This
+    removes null directions caused by duplicate or near-duplicate samples
+    instead of treating repeated Z samples as independent basis states.
 
     Args:
         samples: Iterable of length-``num_qubits`` bitstrings.
@@ -599,15 +597,17 @@ def solve_subspace(
         raise ValueError(f"overlap_tol must be non-negative, got {overlap_tol}")
 
     if bases is None:
-        h_sub = subspace_hamiltonian(samples, hamiltonian)
-        n = h_sub.shape[0]
-        if n == 0:
+        samples = list(samples)
+        if not samples:
             return (
                 np.zeros(0, dtype=np.float64),
                 np.zeros((0, 0), dtype=np.complex128),
             )
-        eigvals, eigvecs = np.linalg.eigh(h_sub)
-        return eigvals, eigvecs
+        # Route the default Z basis through the generalized solver too.  Its
+        # overlap matrix detects duplicate samples and removes their null
+        # directions; treating S as identity produced spurious eigenvalues
+        # below the variational minimum whenever a sampler repeated a state.
+        bases = (qm_o.Pauli.Z,) * len(samples[0])
 
     h_sub, s_sub = generalized_subspace_matrices(samples, bases, hamiltonian)
     n = h_sub.shape[0]

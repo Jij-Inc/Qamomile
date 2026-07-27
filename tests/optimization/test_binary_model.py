@@ -828,7 +828,7 @@ def test_from_hubo_duplicate_indices_in_term_warn_and_normalize():
 
 
 def test_binary_model_expr_duplicate_indices_warn_and_normalize():
-    """BinaryModel(expr) should warn and normalize duplicate indices in terms."""
+    """BinaryModel(expr) should apply the SPIN identity to duplicates."""
     expr = BinaryExpr(
         vartype=VarType.SPIN,
         constant=0.5,
@@ -838,8 +838,10 @@ def test_binary_model_expr_duplicate_indices_warn_and_normalize():
         model = BinaryModel(expr)
 
     assert np.isclose(model.constant, 1.5)
-    assert np.isclose(model.quad[(0, 1)], 2.0)
-    assert model.coefficients == {(0, 1): 2.0}
+    assert model.index_new_to_origin == {0: 1}
+    assert np.isclose(model.linear[0], 2.0)
+    assert model.coefficients == {(0,): 2.0}
+    assert model.calc_energy([1]) == pytest.approx(3.5)
 
 
 # ---- Random test helpers ----

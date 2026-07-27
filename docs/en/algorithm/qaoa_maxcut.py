@@ -35,7 +35,7 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %% [markdown]
 # ## What is MaxCut?
@@ -224,11 +224,8 @@ def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 # Qamomile's rotation gates include a $1/2$ factor:
 # $\text{RZ}(\theta) = e^{-i \theta Z / 2}$ and
 # $\text{RZZ}(\theta) = e^{-i \theta Z \otimes Z / 2}$.
-# To match $e^{-i \gamma H_C}$ exactly one would pass $2 J_{ij} \gamma$
-# as the angle. However, since $\gamma$ is a **variational parameter**
-# that the classical optimizer tunes freely, this constant factor is
-# simply absorbed into the optimal $\gamma$ values. We therefore pass
-# $J_{ij} \cdot \gamma$ (and $h_i \cdot \gamma$) directly.
+# To match $e^{-i \gamma H_C}$ exactly, we therefore pass
+# $2 J_{ij} \gamma$ to `rzz` and $2 h_i \gamma$ to `rz`.
 #
 # We keep the `linear` argument even though it is empty for unweighted
 # MaxCut — this makes the kernel immediately reusable for weighted MaxCut
@@ -244,9 +241,9 @@ def cost_layer(
     gamma: qmc.Float,
 ) -> qmc.Vector[qmc.Qubit]:
     for (i, j), Jij in quad.items():
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * gamma)
+        q[i], q[j] = qmc.rzz(q[i], q[j], angle=2.0 * Jij * gamma)
     for i, hi in linear.items():
-        q[i] = qmc.rz(q[i], angle=hi * gamma)
+        q[i] = qmc.rz(q[i], angle=2.0 * hi * gamma)
     return q
 
 

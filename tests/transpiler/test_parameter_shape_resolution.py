@@ -68,7 +68,10 @@ class TestPassDirectInvocation:
 
     def test_binding_folds_symbolic_dim(self):
         kernel = self._make_kernel()
-        block = _as_hierarchical(kernel.build(parameters=["gamma"]))
+        block = dataclasses.replace(
+            _as_hierarchical(kernel.build(parameters=["gamma"])),
+            output_names=["accumulator"],
+        )
 
         resolved = ParameterShapeResolutionPass(
             bindings={"gamma": [0.1, 0.2, 0.3]}
@@ -80,6 +83,11 @@ class TestPassDirectInvocation:
         assert isinstance(gamma, ArrayValue)
         assert gamma.shape[0].is_constant()
         assert gamma.shape[0].get_const() == 3
+        parameter = resolved.parameters["gamma"]
+        assert isinstance(parameter, ArrayValue)
+        assert parameter.shape[0].is_constant()
+        assert parameter.shape[0].get_const() == 3
+        assert resolved.output_names == ["accumulator"]
 
     def test_no_binding_leaves_symbolic(self):
         kernel = self._make_kernel()

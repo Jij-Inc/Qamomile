@@ -105,6 +105,13 @@ class LayoutState:
     inlined_op_keys: set[tuple] = field(default_factory=set)
     gate_widths: dict[tuple, float] = field(default_factory=dict)
     folded_block_extents: dict[tuple, dict] = field(default_factory=dict)
+    # Header labels drawn above a wire that are not backed by a block_ranges
+    # entry (unfolded if/else branch boxes). Each entry is
+    # ``{"top_qubit": int, "num_lines": int}`` and only contributes vertical
+    # clearance above its top qubit; it never draws a border.
+    # Folded control-flow blocks use ``folded_block_extents`` instead because
+    # they draw a full bordered summary box centered on the affected qubits.
+    label_extents: list[dict] = field(default_factory=list)
 
 
 @dataclass

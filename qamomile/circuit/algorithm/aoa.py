@@ -11,9 +11,9 @@ import numpy as np
 
 import qamomile.circuit as qmc
 
+from ..stdlib.state_preparation.dicke import prepare_dicke
 from . import basic as _basic
 from .qaoa import hubo_ising_cost, ising_cost
-from .state_preparation.dicke import prepare_dicke
 
 
 @qmc.qkernel

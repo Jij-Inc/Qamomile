@@ -1,12 +1,9 @@
 """CUDA-Q backend for Qamomile.
 
-This module provides transpiler, executor, and observable conversion
-for the CUDA-Q quantum computing platform.
-
-All circuits are emitted through a unified ``CudaqKernelEmitter`` codegen
-path, producing ``CudaqKernelArtifact`` instances.  The artifact's
-``ExecutionMode`` (STATIC or RUNNABLE) determines which CUDA-Q runtime
-API is used for execution.
+Design intent: this package concretizes circuit's abstract IR through an
+internal ``CudaqMaterializer`` and exposes only the transpiler, executor, and
+observable conversion. Source-generation machinery and artifact wrappers are
+implementation details rather than a second public compilation API.
 
 Public symbols are exported lazily so that a mere ``import qamomile.cudaq``
 does not fail in environments where the ``cudaq`` package is absent.  Accessing
@@ -22,15 +19,9 @@ import importlib.util
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from qamomile.cudaq.emitter import (
-        CudaqKernelArtifact,
-        CudaqKernelEmitter,
-        ExecutionMode,
-    )
+    from qamomile.cudaq.emitter import ExecutionMode
     from qamomile.cudaq.observable import hamiltonian_to_cudaq_spin_op
     from qamomile.cudaq.transpiler import (
-        BoundCudaqKernelArtifact,
-        CudaqEmitPass,
         CudaqExecutor,
         CudaqTranspiler,
     )
@@ -45,29 +36,19 @@ See: https://nvidia.github.io/cuda-quantum/latest/using/install/local_installati
 
 # Mapping from public symbol name to the submodule that defines it.
 _SYMBOL_TO_MODULE: dict[str, str] = {
-    # New unified types
-    "ExecutionMode": "qamomile.cudaq.emitter",
-    "CudaqKernelArtifact": "qamomile.cudaq.emitter",
-    "CudaqKernelEmitter": "qamomile.cudaq.emitter",
-    "BoundCudaqKernelArtifact": "qamomile.cudaq.transpiler",
     # Transpiler and executor
     "CudaqTranspiler": "qamomile.cudaq.transpiler",
     "CudaqExecutor": "qamomile.cudaq.transpiler",
-    "CudaqEmitPass": "qamomile.cudaq.transpiler",
+    "ExecutionMode": "qamomile.cudaq.emitter",
     # Observable
     "hamiltonian_to_cudaq_spin_op": "qamomile.cudaq.observable",
 }
 
 __all__ = [
-    # New unified types
-    "ExecutionMode",
-    "CudaqKernelArtifact",
-    "CudaqKernelEmitter",
-    "BoundCudaqKernelArtifact",
     # Transpiler and executor
     "CudaqTranspiler",
     "CudaqExecutor",
-    "CudaqEmitPass",
+    "ExecutionMode",
     # Observable
     "hamiltonian_to_cudaq_spin_op",
 ]

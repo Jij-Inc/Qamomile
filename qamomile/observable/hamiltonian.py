@@ -37,9 +37,26 @@ from __future__ import annotations
 import dataclasses
 import enum
 import math
+import operator
 from typing import Iterator
 
 import numpy as np
+
+# Numerical tolerances for interpreting Hamiltonian coefficients. They live
+# with the Hamiltonian (rather than in any backend / emit module) because they
+# describe properties of the operator itself and are shared across consumers:
+# Hamiltonian arithmetic here, observable conversion, and the Pauli-evolution
+# emit paths.
+#
+# A coefficient whose magnitude is at or below this is treated as zero (the
+# term is dropped / not emitted). The slack keeps coefficients that cancel to
+# ~0 during arithmetic from lingering or emitting spurious gates.
+PAULI_TERM_ZERO_ATOL = 1e-15
+# A coefficient whose imaginary part exceeds this fails the Hermiticity
+# requirement: a Hamiltonian is Hermitian (real coefficients) only within this
+# slack, which absorbs floating-point imaginary residue from complex
+# arithmetic. ``exp(-i * gamma * H)`` is unitary only for a Hermitian ``H``.
+HERMITIAN_IMAG_ATOL = 1e-10
 
 
 class Pauli(enum.Enum):
@@ -57,6 +74,16 @@ class Pauli(enum.Enum):
     Y = 1
     Z = 2
     I = 3  # noqa: E741
+
+
+# Single-character label for each Pauli operator (identity included). Shared
+# so emitters and formatters do not each re-define the same mapping.
+PAULI_TO_CHAR: dict[Pauli, str] = {
+    Pauli.I: "I",
+    Pauli.X: "X",
+    Pauli.Y: "Y",
+    Pauli.Z: "Z",
+}
 
 
 # Dense 2x2 matrices for each single-qubit Pauli. Hoisted to module level
@@ -115,6 +142,31 @@ class PauliOperator:
 
     pauli: Pauli
     index: int
+
+    def __post_init__(self) -> None:
+        """Validate and normalize the addressed qubit index.
+
+        Raises:
+            TypeError: If ``index`` is not an integer or is a boolean.
+            ValueError: If ``index`` is negative.
+        """
+        if isinstance(self.index, bool):
+            raise TypeError(
+                "PauliOperator index must be a non-negative integer, "
+                f"got {type(self.index).__name__}."
+            )
+        try:
+            normalized_index = operator.index(self.index)
+        except TypeError as error:
+            raise TypeError(
+                "PauliOperator index must be a non-negative integer, "
+                f"got {type(self.index).__name__}."
+            ) from error
+        if normalized_index < 0:
+            raise ValueError(
+                f"PauliOperator index must be non-negative, got {normalized_index}."
+            )
+        object.__setattr__(self, "index", normalized_index)
 
     def __hash__(self) -> int:
         """
@@ -251,10 +303,11 @@ class Hamiltonian:
             None: This method mutates ``self._terms`` in place.
         """
         sorted_ops = tuple(sorted(operators, key=lambda x: (x.index, x.pauli.value)))
-        if sorted_ops in self._terms:
-            self._terms[sorted_ops] += coeff
-        else:
-            self._terms[sorted_ops] = coeff
+        updated = self._terms.get(sorted_ops, 0.0) + coeff
+        if abs(updated) <= PAULI_TERM_ZERO_ATOL:
+            self._terms.pop(sorted_ops, None)
+            return
+        self._terms[sorted_ops] = updated
 
     @property
     def num_qubits(self) -> int:
@@ -298,7 +351,7 @@ class Hamiltonian:
 
         .. code::
 
-            import qamomile.core.operator as qm_o
+            import qamomile.observable as qm_o
             import IPython.display as ipd
 
             h = qm_o.Hamiltonian()
@@ -310,8 +363,6 @@ class Hamiltonian:
         h_str = ""
         counter = 0
 
-        pauli_map = {Pauli.X: "X", Pauli.Y: "Y", Pauli.Z: "Z"}
-
         for term, coeff in self.terms.items():
             term_str = ""
 
@@ -319,7 +370,7 @@ class Hamiltonian:
                 if op.pauli == Pauli.I:
                     continue
 
-                pauli_str = pauli_map.get(op.pauli, "")
+                pauli_str = PAULI_TO_CHAR.get(op.pauli, "")
                 term_str += f"{pauli_str}_{{{op.index}}}"
 
             # At first term or h_str is still empty, we don't need to add a sign
@@ -461,24 +512,23 @@ class Hamiltonian:
 
     def __add__(self, other):
         if isinstance(other, Hamiltonian):
-            h = Hamiltonian()
+            declared_widths = [
+                width
+                for width in (self._num_qubits, other._num_qubits)
+                if width is not None
+            ]
+            h = Hamiltonian(
+                num_qubits=max(declared_widths) if declared_widths else None
+            )
             h._terms = self._terms.copy()
             h.constant = self.constant
             for term, coeff in other.terms.items():
                 h.add_term(term, coeff)
             h.constant += other.constant
 
-            # Preserve the qubit register from BOTH operands.  The previous
-            # logic only kept ``self.num_qubits``, so e.g.
-            # ``Hamiltonian.identity(1, num_qubits=2) + Hamiltonian.identity(1, num_qubits=5)``
-            # silently lost the right-hand register.
-            declared = max(self.num_qubits, other.num_qubits)
-            if h.num_qubits < declared:
-                h._num_qubits = declared
-
             return h
         elif isinstance(other, (int, float, complex)):
-            h = Hamiltonian(num_qubits=self.num_qubits)
+            h = Hamiltonian(num_qubits=self._num_qubits)
             h._terms = self._terms.copy()
             h.constant = self.constant + other
 
@@ -497,13 +547,20 @@ class Hamiltonian:
 
     def __mul__(self, other):
         if isinstance(other, (int, float, complex)):
-            h = Hamiltonian(num_qubits=self.num_qubits)
+            h = Hamiltonian(num_qubits=self._num_qubits)
             for term, coeff in self.terms.items():
                 h.add_term(term, coeff * other)
             h.constant = self.constant * other
             return h
         elif isinstance(other, Hamiltonian):
-            h = Hamiltonian()
+            declared_widths = [
+                width
+                for width in (self._num_qubits, other._num_qubits)
+                if width is not None
+            ]
+            h = Hamiltonian(
+                num_qubits=max(declared_widths) if declared_widths else None
+            )
             for term1, coeff1 in self.terms.items():
                 for term2, coeff2 in other.terms.items():
                     term, phase = simplify_pauliop_terms(term1 + term2)
@@ -512,23 +569,15 @@ class Hamiltonian:
                     else:
                         h.constant += phase * coeff1 * coeff2
 
-            if not math.isclose(abs(other.constant), 0.0, abs_tol=1e-15):
+            if not math.isclose(abs(other.constant), 0.0, abs_tol=PAULI_TERM_ZERO_ATOL):
                 for terms, coeff1 in self.terms.items():
                     h.add_term(terms, coeff1 * other.constant)
 
-            if not math.isclose(abs(self.constant), 0.0, abs_tol=1e-15):
+            if not math.isclose(abs(self.constant), 0.0, abs_tol=PAULI_TERM_ZERO_ATOL):
                 for terms, coeff2 in other.terms.items():
                     h.add_term(terms, coeff2 * self.constant)
 
             h.constant += self.constant * other.constant
-
-            # Preserve the qubit register from BOTH operands.  The previous
-            # logic only kept ``self.num_qubits``, so e.g.
-            # ``Hamiltonian.identity(1, num_qubits=2) * Hamiltonian.identity(1, num_qubits=5)``
-            # silently lost the right-hand register.
-            declared = max(self.num_qubits, other.num_qubits)
-            if h.num_qubits < declared:
-                h._num_qubits = declared
 
             return h
         else:

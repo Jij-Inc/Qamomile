@@ -1,9 +1,8 @@
-"""numpy ndarray wrapper used by both JSON and msgpack pipelines.
+"""Build validated NumPy records for the protobuf payload union.
 
-The wrapper is a tagged dict that both wire formats produce and
-consume in identical shape; only the encoding of the ``"data"``
-field differs at the wire boundary (base64 string in JSON, native
-``bin`` in msgpack).
+The semantic encoder uses tagged intermediate records before the protobuf
+bridge materializes ``NumpyValue`` messages. Arrays carry shape plus raw bytes;
+scalars carry their dtype plus one exact item's bytes.
 
 Allowed dtypes are restricted to an explicit allow-list. The decoder
 rejects any dtype string outside the list, so a malicious payload
@@ -16,28 +15,64 @@ from typing import Any
 
 import numpy as np
 
-# Allow-list of dtype names the decoder accepts. Anything outside this
-# set raises ValueError. Keep limited to dtypes qamomile actually uses
-# in IR payloads (binding values + metadata).
-_ALLOWED_DTYPES: frozenset[str] = frozenset(
+from qamomile._utils import is_plain_int
+
+# Allow-list of primitive kind/itemsize pairs. The serialized spelling is the
+# canonical ``dtype.str``, which also preserves byte order.
+_ALLOWED_DTYPE_LAYOUTS: frozenset[tuple[str, int]] = frozenset(
     {
-        "int8",
-        "int16",
-        "int32",
-        "int64",
-        "uint8",
-        "uint16",
-        "uint32",
-        "uint64",
-        "float32",
-        "float64",
-        "complex64",
-        "complex128",
-        "bool",
+        ("i", 1),
+        ("i", 2),
+        ("i", 4),
+        ("i", 8),
+        ("u", 1),
+        ("u", 2),
+        ("u", 4),
+        ("u", 8),
+        ("f", 2),
+        ("f", 4),
+        ("f", 8),
+        ("c", 8),
+        ("c", 16),
+        ("b", 1),
     }
 )
 
-_NP_TAG = "$np_array"
+_NP_ARRAY_TAG = "$np_array"
+_NP_SCALAR_TAG = "$np_scalar"
+
+
+def _validated_dtype(dtype_spec: Any, label: str) -> np.dtype:
+    """Parse one canonical, allow-listed primitive NumPy dtype.
+
+    Args:
+        dtype_spec (Any): Candidate canonical ``dtype.str`` value.
+        label (str): Diagnostic label such as ``"array"`` or ``"scalar"``.
+
+    Returns:
+        np.dtype: Validated dtype preserving its explicit byte order.
+
+    Raises:
+        ValueError: If the spelling is non-canonical or the primitive layout
+            is outside the allow-list.
+    """
+    if not isinstance(dtype_spec, str):
+        raise ValueError(f"numpy {label} dtype {dtype_spec!r} is not a string")
+    try:
+        dtype = np.dtype(dtype_spec)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"numpy {label} dtype {dtype_spec!r} is invalid") from exc
+    if (
+        dtype.str != dtype_spec
+        or dtype.fields is not None
+        or dtype.subdtype is not None
+        or (dtype.kind, dtype.itemsize) not in _ALLOWED_DTYPE_LAYOUTS
+    ):
+        raise ValueError(
+            f"numpy {label} dtype {dtype_spec!r} is not in the serialization "
+            "allow-list of primitive bool, integer, float, and complex layouts"
+        )
+    return dtype
 
 
 def is_array_wrapper(d: Any) -> bool:
@@ -51,15 +86,26 @@ def is_array_wrapper(d: Any) -> bool:
         bool: ``True`` when ``d`` is a dict carrying the
             ``$np_array`` tag with a ``True``-ish value.
     """
-    return isinstance(d, dict) and d.get(_NP_TAG) is True
+    return isinstance(d, dict) and d.get(_NP_ARRAY_TAG) is True
+
+
+def is_scalar_wrapper(d: Any) -> bool:
+    """Return whether ``d`` is a NumPy-scalar wrapper dict.
+
+    Args:
+        d (Any): Candidate wire payload.
+
+    Returns:
+        bool: Whether ``d`` carries the exact scalar wrapper tag.
+    """
+    return isinstance(d, dict) and d.get(_NP_SCALAR_TAG) is True
 
 
 def array_to_dict(arr: np.ndarray) -> dict[str, Any]:
     """Encode a numpy ndarray into the wrapper dict.
 
     Args:
-        arr (np.ndarray): Source array. ``arr.dtype.name`` must be in
-            the allow-list (:data:`_ALLOWED_DTYPES`).
+        arr (np.ndarray): Source array with an allow-listed primitive dtype.
 
     Returns:
         dict[str, Any]: A wrapper dict with ``$np_array``, ``dtype``,
@@ -76,18 +122,17 @@ def array_to_dict(arr: np.ndarray) -> dict[str, Any]:
         raise TypeError(
             f"array_to_dict() expected numpy.ndarray, got {type(arr).__name__}"
         )
-    dtype_name = arr.dtype.name
-    if dtype_name not in _ALLOWED_DTYPES:
-        raise ValueError(
-            f"numpy dtype {dtype_name!r} is not in the serialization "
-            f"allow-list {sorted(_ALLOWED_DTYPES)}"
-        )
-    # Ensure contiguous bytes so np.frombuffer + reshape round-trips.
-    contiguous = np.ascontiguousarray(arr)
+    dtype_spec = arr.dtype.str
+    _validated_dtype(dtype_spec, "array")
+    # Ensure contiguous bytes so np.frombuffer + reshape round-trips without
+    # copying arrays that are already in C order. Zero-dimensional arrays are
+    # C-contiguous, so they retain their rank on the no-copy path instead of
+    # being promoted to shape ``(1,)`` by ``np.ascontiguousarray``.
+    contiguous = arr if arr.flags.c_contiguous else np.ascontiguousarray(arr)
     return {
-        _NP_TAG: True,
-        "dtype": dtype_name,
-        "shape": list(contiguous.shape),
+        _NP_ARRAY_TAG: True,
+        "dtype": dtype_spec,
+        "shape": list(arr.shape),
         "data": contiguous.tobytes(),
     }
 
@@ -97,9 +142,7 @@ def dict_to_array(d: dict[str, Any]) -> np.ndarray:
 
     Args:
         d (dict[str, Any]): A wrapper dict previously produced by
-            :func:`array_to_dict` (possibly after a JSON round-trip
-            that converted the ``data`` field between bytes and
-            base64).
+            :func:`array_to_dict` after protobuf decoding.
 
     Returns:
         np.ndarray: The reconstructed array with the original dtype
@@ -112,16 +155,10 @@ def dict_to_array(d: dict[str, Any]) -> np.ndarray:
     """
     if not is_array_wrapper(d):
         raise ValueError("dict_to_array() called with a non-wrapper dict")
-    dtype_name = d.get("dtype")
-    if not isinstance(dtype_name, str) or dtype_name not in _ALLOWED_DTYPES:
-        raise ValueError(
-            f"numpy dtype {dtype_name!r} is not in the serialization "
-            f"allow-list {sorted(_ALLOWED_DTYPES)}"
-        )
+    dtype_spec = d.get("dtype")
+    dtype = _validated_dtype(dtype_spec, "array")
     raw_shape = d.get("shape")
-    if not isinstance(raw_shape, list) or not all(
-        isinstance(x, int) for x in raw_shape
-    ):
+    if not isinstance(raw_shape, list) or not all(is_plain_int(x) for x in raw_shape):
         raise ValueError("numpy wrapper 'shape' must be a list of ints")
     shape = tuple(raw_shape)
     data = d.get("data")
@@ -130,14 +167,70 @@ def dict_to_array(d: dict[str, Any]) -> np.ndarray:
             "numpy wrapper 'data' must be bytes after wire-format decoding"
         )
 
-    expected_size = int(np.dtype(dtype_name).itemsize)
+    expected_size = int(dtype.itemsize)
     for dim in shape:
         expected_size *= dim
     if expected_size != len(data):
         raise ValueError(
             f"numpy wrapper data length {len(data)} does not match "
-            f"expected {expected_size} bytes for dtype {dtype_name!r} "
+            f"expected {expected_size} bytes for dtype {dtype_spec!r} "
             f"and shape {shape}"
         )
 
-    return np.frombuffer(bytes(data), dtype=np.dtype(dtype_name)).reshape(shape).copy()
+    return np.frombuffer(bytes(data), dtype=dtype).reshape(shape).copy()
+
+
+def scalar_to_dict(value: np.generic) -> dict[str, Any]:
+    """Encode an allow-listed NumPy scalar without widening its dtype.
+
+    Args:
+        value (np.generic): NumPy scalar whose dtype and exact bytes must be
+            preserved.
+
+    Returns:
+        dict[str, Any]: Tagged scalar wrapper containing dtype and raw bytes.
+
+    Raises:
+        TypeError: If ``value`` is not a NumPy scalar.
+        ValueError: If its dtype is outside the portable allow-list.
+    """
+    if not isinstance(value, np.generic):
+        raise TypeError(
+            f"scalar_to_dict() expected numpy scalar, got {type(value).__name__}"
+        )
+    dtype_spec = value.dtype.str
+    _validated_dtype(dtype_spec, "scalar")
+    return {
+        _NP_SCALAR_TAG: True,
+        "dtype": dtype_spec,
+        "data": np.asarray(value).tobytes(),
+    }
+
+
+def dict_to_scalar(d: dict[str, Any]) -> np.generic:
+    """Decode an exact NumPy scalar wrapper.
+
+    Args:
+        d (dict[str, Any]): Wrapper produced by :func:`scalar_to_dict`.
+
+    Returns:
+        np.generic: Scalar with the original dtype and bit representation.
+
+    Raises:
+        ValueError: If the wrapper, dtype, or byte length is malformed.
+    """
+    if not is_scalar_wrapper(d):
+        raise ValueError("dict_to_scalar() called with a non-wrapper dict")
+    dtype_spec = d.get("dtype")
+    dtype = _validated_dtype(dtype_spec, "scalar")
+    data = d.get("data")
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError(
+            "numpy scalar wrapper 'data' must be bytes after wire-format decoding"
+        )
+    if len(data) != dtype.itemsize:
+        raise ValueError(
+            f"numpy scalar wrapper data length {len(data)} does not match "
+            f"dtype {dtype_spec!r} itemsize {dtype.itemsize}"
+        )
+    return np.frombuffer(bytes(data), dtype=dtype, count=1)[0]

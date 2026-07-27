@@ -202,7 +202,7 @@ uv run ruff format --check qamomile/ tests/
 
 # Type checking
 # (CLAUDE.md "Build and Development Commands")
-uv run zuban qamomile/
+uv run zuban check qamomile/
 ```
 
 Run **all three** even if earlier ones fail — each surfaces a different class of regression and the reviewer / user needs the full picture in one pass. Do not paraphrase the output; quote each failing line (file:line + message) verbatim in the report so the user can jump to it.
@@ -219,7 +219,7 @@ These checks scope to the whole `qamomile/` + `tests/` tree (matching CI), not j
 
 ```bash
 git worktree add /tmp/qamomile-base main
-( cd /tmp/qamomile-base && uv run ruff check qamomile/ tests/; uv run ruff format --check qamomile/ tests/; uv run zuban qamomile/ )
+( cd /tmp/qamomile-base && uv run ruff check qamomile/ tests/; uv run ruff format --check qamomile/ tests/; uv run zuban check qamomile/ )
 git worktree remove /tmp/qamomile-base
 ```
 

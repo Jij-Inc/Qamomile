@@ -1,7 +1,7 @@
 """Tests for ``EmitContext`` — typed bindings container.
 
 The pre-EmitContext design used a single ``bindings: dict[str, Any]`` for
-five distinct semantic categories (params, loop vars, intermediates, phi
+five distinct semantic categories (params, loop vars, intermediates, merge
 aliases, runtime exprs). This caused name-collision bugs (e.g.
 ``"bit_tmp"`` overwrites between chained predicates). ``EmitContext`` is
 a ``dict`` subclass that adds typed methods and slot tracking so writers
@@ -92,6 +92,18 @@ class TestTypedWriters:
         ctx.set_runtime_expr(uuid, expr)
         assert ctx[uuid] is expr
         assert ctx._runtime_exprs == {uuid: expr}
+
+    def test_container_display_names_are_not_binding_keys(self):
+        """Typed compiler data stays UUID-keyed despite duplicate labels."""
+        ctx = EmitContext()
+        ctx.set_array_data("array-uuid", [1], display_name="shared")
+        ctx.set_dict_data("dict-uuid", {1: 2}, display_name="shared")
+        ctx.set_observable("observable-uuid", object(), display_name="shared")
+
+        assert "shared" not in ctx
+        assert ctx["array-uuid"] == [1]
+        assert ctx["dict-uuid"] == {1: 2}
+        assert "observable-uuid" in ctx
 
 
 class TestCopySemantics:

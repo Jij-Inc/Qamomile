@@ -63,7 +63,7 @@ def bartschi_eidenbenz_schedule(
     Returns:
         dict[tuple[int, int, int], float]: Ordered gate schedule ready for
         direct use with
-        :func:`~qamomile.circuit.algorithm.state_preparation.dicke.prepare_dicke`.
+        :func:`~qamomile.circuit.stdlib.state_preparation.dicke.prepare_dicke`.
 
     Raises:
         ValueError: If ``k_dicke`` is outside ``[0, n_dicke]``.
@@ -103,7 +103,7 @@ def dicke_state_composition_schedule(
         tuple[np.ndarray, dict[tuple[int, int, int], float]]:
         ``(initial_ones, schedule)`` — global qubit indices and SCS gate
         schedule for the full register, ready for use with
-        :func:`~qamomile.circuit.algorithm.state_preparation.dicke.prepare_dicke`.
+        :func:`~qamomile.circuit.stdlib.state_preparation.dicke.prepare_dicke`.
         ``schedule`` maps 3-tuple qubit indices to rotation angles; pair
         entries satisfy ``key[1] == key[2]`` and triplet entries satisfy
         ``key[1] != key[2]``.

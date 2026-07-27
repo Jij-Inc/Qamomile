@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from abc import ABC, abstractmethod
 from typing import Callable
 
@@ -37,10 +38,14 @@ class ControlFlowVisitor(ABC):
         pass
 
     def _visit_control_flow(self, op: Operation) -> None:
-        """Recursively visit operations inside control flow constructs."""
+        """Recursively visit operations inside control-flow regions.
+
+        Args:
+            op (Operation): Operation whose nested regions should be visited.
+        """
         if isinstance(op, HasNestedOps):
-            for op_list in op.nested_op_lists():
-                self.visit_operations(op_list)
+            for region in op.nested_regions():
+                self.visit_operations(list(region.operations))
 
 
 class OperationTransformer(ABC):
@@ -72,12 +77,25 @@ class OperationTransformer(ABC):
         pass
 
     def _transform_control_flow(self, op: Operation) -> Operation:
-        """Recursively transform operations inside control flow constructs."""
+        """Recursively transform operations inside control-flow regions.
+
+        Args:
+            op (Operation): Operation whose nested regions should be rebuilt.
+
+        Returns:
+            Operation: Operation with every nested region transformed.
+        """
         if isinstance(op, HasNestedOps):
-            new_lists = [
-                self.transform_operations(op_list) for op_list in op.nested_op_lists()
-            ]
-            return op.rebuild_nested(new_lists)
+            new_regions = tuple(
+                dataclasses.replace(
+                    region,
+                    operations=tuple(
+                        self.transform_operations(list(region.operations))
+                    ),
+                )
+                for region in op.nested_regions()
+            )
+            return op.rebuild_regions(new_regions)
         return op
 
 
@@ -103,7 +121,9 @@ class ValueCollector(ControlFlowVisitor):
     """Collects Value UUIDs from operation operands and results.
 
     Attributes:
-        operand_uuids: Set of UUIDs from operands
+        operand_uuids: Set of UUIDs from input values (operands plus
+            subclass-specific Value fields such as IfOperation yields,
+            via ``all_input_values``)
         result_uuids: Set of UUIDs from results
     """
 
@@ -112,11 +132,15 @@ class ValueCollector(ControlFlowVisitor):
         self.result_uuids: set[str] = set()
 
     def visit_operation(self, op: Operation) -> None:
-        from qamomile.circuit.ir.value import ValueBase
+        """Record one operation's input and result Value UUIDs.
 
-        for operand in op.operands:
-            if isinstance(operand, ValueBase):
-                self.operand_uuids.add(operand.uuid)
+        Args:
+            op (Operation): The visited operation. Inputs are read via
+                ``all_input_values`` so subclass-specific Value fields
+                (e.g. IfOperation yields) are covered.
+        """
+        for operand in op.all_input_values():
+            self.operand_uuids.add(operand.uuid)
 
         for result in op.results:
             self.result_uuids.add(result.uuid)

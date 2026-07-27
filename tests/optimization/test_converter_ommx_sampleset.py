@@ -13,6 +13,7 @@ import numpy as np
 import ommx.v1
 import pytest
 
+from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinarySampleSet, VarType
 from qamomile.optimization.converter import binary_sampleset_to_ommx_samples
 from qamomile.optimization.qaoa import QAOAConverter
@@ -137,6 +138,46 @@ def test_qaoa_converter_does_not_mutate_caller_instance():
     )
     assert len(instance.constraints) == 1
     assert instance.constraints[0].name == "eq"
+
+
+def test_qaoa_decode_reports_original_objective_not_penalty_energy():
+    """OMMX decode separates the original objective from penalty energy."""
+    x0 = ommx.v1.DecisionVariable.binary(0, name="x0")
+    x1 = ommx.v1.DecisionVariable.binary(1, name="x1")
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=[x0, x1],
+        objective=-10.0 * x0,
+        constraints=[(x0 + x1 == 1).set_id(0)],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+    converter = QAOAConverter(instance, uniform_penalty_weight=2.0)
+    raw = SampleResult(results=[([1, 1], 1)], shots=1)
+
+    binary = converter.decode_to_binary_sampleset(raw)
+    decoded = converter.decode(raw)
+
+    assert binary.energy == pytest.approx([-8.0])
+    assert decoded.get(0).objective == pytest.approx(-10.0)
+    assert not decoded.get(0).feasible
+
+
+def test_qaoa_exposes_uniform_constraint_penalty_weight():
+    """Changing the public penalty option changes infeasible QUBO energy."""
+    x0 = ommx.v1.DecisionVariable.binary(0)
+    x1 = ommx.v1.DecisionVariable.binary(1)
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=[x0, x1],
+        objective=0.0,
+        constraints=[(x0 + x1 == 1).set_id(0)],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+    raw = SampleResult(results=[([1, 1], 1)], shots=1)
+
+    low = QAOAConverter(instance, uniform_penalty_weight=1.0)
+    high = QAOAConverter(instance, uniform_penalty_weight=7.0)
+
+    assert low.decode_to_binary_sampleset(raw).energy == pytest.approx([1.0])
+    assert high.decode_to_binary_sampleset(raw).energy == pytest.approx([7.0])
 
 
 def test_fqaoa_converter_does_not_mutate_caller_instance():

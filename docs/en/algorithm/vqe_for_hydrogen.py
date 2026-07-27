@@ -31,7 +31,7 @@
 
 # %%
 # Required packages can be installed with the following command
-# # !pip install openfermion pyscf openfermionpyscf
+# # !pip install "qamomile[qiskit,visualization]" openfermion pyscf openfermionpyscf
 
 # %%
 import os

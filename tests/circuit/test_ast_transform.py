@@ -2,6 +2,7 @@
 
 import ast
 import textwrap
+import threading
 import warnings
 
 import pytest
@@ -14,7 +15,31 @@ from qamomile.circuit.frontend.ast_transform import (
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.handle import Qubit
 from qamomile.circuit.frontend.qkernel import qkernel
+from qamomile.circuit.ir.operation import GateOperationType, InvokeOperation
 from qamomile.circuit.transpiler.errors import FrontendTransformError
+
+_LIVE_GLOBAL_ANGLE = 0.5
+
+
+@qkernel
+def _kernel_using_live_global(q: Qubit) -> Qubit:
+    """Apply a rotation using a module global rebound after decoration."""
+    return qmc.rz(q, _LIVE_GLOBAL_ANGLE)
+
+
+_LIVE_GLOBAL_ANGLE = 1.25
+
+
+@qkernel
+def _kernel_using_forward_helper(q: Qubit) -> Qubit:
+    """Call a helper whose module binding is defined later in this file."""
+    return _forward_helper(q)
+
+
+@qkernel
+def _forward_helper(q: Qubit) -> Qubit:
+    """Provide the forward-defined helper used by the preceding kernel."""
+    return qmc.x(q)
 
 
 class TestLoopVariableShadowing:
@@ -183,6 +208,218 @@ class TestRuntimeLimitations:
         # Should not raise — measure here is a classical function, not qmc.measure
         graph = circuit.build(n=1)
         assert graph is not None
+
+
+class TestFailLoudPythonSemantics:
+    """Unsupported Python truth and control-flow semantics must fail loudly."""
+
+    def test_symbolic_handle_has_no_python_truth_value(self):
+        """Direct bool conversion of a symbolic handle raises TypeError."""
+        with pytest.raises(TypeError, match="symbolic Qamomile handle") as exc_info:
+            bool(qmc.bit(False))
+
+        message = str(exc_info.value)
+        assert "Inside a qkernel body, use 'if handle:'" in message
+        assert "outside qkernel tracing" in message
+
+    def test_not_on_symbolic_handle_is_rejected(self):
+        """Python ``not`` cannot silently fold a symbolic Bit to false."""
+
+        @qkernel
+        def bad_not() -> qmc.Bit:
+            bit = qmc.bit(False)
+            if not bit:
+                bit = qmc.bit(True)
+            return bit
+
+        with pytest.raises(TypeError, match="use '&', '\\|', and '~'"):
+            bad_not.build()
+
+    def test_and_on_symbolic_handles_is_rejected(self):
+        """Python ``and`` cannot silently discard its first symbolic operand."""
+
+        @qkernel
+        def bad_and() -> qmc.Bit:
+            left = qmc.bit(True)
+            right = qmc.bit(False)
+            if left and right:
+                right = qmc.bit(True)
+            return right
+
+        with pytest.raises(TypeError, match="symbolic Qamomile handle"):
+            bad_and.build()
+
+    def test_or_on_symbolic_handles_is_rejected(self):
+        """Python ``or`` cannot silently discard its second symbolic operand."""
+
+        @qkernel
+        def bad_or() -> qmc.Bit:
+            left = qmc.bit(False)
+            right = qmc.bit(True)
+            if left or right:
+                right = qmc.bit(False)
+            return right
+
+        with pytest.raises(TypeError, match="symbolic Qamomile handle"):
+            bad_or.build()
+
+    def test_conditional_expression_on_symbolic_handle_is_rejected(self):
+        """A symbolic conditional expression cannot choose a branch at trace time."""
+
+        @qkernel
+        def bad_conditional_expression() -> qmc.UInt:
+            condition = qmc.bit(False)
+            return qmc.uint(1) if condition else qmc.uint(0)
+
+        with pytest.raises(TypeError, match="symbolic Qamomile handle"):
+            bad_conditional_expression.build()
+
+    def test_chained_comparison_on_symbolic_handles_is_rejected(self):
+        """A chained comparison cannot discard its first symbolic comparison."""
+
+        @qkernel
+        def bad_chained_comparison(value: qmc.UInt) -> qmc.Bit:
+            return qmc.uint(0) < value < qmc.uint(2)
+
+        with pytest.raises(TypeError, match="symbolic Qamomile handle"):
+            bad_chained_comparison.build(value=1)
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_return_inside_loop_is_rejected(self, loop_kind):
+        """A return that cannot preserve Python loop-exit semantics is rejected."""
+        if loop_kind == "for":
+            with pytest.raises(SyntaxError, match="return.*for loop"):
+
+                @qkernel
+                def bad_for_return() -> qmc.Bit:
+                    q = qmc.qubit()
+                    for _ in qmc.range(2):
+                        q = qmc.x(q)
+                        return qmc.measure(q)
+                    return qmc.measure(q)
+
+        else:
+            with pytest.raises(SyntaxError, match="return.*while loop"):
+
+                @qkernel
+                def bad_while_return(run: qmc.UInt) -> qmc.Bit:
+                    q = qmc.qubit()
+                    while run:
+                        q = qmc.x(q)
+                        return qmc.measure(q)
+                    return qmc.measure(q)
+
+    @pytest.mark.parametrize("keyword", ["break", "continue"])
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_loop_control_has_qkernel_specific_diagnostic(
+        self,
+        keyword: str,
+        loop_kind: str,
+    ) -> None:
+        """Unsupported loop control never reports 'outside loop'."""
+        source = f"""
+        def invalid(run: qmc.UInt) -> qmc.UInt:
+            {"for _ in qmc.range(2):" if loop_kind == "for" else "while run:"}
+                {keyword}
+            return run
+        """
+        with pytest.raises(
+            SyntaxError, match=rf"{keyword}.*{loop_kind}.*not supported"
+        ):
+            ControlFlowTransformer().visit(ast.parse(textwrap.dedent(source)))
+
+    def test_lazy_block_build_is_thread_safe(self, monkeypatch) -> None:
+        """Concurrent first access shares one block without false recursion."""
+        from qamomile.circuit.frontend import qkernel_block
+
+        @qkernel
+        def kernel() -> qmc.Bit:
+            return qmc.measure(qmc.qubit("q"))
+
+        original = qkernel_block.func_to_block
+        started = threading.Event()
+        release = threading.Event()
+        build_count = 0
+
+        def delayed_build(func):
+            """Hold the sole block build until both workers overlap."""
+            nonlocal build_count
+            build_count += 1
+            started.set()
+            assert release.wait(timeout=5.0)
+            return original(func)
+
+        monkeypatch.setattr(qkernel_block, "func_to_block", delayed_build)
+        blocks = []
+        errors = []
+
+        def access_block() -> None:
+            """Read the shared lazy block from one worker."""
+            try:
+                blocks.append(kernel.block)
+            except Exception as error:  # pragma: no cover - assertion payload
+                errors.append(error)
+
+        first = threading.Thread(target=access_block)
+        second = threading.Thread(target=access_block)
+        first.start()
+        assert started.wait(timeout=5.0)
+        second.start()
+        release.set()
+        first.join(timeout=5.0)
+        second.join(timeout=5.0)
+
+        assert not first.is_alive() and not second.is_alive()
+        assert errors == []
+        assert len(blocks) == 2 and blocks[0] is blocks[1]
+        assert build_count == 1
+
+    @pytest.mark.parametrize("loop_kind", ["if", "while"])
+    def test_walrus_in_condition_is_rejected(self, loop_kind):
+        """A walrus target cannot be moved into a generated helper scope."""
+        if loop_kind == "if":
+            with pytest.raises(SyntaxError, match="Assignment expressions"):
+
+                @qkernel
+                def bad_if_walrus() -> qmc.Bit:
+                    q = qmc.qubit()
+                    bit = qmc.bit(False)
+                    if bit := qmc.measure(q):
+                        pass
+                    return bit
+
+        else:
+            with pytest.raises(SyntaxError, match="Assignment expressions"):
+
+                @qkernel
+                def bad_while_walrus() -> qmc.Bit:
+                    q = qmc.qubit()
+                    bit = qmc.bit(True)
+                    while bit := qmc.measure(q):
+                        pass
+                    return bit
+
+
+class TestLivePythonNameResolution:
+    """Transformed kernels retain Python's build-time name lookup behavior."""
+
+    def test_forward_defined_module_helper_is_resolved_at_build(self):
+        """A helper defined after its caller is available during lazy tracing."""
+        block = _kernel_using_forward_helper.build()
+        assert any(
+            isinstance(op, InvokeOperation) and op.target.name == "_forward_helper"
+            for op in block.operations
+        )
+
+    def test_rebound_module_global_is_refreshed_at_build(self):
+        """A module constant rebound after decoration uses its current value."""
+        block = _kernel_using_live_global.build()
+        rotation = next(
+            op
+            for op in block.operations
+            if getattr(op, "gate_type", None) == GateOperationType.RZ
+        )
+        assert rotation.operands[1].metadata.scalar.const_value == 1.25
 
 
 class TestVariableCollectorAttributeAccess:

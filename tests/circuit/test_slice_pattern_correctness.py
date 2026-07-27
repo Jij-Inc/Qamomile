@@ -10,10 +10,11 @@ to write slicing code — evens / odds Bell-pair loop, ``qft`` on a
 slice, ``cast`` to ``QFixed``, in-line ``q[a:b] = h(q[a:b])`` broadcast,
 top-level slice with a body loop, Python-style auto-truncation, and
 passing a view as a sub-kernel argument.  Each kernel is transpiled
-on every supported SDK (Qiskit / QuriParts / CUDA-Q via
-``importorskip``), the result statevector compared to an analytical
-Qiskit reference (or ``run()`` for the QFixed Float-return kernel),
-and ``estimate_resources`` pinned to the expected qubit / gate counts.
+on every supported SDK (Qiskit / QuriParts / CUDA-Q, parametrized via
+the ``sv_backend`` fixture whose quri_parts / cudaq params carry their
+markers), the result statevector compared to an analytical Qiskit
+reference (or ``run()`` for the QFixed Float-return kernel), and
+``estimate_resources`` pinned to the expected qubit / gate counts.
 A backend-agnostic IR-level resource estimator is intentionally
 re-asserted here so the per-pattern claim stays auditable.
 
@@ -145,36 +146,54 @@ def _cudaq_statevector(kern, bindings: dict) -> np.ndarray:
     return np.array(cudaq.get_state(cudaq_circuit.kernel_func))
 
 
-def _assert_cross_backend_matches(kern, bindings: dict, expected_sv: np.ndarray):
-    """Assert that every available backend matches the reference statevector.
+_SV_BACKEND_HELPERS = {
+    "qiskit": _qiskit_statevector,
+    "quri_parts": _quri_parts_statevector,
+    "cudaq": _cudaq_statevector,
+}
 
-    Backends that are not installed are silently skipped via
-    ``pytest.importorskip`` inside the per-backend helpers; the Qiskit
-    branch is always exercised.
+
+@pytest.fixture(
+    params=[
+        pytest.param("qiskit", id="qiskit"),
+        pytest.param("quri_parts", marks=pytest.mark.quri_parts, id="quri_parts"),
+        pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
+    ]
+)
+def sv_backend(request):
+    """Backend name for single-backend statevector assertions.
+
+    The quri_parts / cudaq params carry their markers so each leg only
+    runs in the matching ``-m`` session; in particular the cudaq leg
+    must never load cudaq into a default session (see
+    tests/_cudaq_isolation.py). The SDK import itself happens lazily
+    inside the per-backend statevector helper.
 
     Args:
+        request (pytest.FixtureRequest): Parametrization carrier.
+
+    Returns:
+        str: One of ``"qiskit"``, ``"quri_parts"``, ``"cudaq"``.
+    """
+    return request.param
+
+
+def _assert_backend_matches(
+    backend: str, kern, bindings: dict, expected_sv: np.ndarray
+):
+    """Assert that one backend's statevector matches the reference.
+
+    Args:
+        backend (str): Backend name supplied by the ``sv_backend``
+            fixture.
         kern: Compiled qkernel.
         bindings (dict): Compile-time bindings.
         expected_sv (np.ndarray): Reference unitary statevector.
     """
-    actual_qiskit = _qiskit_statevector(kern, bindings)
-    assert statevectors_equal(actual_qiskit, expected_sv), (
-        f"[qiskit] statevector mismatch.\n"
-        f"  actual:   {actual_qiskit}\n"
-        f"  expected: {expected_sv}"
-    )
-
-    actual_quri = _quri_parts_statevector(kern, bindings)
-    assert statevectors_equal(actual_quri, expected_sv), (
-        f"[quri_parts] statevector mismatch.\n"
-        f"  actual:   {actual_quri}\n"
-        f"  expected: {expected_sv}"
-    )
-
-    actual_cudaq = _cudaq_statevector(kern, bindings)
-    assert statevectors_equal(actual_cudaq, expected_sv), (
-        f"[cudaq] statevector mismatch.\n"
-        f"  actual:   {actual_cudaq}\n"
+    actual = _SV_BACKEND_HELPERS[backend](kern, bindings)
+    assert statevectors_equal(actual, expected_sv), (
+        f"[{backend}] statevector mismatch.\n"
+        f"  actual:   {actual}\n"
         f"  expected: {expected_sv}"
     )
 
@@ -218,7 +237,7 @@ class TestEvensOddsCxPattern:
         return qmc.measure(q)
 
     @pytest.mark.parametrize("n", [4, 6])
-    def test_transpile_and_statevector_match(self, n: int):
+    def test_transpile_and_statevector_match(self, sv_backend, n: int):
         """Cross-backend statevector matches ``H_evens then CX(evens, odds)``."""
         bindings = {"n": n}
         ref_qc = QuantumCircuit(n)
@@ -228,7 +247,7 @@ class TestEvensOddsCxPattern:
         for i in range(n_pairs):
             ref_qc.cx(2 * i, 2 * i + 1)
         expected_sv = np.array(Statevector(ref_qc).data)
-        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern, bindings, expected_sv)
 
     @pytest.mark.parametrize(
         "n, exp_qubits, exp_single, exp_two",
@@ -238,7 +257,7 @@ class TestEvensOddsCxPattern:
         self, n: int, exp_qubits: int, exp_single: int, exp_two: int
     ):
         """Resource estimate matches H + CX counts inside the loop."""
-        est = estimate_resources(self._kern.block, bindings={"n": n})
+        est = estimate_resources(self._kern.block, inputs={"n": n})
         assert int(est.qubits) == exp_qubits
         assert int(est.gates.single_qubit) == exp_single
         assert int(est.gates.two_qubit) == exp_two
@@ -257,7 +276,7 @@ class TestQftOnView:
         q[lo:hi] = view
         return qmc.measure(q)
 
-    def test_transpile_and_statevector_match(self):
+    def test_transpile_and_statevector_match(self, sv_backend):
         """``qft(|000>) = |+++>``; the rest of the register stays |0>."""
         bindings = {"lo": 1, "hi": 4}
         # ``qft(|000>) = (1/sqrt(8)) * sum_k |k>`` for a 3-qubit register,
@@ -272,22 +291,19 @@ class TestQftOnView:
             # Qiskit indexes qubit 0 as the least-significant bit.
             idx = (k & 0b1) << 1 | ((k >> 1) & 0b1) << 2 | ((k >> 2) & 0b1) << 3
             expected_sv[idx] = amp
-        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        """``qft`` is wrapped as a composite gate; the top-level block reports 0 leaf gates.
+        """``qft`` on a view estimates resources through the composite formula.
 
-        ``estimate_resources`` walks the IR ``Block`` at the level the
-        kernel produced it.  ``CompositeGateOperation`` is one logical
-        op, not a tree of H / CP, so leaf gate counters return zero.
-        The qubit count (8 — the full ``qubit_array`` size) is still
-        reported correctly.  This is intentional behaviour, not a slice
-        regression; we pin it so any future estimator change that
-        starts unpacking composite gates is noticed.
+        The boxed QFT stays visible as an ``InvokeOperation``, but the
+        resource estimator resolves the symbolic slice width from the
+        bindings and applies the stdlib QFT formula. The qubit count
+        remains the full allocated register size.
         """
-        est = estimate_resources(self._kern.block, bindings={"lo": 1, "hi": 4})
+        est = estimate_resources(self._kern.block, inputs={"lo": 1, "hi": 4})
         assert int(est.qubits) == 8
-        assert int(est.gates.total) == 0
+        assert int(est.gates.total) == 7
 
 
 class TestCastSliceToQFixed:
@@ -322,8 +338,13 @@ class TestCastSliceToQFixed:
         got = exe.run(transpiler.executor()).result()
         assert float(got) == pytest.approx(0.0, abs=1e-9)
 
+    @pytest.mark.cudaq
     def test_cudaq_run_returns_zero(self):
-        """Cross-backend: CUDA-Q ``run`` also returns 0.0."""
+        """Cross-backend: CUDA-Q ``run`` also returns 0.0.
+
+        Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+        session is unsafe — see tests/_cudaq_isolation.py.
+        """
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
 
@@ -353,13 +374,13 @@ class TestInlineSliceAssignBroadcast:
         q[1 : n - 2] = qmc.h(q[1 : n - 2])
         return qmc.measure(q)
 
-    def test_transpile_and_statevector_match(self):
+    def test_transpile_and_statevector_match(self, sv_backend):
         bindings = {"n": 6}
         expected_sv = _reference_statevector(6, [1, 2, 3])
-        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(self._kern.block, bindings={"n": 6})
+        est = estimate_resources(self._kern.block, inputs={"n": 6})
         assert int(est.qubits) == 6
         assert int(est.gates.single_qubit) == 3
         assert int(est.gates.two_qubit) == 0
@@ -652,10 +673,10 @@ class TestInlineCallSliceBroadcast:
         qs = _slice_broadcast_inner(qs)
         return qmc.measure(qs)
 
-    def test_concrete_transpile_and_statevector_match(self):
+    def test_concrete_transpile_and_statevector_match(self, sv_backend):
         """The inlined ``qs[0:2] = qmc.h(qs[0:2])`` applies H to qs[0]/qs[1] only."""
         expected_sv = _reference_statevector(3, [0, 1])
-        _assert_cross_backend_matches(self._kern_concrete, {}, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern_concrete, {}, expected_sv)
 
     @qmc.qkernel
     def _kern_symbolic(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
@@ -665,10 +686,10 @@ class TestInlineCallSliceBroadcast:
         return qmc.measure(qs)
 
     @pytest.mark.parametrize("n", [3, 5, 7])
-    def test_symbolic_transpile_and_statevector_match(self, n: int):
+    def test_symbolic_transpile_and_statevector_match(self, sv_backend, n: int):
         """``qs[0:n-1]`` covers every qubit except the last across multiple sizes."""
         expected_sv = _reference_statevector(n, list(range(n - 1)))
-        _assert_cross_backend_matches(self._kern_symbolic, {"n": n}, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern_symbolic, {"n": n}, expected_sv)
 
     @qmc.qkernel
     def _kern_nested_slice() -> qmc.Vector[qmc.Bit]:
@@ -677,10 +698,10 @@ class TestInlineCallSliceBroadcast:
         qs = _nested_slice_inner(qs)
         return qmc.measure(qs)
 
-    def test_nested_slice_transpile_and_statevector_match(self):
+    def test_nested_slice_transpile_and_statevector_match(self, sv_backend):
         """``s1 = qs[0:4]; s1[0:2] = h(s1[0:2])`` applies H to qs[0]/qs[1]."""
         expected_sv = _reference_statevector(6, [0, 1])
-        _assert_cross_backend_matches(self._kern_nested_slice, {}, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern_nested_slice, {}, expected_sv)
 
     @qmc.qkernel
     def _kern_multi_slice() -> qmc.Vector[qmc.Bit]:
@@ -689,10 +710,10 @@ class TestInlineCallSliceBroadcast:
         qs = _multi_slice_inner(qs)
         return qmc.measure(qs)
 
-    def test_multi_slice_transpile_and_statevector_match(self):
+    def test_multi_slice_transpile_and_statevector_match(self, sv_backend):
         """Both ``qs[0:2]`` and ``qs[2:4]`` broadcasts survive inlining."""
         expected_sv = _reference_statevector(4, [0, 1, 2, 3])
-        _assert_cross_backend_matches(self._kern_multi_slice, {}, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern_multi_slice, {}, expected_sv)
 
     @qmc.qkernel
     def _kern_slice_and_scalar() -> qmc.Vector[qmc.Bit]:
@@ -701,10 +722,12 @@ class TestInlineCallSliceBroadcast:
         qs = _slice_and_scalar_inner(qs)
         return qmc.measure(qs)
 
-    def test_slice_and_scalar_transpile_and_statevector_match(self):
+    def test_slice_and_scalar_transpile_and_statevector_match(self, sv_backend):
         """Mixing slice and scalar element gates in one inlined sub-kernel works."""
         expected_sv = _reference_statevector(3, [0, 1, 2])
-        _assert_cross_backend_matches(self._kern_slice_and_scalar, {}, expected_sv)
+        _assert_backend_matches(
+            sv_backend, self._kern_slice_and_scalar, {}, expected_sv
+        )
 
     @qmc.qkernel
     def _kern_two_level_inline() -> qmc.Vector[qmc.Bit]:
@@ -713,10 +736,12 @@ class TestInlineCallSliceBroadcast:
         qs = _slice_mid_for_two_level(qs)
         return qmc.measure(qs)
 
-    def test_two_level_inline_transpile_and_statevector_match(self):
+    def test_two_level_inline_transpile_and_statevector_match(self, sv_backend):
         """Slice metadata survives two levels of inlining."""
         expected_sv = _reference_statevector(3, [0, 1])
-        _assert_cross_backend_matches(self._kern_two_level_inline, {}, expected_sv)
+        _assert_backend_matches(
+            sv_backend, self._kern_two_level_inline, {}, expected_sv
+        )
 
     @qmc.qkernel
     def _kern_view_arg_inner_slice(num: qmc.UInt) -> qmc.Vector[qmc.Bit]:
@@ -727,13 +752,13 @@ class TestInlineCallSliceBroadcast:
         q[0::2] = evens
         return qmc.measure(q)
 
-    def test_view_arg_inner_slice_transpile_and_statevector_match(self):
+    def test_view_arg_inner_slice_transpile_and_statevector_match(self, sv_backend):
         """Slice chain ``q[0::2][0:2]`` resolves to root qubits q[0] / q[2]."""
         # num=6: evens = q[0::2] = {q[0], q[2], q[4]}.  The sub-kernel
         # applies H to view[0:2] = {evens[0], evens[1]} = {q[0], q[2]}.
         expected_sv = _reference_statevector(6, [0, 2])
-        _assert_cross_backend_matches(
-            self._kern_view_arg_inner_slice, {"num": 6}, expected_sv
+        _assert_backend_matches(
+            sv_backend, self._kern_view_arg_inner_slice, {"num": 6}, expected_sv
         )
 
     @qmc.qkernel
@@ -751,10 +776,12 @@ class TestInlineCallSliceBroadcast:
         qs = _deep_chain_l3(qs)
         return qmc.measure(qs)
 
-    def test_four_level_inline_transpile_and_statevector_match(self):
+    def test_four_level_inline_transpile_and_statevector_match(self, sv_backend):
         """Slice metadata survives four levels of inlining."""
         expected_sv = _reference_statevector(3, [0, 1])
-        _assert_cross_backend_matches(self._kern_four_level_inline, {}, expected_sv)
+        _assert_backend_matches(
+            sv_backend, self._kern_four_level_inline, {}, expected_sv
+        )
 
     @qmc.qkernel
     def _kern_nested_slice_two_level_inline() -> qmc.Vector[qmc.Bit]:
@@ -763,11 +790,13 @@ class TestInlineCallSliceBroadcast:
         qs = _nested_slice_mid(qs)
         return qmc.measure(qs)
 
-    def test_nested_slice_two_level_inline_transpile_and_statevector_match(self):
+    def test_nested_slice_two_level_inline_transpile_and_statevector_match(
+        self, sv_backend
+    ):
         """Slice-of-slice broadcast through two levels of inlining."""
         expected_sv = _reference_statevector(6, [0, 1])
-        _assert_cross_backend_matches(
-            self._kern_nested_slice_two_level_inline, {}, expected_sv
+        _assert_backend_matches(
+            sv_backend, self._kern_nested_slice_two_level_inline, {}, expected_sv
         )
 
 
@@ -784,13 +813,13 @@ class TestTopLevelSliceWithBodyLoop:
         q[0::2] = evens
         return qmc.measure(q)
 
-    def test_transpile_and_statevector_match(self):
+    def test_transpile_and_statevector_match(self, sv_backend):
         bindings = {"n": 4}
         expected_sv = _reference_statevector(4, [0, 2])
-        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(self._kern.block, bindings={"n": 4})
+        est = estimate_resources(self._kern.block, inputs={"n": 4})
         assert int(est.qubits) == 4
         assert int(est.gates.single_qubit) == 2
         assert int(est.gates.two_qubit) == 0
@@ -807,11 +836,11 @@ class TestAutoTruncatedSlice:
         q[3:10] = qmc.h(q[3:10])
         return qmc.measure(q)
 
-    def test_transpile_and_statevector_match(self):
+    def test_transpile_and_statevector_match(self, sv_backend):
         # q[3:10] on a length-4 array is truncated to q[3:4]; only q[3]
         # gets H.
         expected_sv = _reference_statevector(4, [3])
-        _assert_cross_backend_matches(self._kern, {}, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern, {}, expected_sv)
 
     def test_resource_estimate(self):
         est = estimate_resources(self._kern.block)
@@ -849,13 +878,13 @@ class TestViewPassedToSubKernel:
         q[0::2] = evens
         return qmc.measure(q)
 
-    def test_transpile_and_statevector_match(self):
+    def test_transpile_and_statevector_match(self, sv_backend):
         bindings = {"num": 6}
         expected_sv = _reference_statevector(6, [0, 2, 4])
-        _assert_cross_backend_matches(self._kern, bindings, expected_sv)
+        _assert_backend_matches(sv_backend, self._kern, bindings, expected_sv)
 
     def test_resource_estimate(self):
-        est = estimate_resources(self._kern.block, bindings={"num": 6})
+        est = estimate_resources(self._kern.block, inputs={"num": 6})
         assert int(est.qubits) == 6
         assert int(est.gates.single_qubit) == 3
         assert int(est.gates.two_qubit) == 0
@@ -1090,7 +1119,7 @@ class TestControlFlowBodyViolations:
 
     def test_release_of_outer_view_in_body_raises(self):
         """Slice-assign that releases an outer view from inside a for body."""
-        from qamomile.circuit.transpiler.errors import SliceBorrowViolationError
+        from qamomile.circuit.transpiler.errors import ValidationError
 
         @qmc.qkernel
         def kern() -> qmc.Vector[qmc.Bit]:
@@ -1101,7 +1130,7 @@ class TestControlFlowBodyViolations:
             return qmc.measure(q)
 
         transpiler = QiskitTranspiler()
-        with pytest.raises(SliceBorrowViolationError):
+        with pytest.raises(ValidationError):
             transpiler.transpile(kern)
 
 

@@ -111,7 +111,7 @@ class CircuitStyle:
     min_left_margin: float = 0.3  # Minimum left margin for blocks
     label_height: float = 0.35  # Height reserved for block labels
 
-    # Box padding (for For/If/While/CallBlock boxes)
+    # Box padding (for For/If/While/callable boxes)
     box_padding_x: float = 0.3  # Horizontal padding inside boxes
     box_padding_y: float = 0.2  # Vertical padding inside boxes
 
@@ -144,7 +144,7 @@ class CircuitStyle:
 
     # Folded block width constants (Issue 1, 5, 7)
     folded_loop_width: float = 1.5  # Fixed width for folded ForOperation blocks
-    folded_call_block_width: float = 1.5  # Fixed width for folded CallBlock boxes
+    folded_call_block_width: float = 1.5  # Fixed width for folded callable boxes
 
     # Gate text padding (Issue 3)
     gate_text_padding: float = 0.10  # Padding around gate text (left and right)

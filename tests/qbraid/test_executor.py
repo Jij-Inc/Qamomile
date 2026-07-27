@@ -1,5 +1,6 @@
 """Tests for QBraidExecutor constructor, execute, and shared wait helper."""
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -76,6 +77,12 @@ class TestConstructor:
         executor = QBraidExecutor(device_id="dev123", provider=provider)
         provider.get_device.assert_called_once_with("dev123")
         assert executor.device is mock_device
+
+    def test_missing_optional_dependency_has_install_guidance(self):
+        """A missing qbraid package raises an actionable ImportError."""
+        with patch.dict(sys.modules, {"qbraid": None}):
+            with pytest.raises(ImportError, match=r"qamomile\[qbraid\]"):
+                QBraidExecutor._resolve_device("dev123", None, None)
 
     @patch("qamomile.qbraid.executor.QBraidExecutor._resolve_device")
     def test_device_id_only(self, mock_resolve):

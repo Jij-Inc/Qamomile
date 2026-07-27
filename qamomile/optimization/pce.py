@@ -37,6 +37,7 @@ import qamomile.observable as qm_o
 from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet, VarType
 from qamomile.optimization.converter import (
     binary_sampleset_to_ommx_samples,
+    evaluate_original_instance,
     normalize_problem_input,
 )
 from qamomile.optimization.qrao.rounding import SignRounder
@@ -326,6 +327,9 @@ class PCEConverter:
         instance: ommx.v1.Instance | BinaryModel,
         correlator_order: int,
         num_qubits: int | None = None,
+        *,
+        uniform_penalty_weight: float | None = None,
+        penalty_weights: dict[int, float] | None = None,
     ) -> None:
         """Initialize the converter from an OMMX instance or BinaryModel.
 
@@ -351,6 +355,10 @@ class PCEConverter:
                 given, must be at least that minimum; supplying a larger
                 value is supported for callers that want to match a
                 specific hardware register width.
+            uniform_penalty_weight (float | None): Uniform OMMX constraint
+                penalty. ``None`` delegates weight selection to OMMX.
+            penalty_weights (dict[int, float] | None): Optional per-constraint
+                penalty weights keyed by constraint ID.
 
         Raises:
             TypeError: If ``instance`` is neither an ``ommx.v1.Instance``
@@ -361,11 +369,19 @@ class PCEConverter:
                 problem contains higher-order (HUBO) terms (raised by
                 :class:`PCEEncoder`).
         """
+        self.original_instance: ommx.v1.Instance | None
         self.instance: ommx.v1.Instance | None
         self.original_vartype: VarType
         self.spin_model: BinaryModel
-        self.instance, self.original_vartype, self.spin_model = normalize_problem_input(
-            instance
+        (
+            self.original_instance,
+            self.instance,
+            self.original_vartype,
+            self.spin_model,
+        ) = normalize_problem_input(
+            instance,
+            uniform_penalty_weight=uniform_penalty_weight,
+            penalty_weights=penalty_weights,
         )
         self._encoder: PCEEncoder = PCEEncoder(
             self.spin_model,
@@ -541,6 +557,7 @@ class PCEConverter:
         # through the shared helper, and let evaluate_samples report the
         # original (un-penalized) objective and feasibility.
         if self.instance is not None:
+            assert self.original_instance is not None
             binary_sampleset = BinarySampleSet(
                 samples=[binary_sample],
                 num_occurrences=[1],
@@ -548,7 +565,11 @@ class PCEConverter:
                 vartype=VarType.BINARY,
             )
             ommx_samples = binary_sampleset_to_ommx_samples(binary_sampleset)
-            return self.instance.evaluate_samples(ommx_samples)
+            return evaluate_original_instance(
+                self.original_instance,
+                self.instance,
+                ommx_samples,
+            )
 
         # BinaryModel path: return in the model's original vartype.
         if self.original_vartype == VarType.BINARY:

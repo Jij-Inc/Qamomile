@@ -47,6 +47,11 @@ class CompiledQuantumSegment(Generic[T]):
         default_factory=ParameterMetadata
     )
 
+    # Physical qubit indices returned for a qkernel without explicit outputs.
+    # None preserves the complete backend bitstring. An explicit tuple lets a
+    # materializer hide internal ancillas while retaining logical wire order.
+    implicit_output_qubit_indices: tuple[int, ...] | None = None
+
 
 @dataclasses.dataclass
 class CompiledClassicalSegment:

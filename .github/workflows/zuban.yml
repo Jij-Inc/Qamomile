@@ -15,7 +15,27 @@ on:
       - synchronize
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.changes.outputs.docs_only }}
+      skip_all: ${{ steps.changes.outputs.skip_all }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: changes
+        shell: bash
+        run: |
+          .github/scripts/classify-changes.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}"
+
   zuban-check:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.skip_all != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +54,11 @@ jobs:
         shell: bash
         run: |
           set -eux
-          uv sync --frozen --group dev
+          # HUGR is an optional runtime target, but its lowerer is part of the
+          # checked qamomile/ tree. Install that extra so Zuban resolves and
+          # checks the actual third-party API instead of treating imports as
+          # missing modules.
+          uv sync --frozen --group dev --extra hugr
 
       - name: Type check with zuban
         shell: bash
@@ -46,4 +70,6 @@ jobs:
           # to qamomile/ for now so future docs edits don't accidentally
           # break the type-check job. Re-enable by switching the line
           # above to ``uv run zuban check qamomile/ docs/`` once the
-          # docs-side discipline is established.
+          # docs-side discipline is established; when doing so, drop the
+          # docs_only skip on this job so docs-only pull requests still
+          # get type-checked.

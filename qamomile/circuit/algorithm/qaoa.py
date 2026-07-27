@@ -14,8 +14,10 @@ def ising_cost(
 ) -> qmc.Vector[qmc.Qubit]:
     """Apply the Ising cost layer for quadratic interactions.
 
-    Applies RZZ gates for quadratic terms and RZ gates for linear terms,
-    each scaled by the variational parameter gamma.
+    Applies RZZ gates for quadratic terms and RZ gates for linear terms.
+    Qamomile rotation gates implement ``exp(-i * angle * P / 2)``, so each
+    angle is ``2 * coefficient * gamma`` to realize
+    ``exp(-i * gamma * H_cost)``.
 
     Args:
         quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]):
@@ -29,9 +31,9 @@ def ising_cost(
         qmc.Vector[qmc.Qubit]: Updated qubit register.
     """
     for (i, j), Jij in quad.items():
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * gamma)
+        q[i], q[j] = qmc.rzz(q[i], q[j], angle=2.0 * Jij * gamma)
     for i, hi in linear.items():
-        q[i] = qmc.rz(q[i], angle=hi * gamma)
+        q[i] = qmc.rz(q[i], angle=2.0 * hi * gamma)
     return q
 
 
@@ -146,7 +148,7 @@ def hubo_ising_cost(
     """
     q = ising_cost(quad, linear, q, gamma)
     for indices, coeff in qmc.items(higher):
-        q = _basic.phase_gadget(q, indices, coeff * gamma)
+        q = _basic.phase_gadget(q, indices, 2.0 * coeff * gamma)
     return q
 
 

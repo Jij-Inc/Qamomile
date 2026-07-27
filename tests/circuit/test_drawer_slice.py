@@ -381,11 +381,11 @@ class TestSliceDrawSmoke:
 class TestSliceSubKernelArgumentDraw:
     """Slice views handed as sub-kernel arguments must alias root wires.
 
-    Before the slice-view-aware ``CallBlockOperation`` handling in
+    Before the slice-view-aware ``InvokeOperation`` handling in
     ``build_qubit_map`` and the matching slice-of walk in
     ``_resolve_non_element_operand``, passing a slice view to a
     ``@qkernel`` registered the view's logical id as a single fresh
-    wire.  The sub-kernel's call-block box then claimed phantom wire
+    wire.  The sub-kernel's invoke box then claimed phantom wire
     indices outside the actual qubit range, and the renderer crashed
     with ``IndexError`` translating those phantom indices to
     y-coordinates.  The tests below pin the affected-qubit set of the

@@ -202,3 +202,105 @@ class TestEstimateExpectation:
 
         result = executor.estimate(circuit, hamiltonian, params=[])
         assert np.isclose(result, 0.0, atol=1e-10)
+
+    def test_estimate_accepts_numpy_parameter_array(self) -> None:
+        """NumPy parameter arrays do not enter ambiguous truth-value logic."""
+        import qamomile.observable as qm_o
+
+        emitter = QuriPartsGateEmitter()
+        circuit = emitter.create_circuit(1, 0)
+        theta = emitter.create_parameter("theta")
+        emitter.emit_rx(circuit, 0, theta)
+
+        result = QuriPartsExecutor().estimate(
+            circuit,
+            qm_o.Z(0),
+            params=np.array([0.3]),
+        )
+
+        assert np.isclose(result, np.cos(0.3), atol=1e-10)
+
+    def test_custom_estimator_is_used_after_parameter_binding(self) -> None:
+        """Binding a circuit cannot silently replace an explicit estimator."""
+        import quri_parts.core.operator as qp_o
+
+        emitter = QuriPartsGateEmitter()
+        circuit = emitter.create_circuit(1, 0)
+        theta = emitter.create_parameter("theta")
+        emitter.emit_rx(circuit, 0, theta)
+        metadata = ParameterMetadata(
+            parameters=[ParameterInfo("theta", "theta", None, theta)]
+        )
+        bound = QuriPartsExecutor().bind_parameters(
+            circuit,
+            {"theta": 0.3},
+            metadata,
+        )
+        calls: list[tuple[object, object]] = []
+
+        class Estimate:
+            """Minimal QURI-compatible estimate result."""
+
+            value = complex(7.0)
+
+        def estimator(operator: object, state: object) -> Estimate:
+            """Record the configured non-parametric estimator call."""
+            calls.append((operator, state))
+            return Estimate()
+
+        operator = qp_o.Operator({qp_o.pauli_label([(0, 3)]): 1.0})
+        result = QuriPartsExecutor(bound_estimator=estimator).estimate_expectation(
+            bound,
+            operator,
+            [],
+        )
+
+        assert result == 7.0
+        assert len(calls) == 1
+
+    def test_parametric_estimator_on_bound_state_has_clear_error(self) -> None:
+        """A three-argument estimator is not called with a bound state."""
+        import quri_parts.core.operator as qp_o
+        from quri_parts.qulacs.estimator import (
+            create_qulacs_vector_parametric_estimator,
+        )
+
+        emitter = QuriPartsGateEmitter()
+        circuit = emitter.create_circuit(1, 0)
+        theta = emitter.create_parameter("theta")
+        emitter.emit_rx(circuit, 0, theta)
+        operator = qp_o.Operator({qp_o.pauli_label([(0, 3)]): 1.0})
+        executor = QuriPartsExecutor(
+            estimator=create_qulacs_vector_parametric_estimator()
+        )
+
+        with pytest.raises(
+            QamomileQuriPartsTranspileError,
+            match="requires a two-argument non-parametric estimator",
+        ):
+            executor.estimate_expectation(
+                circuit.bind_parameters([0.3]),
+                operator,
+                [],
+            )
+
+    def test_default_parametric_estimator_does_not_shadow_bound_path(self) -> None:
+        """Lazy parametric-estimator creation preserves later bound estimates."""
+        import quri_parts.core.operator as qp_o
+
+        emitter = QuriPartsGateEmitter()
+        circuit = emitter.create_circuit(1, 0)
+        theta = emitter.create_parameter("theta")
+        emitter.emit_rx(circuit, 0, theta)
+        operator = qp_o.Operator({qp_o.pauli_label([(0, 3)]): 1.0})
+        executor = QuriPartsExecutor()
+
+        unbound_result = executor.estimate_expectation(circuit, operator, [0.3])
+        bound_result = executor.estimate_expectation(
+            circuit.bind_parameters([0.3]),
+            operator,
+            [],
+        )
+
+        assert np.isclose(unbound_result, np.cos(0.3), atol=1e-10)
+        assert np.isclose(bound_result, unbound_result, atol=1e-10)

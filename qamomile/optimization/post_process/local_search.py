@@ -83,13 +83,26 @@ class LocalSearch:
     Args:
         model: The problem to minimize. Either a :class:`BinaryModel`
             (any vartype, any order) or an :class:`ommx.v1.Instance`.
+        uniform_penalty_weight: Uniform constraint-penalty weight passed to
+            :meth:`ommx.v1.Instance.to_hubo`. ``None`` delegates selection
+            to OMMX.
+        penalty_weights: Optional per-constraint penalty weights keyed by
+            constraint ID.
 
     Raises:
         TypeError: If *model* is neither a BinaryModel nor an
             ommx.v1.Instance.
+        ValueError: If penalty options are supplied for a BinaryModel.
     """
 
-    def __init__(self, model: ommx.v1.Instance | BinaryModel) -> None:
+    def __init__(
+        self,
+        model: ommx.v1.Instance | BinaryModel,
+        *,
+        uniform_penalty_weight: float | None = None,
+        penalty_weights: dict[int, float] | None = None,
+    ) -> None:
+        self._ommx_lowered_instance: ommx.v1.Instance | None = None
         if isinstance(model, ommx.v1.Instance):
             # Keep the caller's original (still-constrained) instance for
             # later `evaluate()` — feasibility must be judged against the
@@ -99,9 +112,17 @@ class LocalSearch:
             # freely without leaking slack variables or constraint drops
             # back to the caller.
             working = ommx.v1.Instance.from_bytes(model.to_bytes())
-            hubo, constant = working.to_hubo()
+            hubo, constant = working.to_hubo(
+                uniform_penalty_weight=uniform_penalty_weight,
+                penalty_weights=dict(penalty_weights or {}),
+            )
+            self._ommx_lowered_instance = working
             model = BinaryModel.from_hubo(hubo, constant=constant)
         elif isinstance(model, BinaryModel):
+            if uniform_penalty_weight is not None or penalty_weights:
+                raise ValueError(
+                    "Penalty weights can only be used with an ommx.v1.Instance"
+                )
             self._ommx_instance = None
         else:
             raise TypeError(
@@ -238,17 +259,20 @@ class LocalSearch:
         spin_state = self._search(step_fn, spin_state, max_iter)
         sample_set = self._to_sampleset(spin_state)
         if self._ommx_instance is not None:
-            # `self._ommx_instance` is the original (still-constrained)
-            # instance, so `evaluate` reports feasibility against the
-            # user's constraints. But the sample dict includes slack
-            # decision variables introduced by `to_hubo` on the working
-            # copy — those IDs don't exist on the original instance, and
-            # passing them to `evaluate` raises. Filter to the ids ommx
-            # actually consumes during `evaluate` — `used_decision_variable_ids`
-            # excludes fixed / unreferenced variables as well as slacks,
-            # which is exactly the set `evaluate` needs.
+            assert self._ommx_lowered_instance is not None
+            # Evaluate the encoded bit state on the lowered instance first.
+            # OMMX reconstructs original integer variables from its log-encoding
+            # bits here.  Feed only those reconstructed original variables to
+            # the untouched instance so feasibility and objective values use
+            # the user's original constraints rather than the penalty model.
+            lowered_solution = self._ommx_lowered_instance.evaluate(
+                sample_set.samples[0]
+            )
             used_ids = self._ommx_instance.used_decision_variable_ids()
-            sample = {k: v for k, v in sample_set.samples[0].items() if k in used_ids}
+            sample = {
+                variable_id: lowered_solution.state.entries[variable_id]
+                for variable_id in used_ids
+            }
             return self._ommx_instance.evaluate(sample)
         return sample_set
 
@@ -312,18 +336,94 @@ class LocalSearch:
                 f"of the instance. Missing IDs: {sorted(missing)}."
             )
 
-        state: list[int] = []
-        for i in range(self._model.num_bits):
-            var_id = self._model.index_new_to_origin[i]
-            if var_id in used_ids:
-                # Validation above guarantees var_id is in entries.
-                state.append(int(round(entries[var_id])))
-            else:
-                # Slack bit introduced by `to_hubo` on a constrained
-                # instance — not present on the user's Solution. Default
-                # to 0; the local search will overwrite it as needed.
-                state.append(0)
-        return state
+        return self._encode_original_state(entries)
+
+    def _encode_original_state(self, entries: dict[int, float]) -> list[int]:
+        """Encode original OMMX variables into the lowered binary variables.
+
+        OMMX exposes the inverse log-encoding through ``Instance.evaluate``
+        but does not expose a public forward encoding table.  Recover the
+        table deterministically by evaluating the all-zero lowered state and
+        each one-hot lowered bit.  Each generated bit affects at most one
+        original variable; a small subset-sum then represents the requested
+        integer value. Constraint-only slack bits remain zero and can be
+        optimized by the local search.
+
+        Args:
+            entries: Original decision-variable values keyed by OMMX ID.
+
+        Returns:
+            Binary state ordered by the internal model's compact indices.
+
+        Raises:
+            ValueError: If the requested original state cannot be represented
+                by the lowered binary encoding.
+        """
+        assert self._ommx_instance is not None
+        assert self._ommx_lowered_instance is not None
+        encoded_ids = list(self._model.index_new_to_origin.values())
+        zeros = {variable_id: 0 for variable_id in encoded_ids}
+        base = self._ommx_lowered_instance.evaluate(zeros).state.entries
+        used_ids = self._ommx_instance.used_decision_variable_ids()
+
+        effects: dict[int, tuple[int, int]] = {}
+        for encoded_id in encoded_ids:
+            probe = zeros.copy()
+            probe[encoded_id] = 1
+            decoded = self._ommx_lowered_instance.evaluate(probe).state.entries
+            changed = [
+                original_id
+                for original_id in used_ids
+                if not np.isclose(decoded[original_id], base[original_id])
+            ]
+            if len(changed) > 1:
+                raise ValueError(
+                    "OMMX lowered bit affects multiple original variables; "
+                    f"cannot encode warm start safely: bit {encoded_id}, "
+                    f"variables {sorted(changed)}."
+                )
+            if changed:
+                original_id = changed[0]
+                delta = decoded[original_id] - base[original_id]
+                rounded = int(round(delta))
+                if not np.isclose(delta, rounded):
+                    raise ValueError(
+                        "OMMX lowered bit has a non-integral encoding weight: "
+                        f"bit {encoded_id}, weight {delta}."
+                    )
+                effects[encoded_id] = (original_id, rounded)
+
+        encoded = zeros.copy()
+        for original_id in used_ids:
+            target_delta = entries[original_id] - base[original_id]
+            target = int(round(target_delta))
+            if not np.isclose(target_delta, target):
+                raise ValueError(
+                    f"Warm-start value for variable {original_id} must be integral; "
+                    f"got {entries[original_id]}."
+                )
+            candidates = [
+                (encoded_id, weight)
+                for encoded_id, (affected_id, weight) in effects.items()
+                if affected_id == original_id
+            ]
+            reachable: dict[int, tuple[int, ...]] = {0: ()}
+            for encoded_id, weight in candidates:
+                for subtotal, chosen in list(reachable.items()):
+                    reachable.setdefault(subtotal + weight, chosen + (encoded_id,))
+            if target not in reachable:
+                raise ValueError(
+                    f"Warm-start value {entries[original_id]} for variable "
+                    f"{original_id} is not representable by the OMMX binary "
+                    "encoding."
+                )
+            for encoded_id in reachable[target]:
+                encoded[encoded_id] = 1
+
+        return [
+            encoded[self._model.index_new_to_origin[index]]
+            for index in range(self._model.num_bits)
+        ]
 
     def _to_spin(self, state: np.ndarray) -> np.ndarray:
         """Convert state from the model's vartype to SPIN (±1).

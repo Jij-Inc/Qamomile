@@ -10,9 +10,8 @@ of the product of their Paulis.
 
 from __future__ import annotations
 
+import math
 import typing
-
-import numpy as np
 
 import qamomile.observable as qm_o
 from qamomile._utils import is_close_zero
@@ -20,6 +19,8 @@ from qamomile.optimization.binary_model import BinaryModel, VarType
 
 from .base_converter import QRACConverterBase
 from .base_encoder import BaseQRACEncoder, PauliType
+
+_QRAC_SCALE = math.sqrt(3.0)
 
 
 class QRACSpaceEfficientEncoder(BaseQRACEncoder):
@@ -84,13 +85,6 @@ def qrac_space_efficient_encode_ising(
     """
     encoded_ope = numbering_space_efficient_encode(ising)
 
-    # Build per-variable occupancy (2 for most qubits, 1 for last if num_vars is odd)
-    num_vars = ising.num_bits
-    var_occupancy: dict[int, int] = {}
-    for i in range(num_vars):
-        qubit = i // 2
-        var_occupancy[i] = min(2, num_vars - qubit * 2)
-
     hamiltonian = qm_o.Hamiltonian()
     hamiltonian.constant = ising.constant
 
@@ -98,8 +92,7 @@ def qrac_space_efficient_encode_ising(
         if is_close_zero(coeff):
             continue
         pauli = encoded_ope[idx]
-        k = var_occupancy[idx]
-        hamiltonian.add_term((pauli,), np.sqrt(k) * coeff)
+        hamiltonian.add_term((pauli,), _QRAC_SCALE * coeff)
 
     for (i, j), coeff in ising.quad.items():
         if is_close_zero(coeff):
@@ -109,14 +102,13 @@ def qrac_space_efficient_encode_ising(
             continue
         pauli_i = encoded_ope[i]
         pauli_j = encoded_ope[j]
-        ki, kj = var_occupancy[i], var_occupancy[j]
         if pauli_i.index == pauli_j.index:
             hamiltonian.add_term(
                 (qm_o.PauliOperator(qm_o.Pauli.Z, pauli_i.index),),
-                np.sqrt(ki) * np.sqrt(kj) * coeff,
+                _QRAC_SCALE * coeff,
             )
         else:
-            hamiltonian.add_term((pauli_i, pauli_j), np.sqrt(ki) * np.sqrt(kj) * coeff)
+            hamiltonian.add_term((pauli_i, pauli_j), 3.0 * coeff)
 
     return hamiltonian, encoded_ope
 

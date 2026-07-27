@@ -2,6 +2,7 @@
 
 import itertools
 import math
+from typing import Any
 
 import networkx as nx
 import numpy as np
@@ -706,13 +707,19 @@ class TestPCEEndToEnd:
 
         self._check_transpile_runs(QuriPartsTranspiler())
 
+    @pytest.mark.cudaq
     def test_transpile_with_cudaq(self):
-        """The PCE ansatz produces a runnable executable on CUDA-Q."""
+        """The PCE ansatz produces a runnable executable on CUDA-Q.
+
+        Runs in ``-m cudaq`` sessions only: loading cudaq into a default
+        session is unsafe — see tests/_cudaq_isolation.py.
+        """
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
 
         self._check_transpile_runs(CudaqTranspiler())
 
+    @pytest.mark.cudaq
     def test_cross_backend_expval_consistency(self):
         """The same ansatz/observable produces matching ⟨P⟩ across backends.
 
@@ -721,6 +728,11 @@ class TestPCEEndToEnd:
         expectation values to within numerical tolerance. Backends that are
         not installed are silently skipped; if fewer than two backends are
         available, the test itself is skipped.
+
+        Marked ``cudaq`` because the CUDA-Q leg imports cudaq whenever it is
+        installed, which is unsafe in default sessions (see
+        tests/_cudaq_isolation.py). In the dedicated ``-m cudaq`` CI jobs
+        this cross-checks Qiskit against CUDA-Q.
         """
         _, n, observables, ansatz = self._build_pce_setup()
 
@@ -735,19 +747,36 @@ class TestPCEEndToEnd:
         # around ``from qamomile.<backend> import ...`` does not catch a
         # missing SDK — the ImportError fires later, mid-test. Use
         # ``find_spec`` to check existence without importing.
-        backends: list[tuple[str, Transpiler]] = []
+        backends: list[tuple[str, Transpiler, Any]] = []
         if importlib.util.find_spec("qiskit") is not None:
+            from qiskit.providers.basic_provider import BasicSimulator
+
             from qamomile.qiskit import QiskitTranspiler
 
-            backends.append(("qiskit", QiskitTranspiler()))
+            # An explicit BasicSimulator keeps qiskit-aer out of this
+            # cudaq-marked test's process (see tests/_cudaq_isolation.py);
+            # the expval path uses the pure StatevectorEstimator and never
+            # runs the sampling backend anyway.
+            qiskit_transpiler = QiskitTranspiler()
+            backends.append(
+                (
+                    "qiskit",
+                    qiskit_transpiler,
+                    qiskit_transpiler.executor(backend=BasicSimulator()),
+                )
+            )
         if importlib.util.find_spec("quri_parts") is not None:
             from qamomile.quri_parts import QuriPartsTranspiler
 
-            backends.append(("quri_parts", QuriPartsTranspiler()))
+            quri_parts_transpiler = QuriPartsTranspiler()
+            backends.append(
+                ("quri_parts", quri_parts_transpiler, quri_parts_transpiler.executor())
+            )
         if importlib.util.find_spec("cudaq") is not None:
             from qamomile.cudaq import CudaqTranspiler
 
-            backends.append(("cudaq", CudaqTranspiler()))
+            cudaq_transpiler = CudaqTranspiler()
+            backends.append(("cudaq", cudaq_transpiler, cudaq_transpiler.executor()))
 
         if len(backends) < 2:
             pytest.skip("Need at least two installed backends to cross-check.")
@@ -756,8 +785,7 @@ class TestPCEEndToEnd:
         # same physical expectation value.
         thetas = [0.3, 0.7]
         per_backend: dict[str, list[float]] = {}
-        for name, transpiler in backends:
-            executor = transpiler.executor()
+        for name, transpiler, executor in backends:
             results: list[float] = []
             for P_i in observables:
                 executable = transpiler.transpile(

@@ -12,6 +12,7 @@ from qamomile.circuit.ir.canonical import (
     content_hash,
     to_canonical_bytes,
 )
+from qamomile.circuit.ir.effect import KernelEffect
 from qamomile.circuit.ir.printer import format_value, pretty_print_block
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "canonicalize_and_remap",
     "content_hash",
     "format_value",
+    "KernelEffect",
     "pretty_print_block",
     "to_canonical_bytes",
 ]
