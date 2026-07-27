@@ -1,5 +1,6 @@
 """Tests for qamomile/circuit/algorithm/aoa.py primitives."""
 
+import importlib.util
 import re
 
 import numpy as np
@@ -39,14 +40,16 @@ try:
     BACKENDS.append(("quri_parts", QuriPartsTranspiler))
 except ImportError:
     pass
-try:
-    import cudaq  # noqa: F401
-
+# cudaq imports ``torch`` at import time, which cannot share a process with a
+# qiskit-aer simulation (duplicate OpenMP runtimes segfault on macOS arm64).
+# ``importlib.util.find_spec`` therefore probes availability *without* importing
+# cudaq at collection time (see tests/_cudaq_isolation.py), and the backend
+# parameter carries ``pytest.mark.cudaq`` so default (``-m "not cudaq"``) runs
+# never load cudaq mid-session.
+if importlib.util.find_spec("cudaq") is not None:
     from qamomile.cudaq.transpiler import CudaqTranspiler
 
-    BACKENDS.append(("cudaq", CudaqTranspiler))
-except ImportError:
-    pass
+    BACKENDS.append(pytest.param("cudaq", CudaqTranspiler, marks=pytest.mark.cudaq))
 
 if not BACKENDS:
     pytest.skip("No quantum backend available", allow_module_level=True)
@@ -806,17 +809,19 @@ def test_hubo_aoa_state_superposition_expval_z_sum_is_zero(name, TranspilerCls):
 def test_hubo_aoa_state_superposition_expval_higher_order_x0_matches_analytic(
     name, TranspilerCls, seed
 ):
-    """Tests that the 3-body HUBO cost phase gives <X0> = cos(J * gamma) analytically.
+    """Tests that the 3-body HUBO cost phase gives <X0> = cos(2 * J * gamma).
 
     Starting from |+>^3, applying one HUBO cost layer with only the 3-body term
-    (0,1,2) of weight J and no mixer (beta=0) produces the state:
+    (0,1,2) of weight J and no mixer (beta=0). The cost unitary follows the
+    standard QAOA convention exp(-i * gamma * H_cost), so the weight-J term
+    produces the state:
 
-        exp(-i * J * gamma / 2 * Z0 Z1 Z2) |+>^3.
+        exp(-i * J * gamma * Z0 Z1 Z2) |+>^3.
 
-    For this state, <X0> = cos(J * gamma).  Derivation: the expectation value
-    sums exp(-i * J * gamma * s0 * s1 * s2) over all 8 basis states, where 4 have
-    product +1 and 4 have product -1, yielding (1/8)(4 e^{-i J gamma} + 4 e^{+i J gamma})
-    = cos(J * gamma).
+    For this state, <X0> = cos(2 * J * gamma).  Derivation: the expectation value
+    sums exp(-i * 2 * J * gamma * s0 * s1 * s2) over all 8 basis states, where 4
+    have product +1 and 4 have product -1, yielding
+    (1/8)(4 e^{-i 2 J gamma} + 4 e^{+i 2 J gamma}) = cos(2 * J * gamma).
     """
     rng = np.random.default_rng(seed)
     J = float(rng.uniform(0.3, 2.0))
@@ -842,7 +847,7 @@ def test_hubo_aoa_state_superposition_expval_higher_order_x0_matches_analytic(
     job = exe.run(transpiler.executor())
     result = job.result()
 
-    np.testing.assert_allclose(result, np.cos(J * gamma), atol=1e-5)
+    np.testing.assert_allclose(result, np.cos(2.0 * J * gamma), atol=1e-5)
 
 
 @pytest.mark.parametrize("name,TranspilerCls", BACKENDS)

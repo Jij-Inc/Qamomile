@@ -263,7 +263,7 @@ fig
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.aoa import xy_mixer
 from qamomile.circuit.algorithm.qaoa import ising_cost
-from qamomile.circuit.algorithm.state_preparation import prepare_dicke
+from qamomile.circuit.stdlib.state_preparation import prepare_dicke
 
 # Dicke 状態の準備とミキサーの構築に必要なインデックスを取得するため、コンバーターの内部ロジックにアクセスできます。
 # これは可視化には便利ですが、通常のユーザーワークフローの一部ではありません。

@@ -1,5 +1,6 @@
 """Tests for qamomile/circuit/stdlib/state_preparation/dicke.py primitives."""
 
+import importlib.util
 import re
 
 import numpy as np
@@ -35,14 +36,16 @@ try:
     BACKENDS.append(("quri_parts", QuriPartsTranspiler))
 except ImportError:
     pass
-try:
-    import cudaq  # noqa: F401
-
+# cudaq imports ``torch`` at import time, which cannot share a process with a
+# qiskit-aer simulation (duplicate OpenMP runtimes segfault on macOS arm64).
+# ``importlib.util.find_spec`` therefore probes availability *without* importing
+# cudaq at collection time (see tests/_cudaq_isolation.py), and the backend
+# parameter carries ``pytest.mark.cudaq`` so default (``-m "not cudaq"``) runs
+# never load cudaq mid-session.
+if importlib.util.find_spec("cudaq") is not None:
     from qamomile.cudaq.transpiler import CudaqTranspiler
 
-    BACKENDS.append(("cudaq", CudaqTranspiler))
-except ImportError:
-    pass
+    BACKENDS.append(pytest.param("cudaq", CudaqTranspiler, marks=pytest.mark.cudaq))
 
 if not BACKENDS:
     pytest.skip("No quantum backend available", allow_module_level=True)

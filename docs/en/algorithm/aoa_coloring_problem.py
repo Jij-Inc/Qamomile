@@ -266,7 +266,7 @@ fig
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.aoa import xy_mixer
 from qamomile.circuit.algorithm.qaoa import ising_cost
-from qamomile.circuit.algorithm.state_preparation import prepare_dicke
+from qamomile.circuit.stdlib.state_preparation import prepare_dicke
 
 #We can access the internal logic of the converter to get the indices for dicke state preparation and mixer construction.
 #This is useful for visualizing but not part of the normal user workflow.
