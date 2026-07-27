@@ -36,16 +36,15 @@ try:
     BACKENDS.append(("quri_parts", QuriPartsTranspiler))
 except ImportError:
     pass
-# cudaq imports ``torch`` at import time, which cannot share a process with a
-# qiskit-aer simulation (duplicate OpenMP runtimes segfault on macOS arm64).
-# ``importlib.util.find_spec`` therefore probes availability *without* importing
-# cudaq at collection time (see tests/_cudaq_isolation.py), and the backend
-# parameter carries ``pytest.mark.cudaq`` so default (``-m "not cudaq"``) runs
-# never load cudaq mid-session.
+# cudaq imports ``torch`` at import time, whose OpenMP runtime segfaults
+# alongside qiskit-aer, so the collection-isolation guard
+# (tests/_cudaq_isolation.py) forbids a module-level ``import cudaq``.
+# ``importlib.util.find_spec`` probes availability without loading the runtime
+# (importing ``CudaqTranspiler`` alone does not pull in cudaq).
 if importlib.util.find_spec("cudaq") is not None:
     from qamomile.cudaq.transpiler import CudaqTranspiler
 
-    BACKENDS.append(pytest.param("cudaq", CudaqTranspiler, marks=pytest.mark.cudaq))
+    BACKENDS.append(("cudaq", CudaqTranspiler))
 
 if not BACKENDS:
     pytest.skip("No quantum backend available", allow_module_level=True)
