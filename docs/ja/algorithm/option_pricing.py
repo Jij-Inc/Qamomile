@@ -52,11 +52,10 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # 金融リスクの計算は、大きな需要があります。
 # モンテカルロ (MC) 計算はその中心的な計算手法であり、Value at Risk (VaR) の推定や店頭デリバティブの価格決定など、幅広く用いられています。
-# しかし収束が悪く、その誤差は $\varepsilon = \mathcal{O} (M^{-1/2})$ で減衰するという欠点があります。
+# しかしその誤差は $\varepsilon = \mathcal{O} (M^{-1/2})$ で減衰するという欠点があります。
 # ここで $M$ はサンプル数です。  
-# 対象となる確率分布が量子状態として準備される場合、量子振幅推定 (QAE) により、期待値などの統計量を $\mathcal{O} (M^{-1})$ で推定できることが知られています。
-# これは先ほどの古典MCに対し、二次の高速化をもたらすことがわかります。  
-# [Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、先行研究のプライシング手法を拡張した量子回路実装を示しました。
+# 対象となる確率分布が量子状態として準備される場合、量子振幅推定 (QAE) により、期待値などの統計量を $\mathcal{O} (M^{-1})$ の誤差で推定できることが知られています。
+# これは先ほどの古典MCに対し、二次の高速化をもたらすことがわかります。
 #
 # ### 先行研究
 #
@@ -67,7 +66,7 @@ from qamomile.qiskit import QiskitTranspiler
 # もう一つの重要な先行研究として、[Woerner & Egger (2019)](https://www.nature.com/articles/s41534-019-0130-6)があります。
 # これはプライシングに対してではなく、VaR や Conditional Value at Risk (CVaR) に QAE を適用した研究です。
 # 先ほどの[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算を改良し、必要量子ビット数・ゲート数の大幅な削減に成功しました。  
-# そこで[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算手法をオプションプライシングに拡張し、NISQフレンドリーな実装を示しました。
+# そこで[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算手法をオプションプライシングに拡張した実装を示しました。
 #
 # ## アルゴリズム: NISQでのオプションプライシング計算
 #
@@ -75,7 +74,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # QAE ではグローバー演算子 $\mathcal{Q}$ を $k$ 回繰り返すことで、測定確率が
 # $\sin^2((2k+1)\theta_a)$ という既知の関数形で変化します。
-# これにより、少ない測定回数でも $\theta_a$ を高精度に推定することが可能になります。  
+# これにより、少ない測定回数でも $\theta_a$ を高精度に推定することが可能になります。
 # 今、アセットの価格を $S_i$とし、それが起こる確率を $p_i$ としましょう。
 # 演算子 $\mathcal{A}$ が
 #
@@ -84,8 +83,8 @@ from qamomile.qiskit import QiskitTranspiler
 # = \sum_{i=0}^{2^n - 1} \sqrt{1-f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 0 \rangle + \sum_{i=0}^{2^n - 1} \sqrt{f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 1 \rangle \tag{1}
 # $$
 #
-# のような状態を作れるとすると、$\vert 1 \rangle$ の振幅は $a = \mathbb{E}[f(S)]$ となり、QAE によりペイオフの期待値を計算できることがわかります。
-# [Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321) は補助レジスタにペイオフをバイナリ表現で格納する手法を提案しましたが、量子ビット数と回路 depth が増大する問題がありました。
+# のような状態を作れるとすると、ペイオフ量子ビットが $\vert 1 \rangle$ の状態で観測される確率は $a = \mathbb{E}[f(S)]$ となり、QAE によりペイオフの期待値を計算できることがわかります。
+# [Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321) は補助レジスタにペイオフをバイナリ表現で格納する手法を提案しましたが、量子ビット数と回路の深さが増大する問題がありました。
 # そこで [Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/) では、[Woerner & Egger (2019)](https://www.nature.com/articles/s41534-019-0130-6) の軽量な $R_y$ 手法を採用しました。
 #
 # ### 平均値への適用と $c$ パラメータ
@@ -104,13 +103,12 @@ from qamomile.qiskit import QiskitTranspiler
 # P_1 \approx \frac{1}{2} + c\,\mathbb{E}[\tilde{f}] + \mathcal{O}(c^3) \tag{3}
 # $$
 #
-# となり、$P_1$ を推定すれば既知の $c, f_\mathrm{min}, f_\mathrm{max}$ から $\mathbb{E}[f(S)]$ を算出できます。  
+# となり、$P_1$ を推定すれば既知の $c, f_\mathrm{min}, f_\mathrm{max}$ から $\mathbb{E}[f(S)]$ を算出できます。
 # $P_1$ の推定誤差を $\delta P_1$ とすると、$\mathbb{E}[\tilde{f}] \approx (P_1 - 1/2)/c$ より
 # 推定誤差は $\delta P_1/c$ に増幅されます。
-# $c$ を小さくするとこの誤差増幅が大きくなり、逆に大きくすると
-# 近似バイアス $\mathcal{O}(c^2)$ が増大します。
+# $c$ を小さくするとこの誤差増幅が大きくなり、逆に大きくすると近似バイアス $\mathcal{O}(c^2)$ が増大します。
 # このトレードオフから収束率は $\mathcal{O}(M^{-2/3})$ となります。
-# 完全な二次高速化には至りませんが、依然として古典 MC の $\mathcal{O}(M^{-1/2})$ を凌駕します。  
+# 完全な二次高速化には至りませんが、依然として古典 MC の $\mathcal{O}(M^{-1/2})$ を凌駕します。
 # 以下の実装では、位相推定を用いない軽量な最尤振幅推定(MLAE)を採用しています。
 #
 # ### コールオプションへの応用
@@ -127,8 +125,7 @@ from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # ## Qamomileによる実装
-
-# %% [markdown]
+#
 # ### 分布の準備
 #
 # それでは、[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)で示された実装を見ていきましょう。
@@ -261,9 +258,9 @@ load_distribution_inv = qmc.inverse(load_distribution)
 
 
 # %% [markdown]
-# この分布読み込みと、(21)式にあるように制御 $R_y$ ゲートである $\mathrm{CR}_y$ を施すことで、コールオプションのペイオフをペイオフ量子ビット振幅に変換する回路を構築します。
+# この分布読み込みと、UCR-Y を施すことで、コールオプションのペイオフをペイオフ量子ビット振幅に変換する回路を構築します。
 # `num_shots` の回数だけ測定を行い、ペイオフ量子ビットが $\vert 1 \rangle$ になる確率 $P_1$ を推定します。
-# そして(13)式から近似式 $P_1 \approx \frac{1}{2} + c\mathbb{E}[\tilde{f}]$ から、ペイオフの期待値を算出します。
+# そして(3)の近似式 $P_1 \approx \frac{1}{2} + c\mathbb{E}[\tilde{f}]$ から、ペイオフの期待値を算出します。
 # ここで算出された $P_1$ の値が理論値と近い値となることを示すことで、ペイオフ回路が正しく機能していることを確認しています。
 
 # %%
@@ -434,10 +431,12 @@ for k in k_list:
 
 
 # %% [markdown]
+# ## 結果
+#
 # 複数の $k$ での測定データ (二項分布) をベースに、$P_1^{(k)} = \sin^2 ((2k+1) \theta_\alpha)$ というモデルに対する最尤推定を実施しましょう。
 # これにより振幅角 $\theta_\alpha$ を推定し、さらに $P_1 = \sin^2 \theta_\alpha$ を計算します。
 # そしてこの $P_1$ からペイオフの期待値 $\mathbb{E}[f(S)]$ を計算し、無リスク金利で割り引くことで、オプションのフェアバリューを算出します。
-# 最後に、古典モンテカルロ法から求めた参照値との比較を行っています。
+# 最後に、厳密計算から求めた参照値との比較を行っています。
 
 # %%
 # ============================================================
@@ -473,7 +472,7 @@ print(f"絶対誤差:          {abs(fair_hat - exact_fair):.6f}")
 
 # %% [markdown]
 # 対数尤度関数 $\log \mathcal{L} (\sin^2 \theta)$と、$P_1^{(k)}$ をプロットしてみましょう。
-# 左図は対数尤度関数と、最尤推定値および古典MCによる理論値も示しています。
+# 左図は対数尤度関数と、最尤推定値および厳密計算による理論値も示しています。
 # さらに右図は、$\theta_\alpha$ から得られる理論曲線 $P_1^{(k)} = \sin^2 ((2k+1) \theta_\alpha)$ も重ねて描画しています。
 
 # %%
@@ -523,3 +522,5 @@ plt.show()
 #
 # * 対数正規分布を Möttönen の符号化手法により量子状態に符号化、一様な制御回転を用いてコールオプションのペイオフをペイオフ量子ビット振幅に符号化しました。状態の読み込みには、Qamomile の `amplitude_encoding` を用いることができます。
 # * Grover 演算子 $\mathcal{Q}$ を $k$ 回適用した回路を様々な $k$ で測定し、最尤推定から振幅角を推定することで、期待ペイオフを求めました。
+
+# %%
