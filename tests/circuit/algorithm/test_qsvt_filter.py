@@ -341,7 +341,7 @@ def test_probe_samples_and_estimates_on_every_sdk(
         """Estimate the all-zero ancilla projector after the filter."""
         ancilla = qmc.qubit_array(num_ancilla, "ancilla")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        for index in range(encoding.num_system_qubits):
+        for index in qmc.range(encoding.num_system_qubits):
             system[index] = qmc.h(system[index])
         proj = ancilla[0:1]
         signal = ancilla[1:num_ancilla]

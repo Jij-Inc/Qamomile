@@ -13,6 +13,7 @@ the library — the converter only emits quantum programs.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numpy as np
 
@@ -20,7 +21,6 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile._utils import is_close_zero
 from qamomile.circuit.algorithm.qsvt_filter import eigenstate_filter_probe
-from qamomile.circuit.stdlib.block_encoding import LCUBlockEncoding
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -41,6 +41,14 @@ The sign fixes the filter's orientation: the negative default keeps the
 eigenstates *below* the threshold. The magnitude sharpens the step.
 """
 
+MAX_POLYNOMIAL_SCALE = 1.2
+r"""Largest ``scale`` magnitude that keeps the polynomial under the QSP bound.
+
+Beyond this, ``pyqsp``'s ``ensure_bounded`` headroom is exhausted, the
+polynomial leaves :math:`\lvert p \rvert \le 1`, and the extracted phases
+stop approximating the sign function.
+"""
+
 
 class QSVTFilterConverter(MathematicalProblemConverter):
     r"""Converter for QSVT eigenstate filtering (Lin & Tong ground-energy search).
@@ -57,14 +65,11 @@ class QSVTFilterConverter(MathematicalProblemConverter):
     the filtered states themselves.
 
     Attributes:
-        encoding (LCUBlockEncoding): Block encoding of the unshifted cost
+        encoding (qmc.LCUBlockEncoding): Block encoding of the unshifted cost
             Hamiltonian, built during construction.
         normalization (float): Its subnormalization :math:`\alpha`, which
             bounds the spectrum: every eigenvalue lies in
             :math:`[-\alpha, \alpha]`, so it sets the binary-search grid.
-        num_ancilla_bits (int): Width of the ancilla block (projector plus
-            signal) of the most recent :meth:`transpile` call. Only present
-            after the first call.
 
     Example:
         >>> from qamomile.optimization.binary_model import BinaryModel
@@ -107,7 +112,26 @@ class QSVTFilterConverter(MathematicalProblemConverter):
             "operator is block encoded internally for the QSVT sign filter."
         )
 
-    def _shifted_encoding(self, mu: float) -> LCUBlockEncoding:
+    def num_ancilla_bits(self, mu: float) -> int:
+        r"""Width of the post-selected ancilla block for one threshold.
+
+        The probe circuit's post-selected block is the projector qubit plus the
+        signal register of the shifted encoding. It depends on ``mu``: at
+        :math:`\mu = 0` the identity term drops out of the LCU (a
+        zero-coefficient term is removed before normalization), leaving a
+        narrower signal register than any non-zero threshold. Pass the same
+        ``mu`` that produced the results being interpreted.
+
+        Args:
+            mu (float): Energy threshold, as passed to :meth:`transpile`.
+
+        Returns:
+            int: Number of leading measured bits that must all be zero for a
+                shot to fall in the filtered block.
+        """
+        return 1 + self._shifted_encoding(mu).num_signal_qubits
+
+    def _shifted_encoding(self, mu: float) -> qmc.LCUBlockEncoding:
         r"""Compose a block encoding of :math:`H - \mu I`.
 
         Written as an LCU *of block encodings*, so the Hamiltonian is decomposed
@@ -120,8 +144,8 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 problem's Ising Hamiltonian.
 
         Returns:
-            LCUBlockEncoding: Descriptor of the shifted operator, with its own
-                flat signal register.
+            qmc.LCUBlockEncoding: Descriptor of the shifted operator, with its
+                own flat signal register.
         """
         identity = qmc.identity_block_encoding(self.encoding.num_system_qubits)
         return qmc.lcu_block_encoding(
@@ -161,9 +185,9 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 negative default keeps the eigenstates *below* the threshold —
                 and its magnitude sharpens the step, ``pyqsp``'s
                 ``ensure_bounded`` leaving headroom under the QSP bound
-                :math:`\lvert p \rvert \le 1`. Magnitudes much above ``1.2``
-                push the polynomial outside that bound and the phases become
-                meaningless.
+                :math:`\lvert p \rvert \le 1`. Magnitudes above
+                :data:`MAX_POLYNOMIAL_SCALE` push the polynomial outside that
+                bound and are rejected.
 
         Returns:
             list[float]: ``degree + 1`` phases in the reflection convention,
@@ -171,10 +195,22 @@ class QSVTFilterConverter(MathematicalProblemConverter):
 
         Raises:
             ImportError: If ``pyqsp`` is not installed.
-            ValueError: If ``degree`` is not a positive odd integer.
+            ValueError: If ``degree`` is not a positive odd integer, ``delta``
+                is not positive, or ``scale`` is zero or exceeds
+                :data:`MAX_POLYNOMIAL_SCALE` in magnitude.
         """
         if not isinstance(degree, int) or degree < 1 or degree % 2 == 0:
             raise ValueError(f"degree must be a positive odd int; got {degree!r}.")
+        # Negated comparisons so NaN, which compares false either way, is
+        # rejected rather than passed through to pyqsp.
+        if not delta > 0.0:
+            raise ValueError(f"delta must be positive; got {delta!r}.")
+        if not 0.0 < abs(scale) <= MAX_POLYNOMIAL_SCALE:
+            raise ValueError(
+                f"|scale| must lie in (0, {MAX_POLYNOMIAL_SCALE}]; got {scale!r}. "
+                "Larger magnitudes push the sign polynomial outside the QSP "
+                "bound |p| <= 1 and the extracted phases become meaningless."
+            )
 
         key = (degree, float(delta), float(scale))
         cached = self._phase_cache.get(key)
@@ -204,8 +240,7 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         )
 
         # sym_qsp raw output -> genuine Wx sequence.
-        wx = np.asarray(wx_phases, dtype=float)
-        wx = wx.copy()
+        wx = np.array(wx_phases, dtype=float)
         wx[0] += math.pi / 4
         wx[-1] += math.pi / 4
 
@@ -256,10 +291,13 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 Must have even length.
 
         Returns:
-            ExecutableProgram: Compiled probe circuit for this threshold.
+            ExecutableProgram: Compiled probe circuit for this threshold. Its
+                post-selected ancilla block is ``num_ancilla_bits(mu)`` wide.
 
         Raises:
-            ValueError: If ``phi`` has odd or fewer than two entries.
+            ValueError: If ``phi`` has odd or fewer than two entries, or if the
+                phase-synthesis arguments are out of range (see
+                :meth:`_qsp_phases`).
             ImportError: If ``phi`` is omitted and ``pyqsp`` is not installed.
         """
         phases = (
@@ -271,10 +309,8 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 f"(odd polynomial degree); got {len(phases)}."
             )
 
-        encoding = self._shifted_encoding(mu)
-        self.num_ancilla_bits = 1 + encoding.num_signal_qubits
         return transpiler.transpile(
-            eigenstate_filter_probe(encoding),
+            eigenstate_filter_probe(self._shifted_encoding(mu)),
             bindings={"phi": phases},
         )
 
@@ -340,7 +376,7 @@ class QSVTFilterConverter(MathematicalProblemConverter):
 
     def decode_to_binary_sampleset(
         self,
-        samples: SampleResult[tuple[list[int], list[int], list[int]]],  # type: ignore[override]
+        samples: SampleResult[Any],
     ) -> BinarySampleSet:
         """Decode the post-selected system measurements into problem samples.
 
@@ -350,10 +386,16 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         :meth:`success_probability` on the same result to recover how many were
         discarded.
 
+        The payload is typed as ``Any`` to stay compatible with the base-class
+        signature, which decodes a flat ``list[int]`` per shot. This converter
+        requires the probe's three-register tuple instead and validates that
+        shape at runtime rather than in the annotation.
+
         Args:
-            samples (SampleResult[tuple[list[int], list[int], list[int]]]): Raw
-                probe results, each value holding the projector, signal, and
-                system bits in that order.
+            samples (SampleResult[Any]): Raw probe results, each value holding
+                the projector, signal, and system bits in that order, as
+                returned by the kernel built by
+                :func:`~qamomile.circuit.algorithm.eigenstate_filter_probe`.
 
         Returns:
             BinarySampleSet: Post-selected samples in the converter's original

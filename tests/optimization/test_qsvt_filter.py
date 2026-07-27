@@ -6,13 +6,12 @@ import math
 from typing import Any
 
 import numpy as np
+import ommx.v1
 import pytest
 
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.qsvt_filter import QSVTFilterConverter
-
-qiskit = pytest.importorskip("qiskit")
 
 
 @pytest.fixture
@@ -22,6 +21,7 @@ def transpiler() -> Any:
     Returns:
         Any: A ``QiskitTranspiler`` instance.
     """
+    pytest.importorskip("qiskit")
     from qamomile.qiskit import QiskitTranspiler
 
     return QiskitTranspiler()
@@ -72,7 +72,7 @@ def _exact_success_probability(
     executable = converter.transpile(transpiler, mu=mu, phi=phases)
     circuit = executable.quantum_circuit.remove_final_measurements(inplace=False)
     state = Statevector.from_instruction(circuit).data
-    num_ancilla = converter.num_ancilla_bits
+    num_ancilla = converter.num_ancilla_bits(mu)
     amplitudes = np.array(
         [state[basis << num_ancilla] for basis in range(1 << num_system_qubits)]
     )
@@ -100,17 +100,32 @@ def test_cost_hamiltonian_is_not_exposed() -> None:
         converter.get_cost_hamiltonian()
 
 
-@pytest.mark.parametrize("mu", [-2.0, 0.0, 1.5])
-def test_shifted_encoding_normalization_grows_with_the_shift(mu: float) -> None:
+@pytest.mark.parametrize(
+    ("mu", "expected_signal_qubits"),
+    [
+        # A non-zero shift keeps both LCU terms, so the composition adds one
+        # selector qubit on top of the child encoding's single signal qubit.
+        (-2.0, 2),
+        (1.5, 2),
+        # lcu_block_encoding drops zero-coefficient terms, so mu == 0 collapses
+        # back to the unshifted encoding's width.
+        (0.0, 1),
+    ],
+)
+def test_shifted_encoding_normalization_grows_with_the_shift(
+    mu: float, expected_signal_qubits: int
+) -> None:
     """Composing with the identity term adds |mu| to the subnormalization."""
     model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0})
     converter = QSVTFilterConverter(model)
 
     shifted = converter._shifted_encoding(mu)
 
+    assert converter.encoding.num_signal_qubits == 1
     assert shifted.num_system_qubits == converter.encoding.num_system_qubits
     assert shifted.normalization == pytest.approx(converter.normalization + abs(mu))
-    assert shifted.num_signal_qubits >= converter.encoding.num_signal_qubits
+    assert shifted.num_signal_qubits == expected_signal_qubits
+    assert converter.num_ancilla_bits(mu) == 1 + expected_signal_qubits
 
 
 def test_qsp_phases_are_odd_length_and_cached() -> None:
@@ -128,19 +143,47 @@ def test_qsp_phases_are_odd_length_and_cached() -> None:
     cached[0] = 0.0
     assert converter._qsp_phases(degree=11, delta=5) == phases
 
-    for degree in (0, -1, 10):
-        with pytest.raises(ValueError, match="degree"):
-            converter._qsp_phases(degree=degree)
+
+@pytest.mark.parametrize("degree", [0, -1, 10])
+def test_qsp_phases_reject_non_odd_positive_degrees(degree: int) -> None:
+    """The sign approximation is an odd polynomial, so degree must be odd."""
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTFilterConverter(model)
+
+    with pytest.raises(ValueError, match="degree"):
+        converter._qsp_phases(degree=degree)
 
 
-def test_transpile_rejects_odd_length_phase_sequences(transpiler: Any) -> None:
+@pytest.mark.parametrize("delta", [0.0, -1.0])
+def test_qsp_phases_reject_non_positive_transition_widths(delta: float) -> None:
+    """A non-positive transition width has no sign-approximation meaning."""
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTFilterConverter(model)
+
+    with pytest.raises(ValueError, match="delta"):
+        converter._qsp_phases(delta=delta)
+
+
+@pytest.mark.parametrize("scale", [0.0, 1.3, -5.0])
+def test_qsp_phases_reject_scales_outside_the_qsp_bound(scale: float) -> None:
+    """Rescaling past the QSP bound would silently yield meaningless phases."""
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTFilterConverter(model)
+
+    with pytest.raises(ValueError, match="scale"):
+        converter._qsp_phases(scale=scale)
+
+
+@pytest.mark.parametrize("phases", [[0.1], [0.1, 0.2, 0.3]])
+def test_transpile_rejects_odd_length_phase_sequences(
+    transpiler: Any, phases: list[float]
+) -> None:
     """The alternation needs an even phase count (odd polynomial degree)."""
     model = BinaryModel.from_higher_ising({(0,): 1.0})
     converter = QSVTFilterConverter(model)
 
-    for phases in ([0.1], [0.1, 0.2, 0.3]):
-        with pytest.raises(ValueError, match="even number"):
-            converter.transpile(transpiler, mu=0.0, phi=phases)
+    with pytest.raises(ValueError, match="even number"):
+        converter.transpile(transpiler, mu=0.0, phi=phases)
 
 
 def test_transpile_sizes_the_circuit_from_the_shifted_encoding(
@@ -159,7 +202,7 @@ def test_transpile_sizes_the_circuit_from_the_shifted_encoding(
     # the post-selected ancilla block.
     expected = 2 + shifted.num_signal_qubits + shifted.num_system_qubits
     assert executable.quantum_circuit.num_qubits == expected
-    assert converter.num_ancilla_bits == 1 + shifted.num_signal_qubits
+    assert converter.num_ancilla_bits(0.5) == 1 + shifted.num_signal_qubits
 
 
 @pytest.mark.parametrize(
@@ -223,6 +266,52 @@ def test_decode_rejects_results_that_are_not_probe_measurements() -> None:
         converter.decode_to_binary_sampleset(samples)
     with pytest.raises(ValueError, match="projector, signal, system"):
         converter.success_probability(samples)
+
+
+def test_ommx_decode_post_selects_before_evaluating_the_original_instance() -> None:
+    """The OMMX output path sees only the post-selected shots.
+
+    ``decode`` is inherited from the base converter and routes through this
+    class's ``decode_to_binary_sampleset`` override, so the projector/signal
+    post-selection must survive all the way into the ``ommx.v1.SampleSet``.
+
+    The QUBO energy is derived by hand: with ``objective = -10 * x0`` and the
+    equality ``x0 + x1 == 1`` absorbed at penalty weight 2, the kept shot
+    ``x0 = x1 = 1`` scores ``-10 + 2 * (1 + 1 - 1)**2 = -8``, while OMMX
+    reports the un-penalized original objective ``-10`` and marks it
+    infeasible.
+    """
+    x0 = ommx.v1.DecisionVariable.binary(0, name="x0")
+    x1 = ommx.v1.DecisionVariable.binary(1, name="x1")
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=[x0, x1],
+        objective=-10.0 * x0,
+        constraints=[(x0 + x1 == 1).set_id(0)],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+    converter = QSVTFilterConverter(instance, uniform_penalty_weight=2.0)
+
+    # Measured bit 1 decodes to spin -1, i.e. binary 1.
+    raw: SampleResult[Any] = SampleResult(
+        results=[
+            (([0], [0], [1, 1]), 3),  # kept: every ancilla zero
+            (([1], [0], [0, 1]), 1),  # dropped: projector fired
+            (([0], [1], [1, 0]), 1),  # dropped: signal register non-zero
+        ],
+        shots=5,
+    )
+
+    assert converter.success_probability(raw) == pytest.approx(0.6)
+
+    binary = converter.decode_to_binary_sampleset(raw)
+    assert binary.samples == [{0: 1, 1: 1}]
+    assert binary.num_occurrences == [3]
+    assert binary.energy == pytest.approx([-8.0])
+
+    decoded = converter.decode(raw)
+    assert isinstance(decoded, ommx.v1.SampleSet)
+    assert decoded.get(0).objective == pytest.approx(-10.0)
+    assert not decoded.get(0).feasible
 
 
 def test_success_probability_of_an_empty_result_is_zero() -> None:
