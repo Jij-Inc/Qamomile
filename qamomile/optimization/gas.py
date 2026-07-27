@@ -7,6 +7,7 @@ space based on previous iterations' results.
 
 import math
 import warnings
+from collections.abc import Sequence
 from decimal import Decimal
 
 import numpy as np
@@ -26,12 +27,54 @@ from .binary_model.model import BinaryModel
 from .converter import MathematicalProblemConverter
 
 
+def _scatter_controls_back(
+    q_input: qmc.Vector[qmc.Qubit],
+    ctrl_indices: list[int],
+    result: Sequence[qmc.Qubit],
+) -> None:
+    """Return borrowed control qubits to their slots in the input register.
+
+    Deliberately a plain Python function rather than inline kernel-body code:
+    the DSL transformer rewrites ``for`` statements it finds inside a qkernel
+    body into ``for_loop()`` context managers, which turns the loop variable
+    into a symbolic ``UInt`` and makes the Python-sequence indexing below raise
+    ``TypeError`` from ``UInt.__index__()``. The transformer never descends into
+    a called helper, so here ``k`` stays a concrete ``int``.
+
+    Args:
+        q_input (qmc.Vector[qmc.Qubit]): Register that lent out the controls.
+        ctrl_indices (list[int]): Slot index in ``q_input`` for each control,
+            in the order they were passed to the controlled kernel.
+        result (Sequence[qmc.Qubit]): Values returned by the controlled kernel;
+            the first ``len(ctrl_indices)`` entries are the controls.
+
+    Returns:
+        None: ``q_input`` is updated in place.
+
+    """
+    for k, idx in enumerate(ctrl_indices):
+        q_input[idx] = result[k]
+
+
 class GASConverter(MathematicalProblemConverter):
     """Converter for Grover Adaptive Search (GAS).
 
     Internally maintains a BINARY-domain model derived from ``spin_model``
     so that the Grover QFT-arithmetic circuit receives the correct QUBO
     coefficients (binary variables take values in {0, 1}, not ±1).
+
+    Attributes:
+        binary_model (BinaryModel): Precision-aligned BINARY-domain model in
+            the caller's original coefficient scale.
+        effective_model (BinaryModel): Model actually encoded into the circuit.
+            Equals ``binary_model`` until ``transpile()`` decides to quantize
+            real-valued coefficients, after which it holds the integer model.
+        quantization_scale (float): Factor relating ``effective_model`` back to
+            ``binary_model`` — every effective coefficient approximates
+            ``quantization_scale ×`` its original counterpart. ``1.0`` whenever
+            no quantization was applied. Thresholds expressed in the original
+            objective scale must be multiplied by this before being compared
+            against the circuit's arithmetic register.
     """
 
     _MAX_EXACT_INT_IN_FLOAT_BITS = 54
@@ -39,7 +82,9 @@ class GASConverter(MathematicalProblemConverter):
     def __post_init__(self) -> None:
         """Derive and cache the BINARY model from the parent spin model."""
         self.binary_model = self.spin_model.change_vartype(VarType.BINARY)
-        coeffs = [self.binary_model.constant] + list(self.binary_model.coefficients.values())
+        coeffs = [self.binary_model.constant] + list(
+            self.binary_model.coefficients.values()
+        )
         coeffs = GASConverter._align_precision(coeffs)
         precision_aligned_constant = coeffs[0]
         precision_aligned_coefficients = {
@@ -49,6 +94,11 @@ class GASConverter(MathematicalProblemConverter):
             hubo=precision_aligned_coefficients,
             constant=precision_aligned_constant,
         )
+        # Establish the encoding state up front so the HUBO kernel factories,
+        # which read `effective_model`, work on a freshly built converter
+        # instead of only after `transpile()` has run.
+        self.effective_model = self.binary_model
+        self.quantization_scale = 1.0
 
     @staticmethod
     def _align_precision(values: list[float]) -> list[float]:
@@ -178,13 +228,18 @@ class GASConverter(MathematicalProblemConverter):
     @staticmethod
     def approximate_real_valued_model(
         binary_model: BinaryModel, quantization_parameter: int | None = None
-    ) -> BinaryModel:
+    ) -> tuple[BinaryModel, float]:
         """Rescale and round all model coefficients to integers for QFT arithmetic.
 
         Divides every coefficient (including the constant) by the maximum absolute
         value to map them into [-1, 1], then multiplies by ``2^(quantization_parameter - 1)``
         and rounds to the nearest integer. The resulting model has integer coefficients
         that the Grover QFT circuit can encode exactly.
+
+        The scale relating the two models is returned alongside the model rather
+        than discarded: the quantized objective is ``scale × f(x)``, so any
+        threshold expressed in the original scale is only comparable against it
+        after being multiplied by ``scale``.
 
         Args:
             binary_model (BinaryModel): The original binary model with real-valued
@@ -195,8 +250,11 @@ class GASConverter(MathematicalProblemConverter):
                 automatically by ``_greedy_quantization_parameter``.
 
         Returns:
-            BinaryModel: A new binary model whose coefficients are integers that
-                approximate the original up to the chosen precision.
+            tuple[BinaryModel, float]: A new binary model whose coefficients are
+                integers approximating the original up to the chosen precision,
+                and the scale factor ``s`` such that each returned coefficient
+                approximates ``s ×`` its original counterpart. ``s`` is ``1.0``
+                when the model is returned unchanged.
         """
 
         #### Rescaling
@@ -204,7 +262,7 @@ class GASConverter(MathematicalProblemConverter):
         coef_array = np.asarray(coef_list, dtype=float)
         max_val = np.max(np.abs(coef_array))
         if np.isclose(max_val, 0.0, atol=1e-12):
-            return binary_model
+            return binary_model, 1.0
         rescaled_coef_list = coef_array / max_val
 
         #### Approximation
@@ -223,16 +281,21 @@ class GASConverter(MathematicalProblemConverter):
                 quantization_parameter = GASConverter._MAX_EXACT_INT_IN_FLOAT_BITS
 
         scale = 2 ** (quantization_parameter - 1)
-        frac_list = [int(round(float(a) * scale)) for a in rescaled_coef_list]
+        # Kept as float: BinaryModel stores float coefficients, and rounding
+        # already guarantees these are integer-valued.
+        frac_list = [float(round(float(a) * scale)) for a in rescaled_coef_list]
         new_constant = frac_list[0]
         new_coef = {
             i: j for i, j in zip(binary_model.coefficients.keys(), frac_list[1:])
         }
 
         ### Build new model with the rational coefficients
-        return BinaryModel.from_hubo(
-            hubo=new_coef,
-            constant=new_constant,
+        return (
+            BinaryModel.from_hubo(
+                hubo=new_coef,
+                constant=new_constant,
+            ),
+            float(scale / max_val),
         )
 
     @staticmethod
@@ -289,7 +352,7 @@ class GASConverter(MathematicalProblemConverter):
         transpiler: Transpiler,
         *,
         output_bits: int | None = None,
-        y: int,
+        y: float,
         num_iterations: int,
         approximate_real_coefficients: bool = True,
         quantization_parameter: int | None = None,
@@ -307,10 +370,18 @@ class GASConverter(MathematicalProblemConverter):
                 sufficient size is computed automatically via
                 ``_required_output_bits``.  A manual value must satisfy
                 ``2**(output_bits-1) > f_max - f_min``.
-            y (int): Current best known objective value.  The oracle marks
+            y (float): Current best known objective value.  The oracle marks
                 all states ``x`` where ``f(x) < y``.  Pass the QUBO objective
-                directly — the sign convention is handled internally.
+                directly, in the model's original scale — the sign convention
+                and any quantization rescaling are handled internally.
             num_iterations (int): Number of Grover operator applications.
+            approximate_real_coefficients (bool): When ``True`` (default) and the
+                model has non-integer coefficients, quantize them to integers so
+                the QFT arithmetic can encode them exactly. When ``False`` the
+                real coefficients are encoded as-is.
+            quantization_parameter (int | None): Bit width forwarded to
+                ``approximate_real_valued_model`` when quantizing. ``None``
+                selects it automatically. Ignored unless quantization applies.
 
         Returns:
             ExecutableProgram: The compiled circuit program.
@@ -325,7 +396,10 @@ class GASConverter(MathematicalProblemConverter):
             not np.isclose(v, round(v), atol=1e-12) for v in all_values
         )
         if has_non_integer and approximate_real_coefficients:
-            self.effective_model = self.approximate_real_valued_model(
+            (
+                self.effective_model,
+                self.quantization_scale,
+            ) = self.approximate_real_valued_model(
                 self.binary_model, quantization_parameter=quantization_parameter
             )
             warnings.warn(
@@ -337,6 +411,7 @@ class GASConverter(MathematicalProblemConverter):
             )
         else:
             self.effective_model = self.binary_model
+            self.quantization_scale = 1.0
 
         if output_bits is None:
             output_bits = self._required_output_bits(self.effective_model)
@@ -354,7 +429,7 @@ class GASConverter(MathematicalProblemConverter):
         transpiler: Transpiler,
         *,
         output_bits: int,
-        y: int,
+        y: float,
         num_iterations: int,
     ) -> ExecutableProgram:
         """Transpile a QUBO model into an executable Grover circuit.
@@ -371,7 +446,8 @@ class GASConverter(MathematicalProblemConverter):
             transpiler (Transpiler): Backend transpiler to use.
             output_bits (int): Number of output qubits for the QFT arithmetic
                 register.
-            y (int): Current best known objective value (QUBO scale).
+            y (float): Current best known objective value, in the model's
+                original (un-quantized) scale.
             num_iterations (int): Number of Grover operator applications.
 
         Returns:
@@ -388,6 +464,22 @@ class GASConverter(MathematicalProblemConverter):
             quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
             iters: qmc.UInt = 1,  # type: ignore[assignment]
         ) -> qmc.Vector[qmc.Bit]:
+            """Measure the input register after running the QUBO Grover algorithm.
+
+            Args:
+                n (qmc.UInt): Number of input (decision-variable) qubits.
+                m (qmc.UInt): Number of output (objective-value) qubits.
+                y (qmc.Float): Internal circuit threshold, already carrying the
+                    quantization scale (see ``_transpile_quadratic``).
+                linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear coefficients.
+                quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]):
+                    Quadratic coefficients indexed by variable pairs.
+                iters (qmc.UInt): Number of Grover iterations. Defaults to 1.
+
+            Returns:
+                qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
+
+            """
             q_output, q_input = grover_algorithm(
                 n=n,
                 m=m,
@@ -399,9 +491,11 @@ class GASConverter(MathematicalProblemConverter):
             return qmc.measure(q_input)
 
         # The QFT register encodes  y_circuit + Σ linear[i]·xᵢ + Σ quad[i,j]·xᵢxⱼ
-        # = (constant − y) + (f(x) − constant)  =  f(x) − y.
-        # The oracle fires when this is negative (MSB = 1), i.e. f(x) < y.
-        y_circuit = self.effective_model.constant - y
+        # = (constant − s·y) + (f_eff(x) − constant)  =  s·(f(x) − y), where s is
+        # `quantization_scale`. The oracle fires when this is negative (MSB = 1);
+        # since s > 0 that is exactly f(x) < y. Scaling y is what keeps the
+        # comparison meaningful once the coefficients have been quantized.
+        y_circuit = self.effective_model.constant - y * self.quantization_scale
 
         return transpiler.transpile(
             measure_grover_algorithm,
@@ -440,18 +534,24 @@ class GASConverter(MathematicalProblemConverter):
             q_input: qmc.Vector[qmc.Qubit],
             coef: qmc.Float,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            """Encode one polynomial term controlled on ``degree`` input qubits.
+
+            Args:
+                q_output (qmc.Vector[qmc.Qubit]): Output register in the Fourier basis.
+                q_input (qmc.Vector[qmc.Qubit]): Input register holding the controls.
+                coef (qmc.Float): Coefficient to encode when all controls are active.
+
+            Returns:
+                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
+                    output and input registers.
+
+            """
             # num_controls baked in at factory time via closure over `degree`.
             ctrl_qft = qmc.control(qft_encoding, num_controls=degree)
             controls = [q_input[ci] for ci in ctrl_indices]
             result = ctrl_qft(*controls, q_output, coef)
             # result = (ctrl_0, ..., ctrl_{degree-1}, q_output)
-            # List-comp instead of a for-statement: the DSL transformer converts
-            # `for k in range(...)` statements into for_loop() context managers
-            # where k becomes a symbolic UInt, causing ctrl_indices[k] and
-            # result[k] (both Python-sequence indexing) to call UInt.__index__()
-            # and raise TypeError.  Inside a list comprehension range(degree) is
-            # Python's built-in and k stays a concrete int.
-            [q_input.__setitem__(ctrl_indices[k], result[k]) for k in range(degree)]  # type: ignore[index]
+            _scatter_controls_back(q_input, ctrl_indices, result)
             q_output = result[degree]  # type: ignore[index]
             return q_output, q_input
 
@@ -476,6 +576,10 @@ class GASConverter(MathematicalProblemConverter):
         Returns:
             qmc.QKernel: A qkernel with signature ``(q_output, q_input)``.
 
+        Raises:
+            ValueError: If ``encoders`` and ``coef_values`` differ in length,
+                which would leave an encoder without its coefficient.
+
         """
         if len(encoders) != len(coef_values):
             raise ValueError(
@@ -492,27 +596,83 @@ class GASConverter(MathematicalProblemConverter):
                 q_output: qmc.Vector[qmc.Qubit],
                 q_input: qmc.Vector[qmc.Qubit],
             ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+                """Pass both registers through unchanged (empty term list).
+
+                Args:
+                    q_output (qmc.Vector[qmc.Qubit]): Output register.
+                    q_input (qmc.Vector[qmc.Qubit]): Input register.
+
+                Returns:
+                    tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: The
+                        registers, untouched.
+
+                """
                 return q_output, q_input
 
             return identity
 
-        def _make_leaf(enc, th):
+        def _make_leaf(enc: qmc.QKernel, th: float) -> qmc.QKernel:
+            """Wrap the final encoder of the chain with its coefficient baked in.
+
+            Args:
+                enc (qmc.QKernel): Encoder kernel to apply.
+                th (float): Coefficient passed to ``enc``.
+
+            Returns:
+                qmc.QKernel: A qkernel with signature ``(q_output, q_input)``.
+
+            """
+
             @qmc.qkernel
             def leaf(
                 q_output: qmc.Vector[qmc.Qubit],
                 q_input: qmc.Vector[qmc.Qubit],
             ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+                """Apply the baked-in encoder once.
+
+                Args:
+                    q_output (qmc.Vector[qmc.Qubit]): Output register.
+                    q_input (qmc.Vector[qmc.Qubit]): Input register.
+
+                Returns:
+                    tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
+                        output and input registers.
+
+                """
                 q_output, q_input = enc(q_output, q_input, th)
                 return q_output, q_input
 
             return leaf
 
-        def _make_step(enc, th, rest):
+        def _make_step(enc: qmc.QKernel, th: float, rest: qmc.QKernel) -> qmc.QKernel:
+            """Prepend one baked-in encoder to an already-composed chain.
+
+            Args:
+                enc (qmc.QKernel): Encoder kernel to apply first.
+                th (float): Coefficient passed to ``enc``.
+                rest (qmc.QKernel): Chain kernel applied after ``enc``.
+
+            Returns:
+                qmc.QKernel: A qkernel with signature ``(q_output, q_input)``.
+
+            """
+
             @qmc.qkernel
             def step(
                 q_output: qmc.Vector[qmc.Qubit],
                 q_input: qmc.Vector[qmc.Qubit],
             ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+                """Apply this encoder, then the rest of the chain.
+
+                Args:
+                    q_output (qmc.Vector[qmc.Qubit]): Output register.
+                    q_input (qmc.Vector[qmc.Qubit]): Input register.
+
+                Returns:
+                    tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
+                        output and input registers.
+
+                """
                 q_output, q_input = enc(q_output, q_input, th)
                 q_output, q_input = rest(q_output, q_input)
                 return q_output, q_input
@@ -563,6 +723,18 @@ class GASConverter(MathematicalProblemConverter):
             q_input: qmc.Vector[qmc.Qubit],
             y: qmc.Float,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            """Prepare Σ|x, f(x) − y> for a HUBO objective of any degree.
+
+            Args:
+                q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
+                q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
+                y (qmc.Float): Objective threshold offset encoded as a constant term.
+
+            Returns:
+                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
+                    output and input registers.
+
+            """
             for i in qmc.range(output_bits):
                 q_output[i] = qmc.h(q_output[i])
             for i in qmc.range(self.effective_model.num_bits):
@@ -622,6 +794,19 @@ class GASConverter(MathematicalProblemConverter):
             q_input: qmc.Vector[qmc.Qubit],
             y: qmc.Float,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            """Apply the Hermitian conjugate of the HUBO state preparation.
+
+            Args:
+                q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
+                q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
+                y (qmc.Float): Objective threshold offset encoded as a constant term.
+                    Must match the value given to the forward kernel.
+
+            Returns:
+                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
+                    output and input registers.
+
+            """
             # Reverse of the final iqft
             q_output = qmc.qft(q_output)
             # Reverse all phase encodings with negated angles
@@ -642,7 +827,7 @@ class GASConverter(MathematicalProblemConverter):
         transpiler: Transpiler,
         *,
         output_bits: int,
-        y: int,
+        y: float,
         num_iterations: int,
     ) -> ExecutableProgram:
         """Transpile a HUBO model into an executable Grover circuit using the factory methods.
@@ -650,7 +835,8 @@ class GASConverter(MathematicalProblemConverter):
         Args:
             transpiler (Transpiler): Backend transpiler to use.
             output_bits (int): Number of output qubits.
-            y (int): Current best known objective value.
+            y (float): Current best known objective value, in the model's
+                original (un-quantized) scale.
             num_iterations (int): Number of Grover operator applications.
 
         Returns:
@@ -790,7 +976,9 @@ class GASConverter(MathematicalProblemConverter):
             )
             return qmc.measure(q_input)
 
-        y_circuit =self.effective_model.constant - y
+        # See _transpile_quadratic for why the threshold carries the
+        # quantization scale.
+        y_circuit = self.effective_model.constant - y * self.quantization_scale
 
         return transpiler.transpile(
             measure_hubo_grover_algorithm,

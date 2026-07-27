@@ -29,6 +29,10 @@
 # 3. Use `GASConverter` to build the Grover Adaptive Search circuit.
 # 4. Run the circuit inside a classical layer that control the number of iterations. Sample the circuit and keep the best solutions until a stopping criterion is reached.
 
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install "qamomile[qiskit,visualization]"
+
 # %% [markdown]
 # ## Portfolio Problem Formulation
 #
@@ -220,7 +224,7 @@ diffusion_op.draw(
 #
 # `converter.transpile(transpiler, y=y, num_iterations=num_iterations)` builds the Grover circuit for the current threshold $y$ and Grover depth. 
 #
-# `exec.sample(executor, shots=256)` runs it on the backend. Even for Grover, multiple shots are needed because NISQ quantum devices are noisy. 
+# `executable.sample(executor, shots=256)` runs it on the backend. Even for Grover, multiple shots are needed because NISQ quantum devices are noisy. 
 #
 # `converter.decode(result)` maps the raw bitstring counts back to decision variable assignments.
 
@@ -276,12 +280,12 @@ def grover_adaptive_search(
         #       Call to the Quantum Grover Circuit         #
         ####################################################
 
-        exec = converter.transpile(transpiler,
-                                y=y,
-                                num_iterations=num_iterations)
+        executable = converter.transpile(transpiler,
+                                         y=y,
+                                         num_iterations=num_iterations)
 
         #We run the circuit several time since NISQ hardware are noisy
-        job = exec.sample(executor, shots=256)
+        job = executable.sample(executor, shots=256)
         result = job.result()
         sample_set = converter.decode(result)
 
@@ -336,8 +340,56 @@ selected = [i+1 for i, xi in enumerate(x) if xi == 1]
 print(f"Selected assets: {selected}, objective value: {y}")
 
 # %% [markdown]
-# After $10$ iterations, the algorithm stop because the solution no further improve.
+# ## Verifying the Result
 #
-# It return the global minimum for the portfolio problem.
+# The search stops once the solution has not improved for `max_no_improvement`
+# rounds, which is a heuristic stopping rule — it does not by itself prove that
+# the returned solution is optimal. With only $9$ assets the problem is small
+# enough to enumerate all $2^9 = 512$ assignments, so we can check the answer
+# against an exact brute-force reference instead of asserting optimality on
+# faith.
+
+# %%
+import itertools
+
+brute_force_x, brute_force_y = min(
+    (
+        (list(bits), instance.evaluate({i: b for i, b in enumerate(bits)}).objective)
+        for bits in itertools.product([0, 1], repeat=len(x))
+    ),
+    key=lambda candidate: candidate[1],
+)
+
+print(f"GAS         : x={x}, objective={y}")
+print(f"Brute force : x={brute_force_x}, objective={brute_force_y}")
+
+assert np.isclose(y, brute_force_y), (
+    f"GAS returned objective {y}, but the true optimum is {brute_force_y}"
+)
+print("\nGAS matched the brute-force optimum.")
+
+# %% [markdown]
+# The assertion above is what makes this page self-checking: if a regression
+# ever degrades the oracle or the decoding, the notebook fails instead of
+# quietly rendering a worse solution.
 #
-# The optimal solution is to buy assets : $1, 5$ and $8$.
+# ## Summary
+#
+# - **GAS is a hybrid loop, not a single circuit.** The quantum part answers one
+#   fixed question — "which $x$ satisfy $f(x) < y$?" — and the classical layer
+#   drives $y$ downwards until no further improvement appears.
+# - **`GASConverter` supplies the quantum half.** `transpile()` builds the
+#   Grover circuit for the current threshold $y$ and Grover depth, and `decode()`
+#   maps raw bitstring counts back to decision-variable assignments through OMMX.
+# - **The objective is encoded as phases, not as an arithmetic circuit.** Each
+#   polynomial term becomes a (controlled) phase rotation in the Fourier basis;
+#   a closing inverse QFT turns the accumulated phase into a two's-complement
+#   integer, whose sign bit is exactly the predicate the oracle needs.
+# - **Higher-order terms come for free.** The same machinery handles HUBO
+#   objectives of any degree — `GASConverter` dispatches to a qkernel-factory
+#   path when the model has terms beyond quadratic.
+# - **Thresholds are compared in the model's own scale.** Pass `y` as the plain
+#   objective value; when real-valued coefficients have to be quantized to
+#   integers, the converter rescales the threshold to match.
+# - **Verify, don't assume.** The stopping rule is heuristic, so on small
+#   instances check the result against brute force, as done above.

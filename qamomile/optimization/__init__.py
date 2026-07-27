@@ -8,8 +8,10 @@ This package turns classical combinatorial optimization problems
 decodes measurement results back into classical solutions. It hosts the
 converter family: ``QAOAConverter`` (``qaoa.py``, QUBO/Ising and HUBO via
 phase gadgets), ``FQAOAConverter`` (``fqaoa.py``, fermionic mixers with
-particle-number constraints), the QRAC converters (``qrao/``), and
-``PCEConverter`` (``pce.py``, Pauli correlation encoding).
+particle-number constraints), the QRAC converters (``qrao/``),
+``PCEConverter`` (``pce.py``, Pauli correlation encoding), and
+``GASConverter`` (``gas.py``, oracle-based Grover Adaptive Search over
+QFT-encoded QUBO/HUBO arithmetic).
 
 Layering constraint (inviolable)
 --------------------------------
