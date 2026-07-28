@@ -9,7 +9,7 @@ from qamomile.circuit.frontend.func_to_block import (
     handle_type_map,
     is_array_type,
 )
-from qamomile.circuit.frontend.handle import Qubit
+from qamomile.circuit.frontend.handle import Qubit, Vector
 from qamomile.circuit.ir.operation.operation import ParamHint, Signature
 
 
@@ -25,6 +25,19 @@ def _array_element_type(param_type: Any) -> Any:
     if hasattr(param_type, "__args__") and param_type.__args__:
         return param_type.__args__[0]
     return getattr(param_type, "element_type", None)
+
+
+def _is_vector_type(param_type: Any) -> bool:
+    """Return whether an annotation is a frontend vector type.
+
+    Args:
+        param_type (Any): Frontend annotation to inspect.
+
+    Returns:
+        bool: ``True`` for ``Vector`` annotations and their subclasses.
+    """
+    origin = getattr(param_type, "__origin__", param_type)
+    return isinstance(origin, type) and issubclass(origin, Vector)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -91,8 +104,8 @@ class CallableSignature:
         if len(self.inputs) != 1 or len(self.outputs) != 1:
             return False
         return (
-            is_array_type(self.inputs[0])
+            _is_vector_type(self.inputs[0])
             and _array_element_type(self.inputs[0]) is Qubit
-            and is_array_type(self.outputs[0])
+            and _is_vector_type(self.outputs[0])
             and _array_element_type(self.outputs[0]) is Qubit
         )

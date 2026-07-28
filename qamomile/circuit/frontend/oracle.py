@@ -71,13 +71,38 @@ class Oracle:
 
         Raises:
             ValueError: If neither ``num_qubits`` nor ``signature`` supplies
-                enough arity information.
+                enough arity information, the signature is not a supported
+                quantum pass-through contract, or its scalar arity disagrees
+                with ``num_qubits``.
         """
-        if signature is not None and num_qubits is None:
-            num_qubits = signature.scalar_qubit_input_count()
-        if num_qubits is None and not (
+        vector_signature = (
             signature is not None and signature.accepts_single_qubit_vector()
-        ):
+        )
+        if signature is not None:
+            inferred_scalar_count = signature.scalar_qubit_input_count()
+            scalar_signature = (
+                inferred_scalar_count is not None
+                and inferred_scalar_count == len(signature.inputs)
+                and inferred_scalar_count == len(signature.outputs)
+                and all(param_type is Qubit for param_type in signature.outputs)
+            )
+            if not scalar_signature and not vector_signature:
+                raise ValueError(
+                    "Oracle CallableSignature must be a Qubit pass-through "
+                    "contract: Qubit... -> Qubit... or "
+                    "Vector[Qubit] -> Vector[Qubit]."
+                )
+            if scalar_signature:
+                assert inferred_scalar_count is not None
+                if num_qubits is None:
+                    num_qubits = inferred_scalar_count
+                elif num_qubits != inferred_scalar_count:
+                    raise ValueError(
+                        "Oracle CallableSignature declares "
+                        f"{inferred_scalar_count} scalar qubits, but "
+                        f"num_qubits is {num_qubits}."
+                    )
+        if num_qubits is None and not vector_signature:
             raise ValueError(
                 "Oracle requires either num_qubits or a single Vector[Qubit] "
                 "CallableSignature."
@@ -151,10 +176,19 @@ class Oracle:
         Raises:
             ValueError: If the vector has a concrete length different from
                 ``num_qubits``.
+            TypeError: If an explicit scalar signature is called with a vector.
             QubitConsumedError: If the register was already consumed or has
                 an outstanding borrow.
             RuntimeError: If no tracer is active.
         """
+        if (
+            self.signature is not None
+            and not self.signature.accepts_single_qubit_vector()
+        ):
+            raise TypeError(
+                f"Oracle '{self.name}' was declared with a scalar signature "
+                "and does not accept a vector argument."
+            )
         size_handle = qubits.shape[0] if qubits.shape else None
         if isinstance(size_handle, int):
             size = size_handle
@@ -253,11 +287,13 @@ class Oracle:
                 the same physical qubit.
             RuntimeError: If no tracer is active.
         """
-        if self.num_qubits is None:
+        if self.signature is not None and self.signature.accepts_single_qubit_vector():
             raise TypeError(
                 f"Oracle '{self.name}' was declared with a vector signature "
                 "and does not accept scalar qubit arguments."
             )
+        if self.num_qubits is None:
+            raise TypeError(f"Oracle '{self.name}' has no scalar qubit arity.")
         if len(qubits) != self.num_qubits:
             raise ValueError(
                 f"Oracle '{self.name}' requires {self.num_qubits} qubits, "
@@ -307,22 +343,22 @@ class Oracle:
         if normalized_control_value is not None:
             attrs["control_value"] = normalized_control_value
         transform = CallTransform.CONTROLLED if controls else CallTransform.DIRECT
-        signature = (
-            self.signature.to_ir_signature()
-            if self.signature is not None
-            else signature_from_values(
-                [q.value for q in all_inputs],
-                results,
-                operand_names=[
-                    *[f"control_{i}" for i in range(len(controls))],
-                    *[f"target_{i}" for i in range(len(qubits))],
-                ],
-                result_names=[
-                    *[f"control_{i}" for i in range(len(controls))],
-                    *[f"target_{i}" for i in range(len(qubits))],
-                ],
-            )
+        signature = signature_from_values(
+            [q.value for q in all_inputs],
+            results,
+            operand_names=[
+                *[f"control_{i}" for i in range(len(controls))],
+                *[f"target_{i}" for i in range(len(qubits))],
+            ],
+            result_names=[
+                *[f"control_{i}" for i in range(len(controls))],
+                *[f"target_{i}" for i in range(len(qubits))],
+            ],
         )
+        if self.signature is not None:
+            declared_signature = self.signature.to_ir_signature()
+            signature.operands[len(controls) :] = declared_signature.operands
+            signature.results[len(controls) :] = declared_signature.results
         op = InvokeOperation(
             operands=[q.value for q in all_inputs],
             results=results,

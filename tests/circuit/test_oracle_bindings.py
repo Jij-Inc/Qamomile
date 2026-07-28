@@ -35,6 +35,21 @@ _ORACLE = qmc.opaque(
     cost=qmc.ResourceEstimate(gates=qmc.GateResources(total=7)),
 )
 _VECTOR_ORACLE = qmc.opaque("late_bound_vector_oracle", num_qubits=2)
+_SIGNATURED_VECTOR_ORACLE = qmc.opaque(
+    "late_bound_signature_vector_oracle",
+    signature=qmc.CallableSignature(
+        inputs=[qmc.Vector[qmc.Qubit]],
+        outputs=[qmc.Vector[qmc.Qubit]],
+    ),
+)
+_SIGNATURED_CONTROLLED_ORACLE = qmc.opaque(
+    "late_bound_signature_controlled_oracle",
+    num_control_qubits=1,
+    signature=qmc.CallableSignature(
+        inputs=[qmc.Qubit],
+        outputs=[qmc.Qubit],
+    ),
+)
 _LOG_WIDTH_VECTOR_ORACLE = qmc.opaque(
     "late_bound_log_width_vector_oracle",
     num_qubits=8,
@@ -187,6 +202,17 @@ def _controlled_sample() -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
+def _signatured_controlled_sample() -> qmc.Vector[qmc.Bit]:
+    """Measure a controlled oracle carrying an explicit target signature."""
+    qubits = qmc.qubit_array(2, "qubits")
+    qubits[0], qubits[1] = _SIGNATURED_CONTROLLED_ORACLE(
+        qubits[1],
+        controls=(qubits[0],),
+    )
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
 def _controlled_helper_sample() -> qmc.Vector[qmc.Bit]:
     """Measure control of a helper whose body contains the oracle."""
     qubits = qmc.qubit_array(2, "qubits")
@@ -213,6 +239,13 @@ def _select_sample() -> qmc.Vector[qmc.Bit]:
 def _vector_sample() -> qmc.Vector[qmc.Bit]:
     """Measure a shape-dependent vector oracle implementation."""
     qubits = _VECTOR_ORACLE(qmc.qubit_array(2, "qubits"))
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _signature_vector_sample() -> qmc.Vector[qmc.Bit]:
+    """Measure an oracle declared with an explicit vector signature."""
+    qubits = _SIGNATURED_VECTOR_ORACLE(qmc.qubit_array(2, "qubits"))
     return qmc.measure(qubits)
 
 
@@ -337,6 +370,69 @@ def test_binding_accepts_direct_and_controlled_calls() -> None:
     assert direct_call.body is not None
     assert controlled_call.body is not None
     assert direct_call.body.name == controlled_call.body.name == "_x_implementation"
+
+
+def test_binding_accepts_controlled_explicit_signature() -> None:
+    """A controlled oracle canonicalizes controls around its target signature."""
+    source_call = _invoke_named(
+        _signatured_controlled_sample.block,
+        "late_bound_signature_controlled_oracle",
+    )
+    assert source_call.definition is not None
+    assert source_call.definition.signature is not None
+    assert len(source_call.definition.signature.operands) == 2
+    assert len(source_call.definition.signature.results) == 2
+    assert serialize(_signatured_controlled_sample)
+
+    transformed = apply_oracle_bindings(
+        _signatured_controlled_sample.block,
+        {"late_bound_signature_controlled_oracle": _x_implementation},
+    )
+    bound = _invoke_named(
+        transformed,
+        "late_bound_signature_controlled_oracle",
+    )
+    assert bound.transform is CallTransform.CONTROLLED
+    assert bound.body is not None
+    assert bound.body.name == "_x_implementation"
+
+    with pytest.raises(ValidationError, match="Input count mismatch"):
+        apply_oracle_bindings(
+            _signatured_controlled_sample.block,
+            {"late_bound_signature_controlled_oracle": (_incompatible_implementation)},
+        )
+
+
+def test_binding_accepts_control_wrapper_for_explicit_signature() -> None:
+    """The control wrapper preserves an explicit target signature."""
+    oracle = qmc.opaque(
+        "wrapped_signature_controlled_oracle",
+        signature=qmc.CallableSignature(
+            inputs=[qmc.Qubit],
+            outputs=[qmc.Qubit],
+        ),
+    )
+    controlled = qmc.control(oracle)
+
+    @qmc.qkernel
+    def sample() -> qmc.Vector[qmc.Bit]:
+        """Measure an explicitly signed oracle through ``qmc.control``."""
+        qubits = qmc.qubit_array(2, "qubits")
+        qubits[0], qubits[1] = controlled(qubits[0], qubits[1])
+        return qmc.measure(qubits)
+
+    assert serialize(sample)
+    transformed = apply_oracle_bindings(
+        sample.block,
+        {"wrapped_signature_controlled_oracle": _x_implementation},
+    )
+    bound = _invoke_named(
+        transformed,
+        "wrapped_signature_controlled_oracle",
+    )
+    assert bound.transform is CallTransform.CONTROLLED
+    assert bound.body is not None
+    assert bound.body.name == "_x_implementation"
 
 
 def test_binding_rejects_bodyful_callable() -> None:
@@ -578,6 +674,60 @@ def test_binding_validates_bodyless_oracle_signature() -> None:
         apply_oracle_bindings(
             _direct_sample.block,
             {"late_bound_oracle": _incompatible_implementation},
+        )
+
+
+def test_binding_validates_explicit_callable_signature() -> None:
+    """Explicit oracle signatures accept only shape-compatible bodies."""
+    transformed = apply_oracle_bindings(
+        _signature_vector_sample.block,
+        {"late_bound_signature_vector_oracle": _vector_implementation},
+    )
+    bound = _invoke_named(transformed, "late_bound_signature_vector_oracle")
+    assert bound.body is not None
+    assert bound.body.name == "_vector_implementation"
+
+    with pytest.raises(
+        ValidationError,
+        match=r"Input shape mismatch.*source is an array, target is a scalar",
+    ):
+        apply_oracle_bindings(
+            _signature_vector_sample.block,
+            {"late_bound_signature_vector_oracle": _x_implementation},
+        )
+
+
+def test_binding_rejects_declared_signature_callsite_mismatch() -> None:
+    """Binding rejects an invocation that violates its declared signature."""
+    source = _signature_vector_sample.block
+    invocation = _invoke_named(source, "late_bound_signature_vector_oracle")
+    assert invocation.definition is not None
+    declared = qmc.CallableSignature(
+        inputs=[qmc.Vector[qmc.Qubit]],
+        outputs=[qmc.Vector[qmc.Bit]],
+    ).to_ir_signature()
+    malformed_invocation = dataclasses.replace(
+        invocation,
+        definition=dataclasses.replace(
+            invocation.definition,
+            signature=declared,
+        ),
+    )
+    malformed = dataclasses.replace(
+        source,
+        operations=[
+            malformed_invocation if operation is invocation else operation
+            for operation in source.operations
+        ],
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=r"declared callable signature disagrees.*Return type mismatch",
+    ):
+        apply_oracle_bindings(
+            malformed,
+            {"late_bound_signature_vector_oracle": _vector_implementation},
         )
 
 

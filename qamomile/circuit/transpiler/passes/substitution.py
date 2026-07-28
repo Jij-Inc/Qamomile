@@ -19,7 +19,7 @@ Example:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -34,6 +34,7 @@ from qamomile.circuit.ir.operation.callable import (
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.operation import Signature
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import ArrayValue, ValueLike
 from qamomile.circuit.transpiler.errors import ValidationError
@@ -60,6 +61,39 @@ class SignatureCompatibilityError(Exception):
                 "Cannot substitute 'oracle': input count mismatch"
             )
     """
+
+
+def _signature_callsite_error(
+    signature: Signature,
+    operands: Sequence[ValueLike],
+    results: Sequence[ValueLike],
+) -> str | None:
+    """Return a declared-signature mismatch at one invocation.
+
+    Args:
+        signature (Signature): Callable definition signature to validate.
+        operands (Sequence[ValueLike]): Actual invocation operands.
+        results (Sequence[ValueLike]): Actual invocation results.
+
+    Returns:
+        str | None: Diagnostic text, or ``None`` when the call site matches.
+    """
+    for role, hints, values in (
+        ("Input", signature.operands, operands),
+        ("Return", signature.results, results),
+    ):
+        if len(hints) != len(values):
+            return (
+                f"{role} count mismatch: signature has {len(hints)}, "
+                f"call site has {len(values)}"
+            )
+        for position, (hint, value) in enumerate(zip(hints, values, strict=True)):
+            if hint is not None and hint.type != value.type:
+                return (
+                    f"{role} type mismatch at position {position}: "
+                    f"signature has {hint.type}, call site has {value.type}"
+                )
+    return None
 
 
 def _shape_compatibility_error(
@@ -677,7 +711,7 @@ class SubstitutionPass(Pass[Block, Block]):
 
     @staticmethod
     def _validate_oracle_signature(op: InvokeOperation, replacement: Block) -> None:
-        """Validate a direct implementation against an opaque call site.
+        """Validate an oracle declaration and its direct implementation.
 
         Explicit controls are excluded because the existing controlled-call
         path synthesizes them around the supplied direct implementation.
@@ -689,6 +723,20 @@ class SubstitutionPass(Pass[Block, Block]):
         Raises:
             ValidationError: If arity, types, or array shapes are incompatible.
         """
+        definition = op.definition
+        if definition is not None and definition.signature is not None:
+            declaration_error = _signature_callsite_error(
+                definition.signature,
+                op.operands,
+                op.results,
+            )
+            if declaration_error is not None:
+                raise ValidationError(
+                    f"Cannot bind opaque oracle {op.target.name!r}: declared "
+                    f"callable signature disagrees with the call site: "
+                    f"{declaration_error}"
+                )
+
         control_count = op.num_control_qubits
         source = Block(
             name=op.target.name,

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.transpiler.errors import ValidationError
 
 _COSTED_ORACLE = qmc.opaque(
     "costed_oracle",
@@ -13,6 +18,14 @@ _COSTED_ORACLE = qmc.opaque(
         gates=qmc.GateResources(total=7),
         calls=qmc.CallResources(queries_by_name={"costed_oracle": 1}),
     ),
+)
+_SIGNATURED_COSTED_ORACLE = qmc.opaque(
+    "signatured_costed_oracle",
+    signature=qmc.CallableSignature(
+        inputs=[qmc.Vector[qmc.Qubit]],
+        outputs=[qmc.Vector[qmc.Qubit]],
+    ),
+    cost=qmc.ResourceEstimate(gates=qmc.GateResources(total=7)),
 )
 
 
@@ -29,6 +42,15 @@ def _static_implementation(
 ) -> qmc.Qubit:
     """Use an LCU descriptor through a compile-time static binding."""
     return qmc.rx(q, encoding.normalization)
+
+
+@qmc.qkernel
+def _vector_implementation(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Implement a vector oracle with one logical gate."""
+    qubits[0] = qmc.h(qubits[0])
+    return qubits
 
 
 @qmc.qkernel
@@ -51,6 +73,40 @@ def _nested_algorithm() -> qmc.Qubit:
     return _helper(qmc.qubit("q"))
 
 
+@qmc.qkernel
+def _signatured_algorithm() -> qmc.Vector[qmc.Qubit]:
+    """Invoke an oracle carrying an explicit vector signature."""
+    return _SIGNATURED_COSTED_ORACLE(qmc.qubit_array(2, "qubits"))
+
+
+def _mismatched_signature_block() -> Block:
+    """Return a block whose declared oracle result disagrees with its call."""
+    source = _signatured_algorithm.block
+    declared = qmc.CallableSignature(
+        inputs=[qmc.Vector[qmc.Qubit]],
+        outputs=[qmc.Vector[qmc.Bit]],
+    ).to_ir_signature()
+    matched = False
+    operations = []
+    for operation in source.operations:
+        if (
+            isinstance(operation, InvokeOperation)
+            and operation.target.name == "signatured_costed_oracle"
+        ):
+            assert operation.definition is not None
+            matched = True
+            operation = dataclasses.replace(
+                operation,
+                definition=dataclasses.replace(
+                    operation.definition,
+                    signature=declared,
+                ),
+            )
+        operations.append(operation)
+    assert matched
+    return dataclasses.replace(source, operations=operations)
+
+
 def test_unbound_estimate_uses_cost_and_bound_estimate_uses_body() -> None:
     """A binding replaces the model cost with implementation resources."""
     unbound = _algorithm.estimate_resources()
@@ -65,6 +121,36 @@ def test_unbound_estimate_uses_cost_and_bound_estimate_uses_body() -> None:
     assert bound.calls.queries_by_name == {}
     assert unbound_again.gates.total == 7
     assert unbound_again.calls.queries_by_name == {"costed_oracle": 1}
+
+
+def test_estimator_substitutes_explicit_signature_oracle() -> None:
+    """Estimator validates and expands an explicitly signed oracle."""
+    unbound = _signatured_algorithm.estimate_resources()
+    bound = _signatured_algorithm.estimate_resources(
+        oracle_bindings={"signatured_costed_oracle": _vector_implementation}
+    )
+
+    assert unbound.gates.total == 7
+    assert bound.gates.total == 1
+    with pytest.raises(
+        ValidationError,
+        match=r"Input shape mismatch.*source is an array, target is a scalar",
+    ):
+        _signatured_algorithm.estimate_resources(
+            oracle_bindings={"signatured_costed_oracle": _one_gate_implementation}
+        )
+
+
+def test_estimator_rejects_declared_signature_callsite_mismatch() -> None:
+    """Estimator rejects an oracle call that violates its declaration."""
+    with pytest.raises(
+        ValidationError,
+        match=r"declared callable signature disagrees.*Return type mismatch",
+    ):
+        qmc.ResourceEstimator().estimate(
+            _mismatched_signature_block(),
+            oracle_bindings={"signatured_costed_oracle": _vector_implementation},
+        )
 
 
 def test_all_estimator_entrypoints_forward_oracle_bindings() -> None:
