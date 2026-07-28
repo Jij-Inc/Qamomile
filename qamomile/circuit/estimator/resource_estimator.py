@@ -1831,15 +1831,16 @@ class ResourceEstimate:
         return estimate
 
     def controlled(self, num_controls: ResourceExpr | int) -> ResourceEstimate:
-        """Estimate controls on an aggregate cost when its arity profile is complete.
+        """Estimate controls on an aggregate cost from its known arity profile.
 
-        A portable estimate whose total is fully partitioned into one- and
-        two-qubit gates is projected through a conservative per-primitive
-        control fallback. Gate names and scheduling are unavailable, so each
-        reported field is an independent upper bound over the supported gate
-        kinds. Other aggregate costs remain unchanged and carry an explicit
-        assumption. Body-backed qkernels are controlled by the estimator
-        interpreter instead.
+        A portable estimate with declared one- or two-qubit gates projects
+        those known primitives through a conservative per-primitive control
+        fallback. Gates outside the supported arity buckets remain unit-cost
+        opaque placeholders in the total and serial depth. Gate names and
+        scheduling are unavailable, so each projected field is an independent
+        upper bound over the supported gate kinds. Other aggregate costs remain
+        unchanged and carry an explicit assumption. Body-backed qkernels are
+        controlled by the estimator interpreter instead.
 
         Args:
             num_controls (ResourceExpr | int): Number of active controls.
@@ -1880,12 +1881,9 @@ class ResourceEstimate:
                     _symbol_aliases=self._symbol_aliases,
                 )
             return projected
-        assumption = ResourceAssumption(
-            message=(
-                "aggregate controlled cost is unchanged because "
-                f"{reason}; no primitive body is available for its "
-                f"{controls} controls"
-            )
+        assumption = _unprojected_aggregate_control_assumption(
+            reason,
+            controls,
         )
         controlled_estimate = ResourceEstimate(
             width=self.width,
@@ -8045,8 +8043,8 @@ def _aggregate_arity_projection_reason(
         estimate (ResourceEstimate): Aggregate estimate to inspect.
 
     Returns:
-        str | None: Ineligibility reason, or ``None`` when the one- and
-            two-qubit profile completely describes the portable gate total.
+        str | None: Ineligibility reason, or ``None`` when at least one
+            one- or two-qubit gate can be projected portably.
     """
     if estimate.basis is not GateBasis.PORTABLE:
         return (
@@ -8054,10 +8052,6 @@ def _aggregate_arity_projection_reason(
             f"basis, not {estimate.basis.value}"
         )
     gates = estimate.gates
-    if _safe_simplify(gates.multi_qubit) != _ZERO:
-        return (
-            "three-or-more-qubit gates need their gate kind and intrinsic control arity"
-        )
     has_opaque_calls = any(
         value != _ZERO
         for value in (
@@ -8072,16 +8066,11 @@ def _aggregate_arity_projection_reason(
             "a zero aggregate gate profile cannot distinguish an exact "
             "identity from an undeclared global phase"
         )
-    classified_total = _safe_simplify(gates.single_qubit + gates.two_qubit)
-    if _safe_simplify(gates.total - classified_total) != _ZERO:
-        return (
-            "the total gate count is not fully partitioned into one- and "
-            "two-qubit gates"
-        )
     for label, count in (
         ("total", gates.total),
         ("one-qubit", gates.single_qubit),
         ("two-qubit", gates.two_qubit),
+        ("three-or-more-qubit", gates.multi_qubit),
         ("Clifford", gates.clifford),
         ("rotation", gates.rotation),
         ("T", gates.t),
@@ -8090,19 +8079,60 @@ def _aggregate_arity_projection_reason(
     ):
         if _safe_simplify(count).is_negative is True:
             return f"the {label} count is negative"
+    arity_remainder = _safe_simplify(
+        gates.total - gates.single_qubit - gates.two_qubit - gates.multi_qubit
+    )
+    if arity_remainder.is_negative is True:
+        return "the declared arity gate counts exceed the total gate count"
     for label, count, upper_label, upper in (
         ("Clifford", gates.clifford, "total", gates.total),
         ("rotation", gates.rotation, "total", gates.total),
-        ("T", gates.t, "one-qubit", gates.single_qubit),
-        ("Toffoli", gates.toffoli, "three-or-more-qubit", gates.multi_qubit),
+        (
+            "T",
+            gates.t,
+            "possible one-qubit",
+            gates.total - gates.two_qubit - gates.multi_qubit,
+        ),
+        (
+            "Toffoli",
+            gates.toffoli,
+            "possible three-or-more-qubit",
+            gates.total - gates.single_qubit - gates.two_qubit,
+        ),
         ("non-Clifford", gates.non_clifford, "total", gates.total),
     ):
         excess = _safe_simplify(count - upper)
         if excess.is_positive is True:
             return f"the {label} count exceeds the declared {upper_label} gate count"
+    if _safe_simplify(gates.single_qubit + gates.two_qubit) == _ZERO:
+        return "the aggregate has no declared one- or two-qubit gate profile"
     if _safe_simplify(estimate.depth.measurement_depth) != _ZERO:
         return "controlled opaque costs cannot contain measurement depth"
     return None
+
+
+def _unprojected_aggregate_control_assumption(
+    reason: str,
+    controls: ResourceExpr,
+) -> ResourceAssumption:
+    """Describe why an aggregate controlled cost remains unchanged.
+
+    Args:
+        reason (str): Missing information or invalid profile description.
+        controls (ResourceExpr): Number of requested coherent controls.
+
+    Returns:
+        ResourceAssumption: User-facing modeled-cost assumption.
+    """
+    control_scope = (
+        f"its {controls} controls" if controls.is_number else "its active controls"
+    )
+    return ResourceAssumption(
+        message=(
+            "aggregate controlled cost is unchanged because "
+            f"{reason}; no primitive body is available for {control_scope}"
+        )
+    )
 
 
 def _aggregate_arity_projection_constraints(
@@ -8125,6 +8155,7 @@ def _aggregate_arity_projection_constraints(
         ("total", gates.total),
         ("one-qubit", gates.single_qubit),
         ("two-qubit", gates.two_qubit),
+        ("three-or-more-qubit", gates.multi_qubit),
         ("Clifford", gates.clifford),
         ("rotation", gates.rotation),
         ("T", gates.t),
@@ -8140,11 +8171,33 @@ def _aggregate_arity_projection_constraints(
                     unit="gate",
                 )
             )
+    arity_remainder = _safe_simplify(
+        gates.total - gates.single_qubit - gates.two_qubit - gates.multi_qubit
+    )
+    if arity_remainder.is_nonnegative is not True:
+        requirements.append(
+            _ResourceConstraint(
+                expression=arity_remainder,
+                minimum=0,
+                label="Portable aggregate unclassified arity remainder",
+                unit="gate",
+            )
+        )
     for label, count, upper_label, upper in (
         ("Clifford", gates.clifford, "total", gates.total),
         ("rotation", gates.rotation, "total", gates.total),
-        ("T", gates.t, "one-qubit", gates.single_qubit),
-        ("Toffoli", gates.toffoli, "three-or-more-qubit", gates.multi_qubit),
+        (
+            "T",
+            gates.t,
+            "possible one-qubit",
+            gates.total - gates.two_qubit - gates.multi_qubit,
+        ),
+        (
+            "Toffoli",
+            gates.toffoli,
+            "possible three-or-more-qubit",
+            gates.total - gates.single_qubit - gates.two_qubit,
+        ),
         ("non-Clifford", gates.non_clifford, "total", gates.total),
     ):
         if _safe_simplify(count - upper).is_nonpositive is not True:
@@ -8170,20 +8223,23 @@ def _project_portable_aggregate_controlled_cost(
     estimate: ResourceEstimate,
     controls: ResourceExpr,
 ) -> tuple[ResourceEstimate | None, str]:
-    """Project a complete aggregate arity profile through portable controls.
+    """Project the known part of an aggregate arity profile through controls.
 
     The projection serializes every primitive because all transformed gates
     share the added controls. Gate-name uncertainty is represented by
-    field-wise one- and two-qubit envelopes, while decomposition ancillas are
-    added to any scratch width already declared by the opaque cost.
+    field-wise one- and two-qubit envelopes. Any remaining gate count stays as
+    a unit-cost opaque serial placeholder without being assigned a false arity.
+    Decomposition ancillas for the known portion are added to any scratch width
+    already declared by the opaque cost.
 
     Args:
         estimate (ResourceEstimate): Aggregate cost before adding controls.
         controls (ResourceExpr): Number of added coherent controls.
 
     Returns:
-        tuple[ResourceEstimate | None, str]: Projected upper bound and an empty
-            reason, or ``None`` with the reason projection was unavailable.
+        tuple[ResourceEstimate | None, str]: Partially projected estimate and
+            an empty reason, or ``None`` with the reason projection was
+            unavailable.
     """
     reason = _aggregate_arity_projection_reason(estimate)
     if reason is not None:
@@ -8199,7 +8255,69 @@ def _project_portable_aggregate_controlled_cost(
     two = _portable_controlled_arity_envelope(2, controls).repeat(
         estimate.gates.two_qubit
     )
-    projected = single.seq(two)
+    unresolved_count = _safe_simplify(
+        estimate.gates.total - estimate.gates.single_qubit - estimate.gates.two_qubit
+    )
+    unresolved = ResourceEstimate(
+        gates=GateResources(
+            total=unresolved_count,
+            multi_qubit=estimate.gates.multi_qubit,
+        ),
+        depth=DepthResources(depth=unresolved_count),
+        trace=ResourceTraceNode(
+            name="unresolved_controlled_aggregate",
+            source_kind="opaque_arity_remainder",
+            summary=f"gates={unresolved_count}",
+        ),
+        quality=EstimateQuality.MODELED,
+        basis=estimate.basis,
+        precision=estimate.precision,
+    )
+    projected = single.seq(two).seq(unresolved)
+    has_unresolved_gates = sp.Gt(unresolved_count, _ZERO)
+    projected_gates = dataclasses.replace(
+        projected.gates,
+        clifford=sp.Max(
+            projected.gates.clifford,
+            _piecewise(
+                estimate.gates.clifford,
+                _ZERO,
+                has_unresolved_gates,
+            ),
+        ),
+        rotation=sp.Max(
+            projected.gates.rotation,
+            _piecewise(
+                estimate.gates.rotation,
+                _ZERO,
+                has_unresolved_gates,
+            ),
+        ),
+        t=sp.Max(
+            projected.gates.t,
+            _piecewise(
+                estimate.gates.t,
+                _ZERO,
+                has_unresolved_gates,
+            ),
+        ),
+        toffoli=sp.Max(
+            projected.gates.toffoli,
+            _piecewise(
+                estimate.gates.toffoli,
+                _ZERO,
+                has_unresolved_gates,
+            ),
+        ),
+        non_clifford=sp.Max(
+            projected.gates.non_clifford,
+            _piecewise(
+                estimate.gates.non_clifford,
+                _ZERO,
+                has_unresolved_gates,
+            ),
+        ),
+    )
     added_clean_ancillas = projected.width.clean_ancilla_qubits
     width = dataclasses.replace(
         estimate.width,
@@ -8208,24 +8326,41 @@ def _project_portable_aggregate_controlled_cost(
         ),
         peak_qubits=estimate.width.peak_qubits + added_clean_ancillas,
     )
-    assumption = ResourceAssumption(
+    complete_assumption = ResourceAssumption(
         message=(
-            "controlled aggregate cost uses a conservative per-primitive "
-            "portable upper bound from complete one- and two-qubit counts; "
-            "gate kinds and scheduling are unavailable, and fallback clean "
-            "ancillas are counted in addition to declared opaque workspace; "
-            "any undeclared controlled global-phase overhead is outside this "
-            "model"
+            "controlled aggregate cost uses conservative per-primitive "
+            "portable upper bounds for all declared one- and two-qubit gates; "
+            "gate kinds and scheduling are unavailable, fallback clean "
+            "ancillas are counted in addition to declared opaque workspace, "
+            "and any undeclared controlled global-phase overhead is outside "
+            "this model"
+        )
+    )
+    unclassified_remainder = _safe_simplify(
+        unresolved_count - estimate.gates.multi_qubit
+    )
+    partial_assumption = ResourceAssumption(
+        message=(
+            "controlled aggregate cost uses conservative per-primitive "
+            "portable upper bounds for declared one- and two-qubit gates; "
+            f"{unresolved_count} gate(s) outside those buckets remain one "
+            "modeled operation each in total and serial depth, including "
+            f"{unclassified_remainder} gate(s) with unclassified arity; "
+            "their controlled decomposition and additional clean ancillas "
+            "are unavailable, unclassified gates are not reported as "
+            "multi_qubit, declared gate-family counts are retained only as "
+            "field-wise floors, and any undeclared controlled global-phase "
+            "overhead is outside this model"
         )
     )
     controlled = ResourceEstimate(
         width=width,
-        gates=projected.gates,
+        gates=projected_gates,
         depth=_max_depth(estimate.depth, projected.depth),
         calls=estimate.calls,
         assumptions=estimate.assumptions,
         trace=_merge_trace(
-            f"controlled_arity_upper_bound({controls})",
+            f"controlled_arity_projection({controls})",
             estimate.trace,
             projected.trace,
         ),
@@ -8246,14 +8381,69 @@ def _project_portable_aggregate_controlled_cost(
         _guarded_qualities=estimate._guarded_qualities,
         _symbol_aliases=estimate._symbol_aliases,
     )
-    return (
-        controlled._with_metadata(
-            assumptions=(assumption,),
+    active_controls = sp.Gt(controls, _ZERO)
+    if unresolved_count == _ZERO:
+        controlled = controlled._with_metadata(
+            assumptions=(complete_assumption,),
             quality=EstimateQuality.MODELED,
-            active_when=sp.Gt(controls, _ZERO),
-        ),
-        "",
+            active_when=active_controls,
+        )
+    elif unresolved_count.is_positive is True:
+        controlled = controlled._with_metadata(
+            assumptions=(partial_assumption,),
+            quality=EstimateQuality.MODELED,
+            active_when=active_controls,
+        )
+    else:
+        controlled = controlled._with_metadata(
+            assumptions=(complete_assumption,),
+            quality=EstimateQuality.MODELED,
+            active_when=sp.And(
+                active_controls,
+                sp.Eq(unresolved_count, _ZERO),
+            ),
+        )._with_metadata(
+            assumptions=(partial_assumption,),
+            quality=EstimateQuality.MODELED,
+            active_when=sp.And(
+                active_controls,
+                sp.Gt(unresolved_count, _ZERO),
+            ),
+        )
+    known_arity_count = _safe_simplify(
+        estimate.gates.single_qubit + estimate.gates.two_qubit
     )
+    if known_arity_count.is_positive is not True:
+        no_profile_reason = (
+            "the aggregate has no declared one- or two-qubit gate profile"
+        )
+        retained = dataclasses.replace(
+            estimate,
+            trace=_wrap_trace(f"controlled({controls})", estimate.trace),
+        )._with_metadata(
+            assumptions=(
+                _unprojected_aggregate_control_assumption(
+                    no_profile_reason,
+                    controls,
+                ),
+            ),
+            quality=EstimateQuality.MODELED,
+            active_when=active_controls,
+        )
+        controlled = retained.conditional(
+            controlled,
+            sp.Eq(known_arity_count, _ZERO),
+        )
+        controlled = dataclasses.replace(
+            controlled,
+            _allocation_sites=estimate._allocation_sites,
+            _output_sizes=estimate._output_sizes,
+            _input_sizes=estimate._input_sizes,
+            _has_output_summary=estimate._has_output_summary,
+            _dependency_keys=estimate._dependency_keys,
+            _symbol_aliases=estimate._symbol_aliases,
+        )
+    return controlled, ""
 
 
 def _estimate_portable_gate(

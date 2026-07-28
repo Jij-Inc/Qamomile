@@ -1166,7 +1166,7 @@ def test_controlled_fixed_opaque_cost_projects_complete_arity_profile(
     assert estimate.calls.queries_by_name == {"arity_oracle": 1}
     assert estimate.quality is qm.EstimateQuality.MODELED
     assert any(
-        "complete one- and two-qubit counts" in assumption.message
+        "for all declared one- and two-qubit gates" in assumption.message
         for assumption in estimate.assumptions
     )
 
@@ -1209,33 +1209,122 @@ def test_open_control_brackets_wrap_projected_fixed_opaque_cost() -> None:
     assert estimate.calls.queries_by_name == {"open_arity_oracle": 1}
 
 
-def test_incomplete_opaque_arity_profile_stays_explicitly_unprojected() -> None:
-    """An unclassified gate remainder preserves cost with a clear assumption."""
+def test_incomplete_opaque_arity_profile_projects_known_gate_counts() -> None:
+    """Known arities are projected while an unknown remainder stays explicit."""
     oracle = qm.opaque(
         "incomplete_arity_oracle",
         num_qubits=1,
         cost=qm.ResourceEstimate(
             gates=qm.GateResources(
-                total=3,
+                total=5,
                 single_qubit=2,
+                two_qubit=1,
             ),
         ),
     )
 
     @qm.qkernel
     def circuit() -> qm.Qubit:
-        """Control an opaque cost whose arity profile has one unknown gate."""
-        control = qm.qubit("control")
+        """Control an opaque cost whose arity profile has two unknown gates."""
+        control_0 = qm.qubit("control_0")
+        control_1 = qm.qubit("control_1")
         target = qm.qubit("target")
-        _, target = qm.control(oracle)(control, target)
+        *_, target = qm.control(
+            oracle,
+            num_controls=2,
+        )(control_0, control_1, target)
         return target
 
     estimate = circuit.estimate_resources()
+    complete = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=3,
+            single_qubit=2,
+            two_qubit=1,
+        )
+    ).controlled(2)
 
-    assert estimate.gates.total == 3
-    assert estimate.gates.single_qubit == 2
+    assert estimate.gates.total == 15
+    assert estimate.depth.depth == 15
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.gates.single_qubit == complete.gates.single_qubit
+    assert estimate.gates.two_qubit == complete.gates.two_qubit
+    assert estimate.gates.multi_qubit == complete.gates.multi_qubit
     assert any(
-        "not fully partitioned" in assumption.message
+        "2 gate(s) with unclassified arity" in assumption.message
+        for assumption in estimate.assumptions
+    )
+
+
+def test_partial_opaque_projection_preserves_declared_multi_qubit_gates() -> None:
+    """Known multi-qubit gates remain classified but are not decomposed."""
+    partial = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=4,
+            single_qubit=2,
+            two_qubit=1,
+            multi_qubit=1,
+        )
+    ).controlled(2)
+    complete = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=3,
+            single_qubit=2,
+            two_qubit=1,
+        )
+    ).controlled(2)
+
+    assert partial.gates.total == 14
+    assert partial.depth.depth == 14
+    assert partial.width.clean_ancilla_qubits == 2
+    assert partial.gates.multi_qubit == complete.gates.multi_qubit + 1
+    assert any(
+        "0 gate(s) with unclassified arity" in assumption.message
+        for assumption in partial.assumptions
+    )
+
+
+def test_partial_opaque_projection_preserves_declared_family_floors() -> None:
+    """Unresolved gates do not silently erase declared family information."""
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=2,
+            single_qubit=1,
+            toffoli=1,
+            non_clifford=1,
+        ),
+        depth=qm.DepthResources(
+            depth=2,
+            toffoli_depth=1,
+            non_clifford_depth=1,
+        ),
+    ).controlled(1)
+
+    assert estimate.gates.total == 2
+    assert estimate.gates.toffoli == 1
+    assert estimate.gates.non_clifford >= 1
+    assert estimate.depth.toffoli_depth == 1
+    assert any(
+        "gate-family counts are retained only as field-wise floors"
+        in assumption.message
+        for assumption in estimate.assumptions
+    )
+
+
+def test_total_only_opaque_cost_is_not_presented_as_a_partial_projection() -> None:
+    """A total without any supported arity bucket remains unchanged."""
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(total=5),
+        depth=qm.DepthResources(depth=3),
+    )
+
+    estimate = base.controlled(2)
+
+    assert estimate.gates == base.gates
+    assert estimate.depth == base.depth
+    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert any(
+        "no declared one- or two-qubit gate profile" in assumption.message
         for assumption in estimate.assumptions
     )
 
@@ -1324,6 +1413,116 @@ def test_symbolic_opaque_arity_constraints_reject_invalid_specialization() -> No
     assert estimate.substitute(gates=1, rotations=2, controls=0).gates.rotation == 2
 
 
+def test_symbolic_partial_arity_remainder_is_validated_only_under_control() -> None:
+    """A symbolic unclassified remainder is constrained on controlled branches."""
+    total = sp.Symbol("total", integer=True, nonnegative=True)
+    single = sp.Symbol("single", integer=True, nonnegative=True)
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=total,
+            single_qubit=single,
+        )
+    )
+
+    estimate = base.controlled(controls)
+    valid = estimate.substitute(total=5, single=2, controls=2)
+
+    assert valid.gates.total == 9
+    assert valid.depth.depth == 9
+    assert any(
+        requirement["label"] == "Portable aggregate unclassified arity remainder"
+        for requirement in estimate.to_dict()["requirements"]
+    )
+    with pytest.raises(ValueError, match="unclassified arity remainder"):
+        estimate.substitute(total=1, single=2, controls=2)
+    zero = estimate.substitute(total=1, single=2, controls=0)
+    assert zero.gates.total == 1
+    assert zero.gates.single_qubit == 2
+
+
+def test_symbolic_zero_known_arity_uses_total_only_control_branch() -> None:
+    """Specializing known arities to zero matches direct total-only modeling."""
+    single = sp.Symbol("single", integer=True, nonnegative=True)
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=5,
+            single_qubit=single,
+        ),
+        depth=qm.DepthResources(depth=1),
+    )
+
+    symbolic = base.controlled(controls)
+    zero = symbolic.substitute(single=0, controls=2)
+    direct = qm.ResourceEstimate(
+        gates=qm.GateResources(total=5),
+        depth=qm.DepthResources(depth=1),
+    ).controlled(2)
+    zero_controls = symbolic.substitute(single=0, controls=0)
+    positive = symbolic.substitute(single=1, controls=2)
+    complete = symbolic.substitute(single=5, controls=2)
+
+    assert zero.gates == direct.gates
+    assert zero.depth == direct.depth
+    assert zero.quality is direct.quality
+    assert any(
+        "no declared one- or two-qubit gate profile" in assumption.message
+        and "active controls" in assumption.message
+        for assumption in zero.assumptions
+    )
+    assert any(
+        "no declared one- or two-qubit gate profile" in assumption.message
+        for assumption in direct.assumptions
+    )
+    assert zero_controls.gates == qm.GateResources(total=5)
+    assert zero_controls.depth == qm.DepthResources(depth=1)
+    assert zero_controls.quality is qm.EstimateQuality.EXACT
+    assert zero_controls.assumptions == ()
+    assert positive.gates.total == 7
+    assert positive.depth.depth == 7
+    assert not any(
+        "no declared one- or two-qubit gate profile" in assumption.message
+        for assumption in positive.assumptions
+    )
+    assert complete.gates.total == 15
+    assert any(
+        "for all declared one- and two-qubit gates" in assumption.message
+        for assumption in complete.assumptions
+    )
+    assert not any(
+        "with unclassified arity" in assumption.message
+        for assumption in complete.assumptions
+    )
+
+
+def test_symbolic_arity_branch_preserves_internal_metadata() -> None:
+    """Partial projection retains caller metadata through its symbolic branch."""
+    single = sp.Dummy("single", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=5,
+            single_qubit=single,
+        ),
+        _allocation_sites={"site": sp.Integer(3)},
+        _output_sizes={"output": sp.Integer(1)},
+        _input_sizes={"input": sp.Integer(2)},
+        _has_output_summary=True,
+        _dependency_keys=frozenset({("wire", None)}),
+        _symbol_aliases={single: "declared_single"},
+    )
+
+    controlled = base.controlled(2)
+
+    assert controlled._allocation_sites == base._allocation_sites
+    assert controlled._output_sizes == base._output_sizes
+    assert controlled._input_sizes == base._input_sizes
+    assert controlled._has_output_summary is True
+    assert controlled._dependency_keys == base._dependency_keys
+    assert controlled._symbol_aliases == base._symbol_aliases
+    assert controlled.parameters == {"declared_single": single}
+
+
 def test_query_only_opaque_cost_is_not_treated_as_complete_gate_profile() -> None:
     """A query declaration without gate counts cannot bound control overhead."""
     base = qm.ResourceEstimate(
@@ -1344,7 +1543,7 @@ def test_query_only_opaque_cost_is_not_treated_as_complete_gate_profile() -> Non
         for assumption in estimate.assumptions
     )
     assert not any(
-        "complete one- and two-qubit counts" in assumption.message
+        "for all declared one- and two-qubit gates" in assumption.message
         for assumption in estimate.assumptions
     )
 

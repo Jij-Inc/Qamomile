@@ -254,7 +254,7 @@ assert vector_est.parameters == {}
 #
 # 本体を持たないcallableは、コストを指定しない限り正確なgate数が分かりません。そのため既定の`UnknownResourcePolicy.ERROR`ではエラーになります。コストが分かっている場合は、`qmc.opaque(...)`に明示的な`ResourceEstimate`を指定してください。探索的な用途では、`OPAQUE_CALL`は名前付きのcallとqueryを記録してqualityを`modeled`とし、`ZERO_WITH_WARNING`はコスト0という仮定を記録します。どちらも未知の本体を分解したかのようには扱いません。
 #
-# 固定されたopaque costでも、`portable`の総ゲート数が`single_qubit`と`two_qubit`へ完全に分けられていれば、制御後の有用な推定値を算出できます。Qamomileは各primitiveをゲート種別に対する保守的な上界で制御化し、共通する制御量子ビットによってdepthを直列化して、追加のclean ancillaも報告します。arityだけではXとH、CXとSWAPなどを区別できず、制御によって観測可能になる未申告のglobal phaseも把握できません。そのため結果は`modeled`のままとなり、これらの仮定を記録します。arityの内訳が不完全な場合や3量子ビット以上のゲートを含む場合、指定されたコストは変更せず、不明な制御コストを`assumptions`へ明示します。ゲート固有の制御コストやphaseの振る舞いが分かっている場合は、context-dependentな`cost(ctx)`モデルを使います。callbackは呼び出し全体に対してauthoritativeで、`ctx.total_controls`からすべてのcoherent controlを一度だけ価格付けできます。
+# 固定されたopaque costでも、`portable` profileに`single_qubit`または`two_qubit`の内訳があれば、制御後の有用な推定値を算出できます。Qamomileは既知のprimitiveをゲート種別に対する保守的な上界で制御化し、共通する制御量子ビットによって直列化して、分解に必要なclean ancillaも報告します。これらの内訳に含まれないゲートは制御後の分解が不明なため、総ゲート数と直列depthに1ゲートずつのopaqueな処理として残します。arityが不明な残差を`multi_qubit`へ誤って分類することはなく、このフィールドは3量子ビット以上に作用すると分かっているゲートだけを表します。arityだけではXとH、CXとSWAPなどを区別できず、制御によって観測可能になる未申告のglobal phaseも把握できません。そのため結果は`modeled`のままとし、不明な制御コストを`assumptions`へ記録します。ゲート固有の制御コストやphaseの振る舞いが分かっている場合は、context-dependentな`cost(ctx)`モデルを使います。callbackは呼び出し全体に対してauthoritativeで、`ctx.total_controls`からすべてのcoherent controlを一度だけ価格付けできます。
 
 
 # %%
@@ -263,7 +263,7 @@ costed_oracle = qmc.opaque(
     num_qubits=2,
     cost=qmc.ResourceEstimate(
         gates=qmc.GateResources(
-            total=3,
+            total=5,
             single_qubit=2,
             two_qubit=1,
         ),
@@ -289,12 +289,13 @@ def controlled_costed_oracle() -> tuple[qmc.Qubit, qmc.Qubit]:
 
 # %%
 costed_est = controlled_costed_oracle.estimate_resources()
-assert costed_est.gates.total == 13
+assert costed_est.gates.total == 15
+assert costed_est.depth.depth == 15
 assert costed_est.width.clean_ancilla_qubits == 2
 assert costed_est.calls.queries_by_name == {"costed_oracle": 1}
 assert costed_est.quality is qmc.EstimateQuality.MODELED
 assert any(
-    "complete one- and two-qubit counts" in assumption.message
+    "2 gate(s) with unclassified arity" in assumption.message
     for assumption in costed_est.assumptions
 )
 
@@ -502,7 +503,7 @@ assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 # - パラメータ付き量子カーネルでは、選択したモデルにおけるスケーリングがSymPy式になります。
 # - `inputs`にはclassicalな値と配列shapeに加え、1次元の量子Vectorの幅を整数で指定できます。維持された要件により、不正な幅やindexは拒否されます。
 # - 結果を実装コストの厳密値として解釈する前に、`basis`、`quality`、`assumptions`、opt-inのtraceを確認します。分岐を選ぶと実行されない側のprovenanceは消えます。
-# - `calls_by_name`が表すのはopaque boundaryだけです。本体を持つcallは再帰的に展開します。1量子ビットと2量子ビットの完全な内訳を持つ固定opaque costには制御後のmodeled estimateを適用し、それ以外の未知の本体には明示的なpolicyまたはcontext-dependentなcostを使います。
+# - `calls_by_name`が表すのはopaque boundaryだけです。本体を持つcallは再帰的に展開します。固定opaque costでは既知の1量子ビットと2量子ビット部分にportableな制御分解を適用し、残りのゲートはmodeledなplaceholderとして明示します。
 # - `to_dict()`はsymbolicなmetricと要件をJSON向けの形式で出力します。
 # - `.substitute(n=...)`で既存の推定を特定サイズに評価して実行可能性を確認し、具体的な構造によりdependency schedulingを精密化したい場合は最初から`inputs`を使います。
 # - FTQC版のShorとEkerå–Håstadは、同じ`O(n^2)`のwindowed modular multiplication bodyと、1つの再利用可能な位相量子ビットを共有します。

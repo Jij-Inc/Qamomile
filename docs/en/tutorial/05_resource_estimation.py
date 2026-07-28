@@ -254,7 +254,7 @@ assert vector_est.parameters == {}
 #
 # A bodyless callable has no honest gate cost unless you provide one. The default `UnknownResourcePolicy.ERROR` therefore raises. Prefer declaring an explicit `ResourceEstimate` cost on `qmc.opaque(...)` when one is known. For exploratory work, `OPAQUE_CALL` records a named call and query with `modeled` quality, while `ZERO_WITH_WARNING` records a zero-cost assumption. Neither policy pretends the unknown body was decomposed.
 #
-# A fixed opaque cost can still support a useful controlled estimate when its `portable` gate total is completely partitioned into `single_qubit` and `two_qubit` counts. Qamomile then controls every counted primitive with a conservative gate-kind upper bound, serializes their depth through the shared controls, and reports additional clean ancillas. Arity alone cannot distinguish, for example, X from H or CX from SWAP, nor can it reveal an undeclared global phase that becomes observable under control. The result therefore remains `modeled` and records these assumptions. If the arity profile is incomplete or contains three-or-more-qubit gates, the declared cost stays unchanged and the missing controlled overhead is explicit in `assumptions`; use a context-dependent `cost(ctx)` model when gate-specific control costs or phase behavior are known. A callback is authoritative for the complete invocation and can price all coherent controls exactly once through `ctx.total_controls`.
+# A fixed opaque cost can still support a useful controlled estimate when its `portable` profile declares any `single_qubit` or `two_qubit` gates. Qamomile controls the known primitives with conservative gate-kind upper bounds, serializes them through the shared controls, and reports their fallback clean ancillas. Gates outside those buckets remain one opaque operation each in the total and serial depth because their controlled decomposition is unavailable. An unclassified remainder is not mislabeled as `multi_qubit`; that field continues to mean gates known to act on three or more qubits. Arity alone cannot distinguish, for example, X from H or CX from SWAP, nor can it reveal an undeclared global phase that becomes observable under control. The result therefore remains `modeled` and records the unknown controlled overhead in `assumptions`. Use a context-dependent `cost(ctx)` model when gate-specific control costs or phase behavior are known. A callback is authoritative for the complete invocation and can price all coherent controls exactly once through `ctx.total_controls`.
 
 
 # %%
@@ -263,7 +263,7 @@ costed_oracle = qmc.opaque(
     num_qubits=2,
     cost=qmc.ResourceEstimate(
         gates=qmc.GateResources(
-            total=3,
+            total=5,
             single_qubit=2,
             two_qubit=1,
         ),
@@ -289,12 +289,13 @@ def controlled_costed_oracle() -> tuple[qmc.Qubit, qmc.Qubit]:
 
 # %%
 costed_est = controlled_costed_oracle.estimate_resources()
-assert costed_est.gates.total == 13
+assert costed_est.gates.total == 15
+assert costed_est.depth.depth == 15
 assert costed_est.width.clean_ancilla_qubits == 2
 assert costed_est.calls.queries_by_name == {"costed_oracle": 1}
 assert costed_est.quality is qmc.EstimateQuality.MODELED
 assert any(
-    "complete one- and two-qubit counts" in assumption.message
+    "2 gate(s) with unclassified arity" in assumption.message
     for assumption in costed_est.assumptions
 )
 
@@ -500,7 +501,7 @@ assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 # - For parameterized qkernels, results are SymPy expressions showing scaling within the selected model.
 # - `inputs` can supply classical values, array shapes, and an integer width for a one-dimensional quantum Vector; retained requirements reject invalid widths and indices.
 # - Check `basis`, `quality`, `assumptions`, and opt-in traces before interpreting a result as an exact implementation cost. Condition selection removes inactive provenance.
-# - `calls_by_name` describes opaque boundaries only. Body-backed calls are recursively expanded; a fixed opaque cost with a complete one-/two-qubit profile receives a modeled controlled estimate, while other unknown bodies use an explicit policy or context-dependent cost.
+# - `calls_by_name` describes opaque boundaries only. Body-backed calls are recursively expanded; a fixed opaque cost projects its known one-/two-qubit portion through the portable control fallback and keeps any remaining gates as visible modeled placeholders.
 # - `to_dict()` exports symbolic metrics and requirements in a JSON-friendly form.
 # - Use `.substitute(n=...)` to evaluate an existing estimate at specific sizes and check feasibility; use initial `inputs` when concrete structure should sharpen dependency scheduling.
 # - The FTQC Shor and Ekerå–Håstad factories share the same `O(n^2)` windowed modular-multiplication body and one reused phase qubit.
