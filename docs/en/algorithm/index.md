@@ -27,6 +27,12 @@ Learn how to use Möttönen amplitude encoding in Qamomile to prepare arbitrary 
 :::
 
 :::{card}
+:header: **Introduction to Quantum Fourier Transform (QFT)**
+:link: qft
+QFT circuit steps, stdlib implementation, execution, and resource estimation.
+:::
+
+:::{card}
 :header: **Multidimensional QFT for Estimating Nanosheet Material Properties**
 :link: multidimensional_qft
 This example implements a multidimensional quantum Fourier transform with Qamomile. For nanosheet material characterization, it uses a multidimensional QFT with data preprocessing to run a nanosheet simulation.
