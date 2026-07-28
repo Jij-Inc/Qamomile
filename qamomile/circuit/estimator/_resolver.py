@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import sympy as sp
+from sympy.logic.boolalg import Boolean
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -20,6 +21,9 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOpKind,
     CompOp,
     CompOpKind,
+    CondOp,
+    CondOpKind,
+    NotOp,
     UnaryMathOp,
     UnaryMathOpKind,
 )
@@ -452,6 +456,20 @@ class ExprResolver:
             assert op.kind is not None
             return _apply_compop(op.kind, left, right)
 
+        if isinstance(op, CondOp):
+            left = self._resolve(op.operands[0], concrete)
+            right = self._resolve(op.operands[1], concrete)
+            assert op.kind is not None
+            return _apply_condop(  # type: ignore[return-value]
+                op.kind,
+                left,
+                right,
+            )
+
+        if isinstance(op, NotOp):
+            operand = self._resolve(op.input, concrete)
+            return sp.Not(_as_boolean(operand))  # type: ignore[return-value]
+
         if isinstance(op, UnaryMathOp):
             operand = self._resolve(op.input, concrete)
             assert op.kind is not None
@@ -518,6 +536,24 @@ _COMPOP_MAP = {
 }
 
 
+def _as_boolean(expression: sp.Basic) -> Boolean:
+    """Convert a numeric or predicate expression to logical truthiness.
+
+    Qamomile predicates follow Python scalar truthiness for compile-time
+    numeric values. Symbolically, that means a non-Boolean expression is true
+    exactly when it is nonzero.
+
+    Args:
+        expression (sp.Basic): Numeric or Boolean SymPy expression.
+
+    Returns:
+        Boolean: Boolean expression with the same truthiness.
+    """
+    if isinstance(expression, Boolean):
+        return expression
+    return sp.Ne(expression, 0)
+
+
 def _apply_binop(kind: BinOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
     """Apply binary arithmetic.
 
@@ -578,3 +614,30 @@ def _apply_compop(kind: CompOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
     if fn is None:
         raise ValueError(f"Unknown CompOpKind: {kind}")
     return fn(left, right)  # type: ignore[return-value]
+
+
+def _apply_condop(
+    kind: CondOpKind,
+    left: sp.Basic,
+    right: sp.Basic,
+) -> Boolean:
+    """Apply a symbolic logical AND or OR operation.
+
+    Args:
+        kind (CondOpKind): Logical operation kind.
+        left (sp.Basic): Left numeric or Boolean operand.
+        right (sp.Basic): Right numeric or Boolean operand.
+
+    Returns:
+        Boolean: SymPy Boolean expression.
+
+    Raises:
+        ValueError: If ``kind`` has no symbolic implementation.
+    """
+    match kind:
+        case CondOpKind.AND:
+            return sp.And(_as_boolean(left), _as_boolean(right))
+        case CondOpKind.OR:
+            return sp.Or(_as_boolean(left), _as_boolean(right))
+        case _:
+            raise ValueError(f"Unknown CondOpKind: {kind}")

@@ -8,6 +8,7 @@ import itertools
 import math
 import numbers
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
@@ -103,6 +104,10 @@ _ONE = sp.Integer(1)
 _CONTROL_BATCH_MIN_WEIGHT = 2
 _CONTROL_BATCH_NATIVE_AT_TWO_CONTROLS = frozenset(
     {"x", "z", "cx", "cz", "toffoli", "rzz"}
+)
+_DEFER_RESOURCE_SYMBOL_METADATA = ContextVar(
+    "qamomile_defer_resource_symbol_metadata",
+    default=False,
 )
 _PHASE_CLASS_CODES = {
     None: 0,
@@ -1412,9 +1417,27 @@ class ResourceEstimate:
             )
         self.assumptions = _active_assumptions(self._guarded_assumptions)
         self.quality = _active_quality(self._guarded_qualities)
-        registry = _serialization_registry(self)
-        self._symbol_aliases = registry.aliases()
-        self.parameters = _collect_parameters(self, registry)
+        if not _DEFER_RESOURCE_SYMBOL_METADATA.get():
+            self._refresh_symbol_metadata()
+
+    def _refresh_symbol_metadata(
+        self,
+        registry: SymbolRegistry | None = None,
+    ) -> SymbolRegistry:
+        """Derive stable public aliases and the parameter map.
+
+        Args:
+            registry (SymbolRegistry | None): Precomputed registry for this
+                exact estimate. Defaults to rebuilding one from all resource
+                expressions and structural requirements.
+
+        Returns:
+            SymbolRegistry: Registry used to refresh the public metadata.
+        """
+        active_registry = registry or _serialization_registry(self)
+        self._symbol_aliases = active_registry.aliases()
+        self.parameters = _collect_parameters(self, active_registry)
+        return active_registry
 
     def _with_metadata(
         self,
@@ -2656,6 +2679,49 @@ class ResourceEstimator:
             NotImplementedError: If the input IR contains a construct not
                 supported by resource estimation.
         """
+        defer_token = _DEFER_RESOURCE_SYMBOL_METADATA.set(True)
+        try:
+            estimate = self._estimate_deferred(
+                kernel,
+                inputs=inputs,
+                strategies=strategies,
+            )
+        finally:
+            _DEFER_RESOURCE_SYMBOL_METADATA.reset(defer_token)
+        estimate._refresh_symbol_metadata()
+        return estimate
+
+    def _estimate_deferred(
+        self,
+        kernel: "QKernel[Any, Any] | Block | Sequence[Operation]",
+        *,
+        inputs: dict[str, Any] | None = None,
+        strategies: dict[str, str] | None = None,
+    ) -> ResourceEstimate:
+        """Estimate resources while deferring public symbol derivation.
+
+        The public :meth:`estimate` wrapper activates the deferral context and
+        refreshes aliases and parameters exactly once on the final result.
+
+        Args:
+            kernel (QKernel[Any, Any] | Block | Sequence[Operation]): Object to
+                estimate. QKernel-like objects are built before traversal.
+            inputs (dict[str, Any] | None): Values used to specialize symbolic
+                qkernel inputs. Defaults to ``None``.
+            strategies (dict[str, str] | None): Per-call strategy overrides.
+                Defaults to ``None``.
+
+        Returns:
+            ResourceEstimate: Estimate awaiting one final public-symbol
+            metadata refresh.
+
+        Raises:
+            ValueError: If an input, callable resource contract, or structural
+                requirement is invalid.
+            TypeError: If ``kernel`` is not a supported estimator input.
+            NotImplementedError: If the input contains an unsupported
+                construct.
+        """
         explicit_inputs = dict(inputs or {})
         root_callable_attrs = _root_callable_resource_attrs(kernel)
         build_inputs, estimation_inputs = _partition_estimation_inputs(
@@ -2697,6 +2763,7 @@ class ResourceEstimator:
                 ),
             )
         if build_inputs:
+            estimate._refresh_symbol_metadata()
             estimate = _substitute_bindings(estimate, build_inputs)
         inferred_shape_inputs = _root_callable_shape_inputs(
             root_callable_attrs,
@@ -6447,7 +6514,11 @@ class ResourceInterpreter:
                     surrounding_controls=ctx.controls,
                 )
         elif callable(cost):
-            estimate = cost(ctx)
+            defer_token = _DEFER_RESOURCE_SYMBOL_METADATA.set(False)
+            try:
+                estimate = cost(ctx)
+            finally:
+                _DEFER_RESOURCE_SYMBOL_METADATA.reset(defer_token)
             if not isinstance(estimate, ResourceEstimate):
                 raise TypeError(
                     f"Opaque cost for '{operation.custom_name}' must return "

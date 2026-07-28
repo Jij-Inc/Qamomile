@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock
+
 import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
+from qamomile.circuit.estimator import (
+    resource_estimator as resource_estimator_module,
+)
 
 
 @qm.qkernel
@@ -68,6 +74,100 @@ def test_clifford_t_basis_lowers_body_gates_and_reports_quality() -> None:
     assert lowered.gates.t == 16
     assert lowered.gates.rotation == 0
     assert lowered.quality is qm.EstimateQuality.UPPER_BOUND
+
+
+def test_estimation_derives_public_symbol_metadata_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intermediate resource algebra defers full symbol-registry derivation."""
+
+    @qm.qkernel
+    def repeated_body() -> qm.Qubit:
+        """Apply two gates in each of sixteen static loop iterations."""
+        target = qm.qubit("target")
+        for _index in qm.range(16):
+            target = qm.h(target)
+            target = qm.x(target)
+        return target
+
+    registry_spy = Mock(wraps=resource_estimator_module._serialization_registry)
+    monkeypatch.setattr(
+        resource_estimator_module,
+        "_serialization_registry",
+        registry_spy,
+    )
+
+    estimate = repeated_body.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert registry_spy.call_count == 1
+    assert estimate.parameters == {}
+    assert registry_spy.call_count == 1
+    assert estimate.width.peak_qubits == 1
+    assert estimate.gates.total == 32
+    assert estimate.gates.single_qubit == 32
+    assert estimate.depth.depth == 32
+
+    payload = estimate.to_dict()
+
+    assert registry_spy.call_count == 2
+    assert payload["parameters"] == {}
+
+
+def test_deferred_symbol_metadata_resets_after_estimation_error() -> None:
+    """A failed estimate cannot defer later manual ResourceEstimate metadata."""
+
+    @qm.qkernel
+    def circuit(iterations: qm.UInt) -> qm.Qubit:
+        """Apply one gate per symbolic iteration."""
+        target = qm.qubit("target")
+        for _index in qm.range(iterations):
+            target = qm.h(target)
+        return target
+
+    with pytest.raises(ValueError, match="neither free symbols"):
+        circuit.estimate_resources(inputs={"unknown": 2})
+
+    manual_work = sp.Symbol(
+        "manual_work",
+        integer=True,
+        nonnegative=True,
+    )
+    stale = sp.Symbol("stale")
+    manual = qm.ResourceEstimate(
+        gates=qm.GateResources(total=manual_work),
+        parameters={"stale": stale},
+    )
+
+    assert manual.parameters == {"manual_work": manual_work}
+
+
+def test_concurrent_estimates_keep_symbol_metadata_scoped() -> None:
+    """Concurrent estimators each finalize their own parameter map."""
+
+    @qm.qkernel
+    def symbolic_body(iterations: qm.UInt) -> qm.Qubit:
+        """Apply one gate per symbolic iteration."""
+        target = qm.qubit("target")
+        for _index in qm.range(iterations):
+            target = qm.h(target)
+        return target
+
+    block = symbolic_body.build()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        estimates = list(
+            pool.map(
+                lambda _index: qm.ResourceEstimator(
+                    basis=qm.GateBasis.LOGICAL
+                ).estimate(block),
+                range(2),
+            )
+        )
+
+    assert all(set(estimate.parameters) == {"iterations"} for estimate in estimates)
+    assert all(
+        estimate.gates.total == estimate.parameters["iterations"]
+        for estimate in estimates
+    )
 
 
 def test_pauli_evolve_depth_tracks_gadget_structure() -> None:

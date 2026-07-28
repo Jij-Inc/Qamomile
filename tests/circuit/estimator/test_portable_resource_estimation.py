@@ -133,7 +133,7 @@ def _recursive_lcu_resource_encoding() -> qm.LCUBlockEncoding:
 
 
 class _ContextAwareOpaqueCost:
-    """Return one gate in the basis requested by the estimator."""
+    """Return one symbolically constructed gate in the requested basis."""
 
     def __call__(self, ctx: qm.OpaqueCallContext) -> qm.ResourceEstimate:
         """Build a basis-compatible callback cost.
@@ -144,11 +144,21 @@ class _ContextAwareOpaqueCost:
         Returns:
             qm.ResourceEstimate: One basis-sensitive modeled gate.
         """
-        return qm.ResourceEstimate(
-            gates=qm.GateResources(total=1, non_clifford=1),
+        callback_work = sp.Symbol(
+            "callback_work",
+            integer=True,
+            nonnegative=True,
+        )
+        symbolic = qm.ResourceEstimate(
+            gates=qm.GateResources(
+                total=callback_work,
+                non_clifford=callback_work,
+            ),
             basis=ctx.basis,
             precision=ctx.precision,
         )
+        assert symbolic.parameters == {"callback_work": callback_work}
+        return symbolic.substitute(callback_work=1)
 
 
 class _AuthoritativeControlOpaqueCost:
@@ -328,6 +338,52 @@ def test_portable_controlled_qkernel_shares_body_control_ladder() -> None:
     assert abstract.gates.multi_qubit == 4
     assert abstract.width.clean_ancilla_qubits == 0
     assert abstract.width.peak_qubits == 4
+
+
+def test_controlled_logical_predicates_honor_concrete_inputs() -> None:
+    """Concrete AND, OR, and NOT branches avoid a spurious shared ladder."""
+
+    @qm.qkernel
+    def conditional_body(
+        target: qm.Qubit,
+        left: qm.Bit,
+        right: qm.Bit,
+        enabled: qm.Bit,
+    ) -> qm.Qubit:
+        """Apply gates only when one of three logical predicates is true."""
+        if left & right:
+            target = qm.x(target)
+        if left | right:
+            target = qm.h(target)
+        if ~enabled:
+            target = qm.z(target)
+        return target
+
+    @qm.qkernel
+    def circuit(left: qm.Bit, right: qm.Bit, enabled: qm.Bit) -> qm.Qubit:
+        """Control the conditional body with three qubits."""
+        controls = qm.qubit_array(3, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(
+            conditional_body,
+            num_controls=3,
+        )(controls, target, left, right, enabled)
+        return target
+
+    estimate = circuit.estimate_resources(
+        inputs={
+            "left": False,
+            "right": False,
+            "enabled": True,
+        }
+    )
+
+    assert estimate.gates.total == 0
+    assert estimate.gates.toffoli == 0
+    assert estimate.depth.depth == 0
+    assert estimate.width.clean_ancilla_qubits == 0
+    assert estimate.parameters == {}
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_portable_controlled_loop_hoists_shared_ladder() -> None:
@@ -1408,6 +1464,65 @@ def test_opaque_callback_arity_profile_is_not_controlled_twice() -> None:
         "controlled aggregate cost" in assumption.message
         for assumption in estimate.assumptions
     )
+
+
+def test_opaque_callback_nested_estimate_restores_manual_parameter_metadata() -> None:
+    """A nested estimate returns to eager callback-local parameter derivation."""
+
+    @qm.qkernel
+    def symbolic_body(iterations: qm.UInt) -> qm.Qubit:
+        """Apply one gate per symbolic iteration."""
+        target = qm.qubit("nested_target")
+        for _index in qm.range(iterations):
+            target = qm.h(target)
+        return target
+
+    def nested_cost(ctx: qm.OpaqueCallContext) -> qm.ResourceEstimate:
+        """Compose a nested estimate with a callback-local symbolic cost.
+
+        Args:
+            ctx (qm.OpaqueCallContext): Active opaque invocation context.
+
+        Returns:
+            qm.ResourceEstimate: Three concrete one-qubit gates.
+        """
+        nested = symbolic_body.estimate_resources(basis=ctx.basis)
+        assert set(nested.parameters) == {"iterations"}
+
+        callback_work = sp.Symbol(
+            "callback_work",
+            integer=True,
+            nonnegative=True,
+        )
+        manual = qm.ResourceEstimate(
+            gates=qm.GateResources(
+                total=callback_work,
+                single_qubit=callback_work,
+            ),
+            basis=ctx.basis,
+            precision=ctx.precision,
+        )
+        assert manual.parameters == {"callback_work": callback_work}
+        return nested.substitute(iterations=2).seq(manual.substitute(callback_work=1))
+
+    oracle = qm.opaque(
+        "nested_estimate_oracle",
+        num_qubits=1,
+        cost=nested_cost,
+    )
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Invoke the callback that performs a nested estimate."""
+        target = qm.qubit("target")
+        (target,) = oracle(target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.parameters == {}
+    assert estimate.gates.total == 3
+    assert estimate.gates.single_qubit == 3
 
 
 def test_opaque_callback_cost_validates_basis_and_precision_provenance() -> None:

@@ -132,6 +132,48 @@ def test_batch_weight_folds_preceding_classical_predicates() -> None:
     assert estimate.width.clean_ancilla_qubits == 0
 
 
+def test_batch_weight_folds_logical_predicate_chains() -> None:
+    """Emitter and estimator agree when AND, OR, and NOT are all false."""
+
+    @qmc.qkernel
+    def logical_identity(target: qmc.Qubit) -> qmc.Qubit:
+        """Apply no gate after folding three constant logical predicates."""
+        left = qmc.bit(False)
+        right = qmc.bit(False)
+        enabled = qmc.bit(True)
+        if left & right:
+            target = qmc.x(target)
+        if left | right:
+            target = qmc.h(target)
+        if ~enabled:
+            target = qmc.z(target)
+        return target
+
+    weight = controlled_emission._controlled_body_batch_weight(
+        _ResolverOnlyEmitPass(),
+        logical_identity.build().operations,
+        {},
+    )
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Control the statically empty logical body with three qubits."""
+        controls = qmc.qubit_array(3, "controls")
+        target = qmc.qubit("target")
+        controls, target = qmc.control(
+            logical_identity,
+            num_controls=3,
+        )(controls, target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert weight == 0
+    assert estimate.gates.total == 0
+    assert estimate.gates.toffoli == 0
+    assert estimate.width.clean_ancilla_qubits == 0
+
+
 def test_batch_weight_binds_invoke_actuals_before_descending() -> None:
     """Invoke analysis binds actual values before inspecting nested branches."""
 
