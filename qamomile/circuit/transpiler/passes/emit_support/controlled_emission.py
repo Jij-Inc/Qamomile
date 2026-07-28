@@ -480,13 +480,23 @@ def _batch_op_weight(
         emit_pass (StandardEmitPass): Active emit pass (for power / loop
             bound resolution).
         op (Operation): One operation of the controlled block body.
-        bindings (dict[str, Any]): Bindings visible inside the block.
+        bindings (dict[str, Any]): Scratch bindings visible inside the block.
+            Concrete classical operation results are added in program order.
 
     Returns:
         int: 0 for ops that emit nothing, 1 for a single controlled gate,
             2 for constructs that on their own justify batching.
     """
-    if isinstance(op, (BinOp, CompOp, CondOp, NotOp, ReturnOperation)):
+    if isinstance(op, BinOp):
+        evaluate_binop(emit_pass, op, bindings)
+        return 0
+    if isinstance(op, (CompOp, CondOp, NotOp)):
+        evaluate_classical_predicate(emit_pass, op, bindings)
+        return 0
+    if isinstance(op, ReturnOperation):
+        return 0
+    if isinstance(op, QInitOperation):
+        # Allocation reserves workspace but emits no controlled instruction.
         return 0
     if isinstance(op, GateOperation):
         return 1
@@ -512,7 +522,17 @@ def _batch_op_weight(
         block = op.effective_body(backend=getattr(emit_pass, "backend_name", None))
         if block is None:
             return 0
-        return _controlled_body_batch_weight(emit_pass, block.operations, bindings)
+        local_bindings = _bind_block_inputs(
+            emit_pass,
+            block,
+            op.operands,
+            bindings,
+        )
+        return _controlled_body_batch_weight(
+            emit_pass,
+            block.operations,
+            local_bindings,
+        )
     if isinstance(op, InverseBlockOperation):
         block = (
             op.implementation_block
@@ -545,7 +565,9 @@ def _for_batch_weight(
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
         op (ForOperation): Loop operation in the controlled body.
-        bindings (dict[str, Any]): Bindings visible inside the block.
+        bindings (dict[str, Any]): Bindings visible inside the block. The
+            function copies them before evaluating classical operations so
+            eligibility analysis cannot mutate the real emission context.
 
     Returns:
         int: The loop's batch weight (0, 1, or 2).
@@ -583,9 +605,10 @@ def _controlled_body_batch_weight(
         int: The total weight, clamped to ``_BATCH_MIN_WEIGHT`` once reached
             (callers only compare against that threshold).
     """
+    local_bindings = bindings.copy()
     total = 0
     for op in operations:
-        total += _batch_op_weight(emit_pass, op, bindings)
+        total += _batch_op_weight(emit_pass, op, local_bindings)
         if total >= _BATCH_MIN_WEIGHT:
             return _BATCH_MIN_WEIGHT
     return total

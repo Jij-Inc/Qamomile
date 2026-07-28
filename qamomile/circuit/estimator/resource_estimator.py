@@ -31,6 +31,10 @@ from qamomile.circuit.ir.dataflow import (
     walk_operations,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
     UnaryMathOp,
     UnaryMathOpKind,
 )
@@ -68,6 +72,7 @@ from qamomile.circuit.ir.operation.operation import (
     QInitOperation,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -95,6 +100,10 @@ ResourceExpr = sp.Expr
 WireKey = tuple[str, int | None]
 _ZERO = sp.Integer(0)
 _ONE = sp.Integer(1)
+_CONTROL_BATCH_MIN_WEIGHT = 2
+_CONTROL_BATCH_NATIVE_AT_TWO_CONTROLS = frozenset(
+    {"x", "z", "cx", "cz", "toffoli", "rzz"}
+)
 _PHASE_CLASS_CODES = {
     None: 0,
     "z": 1,
@@ -234,8 +243,9 @@ class GateBasis(enum.StrEnum):
 
     Values:
         PORTABLE: Recursively lower coherent controls through Qamomile's
-            backend-neutral fallback, including clean ancillas. This is a
-            conservative per-primitive algorithmic estimate and the default.
+            backend-neutral fallback, including clean ancillas and shared
+            body-control ladders when concrete structure permits them. This is
+            the default algorithmic estimate.
         LOGICAL: Keep every source primitive as one abstract logical gate,
             regardless of control arity.
         CLIFFORD_T: Lower the supported logical operations to aggregate
@@ -1798,13 +1808,15 @@ class ResourceEstimate:
         return estimate
 
     def controlled(self, num_controls: ResourceExpr | int) -> ResourceEstimate:
-        """Record a controlled-call context without scaling cost.
+        """Estimate controls on an aggregate cost when its arity profile is complete.
 
-        This deliberately does **not** change aggregate gate/width/depth
-        counts because their primitive structure is unavailable. Body-backed
-        qkernels are controlled by the estimator interpreter instead. A
-        positive or symbolic context is therefore marked ``MODELED`` and
-        carries an explicit assumption rather than appearing exact.
+        A portable estimate whose total is fully partitioned into one- and
+        two-qubit gates is projected through a conservative per-primitive
+        control fallback. Gate names and scheduling are unavailable, so each
+        reported field is an independent upper bound over the supported gate
+        kinds. Other aggregate costs remain unchanged and carry an explicit
+        assumption. Body-backed qkernels are controlled by the estimator
+        interpreter instead.
 
         Args:
             num_controls (ResourceExpr | int): Number of active controls.
@@ -1813,8 +1825,8 @@ class ResourceEstimate:
             ResourceEstimate: Estimate with a recorded controlled assumption.
 
         Raises:
-            ValueError: If a concrete control count is negative or
-                non-integral.
+            ValueError: If a concrete control count or projected gate count
+                is negative or non-integral.
         """
         controls = _expr(num_controls)
         control_constraint = _ResourceConstraint(
@@ -1826,10 +1838,30 @@ class ResourceEstimate:
         control_constraint.validate()
         if controls == _ZERO:
             return self
+        projected, reason = _project_portable_aggregate_controlled_cost(
+            self,
+            controls,
+        )
+        if projected is not None:
+            if not controls.is_number:
+                projected = self.conditional(
+                    projected,
+                    sp.Eq(controls, _ZERO),
+                )
+                projected = dataclasses.replace(
+                    projected,
+                    _constraints=(*projected._constraints, control_constraint),
+                    _output_sizes=self._output_sizes,
+                    _input_sizes=self._input_sizes,
+                    _has_output_summary=self._has_output_summary,
+                    _symbol_aliases=self._symbol_aliases,
+                )
+            return projected
         assumption = ResourceAssumption(
             message=(
-                "aggregate controlled cost is unchanged because no primitive "
-                f"body is available for its {controls} controls"
+                "aggregate controlled cost is unchanged because "
+                f"{reason}; no primitive body is available for its "
+                f"{controls} controls"
             )
         )
         controlled_estimate = ResourceEstimate(
@@ -1837,15 +1869,21 @@ class ResourceEstimate:
             gates=self.gates,
             depth=self.depth,
             calls=self.calls,
+            assumptions=self.assumptions,
             trace=_wrap_trace(f"controlled({controls})", self.trace),
+            quality=self.quality,
             basis=self.basis,
             precision=self.precision,
             _allocation_sites=self._allocation_sites,
             _constraints=self._constraints
             + ((control_constraint,) if not controls.is_number else ()),
+            _output_sizes=self._output_sizes,
+            _input_sizes=self._input_sizes,
+            _has_output_summary=self._has_output_summary,
             _dependency_keys=self._dependency_keys,
             _guarded_assumptions=self._guarded_assumptions,
             _guarded_qualities=self._guarded_qualities,
+            _symbol_aliases=self._symbol_aliases,
         )
         return controlled_estimate._with_metadata(
             assumptions=(assumption,),
@@ -2441,10 +2479,13 @@ def _validate_opaque_cost_provenance(
 class OpaqueCallContext:
     """Describe one bodyless callable invocation for cost evaluation.
 
-    A controlled opaque invocation owns the cost of its explicit control.
-    ``controls`` counts only surrounding controls that the cost callable did not
-    build in; the invocation's *own* control is signalled by ``transform`` being
-    ``CallTransform.CONTROLLED`` and counted by :attr:`own_controls`.
+    A context-aware cost callback is authoritative for the complete invocation,
+    including repetition, the invocation's explicit controls and activation
+    value, and controls inherited from surrounding controlled regions. The
+    callback should use :attr:`total_controls` when pricing coherent-control
+    overhead; the estimator validates and records its result without applying
+    those controls a second time. Fixed ``ResourceEstimate`` costs remain
+    transform-agnostic and are projected automatically by the estimator.
 
     Args:
         callable_ref (CallableRef | None): Stable callable identity.
@@ -2452,11 +2493,15 @@ class OpaqueCallContext:
             site.
         operand_shapes (Mapping[str, ResourceExpr]): Resolved operand shape
             expressions keyed by operand name.
-        attrs (Mapping[str, Any]): Callable attrs copied from the invocation.
+        attrs (Mapping[str, Any]): Callable attrs copied from the invocation,
+            including ``control_value`` when explicit controls use a
+            non-default activation state.
         loop_symbols (Mapping[str, sp.Symbol]): Loop symbols in scope.
-        controls (ResourceExpr): Number of surrounding controls (not the
-            invocation's own control).
-        power (ResourceExpr): Repetition power. Defaults to one.
+        controls (ResourceExpr): Number of controls inherited from surrounding
+            controlled regions, excluding the invocation's own explicit
+            controls.
+        power (ResourceExpr): Repetition power that a context-aware callback
+            must include in its returned cost. Defaults to one.
         transform (CallTransform): Requested call transform.
         strategy (str | None): Selected resource strategy.
         bindings (Mapping[str, Any]): Concrete bindings supplied by the user.
@@ -2485,8 +2530,9 @@ class OpaqueCallContext:
 
         Reads ``attrs["num_control_qubits"]`` when the call is controlled. This
         is the control the callable is applied *with* (e.g. Shor conditioning a
-        modular multiplication on an exponent qubit), distinct from surrounding
-        controls in :attr:`controls`.
+        modular multiplication on an exponent qubit), distinct from inherited
+        controls in :attr:`controls`. A context-aware cost callback must include
+        both sources exactly once in its returned estimate.
 
         Returns:
             int: Own control-qubit count, or ``0`` for a direct call.
@@ -2497,10 +2543,10 @@ class OpaqueCallContext:
 
     @property
     def total_controls(self) -> ResourceExpr:
-        """Return surrounding and invocation-owned controls together.
+        """Return every coherent control the cost callback must price.
 
         Returns:
-            ResourceExpr: Total coherent control count seen by the callable.
+            ResourceExpr: Sum of inherited and invocation-owned controls.
         """
         return self.controls + self.own_controls
 
@@ -2877,6 +2923,265 @@ class ResourceInterpreter:
             *_block_input_constraints(block, resolver),
         )
 
+    def _controlled_operation_batch_weight(
+        self,
+        operation: Operation,
+        resolver: ExprResolver,
+    ) -> int:
+        """Return the shared-control batching weight of one operation.
+
+        The weight mirrors the portable emitter: zero means no emitted
+        controlled work, one means one leaf, and two means the operation can
+        justify a body-wide shared AND ladder by itself.
+
+        Args:
+            operation (Operation): Operation inside a controlled body.
+            resolver (ExprResolver): Resolver for compile-time structure.
+
+        Returns:
+            int: Batching weight clamped to zero, one, or two.
+        """
+        if isinstance(operation, (BinOp, CompOp, CondOp, NotOp, ReturnOperation)):
+            return 0
+        if isinstance(operation, QInitOperation):
+            return 0
+        if isinstance(operation, GateOperation):
+            return 1
+        if isinstance(operation, ControlledUOperation):
+            power = self._apply_condition_values(
+                resolver.resolve(operation.power),
+                record_usage=False,
+            )
+            return 0 if power.is_zero is True else 1
+        if isinstance(operation, PauliEvolveOp):
+            return _CONTROL_BATCH_MIN_WEIGHT
+        if isinstance(operation, ForOperation):
+            if len(operation.operands) < 2:
+                return 0
+            child, start, stop, step, _loop_symbol = build_for_loop_scope(
+                operation,
+                resolver,
+            )
+            iterations = symbolic_iterations(start, stop, step)
+            count = self._concrete_scalar(iterations)
+            if count is None:
+                return 0
+            if count <= 0:
+                return 0
+            body_weight = self._controlled_body_batch_weight(
+                operation.operations,
+                child,
+            )
+            if count == 1:
+                return body_weight
+            return _CONTROL_BATCH_MIN_WEIGHT if body_weight >= 1 else 0
+        if isinstance(operation, IfOperation):
+            taken = self._peek_branch_decision(resolver.resolve(operation.condition))
+            if taken is None:
+                return 1
+            true_child, false_child = build_if_scopes(operation, resolver)
+            return self._controlled_body_batch_weight(
+                (operation.true_operations if taken else operation.false_operations),
+                true_child if taken else false_child,
+            )
+        if isinstance(operation, InvokeOperation):
+            strategy = self._strategy_for(operation)
+            body = operation.effective_body(strategy=strategy)
+            if not isinstance(body, Block):
+                return 0
+            selected_impl = operation.implementation_for(strategy=strategy)
+            body_implements_transform = (
+                selected_impl is not None and selected_impl.body is body
+            )
+            child = resolver.call_child_scope(
+                operation,
+                called_block=body,
+                body_implements_transform=body_implements_transform,
+            )
+            return self._controlled_body_batch_weight(body.operations, child)
+        if isinstance(operation, InverseBlockOperation):
+            if not isinstance(operation.implementation_block, Block):
+                return 0
+            child = _inverse_block_child_resolver(operation, resolver)
+            return self._controlled_body_batch_weight(
+                operation.implementation_block.operations,
+                child,
+            )
+        if isinstance(operation, SelectOperation):
+            return 1
+        return 1
+
+    def _controlled_body_batch_weight(
+        self,
+        operations: Sequence[Operation],
+        resolver: ExprResolver,
+    ) -> int:
+        """Return a controlled body's batching weight up to the threshold.
+
+        Args:
+            operations (Sequence[Operation]): Controlled body operations.
+            resolver (ExprResolver): Resolver for compile-time structure.
+
+        Returns:
+            int: Sum of operation weights, capped at two.
+        """
+        total = 0
+        for operation in operations:
+            total += self._controlled_operation_batch_weight(operation, resolver)
+            if total >= _CONTROL_BATCH_MIN_WEIGHT:
+                return _CONTROL_BATCH_MIN_WEIGHT
+        return total
+
+    def _controlled_body_benefits_from_two_control_batch(
+        self,
+        operations: Sequence[Operation],
+    ) -> bool:
+        """Return whether the emitter batches this body at two controls.
+
+        Args:
+            operations (Sequence[Operation]): Controlled body operations.
+
+        Returns:
+            bool: Whether at least one leaf is not in the emitter's
+            two-control native set.
+        """
+        for operation in operations:
+            if isinstance(operation, GateOperation):
+                name = (
+                    operation.gate_type.name.lower()
+                    if operation.gate_type is not None
+                    else "unknown"
+                )
+                if name not in _CONTROL_BATCH_NATIVE_AT_TWO_CONTROLS:
+                    return True
+            elif isinstance(
+                operation,
+                (
+                    ControlledUOperation,
+                    ForOperation,
+                    InvokeOperation,
+                    InverseBlockOperation,
+                    PauliEvolveOp,
+                    SelectOperation,
+                ),
+            ):
+                return True
+        return False
+
+    def _should_batch_controlled_body(
+        self,
+        operations: Sequence[Operation],
+        resolver: ExprResolver,
+        controls: ResourceExpr,
+    ) -> bool:
+        """Return whether portable estimation should use one shared ladder.
+
+        Args:
+            operations (Sequence[Operation]): Controlled body operations.
+            resolver (ExprResolver): Resolver for compile-time structure.
+            controls (ResourceExpr): Number of surrounding controls.
+
+        Returns:
+            bool: Whether the concrete body matches the emitter's batching
+            policy.
+        """
+        if self.config.basis is not GateBasis.PORTABLE:
+            return False
+        if not controls.is_number or controls.is_integer is not True:
+            return False
+        count = int(controls)
+        if count < 2:
+            return False
+        if (
+            self._controlled_body_batch_weight(operations, resolver)
+            < _CONTROL_BATCH_MIN_WEIGHT
+        ):
+            return False
+        return count != 2 or self._controlled_body_benefits_from_two_control_batch(
+            operations
+        )
+
+    def _peek_branch_decision(self, condition: sp.Basic) -> bool | None:
+        """Inspect a compile-time branch without mutating estimator metadata.
+
+        Args:
+            condition (sp.Basic): Resolved condition expression.
+
+        Returns:
+            bool | None: Definite branch value, or ``None`` when unresolved.
+        """
+        if self.condition_values and condition.free_symbols:
+            substitutions: dict[Any, Any] = {
+                symbol: self.condition_values[_symbol_display_name(symbol)]
+                for symbol in condition.free_symbols
+                if not isinstance(symbol, sp.Dummy)
+                and _symbol_display_name(symbol) in self.condition_values
+            }
+            if substitutions:
+                condition = condition.subs(substitutions, simultaneous=True)
+        if isinstance(condition, sp.logic.boolalg.BooleanAtom):
+            return bool(condition)
+        if condition.is_number:
+            return bool(condition != 0)
+        return None
+
+    def _with_shared_control_ladder(
+        self,
+        body: ResourceEstimate,
+        controls: ResourceExpr,
+    ) -> ResourceEstimate:
+        """Wrap a singly controlled body in one compute/uncompute ladder.
+
+        Args:
+            body (ResourceEstimate): Body already estimated under one control.
+            controls (ResourceExpr): Original concrete control count.
+
+        Returns:
+            ResourceEstimate: Portable shared-fallback cost with concurrently
+            held clean ancillas.
+        """
+        outer_clean_ancillas = controls - _ONE
+        toffoli = _estimate_named_gate_in_basis(
+            "toffoli",
+            _ZERO,
+            basis=self.config.basis,
+            precision=self.config.precision,
+        )
+        ladder = toffoli.repeat(2 * outer_clean_ancillas)
+        estimate = ladder.seq(body)
+        trace_children = tuple(
+            node
+            for node in (toffoli.trace, body.trace, toffoli.trace)
+            if node is not None
+        )
+        return dataclasses.replace(
+            estimate,
+            width=dataclasses.replace(
+                body.width,
+                clean_ancilla_qubits=(
+                    body.width.clean_ancilla_qubits + outer_clean_ancillas
+                ),
+                peak_qubits=body.width.peak_qubits + outer_clean_ancillas,
+            ),
+            trace=(
+                ResourceTraceNode(
+                    name=f"shared_control_ladder({controls})",
+                    source_kind="portable_fallback",
+                    summary=(
+                        f"toffoli_steps={2 * outer_clean_ancillas}, "
+                        f"clean_ancillas={outer_clean_ancillas}"
+                    ),
+                    children=trace_children,
+                )
+                if self.config.trace
+                else None
+            ),
+            _output_sizes=body._output_sizes,
+            _input_sizes=body._input_sizes,
+            _has_output_summary=body._has_output_summary,
+            _dependency_keys=body._dependency_keys,
+        )._with_metadata(quality=EstimateQuality.UPPER_BOUND)
+
     def eval_operations(
         self,
         operations: list[Operation],
@@ -2898,6 +3203,20 @@ class ResourceInterpreter:
         Returns:
             ResourceEstimate: Sequential composition of operation resources.
         """
+        control_count = _expr(controls)
+        if self._should_batch_controlled_body(
+            operations,
+            resolver,
+            control_count,
+        ):
+            body = self.eval_operations(
+                operations,
+                resolver,
+                controls=_ONE,
+                initial_allocations=initial_allocations,
+            )
+            return self._with_shared_control_ladder(body, control_count)
+
         previous_taint = self._measurement_derived
         graph = build_dependency_graph(operations)
         local_taint = find_measurement_derived_values(
@@ -6087,6 +6406,13 @@ class ResourceInterpreter:
     ) -> ResourceEstimate:
         """Evaluate an explicit cost attached to a bodyless callable.
 
+        Fixed ``ResourceEstimate`` costs describe a transform-agnostic base
+        implementation, so the estimator applies repetition and all coherent
+        controls automatically. A callable cost is authoritative for the full
+        :class:`OpaqueCallContext`, including ``power`` and
+        ``total_controls``; its result is therefore validated and wrapped
+        without additional transform pricing.
+
         Args:
             operation (InvokeOperation): Invocation operation.
             cost (Any): ``ResourceEstimate`` or callable accepting ``ctx``.
@@ -6138,8 +6464,6 @@ class ResourceInterpreter:
                 f"Opaque cost for '{operation.custom_name}' must be a "
                 "ResourceEstimate or callable."
             )
-        if not isinstance(cost, ResourceEstimate) and ctx.controls != _ZERO:
-            estimate = estimate.controlled(ctx.controls)
         estimate = dataclasses.replace(
             estimate,
             trace=_wrap_trace(
@@ -7593,6 +7917,272 @@ def _estimate_portable_named_gate(
             controlled,
         )
     return _portable_single_target_estimate(name, controls)
+
+
+def _portable_controlled_arity_envelope(
+    num_qubits: int,
+    controls: ResourceExpr,
+) -> ResourceEstimate:
+    """Bound one unknown primitive from its operand arity.
+
+    Every resource field is maximized independently over the portable gate
+    kinds of the requested arity. The resulting fields need not describe one
+    common gate decomposition, but each is a valid upper bound when the gate
+    name is unavailable.
+
+    Args:
+        num_qubits (int): Primitive operand arity. Supported values are one
+            and two.
+        controls (ResourceExpr): Number of added coherent controls.
+
+    Returns:
+        ResourceEstimate: Field-wise portable upper bound for one primitive.
+
+    Raises:
+        ValueError: If ``num_qubits`` is not one or two.
+    """
+    if num_qubits == 1:
+        gate_names = sorted(_SINGLE_QUBIT_GATES)
+    elif num_qubits == 2:
+        gate_names = sorted(_TWO_QUBIT_GATES)
+    else:
+        raise ValueError(
+            "Portable aggregate control projection supports only one- and "
+            f"two-qubit primitives; got arity {num_qubits}."
+        )
+
+    envelope = _estimate_portable_named_gate(gate_names[0], controls)
+    for gate_name in gate_names[1:]:
+        envelope = envelope.choice(_estimate_portable_named_gate(gate_name, controls))
+    return dataclasses.replace(
+        envelope,
+        trace=ResourceTraceNode(
+            name=f"unknown_{num_qubits}q",
+            source_kind="portable_arity_upper_bound",
+            summary=f"controls={controls}",
+            children=(envelope.trace,) if envelope.trace is not None else (),
+        ),
+    )
+
+
+def _aggregate_arity_projection_reason(
+    estimate: ResourceEstimate,
+) -> str | None:
+    """Return why an aggregate estimate cannot use portable arity projection.
+
+    Args:
+        estimate (ResourceEstimate): Aggregate estimate to inspect.
+
+    Returns:
+        str | None: Ineligibility reason, or ``None`` when the one- and
+            two-qubit profile completely describes the portable gate total.
+    """
+    if estimate.basis is not GateBasis.PORTABLE:
+        return (
+            "automatic arity projection is available only in the portable "
+            f"basis, not {estimate.basis.value}"
+        )
+    gates = estimate.gates
+    if _safe_simplify(gates.multi_qubit) != _ZERO:
+        return (
+            "three-or-more-qubit gates need their gate kind and intrinsic control arity"
+        )
+    has_opaque_calls = any(
+        value != _ZERO
+        for value in (
+            *estimate.calls.calls_by_name.values(),
+            *estimate.calls.queries_by_name.values(),
+        )
+    )
+    if _safe_simplify(gates.total) == _ZERO and has_opaque_calls:
+        return "the opaque call or query has no declared one- or two-qubit gate profile"
+    if _safe_simplify(gates.total) == _ZERO:
+        return (
+            "a zero aggregate gate profile cannot distinguish an exact "
+            "identity from an undeclared global phase"
+        )
+    classified_total = _safe_simplify(gates.single_qubit + gates.two_qubit)
+    if _safe_simplify(gates.total - classified_total) != _ZERO:
+        return (
+            "the total gate count is not fully partitioned into one- and "
+            "two-qubit gates"
+        )
+    for label, count in (
+        ("total", gates.total),
+        ("one-qubit", gates.single_qubit),
+        ("two-qubit", gates.two_qubit),
+        ("Clifford", gates.clifford),
+        ("rotation", gates.rotation),
+        ("T", gates.t),
+        ("Toffoli", gates.toffoli),
+        ("non-Clifford", gates.non_clifford),
+    ):
+        if _safe_simplify(count).is_negative is True:
+            return f"the {label} count is negative"
+    for label, count, upper_label, upper in (
+        ("Clifford", gates.clifford, "total", gates.total),
+        ("rotation", gates.rotation, "total", gates.total),
+        ("T", gates.t, "one-qubit", gates.single_qubit),
+        ("Toffoli", gates.toffoli, "three-or-more-qubit", gates.multi_qubit),
+        ("non-Clifford", gates.non_clifford, "total", gates.total),
+    ):
+        excess = _safe_simplify(count - upper)
+        if excess.is_positive is True:
+            return f"the {label} count exceeds the declared {upper_label} gate count"
+    if _safe_simplify(estimate.depth.measurement_depth) != _ZERO:
+        return "controlled opaque costs cannot contain measurement depth"
+    return None
+
+
+def _aggregate_arity_projection_constraints(
+    estimate: ResourceEstimate,
+    controls: ResourceExpr,
+) -> tuple[_ResourceConstraint, ...]:
+    """Retain unresolved validity requirements for an arity projection.
+
+    Args:
+        estimate (ResourceEstimate): Eligible aggregate estimate.
+        controls (ResourceExpr): Number of added coherent controls.
+
+    Returns:
+        tuple[_ResourceConstraint, ...]: Requirements that become active only
+            when one or more controls use the projection.
+    """
+    gates = estimate.gates
+    requirements: list[_ResourceConstraint] = []
+    for label, count in (
+        ("total", gates.total),
+        ("one-qubit", gates.single_qubit),
+        ("two-qubit", gates.two_qubit),
+        ("Clifford", gates.clifford),
+        ("rotation", gates.rotation),
+        ("T", gates.t),
+        ("Toffoli", gates.toffoli),
+        ("non-Clifford", gates.non_clifford),
+    ):
+        if _safe_simplify(count).is_nonnegative is not True:
+            requirements.append(
+                _ResourceConstraint(
+                    expression=count,
+                    minimum=0,
+                    label=f"Portable aggregate {label} gate count",
+                    unit="gate",
+                )
+            )
+    for label, count, upper_label, upper in (
+        ("Clifford", gates.clifford, "total", gates.total),
+        ("rotation", gates.rotation, "total", gates.total),
+        ("T", gates.t, "one-qubit", gates.single_qubit),
+        ("Toffoli", gates.toffoli, "three-or-more-qubit", gates.multi_qubit),
+        ("non-Clifford", gates.non_clifford, "total", gates.total),
+    ):
+        if _safe_simplify(count - upper).is_nonpositive is not True:
+            requirements.append(
+                _ResourceConstraint(
+                    expression=upper - count,
+                    minimum=0,
+                    label=(
+                        f"Portable aggregate {label} count within "
+                        f"{upper_label} gate count"
+                    ),
+                    unit="gate",
+                )
+            )
+    active_when = sp.Gt(controls, _ZERO)
+    guarded = tuple(requirement.when(active_when) for requirement in requirements)
+    for requirement in guarded:
+        requirement.validate()
+    return guarded
+
+
+def _project_portable_aggregate_controlled_cost(
+    estimate: ResourceEstimate,
+    controls: ResourceExpr,
+) -> tuple[ResourceEstimate | None, str]:
+    """Project a complete aggregate arity profile through portable controls.
+
+    The projection serializes every primitive because all transformed gates
+    share the added controls. Gate-name uncertainty is represented by
+    field-wise one- and two-qubit envelopes, while decomposition ancillas are
+    added to any scratch width already declared by the opaque cost.
+
+    Args:
+        estimate (ResourceEstimate): Aggregate cost before adding controls.
+        controls (ResourceExpr): Number of added coherent controls.
+
+    Returns:
+        tuple[ResourceEstimate | None, str]: Projected upper bound and an empty
+            reason, or ``None`` with the reason projection was unavailable.
+    """
+    reason = _aggregate_arity_projection_reason(estimate)
+    if reason is not None:
+        return None, reason
+    profile_constraints = _aggregate_arity_projection_constraints(
+        estimate,
+        controls,
+    )
+
+    single = _portable_controlled_arity_envelope(1, controls).repeat(
+        estimate.gates.single_qubit
+    )
+    two = _portable_controlled_arity_envelope(2, controls).repeat(
+        estimate.gates.two_qubit
+    )
+    projected = single.seq(two)
+    added_clean_ancillas = projected.width.clean_ancilla_qubits
+    width = dataclasses.replace(
+        estimate.width,
+        clean_ancilla_qubits=(
+            estimate.width.clean_ancilla_qubits + added_clean_ancillas
+        ),
+        peak_qubits=estimate.width.peak_qubits + added_clean_ancillas,
+    )
+    assumption = ResourceAssumption(
+        message=(
+            "controlled aggregate cost uses a conservative per-primitive "
+            "portable upper bound from complete one- and two-qubit counts; "
+            "gate kinds and scheduling are unavailable, and fallback clean "
+            "ancillas are counted in addition to declared opaque workspace; "
+            "any undeclared controlled global-phase overhead is outside this "
+            "model"
+        )
+    )
+    controlled = ResourceEstimate(
+        width=width,
+        gates=projected.gates,
+        depth=_max_depth(estimate.depth, projected.depth),
+        calls=estimate.calls,
+        assumptions=estimate.assumptions,
+        trace=_merge_trace(
+            f"controlled_arity_upper_bound({controls})",
+            estimate.trace,
+            projected.trace,
+        ),
+        quality=estimate.quality,
+        basis=estimate.basis,
+        precision=estimate.precision,
+        _allocation_sites=estimate._allocation_sites,
+        _constraints=(
+            *estimate._constraints,
+            *projected._constraints,
+            *profile_constraints,
+        ),
+        _output_sizes=estimate._output_sizes,
+        _input_sizes=estimate._input_sizes,
+        _has_output_summary=estimate._has_output_summary,
+        _dependency_keys=estimate._dependency_keys,
+        _guarded_assumptions=estimate._guarded_assumptions,
+        _guarded_qualities=estimate._guarded_qualities,
+        _symbol_aliases=estimate._symbol_aliases,
+    )
+    return (
+        controlled._with_metadata(
+            assumptions=(assumption,),
+            quality=EstimateQuality.MODELED,
+            active_when=sp.Gt(controls, _ZERO),
+        ),
+        "",
+    )
 
 
 def _estimate_portable_gate(

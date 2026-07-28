@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -16,6 +17,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType
@@ -71,6 +73,105 @@ def test_gate_matches_qubit_count_rejects_unknown_width() -> None:
     assert not _gate_matches_qubit_count(_GateWithQubitCount(None), 2)
     assert _gate_matches_qubit_count(_GateWithQubitCount(2), 2)
     assert not _gate_matches_qubit_count(_GateWithQubitCount(1), 2)
+
+
+def test_qinit_does_not_contribute_controlled_batch_weight() -> None:
+    """Workspace allocation alone cannot justify a shared control ladder."""
+    workspace = Value(type=QubitType(), name="workspace")
+    operation = QInitOperation(results=[workspace])
+
+    assert (
+        controlled_emission._batch_op_weight(
+            _ResolverOnlyEmitPass(),
+            operation,
+            {},
+        )
+        == 0
+    )
+
+
+def test_batch_weight_folds_preceding_classical_predicates() -> None:
+    """Emitter and estimator skip a ladder when static branches emit no gates."""
+
+    @qmc.qkernel
+    def conditional_identity(target: qmc.Qubit, flag: qmc.UInt) -> qmc.Qubit:
+        """Apply two statically disabled conditional gates."""
+        if flag > qmc.uint(0):
+            target = qmc.h(target)
+        if flag > qmc.uint(0):
+            target = qmc.h(target)
+        return target
+
+    body = conditional_identity.build()
+    flag = next(value for value in body.input_values if value.type.is_classical())
+    bindings = {flag.uuid: 0, "flag": 0}
+
+    weight = controlled_emission._controlled_body_batch_weight(
+        _ResolverOnlyEmitPass(),
+        body.operations,
+        bindings,
+    )
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Control the static identity body with three qubits."""
+        controls = qmc.qubit_array(3, "controls")
+        target = qmc.qubit("target")
+        controls, target = qmc.control(
+            conditional_identity,
+            num_controls=3,
+        )(controls, target, qmc.uint(0))
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert weight == 0
+    assert bindings == {flag.uuid: 0, "flag": 0}
+    assert estimate.gates.total == 0
+    assert estimate.gates.toffoli == 0
+    assert estimate.width.clean_ancilla_qubits == 0
+
+
+def test_batch_weight_binds_invoke_actuals_before_descending() -> None:
+    """Invoke analysis binds actual values before inspecting nested branches."""
+
+    @qmc.qkernel
+    def maybe_h(target: qmc.Qubit, flag: qmc.UInt) -> qmc.Qubit:
+        """Apply a Hadamard only for a nonzero static flag."""
+        if flag > qmc.uint(0):
+            target = qmc.h(target)
+        return target
+
+    @qmc.qkernel
+    def identity_from_invokes(target: qmc.Qubit) -> qmc.Qubit:
+        """Invoke two statically disabled conditional bodies."""
+        target = maybe_h(target, qmc.uint(0))
+        target = maybe_h(target, qmc.uint(0))
+        return target
+
+    weight = controlled_emission._controlled_body_batch_weight(
+        _ResolverOnlyEmitPass(),
+        identity_from_invokes.build().operations,
+        {},
+    )
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Control both nested identity invocations with three qubits."""
+        controls = qmc.qubit_array(3, "controls")
+        target = qmc.qubit("target")
+        controls, target = qmc.control(
+            identity_from_invokes,
+            num_controls=3,
+        )(controls, target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert weight == 0
+    assert estimate.gates.total == 0
+    assert estimate.gates.toffoli == 0
+    assert estimate.width.clean_ancilla_qubits == 0
 
 
 def test_controlled_dispatch_accepts_inverse_block(monkeypatch) -> None:

@@ -105,7 +105,7 @@ assert abstract.width.clean_ancilla_qubits == 0
 assert abstract.qubits == 4
 
 # %% [markdown]
-# `portable` is a conservative per-primitive algorithmic estimate. A backend with a native multi-controlled gate or whole-body ancilla sharing may use fewer resources. Select `logical` when you intentionally want the higher-level view in which each source primitive remains one abstract gate regardless of control count. Select `clifford_t` for aggregate Clifford+T resources of supported operations; `precision` controls arbitrary-rotation synthesis. Unsupported Clifford+T lowering raises an error instead of inventing a cost. None of these models performs routing, hardware-native optimization, or error-correction costing.
+# `portable` mirrors Qamomile's backend-neutral control fallback at the algorithmic level. When a concrete controlled body contains enough work, its gates share one computed control conjunction; isolated primitives and symbolic structures retain a conservative per-primitive fallback. A backend with a native multi-controlled gate may use fewer resources. Select `logical` when you intentionally want the higher-level view in which each source primitive remains one abstract gate regardless of control count. Select `clifford_t` for aggregate Clifford+T resources of supported operations; `precision` controls arbitrary-rotation synthesis. Unsupported Clifford+T lowering raises an error instead of inventing a cost. None of these models performs routing, hardware-native optimization, or error-correction costing.
 
 
 # %%
@@ -253,6 +253,50 @@ assert vector_est.parameters == {}
 # ## Opaque Boundaries, Condition-Aware Provenance, and Traces
 #
 # A bodyless callable has no honest gate cost unless you provide one. The default `UnknownResourcePolicy.ERROR` therefore raises. Prefer declaring an explicit `ResourceEstimate` cost on `qmc.opaque(...)` when one is known. For exploratory work, `OPAQUE_CALL` records a named call and query with `modeled` quality, while `ZERO_WITH_WARNING` records a zero-cost assumption. Neither policy pretends the unknown body was decomposed.
+#
+# A fixed opaque cost can still support a useful controlled estimate when its `portable` gate total is completely partitioned into `single_qubit` and `two_qubit` counts. Qamomile then controls every counted primitive with a conservative gate-kind upper bound, serializes their depth through the shared controls, and reports additional clean ancillas. Arity alone cannot distinguish, for example, X from H or CX from SWAP, nor can it reveal an undeclared global phase that becomes observable under control. The result therefore remains `modeled` and records these assumptions. If the arity profile is incomplete or contains three-or-more-qubit gates, the declared cost stays unchanged and the missing controlled overhead is explicit in `assumptions`; use a context-dependent `cost(ctx)` model when gate-specific control costs or phase behavior are known. A callback is authoritative for the complete invocation and can price all coherent controls exactly once through `ctx.total_controls`.
+
+
+# %%
+costed_oracle = qmc.opaque(
+    "costed_oracle",
+    num_qubits=2,
+    cost=qmc.ResourceEstimate(
+        gates=qmc.GateResources(
+            total=3,
+            single_qubit=2,
+            two_qubit=1,
+        ),
+        calls=qmc.CallResources(
+            queries_by_name={"costed_oracle": 1},
+        ),
+    ),
+)
+
+
+@qmc.qkernel
+def controlled_costed_oracle() -> tuple[qmc.Qubit, qmc.Qubit]:
+    control_0 = qmc.qubit("control_0")
+    control_1 = qmc.qubit("control_1")
+    target_0 = qmc.qubit("target_0")
+    target_1 = qmc.qubit("target_1")
+    *_, target_0, target_1 = qmc.control(
+        costed_oracle,
+        num_controls=2,
+    )(control_0, control_1, target_0, target_1)
+    return target_0, target_1
+
+
+# %%
+costed_est = controlled_costed_oracle.estimate_resources()
+assert costed_est.gates.total == 13
+assert costed_est.width.clean_ancilla_qubits == 2
+assert costed_est.calls.queries_by_name == {"costed_oracle": 1}
+assert costed_est.quality is qmc.EstimateQuality.MODELED
+assert any(
+    "complete one- and two-qubit counts" in assumption.message
+    for assumption in costed_est.assumptions
+)
 
 
 # %%
@@ -456,7 +500,7 @@ assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 # - For parameterized qkernels, results are SymPy expressions showing scaling within the selected model.
 # - `inputs` can supply classical values, array shapes, and an integer width for a one-dimensional quantum Vector; retained requirements reject invalid widths and indices.
 # - Check `basis`, `quality`, `assumptions`, and opt-in traces before interpreting a result as an exact implementation cost. Condition selection removes inactive provenance.
-# - `calls_by_name` describes opaque boundaries only. Body-backed calls are recursively expanded; unknown bodies use an explicit policy or cost.
+# - `calls_by_name` describes opaque boundaries only. Body-backed calls are recursively expanded; a fixed opaque cost with a complete one-/two-qubit profile receives a modeled controlled estimate, while other unknown bodies use an explicit policy or context-dependent cost.
 # - `to_dict()` exports symbolic metrics and requirements in a JSON-friendly form.
 # - Use `.substitute(n=...)` to evaluate an existing estimate at specific sizes and check feasibility; use initial `inputs` when concrete structure should sharpen dependency scheduling.
 # - The FTQC Shor and Ekerå–Håstad factories share the same `O(n^2)` windowed modular-multiplication body and one reused phase qubit.

@@ -151,6 +151,61 @@ class _ContextAwareOpaqueCost:
         )
 
 
+class _AuthoritativeControlOpaqueCost:
+    """Price all explicit and inherited controls exactly once."""
+
+    def __call__(self, ctx: qm.OpaqueCallContext) -> qm.ResourceEstimate:
+        """Build a cost that exposes every control-context component.
+
+        Args:
+            ctx (qm.OpaqueCallContext): Complete opaque invocation context.
+
+        Returns:
+            qm.ResourceEstimate: Complete callback-owned invocation cost.
+        """
+        gate_count = ctx.total_controls + 1
+        return qm.ResourceEstimate(
+            gates=qm.GateResources(
+                total=gate_count,
+                single_qubit=gate_count,
+            ),
+            calls=qm.CallResources(
+                calls_by_name={
+                    f"own_controls={ctx.own_controls}": 1,
+                    f"surrounding_controls={ctx.controls}": 1,
+                    f"total_controls={ctx.total_controls}": 1,
+                }
+            ),
+        )
+
+
+class _AuthoritativeArityProfileOpaqueCost:
+    """Return one complete arity profile already priced by the callback."""
+
+    def __call__(self, ctx: qm.OpaqueCallContext) -> qm.ResourceEstimate:
+        """Return a callback-owned one-/two-qubit gate profile.
+
+        Args:
+            ctx (qm.OpaqueCallContext): Complete opaque invocation context.
+
+        Returns:
+            qm.ResourceEstimate: Complete profile that needs no further
+            control projection.
+        """
+        return qm.ResourceEstimate(
+            gates=qm.GateResources(
+                total=3,
+                single_qubit=2,
+                two_qubit=1,
+            ),
+            calls=qm.CallResources(
+                calls_by_name={
+                    f"authoritative_total_controls={ctx.total_controls}": 1,
+                }
+            ),
+        )
+
+
 class _LogicalOnlyOpaqueCost:
     """Return a deliberately logical-basis callback cost."""
 
@@ -245,8 +300,8 @@ def test_raw_projection_axis_includes_semantic_basis_changes(
     assert estimate.depth.measurement_depth == 1
 
 
-def test_portable_controlled_qkernel_decomposes_every_body_gate() -> None:
-    """Every controlled primitive uses the portable multi-control fallback."""
+def test_portable_controlled_qkernel_shares_body_control_ladder() -> None:
+    """A controlled multi-gate body computes one shared control conjunction."""
 
     @qm.qkernel
     def circuit() -> qm.Qubit:
@@ -259,10 +314,10 @@ def test_portable_controlled_qkernel_decomposes_every_body_gate() -> None:
     portable = circuit.estimate_resources()
     abstract = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
-    assert portable.gates.total == 20
+    assert portable.gates.total == 8
     assert portable.gates.two_qubit == 4
-    assert portable.gates.multi_qubit == 16
-    assert portable.gates.toffoli == 16
+    assert portable.gates.multi_qubit == 4
+    assert portable.gates.toffoli == 4
     assert portable.width.allocated_qubits == 4
     assert portable.width.clean_ancilla_qubits == 2
     assert portable.width.peak_qubits == 6
@@ -273,6 +328,67 @@ def test_portable_controlled_qkernel_decomposes_every_body_gate() -> None:
     assert abstract.gates.multi_qubit == 4
     assert abstract.width.clean_ancilla_qubits == 0
     assert abstract.width.peak_qubits == 4
+
+
+def test_portable_controlled_loop_hoists_shared_ladder() -> None:
+    """A repeated controlled body holds one ladder across all iterations."""
+
+    @qm.qkernel
+    def loop_body(target: qm.Qubit) -> qm.Qubit:
+        """Apply three rotations in a static loop."""
+        for _index in qm.range(3):
+            target = qm.ry(target, 0.25)
+        return target
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Apply the loop body under two controls."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(loop_body, num_controls=2)(controls, target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 5
+    assert estimate.gates.two_qubit == 3
+    assert estimate.gates.multi_qubit == 2
+    assert estimate.gates.toffoli == 2
+    assert estimate.width.clean_ancilla_qubits == 1
+    assert estimate.width.peak_qubits == 4
+
+
+def test_two_control_native_x_body_skips_shared_ladder() -> None:
+    """Two-control X leaves remain direct Toffolis without an ancilla."""
+
+    @qm.qkernel
+    def x_body(
+        left: qm.Qubit,
+        right: qm.Qubit,
+    ) -> tuple[qm.Qubit, qm.Qubit]:
+        """Flip two independent targets."""
+        return qm.x(left), qm.x(right)
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply both X gates under two controls."""
+        controls = qm.qubit_array(2, "controls")
+        left = qm.qubit("left")
+        right = qm.qubit("right")
+        *_, left, right = qm.control(x_body, num_controls=2)(
+            controls,
+            left,
+            right,
+        )
+        return left, right
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 2
+    assert estimate.gates.multi_qubit == 2
+    assert estimate.gates.toffoli == 2
+    assert estimate.width.clean_ancilla_qubits == 0
+    assert estimate.width.peak_qubits == 4
 
 
 @pytest.mark.parametrize(
@@ -445,11 +561,11 @@ def test_open_control_brackets_forward_and_inverse_once() -> None:
     inverse = inverse_circuit.estimate_resources()
 
     for estimate in (forward, inverse):
-        assert estimate.gates.total == 14
+        assert estimate.gates.total == 8
         assert estimate.gates.single_qubit == 2
         assert estimate.gates.two_qubit == 4
-        assert estimate.gates.multi_qubit == 8
-        assert estimate.gates.toffoli == 8
+        assert estimate.gates.multi_qubit == 2
+        assert estimate.gates.toffoli == 2
         assert estimate.width.clean_ancilla_qubits == 1
 
 
@@ -624,18 +740,18 @@ def test_controlled_inverse_preserves_static_control_flow_resources() -> None:
     assert symbolic_branch.substitute(flag=1).gates == true_estimate.gates
     assert symbolic_branch.substitute(flag=0).gates == false_estimate.gates
 
-    assert inverse_estimate.gates.total == 15
+    assert inverse_estimate.gates.total == 7
     assert inverse_estimate.gates.two_qubit == 3
-    assert inverse_estimate.gates.multi_qubit == 12
-    assert inverse_estimate.gates.toffoli == 12
-    assert true_estimate.gates.total == 15
+    assert inverse_estimate.gates.multi_qubit == 4
+    assert inverse_estimate.gates.toffoli == 4
+    assert true_estimate.gates.total == 7
     assert true_estimate.gates.two_qubit == 3
-    assert true_estimate.gates.multi_qubit == 12
-    assert true_estimate.gates.toffoli == 12
-    assert false_estimate.gates.total == 20
+    assert true_estimate.gates.multi_qubit == 4
+    assert true_estimate.gates.toffoli == 4
+    assert false_estimate.gates.total == 8
     assert false_estimate.gates.two_qubit == 4
-    assert false_estimate.gates.multi_qubit == 16
-    assert false_estimate.gates.toffoli == 16
+    assert false_estimate.gates.multi_qubit == 4
+    assert false_estimate.gates.toffoli == 4
     assert true_estimate.width.clean_ancilla_qubits == 2
     assert false_estimate.width.clean_ancilla_qubits == 2
     assert inverse_estimate.width.clean_ancilla_qubits == 2
@@ -804,17 +920,17 @@ def test_controlled_pauli_evolve_resolves_binding_and_constant() -> None:
     assert single.gates.clifford == 2
     assert single.width.clean_ancilla_qubits == 0
 
-    assert triple.gates.total == 10
-    assert triple.gates.single_qubit == 2
-    assert triple.gates.two_qubit == 2
-    assert triple.gates.multi_qubit == 6
-    assert triple.gates.toffoli == 6
+    assert triple.gates.total == 8
+    assert triple.gates.single_qubit == 3
+    assert triple.gates.two_qubit == 1
+    assert triple.gates.multi_qubit == 4
+    assert triple.gates.toffoli == 4
     assert triple.gates.rotation == 2
     assert triple.width.clean_ancilla_qubits == 2
 
 
 def test_pauli_evolve_zero_time_specialization_removes_all_resources() -> None:
-    """Late zero-time inputs remove Pauli gates, depth, and control ancillas."""
+    """Zero time removes the gadget but not a statically selected shared ladder."""
     base_inputs = {"register": 1, "observable": qm_o.Z(0)}
     symbolic = _renamed_pauli_evolution.estimate_resources(inputs=base_inputs)
 
@@ -854,10 +970,11 @@ def test_pauli_evolve_zero_time_specialization_removes_all_resources() -> None:
     )
     controlled_zero = controlled_symbolic.substitute(time=0.0)
     controlled_active = controlled_symbolic.substitute(time=0.25)
-    assert controlled_zero.gates.total == 0
-    assert controlled_zero.depth.depth == 0
-    assert controlled_zero.width.clean_ancilla_qubits == 0
-    assert controlled_zero.width.peak_qubits == 4
+    assert controlled_zero.gates.total == 4
+    assert controlled_zero.gates.toffoli == 4
+    assert controlled_zero.depth.depth == 4
+    assert controlled_zero.width.clean_ancilla_qubits == 2
+    assert controlled_zero.width.peak_qubits == 6
     assert controlled_active.gates.total > 0
     assert controlled_active.width.clean_ancilla_qubits == 2
 
@@ -941,6 +1058,356 @@ def test_pauli_evolve_applies_unknown_policy_and_register_requirement() -> None:
     with pytest.raises(ValueError, match="at least 2 qubits"):
         circuit.estimate_resources(inputs={"width": 1, "hamiltonian": qm_o.Z(1)})
     assert bound.substitute(width=3).gates.total == 1
+
+
+@pytest.mark.parametrize(
+    ("num_controls", "expected_total", "expected_clean_ancillas"),
+    [
+        (1, 5, 1),
+        (2, 13, 2),
+        (4, 25, 4),
+    ],
+)
+def test_controlled_fixed_opaque_cost_projects_complete_arity_profile(
+    num_controls: int,
+    expected_total: int,
+    expected_clean_ancillas: int,
+) -> None:
+    """Complete opaque arity counts receive a portable controlled upper bound."""
+    oracle = qm.opaque(
+        "arity_oracle",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            gates=qm.GateResources(
+                total=3,
+                single_qubit=2,
+                two_qubit=1,
+            ),
+            calls=qm.CallResources(
+                calls_by_name={"arity_oracle": 1},
+                queries_by_name={"arity_oracle": 1},
+            ),
+        ),
+    )
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Apply the fixed-cost oracle under concrete coherent controls."""
+        controls = [qm.qubit(f"control_{index}") for index in range(num_controls)]
+        target = qm.qubit("target")
+        *_, target = qm.control(
+            oracle,
+            num_controls=num_controls,
+        )(*controls, target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == expected_total
+    assert estimate.depth.depth == expected_total
+    assert estimate.width.clean_ancilla_qubits == expected_clean_ancillas
+    assert estimate.calls.calls_by_name == {"arity_oracle": 1}
+    assert estimate.calls.queries_by_name == {"arity_oracle": 1}
+    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert any(
+        "complete one- and two-qubit counts" in assumption.message
+        for assumption in estimate.assumptions
+    )
+
+
+def test_open_control_brackets_wrap_projected_fixed_opaque_cost() -> None:
+    """Open controls add X brackets around the projected opaque gate cost."""
+    oracle = qm.opaque(
+        "open_arity_oracle",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            gates=qm.GateResources(
+                total=3,
+                single_qubit=2,
+                two_qubit=1,
+            ),
+            calls=qm.CallResources(
+                queries_by_name={"open_arity_oracle": 1},
+            ),
+        ),
+    )
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Apply one two-control oracle with one zero-valued control."""
+        control_0 = qm.qubit("control_0")
+        control_1 = qm.qubit("control_1")
+        target = qm.qubit("target")
+        *_, target = qm.control(
+            oracle,
+            num_controls=2,
+            control_value=2,
+        )(control_0, control_1, target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 15
+    assert estimate.depth.depth == 15
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.calls.queries_by_name == {"open_arity_oracle": 1}
+
+
+def test_incomplete_opaque_arity_profile_stays_explicitly_unprojected() -> None:
+    """An unclassified gate remainder preserves cost with a clear assumption."""
+    oracle = qm.opaque(
+        "incomplete_arity_oracle",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            gates=qm.GateResources(
+                total=3,
+                single_qubit=2,
+            ),
+        ),
+    )
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Control an opaque cost whose arity profile has one unknown gate."""
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        _, target = qm.control(oracle)(control, target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 3
+    assert estimate.gates.single_qubit == 2
+    assert any(
+        "not fully partitioned" in assumption.message
+        for assumption in estimate.assumptions
+    )
+
+
+def test_opaque_control_projection_adds_to_declared_clean_workspace() -> None:
+    """Fallback ancillas remain separate from opaque scratch workspace."""
+    estimate = qm.ResourceEstimate(
+        width=qm.WidthResources(
+            clean_ancilla_qubits=3,
+            peak_qubits=3,
+        ),
+        gates=qm.GateResources(
+            total=1,
+            two_qubit=1,
+        ),
+    ).controlled(2)
+
+    assert estimate.gates.total == 7
+    assert estimate.width.clean_ancilla_qubits == 5
+    assert estimate.width.peak_qubits == 5
+
+
+def test_symbolic_opaque_control_projection_preserves_zero_control_cost() -> None:
+    """A symbolic zero-control branch remains the original aggregate cost."""
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        width=qm.WidthResources(clean_ancilla_qubits=1, peak_qubits=1),
+        gates=qm.GateResources(
+            total=3,
+            single_qubit=2,
+            two_qubit=1,
+            clifford=2,
+            rotation=1,
+            non_clifford=1,
+        ),
+        depth=qm.DepthResources(
+            depth=2,
+            clifford_depth=1,
+            rotation_depth=1,
+            non_clifford_depth=1,
+        ),
+        calls=qm.CallResources(
+            calls_by_name={"symbolic_arity_oracle": 1},
+            queries_by_name={"symbolic_arity_oracle": 1},
+        ),
+        assumptions=(qm.ResourceAssumption("declared aggregate model"),),
+        quality=qm.EstimateQuality.MODELED,
+    )
+
+    symbolic = base.controlled(controls)
+    zero = symbolic.substitute(controls=0)
+
+    assert zero.width == base.width
+    assert zero.gates == base.gates
+    assert zero.depth == base.depth
+    assert zero.calls == base.calls
+    assert zero.assumptions == base.assumptions
+    assert zero.quality is base.quality
+    assert symbolic.substitute(controls=2).gates.total == 13
+
+
+def test_symbolic_opaque_arity_constraints_reject_invalid_specialization() -> None:
+    """Deferred family bounds prevent a symbolic aggregate undercount."""
+    gates = sp.Symbol("gates", integer=True, nonnegative=True)
+    rotations = sp.Symbol("rotations", integer=True, nonnegative=True)
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=gates,
+            single_qubit=gates,
+            rotation=rotations,
+        )
+    ).controlled(controls)
+
+    valid = estimate.substitute(gates=2, rotations=1, controls=2)
+
+    assert valid.gates.total == 6
+    assert "rotations" in estimate.parameters
+    assert any(
+        requirement["label"]
+        == "Portable aggregate rotation count within total gate count"
+        for requirement in estimate.to_dict()["requirements"]
+    )
+    with pytest.raises(ValueError, match="rotation count within total"):
+        estimate.substitute(gates=1, rotations=2, controls=2)
+    assert estimate.substitute(gates=1, rotations=2, controls=0).gates.rotation == 2
+
+
+def test_query_only_opaque_cost_is_not_treated_as_complete_gate_profile() -> None:
+    """A query declaration without gate counts cannot bound control overhead."""
+    base = qm.ResourceEstimate(
+        calls=qm.CallResources(
+            calls_by_name={"query_only_oracle": 1},
+            queries_by_name={"query_only_oracle": 1},
+        )
+    )
+
+    estimate = base.controlled(3)
+
+    assert estimate.gates == base.gates
+    assert estimate.depth == base.depth
+    assert estimate.calls == base.calls
+    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert any(
+        "no declared one- or two-qubit gate profile" in assumption.message
+        for assumption in estimate.assumptions
+    )
+    assert not any(
+        "complete one- and two-qubit counts" in assumption.message
+        for assumption in estimate.assumptions
+    )
+
+
+def test_zero_aggregate_cost_does_not_claim_controlled_upper_bound() -> None:
+    """An empty aggregate cannot reveal hidden controlled global phase."""
+    estimate = qm.ResourceEstimate.zero().controlled(3)
+
+    assert estimate.gates.total == 0
+    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert any(
+        "cannot distinguish an exact identity from an undeclared global phase"
+        in assumption.message
+        for assumption in estimate.assumptions
+    )
+
+
+@pytest.mark.parametrize(
+    "gates",
+    [
+        qm.GateResources(total=1, single_qubit=1, toffoli=1),
+        qm.GateResources(total=1, two_qubit=1, t=1),
+    ],
+)
+def test_incompatible_opaque_gate_family_arity_is_not_projected(
+    gates: qm.GateResources,
+) -> None:
+    """Known family/arity contradictions keep their declared aggregate cost."""
+    estimate = qm.ResourceEstimate(gates=gates).controlled(4)
+
+    assert estimate.gates == gates
+    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert any("exceeds the declared" in item.message for item in estimate.assumptions)
+
+
+def test_opaque_callback_prices_own_and_surrounding_controls_once() -> None:
+    """A callback owns explicit and inherited control pricing exactly once."""
+    oracle = qm.opaque(
+        "authoritative_control_oracle",
+        num_qubits=1,
+        num_control_qubits=1,
+        cost=_AuthoritativeControlOpaqueCost(),
+    )
+
+    @qm.qkernel
+    def invoke_oracle(
+        own_control: qm.Qubit,
+        target: qm.Qubit,
+    ) -> tuple[qm.Qubit, qm.Qubit]:
+        """Invoke the oracle with its one explicit control."""
+        own_control, target = oracle(target, controls=(own_control,))
+        return own_control, target
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Invoke the controlled oracle under two inherited controls."""
+        surrounding_0 = qm.qubit("surrounding_0")
+        surrounding_1 = qm.qubit("surrounding_1")
+        own_control = qm.qubit("own_control")
+        target = qm.qubit("target")
+        return qm.control(
+            invoke_oracle,
+            num_controls=2,
+        )(surrounding_0, surrounding_1, own_control, target)
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 4
+    assert estimate.gates.single_qubit == 4
+    assert estimate.calls.calls_by_name == {
+        "own_controls=1": 1,
+        "surrounding_controls=2": 1,
+        "total_controls=3": 1,
+    }
+    assert not any(
+        "controlled aggregate cost" in assumption.message
+        for assumption in estimate.assumptions
+    )
+
+
+def test_opaque_callback_arity_profile_is_not_controlled_twice() -> None:
+    """A complete callback-owned arity profile receives no second projection."""
+    oracle = qm.opaque(
+        "authoritative_arity_oracle",
+        num_qubits=1,
+        cost=_AuthoritativeArityProfileOpaqueCost(),
+    )
+
+    @qm.qkernel
+    def invoke_oracle(target: qm.Qubit) -> qm.Qubit:
+        """Invoke the direct opaque oracle."""
+        (target,) = oracle(target)
+        return target
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Invoke the oracle under two inherited controls."""
+        control_0 = qm.qubit("control_0")
+        control_1 = qm.qubit("control_1")
+        target = qm.qubit("target")
+        return qm.control(
+            invoke_oracle,
+            num_controls=2,
+        )(control_0, control_1, target)
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates == qm.GateResources(
+        total=3,
+        single_qubit=2,
+        two_qubit=1,
+    )
+    assert estimate.calls.calls_by_name == {
+        "authoritative_total_controls=2": 1,
+    }
+    assert not any(
+        "controlled aggregate cost" in assumption.message
+        for assumption in estimate.assumptions
+    )
 
 
 def test_opaque_callback_cost_validates_basis_and_precision_provenance() -> None:
@@ -1174,14 +1641,14 @@ def test_pauli_lcu_block_encoding_composes_forward_inverse_and_control() -> None
     assert direct_estimate.width.allocated_qubits == 2
     assert direct_estimate.width.peak_qubits == 2
 
-    assert controlled_estimate.gates.total == 32
-    assert controlled_estimate.gates.two_qubit == 6
-    assert controlled_estimate.gates.multi_qubit == 26
-    assert controlled_estimate.gates.toffoli == 26
+    assert controlled_estimate.gates.total == 10
+    assert controlled_estimate.gates.two_qubit == 5
+    assert controlled_estimate.gates.multi_qubit == 5
+    assert controlled_estimate.gates.toffoli == 5
     assert controlled_estimate.width.allocated_qubits == 5
-    assert controlled_estimate.width.clean_ancilla_qubits == 3
-    assert controlled_estimate.width.peak_qubits == 8
-    assert controlled_estimate.width.circuit_qubits == 8
+    assert controlled_estimate.width.clean_ancilla_qubits == 2
+    assert controlled_estimate.width.peak_qubits == 7
+    assert controlled_estimate.width.circuit_qubits == 7
 
     assert root_estimate.width.allocated_qubits == 0
     assert root_estimate.width.input_qubits == 2
@@ -1282,19 +1749,19 @@ def test_recursive_lcu_expands_through_inverse_control_and_serialization() -> No
     assert direct_estimate.width.peak_qubits == 3
 
     assert controlled_estimate.gates == qm.GateResources(
-        total=21,
-        single_qubit=0,
+        total=17,
+        single_qubit=3,
         two_qubit=9,
-        multi_qubit=12,
-        clifford=3,
+        multi_qubit=5,
+        clifford=6,
         rotation=6,
         t=0,
-        toffoli=12,
-        non_clifford=18,
+        toffoli=5,
+        non_clifford=11,
     )
     assert controlled_estimate.width.input_qubits == 4
-    assert controlled_estimate.width.clean_ancilla_qubits == 2
-    assert controlled_estimate.width.peak_qubits == 6
+    assert controlled_estimate.width.clean_ancilla_qubits == 1
+    assert controlled_estimate.width.peak_qubits == 5
 
     assert root_estimate.gates == direct_estimate.gates
     assert root_estimate.width == direct_estimate.width
