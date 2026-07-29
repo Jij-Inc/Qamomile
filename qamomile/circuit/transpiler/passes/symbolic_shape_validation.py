@@ -53,15 +53,30 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
     HasNestedOps,
+    IfOperation,
+    WhileOperation,
 )
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.types import (
+    BitType,
+    FloatType,
+    ObservableType,
+    QubitType,
+    UIntType,
+    ValueType,
+)
 from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 from qamomile.circuit.transpiler.block_parameter_binding import (
     pair_block_operands,
 )
 from qamomile.circuit.transpiler.errors import QamomileCompileError
 from qamomile.circuit.transpiler.passes import Pass
+from qamomile.circuit.transpiler.passes.control_flow_reachability import (
+    reachable_nested_regions,
+    same_exact_typed_constant,
+    static_loop_trip_count,
+)
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 
 # Shape dims created by ``func_to_block.create_dummy_input`` follow the
@@ -69,6 +84,27 @@ from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowV
 # an actionable diagnostic identifying the parameter array whose shape
 # failed to resolve.
 _SHAPE_DIM_NAME_PATTERN = re.compile(r"^(?P<array>.+)_dim(?P<index>\d+)$")
+
+_FRONTEND_SCALAR_TYPE_NAMES: dict[type[ValueType], str] = {
+    BitType: "Bit",
+    FloatType: "Float",
+    ObservableType: "Observable",
+    QubitType: "Qubit",
+    UIntType: "UInt",
+}
+
+
+def _frontend_scalar_type_name(value_type: ValueType) -> str | None:
+    """Return the frontend spelling of a recognized scalar IR type.
+
+    Args:
+        value_type (ValueType): Array element type represented in IR.
+
+    Returns:
+        str | None: Frontend scalar name for a supported public handle type,
+            otherwise ``None`` so diagnostics remain type-neutral.
+    """
+    return _FRONTEND_SCALAR_TYPE_NAMES.get(type(value_type))
 
 
 def _looks_like_parameter_shape_dim(v: Value) -> tuple[str, int] | None:
@@ -95,6 +131,7 @@ def _format_actionable_error(
     array_name: str,
     dim_index: int,
     location_hint: str,
+    element_type_name: str | None = None,
 ) -> str:
     """Build the diagnostic for an unresolved parameter shape dim.
 
@@ -104,10 +141,16 @@ def _format_actionable_error(
         dim_index (int): Index of the unresolved shape dimension.
         location_hint (str): Human-readable description of where the dim
             is consumed (e.g. ``"a for-loop 'stop' bound"``).
+        element_type_name (str | None): Frontend scalar type stored by the
+            array, such as ``"Float"`` or ``"UInt"``. Unknown types use an
+            ellipsis instead of suggesting an incorrect annotation.
 
     Returns:
         str: The formatted multi-line error message with concrete fixes.
     """
+    count_stem = array_name[:-1] if array_name.endswith("s") else array_name
+    count_name = f"{count_stem}_count"
+    element_type = f"qm.{element_type_name}" if element_type_name else "..."
     return (
         f"Parameter array '{array_name}' has unresolved shape dimension "
         f"{dim_index}: {location_hint} depends on its length at compile "
@@ -124,10 +167,11 @@ def _format_actionable_error(
         f"  2. If the array values must stay per-execution parameters, "
         f"use a separate compile-time loop counter instead of querying "
         f"the shape:\n"
-        f"       def kernel(p: qm.UInt, {array_name}: qm.Vector[qm.Float], ...):\n"
-        f"           for layer in qm.range(p):\n"
+        f"       def kernel({count_name}: qm.UInt, "
+        f"{array_name}: qm.Vector[{element_type}], ...):\n"
+        f"           for layer in qm.range({count_name}):\n"
         f"               ... {array_name}[layer] ...\n"
-        f"       transpiler.transpile(..., bindings={{'p': 2}}, "
+        f"       transpiler.transpile(..., bindings={{'{count_name}': 2}}, "
         f"parameters=['{array_name}'])"
     )
 
@@ -183,8 +227,81 @@ def _build_classical_dependency_graph(
                 operand_uuids = {value.uuid for value in input_values}
                 for result in op.results:
                     self.graph.setdefault(result.uuid, set()).update(operand_uuids)
+            self._record_control_flow_edges(op)
             for value in input_values:
                 self._record_value_reference_edges(value)
+
+        def _visit_control_flow(self, op: Operation) -> None:
+            """Visit only statically reachable nested regions.
+
+            Args:
+                op (Operation): Operation whose nested regions may be
+                    compile-time selectable.
+
+            Returns:
+                None: Recurses into reachable nested operations in place.
+            """
+            if isinstance(op, HasNestedOps):
+                for region in reachable_nested_regions(op):
+                    self.visit_operations(list(region.operations))
+
+        def _record_control_flow_edges(self, op: Operation) -> None:
+            """Record dataflow crossing a structured-control boundary.
+
+            Args:
+                op (Operation): Operation whose merge or loop-carried values
+                    should be connected.
+
+            Returns:
+                None: Mutates ``self.graph`` in place.
+            """
+            if isinstance(op, IfOperation):
+                for merge in op.iter_merges():
+                    dependencies = self.graph.setdefault(merge.result.uuid, set())
+                    if op.condition.is_constant():
+                        dependencies.add(
+                            merge.select(bool(op.condition.get_const())).uuid
+                        )
+                        continue
+                    dependencies.update((merge.true_value.uuid, merge.false_value.uuid))
+                    equal_constants = same_exact_typed_constant(
+                        merge.true_value,
+                        merge.false_value,
+                    )
+                    if not merge.is_identity and not equal_constants:
+                        dependencies.add(op.condition.uuid)
+                return
+
+            if isinstance(op, (ForOperation, ForItemsOperation)):
+                trip_count = static_loop_trip_count(op)
+                for region_arg in op.region_args:
+                    if trip_count == 0:
+                        self.graph.setdefault(region_arg.result.uuid, set()).add(
+                            region_arg.init.uuid
+                        )
+                        continue
+                    self.graph.setdefault(region_arg.block_arg.uuid, set()).add(
+                        region_arg.init.uuid
+                    )
+                    if trip_count is None or trip_count > 1:
+                        self.graph[region_arg.block_arg.uuid].add(
+                            region_arg.yielded.uuid
+                        )
+                    result_dependencies = self.graph.setdefault(
+                        region_arg.result.uuid, set()
+                    )
+                    result_dependencies.add(region_arg.yielded.uuid)
+                    if trip_count is None:
+                        result_dependencies.add(region_arg.init.uuid)
+                return
+
+            if isinstance(op, WhileOperation):
+                for region_arg in op.region_args:
+                    sources = (region_arg.init.uuid, region_arg.yielded.uuid)
+                    self.graph.setdefault(region_arg.block_arg.uuid, set()).update(
+                        sources
+                    )
+                    self.graph.setdefault(region_arg.result.uuid, set()).update(sources)
 
         def _record_value_reference_edges(
             self,
@@ -213,6 +330,16 @@ def _build_classical_dependency_graph(
                     self.graph.setdefault(value.uuid, set()).add(idx.uuid)
                     self._record_value_reference_edges(idx, seen)
 
+            # A symbolic array dimension is derived from the array parameter
+            # whose runtime payload determines that dimension. Record the
+            # reverse dataflow edge so a structural expression such as
+            # ``(angles.shape[0] - 1) // 2`` can still be traced back to the
+            # public ``angles`` parameter after arithmetic has replaced the
+            # direct ``angles_dim0`` loop bound with anonymous results.
+            for dimension in getattr(value, "shape", ()):
+                if isinstance(dimension, ValueBase):
+                    self.graph.setdefault(dimension.uuid, set()).add(value.uuid)
+
             parent = getattr(value, "parent_array", None)
             if parent is None:
                 return
@@ -220,6 +347,9 @@ def _build_classical_dependency_graph(
 
             cur = parent
             while cur is not None:
+                for dimension in getattr(cur, "shape", ()):
+                    if isinstance(dimension, ValueBase):
+                        self.graph.setdefault(dimension.uuid, set()).add(cur.uuid)
                 for bound in (
                     getattr(cur, "slice_start", None),
                     getattr(cur, "slice_step", None),
@@ -379,6 +509,17 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             for name, value in input.parameters.items()
             if isinstance(value, ValueBase)
         }
+        self._input_shape_dimensions = {
+            dimension.uuid: (
+                value.name,
+                index,
+                _frontend_scalar_type_name(value.type),
+            )
+            for value in input.input_values
+            if isinstance(value, ArrayValue)
+            for index, dimension in enumerate(value.shape)
+            if value.name and not dimension.is_constant()
+        }
         dependency_graph = _build_classical_dependency_graph(input.operations)
         self._walk(
             input.operations,
@@ -429,9 +570,9 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             )
             if isinstance(op, HasNestedOps):
                 nested_scope = enclosing_loop_vars | self._declared_loop_var_uuids(op)
-                for nested in op.nested_op_lists():
+                for region in reachable_nested_regions(op):
                     self._walk(
-                        nested,
+                        list(region.operations),
                         nested_scope,
                         dependency_graph,
                         aliased_shape_dims,
@@ -530,8 +671,8 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         Returns:
             frozenset[str]: UUIDs of the iteration variables ``op`` binds
                 for its body — ``loop_var_value`` for ``ForOperation``,
-                key/value variables for ``ForItemsOperation``, empty for
-                other control flow.
+                key/value variables and vector-key shape dimensions for
+                ``ForItemsOperation``, empty for other control flow.
         """
         uuids: set[str] = set()
         if isinstance(op, ForOperation) and op.loop_var_value is not None:
@@ -539,6 +680,8 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         if isinstance(op, ForItemsOperation):
             for value in op.key_var_values or ():
                 uuids.add(value.uuid)
+                if isinstance(value, ArrayValue):
+                    uuids.update(dimension.uuid for dimension in value.shape)
             if op.value_var_value is not None:
                 uuids.add(op.value_var_value.uuid)
         return frozenset(uuids)
@@ -620,13 +763,35 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         if not isinstance(width, Value) or width.is_constant():
             return
         shape_info = _looks_like_parameter_shape_dim(width)
-        if shape_info is not None and width.uuid not in aliased_shape_dims:
+        if (
+            shape_info is not None
+            and width.uuid not in enclosing_loop_vars
+            and width.uuid not in aliased_shape_dims
+        ):
             array_name, dim_index = shape_info
+            input_shape_info = self._input_shape_dimensions.get(width.uuid)
             raise QamomileCompileError(
                 _format_actionable_error(
                     array_name,
                     dim_index,
                     "a SELECT num_index_qubits value",
+                    None if input_shape_info is None else input_shape_info[2],
+                )
+            )
+        shape_info = self._shape_dimension_source(
+            width,
+            enclosing_loop_vars,
+            dependency_graph,
+            aliased_shape_dims,
+        )
+        if shape_info is not None:
+            array_name, dim_index, element_type_name = shape_info
+            raise QamomileCompileError(
+                _format_actionable_error(
+                    array_name,
+                    dim_index,
+                    "a SELECT num_index_qubits value",
+                    element_type_name,
                 )
             )
         param_name = self._runtime_parameter_source(
@@ -714,13 +879,35 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
         if value.is_constant():
             return
         shape_info = _looks_like_parameter_shape_dim(value)
-        if shape_info is not None and value.uuid not in aliased_shape_dims:
+        if (
+            shape_info is not None
+            and value.uuid not in enclosing_loop_vars
+            and value.uuid not in aliased_shape_dims
+        ):
             array_name, dim_index = shape_info
+            input_shape_info = self._input_shape_dimensions.get(value.uuid)
             raise QamomileCompileError(
                 _format_actionable_error(
                     array_name,
                     dim_index,
                     f"a controlled-unitary {field_label} value",
+                    None if input_shape_info is None else input_shape_info[2],
+                )
+            )
+        shape_info = self._shape_dimension_source(
+            value,
+            enclosing_loop_vars,
+            dependency_graph,
+            aliased_shape_dims,
+        )
+        if shape_info is not None:
+            array_name, dim_index, element_type_name = shape_info
+            raise QamomileCompileError(
+                _format_actionable_error(
+                    array_name,
+                    dim_index,
+                    f"a controlled-unitary {field_label} value",
+                    element_type_name,
                 )
             )
         param_name = self._runtime_parameter_source(
@@ -767,11 +954,38 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
             if not isinstance(operand, Value):
                 continue
             shape_info = _looks_like_parameter_shape_dim(operand)
-            if shape_info is not None and operand.uuid not in aliased_shape_dims:
+            if (
+                shape_info is not None
+                and operand.uuid not in enclosing_loop_vars
+                and operand.uuid not in aliased_shape_dims
+            ):
                 array_name, dim_index = shape_info
+                input_shape_info = self._input_shape_dimensions.get(operand.uuid)
                 location = f"a for-loop '{label}' bound (loop variable '{op.loop_var}')"
                 raise QamomileCompileError(
-                    _format_actionable_error(array_name, dim_index, location)
+                    _format_actionable_error(
+                        array_name,
+                        dim_index,
+                        location,
+                        None if input_shape_info is None else input_shape_info[2],
+                    )
+                )
+            shape_info = self._shape_dimension_source(
+                operand,
+                enclosing_loop_vars,
+                dependency_graph,
+                aliased_shape_dims,
+            )
+            if shape_info is not None:
+                array_name, dim_index, element_type_name = shape_info
+                location = f"a for-loop '{label}' bound (loop variable '{op.loop_var}')"
+                raise QamomileCompileError(
+                    _format_actionable_error(
+                        array_name,
+                        dim_index,
+                        location,
+                        element_type_name,
+                    )
                 )
             param_name = self._runtime_parameter_source(
                 operand,
@@ -784,6 +998,52 @@ class SymbolicShapeValidationPass(Pass[Block, Block]):
                         param_name, label, op.loop_var
                     )
                 )
+
+    def _shape_dimension_source(
+        self,
+        operand: Value,
+        enclosing_loop_vars: frozenset[str],
+        dependency_graph: dict[str, set[str]],
+        aliased_shape_dims: frozenset[str],
+    ) -> tuple[str, int, str | None] | None:
+        """Trace a structural expression back to an input array dimension.
+
+        Args:
+            operand (Value): Structural value whose classical dependencies
+                should be inspected.
+            enclosing_loop_vars (frozenset[str]): Loop-variable UUIDs that are
+                resolved during emit-time unrolling.
+            dependency_graph (dict[str, set[str]]): Classical dependency edges
+                visible at ``operand``.
+            aliased_shape_dims (frozenset[str]): Owned-block formal dimensions
+                whose display names do not identify public input arrays.
+
+        Returns:
+            tuple[str, int, str | None] | None: Public array name, dimension
+            index, and recognized frontend element-type name when one is
+            reachable, otherwise ``None``. The element-type entry is ``None``
+            for an unrecognized IR type.
+        """
+        if operand.is_constant():
+            return None
+        seen: set[str] = set()
+        stack = [operand.uuid]
+        while stack:
+            uuid = stack.pop()
+            if uuid in seen:
+                continue
+            seen.add(uuid)
+            if uuid in enclosing_loop_vars:
+                continue
+            shape_info = (
+                None
+                if uuid in aliased_shape_dims
+                else self._input_shape_dimensions.get(uuid)
+            )
+            if shape_info is not None:
+                return shape_info
+            stack.extend(dependency_graph.get(uuid, ()))
+        return None
 
     def _runtime_parameter_source(
         self,

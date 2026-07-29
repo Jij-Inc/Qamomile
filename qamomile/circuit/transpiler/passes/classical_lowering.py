@@ -144,11 +144,16 @@ class ClassicalLoweringPass(Pass[Block, Block]):
                 new_ops.append(self._lower(op))
                 continue
             if isinstance(op, HasNestedOps):
-                rewritten_lists = [
-                    self._rewrite_operations(body, tainted)
-                    for body in op.nested_op_lists()
+                rewritten_regions = [
+                    dataclasses.replace(
+                        region,
+                        operations=tuple(
+                            self._rewrite_operations(list(region.operations), tainted)
+                        ),
+                    )
+                    for region in op.nested_regions()
                 ]
-                new_ops.append(op.rebuild_nested(rewritten_lists))
+                new_ops.append(op.rebuild_regions(rewritten_regions))
                 continue
             new_ops.append(op)
         return new_ops
@@ -245,10 +250,19 @@ class ClassicalLoweringPass(Pass[Block, Block]):
                 new_ops.extend(appended)
                 continue
             if isinstance(op, HasNestedOps):
-                rebuilt = op.rebuild_nested(
+                rebuilt = op.rebuild_regions(
                     [
-                        self._lower_if_merges(body, tainted, while_protected)
-                        for body in op.nested_op_lists()
+                        dataclasses.replace(
+                            region,
+                            operations=tuple(
+                                self._lower_if_merges(
+                                    list(region.operations),
+                                    tainted,
+                                    while_protected,
+                                )
+                            ),
+                        )
+                        for region in op.nested_regions()
                     ]
                 )
                 if isinstance(rebuilt, (ForOperation, ForItemsOperation)):

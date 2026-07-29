@@ -1715,6 +1715,9 @@ def _decode_for(d: dict[str, Any], ctx: _DecodeContext) -> ForOperation:
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
         region_args=_decode_region_args(d, ctx, results),
+        captures=tuple(
+            _materialize_as_value_like(ctx, ref) for ref in d.get("capture_refs", ())
+        ),
     )
     validate_region_args(op)
     return op
@@ -1756,6 +1759,9 @@ def _decode_for_items(d: dict[str, Any], ctx: _DecodeContext) -> ForItemsOperati
         operations=body,
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
         region_args=_decode_region_args(d, ctx, results),
+        captures=tuple(
+            _materialize_as_value_like(ctx, ref) for ref in d.get("capture_refs", ())
+        ),
     )
     validate_region_args(op)
     return op
@@ -1785,6 +1791,9 @@ def _decode_while(d: dict[str, Any], ctx: _DecodeContext) -> WhileOperation:
         max_iterations=d.get("max_iterations"),
         loop_carried_rebinds=_decode_loop_carried_rebinds(d, ctx),
         region_args=_decode_region_args(d, ctx, results),
+        captures=tuple(
+            _materialize_as_value_like(ctx, ref) for ref in d.get("capture_refs", ())
+        ),
     )
     validate_region_args(op)
     return op
@@ -1854,6 +1863,14 @@ def _decode_if(d: dict[str, Any], ctx: _DecodeContext) -> IfOperation:
         true_operations=true_body,
         false_operations=false_body,
         branch_rebinds=_decode_branch_rebinds(d, ctx),
+        true_captures=tuple(
+            _materialize_as_value_like(ctx, ref)
+            for ref in d.get("true_capture_refs", ())
+        ),
+        false_captures=tuple(
+            _materialize_as_value_like(ctx, ref)
+            for ref in d.get("false_capture_refs", ())
+        ),
     )
     for true_ref, false_ref, result in zip(true_refs, false_refs, results, strict=True):
         op.add_merge(

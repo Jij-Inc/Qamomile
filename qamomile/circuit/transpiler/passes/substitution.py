@@ -442,12 +442,20 @@ class SubstitutionPass(Pass[Block, Block]):
                 ],
             )
         if isinstance(op, HasNestedOps):
-            return op.rebuild_nested(
-                [
-                    self._transform_operations(nested, apply_rules=apply_rules)
-                    for nested in op.nested_op_lists()
-                ]
+            new_regions = tuple(
+                dataclasses.replace(
+                    region,
+                    operations=tuple(
+                        self._transform_operations(
+                            list(region.operations),
+                            apply_rules=apply_rules,
+                        )
+                    ),
+                )
+                for region in op.nested_regions()
             )
+            return op.rebuild_regions(new_regions)
+
         return op
 
     def _transform_definition(self, definition: CallableDef) -> CallableDef:

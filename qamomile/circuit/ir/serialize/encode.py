@@ -287,8 +287,8 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
         if isinstance(v, ValueBase):
             ctx.register_value(v)
     if isinstance(op, HasNestedOps):
-        for child_list in op.nested_op_lists():
-            for child in child_list:
+        for region in op.nested_regions():
+            for child in region.operations:
                 _walk_op_values(child, ctx)
     if isinstance(op, InvokeOperation):
         ctx.register_definition(op.definition)
@@ -1418,6 +1418,7 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["region_args"] = _encode_region_args(op.region_args)
+    d["capture_refs"] = [value.uuid for value in op.captures]
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1451,6 +1452,7 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["region_args"] = _encode_region_args(op.region_args)
+    d["capture_refs"] = [value.uuid for value in op.captures]
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1476,6 +1478,7 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
     d["max_iterations"] = op.max_iterations
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["region_args"] = _encode_region_args(op.region_args)
+    d["capture_refs"] = [value.uuid for value in op.captures]
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1531,6 +1534,8 @@ def _encode_if(op: IfOperation, ctx: _EncodeContext) -> dict[str, Any]:
     d["true_yield_refs"] = [m.true_value.uuid for m in merges]
     d["false_yield_refs"] = [m.false_value.uuid for m in merges]
     d["branch_rebinds"] = _encode_branch_rebinds(op.branch_rebinds)
+    d["true_capture_refs"] = [value.uuid for value in op.true_captures]
+    d["false_capture_refs"] = [value.uuid for value in op.false_captures]
     return d
 
 

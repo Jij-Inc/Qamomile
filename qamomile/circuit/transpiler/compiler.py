@@ -25,6 +25,8 @@ from qamomile.circuit.transpiler.passes.entrypoint_validation import (
 from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
     ParameterShapeResolutionPass,
 )
+from qamomile.circuit.transpiler.passes.region_capture import RegionCapturePass
+from qamomile.circuit.transpiler.passes.region_validation import RegionValidationPass
 from qamomile.circuit.transpiler.prepared import PreparedModule, prepare_module
 from qamomile.circuit.transpiler.target import CompilationTarget
 
@@ -150,6 +152,8 @@ class QamomileCompiler:
             oracle_bindings,
         )
         block = ParameterShapeResolutionPass(ordinary_bindings).run(block)
+        block = RegionCapturePass().run(block)
+        RegionValidationPass().run(block)
         EffectValidationPass().run(block)
         return prepare_module(block, ordinary_bindings)
 

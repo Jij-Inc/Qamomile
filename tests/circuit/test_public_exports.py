@@ -33,6 +33,7 @@ from qamomile.circuit.frontend.operation.measurement import (
     reset,
 )
 from qamomile.circuit.frontend.oracle import Oracle, opaque
+from qamomile.circuit.frontend.struct import struct
 from qamomile.circuit.stdlib.block_encoding.ising_z import (
     IsingZBlockEncoding,
     ising_z_block_encoding,
@@ -51,6 +52,7 @@ from qamomile.circuit.stdlib.block_encoding.periodic_shift import (
     PeriodicShiftLCUBlockEncoding,
     periodic_shift_lcu_block_encoding,
 )
+from qamomile.circuit.stdlib.qsvt import qsvt
 from qamomile.circuit.transpiler import job as _job_module
 
 
@@ -120,6 +122,12 @@ def test_callable_helpers_are_publicly_reexported():
         )
 
 
+def test_struct_is_publicly_reexported() -> None:
+    """The trace-time record decorator is part of the circuit API."""
+    assert qmc.struct is struct
+    assert "struct" in qmc.__all__
+
+
 def test_global_phase_is_publicly_reexported() -> None:
     """The global-phase combinator is part of the curated circuit API."""
     assert qmc.global_phase is global_phase
@@ -177,6 +185,15 @@ def test_block_encoding_subpackage_groups_every_public_producer() -> None:
         assert getattr(stdlib, name) is value
         assert getattr(qmc, name) is value
         assert name in block_encoding.__all__
+
+
+def test_qsvt_is_publicly_reexported_as_a_stdlib_transform() -> None:
+    """QSVT is public without being grouped with encoding producers."""
+    assert qmc.qsvt is qsvt
+    assert stdlib.qsvt is qsvt
+    assert "qsvt" in qmc.__all__
+    assert "qsvt" in stdlib.__all__
+    assert not hasattr(block_encoding, "qsvt")
 
 
 def test_measurement_helpers_are_publicly_reexported():

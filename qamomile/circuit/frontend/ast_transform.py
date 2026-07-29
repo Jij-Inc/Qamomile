@@ -12,6 +12,7 @@ from qamomile.circuit.frontend.operation.control_flow import (
     branch_rebind_pre_bindings,
     dead_rebind_binding,
     emit_if,
+    explicit_loop_bindings,
     for_items,
     for_loop,
     loop_rebind_snapshot,
@@ -21,6 +22,11 @@ from qamomile.circuit.frontend.operation.control_flow import (
     should_trace_for_loop,
     should_trace_items_loop,
     while_loop,
+)
+from qamomile.circuit.frontend.region_analysis import (
+    RegionLocation,
+    RegionSignature,
+    analyze_region_signatures,
 )
 
 
@@ -213,7 +219,21 @@ class ControlFlowTransformer(ast.NodeTransformer):
         global_names: set[str] | None = None,
         param_names: set[str] | None = None,
         namespace: dict[str, Any] | None = None,
+        region_signatures: dict[RegionLocation, RegionSignature] | None = None,
     ) -> None:
+        """Initialize source tracking and explicit region interfaces.
+
+        Args:
+            global_names (set[str] | None): Names resolved outside the qkernel
+                local scope. Defaults to ``None``.
+            param_names (set[str] | None): Function parameter names used for
+                shadowing diagnostics. Defaults to ``None``.
+            namespace (dict[str, Any] | None): Definition-time values used to
+                resolve callable conditions. Defaults to ``None``.
+            region_signatures (dict[RegionLocation, RegionSignature] | None):
+                Static interfaces for structured source regions. Defaults to
+                ``None``.
+        """
         self.counter: int = 0
         # Dict mapping variable name -> type annotation node (ast.AST)
         self.type_registry: dict[str, ast.AST] = {}
@@ -231,6 +251,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._param_names = param_names or set()
         # Namespace for resolving callables (used in while condition QKernel check)
         self._namespace = namespace or {}
+        self._region_signatures = region_signatures or {}
 
     def _get_unique_name(self, prefix: str) -> str:
         name = f"_{prefix}_{self.counter}"
@@ -952,19 +973,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         classical_candidates: list[str],
         lineno: int,
         region_bind: bool = False,
+        array_region_candidates: set[str] | None = None,
     ) -> list[ast.stmt]:
         """Wrap a transformed loop body with rebind snapshot/record probes.
 
-        Prepends ``_qm_rebind_snap_N =
-        loop_rebind_snapshot(locals(), (...))``,
-        and appends ``record_loop_rebinds(_qm_rebind_snap_N, locals(),
-        (...), (...))`` so the tracer can compare pre/post handle
-        identities for each candidate. Snapshot/record candidates are
-        passed as name tuples and resolved tolerantly through
-        ``locals()`` plus the if-branch pre-binding stack — never as
-        direct name loads, which would ``NameError`` for a store-only
-        candidate that is unbound in the current frame (e.g. inside an
-        if branch that only stores the variable). The promotion
+        Prepends an explicit lazy binding snapshot and appends a matching
+        explicit post-body binding map so the tracer can compare pre/post
+        handle identities for each candidate. Lazy lexical resolvers preserve
+        tolerant handling of store-only names without inspecting the Python
+        frame. The promotion
         assignments DO load the name directly, which is safe for
         classical candidates: back-edge candidates are incoming values,
         while store-only live-outs are restricted to names already defined
@@ -972,14 +989,15 @@ class ControlFlowTransformer(ast.NodeTransformer):
         probes live inside the loop's ``with`` body, so the zero-trip
         trace guard skips them together with the body.
 
-        When ``region_bind`` is true (``for`` / ``for-items`` loops), a
+        When ``region_bind`` is true (structured loops), a
         ``name = loop_region_enter(_qm_rebind_snap_N, "name")``
         assignment is additionally injected after the snapshot for each
         read-before-write classical candidate, so the body's carried
         reads go through an explicit region argument (see
-        ``loop_region_enter``). ``while`` loops keep ``region_bind``
-        false — a runtime while loop cannot be unrolled, so its
-        non-condition classical carries keep the record-based rejection.
+        ``loop_region_enter``). Runtime ``while`` carries use the same
+        interface; target validation later rejects non-identity state when a
+        circuit backend cannot thread it through a measurement-controlled
+        loop.
 
         Args:
             flattened_body (list[ast.stmt]): The already-transformed loop
@@ -992,6 +1010,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 generated nodes.
             region_bind (bool): Inject region-argument entry assignments
                 for the classical candidates. Defaults to False.
+            array_region_candidates (set[str] | None): Names whose carry is a
+                persistent element update rather than a whole-array rebind.
+                Defaults to ``None``.
 
         Returns:
             list[ast.stmt]: The wrapped body; ``flattened_body`` itself
@@ -1015,14 +1036,42 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 ctx=ast.Load(),
             )
 
-        def _locals_call() -> ast.Call:
-            """Build a fresh ``locals()`` call node.
+        def _binding_resolvers(names: list[str]) -> ast.Call:
+            """Build an explicit lazy lexical binding map.
+
+            Args:
+                names (list[str]): Source names to resolve.
 
             Returns:
-                ast.Call: A fresh call node per probe site.
+                ast.Call: Call to ``explicit_loop_bindings``.
             """
             return ast.Call(
-                func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]
+                func=ast.Name(id="explicit_loop_bindings", ctx=ast.Load()),
+                args=[
+                    ast.Tuple(
+                        elts=[
+                            ast.Tuple(
+                                elts=[
+                                    ast.Constant(value=name),
+                                    ast.Lambda(
+                                        args=ast.arguments(
+                                            posonlyargs=[],
+                                            args=[],
+                                            kwonlyargs=[],
+                                            kw_defaults=[],
+                                            defaults=[],
+                                        ),
+                                        body=ast.Name(id=name, ctx=ast.Load()),
+                                    ),
+                                ],
+                                ctx=ast.Load(),
+                            )
+                            for name in names
+                        ],
+                        ctx=ast.Load(),
+                    )
+                ],
+                keywords=[],
             )
 
         snap_name = self._get_unique_name("_qm_rebind_snap")
@@ -1030,7 +1079,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             targets=[ast.Name(id=snap_name, ctx=ast.Store())],
             value=ast.Call(
                 func=ast.Name(id="loop_rebind_snapshot", ctx=ast.Load()),
-                args=[_locals_call(), _name_tuple(candidates)],
+                args=[_binding_resolvers(candidates), _name_tuple(candidates)],
                 keywords=[],
             ),
             lineno=lineno,
@@ -1040,7 +1089,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 func=ast.Name(id="record_loop_rebinds", ctx=ast.Load()),
                 args=[
                     ast.Name(id=snap_name, ctx=ast.Load()),
-                    _locals_call(),
+                    _binding_resolvers(candidates),
                     _name_tuple(candidates),
                     _name_tuple(classical_candidates),
                 ],
@@ -1058,6 +1107,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
                         args=[
                             ast.Name(id=snap_name, ctx=ast.Load()),
                             ast.Constant(value=name),
+                            ast.Constant(
+                                value=name in (array_region_candidates or set())
+                            ),
                         ],
                         keywords=[],
                     ),
@@ -1066,6 +1118,70 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 for name in classical_candidates
             ]
         return [snap_stmt, *entry_stmts, *flattened_body, record_stmt]
+
+    @staticmethod
+    def _named_region_values(names: list[str]) -> ast.Tuple:
+        """Build a tuple of explicit ``(name, value)`` region bindings.
+
+        Args:
+            names (list[str]): Source variable names in interface order.
+
+        Returns:
+            ast.Tuple: Tuple literal containing named lexical values.
+        """
+        return ast.Tuple(
+            elts=[
+                ast.Tuple(
+                    elts=[
+                        ast.Constant(value=name),
+                        ast.Name(id=name, ctx=ast.Load()),
+                    ],
+                    ctx=ast.Load(),
+                )
+                for name in names
+            ],
+            ctx=ast.Load(),
+        )
+
+    @staticmethod
+    def _lazy_region_bindings(names: list[str]) -> ast.Call:
+        """Build a lazy lexical binding map without frame inspection.
+
+        Args:
+            names (list[str]): Source names to resolve.
+
+        Returns:
+            ast.Call: Call to ``explicit_loop_bindings`` with one resolver per
+                source name.
+        """
+        return ast.Call(
+            func=ast.Name(id="explicit_loop_bindings", ctx=ast.Load()),
+            args=[
+                ast.Tuple(
+                    elts=[
+                        ast.Tuple(
+                            elts=[
+                                ast.Constant(value=name),
+                                ast.Lambda(
+                                    args=ast.arguments(
+                                        posonlyargs=[],
+                                        args=[],
+                                        kwonlyargs=[],
+                                        kw_defaults=[],
+                                        defaults=[],
+                                    ),
+                                    body=ast.Name(id=name, ctx=ast.Load()),
+                                ),
+                            ],
+                            ctx=ast.Load(),
+                        )
+                        for name in names
+                    ],
+                    ctx=ast.Load(),
+                )
+            ],
+            keywords=[],
+        )
 
     def visit_While(self, node: ast.While) -> Any:
         """Transform a qkernel while loop into a traced context-manager body.
@@ -1110,6 +1226,17 @@ class ControlFlowTransformer(ast.NodeTransformer):
         cond_collector = VariableCollector(global_names=self._global_names)
         cond_collector.visit(node.test)
         cond_loads = set(cond_collector.load_vars)
+        signature = self._region_signatures.get(
+            RegionLocation("while", node.lineno, node.col_offset)
+        )
+        if signature is not None:
+            classical_rebind_candidates = [
+                name for name in signature.carried if name not in cond_loads
+            ]
+            rebind_candidates = list(
+                dict.fromkeys([*rebind_candidates, *signature.carried])
+            )
+        capture_names = list(signature.captures) if signature is not None else []
         body_entry_live_in = self._loop_body_entry_live_in(
             node.body, set(saved_after_load) | cond_loads
         )
@@ -1126,7 +1253,11 @@ class ControlFlowTransformer(ast.NodeTransformer):
         self._after_stmt_load_vars = saved_after_load
 
         flattened_body = self._wrap_body_with_rebind_probes(
-            flattened_body, rebind_candidates, classical_rebind_candidates, node.lineno
+            flattened_body,
+            rebind_candidates,
+            classical_rebind_candidates,
+            node.lineno,
+            region_bind=True,
         )
 
         # Build ``lambda: <condition>``
@@ -1147,7 +1278,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
         while_loop_call = ast.Call(
             func=ast.Name(id="while_loop", ctx=ast.Load()),
             args=[lambda_node],
-            keywords=[],
+            keywords=[
+                ast.keyword(
+                    arg="captures",
+                    value=self._named_region_values(capture_names),
+                )
+            ],
         )
 
         # Build the with-statement
@@ -1159,7 +1295,13 @@ class ControlFlowTransformer(ast.NodeTransformer):
             col_offset=node.col_offset,
         )
 
-        return with_stmt
+        return [
+            with_stmt,
+            *self._region_result_stmts(
+                classical_rebind_candidates,
+                node.lineno,
+            ),
+        ]
 
     def _is_range_call(self, node: ast.expr) -> bool:
         """Check if node is a range() or qm.range() call."""
@@ -1441,6 +1583,26 @@ class ControlFlowTransformer(ast.NodeTransformer):
         rebind_candidates, classical_rebind_candidates = self._loop_rebind_candidates(
             node.body, set(all_binding_names)
         )
+        legacy_classical_candidates = set(classical_rebind_candidates)
+        signature = self._region_signatures.get(
+            RegionLocation("for", node.lineno, node.col_offset)
+        )
+        capture_names = list(signature.captures) if signature is not None else []
+        array_region_candidates: set[str] = set()
+        if signature is not None:
+            classical_rebind_candidates = [
+                name for name in signature.carried if name not in all_binding_names
+            ] + [
+                name
+                for name in classical_rebind_candidates
+                if name not in signature.carried
+            ]
+            rebind_candidates = list(
+                dict.fromkeys([*rebind_candidates, *signature.carried])
+            )
+            array_region_candidates = (
+                set(signature.carried) - legacy_classical_candidates
+            )
 
         # Transform nested control flow first (with definition tracking)
         saved_outer = self._outer_defined_vars
@@ -1467,18 +1629,25 @@ class ControlFlowTransformer(ast.NodeTransformer):
             classical_rebind_candidates,
             node.lineno,
             region_bind=True,
+            array_region_candidates=array_region_candidates,
         )
 
         # Dispatch to the appropriate transform.
         # Sequence iteration is already rejected by _validate_for_loop.
         if self._is_items_call(node.iter):
             return self._transform_for_items(
-                node, flattened_body, classical_rebind_candidates
+                node,
+                flattened_body,
+                classical_rebind_candidates,
+                capture_names,
             )
 
         if self._is_range_call(node.iter):
             return self._transform_for_range(
-                node, flattened_body, classical_rebind_candidates
+                node,
+                flattened_body,
+                classical_rebind_candidates,
+                capture_names,
             )
 
         # [FOR DEVELOPER]
@@ -1532,6 +1701,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         node: ast.For,
         flattened_body: list[ast.stmt],
         classical_candidates: list[str],
+        capture_names: list[str],
     ) -> ast.stmt:
         """Transform a range loop into a guarded ``for_loop`` context.
 
@@ -1549,6 +1719,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
             flattened_body (list[ast.stmt]): Transformed body statements.
             classical_candidates (list[str]): Candidate names that may
                 receive formal loop results.
+            capture_names (list[str]): Read-only region inputs in static
+                interface order.
 
         Returns:
             ast.stmt: Guarded context-manager statement implementing the loop.
@@ -1579,7 +1751,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
         for_loop_call = ast.Call(
             func=ast.Name(id="for_loop", ctx=ast.Load()),
             args=[start_arg, stop_arg, step_arg, ast.Constant(value=loop_var_name)],
-            keywords=[],
+            keywords=[
+                ast.keyword(
+                    arg="captures",
+                    value=self._named_region_values(capture_names),
+                )
+            ],
         )
 
         # Bind the loop variable via ``as i``
@@ -1619,6 +1796,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         node: ast.For,
         flattened_body: list[ast.stmt],
         classical_candidates: list[str],
+        capture_names: list[str],
     ) -> ast.stmt:
         """Transform 'for (k, v) in items(d)' or 'for (k, v) in d.items()' to 'with for_items(d, [...], "v")'.
 
@@ -1639,6 +1817,8 @@ class ControlFlowTransformer(ast.NodeTransformer):
             flattened_body (list[ast.stmt]): Transformed body statements.
             classical_candidates (list[str]): Candidate names that
                 may receive loop carry results.
+            capture_names (list[str]): Read-only region inputs in static
+                interface order.
 
         Returns:
             ast.stmt: Guarded with-statement implementing the items loop.
@@ -1673,7 +1853,12 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 ),
                 ast.Constant(value=value_var),
             ],
-            keywords=[],
+            keywords=[
+                ast.keyword(
+                    arg="captures",
+                    value=self._named_region_values(capture_names),
+                )
+            ],
         )
 
         # Create with statement: with for_items(...) as (key, value):
@@ -1709,6 +1894,9 @@ class ControlFlowTransformer(ast.NodeTransformer):
         )
 
     def visit_If(self, node: ast.If) -> Any:
+        region_signature = self._region_signatures.get(
+            RegionLocation("if", node.lineno, node.col_offset)
+        )
         self._reject_named_expression_in_condition(
             node.test,
             construct="if",
@@ -1778,6 +1966,13 @@ class ControlFlowTransformer(ast.NodeTransformer):
         live_reassigned_existing = reassigned_existing & after_loads
 
         input_vars = sorted(input_vars_set)
+        capture_indices = tuple(
+            input_vars.index(name)
+            for name in (
+                region_signature.inputs if region_signature is not None else ()
+            )
+            if name in input_vars
+        )
         output_vars = sorted(
             (input_vars_set - dead_modified) | live_shared | live_reassigned_existing
         )
@@ -1902,7 +2097,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
             """Build fresh probe expressions for the dead candidates.
 
             Returns:
-                list[ast.expr]: One ``dead_rebind_binding(locals(),
+                list[ast.expr]: One ``dead_rebind_binding(bindings,
                     "name")`` call per candidate. A fresh list per call —
                     AST nodes must not be shared between the two body
                     functions.
@@ -1911,11 +2106,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                 ast.Call(
                     func=ast.Name(id="dead_rebind_binding", ctx=ast.Load()),
                     args=[
-                        ast.Call(
-                            func=ast.Name(id="locals", ctx=ast.Load()),
-                            args=[],
-                            keywords=[],
-                        ),
+                        self._lazy_region_bindings([name]),
                         ast.Constant(value=name),
                     ],
                     keywords=[],
@@ -1954,7 +2145,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         # variable whose old value is dead is deliberately NOT in
         # ``input_vars`` (its old value must not force a merge input), so
         # ``emit_if`` cannot see its pre-branch binding through
-        # ``var_list``; ``branch_rebind_pre_bindings(locals(), ...)``
+        # ``var_list``; an explicit lazy binding map
         # captures it at the call site instead. The candidate analysis
         # is lexical (``reassigned_existing`` uses the outer-defined
         # set), so the helper skips names a preceding pure-store if left
@@ -1969,6 +2160,16 @@ class ControlFlowTransformer(ast.NodeTransformer):
         ]
         pre_binding_names = record_candidates + dead_rebind_candidates
         call_keywords: list[ast.keyword] = []
+        if capture_indices:
+            call_keywords.append(
+                ast.keyword(
+                    arg="capture_indices",
+                    value=ast.Tuple(
+                        elts=[ast.Constant(value=index) for index in capture_indices],
+                        ctx=ast.Load(),
+                    ),
+                )
+            )
         if pre_binding_names:
             call_keywords.append(
                 ast.keyword(
@@ -1985,11 +2186,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
                     value=ast.Call(
                         func=ast.Name(id="branch_rebind_pre_bindings", ctx=ast.Load()),
                         args=[
-                            ast.Call(
-                                func=ast.Name(id="locals", ctx=ast.Load()),
-                                args=[],
-                                keywords=[],
-                            ),
+                            self._lazy_region_bindings(pre_binding_names),
                             ast.Tuple(
                                 elts=[ast.Constant(value=v) for v in pre_binding_names],
                                 ctx=ast.Load(),
@@ -2051,7 +2248,25 @@ class ControlFlowTransformer(ast.NodeTransformer):
         return result_stmts
 
 
-def transform_control_flow(func: Callable):
+def transform_control_flow(
+    func: Callable[..., Any],
+    *,
+    region_signatures: dict[RegionLocation, RegionSignature] | None = None,
+) -> Callable[..., Any]:
+    """Rewrite Python control flow into tracer-visible region builders.
+
+    Args:
+        func (Callable[..., Any]): Raw qkernel function.
+        region_signatures (dict[RegionLocation, RegionSignature] | None):
+            Precomputed explicit region interfaces. Defaults to ``None``.
+
+    Returns:
+        Callable[..., Any]: Transformed function executed by the tracer.
+
+    Raises:
+        SyntaxError: If source retrieval or parsing fails.
+        NotImplementedError: If a referenced closure value is unavailable.
+    """
     try:
         src = inspect.getsource(func)
     except (OSError, TypeError) as e:
@@ -2076,6 +2291,20 @@ def transform_control_flow(func: Callable):
     # of pointing into an opaque ``<qamomile-dsl>`` buffer.
     ast.increment_lineno(tree, func.__code__.co_firstlineno - 1)
     source_filename = inspect.getsourcefile(func) or "<qamomile-dsl>"
+
+    if region_signatures is None:
+        definition = next(
+            (
+                node
+                for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == func.__name__
+            ),
+            None,
+        )
+        if definition is None:
+            raise SyntaxError(f"Cannot locate function {func.__name__!r} in source")
+        region_signatures = analyze_region_signatures(definition)
 
     # Collect global names (modules, builtins, etc.)
     global_names = set(func.__globals__.keys())
@@ -2104,6 +2333,7 @@ def transform_control_flow(func: Callable):
         global_names=global_names,
         param_names=param_names,
         namespace=resolver_namespace,
+        region_signatures=region_signatures,
     )
     tree = transformer.visit(tree)
 
@@ -2123,6 +2353,7 @@ def transform_control_flow(func: Callable):
         "should_trace_items_loop": should_trace_items_loop,
         "for_items": for_items,
         "emit_if": emit_if,
+        "explicit_loop_bindings": explicit_loop_bindings,
         "branch_rebind_pre_bindings": branch_rebind_pre_bindings,
         "dead_rebind_binding": dead_rebind_binding,
         "loop_rebind_snapshot": loop_rebind_snapshot,

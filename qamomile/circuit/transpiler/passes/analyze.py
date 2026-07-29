@@ -51,9 +51,11 @@ from qamomile.circuit.transpiler.errors import (
 )
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
-    _same_exact_typed_constant,
     evaluate_classical_op_concrete,
     resolve_compile_time_condition,
+)
+from qamomile.circuit.transpiler.passes.control_flow_reachability import (
+    same_exact_typed_constant,
 )
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 from qamomile.circuit.transpiler.passes.validate_while import build_producer_map
@@ -210,19 +212,37 @@ def prune_compile_time_ifs(
                     # loop-scoped checks see exactly the pairs from ifs
                     # inside this body — pre-loop pairs must not leak in.
                     subtree: list[tuple[Value, Value]] = []
-                    op = op.rebuild_nested(
+                    op = op.rebuild_regions(
                         [
-                            walk(body, dict(concrete_values), subtree)
-                            for body in op.nested_op_lists()
+                            dataclasses.replace(
+                                region,
+                                operations=tuple(
+                                    walk(
+                                        list(region.operations),
+                                        dict(concrete_values),
+                                        subtree,
+                                    )
+                                ),
+                            )
+                            for region in op.nested_regions()
                         ]
                     )
                     loop_aliases[id(op)] = tuple(subtree)
                     sink.extend(subtree)
                 else:
-                    op = op.rebuild_nested(
+                    op = op.rebuild_regions(
                         [
-                            walk(body, dict(concrete_values), sink)
-                            for body in op.nested_op_lists()
+                            dataclasses.replace(
+                                region,
+                                operations=tuple(
+                                    walk(
+                                        list(region.operations),
+                                        dict(concrete_values),
+                                        sink,
+                                    )
+                                ),
+                            )
+                            for region in op.nested_regions()
                         ]
                     )
             pruned.append(op)
@@ -261,8 +281,13 @@ def flatten_ops(
         if not into_if_branches and isinstance(op, IfOperation):
             continue
         if isinstance(op, HasNestedOps):
-            for body in op.nested_op_lists():
-                flat.extend(flatten_ops(body, into_if_branches=into_if_branches))
+            for region in op.nested_regions():
+                flat.extend(
+                    flatten_ops(
+                        list(region.operations),
+                        into_if_branches=into_if_branches,
+                    )
+                )
     return flat
 
 
@@ -445,7 +470,11 @@ def reject_self_referential_loop_stores(
     for op in flatten_ops(pruned.operations, into_if_branches=False):
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
             check_loop_body(
-                [body_op for body in op.nested_op_lists() for body_op in body],
+                [
+                    body_op
+                    for region in op.nested_regions()
+                    for body_op in region.operations
+                ],
                 pruned.aliases_for_loop(op),
             )
 
@@ -895,12 +924,52 @@ def _check_loop_carried_rebinds(
             body, was initialized from a plain Python number, or swaps
             with another rebound variable.
     """
+    if isinstance(loop_op, WhileOperation) and loop_op.region_args:
+        # The frontend now represents non-condition while state explicitly,
+        # but the circuit emit contract has no target-independent runtime
+        # storage model for these values yet. Reject at analysis rather than
+        # letting segmentation or a backend fail ambiguously. Compile-time
+        # branch pruning can collapse a provisional carry to an identity,
+        # which the normal identity-carry lowering removes later.
+        collapsed = {result.uuid: source.uuid for result, source in body_merge_aliases}
+
+        def canonical_region_uuid(uuid: str) -> str:
+            """Follow pruned merge aliases for a region yield.
+
+            Args:
+                uuid (str): Yield UUID to canonicalize.
+
+            Returns:
+                str: First non-merge UUID in the alias chain.
+            """
+            seen: set[str] = set()
+            while uuid in collapsed and uuid not in seen:
+                seen.add(uuid)
+                uuid = collapsed[uuid]
+            return uuid
+
+        unsupported = next(
+            (
+                region_arg
+                for region_arg in loop_op.region_args
+                if canonical_region_uuid(region_arg.yielded.uuid)
+                not in {region_arg.block_arg.uuid, region_arg.init.uuid}
+            ),
+            None,
+        )
+        if unsupported is not None:
+            raise _loop_carried_rebind_error(unsupported.var_name, "while")
+
     records = loop_op.loop_carried_rebinds
     if not records:
         return
 
     loop_kind = _LOOP_KIND_NAMES.get(type(loop_op), "for")
-    body_ops = [o for body in loop_op.nested_op_lists() for o in body]
+    body_ops = [
+        operation
+        for region in loop_op.nested_regions()
+        for operation in region.operations
+    ]
     flat_body = flatten_ops(body_ops)
 
     # Dead-branch merge aliases recorded by pruning:
@@ -1139,7 +1208,7 @@ def _check_loop_carried_rebinds(
             if (
                 isinstance(record.before, Value)
                 and isinstance(canon_value, Value)
-                and _same_exact_typed_constant(record.before, canon_value)
+                and same_exact_typed_constant(record.before, canon_value)
             ):
                 continue
             # Trace-time-folded accumulation: an all-constant update like
