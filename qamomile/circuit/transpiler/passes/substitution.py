@@ -34,6 +34,7 @@ from qamomile.circuit.ir.operation.callable import (
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import Signature
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.value import ArrayValue, ValueLike
@@ -313,11 +314,11 @@ class SubstitutionPass(Pass[Block, Block]):
     def _reset_state(self) -> None:
         """Reset graph traversal state before one pass invocation."""
         self._matched_bindings: set[str] = set()
-        self._block_cache: dict[tuple[int, bool], Block] = {}
-        self._definition_cache: dict[int, CallableDef] = {}
+        self._block_cache: dict[tuple[int, bool, bool], Block] = {}
+        self._definition_cache: dict[tuple[int, bool], CallableDef] = {}
         self._active_bindings: list[str] = []
         self._active_replacement_blocks: dict[int, str] = {}
-        self._active_block_keys: list[tuple[int, bool]] = []
+        self._active_block_keys: list[tuple[int, bool, bool]] = []
 
     @property
     def name(self) -> str:
@@ -369,17 +370,25 @@ class SubstitutionPass(Pass[Block, Block]):
             )
         return transformed
 
-    def _transform_block(self, block: Block, *, apply_rules: bool) -> Block:
+    def _transform_block(
+        self,
+        block: Block,
+        *,
+        apply_rules: bool,
+        inside_inverse: bool = False,
+    ) -> Block:
         """Clone and transform one source block.
 
         Args:
             block (Block): Source block.
             apply_rules (bool): Whether Configure rules apply in this region.
+            inside_inverse (bool): Whether the block belongs to an
+                ``InverseBlockOperation``. Defaults to ``False``.
 
         Returns:
             Block: Cached transformed block.
         """
-        key = (id(block), apply_rules)
+        key = (id(block), apply_rules, inside_inverse)
         cached = self._block_cache.get(key)
         if cached is not None:
             return cached
@@ -390,6 +399,7 @@ class SubstitutionPass(Pass[Block, Block]):
             transformed.operations = self._transform_operations(
                 block.operations,
                 apply_rules=apply_rules,
+                inside_inverse=inside_inverse,
             )
         finally:
             self._active_block_keys.pop()
@@ -400,18 +410,25 @@ class SubstitutionPass(Pass[Block, Block]):
         operations: list[Operation],
         *,
         apply_rules: bool,
+        inside_inverse: bool = False,
     ) -> list[Operation]:
         """Transform one operation sequence.
 
         Args:
             operations (list[Operation]): Operations to transform.
             apply_rules (bool): Whether Configure rules apply in this region.
+            inside_inverse (bool): Whether the sequence belongs to an
+                ``InverseBlockOperation``. Defaults to ``False``.
 
         Returns:
             list[Operation]: Transformed operations.
         """
         return [
-            self._transform_operation(operation, apply_rules=apply_rules)
+            self._transform_operation(
+                operation,
+                apply_rules=apply_rules,
+                inside_inverse=inside_inverse,
+            )
             for operation in operations
         ]
 
@@ -420,23 +437,56 @@ class SubstitutionPass(Pass[Block, Block]):
         op: Operation,
         *,
         apply_rules: bool,
+        inside_inverse: bool = False,
     ) -> Operation:
         """Transform one operation and its source-owned regions.
 
         Args:
             op (Operation): Operation to transform.
             apply_rules (bool): Whether Configure rules apply in this region.
+            inside_inverse (bool): Whether the operation belongs to an
+                ``InverseBlockOperation``. Defaults to ``False``.
 
         Returns:
             Operation: Transformed operation.
         """
         if isinstance(op, InvokeOperation):
-            return self._transform_invoke(op, apply_rules=apply_rules)
+            return self._transform_invoke(
+                op,
+                apply_rules=apply_rules,
+                inside_inverse=inside_inverse,
+            )
+        if self._oracle_bindings and isinstance(op, InverseBlockOperation):
+            return dataclasses.replace(
+                op,
+                source_block=(
+                    self._transform_block(
+                        op.source_block,
+                        apply_rules=False,
+                        inside_inverse=True,
+                    )
+                    if op.source_block is not None
+                    else None
+                ),
+                implementation_block=(
+                    self._transform_block(
+                        op.implementation_block,
+                        apply_rules=False,
+                        inside_inverse=True,
+                    )
+                    if op.implementation_block is not None
+                    else None
+                ),
+            )
         if self._oracle_bindings and isinstance(op, ControlledUOperation):
             return dataclasses.replace(
                 op,
                 block=(
-                    self._transform_block(op.block, apply_rules=False)
+                    self._transform_block(
+                        op.block,
+                        apply_rules=False,
+                        inside_inverse=inside_inverse,
+                    )
                     if op.block is not None
                     else None
                 ),
@@ -445,7 +495,11 @@ class SubstitutionPass(Pass[Block, Block]):
             return dataclasses.replace(
                 op,
                 case_blocks=[
-                    self._transform_block(case_block, apply_rules=apply_rules)
+                    self._transform_block(
+                        case_block,
+                        apply_rules=apply_rules,
+                        inside_inverse=inside_inverse,
+                    )
                     for case_block in op.case_blocks
                 ],
             )
@@ -457,6 +511,7 @@ class SubstitutionPass(Pass[Block, Block]):
                         self._transform_operations(
                             list(region.operations),
                             apply_rules=apply_rules,
+                            inside_inverse=inside_inverse,
                         )
                     ),
                 )
@@ -466,7 +521,12 @@ class SubstitutionPass(Pass[Block, Block]):
 
         return op
 
-    def _transform_definition(self, definition: CallableDef) -> CallableDef:
+    def _transform_definition(
+        self,
+        definition: CallableDef,
+        *,
+        inside_inverse: bool,
+    ) -> CallableDef:
         """Clone a source callable definition and bind its reachable bodies.
 
         Configure rules do not enter existing definition bodies, preserving
@@ -474,11 +534,13 @@ class SubstitutionPass(Pass[Block, Block]):
 
         Args:
             definition (CallableDef): Definition to transform.
+            inside_inverse (bool): Whether the definition is reached through
+                an ``InverseBlockOperation``.
 
         Returns:
             CallableDef: Cached transformed definition.
         """
-        key = id(definition)
+        key = (id(definition), inside_inverse)
         cached = self._definition_cache.get(key)
         if cached is not None:
             return cached
@@ -490,7 +552,11 @@ class SubstitutionPass(Pass[Block, Block]):
         )
         self._definition_cache[key] = transformed
         transformed.body = (
-            self._transform_block(definition.body, apply_rules=False)
+            self._transform_block(
+                definition.body,
+                apply_rules=False,
+                inside_inverse=inside_inverse,
+            )
             if definition.body is not None
             else None
         )
@@ -498,7 +564,11 @@ class SubstitutionPass(Pass[Block, Block]):
             dataclasses.replace(
                 implementation,
                 body=(
-                    self._transform_block(implementation.body, apply_rules=False)
+                    self._transform_block(
+                        implementation.body,
+                        apply_rules=False,
+                        inside_inverse=inside_inverse,
+                    )
                     if implementation.body is not None
                     else None
                 ),
@@ -530,12 +600,15 @@ class SubstitutionPass(Pass[Block, Block]):
         op: InvokeOperation,
         *,
         apply_rules: bool,
+        inside_inverse: bool = False,
     ) -> InvokeOperation:
         """Transform one invocation.
 
         Args:
             op (InvokeOperation): Invocation to transform.
             apply_rules (bool): Whether Configure rules apply here.
+            inside_inverse (bool): Whether the invocation belongs to an
+                ``InverseBlockOperation``. Defaults to ``False``.
 
         Returns:
             InvokeOperation: Transformed invocation.
@@ -550,6 +623,15 @@ class SubstitutionPass(Pass[Block, Block]):
         )
         rule = self._rule_for(op) if apply_rules or has_oracle_binding else None
         if has_oracle_binding:
+            if inside_inverse:
+                raise ValueError(
+                    f"oracle_bindings[{op.target.name!r}] cannot bind an opaque "
+                    "Oracle reached through qmc.inverse(): late-bound bodies "
+                    "cannot update both the InverseBlockOperation source and "
+                    "its pre-generated fallback implementation consistently. "
+                    "Use a qkernel implementation that is available before "
+                    "qmc.inverse() instead."
+                )
             replacement = self._oracle_bindings[op.target.name]
             return self._bind_opaque(op, replacement, rule)
 
@@ -558,7 +640,11 @@ class SubstitutionPass(Pass[Block, Block]):
             assert rule is not None
             replacement = configured_replacement
             if self._oracle_bindings:
-                replacement = self._transform_block(replacement, apply_rules=False)
+                replacement = self._transform_block(
+                    replacement,
+                    apply_rules=False,
+                    inside_inverse=inside_inverse,
+                )
             current_body = op.effective_body()
             if isinstance(current_body, Block) and rule.validate_signature:
                 compatible, error = check_signature_compatibility(
@@ -590,7 +676,10 @@ class SubstitutionPass(Pass[Block, Block]):
 
         definition = op.definition or CallableDef(ref=op.target)
         transformed_definition = (
-            self._transform_definition(definition)
+            self._transform_definition(
+                definition,
+                inside_inverse=inside_inverse,
+            )
             if self._oracle_bindings
             else definition
         )
@@ -721,7 +810,7 @@ class SubstitutionPass(Pass[Block, Block]):
             start = self._active_bindings.index(active_owner)
             cycle = [*self._active_bindings[start:], name, active_owner]
             raise ValueError("Cyclic oracle bindings detected: " + " -> ".join(cycle))
-        if (id(replacement), False) in self._active_block_keys:
+        if (id(replacement), False, False) in self._active_block_keys:
             raise ValueError(
                 f"Cyclic oracle binding detected for {name!r}: its implementation "
                 "re-enters an active source or configured replacement block"

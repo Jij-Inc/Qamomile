@@ -97,6 +97,12 @@ def _nested_algorithm() -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _inverse_algorithm() -> qmc.Qubit:
+    """Invoke the inverse of a helper containing the costed oracle."""
+    return qmc.inverse(_helper)(qmc.qubit("q"))
+
+
+@qmc.qkernel
 def _signatured_algorithm() -> qmc.Vector[qmc.Qubit]:
     """Invoke an oracle carrying an explicit vector signature."""
     return _SIGNATURED_COSTED_ORACLE(qmc.qubit_array(2, "qubits"))
@@ -205,6 +211,14 @@ def test_estimator_binding_reaches_nested_definition() -> None:
     )
 
     assert estimate.gates.total == 1
+
+
+def test_estimator_reports_inverse_oracle_binding_limitation() -> None:
+    """Estimator rejects inverse-owned bindings with the shared diagnostic."""
+    with pytest.raises(ValueError, match=r"reached through qmc\.inverse\(\)"):
+        _inverse_algorithm.estimate_resources(
+            oracle_bindings={"costed_oracle": _one_gate_implementation}
+        )
 
 
 def test_estimator_rejects_bindings_for_raw_operation_sequence() -> None:

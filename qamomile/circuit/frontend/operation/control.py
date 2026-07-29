@@ -2781,16 +2781,20 @@ def _qkernel_for_oracle(oracle: Oracle, *, vector: bool) -> QKernel:
             filename,
         )
         namespace = {**_wrapper_namespace(oracle), "Vector": Vector}
+        built = False
         try:
             exec(compile(src, filename, "exec"), namespace)
             adapter = _qkernel_decorator(namespace[wrapper_name])
             _ = adapter.block
+            built = True
         except (SyntaxError, TypeError, ValueError, RuntimeError) as error:
-            linecache.cache.pop(filename, None)
             raise TypeError(
                 f"control(): failed to build the internal adapter for Oracle "
                 f"{oracle.name!r}: {error}."
             ) from error
+        finally:
+            if not built:
+                linecache.cache.pop(filename, None)
         weakref.finalize(adapter, linecache.cache.pop, filename, None)
     return adapter
 

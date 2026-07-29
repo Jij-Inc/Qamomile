@@ -11,6 +11,7 @@ import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types import UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -195,6 +196,21 @@ def _same_name_collision_sample() -> qmc.Bit:
 def _nested_sample() -> qmc.Bit:
     """Measure an oracle reached through a qkernel helper."""
     q = _oracle_helper(qmc.qubit("q"))
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _inverse_sample() -> qmc.Bit:
+    """Measure an inverse helper whose body contains the oracle."""
+    q = qmc.inverse(_oracle_helper)(qmc.qubit("q"))
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _helper_then_inverse_sample() -> qmc.Bit:
+    """Measure a direct helper followed by its inverse."""
+    q = _oracle_helper(qmc.qubit("q"))
+    q = qmc.inverse(_oracle_helper)(q)
     return qmc.measure(q)
 
 
@@ -602,6 +618,72 @@ def test_binding_rejects_inverse_transform() -> None:
         apply_oracle_bindings(
             inverse,
             {"late_bound_oracle": _x_implementation},
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(_inverse_sample.block, id="inverse-only"),
+        pytest.param(_helper_then_inverse_sample.block, id="direct-and-inverse"),
+    ],
+)
+def test_binding_rejects_oracle_reached_through_inverse(source: qmc.Block) -> None:
+    """Inverse-owned Oracle calls fail before unused-key or emit diagnostics."""
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"oracle_bindings\['late_bound_oracle'\].*qmc\.inverse\(\).*"
+            r"fallback implementation"
+        ),
+    ):
+        apply_oracle_bindings(
+            source,
+            {"late_bound_oracle": _x_implementation},
+        )
+
+
+def test_binding_checks_inverse_implementation_block() -> None:
+    """Inverse fallback blocks participate in unsupported-binding diagnosis."""
+    source = _inverse_sample.block
+    inverse = next(
+        operation
+        for operation in source.operations
+        if isinstance(operation, InverseBlockOperation)
+    )
+    fallback_only = dataclasses.replace(
+        source,
+        operations=[
+            (
+                dataclasses.replace(
+                    operation,
+                    source_block=_x_implementation.block,
+                    implementation_block=_oracle_helper.block,
+                )
+                if operation is inverse
+                else operation
+            )
+            for operation in source.operations
+        ],
+    )
+
+    with pytest.raises(ValueError, match=r"reached through qmc\.inverse\(\)"):
+        apply_oracle_bindings(
+            fallback_only,
+            {"late_bound_oracle": _x_implementation},
+        )
+
+
+def test_transpile_reports_inverse_binding_after_serialization(
+    qiskit_transpiler: Any,
+) -> None:
+    """Serialized inverse calls retain the explicit unsupported diagnostic."""
+    restored = deserialize(serialize(_inverse_sample))
+
+    with pytest.raises(ValueError, match=r"reached through qmc\.inverse\(\)"):
+        qiskit_transpiler.transpile(
+            restored,
+            oracle_bindings={"late_bound_oracle": _x_implementation},
         )
 
 

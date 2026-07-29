@@ -1,7 +1,9 @@
 """Tests for controlled gate API with all gate types x num_controls."""
 
 import dataclasses
+import importlib
 import inspect
+import linecache
 import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -1385,6 +1387,37 @@ class TestControlledAcceptsBuiltinGate:
 
 class TestControlledOracle:
     """``control(Oracle)`` shares the controlled qkernel protocol."""
+
+    def test_adapter_cleanup_on_unexpected_build_failure(self, monkeypatch):
+        """Unexpected build failures remove synthesized source from linecache."""
+        oracle_name = "unexpected_adapter_failure"
+        filename_prefix = f"<qamomile-oracle-scalar-adapter-{oracle_name}-"
+        existing_entries = {
+            filename
+            for filename in linecache.cache
+            if filename.startswith(filename_prefix)
+        }
+        control_module = importlib.import_module(
+            "qamomile.circuit.frontend.operation.control"
+        )
+
+        unexpected_failure = MagicMock(side_effect=OSError("unexpected build failure"))
+        monkeypatch.setattr(
+            control_module,
+            "_qkernel_decorator",
+            unexpected_failure,
+        )
+
+        with pytest.raises(OSError, match="unexpected build failure"):
+            qmc.control(qmc.opaque(oracle_name, num_qubits=1))
+
+        unexpected_failure.assert_called_once()
+        remaining_entries = {
+            filename
+            for filename in linecache.cache
+            if filename.startswith(filename_prefix)
+        }
+        assert remaining_entries == existing_entries
 
     def test_controlled_oracle_keeps_bodyless_invoke_inside_adapter(self):
         """The adapter keeps the opaque call nested under structural control."""

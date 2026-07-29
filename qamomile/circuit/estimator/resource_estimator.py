@@ -1124,17 +1124,17 @@ class ResourceEstimator:
             build_inputs,
             estimation_inputs,
         )
-        normalized_oracle_bindings = _normalize_oracle_bindings(oracle_bindings)
-        if normalized_oracle_bindings:
-            if not isinstance(block_or_ops, Block):
+        if oracle_bindings is not None:
+            if isinstance(block_or_ops, Block):
+                block_or_ops = _apply_oracle_bindings(
+                    block_or_ops,
+                    oracle_bindings,
+                )
+            elif _normalize_oracle_bindings(oracle_bindings):
                 raise TypeError(
                     "oracle_bindings requires a QKernel or hierarchical Block; "
                     "raw operation sequences do not carry callable definitions."
                 )
-            block_or_ops = _apply_oracle_bindings(
-                block_or_ops,
-                normalized_oracle_bindings,
-            )
         config = dataclasses.replace(
             self.config,
             strategies={**self.config.strategies, **dict(strategies or {})},
