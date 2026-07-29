@@ -3541,6 +3541,11 @@ def _resolve_transformed_power(
         resolved = power.get_const()
     else:
         resolved = environment.get(f"__index__:{power.uuid}")
+    if resolved is None:
+        raise EmitError(
+            "HUGR transformed call power must be a compile-time nonnegative integer",
+            operation="ControlledUOperation",
+        )
     try:
         return coerce_nonnegative_integral(
             resolved,
