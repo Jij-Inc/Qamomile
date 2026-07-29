@@ -541,7 +541,17 @@ def _batch_op_weight(
         )
         if block is None:
             return 0
-        return _controlled_body_batch_weight(emit_pass, block.operations, bindings)
+        local_bindings = _bind_block_inputs(
+            emit_pass,
+            block,
+            [*op.target_qubits, *op.parameters],
+            bindings,
+        )
+        return _controlled_body_batch_weight(
+            emit_pass,
+            block.operations,
+            local_bindings,
+        )
     if isinstance(op, SelectOperation):
         return 1
     # Unsupported op kinds are rejected by the walker further down; if a

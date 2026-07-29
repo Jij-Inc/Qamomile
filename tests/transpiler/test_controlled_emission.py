@@ -216,6 +216,82 @@ def test_batch_weight_binds_invoke_actuals_before_descending() -> None:
     assert estimate.width.clean_ancilla_qubits == 0
 
 
+def test_batch_weight_binds_inverse_actuals_before_descending() -> None:
+    """Inverse analysis binds actual values before resolving nested powers."""
+
+    @qmc.qkernel
+    def x_body(target: qmc.Qubit) -> qmc.Qubit:
+        """Apply the target operation used by a symbolic controlled power."""
+        return qmc.x(target)
+
+    @qmc.qkernel
+    def powered_x(
+        control: qmc.Qubit,
+        target: qmc.Qubit,
+        power: qmc.UInt,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Apply X under one control with a caller-provided power."""
+        return qmc.control(x_body)(control, target, power=power)
+
+    @qmc.qkernel
+    def identity_from_inverses(
+        control: qmc.Qubit,
+        target: qmc.Qubit,
+        actual_power: qmc.UInt,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Invert two controlled operations with one caller-provided power."""
+        control, target = qmc.inverse(powered_x)(
+            control,
+            target,
+            actual_power,
+        )
+        control, target = qmc.inverse(powered_x)(
+            control,
+            target,
+            actual_power,
+        )
+        return control, target
+
+    body = identity_from_inverses.build()
+    assert sum(isinstance(op, InverseBlockOperation) for op in body.operations) == 2
+    actual_power = next(
+        value for value in body.input_values if value.type.is_classical()
+    )
+    bindings: dict[str, Any] = {
+        actual_power.uuid: 0,
+        "actual_power": 0,
+    }
+
+    weight = controlled_emission._controlled_body_batch_weight(
+        _ResolverOnlyEmitPass(),
+        body.operations,
+        bindings,
+    )
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Control both inverse identity bodies with three qubits."""
+        controls = qmc.qubit_array(3, "controls")
+        inner_control = qmc.qubit("inner_control")
+        target = qmc.qubit("target")
+        controls, inner_control, target = qmc.control(
+            identity_from_inverses,
+            num_controls=3,
+        )(controls, inner_control, target, qmc.uint(0))
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert weight == 0
+    assert bindings == {
+        actual_power.uuid: 0,
+        "actual_power": 0,
+    }
+    assert estimate.gates.total == 0
+    assert estimate.gates.toffoli == 0
+    assert estimate.width.clean_ancilla_qubits == 0
+
+
 def test_controlled_dispatch_accepts_inverse_block(monkeypatch) -> None:
     """Controlled dispatch resolves inverse-block operands via the map."""
     q = Value(type=QubitType(), name="q")
