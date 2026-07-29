@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.frontend.qkernel_build import build_qkernel
-from qamomile.circuit.frontend.qkernel_like import OracleBindings
 from qamomile.circuit.frontend.qkernel_metadata import (
     estimate_qkernel_resources,
 )
@@ -20,6 +19,7 @@ from qamomile.circuit.ir.block import Block
 if TYPE_CHECKING:
     from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
     from qamomile.circuit.frontend.qkernel import QKernel
+    from qamomile.circuit.frontend.qkernel_like import OracleBindings
 
 
 class QKernelBuildMixin:

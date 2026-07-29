@@ -1135,6 +1135,9 @@ class ResourceEstimator:
                     "oracle_bindings requires a QKernel or hierarchical Block; "
                     "raw operation sequences do not carry callable definitions."
                 )
+            else:
+                # Empty bindings require no callable-definition traversal.
+                pass
         config = dataclasses.replace(
             self.config,
             strategies={**self.config.strategies, **dict(strategies or {})},

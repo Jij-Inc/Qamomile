@@ -3056,6 +3056,8 @@ class _ControlledOracle:
         else:
             self._validate_scalar_arguments(args)
 
+        # Exact zero is intentional: every nonzero concrete phase must reach
+        # the adapter, and symbolic phases also require that path.
         uses_default_modifiers = (
             isinstance(self.num_controls, int)
             and not isinstance(self.num_controls, bool)

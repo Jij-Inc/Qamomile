@@ -7,11 +7,10 @@ import inspect
 import textwrap
 from typing import TYPE_CHECKING, Any
 
-from qamomile.circuit.frontend.qkernel_like import OracleBindings
-
 if TYPE_CHECKING:
     from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
     from qamomile.circuit.frontend.qkernel import QKernel
+    from qamomile.circuit.frontend.qkernel_like import OracleBindings
 
 
 def extract_return_names(kernel: "QKernel[Any, Any]") -> list[str] | None:

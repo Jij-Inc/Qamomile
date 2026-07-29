@@ -29,6 +29,40 @@ def test_vector_oracle_cannot_bypass_declared_controls() -> None:
     [
         pytest.param(
             qmc.CallableSignature(
+                inputs=[qmc.Vector[qmc.Qubit]],
+                outputs=[qmc.Vector[qmc.Qubit]],
+            ),
+            id="vector",
+        ),
+        pytest.param(
+            qmc.CallableSignature(
+                inputs=[qmc.VectorView[qmc.Qubit]],
+                outputs=[qmc.VectorView[qmc.Qubit]],
+            ),
+            id="vector-view",
+        ),
+    ],
+)
+def test_vector_signature_rejects_explicit_controls(
+    signature: qmc.CallableSignature,
+) -> None:
+    """An Oracle cannot be constructed with no valid call form."""
+    with pytest.raises(
+        ValueError,
+        match="vector signatures cannot declare explicit scalar controls",
+    ):
+        qmc.opaque(
+            "invalid_controlled_vector_signature",
+            num_control_qubits=1,
+            signature=signature,
+        )
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        pytest.param(
+            qmc.CallableSignature(
                 inputs=[qmc.Qubit],
                 outputs=[qmc.Bit],
             ),

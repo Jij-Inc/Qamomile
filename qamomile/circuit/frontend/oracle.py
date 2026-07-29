@@ -32,7 +32,8 @@ class Oracle:
             by the oracle. ``None`` means the arity is provided by
             ``signature`` and may be vector-shaped.
         num_control_qubits (int): Number of explicit control qubits required
-            by scalar calls. Defaults to ``0``.
+            by scalar calls. Must be ``0`` when ``signature`` is
+            vector-shaped. Defaults to ``0``.
         signature (CallableSignature | None): Optional frontend signature.
             When omitted, a fixed-width scalar/vector-compatible oracle is
             created from ``num_qubits``.
@@ -63,7 +64,7 @@ class Oracle:
             num_qubits (int | None): Fixed scalar/vector width. Defaults to
                 ``None`` when ``signature`` describes the callable.
             num_control_qubits (int): Number of explicit scalar controls.
-                Defaults to ``0``.
+                Must be ``0`` for a vector signature. Defaults to ``0``.
             signature (CallableSignature | None): Optional frontend signature.
                 Defaults to ``None``.
             cost (Any | None): Optional fixed or context-dependent opaque cost.
@@ -73,7 +74,8 @@ class Oracle:
             ValueError: If neither ``num_qubits`` nor ``signature`` supplies
                 enough arity information, the signature is not a supported
                 quantum pass-through contract, or its scalar arity disagrees
-                with ``num_qubits``.
+                with ``num_qubits``, or a vector signature declares explicit
+                scalar controls.
         """
         vector_signature = (
             signature is not None and signature.accepts_single_qubit_vector()
@@ -102,6 +104,11 @@ class Oracle:
                         f"{inferred_scalar_count} scalar qubits, but "
                         f"num_qubits is {num_qubits}."
                     )
+        if vector_signature and num_control_qubits != 0:
+            raise ValueError(
+                "Oracle vector signatures cannot declare explicit scalar "
+                "controls; set num_control_qubits=0."
+            )
         if num_qubits is None and not vector_signature:
             raise ValueError(
                 "Oracle requires either num_qubits or a single Vector[Qubit] "
@@ -413,7 +420,8 @@ def opaque(
             by the callable. Defaults to ``None`` when ``signature`` carries
             the shape contract.
         num_control_qubits (int): Number of explicit scalar control qubits
-            required by scalar calls. Defaults to ``0``.
+            required by scalar calls. Must be ``0`` for a vector signature.
+            Defaults to ``0``.
         signature (CallableSignature | None): Optional frontend signature.
             Defaults to ``None``.
         cost (Any | None): Optional ``ResourceEstimate`` or callable accepting
@@ -421,6 +429,10 @@ def opaque(
 
     Returns:
         Oracle: Opaque callable backed by ``InvokeOperation`` with no body.
+
+    Raises:
+        ValueError: If the arity or signature is invalid, including a vector
+            signature combined with explicit scalar controls.
     """
     return Oracle(
         name=name,

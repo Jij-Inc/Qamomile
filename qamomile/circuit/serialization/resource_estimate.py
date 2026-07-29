@@ -163,16 +163,17 @@ def decode_fixed_resource_estimate(
     """
     if payload is None:
         return None
-    record = _require_record(payload, _ESTIMATE_FIELDS, callable_name)
-    format_version = _require_plain_integer(
-        record["format_version"],
-        f"{callable_name}.format_version",
-    )
-    if format_version != _FORMAT_VERSION:
-        raise ValueError(
-            f"opaque cost for {callable_name!r} uses unsupported format version "
-            f"{format_version!r}"
+    if isinstance(payload, dict) and "format_version" in payload:
+        format_version = _require_plain_integer(
+            payload["format_version"],
+            f"{callable_name}.format_version",
         )
+        if format_version != _FORMAT_VERSION:
+            raise ValueError(
+                f"opaque cost for {callable_name!r} uses unsupported format "
+                f"version {format_version!r}"
+            )
+    record = _require_record(payload, _ESTIMATE_FIELDS, callable_name)
     raw_calls = _require_record(
         record["calls"],
         _CALL_FIELDS,
@@ -402,6 +403,9 @@ def _encode_resource_number(value: Any, location: str) -> dict[str, Any]:
             "denominator": int(number.q),
         }
     if isinstance(number, sp.Float):
+        # SymPy has no public lossless Float payload. These are the same
+        # reconstruction fields SymPy uses for pickling, and decode verifies
+        # them after rebuilding the value.
         sign, mantissa, exponent, bitcount = number._mpf_
         return {
             "kind": "float",

@@ -674,6 +674,9 @@ class SubstitutionPass(Pass[Block, Block]):
                 ),
             )
 
+        if not self._oracle_bindings and (rule is None or rule.strategy is None):
+            return op
+
         definition = op.definition or CallableDef(ref=op.target)
         transformed_definition = (
             self._transform_definition(

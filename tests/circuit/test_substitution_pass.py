@@ -4,7 +4,7 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.callable import CallableRef, InvokeOperation
 from qamomile.circuit.transpiler.passes.substitution import (
     SignatureCompatibilityError,
     SubstitutionConfig,
@@ -111,6 +111,11 @@ class TestSubstitutionPass:
             """Call the named custom gate."""
             return specific_gate(q)
 
+        source_invocation = next(
+            operation
+            for operation in circuit.block.operations
+            if isinstance(operation, InvokeOperation)
+        )
         result = SubstitutionPass(
             SubstitutionConfig(
                 rules=[SubstitutionRule(source_name="custom", strategy="wrong")]
@@ -123,6 +128,32 @@ class TestSubstitutionPass:
         )
 
         assert invocation.strategy_name is None
+        assert invocation is source_invocation
+
+    def test_unmatched_invoke_preserves_nullable_definition(self):
+        """A Configure-only pass does not synthesize an empty definition."""
+        invocation = InvokeOperation(
+            target=CallableRef(namespace="test", name="unmatched")
+        )
+        # Exercise the nullable IR field directly; the constructor fills it.
+        invocation.definition = None
+        block = Block(
+            name="caller",
+            label_args=[],
+            input_values=[],
+            output_values=[],
+            operations=[invocation],
+            kind=BlockKind.HIERARCHICAL,
+        )
+
+        result = SubstitutionPass(
+            SubstitutionConfig(
+                rules=[SubstitutionRule(source_name="other", strategy="unused")]
+            )
+        ).run(block)
+
+        assert result.operations[0] is invocation
+        assert invocation.definition is None
 
 
 class TestCreateSubstitutionPass:

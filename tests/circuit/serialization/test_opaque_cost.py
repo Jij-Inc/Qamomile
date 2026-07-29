@@ -326,6 +326,20 @@ def test_malformed_resource_record_is_rejected() -> None:
         decode_fixed_resource_estimate(payload, "malformed_record_oracle")
 
 
+def test_unsupported_format_version_precedes_schema_validation() -> None:
+    """A future payload reports its unsupported version before new fields."""
+    payload = encode_fixed_resource_estimate(
+        qmc.ResourceEstimate(),
+        "future_format_oracle",
+    )
+    assert payload is not None
+    payload["format_version"] = 2
+    payload["future_field"] = {}
+
+    with pytest.raises(ValueError, match="unsupported format version 2"):
+        decode_fixed_resource_estimate(payload, "future_format_oracle")
+
+
 def test_named_resource_entries_must_be_canonical() -> None:
     """Named resource maps must use unique, lexicographically sorted entries."""
     payload = encode_fixed_resource_estimate(
