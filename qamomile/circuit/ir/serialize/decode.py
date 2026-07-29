@@ -140,6 +140,7 @@ class _DecodeContext:
         self,
         value_table: list[dict[str, Any]],
         callable_table: list[dict[str, Any]] | None = None,
+        opaque_cost_decoder: Callable[[Any, str], Any] | None = None,
     ) -> None:
         """Initialize a decode context.
 
@@ -149,6 +150,10 @@ class _DecodeContext:
                 ``uuid`` field; duplicates are an error.
             callable_table (list[dict[str, Any]] | None): Callable definitions
                 keyed by module-local IDs. Defaults to an empty registry.
+            opaque_cost_decoder (Callable[[Any, str], Any] | None): Optional
+                serialization-boundary decoder for opaque resource costs. The
+                callback receives the closed payload and callable name.
+                Defaults to ``None``, which rejects present opaque costs.
 
         Raises:
             ValueError: If a value-table dict lacks a ``uuid`` or if
@@ -170,6 +175,7 @@ class _DecodeContext:
         self._blocks: list[Block] = []
         self._definition_entries: dict[str, dict[str, Any]] = {}
         self._definitions: dict[str, CallableDef] = {}
+        self._opaque_cost_decoder = opaque_cost_decoder
         for entry in callable_table:
             if not isinstance(entry, dict):
                 raise ValueError("callable_table entries must be dicts")
@@ -187,6 +193,28 @@ class _DecodeContext:
             ref = _decode_callable_ref(definition_payload.get("ref"))
             self._definition_entries[definition_id] = definition_payload
             self._definitions[definition_id] = CallableDef(ref=ref)
+
+    def decode_opaque_cost(self, payload: Any, callable_name: str) -> Any:
+        """Decode an opaque cost through the configured boundary codec.
+
+        Args:
+            payload (Any): Encoded opaque-cost payload, or ``None``.
+            callable_name (str): Callable name used by codec diagnostics.
+
+        Returns:
+            Any: Reconstructed opaque cost, or ``None`` when absent.
+
+        Raises:
+            ValueError: If a cost is present without a boundary codec.
+        """
+        if payload is None:
+            return None
+        if self._opaque_cost_decoder is None:
+            raise ValueError(
+                "Opaque callable costs require the qkernel deserialization "
+                "boundary codec."
+            )
+        return self._opaque_cost_decoder(_decode_payload(payload), callable_name)
 
     def register_block(self, block: Block) -> Block:
         """Register a decoded block for post-link metadata refresh.
@@ -2242,8 +2270,10 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
     if not isinstance(attrs, dict):
         raise ValueError("CallableDef attrs must decode to a dict")
     raw_policy = d.get("default_policy", CallPolicy.INLINE.name)
+    ref = _decode_callable_ref(d.get("ref"))
+    opaque_cost = ctx.decode_opaque_cost(d.get("opaque_cost"), ref.name)
     return CallableDef(
-        ref=_decode_callable_ref(d.get("ref")),
+        ref=ref,
         signature=_decode_signature(d.get("signature"), ctx),
         body=(_decode_block(d["body"], ctx) if d.get("body") is not None else None),
         body_ref=_decode_callable_body_ref(d.get("body_ref")),
@@ -2251,7 +2281,7 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
             _decode_callable_implementation(impl, ctx)
             for impl in d.get("implementations", [])
         ],
-        opaque_cost=None,
+        opaque_cost=opaque_cost,
         default_policy=_enum_by_name(CallPolicy, raw_policy, "CallPolicy"),
         attrs=attrs,
     )

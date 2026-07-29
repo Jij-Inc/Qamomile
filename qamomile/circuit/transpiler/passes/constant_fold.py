@@ -1040,6 +1040,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                             power=power,
                             block=result_op.block,
                             callable_ref=result_op.callable_ref,
+                            callable_attrs=dict(result_op.callable_attrs),
                         )
                         extra_kwargs = {}  # Already applied
                     else:

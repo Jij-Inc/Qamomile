@@ -21,15 +21,16 @@ from typing import TYPE_CHECKING, Any, cast
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle import QFixed, Qubit, Vector
 from qamomile.circuit.frontend.operation.control_flow import for_loop
+from qamomile.circuit.frontend.oracle import Oracle
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel_like import QKernelLike
 
 
 def qpe(
-    target: Qubit,
+    target: Qubit | Vector[Qubit],
     counting: Vector[Qubit],
-    unitary: "QKernelLike",
+    unitary: "QKernelLike | Oracle",
     **params: Any,
 ) -> QFixed:
     """Quantum Phase Estimation.
@@ -37,14 +38,27 @@ def qpe(
     Estimates the phase φ where U|ψ> = e^{2πiφ}|ψ>.
 
     Args:
-        target (Qubit): Eigenstate ``|psi>`` of the unitary.
+        target (Qubit | Vector[Qubit]): Eigenstate ``|psi>`` of the unitary.
         counting (Vector[Qubit]): Register that stores the phase estimate.
-        unitary (QKernelLike): Unitary qkernel to control.
+        unitary (QKernelLike | Oracle): Unitary qkernel or opaque oracle to
+            control.
         **params (Any): Classical parameters forwarded to the unitary.
 
     Returns:
         QFixed: Phase register as quantum fixed-point number
+
+    Raises:
+        ValueError: If ``unitary`` is an Oracle that already declares explicit
+            control qubits. QPE supplies its own counting-register control and
+            therefore requires an uncontrolled unitary.
     """
+    if isinstance(unitary, Oracle) and unitary.num_control_qubits:
+        raise ValueError(
+            "qpe() requires an uncontrolled Oracle; "
+            f"{unitary.name!r} declares {unitary.num_control_qubits} explicit "
+            "control qubit(s)."
+        )
+
     n = counting.shape[0]  # UInt handle (symbolic or concrete)
     controlled_u = cast(Callable[..., tuple[Any, ...]], qmc.control(unitary))
 

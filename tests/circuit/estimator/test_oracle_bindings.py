@@ -9,6 +9,7 @@ import pytest
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler.errors import ValidationError
 
 _COSTED_ORACLE = qmc.opaque(
@@ -26,6 +27,13 @@ _SIGNATURED_COSTED_ORACLE = qmc.opaque(
         outputs=[qmc.Vector[qmc.Qubit]],
     ),
     cost=qmc.ResourceEstimate(gates=qmc.GateResources(total=7)),
+)
+_QPE_COSTED_ORACLE = qmc.opaque(
+    "qpe_costed_oracle",
+    num_qubits=1,
+    cost=qmc.ResourceEstimate(
+        calls=qmc.CallResources(queries_by_name={"qpe_costed_oracle": 1}),
+    ),
 )
 
 
@@ -51,6 +59,21 @@ def _vector_implementation(
     """Implement a vector oracle with one logical gate."""
     qubits[0] = qmc.h(qubits[0])
     return qubits
+
+
+@qmc.qkernel
+def _qpe_oracle_implementation(q: qmc.Qubit) -> qmc.Qubit:
+    """Implement the resource-test phase oracle with one Z gate."""
+    return qmc.z(q)
+
+
+@qmc.qkernel
+def _qpe_algorithm() -> qmc.Float:
+    """Run three-bit QPE with a bodyless, costed oracle."""
+    counting = qmc.qubit_array(3, "counting")
+    target = qmc.x(qmc.qubit("target"))
+    phase = qmc.qpe(target, counting, _QPE_COSTED_ORACLE)
+    return qmc.measure(phase)
 
 
 @qmc.qkernel
@@ -219,3 +242,23 @@ def test_estimator_accepts_empty_bindings_for_raw_operations() -> None:
     )
 
     assert estimate.gates.total == 7
+
+
+def test_qpe_oracle_estimation_survives_serialization_and_binding() -> None:
+    """QPE powers produce seven queries before and after load or substitution."""
+    payload = serialize(_qpe_algorithm)
+    restored = deserialize(payload)
+
+    original = _qpe_algorithm.estimate_resources()
+    unbound = qmc.estimate_resources(restored)
+    bound = qmc.estimate_resources(
+        restored,
+        oracle_bindings={"qpe_costed_oracle": _qpe_oracle_implementation},
+    )
+
+    expected_queries = {"qpe_costed_oracle": 7}
+    assert original.calls.queries_by_name == expected_queries
+    assert unbound.calls.queries_by_name == expected_queries
+    assert bound.calls.queries_by_name == {}
+    assert bound.gates.total == unbound.gates.total + 7
+    assert bound.gates.two_qubit == unbound.gates.two_qubit + 7

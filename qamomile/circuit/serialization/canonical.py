@@ -103,17 +103,33 @@ def _rewrite_node(
             node[key] = [
                 None
                 if item is None
-                else _mapped(item, uuid_remap, key, _VALUE_NAMESPACE)
+                else _mapped_carrier_identity(
+                    item,
+                    uuid_remap,
+                    key,
+                    _VALUE_NAMESPACE,
+                )
                 for item in value
             ]
         elif key.endswith("_logical_ids") and isinstance(value, list):
             node[key] = [
-                _mapped(item, logical_id_remap, key, _LOGICAL_NAMESPACE)
+                _mapped_carrier_identity(
+                    item,
+                    logical_id_remap,
+                    key,
+                    _LOGICAL_NAMESPACE,
+                )
                 for item in value
             ]
         elif key == "qubit_mapping" and isinstance(value, list):
             node[key] = [
-                _mapped(item, uuid_remap, key, _VALUE_NAMESPACE) for item in value
+                _mapped_carrier_identity(
+                    item,
+                    uuid_remap,
+                    key,
+                    _VALUE_NAMESPACE,
+                )
+                for item in value
             ]
         elif key == "parameters" and isinstance(value, dict):
             node[key] = {
@@ -124,6 +140,43 @@ def _rewrite_node(
             node[key] = _mapped(value, uuid_remap, key, _VALUE_NAMESPACE)
         else:
             _rewrite_node(value, uuid_remap, logical_id_remap)
+
+
+def _mapped_carrier_identity(
+    value: Any,
+    mapping: dict[str, str],
+    field: str,
+    namespace: uuid.UUID,
+) -> str:
+    """Canonicalize a scalar or array-element carrier identity.
+
+    Array-backed qubits use the structural ``"{array_uuid}_{index}"``
+    identity convention. Preserve that relationship instead of assigning an
+    unrelated external UUID so the deserialized emit pipeline can recover the
+    carrier's root array and element index.
+
+    Args:
+        value (Any): Scalar identity or structural array-element identity.
+        mapping (dict[str, str]): Applicable canonical ID map.
+        field (str): Field name used for diagnostics.
+        namespace (uuid.UUID): Namespace for metadata-only scalar identities.
+
+    Returns:
+        str: Canonical scalar or structural array-element identity.
+
+    Raises:
+        ValueError: If ``value`` is not a string identity.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{field} has a non-string identity {value!r}")
+    if value in mapping:
+        return mapping[value]
+
+    root, separator, index = value.rpartition("_")
+    if separator and index.isdigit() and root in mapping:
+        return f"{mapping[root]}_{index}"
+
+    return _mapped(value, mapping, field, namespace)
 
 
 def _mapped(

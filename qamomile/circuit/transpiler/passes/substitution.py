@@ -537,8 +537,11 @@ class SubstitutionPass(Pass[Block, Block]):
                 forms a cyclic implementation dependency.
             SignatureCompatibilityError: If a replacement signature differs.
         """
-        rule = self._rule_for(op) if apply_rules else None
-        if op.target.name in self._oracle_bindings:
+        has_oracle_binding = (
+            op.target.name in self._oracle_bindings and self._is_oracle_invocation(op)
+        )
+        rule = self._rule_for(op) if apply_rules or has_oracle_binding else None
+        if has_oracle_binding:
             replacement = self._oracle_bindings[op.target.name]
             return self._bind_opaque(op, replacement, rule)
 
@@ -573,6 +576,7 @@ class SubstitutionPass(Pass[Block, Block]):
                     definition,
                     ref=new_ref,
                     body=replacement,
+                    opaque_cost=None,
                 ),
             )
 
@@ -594,6 +598,31 @@ class SubstitutionPass(Pass[Block, Block]):
                 transformed_definition,
                 attrs={**transformed_definition.attrs, **attrs},
             ),
+        )
+
+    @staticmethod
+    def _is_oracle_invocation(op: InvokeOperation) -> bool:
+        """Return whether an invocation carries the Oracle callable contract.
+
+        Definition names are not globally unique across callable namespaces.
+        A qkernel or composite may therefore share its short name with an
+        Oracle. Per-call Oracle bindings ignore those unrelated invocations
+        and select only calls whose serialized callable metadata identifies
+        them as Oracles.
+
+        Args:
+            op (InvokeOperation): Invocation being considered for binding.
+
+        Returns:
+            bool: ``True`` when the invocation uses the canonical Oracle
+                namespace and declares ``kind="oracle"``.
+        """
+        definition_kind = (
+            op.definition.attrs.get("kind") if op.definition is not None else None
+        )
+        return (
+            op.target.namespace == "user.oracle"
+            and op.attrs.get("kind", definition_kind) == "oracle"
         )
 
     def _bind_opaque(

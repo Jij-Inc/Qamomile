@@ -42,6 +42,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
+    SymbolicControlledU,
 )
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
@@ -118,9 +119,17 @@ class HugrCompilationPlan:
     Args:
         definitions (tuple[CallableRef, ...]): Reachable body-backed callable
             definitions emitted as HUGR functions.
+        entrypoint (Block | None): HUGR-specialized entrypoint lowering view.
+            ``None`` preserves the source entrypoint for compatibility with
+            manually constructed plans. Defaults to ``None``.
+        bodies (Mapping[CallableRef, Block]): HUGR-specialized bodies for the
+            callable definitions emitted as functions. Missing entries use
+            their source bodies. Defaults to an empty mapping.
     """
 
     definitions: tuple[CallableRef, ...]
+    entrypoint: Block | None = None
+    bodies: Mapping[CallableRef, Block] = dataclasses.field(default_factory=dict)
 
 
 class HugrTarget:
@@ -149,16 +158,29 @@ class HugrTarget:
                 multiple specialized bodies that cannot share one HUGR symbol.
         """
         _validate_direct_semantics(program)
+        inline_refs = frozenset(
+            ref
+            for ref, definition in program.definitions.items()
+            if definition.body is not None
+            and _requires_hugr_callsite_specialization(definition.body)
+        )
         for ref, variants in program.definition_variants.items():
-            if len(variants) > 1:
+            if ref not in inline_refs and len(variants) > 1:
                 symbol = f"{ref.namespace}.{ref.name}@{ref.version}"
                 raise CallableDefinitionConflictError(symbol)
         definitions = tuple(
             ref
             for ref, definition in program.definitions.items()
-            if definition.body is not None
+            if definition.body is not None and ref not in inline_refs
         )
-        return HugrCompilationPlan(definitions=definitions)
+        return HugrCompilationPlan(
+            definitions=definitions,
+            entrypoint=_prepare_hugr_block(program.entrypoint, inline_refs),
+            bodies={
+                ref: _prepare_hugr_block(program.body(ref), inline_refs)
+                for ref in definitions
+            },
+        )
 
     def compile(
         self,
@@ -244,6 +266,241 @@ def _validate_direct_semantics(program: PreparedModule) -> None:
         reject_control_flow_quantum_discard(block.operations, dict(bindings))
 
 
+def _requires_hugr_callsite_specialization(block: Block) -> bool:
+    """Return whether a callable boundary needs a fixed-shape HUGR clone.
+
+    HUGR represents a Qamomile vector as a fixed tuple, so a callable whose
+    public boundary still carries a symbolic array extent cannot own one
+    reusable HUGR function symbol. Such bodies are inlined at each call site,
+    where the ordinary inline pass maps formal shape values to the concrete
+    caller extents.
+
+    Args:
+        block (Block): Callable body considered for HUGR function emission.
+
+    Returns:
+        bool: Whether any input or output array has a non-fixed extent.
+    """
+    return any(
+        isinstance(value, ArrayValue)
+        and (len(value.shape) != 1 or not value.shape[0].is_constant())
+        for value in [*block.input_values, *block.output_values]
+    )
+
+
+def _prepare_hugr_block(
+    block: Block,
+    callsite_specialized_refs: frozenset[CallableRef],
+) -> Block:
+    """Create a HUGR-only lowering view with required calls inlined.
+
+    Dynamic vector callables are monomorphized through ordinary call-site
+    inlining. Body-backed direct calls nested inside a transformed operation
+    are also inlined because HUGR's transformed-call legalizer must inherit
+    the surrounding controls and direction instead of emitting an independent
+    function call.
+
+    Args:
+        block (Block): Source semantic block, which remains unmodified.
+        callsite_specialized_refs (frozenset[CallableRef]): Callable symbols
+            whose symbolic vector boundaries require per-call fixed shapes.
+
+    Returns:
+        Block: Target-owned block prepared for direct HUGR lowering.
+    """
+    marked = dataclasses.replace(
+        block,
+        operations=_mark_hugr_inline_calls(
+            block.operations,
+            callsite_specialized_refs,
+            inside_transform=False,
+            visiting_blocks=frozenset({id(block)}),
+        ),
+    )
+    return InlinePass().run(marked)
+
+
+def _mark_hugr_nested_block(
+    block: Block,
+    callsite_specialized_refs: frozenset[CallableRef],
+    *,
+    inside_transform: bool,
+    visiting_blocks: frozenset[int],
+) -> Block:
+    """Clone one nested body and mark its HUGR-required inline calls.
+
+    Args:
+        block (Block): Nested callable or operation-owned body.
+        callsite_specialized_refs (frozenset[CallableRef]): Callable symbols
+            requiring call-site shape specialization.
+        inside_transform (bool): Whether the nested body inherits controls or
+            an inverse direction.
+        visiting_blocks (frozenset[int]): Active body identities used to stop
+            recursive definition expansion.
+
+    Returns:
+        Block: Marked clone, or the original block at a recursion boundary.
+    """
+    if id(block) in visiting_blocks:
+        return block
+    nested_visiting = visiting_blocks | {id(block)}
+    return dataclasses.replace(
+        block,
+        operations=_mark_hugr_inline_calls(
+            block.operations,
+            callsite_specialized_refs,
+            inside_transform=inside_transform,
+            visiting_blocks=nested_visiting,
+        ),
+    )
+
+
+def _mark_hugr_inline_calls(
+    operations: list[Operation],
+    callsite_specialized_refs: frozenset[CallableRef],
+    *,
+    inside_transform: bool,
+    visiting_blocks: frozenset[int],
+) -> list[Operation]:
+    """Clone operations and mark target-required direct calls as inline.
+
+    Args:
+        operations (list[Operation]): Source operation sequence.
+        callsite_specialized_refs (frozenset[CallableRef]): Callable symbols
+            requiring call-site shape specialization.
+        inside_transform (bool): Whether the sequence inherits controls or an
+            inverse direction from an enclosing transformed operation.
+        visiting_blocks (frozenset[int]): Active body identities used to stop
+            recursive definition expansion.
+
+    Returns:
+        list[Operation]: Non-destructively rewritten operation sequence.
+    """
+    prepared: list[Operation] = []
+    for operation in operations:
+        if isinstance(operation, InvokeOperation):
+            should_inline = (
+                operation.transform is CallTransform.DIRECT
+                and operation.body is not None
+                and (operation.target in callsite_specialized_refs or inside_transform)
+            )
+            if operation.body is not None:
+                assert operation.definition is not None
+                body = operation.body
+                if operation.transform is not CallTransform.DIRECT:
+                    body = _mark_hugr_nested_block(
+                        body,
+                        callsite_specialized_refs,
+                        inside_transform=True,
+                        visiting_blocks=visiting_blocks,
+                    )
+                elif should_inline:
+                    body = _mark_hugr_nested_block(
+                        body,
+                        callsite_specialized_refs,
+                        inside_transform=inside_transform,
+                        visiting_blocks=visiting_blocks,
+                    )
+                default_policy = operation.definition.default_policy
+                if operation.transform is CallTransform.DIRECT:
+                    default_policy = (
+                        CallPolicy.INLINE if should_inline else CallPolicy.PRESERVE_BOX
+                    )
+                operation = dataclasses.replace(
+                    operation,
+                    definition=dataclasses.replace(
+                        operation.definition,
+                        body=body,
+                        default_policy=default_policy,
+                    ),
+                )
+            prepared.append(operation)
+            continue
+        if isinstance(operation, ControlledUOperation):
+            prepared.append(
+                dataclasses.replace(
+                    operation,
+                    block=(
+                        _mark_hugr_nested_block(
+                            operation.block,
+                            callsite_specialized_refs,
+                            inside_transform=True,
+                            visiting_blocks=visiting_blocks,
+                        )
+                        if operation.block is not None
+                        else None
+                    ),
+                )
+            )
+            continue
+        if isinstance(operation, InverseBlockOperation):
+            source = operation.source_block
+            source_block = (
+                _mark_hugr_nested_block(
+                    source,
+                    callsite_specialized_refs,
+                    inside_transform=True,
+                    visiting_blocks=visiting_blocks,
+                )
+                if source is not None
+                else None
+            )
+            implementation = operation.implementation_block
+            implementation_block = (
+                _mark_hugr_nested_block(
+                    implementation,
+                    callsite_specialized_refs,
+                    inside_transform=True,
+                    visiting_blocks=visiting_blocks,
+                )
+                if implementation is not None
+                else None
+            )
+            prepared.append(
+                dataclasses.replace(
+                    operation,
+                    source_block=source_block,
+                    implementation_block=implementation_block,
+                )
+            )
+            continue
+        if isinstance(operation, SelectOperation):
+            prepared.append(
+                dataclasses.replace(
+                    operation,
+                    case_blocks=[
+                        _mark_hugr_nested_block(
+                            case_block,
+                            callsite_specialized_refs,
+                            inside_transform=inside_transform,
+                            visiting_blocks=visiting_blocks,
+                        )
+                        for case_block in operation.case_blocks
+                    ],
+                )
+            )
+            continue
+        if isinstance(operation, HasNestedOps):
+            regions = tuple(
+                dataclasses.replace(
+                    region,
+                    operations=tuple(
+                        _mark_hugr_inline_calls(
+                            list(region.operations),
+                            callsite_specialized_refs,
+                            inside_transform=inside_transform,
+                            visiting_blocks=visiting_blocks,
+                        )
+                    ),
+                )
+                for region in operation.nested_regions()
+            )
+            prepared.append(operation.rebuild_regions(regions))
+            continue
+        prepared.append(operation)
+    return prepared
+
+
 def _require_hugr() -> tuple[Any, Any, Any, Any, Any]:
     """Import HUGR builders, types, values, and TKET extensions.
 
@@ -286,27 +543,33 @@ def _lower_module(program: PreparedModule, plan: HugrCompilationPlan) -> Any:
     build, _, _, Package, tket_exts = _require_hugr()
     module = build.Module()
     functions: dict[CallableRef, Any] = {}
+    entrypoint = plan.entrypoint or program.entrypoint
 
     for ref in plan.definitions:
-        body = program.body(ref)
+        body = plan.bodies.get(ref, program.body(ref))
         functions[ref] = module.define_function(
             _symbol_name(ref),
             [_lower_value_type(value) for value in body.input_values],
             [_lower_value_type(value) for value in body.output_values],
         )
 
-    entry_inputs = _entry_inputs(program.entrypoint, program.bindings)
+    entry_inputs = _entry_inputs(entrypoint, program.bindings)
     main = module.define_function(
         "main",
         [_lower_value_type(value) for value in entry_inputs],
-        [_lower_value_type(value) for value in program.entrypoint.output_values],
+        [_lower_value_type(value) for value in entrypoint.output_values],
         visibility="Public",
     )
 
     for ref in plan.definitions:
-        _lower_block(program.body(ref), functions[ref], functions, None)
+        _lower_block(
+            plan.bodies.get(ref, program.body(ref)),
+            functions[ref],
+            functions,
+            None,
+        )
     _lower_block(
-        program.entrypoint,
+        entrypoint,
         main,
         functions,
         entry_inputs,
@@ -2966,6 +3229,183 @@ def _lower_call(
             environment[result.uuid] = wire
 
 
+def _bind_transformed_array_shape(
+    formal: ValueBase,
+    actual: ValueBase,
+    resolved: Any,
+    builder: Any,
+    environment: dict[str, Any],
+) -> None:
+    """Bind a transformed body's vector extent from its fixed actual value.
+
+    Operation-owned controlled and inverse blocks keep independent formal
+    values, so ordinary top-level inlining cannot rewrite their boundary
+    shapes. HUGR nevertheless receives a flattened fixed tuple at the call
+    site; publish that tuple width as both a compile-time index and an integer
+    wire for shape-dependent loops and arithmetic inside the transformed body.
+
+    Args:
+        formal (ValueBase): Transformed-body formal input.
+        actual (ValueBase): Matching call-site actual input.
+        resolved (Any): HUGR wire or flattened array wires for ``actual``.
+        builder (Any): HUGR dataflow builder used to load the extent.
+        environment (dict[str, Any]): Body-local value environment to update.
+
+    Raises:
+        EmitError: If array ranks or a fixed formal extent are incompatible.
+    """
+    if not isinstance(formal, ArrayValue) or not isinstance(actual, ArrayValue):
+        return
+    if len(formal.shape) != 1 or len(actual.shape) != 1:
+        raise EmitError("HUGR transformed arrays require one-dimensional shapes")
+    if not isinstance(resolved, list):
+        raise EmitError("HUGR transformed array input did not resolve to fixed wires")
+    extent = len(resolved)
+    formal_dimension = formal.shape[0]
+    if formal_dimension.is_constant() and int(formal_dimension.get_const()) != extent:
+        raise EmitError("HUGR transformed array input extent mismatch")
+
+    from hugr.std.int import IntVal
+
+    [extent_wire] = builder.load(IntVal(extent))
+    environment[formal_dimension.uuid] = extent_wire
+    environment[f"__index__:{formal_dimension.uuid}"] = extent
+
+
+def _resolve_transformed_integer(
+    value: Value,
+    environment: dict[str, Any],
+    field: str,
+) -> int:
+    """Resolve one transformed-call structural value to a Python integer.
+
+    Args:
+        value (Value): Structural UInt value to resolve.
+        environment (dict[str, Any]): UUID-to-wire and compile-time index
+            mapping.
+        field (str): Field label used in diagnostics.
+
+    Returns:
+        int: Resolved compile-time integer.
+
+    Raises:
+        EmitError: If the value is not known as a compile-time integer.
+    """
+    resolved: Any = (
+        value.get_const()
+        if value.is_constant()
+        else environment.get(f"__index__:{value.uuid}")
+    )
+    if isinstance(resolved, bool) or not isinstance(resolved, int):
+        raise EmitError(
+            f"HUGR transformed call {field} must be a compile-time integer",
+            operation="ControlledUOperation",
+        )
+    return resolved
+
+
+def _resolve_transformed_controls(
+    operation: InvokeOperation | ControlledUOperation | InverseBlockOperation,
+    controls: list[Value],
+    environment: dict[str, Any],
+) -> tuple[list[Any], list[int]]:
+    """Resolve full control carriers and the active control positions.
+
+    Symbolic controlled calls may carry a larger pass-through pool than the
+    active control set. Keeping the flattened carrier separate from its active
+    positions lets HUGR consume only selected controls while publishing every
+    pool element after the call.
+
+    Args:
+        operation (InvokeOperation | ControlledUOperation |
+            InverseBlockOperation): Transformed operation being lowered.
+        controls (list[Value]): Control operand groups at the call site.
+        environment (dict[str, Any]): UUID-to-wire and compile-time value
+            mapping.
+
+    Returns:
+        tuple[list[Any], list[int]]: Flattened full carrier wires and the
+            ordered positions that act as controls.
+
+    Raises:
+        EmitError: If symbolic control metadata is unresolved, non-positive,
+            incompatible with the operand grouping, duplicated, or out of
+            bounds.
+    """
+    groups: list[list[Any]] = []
+    for value in controls:
+        resolved = _resolve_wire(value, environment)
+        groups.append(list(resolved) if isinstance(resolved, list) else [resolved])
+    carrier_wires = [wire for group in groups for wire in group]
+
+    if isinstance(operation, SymbolicControlledU):
+        num_controls = _resolve_transformed_integer(
+            operation.num_controls,
+            environment,
+            "num_controls",
+        )
+        if num_controls <= 0:
+            raise EmitError(
+                "HUGR transformed call num_controls must be positive",
+                operation="ControlledUOperation",
+            )
+        if operation.control_indices is not None:
+            if len(groups) != 1:
+                raise EmitError(
+                    "HUGR transformed control_indices requires exactly one "
+                    "control-pool operand",
+                    operation="ControlledUOperation",
+                )
+            active_positions = [
+                _resolve_transformed_integer(
+                    value,
+                    environment,
+                    f"control_indices[{index}]",
+                )
+                for index, value in enumerate(operation.control_indices)
+            ]
+            if len(active_positions) != num_controls:
+                raise EmitError(
+                    f"HUGR transformed control_indices length "
+                    f"({len(active_positions)}) does not match num_controls "
+                    f"({num_controls})",
+                    operation="ControlledUOperation",
+                )
+            if len(set(active_positions)) != len(active_positions):
+                raise EmitError(
+                    "HUGR transformed control_indices contains duplicate "
+                    f"entries: {active_positions}",
+                    operation="ControlledUOperation",
+                )
+            for position in active_positions:
+                if position < 0 or position >= len(carrier_wires):
+                    raise EmitError(
+                        f"HUGR transformed control_indices entry {position} is "
+                        f"out of bounds for control pool of length "
+                        f"{len(carrier_wires)}",
+                        operation="ControlledUOperation",
+                    )
+            return carrier_wires, active_positions
+
+        if len(carrier_wires) != num_controls:
+            raise EmitError(
+                f"HUGR transformed control operands expand to "
+                f"{len(carrier_wires)} qubits, but num_controls resolves to "
+                f"{num_controls}",
+                operation="ControlledUOperation",
+            )
+    elif isinstance(operation, ConcreteControlledU):
+        if len(carrier_wires) != operation.num_controls:
+            raise EmitError(
+                f"HUGR transformed control operands expand to "
+                f"{len(carrier_wires)} qubits, but num_controls is "
+                f"{operation.num_controls}",
+                operation="ControlledUOperation",
+            )
+
+    return carrier_wires, list(range(len(carrier_wires)))
+
+
 def _lower_transformed_call(
     operation: InvokeOperation | ControlledUOperation | InverseBlockOperation,
     builder: Any,
@@ -3047,6 +3487,13 @@ def _lower_transformed_call(
             local[formal.uuid] = (
                 list(resolved) if isinstance(resolved, list) else resolved
             )
+            _bind_transformed_array_shape(
+                formal,
+                actual,
+                resolved,
+                builder,
+                local,
+            )
         if len(body_classical_inputs) != len(classical):
             raise EmitError("HUGR transformed call classical arity mismatch")
         pairs = zip(body_classical_inputs, classical, strict=True)
@@ -3064,6 +3511,13 @@ def _lower_transformed_call(
                 resolved = _resolve_wire(cast(Value, actual), environment)
                 local[formal.uuid] = (
                     list(resolved) if isinstance(resolved, list) else resolved
+                )
+                _bind_transformed_array_shape(
+                    formal,
+                    actual,
+                    resolved,
+                    builder,
+                    local,
                 )
     for formal, actual in pairs:
         actual_value = cast(Value, actual)
@@ -3088,10 +3542,12 @@ def _lower_transformed_call(
         if parameter_name is not None:
             local[f"__parameter__:{parameter_name}"] = resolved
 
-    control_wires = []
-    for value in controls:
-        resolved = _resolve_wire(value, environment)
-        control_wires.extend(resolved if isinstance(resolved, list) else [resolved])
+    carrier_wires, active_control_positions = _resolve_transformed_controls(
+        operation,
+        controls,
+        environment,
+    )
+    control_wires = [carrier_wires[position] for position in active_control_positions]
     control_value = _transformed_control_value(operation)
     if control_value is not None:
         control_wires = _toggle_zero_controls(
@@ -3114,6 +3570,12 @@ def _lower_transformed_call(
             control_value,
             reverse=True,
         )
+    for position, wire in zip(
+        active_control_positions,
+        control_wires,
+        strict=True,
+    ):
+        carrier_wires[position] = wire
 
     quantum_exit = body_quantum_inputs if inverse else body_quantum_outputs
     result_quantum = [value for value in operation.results if value.type.is_quantum()]
@@ -3124,7 +3586,7 @@ def _lower_transformed_call(
     control_offset = 0
     for source, result in zip(controls, result_controls, strict=True):
         width = _array_size(source) if isinstance(source, ArrayValue) else 1
-        selected = control_wires[control_offset : control_offset + width]
+        selected = carrier_wires[control_offset : control_offset + width]
         control_offset += width
         wire: Any = selected if isinstance(result, ArrayValue) else selected[0]
         _publish_transformed_result(source, result, wire, environment, live_qubits)
@@ -3214,6 +3676,229 @@ def _toggle_zero_controls(
     for position in positions:
         [updated[position]] = builder.add_op(quantum.X, updated[position])
     return updated
+
+
+def _lower_nested_controlled_invoke(
+    operation: InvokeOperation,
+    builder: Any,
+    environment: dict[str, Any],
+    inherited_controls: list[Any],
+    inverse: bool,
+) -> list[Any]:
+    """Lower a controlled Invoke inside an enclosing transformed body.
+
+    The invocation's explicit controls compose after the inherited controls,
+    while its activation pattern applies only to its own control operands.
+    The callable body is lowered in the enclosing direction so an outer
+    inverse produces the adjoint controlled body.
+
+    Args:
+        operation (InvokeOperation): Nested controlled invocation.
+        builder (Any): HUGR dataflow builder.
+        environment (dict[str, Any]): Enclosing transformed-body wire mapping.
+        inherited_controls (list[Any]): Current outer control wires.
+        inverse (bool): Whether the enclosing body is lowered in reverse.
+
+    Returns:
+        list[Any]: Updated inherited control wires.
+
+    Raises:
+        EmitError: If the invocation is opaque, has an incompatible body or
+            result layout, or contains unsupported transformed operations.
+    """
+    if operation.transform is not CallTransform.CONTROLLED:
+        raise EmitError(
+            "HUGR nested transformed Invoke must be controlled",
+            operation="InvokeOperation",
+        )
+    body = operation.body
+    if body is None:
+        raise EmitError(
+            f"Nested controlled HUGR callable {operation.target.name!r} is opaque",
+            operation="InvokeOperation",
+        )
+    body = InlinePass().run(body)
+    body_quantum_inputs = [
+        value for value in body.input_values if value.type.is_quantum()
+    ]
+    body_classical_inputs = [
+        value
+        for value in body.input_values
+        if value.type.is_classical() or value.type.is_object()
+    ]
+    body_quantum_outputs = [
+        value for value in body.output_values if value.type.is_quantum()
+    ]
+
+    operand_controls = operation.control_qubits
+    operand_targets = operation.target_qubits
+    quantum_results = [value for value in operation.results if value.type.is_quantum()]
+    result_controls = quantum_results[: len(operand_controls)]
+    result_targets = quantum_results[len(operand_controls) :]
+    if len(result_controls) != len(operand_controls) or len(result_targets) != len(
+        operand_targets
+    ):
+        raise EmitError(
+            "HUGR nested controlled Invoke quantum result arity mismatch",
+            operation="InvokeOperation",
+        )
+
+    if inverse:
+        source_controls = result_controls
+        destination_controls = operand_controls
+        source_targets = result_targets
+        destination_targets = operand_targets
+        body_entry = body_quantum_outputs
+        body_exit = body_quantum_inputs
+    else:
+        source_controls = operand_controls
+        destination_controls = result_controls
+        source_targets = operand_targets
+        destination_targets = result_targets
+        body_entry = body_quantum_inputs
+        body_exit = body_quantum_outputs
+    if len(body_entry) != len(source_targets) or len(body_exit) != len(
+        destination_targets
+    ):
+        raise EmitError(
+            "HUGR nested controlled Invoke body quantum arity mismatch",
+            operation="InvokeOperation",
+        )
+    if len(body_classical_inputs) != len(operation.parameters):
+        raise EmitError(
+            "HUGR nested controlled Invoke classical arity mismatch",
+            operation="InvokeOperation",
+        )
+
+    local = {
+        key: list(value) if isinstance(value, list) else value
+        for key, value in environment.items()
+    }
+    for formal, actual in zip(body_entry, source_targets, strict=True):
+        resolved = _resolve_wire(actual, environment)
+        local[formal.uuid] = list(resolved) if isinstance(resolved, list) else resolved
+        _bind_transformed_array_shape(
+            formal,
+            actual,
+            resolved,
+            builder,
+            local,
+        )
+    for formal, actual in zip(
+        body_classical_inputs,
+        operation.parameters,
+        strict=True,
+    ):
+        resolved = _resolve_classical_argument(actual, builder, environment)
+        local[formal.uuid] = resolved
+        known_index: Any = (
+            actual.get_const()
+            if actual.is_constant()
+            else environment.get(f"__index__:{actual.uuid}")
+        )
+        if (
+            isinstance(formal.type, UIntType)
+            and not isinstance(known_index, bool)
+            and isinstance(known_index, int)
+        ):
+            local[f"__index__:{formal.uuid}"] = known_index
+        parameter_name = formal.parameter_name()
+        if parameter_name is not None:
+            local[f"__parameter__:{parameter_name}"] = resolved
+
+    own_carrier_wires, own_active_positions = _resolve_transformed_controls(
+        operation,
+        source_controls,
+        environment,
+    )
+    own_control_wires = [
+        own_carrier_wires[position] for position in own_active_positions
+    ]
+    control_value = _transformed_control_value(operation)
+    if control_value is not None:
+        own_control_wires = _toggle_zero_controls(
+            builder,
+            own_control_wires,
+            control_value,
+        )
+    inherited_count = len(inherited_controls)
+    combined_controls = _lower_transformed_operations(
+        body.operations,
+        builder,
+        local,
+        [*inherited_controls, *own_control_wires],
+        inverse,
+    )
+    updated_inherited = combined_controls[:inherited_count]
+    own_control_wires = combined_controls[inherited_count:]
+    if len(own_control_wires) != len(own_active_positions):
+        raise EmitError(
+            "HUGR nested controlled Invoke changed its control arity",
+            operation="InvokeOperation",
+        )
+    if control_value is not None:
+        own_control_wires = _toggle_zero_controls(
+            builder,
+            own_control_wires,
+            control_value,
+            reverse=True,
+        )
+    for position, wire in zip(
+        own_active_positions,
+        own_control_wires,
+        strict=True,
+    ):
+        own_carrier_wires[position] = wire
+
+    discarded_live_qubits: dict[str, Any] = {}
+    control_offset = 0
+    for source, destination in zip(
+        source_controls,
+        destination_controls,
+        strict=True,
+    ):
+        width = _array_size(source) if isinstance(source, ArrayValue) else 1
+        selected = own_carrier_wires[control_offset : control_offset + width]
+        control_offset += width
+        wire: Any = selected if isinstance(destination, ArrayValue) else selected[0]
+        _publish_transformed_result(
+            source,
+            destination,
+            wire,
+            environment,
+            discarded_live_qubits,
+        )
+    for source, destination, formal in zip(
+        source_targets,
+        destination_targets,
+        body_exit,
+        strict=True,
+    ):
+        wire = local.get(formal.uuid)
+        if wire is None:
+            entry = next(
+                (
+                    value
+                    for value in body_entry
+                    if value.logical_id == formal.logical_id
+                ),
+                None,
+            )
+            if entry is None or entry.uuid not in local:
+                raise EmitError(
+                    "HUGR nested controlled Invoke cannot resolve a zero-trip "
+                    "quantum exit",
+                    operation="InvokeOperation",
+                )
+            wire = local[entry.uuid]
+        _publish_transformed_result(
+            source,
+            destination,
+            wire,
+            environment,
+            discarded_live_qubits,
+        )
+    return updated_inherited
 
 
 def _lower_transformed_operations(
@@ -3310,6 +3995,18 @@ def _lower_transformed_operations(
                 builder,
                 environment,
                 control_wires[0],
+                inverse,
+            )
+            continue
+        if (
+            isinstance(operation, InvokeOperation)
+            and operation.transform is CallTransform.CONTROLLED
+        ):
+            control_wires = _lower_nested_controlled_invoke(
+                operation,
+                builder,
+                environment,
+                control_wires,
                 inverse,
             )
             continue

@@ -3328,7 +3328,7 @@ def _substitute_resource_expr(
     """
     resolved = cast(
         sp.Expr,
-        expression.subs(substitutions, simultaneous=True).doit(),
+        expression.subs(tuple(substitutions.items()), simultaneous=True).doit(),
     )
     if resolved.is_number and resolved.is_negative is True:
         return _ZERO

@@ -75,12 +75,35 @@ def _hugr_helper(qubit: qmc.Qubit) -> qmc.Qubit:
 
 
 _HUGR_OPAQUE_ORACLE = qmc.opaque("hugr_opaque_oracle", num_qubits=1)
+_HUGR_PRECONTROLLED_ORACLE = qmc.opaque(
+    "hugr_precontrolled_oracle",
+    num_qubits=1,
+    num_control_qubits=1,
+)
+_HUGR_VECTOR_ORACLE = qmc.opaque("hugr_vector_oracle", num_qubits=2)
+_HUGR_SIGNATURE_VECTOR_ORACLE = qmc.opaque(
+    "hugr_signature_vector_oracle",
+    signature=qmc.CallableSignature(
+        inputs=[qmc.Vector[qmc.Qubit]],
+        outputs=[qmc.Vector[qmc.Qubit]],
+    ),
+)
 
 
 @qmc.qkernel
 def _hugr_oracle_implementation(qubit: qmc.Qubit) -> qmc.Qubit:
     """Implement the HUGR oracle test with an X gate."""
     return qmc.x(qubit)
+
+
+@qmc.qkernel
+def _hugr_vector_oracle_implementation(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Implement a shape-dependent HUGR vector Oracle."""
+    for index in qmc.range(qubits.shape[0]):
+        qubits[index] = qmc.x(qubits[index])
+    return qubits
 
 
 @qmc.qkernel
@@ -114,6 +137,143 @@ def _hugr_controlled_oracle_program() -> qmc.Vector[qmc.Bit]:
         qubits[1],
     )
     return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_symbolic_controlled_oracle_program(num_controls: qmc.UInt) -> qmc.Bit:
+    """Control a powered Oracle through its generalized internal adapter.
+
+    Args:
+        num_controls (qmc.UInt): Compile-time control-register width.
+
+    Returns:
+        qmc.Bit: Measured Oracle target.
+    """
+    controls = qmc.x(qmc.qubit_array(num_controls, "controls"))
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _HUGR_OPAQUE_ORACLE,
+        num_controls=num_controls,
+    )(
+        controls,
+        target,
+        power=3,
+    )
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_indexed_symbolic_controlled_oracle_program(
+    num_controls: qmc.UInt,
+) -> qmc.Bit:
+    """Select one active control from a larger pass-through pool."""
+    controls = qmc.qubit_array(2, "controls")
+    controls[1] = qmc.x(controls[1])
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _HUGR_OPAQUE_ORACLE,
+        num_controls=num_controls,
+    )(
+        controls,
+        target,
+        control_indices=(1,),
+    )
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_mismatched_symbolic_control_group_program(
+    num_controls: qmc.UInt,
+) -> qmc.Bit:
+    """Expose a grouped control prefix wider than num_controls."""
+    controls = qmc.qubit_array(2, "controls")
+    extra_control = qmc.qubit("extra_control")
+    target = qmc.qubit("target")
+    controls, extra_control, target = qmc.control(
+        _HUGR_OPAQUE_ORACLE,
+        num_controls=num_controls,
+    )(
+        controls,
+        extra_control,
+        target,
+    )
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_out_of_bounds_control_index_program(
+    num_controls: qmc.UInt,
+) -> qmc.Bit:
+    """Select an invalid active position from a fixed control pool."""
+    controls = qmc.qubit_array(2, "controls")
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _HUGR_OPAQUE_ORACLE,
+        num_controls=num_controls,
+    )(
+        controls,
+        target,
+        control_indices=(2,),
+    )
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_precontrolled_powered_oracle_program() -> qmc.Vector[qmc.Bit]:
+    """Compose one outer control with an Oracle's explicit control."""
+    qubits = qmc.qubit_array(3, "qubits")
+    qubits[0] = qmc.x(qubits[0])
+    qubits[1] = qmc.x(qubits[1])
+    qubits[0], qubits[1], qubits[2] = qmc.control(
+        _HUGR_PRECONTROLLED_ORACLE,
+    )(
+        qubits[0],
+        qubits[1],
+        qubits[2],
+        power=2,
+    )
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_fixed_vector_oracle_program() -> qmc.Vector[qmc.Bit]:
+    """Invoke a shape-dependent implementation for a fixed-width Oracle."""
+    qubits = _HUGR_VECTOR_ORACLE(qmc.qubit_array(2, "qubits"))
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_signature_vector_oracle_program() -> qmc.Vector[qmc.Bit]:
+    """Invoke a shape-dependent implementation through a vector signature."""
+    qubits = _HUGR_SIGNATURE_VECTOR_ORACLE(qmc.qubit_array(2, "qubits"))
+    return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _hugr_controlled_vector_oracle_program() -> tuple[
+    qmc.Bit,
+    qmc.Vector[qmc.Bit],
+]:
+    """Control a powered vector Oracle through its internal adapter."""
+    control = qmc.x(qmc.qubit("control"))
+    targets = qmc.qubit_array(2, "targets")
+    control, targets = qmc.control(_HUGR_SIGNATURE_VECTOR_ORACLE)(
+        control,
+        targets,
+        power=2,
+    )
+    return qmc.measure(control), qmc.measure(targets)
+
+
+@qmc.qkernel
+def _hugr_multi_shape_vector_oracle_program() -> tuple[
+    qmc.Vector[qmc.Bit],
+    qmc.Vector[qmc.Bit],
+]:
+    """Specialize one vector Oracle implementation at two fixed extents."""
+    short = _HUGR_SIGNATURE_VECTOR_ORACLE(qmc.qubit_array(2, "short"))
+    long = _HUGR_SIGNATURE_VECTOR_ORACLE(qmc.qubit_array(3, "long"))
+    return qmc.measure(short), qmc.measure(long)
 
 
 @qmc.qkernel
@@ -1741,6 +1901,129 @@ def test_hugr_compiles_controlled_oracle_binding() -> None:
 
     assert isinstance(compiled.artifact, Package)
     assert compiled.metadata.target == "hugr"
+
+
+@pytest.mark.hugr
+def test_hugr_compiles_powered_symbolic_width_oracle_binding() -> None:
+    """HUGR inherits controls and power through the internal Oracle adapter."""
+    compiled = HugrTranspiler().transpile(
+        _hugr_symbolic_controlled_oracle_program,
+        bindings={"num_controls": 2},
+        oracle_bindings={"hugr_opaque_oracle": _hugr_oracle_implementation},
+    )
+
+    assert isinstance(compiled.artifact, Package)
+    names = _hugr_operation_names(compiled.artifact)
+    assert names.count("tket.quantum.Toffoli") == 3
+
+
+@pytest.mark.hugr
+def test_hugr_symbolic_controlled_oracle_respects_control_indices() -> None:
+    """Only the selected pool position controls the bound Oracle body."""
+    compiled = HugrTranspiler().transpile(
+        _hugr_indexed_symbolic_controlled_oracle_program,
+        bindings={"num_controls": 1},
+        oracle_bindings={"hugr_opaque_oracle": _hugr_oracle_implementation},
+    )
+
+    assert isinstance(compiled.artifact, Package)
+    names = _hugr_operation_names(compiled.artifact)
+    assert names.count("tket.quantum.CX") == 1
+    assert names.count("tket.quantum.Toffoli") == 0
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_symbolic_control_width_mismatch() -> None:
+    """Grouped control carriers must expand to exactly num_controls qubits."""
+    with pytest.raises(
+        EmitError,
+        match=r"expand to 3 qubits.*num_controls resolves to 2",
+    ):
+        HugrTranspiler().transpile(
+            _hugr_mismatched_symbolic_control_group_program,
+            bindings={"num_controls": 2},
+            oracle_bindings={"hugr_opaque_oracle": _hugr_oracle_implementation},
+        )
+
+
+@pytest.mark.hugr
+def test_hugr_rejects_out_of_bounds_symbolic_control_index() -> None:
+    """A selected pool position must exist in the complete carrier."""
+    with pytest.raises(
+        EmitError,
+        match=r"control_indices entry 2 is out of bounds.*length 2",
+    ):
+        HugrTranspiler().transpile(
+            _hugr_out_of_bounds_control_index_program,
+            bindings={"num_controls": 1},
+            oracle_bindings={"hugr_opaque_oracle": _hugr_oracle_implementation},
+        )
+
+
+@pytest.mark.hugr
+def test_hugr_compiles_powered_precontrolled_oracle_binding() -> None:
+    """Outer and Oracle-owned controls compose inside the internal adapter."""
+    compiled = HugrTranspiler().transpile(
+        _hugr_precontrolled_powered_oracle_program,
+        oracle_bindings={"hugr_precontrolled_oracle": _hugr_oracle_implementation},
+    )
+
+    assert isinstance(compiled.artifact, Package)
+    names = _hugr_operation_names(compiled.artifact)
+    assert names.count("tket.quantum.Toffoli") == 2
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("kernel", "binding_name"),
+    [
+        (_hugr_fixed_vector_oracle_program, "hugr_vector_oracle"),
+        (
+            _hugr_signature_vector_oracle_program,
+            "hugr_signature_vector_oracle",
+        ),
+    ],
+)
+def test_hugr_specializes_vector_oracle_binding_at_callsite(
+    kernel: qmc.QKernel,
+    binding_name: str,
+) -> None:
+    """HUGR monomorphizes a shape-dependent vector body at its fixed call."""
+    compiled = HugrTranspiler().transpile(
+        kernel,
+        oracle_bindings={binding_name: _hugr_vector_oracle_implementation},
+    )
+
+    assert isinstance(compiled.artifact, Package)
+    assert _hugr_operation_names(compiled.artifact).count("tket.quantum.X") == 2
+
+
+@pytest.mark.hugr
+def test_hugr_specializes_one_vector_oracle_at_multiple_extents() -> None:
+    """Each call receives an independent fixed-shape clone of one Oracle body."""
+    compiled = HugrTranspiler().transpile(
+        _hugr_multi_shape_vector_oracle_program,
+        oracle_bindings={
+            "hugr_signature_vector_oracle": _hugr_vector_oracle_implementation
+        },
+    )
+
+    assert isinstance(compiled.artifact, Package)
+    assert _hugr_operation_names(compiled.artifact).count("tket.quantum.X") == 5
+
+
+@pytest.mark.hugr
+def test_hugr_compiles_powered_controlled_vector_oracle_binding() -> None:
+    """HUGR binds adapter shape while preserving inherited control and power."""
+    compiled = HugrTranspiler().transpile(
+        _hugr_controlled_vector_oracle_program,
+        oracle_bindings={
+            "hugr_signature_vector_oracle": _hugr_vector_oracle_implementation
+        },
+    )
+
+    assert isinstance(compiled.artifact, Package)
+    assert _hugr_operation_names(compiled.artifact).count("tket.quantum.CX") == 4
 
 
 @pytest.mark.parametrize(

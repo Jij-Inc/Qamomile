@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import inspect
 import keyword
@@ -10,7 +11,6 @@ import threading
 import types as _types
 import weakref
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Sequence,
@@ -23,7 +23,9 @@ from typing import (
 )
 
 from qamomile.circuit.frontend.handle import Handle, Observable
+from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
+from qamomile.circuit.frontend.oracle import Oracle
 from qamomile.circuit.frontend.param_validation import (
     _array_element_type,
     _is_classical_param_decl,
@@ -32,11 +34,13 @@ from qamomile.circuit.frontend.param_validation import (
     _validate_bound_handles,
     _validate_classical_param_handle,
 )
+from qamomile.circuit.frontend.qkernel import QKernel, qkernel as _qkernel_decorator
 from qamomile.circuit.frontend.qkernel_callable import (
     qkernel_callable_attrs,
     qkernel_callable_def,
     qkernel_callable_ref,
 )
+from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.frontend.qkernel_specialization import (
     select_specialized_block,
 )
@@ -46,6 +50,7 @@ from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.effect import require_unitary_effects
 from qamomile.circuit.ir.operation.callable import (
     CallableRef,
+    CallPolicy,
     CallTransform,
     InvokeOperation,
 )
@@ -59,11 +64,6 @@ from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
-
-if TYPE_CHECKING:
-    from qamomile.circuit.frontend.oracle import Oracle
-from qamomile.circuit.frontend.qkernel import QKernel
-from qamomile.circuit.frontend.qkernel_like import QKernelLike
 
 # Type alias for parameter values
 ParamValue = Union[float, int, Handle]
@@ -2684,66 +2684,318 @@ def _control_callable_metadata(
     return qkernel_callable_ref(qkernel_impl), qkernel_callable_attrs(qkernel_impl)
 
 
-@dataclasses.dataclass
-class _ControlledOracle:
-    """Wrap an opaque Oracle behind the ``control`` call protocol.
+def _oracle_callable_metadata(oracle: Oracle) -> tuple[CallableRef, dict[str, Any]]:
+    """Return stable compiler metadata for an opaque oracle.
 
     Args:
-        oracle (Any): Source ``Oracle`` object to control.
-        num_controls (int): Number of new leading control qubits.
+        oracle (Oracle): Oracle represented by the internal adapter.
+
+    Returns:
+        tuple[CallableRef, dict[str, Any]]: Oracle identity and
+        serializer-friendly callable attributes.
+    """
+    return (
+        CallableRef(namespace="user.oracle", name=oracle.name),
+        {
+            "kind": "oracle",
+            "num_control_qubits": oracle.num_control_qubits,
+            "num_target_qubits": oracle.num_qubits or 0,
+            "custom_name": oracle.name,
+            "gate_type": "CUSTOM",
+            "default_policy": CallPolicy.PRESERVE_BOX.name,
+        },
+    )
+
+
+def _qkernel_for_oracle(oracle: Oracle, *, vector: bool) -> QKernel:
+    """Build an internal qkernel adapter around an opaque oracle.
+
+    The adapter exists only at the frontend boundary. Its traced body contains
+    the original bodyless ``InvokeOperation``, so substitution, estimation,
+    serialization, and backend emission continue to operate on ordinary IR.
+
+    Args:
+        oracle (Oracle): Oracle to adapt.
+        vector (bool): Whether to expose one ``Vector[Qubit]`` parameter
+            instead of the oracle's fixed scalar parameters.
+
+    Returns:
+        QKernel: Eagerly built adapter suitable for ``ControlledGate``.
+
+    Raises:
+        TypeError: If the requested adapter convention is unsupported or
+            adapter compilation fails.
+    """
+    if vector:
+        if oracle.num_control_qubits:
+            raise TypeError(
+                "Vector Oracle adapters do not support explicit scalar controls."
+            )
+        param_decls = ["qubits: Vector[Qubit]"]
+        return_anno = "Vector[Qubit]"
+        invocation = "__qmc_target__(qubits)"
+        adapter_kind = "vector"
+    else:
+        if oracle.num_qubits is None:
+            raise TypeError(
+                f"Oracle {oracle.name!r} has no fixed scalar arity and cannot "
+                "be adapted to scalar qkernel arguments."
+            )
+        control_names = [
+            f"oracle_control_{index}" for index in range(oracle.num_control_qubits)
+        ]
+        target_names = [f"oracle_target_{index}" for index in range(oracle.num_qubits)]
+        all_names = [*control_names, *target_names]
+        param_decls = [f"{name}: Qubit" for name in all_names]
+        return_anno = (
+            "Qubit"
+            if len(all_names) == 1
+            else f"tuple[{', '.join(['Qubit'] * len(all_names))}]"
+        )
+        controls = f"({', '.join(control_names)},)" if control_names else "()"
+        target_args = ", ".join(target_names)
+        invocation = (
+            f"__qmc_target__({target_args}, controls={controls})"
+            if target_args
+            else f"__qmc_target__(controls={controls})"
+        )
+        if len(all_names) == 1:
+            invocation = f"{invocation}[0]"
+        adapter_kind = "scalar"
+
+    global _synthesized_kernel_counter
+    with _synthesized_kernel_lock:
+        _synthesized_kernel_counter += 1
+        seq = _synthesized_kernel_counter
+        wrapper_name = f"_qmc_oracle_{adapter_kind}_adapter"
+        src = (
+            f"def {wrapper_name}({', '.join(param_decls)}) -> {return_anno}:\n"
+            '    """Forward an internal controlled Oracle adapter."""\n'
+            f"    return {invocation}\n"
+        )
+        filename = f"<qamomile-oracle-{adapter_kind}-adapter-{oracle.name}-{seq}>"
+        linecache.cache[filename] = (
+            len(src),
+            None,
+            src.splitlines(keepends=True),
+            filename,
+        )
+        namespace = {**_wrapper_namespace(oracle), "Vector": Vector}
+        try:
+            exec(compile(src, filename, "exec"), namespace)
+            adapter = _qkernel_decorator(namespace[wrapper_name])
+            _ = adapter.block
+        except (SyntaxError, TypeError, ValueError, RuntimeError) as error:
+            linecache.cache.pop(filename, None)
+            raise TypeError(
+                f"control(): failed to build the internal adapter for Oracle "
+                f"{oracle.name!r}: {error}."
+            ) from error
+        weakref.finalize(adapter, linecache.cache.pop, filename, None)
+    return adapter
+
+
+@dataclasses.dataclass
+class _ControlledOracle:
+    """Delegate opaque Oracle control to internal qkernel adapters.
+
+    Args:
+        oracle (Oracle): Source Oracle object to snapshot and control.
+        num_controls (int | UInt): Number of new leading control qubits.
         control_value (int | None): LSB-first activation value for the new
             controls. ``None`` uses all ones.
 
     Raises:
-        TypeError: If the source oracle only supports vector calls or
-            ``control_value`` is not a Python ``int`` or ``None``.
-        ValueError: If ``control_value`` does not fit ``num_controls``.
+        TypeError: If no supported internal adapter can be built.
+        ValueError: If the control configuration is invalid.
     """
 
-    oracle: Any
-    num_controls: int
+    oracle: Oracle
+    num_controls: int | UInt
     control_value: int | None = None
+    _scalar_gate: ControlledGate | None = dataclasses.field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+    _vector_gate: ControlledGate | None = dataclasses.field(
+        init=False,
+        repr=False,
+        default=None,
+    )
 
     def __post_init__(self) -> None:
-        """Validate that the wrapped oracle supports scalar controls.
+        """Build the applicable internal qkernel adapters.
 
         Raises:
-            TypeError: If the oracle has no fixed scalar target arity or
-                ``control_value`` is not a Python ``int`` or ``None``.
-            ValueError: If ``control_value`` does not fit ``num_controls``.
+            TypeError: If the oracle exposes neither a scalar nor vector
+                calling convention supported by the adapter.
+            ValueError: If ``num_controls`` or ``control_value`` is invalid.
         """
-        if self.oracle.num_qubits is None:
-            raise TypeError(
-                "control(Oracle) supports fixed-width scalar oracles only. "
-                "Vector-signature oracles should be called directly."
+        source_oracle = self.oracle
+        signature = source_oracle.signature
+        if signature is not None:
+            signature = dataclasses.replace(
+                signature,
+                inputs=list(signature.inputs),
+                outputs=list(signature.outputs),
             )
-        self.control_value = normalize_control_value(
-            self.control_value,
-            self.num_controls,
+        cost = (
+            source_oracle.cost
+            if callable(source_oracle.cost)
+            else copy.deepcopy(source_oracle.cost)
+        )
+        self.oracle = Oracle(
+            source_oracle.name,
+            source_oracle.num_qubits,
+            num_control_qubits=source_oracle.num_control_qubits,
+            signature=signature,
+            cost=cost,
         )
 
-    def __call__(self, *qubits: Qubit) -> tuple[Qubit, ...]:
-        """Apply the controlled oracle.
+        if isinstance(self.num_controls, bool):
+            raise TypeError(
+                "num_controls must be a positive integer or UInt, got bool "
+                f"({self.num_controls})."
+            )
+        if isinstance(self.num_controls, int) and self.num_controls < 1:
+            raise ValueError(f"num_controls must be >= 1, got {self.num_controls}.")
+        if isinstance(self.num_controls, UInt):
+            if self.control_value is not None:
+                raise ValueError(
+                    "control_value requires a concrete int num_controls; "
+                    "symbolic UInt widths cannot define a fixed activation "
+                    "state at compose time."
+                )
+        else:
+            self.control_value = normalize_control_value(
+                self.control_value,
+                self.num_controls,
+            )
+
+        callable_ref, callable_attrs = _oracle_callable_metadata(self.oracle)
+        signature = self.oracle.signature
+        supports_vector = self.oracle.num_qubits != 0 and (
+            signature is None or signature.accepts_single_qubit_vector()
+        )
+        has_scalar_targets = (
+            self.oracle.num_qubits is not None and self.oracle.num_qubits > 0
+        )
+        supports_scalar = has_scalar_targets and (
+            signature is None or not signature.accepts_single_qubit_vector()
+        )
+        if supports_scalar:
+            self._scalar_gate = ControlledGate(
+                _qkernel_for_oracle(self.oracle, vector=False),
+                num_controls=self.num_controls,
+                control_value=self.control_value,
+                callable_ref=callable_ref,
+                callable_attrs=callable_attrs,
+            )
+        if supports_vector and self.oracle.num_control_qubits == 0:
+            self._vector_gate = ControlledGate(
+                _qkernel_for_oracle(self.oracle, vector=True),
+                num_controls=self.num_controls,
+                control_value=self.control_value,
+                callable_ref=callable_ref,
+                callable_attrs=callable_attrs,
+            )
+        if (
+            self._scalar_gate is None
+            and self._vector_gate is None
+            and self.oracle.num_qubits != 0
+        ):
+            raise TypeError(
+                f"Oracle {self.oracle.name!r} cannot be adapted to the "
+                "controlled-call protocol."
+            )
+
+    def _validate_scalar_arguments(self, args: tuple[Any, ...]) -> None:
+        """Require exact scalar handles in the Oracle-owned argument suffix.
+
+        Generic controlled qkernels support broadcasting a scalar qkernel
+        parameter over a vector. An Oracle's scalar contract is stricter:
+        every explicit Oracle control and target is exactly one ``Qubit``.
 
         Args:
-            *qubits (Qubit): Leading control qubits followed by target qubits.
-
-        Returns:
-            tuple[Qubit, ...]: Output controls followed by target outputs.
+            args (tuple[Any, ...]): Complete controlled-call arguments.
 
         Raises:
-            ValueError: If too few qubits are supplied.
+            TypeError: If an Oracle-owned scalar slot receives a non-Qubit.
+            ValueError: If too few arguments remain for the scalar contract.
         """
-        total_controls = self.oracle.num_control_qubits + self.num_controls
-        if len(qubits) < total_controls:
+        if self.oracle.num_qubits is None:
+            return
+        scalar_count = self.oracle.num_control_qubits + self.oracle.num_qubits
+        if len(args) < scalar_count:
             raise ValueError(
-                f"Controlled Oracle '{self.oracle.name}' requires "
-                f"{total_controls} control qubits, got {len(qubits)}."
+                f"Controlled Oracle {self.oracle.name!r} requires "
+                f"{scalar_count} scalar Oracle arguments after its new "
+                f"controls, got {len(args)} total arguments."
             )
-        controls = qubits[:total_controls]
-        targets = qubits[total_controls:]
-        from qamomile.circuit.frontend.oracle import Oracle
+        for index, argument in enumerate(args[-scalar_count:] if scalar_count else ()):
+            if not isinstance(argument, Qubit):
+                raise TypeError(
+                    f"Controlled Oracle {self.oracle.name!r} scalar argument "
+                    f"#{index} must be a Qubit, got "
+                    f"{type(argument).__name__}."
+                )
 
+    def _validate_vector_target(self, target: ArrayBase) -> None:
+        """Check a concrete vector target against the Oracle's fixed width.
+
+        Args:
+            target (ArrayBase): Vector or vector view selected as the target.
+
+        Raises:
+            ValueError: If the concrete target width differs from
+                ``Oracle.num_qubits``.
+        """
+        if self.oracle.num_qubits is None or not target.shape:
+            return
+        size_handle = target.shape[0]
+        if isinstance(size_handle, int):
+            size = size_handle
+        elif isinstance(size_handle, UInt) and size_handle.value.is_constant():
+            size = int(size_handle.value.get_const())
+        else:
+            return
+        if size != self.oracle.num_qubits:
+            raise ValueError(
+                f"Oracle {self.oracle.name!r} requires "
+                f"{self.oracle.num_qubits} target qubits, got {size}."
+            )
+
+    def _call_direct(self, args: tuple[Any, ...]) -> tuple[Qubit, ...]:
+        """Apply the legacy direct controlled-Invoke representation.
+
+        The direct form preserves the established ``OpaqueCallContext``
+        contract for ordinary scalar calls and is also the only representation
+        for a zero-target opaque global phase. Calls that use the generalized
+        controlled protocol still route through the internal qkernel adapter.
+
+        Args:
+            args (tuple[Any, ...]): Leading new controls, the Oracle's explicit
+                controls, and scalar targets.
+
+        Returns:
+            tuple[Qubit, ...]: Updated controls followed by target outputs.
+
+        Raises:
+            TypeError: If an argument is not a scalar qubit or the Oracle has
+                no scalar calling convention.
+            ValueError: If too few control arguments are supplied or the
+                target arity is invalid.
+        """
+        concrete_controls = cast(int, self.num_controls)
+        total_controls = self.oracle.num_control_qubits + concrete_controls
+        if len(args) < total_controls:
+            raise ValueError(
+                f"Controlled Oracle {self.oracle.name!r} requires "
+                f"{total_controls} control qubits, got {len(args)}."
+            )
+        controls = args[:total_controls]
+        targets = args[total_controls:]
         controlled = Oracle(
             self.oracle.name,
             self.oracle.num_qubits,
@@ -2756,7 +3008,7 @@ class _ControlledOracle:
             None
             if self.control_value is None
             else self.control_value
-            | (((1 << existing_controls) - 1) << self.num_controls)
+            | (((1 << existing_controls) - 1) << concrete_controls)
         )
         return cast(
             tuple[Qubit, ...],
@@ -2767,35 +3019,81 @@ class _ControlledOracle:
             ),
         )
 
+    def __call__(
+        self,
+        *args: Any,
+        power: int | UInt = 1,
+        global_phase: float | int | Float = 0.0,
+        control_indices: Sequence[int | UInt] | None = None,
+    ) -> tuple[Any, ...]:
+        """Apply the controlled oracle.
 
-def _validate_concrete_control_count(num_controls: int | UInt) -> int:
-    """Return a concrete control count for wrappers that cannot be symbolic.
+        Args:
+            *args (Any): Leading controls followed by the oracle arguments.
+            power (int | UInt): Positive application count. Defaults to ``1``.
+            global_phase (float | int | Float): Global phase attached before
+                power and control. Defaults to ``0.0``.
+            control_indices (Sequence[int | UInt] | None): Optional symbolic
+                control-pool indices. Defaults to ``None``.
 
-    Args:
-        num_controls (int | UInt): Requested control count.
+        Returns:
+            tuple[Any, ...]: Output controls followed by oracle outputs.
 
-    Returns:
-        int: Positive concrete control count.
+        Raises:
+            TypeError: If the arguments do not match an available scalar or
+                vector adapter, or generalized modifiers are requested for a
+                zero-target Oracle.
+            ValueError: If a control modifier is invalid.
+        """
+        has_vector_target = bool(args) and isinstance(args[-1], ArrayBase)
+        use_vector = self._vector_gate is not None and has_vector_target
+        if use_vector:
+            self._validate_vector_target(cast(ArrayBase, args[-1]))
+        else:
+            self._validate_scalar_arguments(args)
 
-    Raises:
-        TypeError: If ``num_controls`` is ``bool`` or ``UInt``.
-        ValueError: If ``num_controls`` is less than one.
-    """
-    if isinstance(num_controls, bool):
-        raise TypeError(
-            f"num_controls must be a positive integer, got bool ({num_controls})."
+        uses_default_modifiers = (
+            isinstance(self.num_controls, int)
+            and not isinstance(self.num_controls, bool)
+            and isinstance(power, int)
+            and not isinstance(power, bool)
+            and power == 1
+            and type(global_phase) in {float, int}
+            and not global_phase
+            and control_indices is None
         )
-    if isinstance(num_controls, UInt):
-        raise TypeError("control(Oracle) does not support symbolic num_controls yet.")
-    if num_controls < 1:
-        raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
-    return num_controls
+        uses_legacy_scalar_shape = all(isinstance(arg, Qubit) for arg in args)
+        if uses_default_modifiers and not use_vector and uses_legacy_scalar_shape:
+            return self._call_direct(args)
+
+        gate = self._vector_gate if use_vector else self._scalar_gate
+        if gate is None:
+            if self.oracle.num_qubits == 0:
+                raise TypeError(
+                    f"Controlled Oracle {self.oracle.name!r} has no target "
+                    "qubits, so power, global_phase, symbolic controls, and "
+                    "control_indices are unsupported."
+                )
+            expected = (
+                "a final Vector[Qubit] target"
+                if self._vector_gate is not None
+                else "fixed scalar Oracle arguments"
+            )
+            raise TypeError(
+                f"Controlled Oracle {self.oracle.name!r} requires {expected}."
+            )
+        return gate(
+            *args,
+            power=power,
+            global_phase=global_phase,
+            control_indices=control_indices,
+        )
 
 
 @overload
 def control(
     qkernel: Oracle,
-    num_controls: int = 1,
+    num_controls: int | UInt = 1,
     *,
     control_value: int | None = None,
 ) -> _ControlledOracle:
@@ -2853,21 +3151,23 @@ def control(
             supported. Defaults to ``None``.
 
     Returns:
-        For a qkernel or gate callable, a ``ControlledGate`` that can be called
-        with ``(*controls, *targets, power=..., global_phase=..., **params)``.
-        The call-site phase has semantics
+        ControlledGate | _ControlledOracle: A controlled callable accepting
+        ``(*controls, *targets, power=..., global_phase=..., **params)``.
+        Oracle targets are routed through internal qkernel adapters so they
+        share the same modifier and symbolic-control protocol. The call-site
+        phase has semantics
         ``control((exp(i * global_phase) * U) ** power)`` and therefore becomes
         relative phase on the all-active control subspace. ``power``,
         ``global_phase``, and ``control_indices`` are reserved keyword names;
-        a same-named target parameter can still be supplied positionally. For
-        an ``Oracle``, an opaque qubit-only controlled wrapper is returned;
-        these call-site modifiers are not supported by that wrapper.
+        a same-named target parameter can still be supplied positionally.
+        A zero-target Oracle retains its ordinary scalar controlled-call form,
+        but cannot use modifiers or symbolic/grouped controls because
+        ``ControlledU`` requires at least one target.
 
     Raises:
         TypeError: If ``qkernel`` is a callable that cannot be auto-wrapped
             (missing annotations, unsupported types, or no qubit parameters),
-            ``control_value`` is not a Python ``int`` or ``None``, or an
-            ``Oracle`` control count is symbolic.
+            or ``control_value`` is not a Python ``int`` or ``None``.
         ValueError: If ``num_controls`` is a concrete ``int`` less than one,
             ``control_value`` is out of range, or a non-default value is used
             with symbolic ``num_controls``.
@@ -2907,13 +3207,10 @@ def control(
             controlled_gate = qmc.control(my_composite_gate)
             ctrl_out, tgt0_out, tgt1_out = controlled_gate(ctrl, tgt0, tgt1)
     """
-    from qamomile.circuit.frontend.oracle import Oracle
-
     if isinstance(qkernel, Oracle):
-        concrete_controls = _validate_concrete_control_count(num_controls)
         return _ControlledOracle(
             qkernel,
-            num_controls=concrete_controls,
+            num_controls=num_controls,
             control_value=control_value,
         )
 

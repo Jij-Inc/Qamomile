@@ -22,11 +22,16 @@ from qamomile.circuit.frontend.tracer import trace
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
-from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
+    ControlledUOperation,
+    SymbolicControlledU,
+)
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler.errors import (
     EmitError,
     QubitBorrowConflictError,
@@ -1379,10 +1384,10 @@ class TestControlledAcceptsBuiltinGate:
 
 
 class TestControlledOracle:
-    """``control(Oracle)`` routes through controlled InvokeOperation."""
+    """``control(Oracle)`` shares the controlled qkernel protocol."""
 
-    def test_controlled_oracle_emits_controlled_invoke(self):
-        """control(Oracle) emits a controlled bodyless oracle invocation."""
+    def test_controlled_oracle_keeps_bodyless_invoke_inside_adapter(self):
+        """The adapter keeps the opaque call nested under structural control."""
         cost = qmc.ResourceEstimate(
             gates=qmc.GateResources(t=7),
             calls=qmc.CallResources(queries_by_name={"phase_oracle": 1}),
@@ -1391,30 +1396,357 @@ class TestControlledOracle:
 
         @qmc.qkernel
         def circuit(ctrl: qmc.Qubit, target: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qubit]:
-            ctrl, target = qmc.control(oracle)(ctrl, target)
+            ctrl, target = qmc.control(oracle)(ctrl, target, power=2)
             return ctrl, target
 
         block = circuit.build()
-        invokes = [op for op in block.operations if isinstance(op, InvokeOperation)]
+        [controlled] = [
+            op for op in block.operations if isinstance(op, ConcreteControlledU)
+        ]
+        assert controlled.callable_ref is not None
+        assert controlled.callable_ref.namespace == "user.oracle"
+        assert controlled.callable_ref.name == "phase_oracle"
+        assert controlled.callable_attrs["kind"] == "oracle"
+        assert controlled.block is not None
 
-        assert len(invokes) == 1
-        op = invokes[0]
-        assert op.target.namespace == "user.oracle"
-        assert op.target.name == "phase_oracle"
-        assert op.transform is CallTransform.CONTROLLED
-        assert op.attrs["kind"] == "oracle"
-        assert op.num_control_qubits == 1
-        assert op.num_target_qubits == 1
-        assert op.body is None
-        assert op.definition is not None
-        assert op.definition.opaque_cost is cost
+        [invoke] = [
+            op for op in controlled.block.operations if isinstance(op, InvokeOperation)
+        ]
+        assert invoke.target.namespace == "user.oracle"
+        assert invoke.target.name == "phase_oracle"
+        assert invoke.transform is CallTransform.DIRECT
+        assert invoke.body is None
+        assert invoke.definition is not None
+        assert invoke.definition.opaque_cost == cost
+        assert invoke.definition.opaque_cost is not cost
 
-    def test_controlled_oracle_rejects_symbolic_control_count(self):
-        """control(Oracle) rejects symbolic control counts for now."""
+    def test_adapter_snapshots_fixed_cost_for_serialization_and_estimation(self):
+        """Existing adapters keep fixed costs independent of Oracle mutation."""
+        cost = qmc.ResourceEstimate(
+            gates=qmc.GateResources(total=1),
+            calls=qmc.CallResources(
+                calls_by_name={"snapshot_cost_oracle": 1},
+                queries_by_name={"snapshot_cost_oracle": 1},
+            ),
+        )
+        oracle = qmc.opaque(
+            "snapshot_cost_oracle",
+            num_qubits=1,
+            cost=cost,
+        )
+        old_wrapper = qmc.control(oracle)
+
+        cost.gates.total = 7
+        cost.calls.calls_by_name["snapshot_cost_oracle"] = 7
+        cost.calls.queries_by_name["snapshot_cost_oracle"] = 7
+        fresh_wrapper = qmc.control(oracle)
+
+        @qmc.qkernel
+        def old_circuit() -> qmc.Bit:
+            control_qubit = qmc.qubit("old_control")
+            target = qmc.qubit("old_target")
+            control_qubit, target = old_wrapper(control_qubit, target)
+            return qmc.measure(target)
+
+        @qmc.qkernel
+        def fresh_circuit() -> qmc.Bit:
+            control_qubit = qmc.qubit("fresh_control")
+            target = qmc.qubit("fresh_target")
+            control_qubit, target = fresh_wrapper(control_qubit, target)
+            return qmc.measure(target)
+
+        old_estimate = qmc.estimate_resources(deserialize(serialize(old_circuit)))
+        fresh_estimate = qmc.estimate_resources(deserialize(serialize(fresh_circuit)))
+
+        assert old_estimate.gates.total == 1
+        assert old_estimate.calls.calls_by_name == {"snapshot_cost_oracle": 1}
+        assert old_estimate.calls.queries_by_name == {"snapshot_cost_oracle": 1}
+        assert fresh_estimate.gates.total == 7
+        assert fresh_estimate.calls.calls_by_name == {"snapshot_cost_oracle": 7}
+        assert fresh_estimate.calls.queries_by_name == {"snapshot_cost_oracle": 7}
+
+    def test_adapter_preserves_contextual_cost_callback_identity(self):
+        """Oracle cost callbacks remain shared behavior, not copied state."""
+
+        def callback(context: qmc.OpaqueCallContext) -> qmc.ResourceEstimate:
+            return qmc.ResourceEstimate(
+                gates=qmc.GateResources(total=context.power),
+            )
+
+        wrapper = qmc.control(
+            qmc.opaque(
+                "callback_identity_oracle",
+                num_qubits=1,
+                cost=callback,
+            )
+        )
+
+        assert wrapper.oracle.cost is callback
+
+    def test_default_scalar_call_preserves_opaque_control_context(self):
+        """Legacy scalar calls retain their Oracle-owned control count."""
+
+        def contextual_cost(
+            context: qmc.OpaqueCallContext,
+        ) -> qmc.ResourceEstimate:
+            return qmc.ResourceEstimate(
+                gates=qmc.GateResources(
+                    total=10 if context.own_controls == 2 else 1,
+                )
+            )
+
+        oracle = qmc.opaque(
+            "contextual_oracle",
+            num_qubits=1,
+            cost=contextual_cost,
+        )
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            control_0 = qmc.qubit("control_0")
+            control_1 = qmc.qubit("control_1")
+            target = qmc.qubit("target")
+            control_0, control_1, target = qmc.control(
+                oracle,
+                num_controls=2,
+            )(control_0, control_1, target)
+            return qmc.measure(target)
+
+        estimate = qmc.estimate_resources(circuit)
+
+        assert estimate.gates.total == 10
+
+    def test_zero_target_oracle_keeps_default_direct_control(self):
+        """A controlled opaque global phase remains representable."""
+        oracle = qmc.opaque(
+            "zero_target_oracle",
+            num_qubits=0,
+            cost=qmc.ResourceEstimate(
+                calls=qmc.CallResources(
+                    queries_by_name={"zero_target_oracle": 1},
+                )
+            ),
+        )
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            control_qubit = qmc.qubit("control")
+            (control_qubit,) = qmc.control(oracle)(control_qubit)
+            return qmc.measure(control_qubit)
+
+        [invoke] = [
+            op for op in circuit.block.operations if isinstance(op, InvokeOperation)
+        ]
+        estimate = qmc.estimate_resources(circuit)
+
+        assert invoke.transform is CallTransform.CONTROLLED
+        assert invoke.num_target_qubits == 0
+        assert estimate.calls.queries_by_name == {"zero_target_oracle": 1}
+
+    def test_zero_target_oracle_rejects_empty_vector_adapter(self):
+        """A zero-width vector cannot silently erase an opaque operation."""
+        oracle = qmc.opaque("zero_target_vector_oracle", num_qubits=0)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            control_qubit = qmc.qubit("control")
+            empty_target = qmc.qubit_array(0, "empty_target")
+            qmc.control(oracle)(control_qubit, empty_target)
+            return qmc.measure(control_qubit)
+
+        with pytest.raises(TypeError, match="has no target qubits"):
+            _ = circuit.block
+
+    @pytest.mark.parametrize("num_controls", [0, -1])
+    def test_zero_target_oracle_validates_control_count(self, num_controls: int):
+        """The zero-target compatibility path keeps the positive-width rule."""
+        oracle = qmc.opaque(
+            "zero_target_control_validation",
+            num_qubits=0,
+            signature=qmc.CallableSignature(inputs=[], outputs=[]),
+        )
+
+        with pytest.raises(ValueError, match="num_controls must be >= 1"):
+            qmc.control(oracle, num_controls=num_controls)
+
+    def test_scalar_oracle_rejects_vector_target_slot(self):
+        """Scalar Oracle slots never inherit generic qkernel broadcasting."""
+        oracle = qmc.opaque(
+            "strict_scalar_oracle",
+            num_qubits=2,
+            signature=qmc.CallableSignature(
+                inputs=[qmc.Qubit, qmc.Qubit],
+                outputs=[qmc.Qubit, qmc.Qubit],
+            ),
+        )
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            control_qubit = qmc.qubit("control")
+            first_target = qmc.qubit_array(2, "first_target")
+            second_target = qmc.qubit("second_target")
+            qmc.control(oracle)(
+                control_qubit,
+                first_target,
+                second_target,
+                power=2,
+            )
+            return qmc.measure(second_target)
+
+        with pytest.raises(TypeError, match="scalar argument #0 must be a Qubit"):
+            _ = circuit.block
+
+    def test_scalar_oracle_rejects_vector_explicit_control_slot(self):
+        """An Oracle-owned explicit control must also be one scalar Qubit."""
+        oracle = qmc.opaque(
+            "strict_controlled_oracle",
+            num_qubits=1,
+            num_control_qubits=1,
+        )
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            new_control = qmc.qubit("new_control")
+            oracle_control = qmc.qubit_array(1, "oracle_control")
+            target = qmc.qubit("target")
+            qmc.control(oracle)(
+                new_control,
+                oracle_control,
+                target,
+                power=2,
+            )
+            return qmc.measure(target)
+
+        with pytest.raises(TypeError, match="scalar argument #0 must be a Qubit"):
+            _ = circuit.block
+
+    def test_fixed_width_oracle_rejects_wrong_vector_target_size(self):
+        """The adapter preserves concrete fixed-width vector validation."""
+        oracle = qmc.opaque("fixed_vector_oracle", num_qubits=2)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            control_qubit = qmc.qubit("control")
+            target = qmc.qubit_array(3, "target")
+            control_qubit, target = qmc.control(oracle)(
+                control_qubit,
+                target,
+                power=2,
+            )
+            return qmc.measure(target[0])
+
+        with pytest.raises(ValueError, match="requires 2 target qubits, got 3"):
+            _ = circuit.block
+
+    def test_default_grouped_controls_use_internal_adapter(self):
+        """Grouped controls retain the generic controlled-call convention."""
+        oracle = qmc.opaque("grouped_control_oracle", num_qubits=1)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            controls = qmc.qubit_array(2, "controls")
+            target = qmc.qubit("target")
+            controls, target = qmc.control(
+                oracle,
+                num_controls=2,
+            )(controls, target)
+            return qmc.measure(target)
+
+        assert any(
+            isinstance(op, ConcreteControlledU) for op in circuit.block.operations
+        )
+
+    def test_controlled_oracle_accepts_symbolic_controls_and_power(self):
+        """Oracle adapters expose the standard symbolic controlled protocol."""
         oracle = qmc.opaque("phase_oracle", num_qubits=1)
 
-        with pytest.raises(TypeError, match="symbolic num_controls"):
-            qmc.control(oracle, num_controls=qmc.uint(1))
+        @qmc.qkernel
+        def circuit(num_controls: qmc.UInt) -> qmc.Bit:
+            controls = qmc.qubit_array(num_controls, "controls")
+            target = qmc.qubit("target")
+            controls, target = qmc.control(
+                oracle,
+                num_controls=num_controls,
+            )(
+                controls,
+                target,
+                power=num_controls,
+            )
+            return qmc.measure(target)
+
+        [controlled] = [
+            op for op in circuit.block.operations if isinstance(op, SymbolicControlledU)
+        ]
+        assert controlled.callable_ref is not None
+        assert controlled.callable_ref.namespace == "user.oracle"
+        assert controlled.callable_ref.name == "phase_oracle"
+        assert controlled.power is controlled.num_controls
+
+    def test_equivalent_controlled_oracles_serialize_deterministically(self):
+        """Unrelated adapter creation does not affect serialized block names."""
+
+        def build_payload() -> bytes:
+            oracle = qmc.opaque("stable_oracle", num_qubits=1)
+
+            @qmc.qkernel
+            def circuit() -> qmc.Bit:
+                control_qubit = qmc.qubit("control")
+                target = qmc.qubit("target")
+                control_qubit, target = qmc.control(oracle)(
+                    control_qubit,
+                    target,
+                    power=2,
+                )
+                return qmc.measure(target)
+
+            return serialize(circuit)
+
+        first = build_payload()
+        qmc.control(qmc.opaque("unrelated_oracle", num_qubits=1))
+        second = build_payload()
+
+        assert first == second
+
+    def test_fresh_adapter_observes_mutated_oracle_identity(self):
+        """A fresh wrapper does not reuse a stale adapter for a mutable Oracle."""
+        oracle = qmc.opaque("before_mutation", num_qubits=1)
+        old_wrapper = qmc.control(oracle)
+        assert old_wrapper is not None
+        oracle.name = "after_mutation"
+
+        @qmc.qkernel
+        def old_circuit() -> qmc.Bit:
+            control_qubit = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control_qubit, target = old_wrapper(control_qubit, target)
+            return qmc.measure(target)
+
+        [old_invoke] = [
+            op for op in old_circuit.block.operations if isinstance(op, InvokeOperation)
+        ]
+        assert old_invoke.target.name == "before_mutation"
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            control_qubit = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control_qubit, target = qmc.control(oracle)(
+                control_qubit,
+                target,
+                power=2,
+            )
+            return qmc.measure(target)
+
+        [controlled] = [
+            op for op in circuit.block.operations if isinstance(op, ConcreteControlledU)
+        ]
+        assert controlled.callable_ref is not None
+        assert controlled.callable_ref.name == "after_mutation"
+        assert controlled.block is not None
+        [invoke] = [
+            op for op in controlled.block.operations if isinstance(op, InvokeOperation)
+        ]
+        assert invoke.target.name == "after_mutation"
 
 
 class TestOracleOwnershipTransaction:

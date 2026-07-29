@@ -10,6 +10,7 @@ import pytest
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types import UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -66,6 +67,12 @@ def _x_implementation(q: qmc.Qubit) -> qmc.Qubit:
 @qmc.qkernel
 def _z_implementation(q: qmc.Qubit) -> qmc.Qubit:
     """Implement the test oracle with a Z gate."""
+    return qmc.z(q)
+
+
+@qmc.composite_gate(name="late_bound_oracle")
+def _same_named_non_oracle(q: qmc.Qubit) -> qmc.Qubit:
+    """Provide a non-Oracle callable sharing the Oracle's short name."""
     return qmc.z(q)
 
 
@@ -177,6 +184,14 @@ def _direct_sample() -> qmc.Bit:
 
 
 @qmc.qkernel
+def _same_name_collision_sample() -> qmc.Bit:
+    """Call a same-named composite before the late-bound Oracle."""
+    q = _same_named_non_oracle(qmc.qubit("q"))
+    (q,) = _ORACLE(q)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
 def _nested_sample() -> qmc.Bit:
     """Measure an oracle reached through a qkernel helper."""
     q = _oracle_helper(qmc.qubit("q"))
@@ -199,6 +214,29 @@ def _controlled_sample() -> qmc.Vector[qmc.Bit]:
     qubits[0] = qmc.x(qubits[0])
     qubits[0], qubits[1] = qmc.control(_ORACLE)(qubits[0], qubits[1])
     return qmc.measure(qubits)
+
+
+@qmc.qkernel
+def _symbolic_controlled_sample(num_controls: qmc.UInt) -> qmc.Bit:
+    """Control a powered Oracle with a symbolic-width register.
+
+    Args:
+        num_controls (qmc.UInt): Number of active control qubits.
+
+    Returns:
+        qmc.Bit: Measured Oracle target.
+    """
+    controls = qmc.x(qmc.qubit_array(num_controls, "controls"))
+    target = qmc.qubit("target")
+    controls, target = qmc.control(
+        _ORACLE,
+        num_controls=num_controls,
+    )(
+        controls,
+        target,
+        power=3,
+    )
+    return qmc.measure(target)
 
 
 @qmc.qkernel
@@ -323,6 +361,25 @@ def test_binding_preserves_identity_and_clears_resource_estimate() -> None:
     assert _invoke_named(source, "late_bound_oracle").body is None
 
 
+def test_configured_body_replacement_clears_opaque_cost() -> None:
+    """A Configure body and a fixed opaque cost never coexist."""
+    transformed = SubstitutionPass(
+        SubstitutionConfig(
+            rules=[
+                SubstitutionRule(
+                    source_name="late_bound_oracle",
+                    target=_x_implementation,
+                )
+            ]
+        )
+    ).run(_direct_sample.block)
+
+    invocation = _invoke_named(transformed, "_x_implementation")
+    assert invocation.body is not None
+    assert invocation.definition is not None
+    assert invocation.definition.opaque_cost is None
+
+
 def test_binding_uses_exact_target_name_not_display_name() -> None:
     """Binding keys match ``target.name`` rather than a display alias."""
     source = _direct_sample.block
@@ -350,6 +407,94 @@ def test_binding_uses_exact_target_name_not_display_name() -> None:
     bound = _invoke_named(transformed, "late_bound_oracle")
     assert bound.custom_name == "display_alias"
     assert bound.body is not None
+
+
+def test_binding_ignores_same_named_non_oracle(qiskit_transpiler: Any) -> None:
+    """A same-named composite does not intercept the Oracle binding."""
+    transformed = apply_oracle_bindings(
+        _same_name_collision_sample.block,
+        {"late_bound_oracle": _x_implementation},
+    )
+    same_named_calls = [
+        operation
+        for operation in transformed.operations
+        if isinstance(operation, InvokeOperation)
+        and operation.target.name == "late_bound_oracle"
+    ]
+
+    assert len(same_named_calls) == 2
+    composite = next(
+        operation
+        for operation in same_named_calls
+        if operation.attrs.get("kind") != "oracle"
+    )
+    oracle = next(
+        operation
+        for operation in same_named_calls
+        if operation.attrs.get("kind") == "oracle"
+    )
+    assert composite.body is not None
+    assert composite.body.name == "_same_named_non_oracle"
+    assert oracle.body is not None
+    assert oracle.body.name == "_x_implementation"
+
+    executable = qiskit_transpiler.transpile(
+        _same_name_collision_sample,
+        oracle_bindings={"late_bound_oracle": _x_implementation},
+    )
+    result = executable.sample(qiskit_transpiler.executor(), shots=16).result()
+    assert result.shots == 16
+    assert sum(count for _, count in result.results) == 16
+    assert _observed_bits(result) == {(1,)}
+
+
+def test_binding_requires_canonical_oracle_namespace() -> None:
+    """Oracle-like metadata outside ``user.oracle`` does not intercept binding."""
+    source = _same_name_collision_sample.block
+    operations = []
+    for operation in source.operations:
+        if (
+            isinstance(operation, InvokeOperation)
+            and operation.target.name == "late_bound_oracle"
+            and operation.target.namespace != "user.oracle"
+        ):
+            assert operation.definition is not None
+            attrs = {**operation.attrs, "kind": "oracle"}
+            operation = dataclasses.replace(
+                operation,
+                attrs=attrs,
+                definition=dataclasses.replace(
+                    operation.definition,
+                    attrs={**operation.definition.attrs, **attrs},
+                ),
+            )
+        operations.append(operation)
+
+    transformed = apply_oracle_bindings(
+        dataclasses.replace(source, operations=operations),
+        {"late_bound_oracle": _x_implementation},
+    )
+    same_named_calls = [
+        operation
+        for operation in transformed.operations
+        if isinstance(operation, InvokeOperation)
+        and operation.target.name == "late_bound_oracle"
+    ]
+    noncanonical = next(
+        operation
+        for operation in same_named_calls
+        if operation.target.namespace != "user.oracle"
+    )
+    oracle = next(
+        operation
+        for operation in same_named_calls
+        if operation.target.namespace == "user.oracle"
+    )
+
+    assert noncanonical.body is not None
+    assert noncanonical.body.name == "_same_named_non_oracle"
+    assert oracle.body is not None
+    assert oracle.body.name == "_x_implementation"
 
 
 def test_binding_accepts_direct_and_controlled_calls() -> None:
@@ -895,6 +1040,33 @@ def test_binding_body_wins_and_configured_strategy_composes(
     assert config.substitutions.rules[0].target is _z_implementation
 
 
+def test_binding_strategy_composes_inside_controlled_oracle_adapter() -> None:
+    """Configure strategy metadata reaches a generalized Oracle wrapper."""
+    transformed = SubstitutionPass(
+        SubstitutionConfig(
+            rules=[
+                SubstitutionRule(
+                    source_name="late_bound_oracle",
+                    target=_z_implementation,
+                    strategy="configured_strategy",
+                )
+            ]
+        ),
+        oracle_bindings={"late_bound_oracle": _x_implementation.block},
+    ).run(_symbolic_controlled_sample.block)
+    controlled = next(
+        operation
+        for operation in transformed.operations
+        if isinstance(operation, ControlledUOperation)
+    )
+    assert controlled.block is not None
+    bound = _invoke_named(controlled.block, "late_bound_oracle")
+
+    assert bound.body is not None
+    assert bound.body.name == "_x_implementation"
+    assert bound.strategy_name == "configured_strategy"
+
+
 def test_binding_reaches_configured_replacement_body(
     qiskit_transpiler: Any,
 ) -> None:
@@ -1045,4 +1217,29 @@ def test_oracle_binding_executes_on_every_backend(
         shots=16,
     ).result()
 
+    assert result.shots == 16
+    assert sum(count for _, count in result.results) == 16
     assert _observed_bits(result) == {expected}, sdk_transpiler.backend_name
+
+
+def test_symbolic_controlled_oracle_executes_on_every_backend(
+    sdk_transpiler: Any,
+) -> None:
+    """A ``UInt`` control width resolves before bound Oracle execution.
+
+    Args:
+        sdk_transpiler (Any): Supported SDK transpiler fixture.
+    """
+    payload = serialize(_symbolic_controlled_sample)
+    restored = deserialize(payload)
+    transpiler = sdk_transpiler.transpiler
+    executable = transpiler.transpile(
+        restored,
+        bindings={"num_controls": 2},
+        oracle_bindings={"late_bound_oracle": _x_implementation},
+    )
+    result = executable.sample(transpiler.executor(), shots=16).result()
+
+    assert result.shots == 16
+    assert sum(count for _, count in result.results) == 16
+    assert _observed_bits(result) == {(1,)}, sdk_transpiler.backend_name

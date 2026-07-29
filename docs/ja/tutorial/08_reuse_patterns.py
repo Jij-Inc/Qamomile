@@ -316,6 +316,8 @@ implemented_result = implemented_executable.sample(
     transpiler.executor(),
     shots=16,
 ).result()
+assert implemented_result.shots == 16
+assert sum(count for _, count in implemented_result.results) == 16
 assert all(outcome == (1, 1, 1) for outcome, _ in implemented_result.results)
 
 # %% [markdown]
