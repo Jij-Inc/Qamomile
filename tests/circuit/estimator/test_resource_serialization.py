@@ -12,14 +12,14 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
+from qamomile.circuit.estimator._metrics import (
+    _ConstraintRange,
+    _ResourceConstraint,
+)
 from qamomile.circuit.estimator._serialization import (
     SymbolRegistry,
     normalize_expression,
     stringify_expression,
-)
-from qamomile.circuit.estimator.resource_estimator import (
-    _ConstraintRange,
-    _ResourceConstraint,
 )
 
 

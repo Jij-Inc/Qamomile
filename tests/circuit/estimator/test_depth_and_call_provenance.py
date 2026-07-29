@@ -10,7 +10,7 @@ import sympy as sp
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
 from qamomile.circuit.estimator._resolver import ExprResolver
-from qamomile.circuit.estimator.resource_estimator import (
+from qamomile.circuit.estimator._scheduling import (
     _array_wire_key_at_index,
     _quantum_element_index_expression,
     _quantum_element_wire_index,

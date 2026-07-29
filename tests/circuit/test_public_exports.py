@@ -17,6 +17,11 @@ from __future__ import annotations
 import qamomile.circuit as qmc
 import qamomile.circuit.stdlib as stdlib
 import qamomile.circuit.stdlib.block_encoding as block_encoding
+from qamomile.circuit import estimator as estimator_api
+from qamomile.circuit.estimator import (
+    _metrics as metrics_module,
+    resource_estimator as estimator_module,
+)
 from qamomile.circuit.estimator.resource_estimator import (
     MeasurementResources,
     OpaqueCallContext,
@@ -130,6 +135,29 @@ def test_nonunitary_resource_types_are_publicly_reexported() -> None:
     assert qmc.ResetResources is ResetResources
     assert "MeasurementResources" in qmc.__all__
     assert "ResetResources" in qmc.__all__
+
+
+def test_resource_metric_types_keep_one_canonical_identity() -> None:
+    """Metric types remain identical through public and compatibility paths."""
+    public_metric_names = (
+        "CallResources",
+        "DepthResources",
+        "EstimateQuality",
+        "GateBasis",
+        "GateResources",
+        "MeasurementResources",
+        "ResetResources",
+        "ResourceAssumption",
+        "WidthResources",
+    )
+    for name in public_metric_names:
+        canonical = getattr(metrics_module, name)
+        assert getattr(estimator_api, name) is canonical
+        assert getattr(estimator_module, name) is canonical
+        assert getattr(qmc, name) is canonical
+
+    assert estimator_api.ResourceTraceNode is metrics_module.ResourceTraceNode
+    assert estimator_module.ResourceTraceNode is metrics_module.ResourceTraceNode
 
 
 def test_struct_is_publicly_reexported() -> None:
