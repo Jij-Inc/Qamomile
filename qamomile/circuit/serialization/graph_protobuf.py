@@ -1297,7 +1297,6 @@ _OPERATION_ALLOWED_FIELDS: dict[pb.OperationType, frozenset[str]] = {
             "callable_attrs",
         }
     ),
-    pb.GLOBAL_PHASE_OPERATION: frozenset(),
     pb.RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: frozenset(),
 }
 
