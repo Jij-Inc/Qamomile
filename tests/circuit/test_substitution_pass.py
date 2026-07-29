@@ -164,6 +164,19 @@ class TestSignatureValidation:
         assert is_compatible
         assert error_msg is None
 
+    def test_non_strict_mode_is_rejected(self):
+        """Unsupported non-strict compatibility fails explicitly."""
+
+        @qmc.qkernel
+        def source(q: qmc.Qubit) -> qmc.Qubit:
+            return qmc.h(q)
+
+        with pytest.raises(
+            ValueError,
+            match=r"only supports strict=True",
+        ):
+            check_signature_compatibility(source.block, source.block, strict=False)
+
     def test_input_count_mismatch_raises(self):
         """Test that input count mismatch is detected."""
 

@@ -173,8 +173,16 @@ def check_signature_compatibility(
 
     Returns:
         tuple[bool, str | None]: Compatibility flag and optional diagnostic.
+
+    Raises:
+        ValueError: If ``strict`` is not ``True`` because non-strict
+            compatibility is unsupported.
     """
-    del strict
+    if strict is not True:
+        raise ValueError(
+            "check_signature_compatibility() only supports strict=True; "
+            "non-strict compatibility is undefined"
+        )
     # Check input count
     if len(source.input_values) != len(target.input_values):
         return False, (
