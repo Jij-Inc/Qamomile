@@ -2,6 +2,8 @@
 
 from typing import Any
 
+import pytest
+
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
@@ -132,8 +134,6 @@ def test_qinit_does_not_contribute_controlled_batch_weight() -> None:
 
 def test_controlled_power_analysis_propagates_invalid_values() -> None:
     """Workspace and batch pre-analysis reject a negative controlled power."""
-    import pytest
-
     from qamomile.circuit.transpiler.errors import EmitError
 
     operation = _controlled_u_with_power(-1)
@@ -153,6 +153,93 @@ def test_controlled_power_analysis_propagates_invalid_values() -> None:
             operation,
             {},
         )
+
+
+@pytest.mark.parametrize(
+    ("bound_value", "match"),
+    [
+        pytest.param(True, "bool", id="true"),
+        pytest.param(False, "bool", id="false"),
+        pytest.param(1.5, "non-integer float", id="fractional-float"),
+        pytest.param(3.9, "non-integer float", id="larger-fractional-float"),
+        pytest.param("2", "str", id="string"),
+    ],
+)
+def test_controlled_power_analysis_rejects_non_integer_bindings(
+    bound_value: object,
+    match: str,
+) -> None:
+    """Emit-time power bindings preserve the strict integer contract."""
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    power = Value(type=UIntType(), name="loop_power")
+    operation = _controlled_u_with_power(power)
+    emit_pass = _ResolverOnlyEmitPass()
+    bindings = {power.uuid: bound_value}
+
+    with pytest.raises(EmitError, match=match):
+        controlled_emission.allocate_controlled_workspaces(
+            emit_pass,
+            [operation],
+            {},
+            {},
+            bindings,
+        )
+    with pytest.raises(EmitError, match=match):
+        controlled_emission._batch_op_weight(
+            emit_pass,
+            operation,
+            bindings,
+        )
+
+
+@pytest.mark.parametrize("power", [True, False])
+def test_controlled_power_analysis_rejects_direct_bool(power: bool) -> None:
+    """A direct boolean power cannot exploit Python's integer subclassing."""
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    operation = _controlled_u_with_power(power)
+    emit_pass = _ResolverOnlyEmitPass()
+
+    with pytest.raises(EmitError, match="bool"):
+        controlled_emission.allocate_controlled_workspaces(
+            emit_pass,
+            [operation],
+            {},
+            {},
+            {},
+        )
+    with pytest.raises(EmitError, match="bool"):
+        controlled_emission._batch_op_weight(
+            emit_pass,
+            operation,
+            {},
+        )
+
+
+def test_controlled_power_analysis_accepts_integral_float_binding() -> None:
+    """Emit-time power resolution retains the accepted whole-float behavior."""
+    power = Value(type=UIntType(), name="loop_power")
+    operation = _controlled_u_with_power(power)
+    emit_pass = _ResolverOnlyEmitPass()
+    bindings = {power.uuid: 2.0}
+
+    controlled_emission.allocate_controlled_workspaces(
+        emit_pass,
+        [operation],
+        {},
+        {},
+        bindings,
+    )
+
+    assert (
+        controlled_emission._batch_op_weight(
+            emit_pass,
+            operation,
+            bindings,
+        )
+        == 1
+    )
 
 
 def test_controlled_power_analysis_defers_only_unresolved_values() -> None:

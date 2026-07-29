@@ -1781,6 +1781,12 @@ def _resolve_power_if_bound(
     """
     power = op.power
 
+    if isinstance(power, bool):
+        raise EmitError(
+            f"ControlledU power must be a nonnegative integer, got bool ({power}).",
+            operation="ControlledUOperation",
+        )
+
     if isinstance(power, int):
         resolved_power = power
 
@@ -1788,7 +1794,27 @@ def _resolve_power_if_bound(
         resolved = emit_pass._resolver.resolve_classical_value(power, bindings)
         if resolved is None:
             return None
-        resolved_power = int(resolved)
+        if isinstance(resolved, bool):
+            raise EmitError(
+                f"ControlledU power must be a nonnegative integer, "
+                f"got bool ({resolved}).",
+                operation="ControlledUOperation",
+            )
+        if isinstance(resolved, float):
+            if not resolved.is_integer():
+                raise EmitError(
+                    f"ControlledU power must be an integer, "
+                    f"got non-integer float {resolved}.",
+                    operation="ControlledUOperation",
+                )
+            resolved_power = int(resolved)
+        elif isinstance(resolved, int):
+            resolved_power = resolved
+        else:
+            raise EmitError(
+                f"ControlledU power must be an integer, got {type(resolved).__name__}.",
+                operation="ControlledUOperation",
+            )
 
     else:
         raise EmitError(
