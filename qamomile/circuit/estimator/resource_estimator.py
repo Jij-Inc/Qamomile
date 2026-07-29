@@ -13912,14 +13912,7 @@ def _controlled_u_child_resolver(
             for formal_dim, actual_dim in zip(formal.shape, actual.shape):
                 extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
-    context = resolver.context
-    context.update(extra)
-    return ExprResolver(
-        block=block,
-        context=context,
-        loop_var_names=resolver.loop_var_names,
-        parent_blocks=[],
-    )
+    return resolver.isolated_scope(block, extra)
 
 
 def _select_case_child_resolver(
@@ -13946,14 +13939,7 @@ def _select_case_child_resolver(
             for formal_dim, actual_dim in zip(formal.shape, actual.shape):
                 extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
-    context = resolver.context
-    context.update(extra)
-    return ExprResolver(
-        block=case_block,
-        context=context,
-        loop_var_names=resolver.loop_var_names,
-        parent_blocks=[],
-    )
+    return resolver.isolated_scope(case_block, extra)
 
 
 def _select_case_broadcast_factor(
@@ -14043,11 +14029,4 @@ def _inverse_block_child_resolver(
             for formal_dim, actual_dim in zip(formal.shape, actual.shape):
                 extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
-    context = resolver.context
-    context.update(extra)
-    return ExprResolver(
-        block=impl,
-        context=context,
-        loop_var_names=resolver.loop_var_names,
-        parent_blocks=[],
-    )
+    return resolver.isolated_scope(impl, extra)

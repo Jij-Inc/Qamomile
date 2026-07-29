@@ -345,14 +345,11 @@ def allocate_controlled_workspaces(
     """
     for op in operations:
         if isinstance(op, ControlledUOperation) and op.block is not None:
-            try:
-                power = resolve_power(emit_pass, op, bindings)
-            except EmitError:
-                # A loop-local power can remain unresolved until the controlled
-                # walker replays that iteration. Preserve the existing static
-                # reservation in that case; the emit path will validate it with
-                # the complete iteration bindings.
-                power = None
+            # A loop-local power can remain unresolved until the controlled
+            # walker replays that iteration. Only that case is deferred;
+            # invalid powers and resolver diagnostics must fail before width
+            # allocation can obscure their source.
+            power = _resolve_power_if_bound(emit_pass, op, bindings)
             if power == 0:
                 # A zero-powered call is the identity. Its body never executes,
                 # so neither direct nor recursively nested private workspaces
@@ -501,13 +498,10 @@ def _batch_op_weight(
     if isinstance(op, GateOperation):
         return 1
     if isinstance(op, ControlledUOperation):
-        try:
-            power = resolve_power(emit_pass, op, bindings)
-        except EmitError:
-            # Unresolvable power fails identically on the non-batch path;
-            # count it as real work so the estimate is not skewed.
-            return 1
-        return 1 if power > 0 else 0
+        power = _resolve_power_if_bound(emit_pass, op, bindings)
+        # A loop-local power is resolved when its iteration is replayed. Count
+        # that unresolved operation as real work without hiding invalid values.
+        return 1 if power is None or power > 0 else 0
     if isinstance(op, PauliEvolveOp):
         return 2
     if isinstance(op, ForOperation):
@@ -1764,12 +1758,27 @@ def emit_controlled_pauli_evolve(
     _map_operand_result_groups([op.evolved_qubits], [qubit_indices], qubit_map)
 
 
-def resolve_power(
+def _resolve_power_if_bound(
     emit_pass: "StandardEmitPass",
     op: ControlledUOperation,
     bindings: dict[str, Any],
-) -> int:
-    """Resolve ``ControlledUOperation.power`` to a concrete ``int``."""
+) -> int | None:
+    """Resolve a controlled power when its current scope binds the value.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass and value resolver.
+        op (ControlledUOperation): Controlled operation owning the power.
+        bindings (dict[str, Any]): Emit-time bindings visible in the current
+            scope.
+
+    Returns:
+        int | None: Validated nonnegative power, or ``None`` only when a
+            symbolic value is not yet bound in this scope.
+
+    Raises:
+        EmitError: If the power has an unexpected type, is negative, or its
+            value resolver reports a deterministic error.
+    """
     power = op.power
 
     if isinstance(power, int):
@@ -1778,11 +1787,7 @@ def resolve_power(
     elif isinstance(power, Value):
         resolved = emit_pass._resolver.resolve_classical_value(power, bindings)
         if resolved is None:
-            raise EmitError(
-                f"Cannot resolve ControlledU power '{power.name}'. "
-                f"Ensure all parameters are bound before transpilation.",
-                operation="ControlledUOperation",
-            )
+            return None
         resolved_power = int(resolved)
 
     else:
@@ -1795,6 +1800,38 @@ def resolve_power(
     if resolved_power < 0:
         raise EmitError(
             f"ControlledU power must be non-negative, got {resolved_power}.",
+            operation="ControlledUOperation",
+        )
+    return resolved_power
+
+
+def resolve_power(
+    emit_pass: "StandardEmitPass",
+    op: ControlledUOperation,
+    bindings: dict[str, Any],
+) -> int:
+    """Resolve ``ControlledUOperation.power`` to a concrete integer.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass and value resolver.
+        op (ControlledUOperation): Controlled operation owning the power.
+        bindings (dict[str, Any]): Emit-time bindings visible in the current
+            scope.
+
+    Returns:
+        int: Validated nonnegative power.
+
+    Raises:
+        EmitError: If the power is unresolved, has an unexpected type, is
+            negative, or its value resolver reports a deterministic error.
+    """
+    resolved_power = _resolve_power_if_bound(emit_pass, op, bindings)
+    if resolved_power is None:
+        power = op.power
+        assert isinstance(power, Value)
+        raise EmitError(
+            f"Cannot resolve ControlledU power '{power.name}'. "
+            f"Ensure all parameters are bound before transpilation.",
             operation="ControlledUOperation",
         )
     return resolved_power

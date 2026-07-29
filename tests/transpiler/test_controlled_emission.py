@@ -13,6 +13,7 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
     GateOperation,
     GateOperationType,
 )
@@ -20,7 +21,7 @@ from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
-from qamomile.circuit.ir.types.primitives import FloatType, QubitType
+from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.passes.emit_support import (
     controlled_emission,
@@ -49,6 +50,45 @@ class _ResolverOnlyEmitPass:
     def __init__(self) -> None:
         """Initialize the stand-in with a real ``ValueResolver``."""
         self._resolver = ValueResolver()
+
+    def _get_or_create_parameter(self, name: str, value_uuid: str) -> Any:
+        """Reject unexpected backend-parameter creation in resolver-only tests.
+
+        Args:
+            name (str): Requested backend parameter name.
+            value_uuid (str): IR value identity for the parameter.
+
+        Returns:
+            Any: This stand-in never creates a backend parameter.
+
+        Raises:
+            AssertionError: Always, because these tests supply no runtime
+                parameters.
+        """
+        raise AssertionError(
+            f"unexpected backend parameter request: {name} ({value_uuid})"
+        )
+
+
+def _controlled_u_with_power(power: int | Value) -> ConcreteControlledU:
+    """Build a minimal one-control operation with the requested power.
+
+    Args:
+        power (int | Value): Concrete or symbolic controlled-call power.
+
+    Returns:
+        ConcreteControlledU: Operation over one control and one target with an
+            empty body.
+    """
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    return ConcreteControlledU(
+        operands=[control, target],
+        results=[control.next_version(), target.next_version()],
+        num_controls=1,
+        power=power,
+        block=Block(),
+    )
 
 
 class _GateWithoutQubitCount:
@@ -88,6 +128,53 @@ def test_qinit_does_not_contribute_controlled_batch_weight() -> None:
         )
         == 0
     )
+
+
+def test_controlled_power_analysis_propagates_invalid_values() -> None:
+    """Workspace and batch pre-analysis reject a negative controlled power."""
+    import pytest
+
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    operation = _controlled_u_with_power(-1)
+    emit_pass = _ResolverOnlyEmitPass()
+
+    with pytest.raises(EmitError, match="power must be non-negative"):
+        controlled_emission.allocate_controlled_workspaces(
+            emit_pass,
+            [operation],
+            {},
+            {},
+            {},
+        )
+    with pytest.raises(EmitError, match="power must be non-negative"):
+        controlled_emission._batch_op_weight(
+            emit_pass,
+            operation,
+            {},
+        )
+
+
+def test_controlled_power_analysis_defers_only_unresolved_values() -> None:
+    """A loop-local symbolic power remains eligible for iteration-time binding."""
+    operation = _controlled_u_with_power(
+        Value(type=UIntType(), name="loop_power"),
+    )
+    emit_pass = _ResolverOnlyEmitPass()
+    qubit_map: dict[Any, int] = {}
+    clbit_map: dict[Any, int] = {}
+
+    controlled_emission.allocate_controlled_workspaces(
+        emit_pass,
+        [operation],
+        qubit_map,
+        clbit_map,
+        {},
+    )
+
+    assert qubit_map == {}
+    assert clbit_map == {}
+    assert controlled_emission._batch_op_weight(emit_pass, operation, {}) == 1
 
 
 def test_batch_weight_folds_preceding_classical_predicates() -> None:

@@ -1454,6 +1454,48 @@ def test_expr_resolver_indexes_every_operation_result() -> None:
     assert resolver.resolve(second) == 5
 
 
+def test_expr_resolver_caches_input_shape_aliases_across_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One resolver tree indexes each block's input-shape aliases once."""
+    from qamomile.circuit.estimator import _resolver as resolver_module
+    from qamomile.circuit.estimator._resolver import ExprResolver
+    from qamomile.circuit.ir.block import Block
+    from qamomile.circuit.ir.types.primitives import FloatType, UIntType
+    from qamomile.circuit.ir.value import ArrayValue, Value
+
+    dimension = Value(type=UIntType(), name="values_dim0")
+    values = ArrayValue(
+        type=FloatType(),
+        name="values",
+        shape=(dimension,),
+    )
+    root = Block(
+        name="root",
+        label_args=["values"],
+        input_values=[values],
+    )
+    child = Block(name="child")
+    alias_spy = Mock(wraps=resolver_module.input_shape_dimension_aliases)
+    monkeypatch.setattr(
+        resolver_module,
+        "input_shape_dimension_aliases",
+        alias_spy,
+    )
+    resolver = ExprResolver(root)
+    expected = sp.Symbol("values_dim0", integer=True, nonnegative=True)
+
+    assert resolver.resolve(dimension) == expected
+    assert resolver.resolve(dimension) == expected
+    assert resolver.child_scope(child).resolve(dimension) == expected
+    assert resolver.isolated_scope(root).resolve(dimension) == expected
+    assert sum(call.args[0] is root for call in alias_spy.call_args_list) == 1
+    assert sum(call.args[0] is child for call in alias_spy.call_args_list) == 1
+
+    assert ExprResolver(root).resolve(dimension) == expected
+    assert sum(call.args[0] is root for call in alias_spy.call_args_list) == 2
+
+
 def test_controlled_composite_body_counts_own_control() -> None:
     """A controlled body-backed composite reclassifies its primitives as controlled.
 

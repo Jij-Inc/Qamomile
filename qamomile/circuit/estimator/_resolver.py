@@ -100,6 +100,7 @@ class ExprResolver:
     __slots__ = (
         "_block",
         "_context",
+        "_input_shape_alias_maps",
         "_loop_var_names",
         "_parent_blocks",
         "_producer_maps",
@@ -112,6 +113,7 @@ class ExprResolver:
         loop_var_names: dict[str, sp.Expr] | None = None,
         parent_blocks: list[Any] | None = None,
         producer_maps: dict[int, tuple[Any, dict[str, Operation]]] | None = None,
+        input_shape_alias_maps: (dict[int, tuple[Block, dict[str, str]]] | None) = None,
     ):
         """Initialise an ExprResolver.
 
@@ -130,12 +132,20 @@ class ExprResolver:
                 and its result UUID to producer-operation map. Child resolvers
                 reuse it so every block is indexed at most once. Defaults to
                 ``None``.
+            input_shape_alias_maps (dict[int, tuple[Block, dict[str, str]]] | None):
+                Shared block-identity index containing a strong block reference
+                and its input-dimension UUID to public alias map. Child
+                resolvers reuse it so every block interface is scanned at most
+                once. Defaults to ``None``.
         """
         self._block = block
         self._context: dict[str, sp.Expr] = dict(context or {})
         self._loop_var_names: dict[str, sp.Expr] = dict(loop_var_names or {})
         self._parent_blocks: list[Any] = list(parent_blocks or [])
         self._producer_maps = producer_maps if producer_maps is not None else {}
+        self._input_shape_alias_maps = (
+            input_shape_alias_maps if input_shape_alias_maps is not None else {}
+        )
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
@@ -215,6 +225,39 @@ class ExprResolver:
             loop_var_names=lvn,
             parent_blocks=new_parents,
             producer_maps=self._producer_maps,
+            input_shape_alias_maps=self._input_shape_alias_maps,
+        )
+
+    def isolated_scope(
+        self,
+        inner_block: Any,
+        extra_context: dict[str, sp.Expr] | None = None,
+    ) -> ExprResolver:
+        """Create a resolver scope isolated from caller block visibility.
+
+        Callable bodies receive only values mapped explicitly through their
+        operands, but immutable block indexes remain safe to share across the
+        resolver tree.
+
+        Args:
+            inner_block (Any): Callable block for the isolated scope.
+            extra_context (dict[str, sp.Expr] | None): Additional UUID to
+                expression mappings for formal inputs. Defaults to ``None``.
+
+        Returns:
+            ExprResolver: Resolver with no parent blocks and shared block
+                indexes.
+        """
+        context = self._context.copy()
+        if extra_context:
+            context.update(extra_context)
+        return ExprResolver(
+            block=inner_block,
+            context=context,
+            loop_var_names=self._loop_var_names.copy(),
+            parent_blocks=[],
+            producer_maps=self._producer_maps,
+            input_shape_alias_maps=self._input_shape_alias_maps,
         )
 
     def call_child_scope(
@@ -277,16 +320,8 @@ class ExprResolver:
                 for df, da in zip(formal.shape, actual.shape):
                     extra[df.uuid] = self.resolve(da)
 
-        # Callee gets fresh scope — no parent blocks from caller
-        ctx = self._context.copy()
-        ctx.update(extra)
-        return ExprResolver(
-            block=called_block,
-            context=ctx,
-            loop_var_names=self._loop_var_names.copy(),
-            parent_blocks=[],
-            producer_maps=self._producer_maps,
-        )
+        # Callee gets fresh scope — no parent blocks from caller.
+        return self.isolated_scope(called_block, extra)
 
     def bind(self, value: Value, expression: sp.Expr) -> None:
         """Bind an IR value to an expression in this resolver scope.
@@ -417,10 +452,28 @@ class ExprResolver:
         for block in (self._block, *reversed(self._parent_blocks)):
             if not isinstance(block, Block):
                 continue
-            alias = input_shape_dimension_aliases(block).get(value.uuid)
+            alias = self._input_shape_alias_map(block).get(value.uuid)
             if alias is not None:
                 return alias
         return None
+
+    def _input_shape_alias_map(self, block: Block) -> dict[str, str]:
+        """Return the cached input-dimension alias index for one block.
+
+        Args:
+            block (Block): Block whose immutable interface is indexed.
+
+        Returns:
+            dict[str, str]: Input-dimension UUID to collision-free public
+                alias.
+        """
+        block_id = id(block)
+        cached = self._input_shape_alias_maps.get(block_id)
+        if cached is None or cached[0] is not block:
+            aliases = input_shape_dimension_aliases(block)
+            self._input_shape_alias_maps[block_id] = (block, aliases)
+            return aliases
+        return cached[1]
 
     def _trace(
         self, v: Value, block: Any, visited: set[int], concrete: bool
